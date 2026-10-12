@@ -2762,6 +2762,88 @@ static void test_alpha(BOOL v6)
     DeleteDC(hdc);
 }
 
+static void test_replace_alpha(BOOL v6)
+{
+    static const UINT32 colors[][2] =
+    {
+        {0xff123456, 0xffabcdef},
+        {0x00654321, 0x00fedcba},
+    };
+    DWORD mask_bits = 0;
+    ICONINFO icon_info = {0};
+    IImageList2 *image_list;
+    HBITMAP mask, bitmap;
+    HIMAGELIST himl;
+    UINT32 bits[2];
+    DWORD flags;
+    HICON icon;
+    HRESULT hr;
+    HDC hdc;
+    int i, ret;
+
+    winetest_push_context(v6 ? "v6" : "v5");
+    hdc = CreateCompatibleDC(NULL);
+    mask = CreateBitmap(2, 1, 1, 1, &mask_bits);
+    himl = pImageList_Create(2, 1, ILC_COLOR32 | ILC_MASK, 2, 1);
+    ok(himl != NULL, "Failed to create image list.\n");
+    if (!himl) goto done;
+    icon_info.fIcon = TRUE;
+    icon_info.hbmMask = mask;
+
+    for (i = 0; i < 2; ++i)
+    {
+        bitmap = create_test_bitmap(hdc, 2, 1, 32, colors[i]);
+        icon_info.hbmColor = bitmap;
+        icon = CreateIconIndirect(&icon_info);
+        ok(icon != NULL, "Failed to create icon %d.\n", i);
+        ret = pImageList_ReplaceIcon(himl, -1, icon);
+        ok(ret == i, "Got image index %d, expected %d.\n", ret, i);
+        DestroyIcon(icon);
+        DeleteObject(bitmap);
+    }
+
+    for (i = 0; i < 4; ++i)
+    {
+        winetest_push_context("replacement %d", i);
+        bitmap = create_test_bitmap(hdc, 2, 1, 32, colors[i % 2]);
+        icon_info.hbmColor = bitmap;
+        icon = CreateIconIndirect(&icon_info);
+        ok(icon != NULL, "Failed to create replacement icon.\n");
+        ret = pImageList_ReplaceIcon(himl, 0, icon);
+        ok(ret == 0, "Got image index %d.\n", ret);
+        DestroyIcon(icon);
+        DeleteObject(bitmap);
+
+        if (v6)
+        {
+            hr = pHIMAGELIST_QueryInterface(himl, &IID_IImageList2, (void **)&image_list);
+            ok(hr == S_OK, "QueryInterface returned %#lx.\n", hr);
+            if (SUCCEEDED(hr))
+            {
+                hr = IImageList2_GetItemFlags(image_list, 0, &flags);
+                ok(hr == S_OK, "GetItemFlags returned %#lx.\n", hr);
+                ok(flags == (i % 2 ? 0 : ILIF_ALPHA), "Got item flags %#lx.\n", flags);
+                IImageList2_Release(image_list);
+            }
+        }
+        image_list_get_image_bits_by_draw(himl, 0, bits);
+        ok((bits[0] & 0xffffff) == (colors[i % 2][0] & 0xffffff) &&
+           (bits[1] & 0xffffff) == (colors[i % 2][1] & 0xffffff),
+           "Got replacement pixels [%08x, %08x].\n", bits[0], bits[1]);
+        image_list_get_image_bits_by_draw(himl, 1, bits);
+        ok((bits[0] & 0xffffff) == colors[1][0] && (bits[1] & 0xffffff) == colors[1][1],
+           "Got neighboring pixels [%08x, %08x].\n", bits[0], bits[1]);
+        ret = pImageList_GetImageCount(himl);
+        ok(ret == 2, "Got image count %d.\n", ret);
+        winetest_pop_context();
+    }
+    pImageList_Destroy(himl);
+done:
+    DeleteObject(mask);
+    DeleteDC(hdc);
+    winetest_pop_context();
+}
+
 static void test_IImageList_Clone(void)
 {
     IImageList *imgl, *imgl2;
@@ -3031,6 +3113,7 @@ START_TEST(imagelist)
     test_copy();
     test_loadimage();
     test_alpha(FALSE);
+    test_replace_alpha(FALSE);
 
     /* Now perform v6 tests */
     if (!load_v6_module(&ctx_cookie, &hCtx))
@@ -3052,6 +3135,7 @@ START_TEST(imagelist)
     test_copy();
     test_loadimage();
     test_alpha(TRUE);
+    test_replace_alpha(TRUE);
 
     test_ImageList_DrawIndirect();
     test_shell_imagelist();
