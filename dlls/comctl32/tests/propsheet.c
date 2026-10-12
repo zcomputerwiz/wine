@@ -489,6 +489,58 @@ static void test_wiznavigation(void)
     UnhookWindowsHookEx( hook );
 }
 
+static void test_wizbuttons_focus(void)
+{
+    static const struct
+    {
+        DWORD initial_flags, updated_flags;
+        int initial_button, expected_button;
+    } cases[] =
+    {
+        {PSWIZB_NEXT, PSWIZB_FINISH, 12324, 12325},
+        {PSWIZB_FINISH, PSWIZB_NEXT, 12325, 12324},
+        {PSWIZB_NEXT, PSWIZB_BACK, 12324, 12323},
+        {PSWIZB_BACK, PSWIZB_BACK | PSWIZB_NEXT, 12323, 12323},
+        {PSWIZB_NEXT, 0, 12324, IDCANCEL},
+    };
+    PROPSHEETPAGEA psp = {sizeof(psp)};
+    PROPSHEETHEADERA psh = {sizeof(psh)};
+    HPROPSHEETPAGE page;
+    HWND sheet, edit, initial, expected;
+    unsigned int i;
+
+    psp.hInstance = GetModuleHandleA(NULL);
+    psp.pszTemplate = MAKEINTRESOURCEA(IDD_PROP_PAGE_EDIT);
+    psp.pfnDlgProc = nav_page_proc;
+    page = pCreatePropertySheetPageA(&psp);
+    psh.dwFlags = PSH_MODELESS | PSH_WIZARD;
+    psh.pszCaption = "Wizard focus";
+    psh.nPages = 1;
+    psh.phpage = &page;
+    sheet = (HWND)pPropertySheetA(&psh);
+    ok(sheet != NULL && sheet != INVALID_HANDLE_VALUE, "Failed to create wizard.\n");
+    if (!sheet || sheet == INVALID_HANDLE_VALUE) return;
+
+    for (i = 0; i < ARRAY_SIZE(cases); ++i)
+    {
+        winetest_push_context("case %u", i);
+        SendMessageA(sheet, PSM_SETWIZBUTTONS, 0, cases[i].initial_flags);
+        initial = GetDlgItem(sheet, cases[i].initial_button);
+        expected = GetDlgItem(sheet, cases[i].expected_button);
+        SetFocus(initial);
+        ok(GetFocus() == initial, "Failed to focus initial button.\n");
+        SendMessageA(sheet, PSM_SETWIZBUTTONS, 0, cases[i].updated_flags);
+        ok(GetFocus() == expected, "Wizard button focus is %p, expected %p.\n", GetFocus(), expected);
+        winetest_pop_context();
+    }
+    edit = GetDlgItem((HWND)SendMessageA(sheet, PSM_GETCURRENTPAGEHWND, 0, 0), IDC_PS_EDIT1);
+    ok(edit != NULL, "Failed to find page edit control.\n");
+    SetFocus(edit);
+    SendMessageA(sheet, PSM_SETWIZBUTTONS, 0, PSWIZB_FINISH);
+    ok(GetFocus() == edit, "Wizard moved focus away from the page edit control.\n");
+    DestroyWindow(sheet);
+}
+
 static void test_buttons(void)
 {
     HPROPSHEETPAGE hpsp[1];
@@ -1776,6 +1828,7 @@ START_TEST(propsheet)
     test_nopage();
     test_disableowner();
     test_wiznavigation();
+    test_wizbuttons_focus();
     test_buttons();
     test_custom_default_button();
     test_messages();
@@ -1795,6 +1848,7 @@ START_TEST(propsheet)
     is_v6 = TRUE;
 
     test_page_dialog_texture();
+    test_wizbuttons_focus();
 
     unload_v6_module(ctx_cookie, ctx);
 }
