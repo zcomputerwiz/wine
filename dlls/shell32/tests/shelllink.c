@@ -1062,7 +1062,7 @@ static void test_SHGetStockIconInfo(void)
             "%3d: got 0x%lx, iSysImageIndex: 0x%x, iIcon: 0x%x (expected S_OK)\n",
             i, hr, sii->iSysImageIndex, sii->iIcon);
 
-    todo_wine_if(sii->hIcon == 0) {
+    todo_wine_if(sii->hIcon == 0 && i != SIID_RECYCLER) {
         ok(sii->hIcon != 0,
             "%3d: got %p, should be non-zero handle\n",
             i, sii->hIcon);
