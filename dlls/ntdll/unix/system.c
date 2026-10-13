@@ -32,6 +32,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <errno.h>
 #include <sys/time.h>
@@ -3103,6 +3104,21 @@ static void get_timezone_info( RTL_DYNAMIC_TIME_ZONE_INFORMATION *tzi )
     BOOL inverted_dst;
 
     mutex_lock( &timezone_mutex );
+
+    /* the host zone can change while we run (timedatectl, a settings panel): drop the cache then */
+    {
+        static dev_t tz_dev;
+        static ino_t tz_ino;
+        static time_t tz_mtime;
+        struct stat st;
+
+        if (!stat( "/etc/localtime", &st ) &&
+            (st.st_dev != tz_dev || st.st_ino != tz_ino || st.st_mtime != tz_mtime))
+        {
+            tz_dev = st.st_dev; tz_ino = st.st_ino; tz_mtime = st.st_mtime;
+            current_year = -1;
+        }
+    }
 
     year_start = time(NULL);
     tm = gmtime(&year_start);
