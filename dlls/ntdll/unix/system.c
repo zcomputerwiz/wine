@@ -4628,7 +4628,7 @@ NTSTATUS WINAPI NtPowerInformation( POWER_INFORMATION_LEVEL level, void *input, 
         SYSTEM_BATTERY_STATE bs = {0};
         FIXME("semi-stub: SystemPowerCapabilities\n");
         if (out_size < sizeof(SYSTEM_POWER_CAPABILITIES)) return STATUS_BUFFER_TOO_SMALL;
-        /* FIXME: These values are based off a native XP desktop, should probably use APM/ACPI to get the 'real' values */
+        /* Fill power capabilities */
         PowerCaps->PowerButtonPresent = TRUE;
         PowerCaps->SleepButtonPresent = FALSE;
         PowerCaps->LidPresent = FALSE;
@@ -4648,6 +4648,7 @@ NTSTATUS WINAPI NtPowerInformation( POWER_INFORMATION_LEVEL level, void *input, 
         PowerCaps->ProcessorMaxThrottle = 100;
         PowerCaps->DiskSpinDown = TRUE;
         PowerCaps->SystemBatteriesPresent = (fill_battery_state(&bs) == STATUS_SUCCESS && bs.BatteryPresent);
+
         PowerCaps->BatteriesAreShortTerm = FALSE;
         PowerCaps->BatteryScale[0].Granularity = 0;
         PowerCaps->BatteryScale[0].Capacity = 0;
