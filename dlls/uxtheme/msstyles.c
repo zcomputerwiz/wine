@@ -238,7 +238,7 @@ HRESULT MSSTYLES_SetActiveTheme(PTHEME_FILE tf, BOOL setMetrics)
     if (tfActiveTheme)
     {
         InterlockedIncrement(&tfActiveTheme->refcount);
-	if(!tfActiveTheme->classes)
+	if(setMetrics || !tfActiveTheme->classes)
 	    MSSTYLES_ParseThemeIni(tfActiveTheme, setMetrics);
     }
     return S_OK;
@@ -908,6 +908,7 @@ static void parse_apply_nonclient (struct PARSENONCLIENTSTATE* state)
  */
 static void MSSTYLES_ParseThemeIni(PTHEME_FILE tf, BOOL setMetrics)
 {
+    BOOL parse_classes = !tf->classes;
     PTHEME_CLASS cls;
     PTHEME_CLASS globals;
     PTHEME_PARTSTATE ps;
@@ -977,7 +978,7 @@ static void MSSTYLES_ParseThemeIni(PTHEME_FILE tf, BOOL setMetrics)
 	    }
             continue;
         }
-        if(MSSTYLES_ParseIniSectionName(lpName, dwLen, szAppName, szClassName, &iPartId, &iStateId)) {
+        if(parse_classes && MSSTYLES_ParseIniSectionName(lpName, dwLen, szAppName, szClassName, &iPartId, &iStateId)) {
             BOOL isGlobal = FALSE;
             if(!lstrcmpiW(szClassName, L"globals")) {
                 isGlobal = TRUE;
