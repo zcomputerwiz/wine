@@ -747,6 +747,8 @@ static void wayland_surface_reconfigure_geometry(struct wayland_surface *surface
         xdg_surface_set_window_geometry(surface->xdg_surface,
                                         rect.left, rect.top,
                                         width, height);
+        surface->window_geometry_offset.x = rect.left;
+        surface->window_geometry_offset.y = rect.top;
         if (surface->window.resizeable)
         {
             xdg_toplevel_set_min_size(surface->xdg_toplevel, 0, 0);
