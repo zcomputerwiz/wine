@@ -1905,8 +1905,13 @@ static INT LISTVIEW_ProcessLetterKeys(LISTVIEW_INFO *infoPtr, WPARAM charCode, L
     /* simple parameter checking */
     if (!charCode || !keyData || infoPtr->nItemCount == 0) return 0;
 
+    /* a space continues a search in progress ("my p" finds "My Pictures"), it does not start one */
+    if (charCode == ' ' &&
+        (!infoPtr->nSearchParamLength || GetTickCount() - infoPtr->lastKeyPressTimestamp >= KEY_DELAY))
+        return 0;
+
     /* only allow the valid WM_CHARs through */
-    if (!iswalnum(charCode) &&
+    if (!iswalnum(charCode) && charCode != ' ' &&
         charCode != '.' && charCode != '`' && charCode != '!' &&
         charCode != '@' && charCode != '#' && charCode != '$' &&
         charCode != '%' && charCode != '^' && charCode != '&' &&
