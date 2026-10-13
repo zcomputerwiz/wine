@@ -40,6 +40,7 @@ static HTHEME  (WINAPI * pOpenThemeDataEx)(HWND, LPCWSTR, DWORD);
 static HTHEME (WINAPI *pOpenThemeDataForDpi)(HWND, LPCWSTR, UINT);
 static HRESULT (WINAPI *pOpenThemeFile)(const WCHAR *, const WCHAR *, const WCHAR *, HANDLE, DWORD);
 static HRESULT (WINAPI *pCloseThemeFile)(HANDLE);
+static HRESULT (WINAPI *pApplyTheme)(HANDLE, char *, HWND);
 static HPAINTBUFFER (WINAPI *pBeginBufferedPaint)(HDC, const RECT *, BP_BUFFERFORMAT, BP_PAINTPARAMS *, HDC *);
 static HRESULT (WINAPI *pBufferedPaintClear)(HPAINTBUFFER, const RECT *);
 static HRESULT (WINAPI *pDrawThemeBackgroundEx)(HTHEME, HDC, int, int, const RECT *, const DTBGOPTS *);
@@ -84,6 +85,7 @@ static void init_funcs(void)
 
     pOpenThemeFile = (void *)GetProcAddress(uxtheme, MAKEINTRESOURCEA(2));
     pCloseThemeFile = (void *)GetProcAddress(uxtheme, MAKEINTRESOURCEA(3));
+    pApplyTheme = (void *)GetProcAddress(uxtheme, MAKEINTRESOURCEA(4));
     pShouldSystemUseDarkMode = (void *)GetProcAddress(uxtheme, MAKEINTRESOURCEA(138));
     pShouldAppsUseDarkMode = (void *)GetProcAddress(uxtheme, MAKEINTRESOURCEA(132));
     pGetImmersiveColorTypeFromName = (void *)GetProcAddress(uxtheme, MAKEINTRESOURCEA(96));
@@ -2902,12 +2904,116 @@ static void test_DrawThemeTextEx(void)
     DestroyWindow(hwnd);
 }
 
+static void test_theme_font_tokens(void)
+{
+    static const WCHAR colors[] = L"NormalColor\0";
+    static const WCHAR sizes[] = L"NormalSize\0";
+    static const WCHAR files[] = L"TEST_INI\0";
+    static const WCHAR ini[] =
+        L"[Button.PushButton(Normal)]\r\n"
+        L"Font=Tahoma, 10, bold, italic, underline, strikeout\r\n"
+        L"[Button.PushButton(Hot)]\r\n"
+        L"Font=  Tahoma   , 10, bold  , italic   , underline  , strikeout\r\n";
+    WORD version = 3;
+    WCHAR module[MAX_PATH], temp[MAX_PATH], path[MAX_PATH];
+    WCHAR saved_path[MAX_PATH], saved_color[MAX_PATH], saved_size[MAX_PATH];
+    LOGFONTW control, spaced;
+    HANDLE update, file = NULL;
+    HANDLE saved_file = NULL;
+    HTHEME theme;
+    HRESULT hr;
+    BOOL ret;
+
+    if (!pOpenThemeFile || !pCloseThemeFile || !pApplyTheme)
+    {
+        win_skip("Theme file APIs are unavailable.\n");
+        return;
+    }
+    GetModuleFileNameW(NULL, module, ARRAY_SIZE(module));
+    GetTempPathW(ARRAY_SIZE(temp), temp);
+    ret = GetTempFileNameW(temp, L"thm", 0, path);
+    ok(ret, "Failed to get temporary path.\n");
+    if (!ret) return;
+    ret = CopyFileW(module, path, FALSE);
+    ok(ret, "Failed to copy test image, error %lu.\n", GetLastError());
+    if (!ret) goto cleanup;
+    update = BeginUpdateResourceW(path, TRUE);
+    ok(update != NULL, "Failed to open resources, error %lu.\n", GetLastError());
+    if (!update) goto cleanup;
+    ret = UpdateResourceW(update, L"PACKTHEM_VERSION", MAKEINTRESOURCEW(1), 0, &version, sizeof(version));
+    ok(ret, "Failed to add version resource.\n");
+    ret = UpdateResourceW(update, L"COLORNAMES", MAKEINTRESOURCEW(1), 0, (void *)colors, sizeof(colors));
+    ok(ret, "Failed to add color resource.\n");
+    ret = UpdateResourceW(update, L"SIZENAMES", MAKEINTRESOURCEW(1), 0, (void *)sizes, sizeof(sizes));
+    ok(ret, "Failed to add size resource.\n");
+    ret = UpdateResourceW(update, L"FILERESNAMES", MAKEINTRESOURCEW(1), 0, (void *)files, sizeof(files));
+    ok(ret, "Failed to add file map.\n");
+    ret = UpdateResourceW(update, L"TEXTFILE", L"TEST_INI", 0, (void *)ini, sizeof(ini));
+    ok(ret, "Failed to add theme text.\n");
+    ret = EndUpdateResourceW(update, FALSE);
+    ok(ret, "Failed to write resources, error %lu.\n", GetLastError());
+    if (!ret) goto cleanup;
+    hr = pOpenThemeFile(path, colors, sizes, &file, 0);
+    if (FAILED(hr))
+    {
+        win_skip("Unsigned text theme format unsupported, hr %#lx.\n", hr);
+        goto cleanup;
+    }
+    hr = GetCurrentThemeName(saved_path, ARRAY_SIZE(saved_path), saved_color, ARRAY_SIZE(saved_color),
+                             saved_size, ARRAY_SIZE(saved_size));
+    if (SUCCEEDED(hr))
+    {
+        hr = pOpenThemeFile(saved_path, saved_color, saved_size, &saved_file, 0);
+        ok(hr == S_OK, "Failed to save original theme, hr %#lx.\n", hr);
+        if (FAILED(hr))
+        {
+            pCloseThemeFile(file);
+            goto cleanup;
+        }
+    }
+    hr = pApplyTheme(file, NULL, NULL);
+    ok(hr == S_OK, "Failed to apply fixture, hr %#lx.\n", hr);
+    theme = SUCCEEDED(hr) ? OpenThemeData(NULL, L"Button") : NULL;
+    ok(theme != NULL, "Failed to open fixture's Button class.\n");
+    if (theme)
+    {
+        hr = GetThemeFont(theme, NULL, BP_PUSHBUTTON, PBS_NORMAL, TMT_FONT, &control);
+        ok(hr == S_OK, "Got control font hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            ok(!lstrcmpW(control.lfFaceName, L"Tahoma"), "Got control face %s.\n",
+               wine_dbgstr_w(control.lfFaceName));
+            ok(control.lfWeight == FW_BOLD && control.lfItalic && control.lfUnderline && control.lfStrikeOut,
+               "Control attributes: weight %ld, italic %u, underline %u, strikeout %u.\n",
+               control.lfWeight, control.lfItalic, control.lfUnderline, control.lfStrikeOut);
+        }
+        hr = GetThemeFont(theme, NULL, BP_PUSHBUTTON, PBS_HOT, TMT_FONT, &spaced);
+        ok(hr == S_OK, "Got spaced font hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            ok(!lstrcmpW(spaced.lfFaceName, L"Tahoma"), "Theme token face: got %s.\n",
+               wine_dbgstr_w(spaced.lfFaceName));
+            ok(spaced.lfWeight == FW_BOLD && spaced.lfItalic && spaced.lfUnderline && spaced.lfStrikeOut,
+               "Theme token attributes: weight %ld, italic %u, underline %u, strikeout %u.\n",
+               spaced.lfWeight, spaced.lfItalic, spaced.lfUnderline, spaced.lfStrikeOut);
+        }
+        CloseThemeData(theme);
+    }
+    hr = pApplyTheme(saved_file, NULL, NULL);
+    ok(hr == S_OK, "Failed to restore original theme, hr %#lx.\n", hr);
+    if (saved_file) pCloseThemeFile(saved_file);
+    pCloseThemeFile(file);
+cleanup:
+    DeleteFileW(path);
+}
+
 START_TEST(system)
 {
     ULONG_PTR ctx_cookie;
     HANDLE ctx;
 
     init_funcs();
+    test_theme_font_tokens();
     init_msg_sequences(sequences, NUM_MSG_SEQUENCES);
 
     test_IsThemed();
