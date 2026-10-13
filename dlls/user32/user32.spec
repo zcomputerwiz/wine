@@ -1115,7 +1115,7 @@
 @ stdcall SetWindowLongW(long long long)
 @ stdcall SetWindowPlacement(long ptr) NtUserSetWindowPlacement
 @ stdcall SetWindowPos(long long long long long long long) NtUserSetWindowPos
-@ stdcall SetWindowRgn(long long long) NtUserSetWindowRgn
+@ stdcall SetWindowRgn(long long long)
 # @ stub SetWindowRgnEx
 @ stdcall SetWindowStationUser(long long)
 @ stdcall SetWindowTextA(long str)
