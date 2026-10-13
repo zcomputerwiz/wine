@@ -653,18 +653,26 @@ static void shellview_add_item(IShellViewImpl *shellview, LPCITEMIDLIST pidl)
     TRACE("(%p)(pidl=%p)\n", shellview, pidl);
 
     item.mask = LVIF_TEXT | LVIF_IMAGE | LVIF_PARAM;
-    item.iItem = 0;
+    item.iItem = INT_MAX;   /* at the end, as Windows shows a new item until the folder is refreshed */
     item.iSubItem = 0;
     item.lParam = (LPARAM)pidl;
     item.pszText = LPSTR_TEXTCALLBACKW;
     item.iImage = I_IMAGECALLBACK;
-    SendMessageW(shellview->hWndList, LVM_INSERTITEMW, 0, (LPARAM)&item);
+    item.iItem = SendMessageW(shellview->hWndList, LVM_INSERTITEMW, 0, (LPARAM)&item);
+    if (shellview->drive_groups)
+        SendMessageW(shellview->hWndList, LVM_MOVEITEMTOGROUP, item.iItem, drive_group(pidl));
+    if (shellview->tile_column_count)
+    {
+        /* Windows XP shows the type and size of a file under its name, nothing for folders and drives */
+        LVTILEINFO tile = { sizeof(tile), item.iItem, _ILIsValue(pidl) ? shellview->tile_column_count : 0,
+                            shellview->tile_columns };
+        SendMessageW(shellview->hWndList, LVM_SETTILEINFO, 0, (LPARAM)&tile);
+    }
 
     for (i = 1; i < shellview->columns; i++)
     {
         item.mask = LVIF_TEXT;
-        item.iItem = 0;
-        item.iSubItem = 1;
+        item.iSubItem = i;
         item.pszText = LPSTR_TEXTCALLBACKW;
         SendMessageW(shellview->hWndList, LVM_SETITEMW, 0, (LPARAM)&item);
     }
@@ -688,8 +696,11 @@ static BOOLEAN LV_RenameItem(IShellViewImpl * This, LPCITEMIDLIST pidlOld, LPCIT
 	  SendMessageW(This->hWndList, LVM_GETITEMW, 0, (LPARAM) &lvItem);
 
 	  SHFree((LPITEMIDLIST)lvItem.lParam);
-	  lvItem.mask = LVIF_PARAM;
+	  /* the name comes from the new pidl again (an edited label is kept as fixed text) */
+	  lvItem.mask = LVIF_PARAM | LVIF_TEXT;
 	  lvItem.iItem = nItem;
+	  lvItem.iSubItem = 0;
+	  lvItem.pszText = LPSTR_TEXTCALLBACKW;
 	  lvItem.lParam = (LPARAM) ILClone(ILFindLastID(pidlNew));	/* set the item's data */
 	  SendMessageW(This->hWndList, LVM_SETITEMW, 0, (LPARAM) &lvItem);
 	  SendMessageW(This->hWndList, LVM_UPDATE, nItem, 0);
@@ -1674,19 +1685,34 @@ static LRESULT ShellView_OnChange(IShellViewImpl * This, const LPCITEMIDLIST *pi
     {
         case SHCNE_MKDIR:
         case SHCNE_CREATE:
-            pidl = ILClone(ILFindLastID(pidls[0]));
-            shellview_add_item(This, pidl);
+            if (!item_in_view(This, pidls[0]) || LV_FindItemByPidl(This, ILFindLastID(pidls[0])) != -1) break;
+            shellview_add_item(This, reparse_item(This, pidls[0]));
             break;
         case SHCNE_RMDIR:
         case SHCNE_DELETE:
         {
-            INT i = LV_FindItemByPidl(This, ILFindLastID(pidls[0]));
+            INT i;
+
+            if (!item_in_view(This, pidls[0])) break;
+            i = LV_FindItemByPidl(This, ILFindLastID(pidls[0]));
             ret = SendMessageW(This->hWndList, LVM_DELETEITEM, i, 0);
             break;
         }
         case SHCNE_RENAMEFOLDER:
         case SHCNE_RENAMEITEM:
-            LV_RenameItem(This, pidls[0], pidls[1]);
+            /* a move into or out of the folder shows as a rename */
+            old_in = item_in_view(This, pidls[0]);
+            new_in = item_in_view(This, pidls[1]);
+            if (old_in && new_in)
+            {
+                pidl = reparse_item(This, pidls[1]);
+                LV_RenameItem(This, pidls[0], pidl);
+                ILFree(pidl);
+            }
+            else if (old_in)
+                SendMessageW(This->hWndList, LVM_DELETEITEM, LV_FindItemByPidl(This, ILFindLastID(pidls[0])), 0);
+            else if (new_in && LV_FindItemByPidl(This, ILFindLastID(pidls[1])) == -1)
+                shellview_add_item(This, reparse_item(This, pidls[1]));
             break;
         case SHCNE_UPDATEITEM:
 	    break;
