@@ -146,3 +146,8 @@ void WINAPI USER_NonClientButtonDraw( HWND hwnd, HDC hdc, enum NONCLIENT_BUTTON_
         return;
     }
 }
+
+BOOL WINAPI USER_NonClientFrameDraw( HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex_style, UINT flags )
+{
+    return FALSE;
+}

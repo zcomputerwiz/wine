@@ -165,6 +165,7 @@ extern struct user_api_hook *user_api;
 LRESULT WINAPI USER_DefDlgProc(HWND, UINT, WPARAM, LPARAM, BOOL);
 LRESULT WINAPI USER_ScrollBarProc(HWND, UINT, WPARAM, LPARAM, BOOL);
 void WINAPI USER_NonClientButtonDraw(HWND, HDC, enum NONCLIENT_BUTTON_TYPE, RECT, BOOL, BOOL);
+BOOL WINAPI USER_NonClientFrameDraw(HWND, HDC, RECT, DWORD, DWORD, UINT);
 void WINAPI USER_ScrollBarDraw(HWND, HDC, INT, enum SCROLL_HITTEST,
                                const struct SCROLL_TRACKING_INFO *, BOOL, BOOL, RECT *, UINT,
                                INT, INT, INT, BOOL);

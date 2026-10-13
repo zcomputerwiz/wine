@@ -79,6 +79,7 @@ struct user_entry
     USER32_CALLBACK_ENTRY(CallWindowsHook) \
     USER32_CALLBACK_ENTRY(CopyImage) \
     USER32_CALLBACK_ENTRY(DrawNonClientButton) \
+    USER32_CALLBACK_ENTRY(DrawNonClientFrame) \
     USER32_CALLBACK_ENTRY(DrawScrollBar) \
     USER32_CALLBACK_ENTRY(DrawText) \
     USER32_CALLBACK_ENTRY(FreeCachedClipboardData) \
@@ -589,6 +590,18 @@ struct draw_non_client_button_params
     BOOL down;
     BOOL grayed;
 };
+
+/* NtUserDrawNonClientFrame params */
+struct draw_non_client_frame_params
+{
+    HWND hwnd;
+    HDC hdc;
+    RECT rect;
+    DWORD style;
+    DWORD ex_style;
+    UINT flags;     /* NCFRAME_* */
+};
+
 
 /* NtUserDrawScrollBar params */
 struct draw_scroll_bar_params
