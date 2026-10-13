@@ -138,6 +138,42 @@
 #define IDS_RECYCLEBIN_OVERWRITE_CAPTION 171
 
 #define IDS_NEW_MENU_FOLDER         180
+#define IDS_COPY_OF                 181
+#define IDS_COPY_N_OF               182
+#define IDS_SHORTCUT_TO             183
+#define IDS_SHORTCUT_N_TO           184
+#define IDS_NEW_ITEM                185
+#define IDS_SEND_TO                 186
+#define IDS_SEND_TO_DESKTOP         187
+#define IDS_OPEN_WITH               188
+#define IDS_OPEN_WITH_DOTS          189
+#define IDS_OPEN_WITH_CHOOSE        190
+#define IDS_OPEN_WITH_RECOMMENDED   191
+#define IDS_OPEN_WITH_OTHER         192
+#define IDS_OPEN_WITH_PROGRAMS      193
+#define IDS_ALL_FILES               194
+#define IDS_DELETEMULTIPLE_CAPTION  195
+#define IDS_LOCAL_DISK              196
+#define IDS_CD_DRIVE                197
+#define IDS_REMOVABLE_DISK          198
+#define IDS_NETWORK_DRIVE           199
+#define IDS_UNDO                    230
+#define IDS_UNDO_RENAME             231
+#define IDS_UNDO_MOVE               232
+#define IDS_UNDO_COPY               233
+#define IDS_UNDO_DELETE             234
+#define IDS_DRIVES_SHAREDDOCS_GROUP 235
+#define IDS_DRIVES_FIXED_GROUP      236
+#define IDS_DRIVES_REMOVABLE_GROUP  237
+#define IDS_DRIVES_NETDRIVE_GROUP   238
+#define IDS_DRIVES_OTHER_GROUP      239
+
+/* Open With dialog */
+#define IDD_OPEN_WITH               10
+#define IDC_OPENWITH_FILE           14001
+#define IDC_OPENWITH_PROGRAMS       14002
+#define IDC_OPENWITH_ALWAYS         14003
+#define IDC_OPENWITH_BROWSE         14004
 
 #define IDS_LICENSE                 256
 #define IDS_LICENSE_CAPTION         257
@@ -155,6 +191,14 @@
 
 /* Note: this string is referenced from the registry*/
 #define IDS_RECYCLEBIN_FOLDER_NAME   8964
+#define IDS_MYDOCUMENTS_FOLDER_NAME  9227
+#define IDS_MYPICTURES_FOLDER_NAME   9228
+#define IDS_MYMUSIC_FOLDER_NAME      9229
+#define IDS_MYVIDEOS_FOLDER_NAME     9230
+#define IDS_SHAREDDOCS_FOLDER_NAME   21785  /* Windows XP IDS_LOCALGDN_FLD_SHARED_DOC */
+#define IDS_SHAREDMUSIC_FOLDER_NAME  0x7143 /* Windows XP IDS_SHAREDMUSIC ... */
+#define IDS_SHAREDVIDEO_FOLDER_NAME  0x7144
+#define IDS_SHAREDPICTURES_FOLDER_NAME 0x7145
 
 /* Properties dialog */
 #define IDD_FILE_PROPERTIES        8
@@ -432,6 +476,8 @@ FIXME: Need to add them, but for now just let them use the same: searching.avi
 #define IDC_FPROP_READONLY          13019
 #define IDC_FPROP_HIDDEN            13020
 #define IDC_FPROP_ARCHIVE           13021
+#define IDC_FPROP_SIZEONDISK_LABEL  13022
+#define IDC_FPROP_SIZEONDISK        13023
 
 /* bitmaps */
 #define IDB_SORT_INCR           133
