@@ -1005,6 +1005,7 @@ SOURCES = \
 	wexpower.h \
 	wexnet.h \
 	wexwlan.h \
+	wexsearch.h \
 	wexhost.h \
 	wfext.h \
 	wia.h \
