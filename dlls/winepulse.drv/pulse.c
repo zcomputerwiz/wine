@@ -2520,6 +2520,121 @@ fail:
     return STATUS_SUCCESS;
 }
 
+struct endpoint_vol_data
+{
+    BOOL found;
+    float volume;
+    BOOL mute;
+    unsigned int channels;
+    char name[256];
+};
+
+static void sink_vol_cb(pa_context *c, const pa_sink_info *i, int eol, void *user)
+{
+    struct endpoint_vol_data *d = user;
+
+    pulse_broadcast();
+    if (eol || !i || d->found) return;
+    d->found = TRUE;
+    d->volume = (float)pa_cvolume_avg(&i->volume) / PA_VOLUME_NORM;
+    d->mute = !!i->mute;
+    d->channels = i->volume.channels;
+    snprintf(d->name, sizeof(d->name), "%s", i->name);
+}
+
+static void source_vol_cb(pa_context *c, const pa_source_info *i, int eol, void *user)
+{
+    struct endpoint_vol_data *d = user;
+
+    pulse_broadcast();
+    if (eol || !i || d->found) return;
+    d->found = TRUE;
+    d->volume = (float)pa_cvolume_avg(&i->volume) / PA_VOLUME_NORM;
+    d->mute = !!i->mute;
+    d->channels = i->volume.channels;
+    snprintf(d->name, sizeof(d->name), "%s", i->name);
+}
+
+static void endpoint_success_cb(pa_context *c, int success, void *user)
+{
+    *(int *)user = success;
+    pulse_broadcast();
+}
+
+/* the physical device the endpoint stands for (empty name: the server's default); pulse lock held */
+static HRESULT endpoint_query(const struct endpoint_volume_params *params, struct endpoint_vol_data *d)
+{
+    const char *name = params->device && params->device[0] ? params->device : NULL;
+    pa_operation *o;
+
+    memset(d, 0, sizeof(*d));
+    if (!pulse_ml) return E_FAIL;
+    if (FAILED(pulse_connect("Wine"))) return E_FAIL;
+
+    if (params->flow == eRender) o = pa_context_get_sink_info_by_name(pulse_ctx, name, sink_vol_cb, d);
+    else o = pa_context_get_source_info_by_name(pulse_ctx, name, source_vol_cb, d);
+    wait_pa_operation_complete(o);
+    return d->found ? S_OK : E_FAIL;
+}
+
+static NTSTATUS pulse_get_endpoint_volume(void *args)
+{
+    struct endpoint_volume_params *params = args;
+    struct endpoint_vol_data d;
+
+    pulse_lock();
+    params->result = endpoint_query(params, &d);
+    pulse_unlock();
+    if (SUCCEEDED(params->result))
+    {
+        if (params->volume) *params->volume = d.volume;
+        if (params->mute) *params->mute = d.mute;
+    }
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS pulse_set_endpoint_volume(void *args)
+{
+    struct endpoint_volume_params *params = args;
+    struct endpoint_vol_data d;
+    pa_operation *o;
+    int success = 0;
+
+    pulse_lock();
+    if (FAILED(params->result = endpoint_query(params, &d))) goto done;
+
+    if (params->volume)
+    {
+        pa_cvolume cv;
+        float v = *params->volume;
+
+        if (v < 0.0f) v = 0.0f;
+        if (v > 1.0f) v = 1.0f;
+        pa_cvolume_set(&cv, d.channels, (pa_volume_t)(v * PA_VOLUME_NORM + 0.5f));
+        if (params->flow == eRender)
+            o = pa_context_set_sink_volume_by_name(pulse_ctx, d.name, &cv, endpoint_success_cb, &success);
+        else
+            o = pa_context_set_source_volume_by_name(pulse_ctx, d.name, &cv, endpoint_success_cb, &success);
+        wait_pa_operation_complete(o);
+        if (!success) params->result = E_FAIL;
+    }
+
+    if (params->mute && SUCCEEDED(params->result))
+    {
+        success = 0;
+        if (params->flow == eRender)
+            o = pa_context_set_sink_mute_by_name(pulse_ctx, d.name, !!*params->mute, endpoint_success_cb, &success);
+        else
+            o = pa_context_set_source_mute_by_name(pulse_ctx, d.name, !!*params->mute, endpoint_success_cb, &success);
+        wait_pa_operation_complete(o);
+        if (!success) params->result = E_FAIL;
+    }
+
+done:
+    pulse_unlock();
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS pulse_midi_get_driver(void *args)
 {
     static const WCHAR driver[] = {'a','l','s','a',0};
@@ -2567,6 +2682,8 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     pulse_not_implemented,
     pulse_not_implemented,
     pulse_not_implemented,
+    pulse_get_endpoint_volume,
+    pulse_set_endpoint_volume,
 };
 
 C_ASSERT(ARRAYSIZE(__wine_unix_call_funcs) == funcs_count);
@@ -3053,6 +3170,8 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
     pulse_is_started,
     pulse_wow64_get_prop_value,
     pulse_midi_get_driver,
+    pulse_not_implemented,
+    pulse_not_implemented,
     pulse_not_implemented,
     pulse_not_implemented,
     pulse_not_implemented,

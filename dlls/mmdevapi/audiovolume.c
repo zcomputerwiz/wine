@@ -19,6 +19,8 @@
 #define COBJMACROS
 
 #include <stdarg.h>
+#include <math.h>
+#include <assert.h>
 
 #include "windef.h"
 #include "winbase.h"
@@ -42,8 +44,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(mmdevapi);
 typedef struct AEVImpl {
     IAudioEndpointVolumeEx IAudioEndpointVolumeEx_iface;
     LONG ref;
-    float master_vol;
-    BOOL mute;
+    GUID devguid;
 } AEVImpl;
 
 static inline AEVImpl *impl_from_IAudioEndpointVolumeEx(IAudioEndpointVolumeEx *iface)
@@ -110,58 +111,96 @@ static HRESULT WINAPI AEV_UnregisterControlChangeNotify(IAudioEndpointVolumeEx *
     return S_OK;
 }
 
+/* The endpoint volume is the sound server's volume for the physical device behind this endpoint; the
+ * driver reads/writes it (winepulse: PulseAudio/PipeWire via libpulse).  Drivers without support return
+ * E_NOTIMPL and callers fall back to their own handling.  The scalar uses PulseAudio's scale, i.e. the
+ * numbers pavucontrol and wpctl show; dB values follow its cubic curve. */
+static HRESULT aev_driver_call( AEVImpl *This, unsigned int code, float *volume, BOOL *mute )
+{
+    struct endpoint_volume_params params;
+    char *name;
+    EDataFlow flow;
+    NTSTATUS status;
+
+    if (!get_device_name_from_guid( &This->devguid, &name, &flow )) return E_FAIL;
+    params.device = name;
+    params.flow = flow;
+    params.volume = volume;
+    params.mute = mute;
+    params.result = E_NOTIMPL;
+    __wine_unix_call( drvs.module_unixlib, main_loop_start, NULL );   /* idempotent; the pulse driver needs its loop */
+    status = __wine_unix_call( drvs.module_unixlib, code, &params );
+    free( name );
+    return status ? E_NOTIMPL : params.result;
+}
+
+static float scalar_to_db( float scalar )
+{
+    return scalar <= 0.0f ? -100.0f : max( -100.0f, 60.0f * log10f( scalar ) );
+}
+
+static float db_to_scalar( float db )
+{
+    return powf( 10.0f, db / 60.0f );
+}
+
 static HRESULT WINAPI AEV_GetChannelCount(IAudioEndpointVolumeEx *iface, UINT *count)
 {
     TRACE("(%p)->(%p)\n", iface, count);
     if (!count)
         return E_POINTER;
-    FIXME("stub\n");
-    return E_NOTIMPL;
+    *count = 2;
+    return S_OK;
 }
 
 static HRESULT WINAPI AEV_SetMasterVolumeLevel(IAudioEndpointVolumeEx *iface, float leveldb, const GUID *ctx)
 {
     AEVImpl *This = impl_from_IAudioEndpointVolumeEx(iface);
+    float scalar;
 
     TRACE("(%p)->(%f,%s)\n", iface, leveldb, debugstr_guid(ctx));
 
-    if(leveldb < -100.f || leveldb > 0.f)
+    if (leveldb < -100.f || leveldb > 0.f)
         return E_INVALIDARG;
 
-    This->master_vol = leveldb;
-
-    return S_OK;
+    scalar = db_to_scalar( leveldb );
+    return aev_driver_call( This, set_endpoint_volume, &scalar, NULL );
 }
 
 static HRESULT WINAPI AEV_SetMasterVolumeLevelScalar(IAudioEndpointVolumeEx *iface, float level, const GUID *ctx)
 {
+    AEVImpl *This = impl_from_IAudioEndpointVolumeEx(iface);
+
     TRACE("(%p)->(%f,%s)\n", iface, level, debugstr_guid(ctx));
-    FIXME("stub\n");
-    return E_NOTIMPL;
+
+    if (level < 0.0f || level > 1.0f)
+        return E_INVALIDARG;
+    return aev_driver_call( This, set_endpoint_volume, &level, NULL );
 }
 
 static HRESULT WINAPI AEV_GetMasterVolumeLevel(IAudioEndpointVolumeEx *iface, float *leveldb)
 {
     AEVImpl *This = impl_from_IAudioEndpointVolumeEx(iface);
+    float scalar;
+    HRESULT hr;
 
     TRACE("(%p)->(%p)\n", iface, leveldb);
 
     if (!leveldb)
         return E_POINTER;
-
-    *leveldb = This->master_vol;
-
-    return S_OK;
+    if (SUCCEEDED(hr = aev_driver_call( This, get_endpoint_volume, &scalar, NULL )))
+        *leveldb = scalar_to_db( scalar );
+    return hr;
 }
 
 static HRESULT WINAPI AEV_GetMasterVolumeLevelScalar(IAudioEndpointVolumeEx *iface, float *level)
 {
+    AEVImpl *This = impl_from_IAudioEndpointVolumeEx(iface);
+
     TRACE("(%p)->(%p)\n", iface, level);
     if (!level)
         return E_POINTER;
-    FIXME("stub\n");
-    *level = 1.0;
-    return S_OK;
+    return aev_driver_call( This, get_endpoint_volume, level, NULL );
 }
 
 static HRESULT WINAPI AEV_SetChannelVolumeLevel(IAudioEndpointVolumeEx *iface, UINT chan, float leveldb, const GUID *ctx)
@@ -199,15 +238,14 @@ static HRESULT WINAPI AEV_GetChannelVolumeLevelScalar(IAudioEndpointVolumeEx *if
 static HRESULT WINAPI AEV_SetMute(IAudioEndpointVolumeEx *iface, BOOL mute, const GUID *ctx)
 {
     AEVImpl *This = impl_from_IAudioEndpointVolumeEx(iface);
-    HRESULT ret;
+    BOOL current;
+    HRESULT hr;
 
     TRACE("(%p)->(%u,%s)\n", iface, mute, debugstr_guid(ctx));
 
-    ret = This->mute == mute ? S_FALSE : S_OK;
-
-    This->mute = mute;
-
-    return ret;
+    if (FAILED(hr = aev_driver_call( This, get_endpoint_volume, NULL, &current ))) return hr;
+    if (!current == !mute) return S_FALSE;
+    return aev_driver_call( This, set_endpoint_volume, NULL, &mute );
 }
 
 static HRESULT WINAPI AEV_GetMute(IAudioEndpointVolumeEx *iface, BOOL *mute)
@@ -218,33 +256,45 @@ static HRESULT WINAPI AEV_GetMute(IAudioEndpointVolumeEx *iface, BOOL *mute)
 
     if (!mute)
         return E_POINTER;
-
-    *mute = This->mute;
-
-    return S_OK;
+    return aev_driver_call( This, get_endpoint_volume, NULL, mute );
 }
 
+/* 101 steps of 1% on the scalar */
 static HRESULT WINAPI AEV_GetVolumeStepInfo(IAudioEndpointVolumeEx *iface, UINT *stepsize, UINT *stepcount)
 {
+    AEVImpl *This = impl_from_IAudioEndpointVolumeEx(iface);
+    float scalar;
+    HRESULT hr;
+
     TRACE("(%p)->(%p,%p)\n", iface, stepsize, stepcount);
     if (!stepsize && !stepcount)
         return E_POINTER;
-    FIXME("stub\n");
-    return E_NOTIMPL;
+    if (FAILED(hr = aev_driver_call( This, get_endpoint_volume, &scalar, NULL ))) return hr;
+    if (stepsize) *stepsize = (UINT)(scalar * 100.0f + 0.5f);   /* current step */
+    if (stepcount) *stepcount = 101;
+    return S_OK;
+}
+
+static HRESULT aev_step( AEVImpl *This, float delta )
+{
+    float scalar;
+    HRESULT hr;
+
+    if (FAILED(hr = aev_driver_call( This, get_endpoint_volume, &scalar, NULL ))) return hr;
+    scalar = min( 1.0f, max( 0.0f, floorf( scalar * 100.0f + 0.5f ) / 100.0f + delta ) );
+    return aev_driver_call( This, set_endpoint_volume, &scalar, NULL );
 }
 
 static HRESULT WINAPI AEV_VolumeStepUp(IAudioEndpointVolumeEx *iface, const GUID *ctx)
 {
     TRACE("(%p)->(%s)\n", iface, debugstr_guid(ctx));
-    FIXME("stub\n");
-    return E_NOTIMPL;
+    return aev_step( impl_from_IAudioEndpointVolumeEx(iface), 0.01f );
 }
 
 static HRESULT WINAPI AEV_VolumeStepDown(IAudioEndpointVolumeEx *iface, const GUID *ctx)
 {
     TRACE("(%p)->(%s)\n", iface, debugstr_guid(ctx));
-    FIXME("stub\n");
-    return E_NOTIMPL;
+    return aev_step( impl_from_IAudioEndpointVolumeEx(iface), -0.01f );
 }
 
 static HRESULT WINAPI AEV_QueryHardwareSupport(IAudioEndpointVolumeEx *iface, DWORD *mask)
@@ -314,6 +364,7 @@ HRESULT AudioEndpointVolume_Create(MMDevice *parent, IAudioEndpointVolumeEx **pp
         return E_OUTOFMEMORY;
     This->IAudioEndpointVolumeEx_iface.lpVtbl = &AEVImpl_Vtbl;
     This->ref = 1;
+    This->devguid = parent->devguid;
 
     *ppv = &This->IAudioEndpointVolumeEx_iface;
     return S_OK;
