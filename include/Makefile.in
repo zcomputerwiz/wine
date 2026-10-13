@@ -1003,6 +1003,7 @@ SOURCES = \
 	wexshell.h \
 	wexres.h \
 	wextheme.h \
+	wexpower.h \
 	wexhost.h \
 	wfext.h \
 	wia.h \
