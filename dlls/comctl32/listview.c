@@ -4824,8 +4824,25 @@ static void LISTVIEW_DrawBackgroundBitmap(const LISTVIEW_INFO *infoPtr, HDC hdc,
 
     mem_hdc = CreateCompatibleDC(hdc);
     SelectObject(mem_hdc, infoPtr->hBkBitmap);
-    BitBlt(hdc, lprcBox->left, lprcBox->top, lprcBox->right - lprcBox->left,
-           lprcBox->bottom - lprcBox->top, mem_hdc, lprcBox->left, lprcBox->top, SRCCOPY);
+    if (infoPtr->bkImageOffset)
+    {
+        /* Windows Explorer's watermark: on the background color, at its place in the window */
+        RECT client, image, part;
+        BITMAP bm;
+
+        GetObjectW(infoPtr->hBkBitmap, sizeof(bm), &bm);
+        GetClientRect(infoPtr->hwndSelf, &client);
+        image.left = (client.right - bm.bmWidth) * infoPtr->bkImageX / 100;
+        image.top = (client.bottom - bm.bmHeight) * infoPtr->bkImageY / 100;
+        image.right = image.left + bm.bmWidth;
+        image.bottom = image.top + bm.bmHeight;
+        if (IntersectRect(&part, &image, lprcBox))
+            BitBlt(hdc, part.left, part.top, part.right - part.left, part.bottom - part.top, mem_hdc,
+                   part.left - image.left, part.top - image.top, SRCCOPY);
+    }
+    else
+        BitBlt(hdc, lprcBox->left, lprcBox->top, lprcBox->right - lprcBox->left,
+               lprcBox->bottom - lprcBox->top, mem_hdc, lprcBox->left, lprcBox->top, SRCCOPY);
     DeleteDC(mem_hdc);
 }
 
@@ -8368,8 +8385,9 @@ static BOOL LISTVIEW_SetBkImage(LISTVIEW_INFO *infoPtr, const LVBKIMAGEW *image,
     if (image->ulFlags & ~LVBKIF_SOURCE_MASK)
         FIXME("unsupported flags %08lx\n", image->ulFlags & ~LVBKIF_SOURCE_MASK);
 
-    if (image->xOffsetPercent || image->yOffsetPercent)
-        FIXME("unsupported offset %d,%d\n", image->xOffsetPercent, image->yOffsetPercent);
+    infoPtr->bkImageOffset = image->xOffsetPercent || image->yOffsetPercent;
+    infoPtr->bkImageX = max(0, min(100, image->xOffsetPercent));
+    infoPtr->bkImageY = max(0, min(100, image->yOffsetPercent));
 
     switch (image->ulFlags & LVBKIF_SOURCE_MASK)
     {
