@@ -5,7 +5,12 @@ HKCR
         '{00021400-0000-0000-C000-000000000046}' { val LocalizedString = s '@%MODULE%,-20' }
         '{20D04FE0-3AEA-1069-A2D8-08002B30309D}' { val LocalizedString = s '@%MODULE%,-21' }
         '{21EC2020-3AEA-1069-A2DD-08002B30309D}' { val LocalizedString = s '@%MODULE%,-22' }
-        '{450D8FBA-AD25-11D0-98A8-0800361B1103}' { val LocalizedString = s '@%MODULE%,-46' }
+        '{450D8FBA-AD25-11D0-98A8-0800361B1103}' { val LocalizedString = s '@%MODULE%,-9227' }
+        '{59031A47-3F72-44A7-89C5-5595FE6B30EE}'
+        {
+            val LocalizedString = s '@%MODULE%,-21785'
+            DefaultIcon = s '%MODULE%,-235'
+        }
         '{645FF040-5081-101B-9F08-00AA002F954E}'
         {
             val LocalizedString = s '@%MODULE%,-8964'
@@ -41,6 +46,8 @@ HKLM
                             NoRemove Namespace
                             {
                                 '{21EC2020-3AEA-1069-A2DD-08002B30309D}' = s 'Control Panel'
+                                '{59031A47-3F72-44A7-89C5-5595FE6B30EE}' = s 'Shared Documents'
+                                '{450D8FBA-AD25-11D0-98A8-0800361B1103}' = s 'My Documents'
                             }
                         }
                     }
