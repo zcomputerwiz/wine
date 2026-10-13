@@ -135,7 +135,7 @@ static DWORD query_reg_path (HKEY hKey, LPCWSTR lpszValue,
  *
  * Set the current active theme from the registry
  */
-static void UXTHEME_LoadTheme(void)
+static void UXTHEME_LoadTheme(BOOL reload)
 {
     HKEY hKey;
     DWORD buffsize;
@@ -184,7 +184,10 @@ static void UXTHEME_LoadTheme(void)
             lstrcpynW(szCurrentColor, pt->pszSelectedColor, ARRAY_SIZE(szCurrentColor));
             lstrcpynW(szCurrentSize, pt->pszSelectedSize, ARRAY_SIZE(szCurrentSize));
 
-            UXTHEME_SetActiveTheme(pt);
+            if (reload)
+                MSSTYLES_SetActiveTheme(pt, FALSE); /* another process changed the theme; only follow it */
+            else
+                UXTHEME_SetActiveTheme(pt);
             TRACE("Theme active: %s %s %s\n", debugstr_w(szCurrentTheme),
                 debugstr_w(szCurrentColor), debugstr_w(szCurrentSize));
             MSSTYLES_CloseThemeFile(pt);
@@ -500,6 +503,29 @@ HRESULT UXTHEME_SetActiveTheme(PTHEME_FILE tf)
     return hr;
 }
 
+/* The active theme lives in the registry (ThemeManager).  A process that applies a theme only changes its own
+ * state, so every process watches the key and follows changes made by others. */
+static HKEY theme_watch_key;
+static HANDLE theme_watch_event;
+
+static void UXTHEME_WatchThemeChanges(void)
+{
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, szThemeManager, 0, NULL, 0, KEY_READ | KEY_NOTIFY, NULL, &theme_watch_key, NULL))
+        return;
+    theme_watch_event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (theme_watch_event)
+        RegNotifyChangeKeyValue(theme_watch_key, TRUE, REG_NOTIFY_CHANGE_LAST_SET, theme_watch_event, TRUE);
+}
+
+void UXTHEME_CheckReload(void)
+{
+    if (theme_watch_event && WaitForSingleObject(theme_watch_event, 0) == WAIT_OBJECT_0)
+    {
+        RegNotifyChangeKeyValue(theme_watch_key, TRUE, REG_NOTIFY_CHANGE_LAST_SET, theme_watch_event, TRUE);
+        UXTHEME_LoadTheme(TRUE);
+    }
+}
+
 /***********************************************************************
  *      UXTHEME_InitSystem
  */
@@ -510,7 +536,8 @@ void UXTHEME_InitSystem(HINSTANCE hInst)
     atSubIdList          = GlobalAddAtomW(L"ux_subidlst");
     atDialogThemeEnabled = GlobalAddAtomW(L"ux_dialogtheme");
 
-    UXTHEME_LoadTheme();
+    UXTHEME_LoadTheme(FALSE);
+    UXTHEME_WatchThemeChanges();
     ThemeHooksInstall();
 }
 
@@ -539,6 +566,7 @@ BOOL WINAPI IsAppThemed(void)
 BOOL WINAPI IsThemeActive(void)
 {
     TRACE("\n");
+    UXTHEME_CheckReload();
     SetLastError(ERROR_SUCCESS);
     return bThemeActive;
 }
@@ -631,6 +659,7 @@ static HTHEME open_theme_data(HWND hwnd, LPCWSTR pszClassList, DWORD flags, UINT
     if(flags)
         FIXME("unhandled flags: %lx\n", flags);
 
+    UXTHEME_CheckReload();
     if(bThemeActive)
     {
         pszAppName = UXTHEME_GetWindowProperty(hwnd, atSubAppName, szAppBuff, ARRAY_SIZE(szAppBuff));
