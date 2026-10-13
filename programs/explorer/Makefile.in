@@ -1,16 +1,52 @@
 MODULE    = explorer.exe
 IMPORTS   = rpcrt4 user32 gdi32 advapi32 win32u
-DELAYIMPORTS = comctl32 shell32 oleaut32 ole32 shlwapi
+DELAYIMPORTS = wexhost msimg32 comctl32 shell32 oleaut32 ole32 shlwapi uxtheme winmm iphlpapi ws2_32 version gdiplus
 
 EXTRADLLFLAGS = -mwindows -municode
 
-VER_FILEDESCRIPTION_STR = "Wine Explorer"
+# the XP name, which the taskbar's group buttons and Task Manager show
+VER_FILEDESCRIPTION_STR = "Windows Explorer"
 VER_PRODUCTVERSION      = 6,1,7601,17567
 
 SOURCES = \
+	agent_char.c \
+	alttab.c \
 	appbar.c \
+	audio_backend.c \
+	browser_taskpane.c \
+	browser_ui.c \
 	desktop.c \
+	desktop_view.c \
 	explorer.c \
 	explorer.rc \
+	instant_search.c \
+	linux_windows.c \
+	net_backend.c \
+	net_props.c \
+	nettray.c \
+	power_backend.c \
+	power_mgmt.c \
+	powertray.c \
+	search_companion.c \
+	search_engine.c \
+	search_results.c \
+	slideshow.c \
+	shellfolders.c \
+	shellres.c \
 	startmenu.c \
-	systray.c
+	startmenu_view.c \
+	startsettings.c \
+	notifyprops.c \
+	startprops.c \
+	systray.c \
+	taskband.c \
+	toolbars.c \
+	taskbar_props.c \
+	theme_engine.c \
+	tray_clock.c \
+	trayvol_dialog.c \
+	uac_agent.c \
+	volumetray.c \
+	wlan_dialog.c \
+	wlan_status.c
+

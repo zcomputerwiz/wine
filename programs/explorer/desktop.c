@@ -29,11 +29,13 @@
 #include <shlobj.h>
 #include <shellapi.h>
 #include <ntuser.h>
+#include <wexhost.h>
 #include "exdisp.h"
 
 #include "wine/debug.h"
 #include "explorer_private.h"
 #include "resource.h"
+#include "shellfolders.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(explorer);
 
@@ -43,6 +45,26 @@ WINE_DEFAULT_DEBUG_CHANNEL(explorer);
 static const WCHAR default_driver[] = L"mac,x11,wayland";
 
 static BOOL using_root = TRUE;
+static BOOL shell_mode;   /* WineExplorer interactive shell: taskbar, Start menu, desktop view */
+static HWINEVENTHOOK composition_shadow_hook;
+
+static void CALLBACK composition_shadow_event( HWINEVENTHOOK hook, DWORD event, HWND hwnd,
+                                               LONG object, LONG child, DWORD thread, DWORD time )
+{
+    UINT64 window;
+    BOOL enabled = FALSE, shadow = FALSE;
+    if (!hwnd || object != OBJID_WINDOW || child != CHILDID_SELF ||
+        GetAncestor( hwnd, GA_ROOT ) != hwnd ||
+        !(GetClassLongW( hwnd, GCL_STYLE ) & CS_DROPSHADOW)) return;
+    if (WexCompositionGetEnabled( &enabled ) || !enabled) return;
+    if (event == EVENT_OBJECT_SHOW)
+        SystemParametersInfoW( SPI_GETDROPSHADOW, 0, &shadow, 0 );
+    window = (ULONG_PTR)GetPropW( hwnd, L"__wine_x11_whole_window" );
+    /* Cross-process property reads can be zero. In that case winex11 publishes
+     * _WEX_DROPSHADOW on the X window and compose.c reads it directly. */
+    if (window) WexCompositionSetShadow( window, shadow );
+}
+#define IDHK_TASKLIST 1   /* Ctrl+Esc on the shell window */
 
 struct launcher
 {
@@ -800,13 +822,29 @@ static LRESULT WINAPI desktop_wnd_proc( HWND hwnd, UINT message, WPARAM wp, LPAR
         switch(wp & 0xfff0)
         {
         case SC_CLOSE:
-            ExitWindows( 0, 0 );
+            if (shell_mode) power_mgmt_show_shutdown_dialog( hwnd );   /* Alt+F4 on the Windows desktop */
+            else ExitWindows( 0, 0 );
             return 0;
+        case SC_TASKLIST:
+            /* Ctrl+Esc and the Windows key reach the shell window as on Windows: they open (or close) Start */
+            if (shell_mode)
+            {
+                startmenu_toggle();
+                return 0;
+            }
+            break;
         }
         break;
 
+    case WM_HOTKEY:
+        if (wp == IDHK_TASKLIST) PostMessageW( hwnd, WM_SYSCOMMAND, SC_TASKLIST, 0 );
+        return 0;
+
     case WM_CLOSE:
-        PostQuitMessage(0);
+        /* wineserver posts this when no other program uses the desktop any more (also when a thread of ours that
+         * used it ends): a plain desktop goes away then, the shell stays.  Sent, it is someone closing it. */
+        if (!shell_mode) PostQuitMessage(0);
+        else if (InSendMessage()) power_mgmt_show_shutdown_dialog( hwnd );
         return 0;
 
     case WM_SETCURSOR:
@@ -816,8 +854,37 @@ static LRESULT WINAPI desktop_wnd_proc( HWND hwnd, UINT message, WPARAM wp, LPAR
         return HTCLIENT;
 
     case WM_ERASEBKGND:
-        if (!using_root) PaintDesktop( (HDC)wp );
+        if (!using_root && !shell_mode) PaintDesktop( (HDC)wp );
         return TRUE;
+
+    case WM_DISPLAYCHANGE:
+    {
+        LRESULT result = desktop_orig_wndproc( hwnd, message, wp, lp );
+        int new_w = LOWORD(lp);
+        int new_h = HIWORD(lp);
+        if (!new_w || !new_h)
+        {
+            new_w = GetSystemMetrics(SM_CXSCREEN);
+            new_h = GetSystemMetrics(SM_CYSCREEN);
+        }
+        TRACE("desktop_wnd_proc: WM_DISPLAYCHANGE %dx%d @ %Id bpp\n", new_w, new_h, wp);
+        if (shell_mode)
+        {
+            desktop_view_on_display_change(new_w, new_h);
+        }
+        return result;
+    }
+
+    case WM_SIZE:
+    {
+        int new_w = LOWORD(lp);
+        int new_h = HIWORD(lp);
+        if (shell_mode && (wp == SIZE_RESTORED || wp == SIZE_MAXIMIZED) && new_w && new_h)
+        {
+            desktop_view_on_display_change(new_w, new_h);
+        }
+        break;
+    }
 
     case WM_SETTINGCHANGE:
         if (wp == SPI_SETDESKWALLPAPER)
@@ -829,18 +896,31 @@ static LRESULT WINAPI desktop_wnd_proc( HWND hwnd, UINT message, WPARAM wp, LPAR
         return 0;
 
     case WM_LBUTTONDBLCLK:
-        if (!using_root)
+        if (!using_root && !shell_mode)
         {
             const struct launcher *launcher = launcher_from_point( (short)LOWORD(lp), (short)HIWORD(lp) );
             if (launcher) ShellExecuteW( NULL, L"open", launcher->path, NULL, NULL, 0 );
         }
         return 0;
 
+    case WM_KEYDOWN:
+    case WM_KEYUP:
+        if (shell_mode && desktop_view_get_hwnd())
+            return SendMessageW( desktop_view_get_hwnd(), message, wp, lp );
+        break;
+
     case WM_PAINT:
         {
             PAINTSTRUCT ps;
             BeginPaint( hwnd, &ps );
-            if (!using_root)
+            if (shell_mode)
+            {
+                /* The bottommost desktop view paints the wallpaper and icons.
+                 * Painting them again on the X11 parent can cover application
+                 * windows while a display change is being redrawn. */
+                if (!desktop_view_get_hwnd()) PaintDesktop( ps.hdc );
+            }
+            else if (!using_root)
             {
                 PaintDesktop( ps.hdc );
                 draw_launchers( ps.hdc, ps.rcPaint );
@@ -1166,6 +1246,37 @@ static inline BOOL is_whitespace(WCHAR c)
     return c == ' ' || c == '\t';
 }
 
+static HWND shell_hwnd;
+
+/* The Windows key alone (down and up with no other key between) opens Start; with another key it is a shortcut */
+static LRESULT CALLBACK winkey_hook( int code, WPARAM wp, LPARAM lp )
+{
+    static BOOL win_down, win_used;
+    const KBDLLHOOKSTRUCT *kb = (const KBDLLHOOKSTRUCT *)lp;
+
+    if (code == HC_ACTION)
+    {
+        BOOL win = kb->vkCode == VK_LWIN || kb->vkCode == VK_RWIN;
+        BOOL down = wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN;
+
+        /* Alt+Tab: the switcher takes Tab and its navigation keys */
+        if (alttab_key( kb->vkCode, down )) return 1;
+
+        if (win && down)
+        {
+            if (!win_down) win_used = FALSE;
+            win_down = TRUE;
+        }
+        else if (win)
+        {
+            if (win_down && !win_used) PostMessageW( shell_hwnd, WM_SYSCOMMAND, SC_TASKLIST, 0 );
+            win_down = FALSE;
+        }
+        else if (down && win_down) win_used = TRUE;
+    }
+    return CallNextHookEx( NULL, code, wp, lp );
+}
+
 /* Set the shell window if appropriate for the current desktop. We should set
    the shell window on the "Default" desktop on a visible window station, but
    not for other desktops. */
@@ -1191,6 +1302,13 @@ static void set_shell_window( HWND hwnd )
     }
 
     SetShellWindow( hwnd );
+    if (shell_mode)
+    {
+        /* what Windows does for the shell window: Ctrl+Esc, and the Windows key pressed and released alone */
+        RegisterHotKey( hwnd, IDHK_TASKLIST, MOD_CONTROL, VK_ESCAPE );
+        shell_hwnd = hwnd;
+        SetWindowsHookExW( WH_KEYBOARD_LL, winkey_hook, GetModuleHandleW( NULL ), 0 );
+    }
 }
 
 /* main desktop management function */
@@ -1204,7 +1322,7 @@ void manage_desktop( WCHAR *arg )
     WCHAR *cmdline = NULL, *driver = NULL;
     WCHAR *p = arg;
     const WCHAR *name = NULL;
-    BOOL enable_shell, enable_launchers, show_systray, no_tray_items;
+    BOOL enable_shell, enable_launchers, show_systray, no_tray_items, force_shell = FALSE;
     void (WINAPI *pShellDDEInit)( BOOL ) = NULL;
     HMODULE shell32;
     HANDLE thread;
@@ -1218,6 +1336,16 @@ void manage_desktop( WCHAR *arg )
         *p++ = 0;
         while (*p && is_whitespace(*p)) p++;
         if (*p) cmdline = p;
+    }
+
+    /* "/shell" before the program to run turns the desktop into the interactive Windows-style shell
+     * (what Winlogon does by starting the Shell value); no program after it means the built-in shell */
+    if (cmdline && !wcsncmp( cmdline, L"/shell", 6 ) && (!cmdline[6] || is_whitespace( cmdline[6] )))
+    {
+        force_shell = TRUE;
+        cmdline += 6;
+        while (*cmdline && is_whitespace( *cmdline )) cmdline++;
+        if (!*cmdline) cmdline = NULL;
     }
 
     /* parse the desktop option */
@@ -1239,7 +1367,7 @@ void manage_desktop( WCHAR *arg )
         if (!get_default_desktop_size( name, &width, &height )) width = height = 0;
     }
 
-    enable_shell = name ? get_default_enable_shell( name ) : FALSE;
+    enable_shell = force_shell || (name ? get_default_enable_shell( name ) : FALSE);
     enable_launchers = get_default_enable_launchers();
     show_systray = get_default_show_systray( name );
     no_tray_items = get_no_tray_items_display();
@@ -1290,8 +1418,37 @@ void manage_desktop( WCHAR *arg )
         initialize_display_settings( width, height );
         initialize_appbar();
 
+        shell_mode = enable_shell && !using_root;
+        if (shell_mode)
+        {
+            /* like on Windows, the desktop stays while the shell runs, with or without programs */
+            USEROBJECTFLAGS uof;
+            HDESK desk = GetThreadDesktop( GetCurrentThreadId() );
+            if (GetUserObjectInformationW( desk, UOI_FLAGS, &uof, sizeof(uof), NULL ))
+            {
+                uof.dwFlags |= DF_WINE_SHELL_DESKTOP;
+                SetUserObjectInformationW( desk, UOI_FLAGS, &uof, sizeof(uof) );
+            }
+
+            theme_init( hwnd );
+            desktop_view_create( hwnd, width, height );
+            uac_agent_start();
+            linux_windows_start();
+            {
+                DWORD composition = 0, size = sizeof(composition), err;
+                RegGetValueW( HKEY_CURRENT_USER, L"Software\\WineExplorer\\Shell", L"Composition",
+                              RRF_RT_REG_DWORD, NULL, &composition, &size );
+                if (composition == 1 && (err = WexCompositionSetEnabled( TRUE )))
+                    WARN( "composition unavailable, error %lu\n", err );
+                else if (composition == 1)
+                    composition_shadow_hook = SetWinEventHook( EVENT_OBJECT_SHOW, EVENT_OBJECT_HIDE,
+                                                               NULL, composition_shadow_event, 0, 0,
+                                                               WINEVENT_OUTOFCONTEXT );
+            }
+            shellfolder_link_media_folders();
+        }
+        else if (!using_root && enable_launchers) initialize_launchers( hwnd );
         initialize_systray( using_root, enable_shell, show_systray, no_tray_items );
-        if (!using_root && enable_launchers) initialize_launchers( hwnd );
 
         if ((shell32 = LoadLibraryW( L"shell32.dll" )) &&
             (pShellDDEInit = (void *)GetProcAddress( shell32, (LPCSTR)188)))
@@ -1327,11 +1484,18 @@ void manage_desktop( WCHAR *arg )
     if (hwnd)
     {
         TRACE( "desktop message loop starting on hwnd %p\n", hwnd );
-        while (GetMessageW( &msg, 0, 0, 0 )) DispatchMessageW( &msg );
+        while (GetMessageW( &msg, 0, 0, 0 ))
+        {
+            TranslateMessage( &msg );   /* typed characters: the search box, typing in the Start menu */
+            DispatchMessageW( &msg );
+        }
         TRACE( "desktop message loop exiting for hwnd %p\n", hwnd );
     }
 
     if (pShellDDEInit) pShellDDEInit( FALSE );
+    if (composition_shadow_hook) UnhookWinEvent( composition_shadow_hook );
+    WexCompositionSetEnabled( FALSE );
+    linux_windows_stop();
 
     ExitProcess( 0 );
 }
