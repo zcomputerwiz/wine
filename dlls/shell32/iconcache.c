@@ -32,6 +32,7 @@
 #include "wine/debug.h"
 
 #include "shellapi.h"
+#include "shlwapi.h"
 #include "objbase.h"
 #include "pidl.h"
 #include "shell32_main.h"
@@ -344,27 +345,71 @@ static BOOL get_imagelist_icon_size(int list, SIZE *size)
     return TRUE;
 }
 
-/****************************************************************************
- * SIC_LoadIcon				[internal]
+/*****************************************************************************
+ * SIC_GetShellIconOverride		[internal]
  *
- * NOTES
- *  gets icons by index from the file
+ * Like Windows, the icons of shell32 itself can be replaced by values of the Shell Icons key: the value name is the
+ * icon index ("3" is the closed folder) and the data is "file,index".  An icon given by resource id stands for index
+ * id - 1 (shell32's first icons are numbered from 1 without gaps); one beyond that range is looked up by its negative
+ * id ("-137"), which Windows has no use for.
  */
-static INT SIC_LoadIcon (const WCHAR *sourcefile, INT index, DWORD flags)
+static BOOL SIC_GetShellIconOverride(INT index, WCHAR *path, DWORD size, INT *icon)
 {
-    HICON hicons[ARRAY_SIZE(shell_imagelists)] = { 0 };
-    HICON hshortcuts[ARRAY_SIZE(hicons)] = { 0 };
+    WCHAR name[12];
+    DWORD len = size * sizeof(WCHAR);
+
+    if (index < 0 && -index <= IDI_SHELL_UNKNOWN_DRIVE) index = -index - 1;
+    swprintf(name, ARRAY_SIZE(name), L"%d", index);
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Icons",
+                     name, RRF_RT_REG_SZ, NULL, path, &len) || !path[0])   /* REG_EXPAND_SZ comes expanded */
+        return FALSE;
+    *icon = PathParseIconLocationW(path);
+    TRACE("icon %s replaced by %s,%d\n", debugstr_w(name), debugstr_w(path), *icon);
+    return TRUE;
+}
+
+static BOOL SIC_IsShell32(const WCHAR *sourcefile)
+{
+    return !wcsicmp(PathFindFileNameW(sourcefile), PathFindFileNameW(swShell32Name));
+}
+
+/* One icon for each image list from the file; FALSE (and nothing kept) if any size is missing */
+static BOOL SIC_ExtractAllSizes (const WCHAR *file, INT index, HICON *hicons)
+{
     unsigned int i;
     SIZE size;
-    INT ret = -1;
 
-    for (i = 0; i < ARRAY_SIZE(hicons); i++)
+    for (i = 0; i < ARRAY_SIZE(shell_imagelists); i++)
     {
+        hicons[i] = 0;
         if (!get_imagelist_icon_size( i, &size ) ||
-            !PrivateExtractIconsW( sourcefile, index, size.cx, size.cy, &hicons[i], 0, 1, 0 ))
-            WARN("Failed to load icon %d from %s.\n", index, debugstr_w(sourcefile));
-        if (!hicons[i]) goto fail;
+            !PrivateExtractIconsW( file, index, size.cx, size.cy, &hicons[i], 0, 1, 0 ) || !hicons[i])
+        {
+            WARN("Failed to load icon %d from %s.\n", index, debugstr_w(file));
+            while (i--) DestroyIcon(hicons[i]);
+            return FALSE;
+        }
     }
+    return TRUE;
+}
+
+/****************************************************************************
+ * SIC_ExtractIcons			[internal]
+ *
+ * One icon per image list, from the file or from what replaces it in Shell Icons.  Returns the flags the icons were
+ * made with (GIL_FORSHORTCUT is dropped if the overlay failed), or -1.
+ */
+static INT SIC_ExtractIcons (const WCHAR *sourcefile, INT index, DWORD flags, HICON *hicons)
+{
+    HICON hshortcuts[ARRAY_SIZE(shell_imagelists)] = { 0 };
+    WCHAR override[MAX_PATH];
+    unsigned int i;
+    INT override_index;
+
+    if (!(SIC_IsShell32(sourcefile) && SIC_GetShellIconOverride(index, override, ARRAY_SIZE(override), &override_index) &&
+          SIC_ExtractAllSizes(override, override_index, hicons)) &&
+        !SIC_ExtractAllSizes(sourcefile, index, hicons))
+        return -1;
 
     if (flags & GIL_FORSHORTCUT)
     {
@@ -387,20 +432,64 @@ static INT SIC_LoadIcon (const WCHAR *sourcefile, INT index, DWORD flags)
         }
         else
         {
-            for (i = 0; i < ARRAY_SIZE(hicons); i++)
+            for (i = 0; i < ARRAY_SIZE(hshortcuts); i++)
             {
                 DestroyIcon(hicons[i]);
                 hicons[i] = hshortcuts[i];
             }
         }
     }
+    return flags;
+}
 
-    ret = SIC_IconAppend( sourcefile, index, hicons, flags );
+/****************************************************************************
+ * SIC_LoadIcon				[internal]
+ *
+ * NOTES
+ *  gets icons by index from the file
+ */
+static INT SIC_LoadIcon (const WCHAR *sourcefile, INT index, DWORD flags)
+{
+    HICON hicons[ARRAY_SIZE(shell_imagelists)];
+    unsigned int i;
+    INT ret, made;
 
-fail:
+    if ((made = SIC_ExtractIcons( sourcefile, index, flags, hicons )) == -1) return -1;
+    ret = SIC_IconAppend( sourcefile, index, hicons, made );
     for (i = 0; i < ARRAY_SIZE(hicons); i++)
         DestroyIcon(hicons[i]);
     return ret;
+}
+
+/****************************************************************************
+ * SIC_ReloadShellIcons			[internal]
+ *
+ * Load the cached icons of shell32 again, in place, so that image indexes handed out stay valid: after the
+ * Shell Icons key changed (FileIconInit(TRUE)), or only those it replaces (when the cache is created).
+ */
+static void SIC_ReloadShellIcons (BOOL replaced_only)
+{
+    HICON hicons[ARRAY_SIZE(shell_imagelists)];
+    WCHAR override[MAX_PATH];
+    unsigned int i;
+    INT n, override_index;
+
+    EnterCriticalSection(&SHELL32_SicCS);
+    for (n = 0; n < DPA_GetPtrCount(sic_hdpa); n++)
+    {
+        SIC_ENTRY *entry = DPA_GetPtr(sic_hdpa, n);
+
+        if (!SIC_IsShell32(entry->sSourceFile)) continue;
+        if (replaced_only && !SIC_GetShellIconOverride(entry->dwSourceIndex, override, ARRAY_SIZE(override), &override_index))
+            continue;
+        if (SIC_ExtractIcons(entry->sSourceFile, entry->dwSourceIndex, entry->dwFlags, hicons) == -1) continue;
+        for (i = 0; i < ARRAY_SIZE(shell_imagelists); i++)
+        {
+            ImageList_ReplaceIcon(shell_imagelists[i], entry->dwListIndex, hicons[i]);
+            DestroyIcon(hicons[i]);
+        }
+    }
+    LeaveCriticalSection(&SHELL32_SicCS);
 }
 
 static int get_shell_icon_size(void)
@@ -478,6 +567,7 @@ static BOOL WINAPI SIC_Initialize( INIT_ONCE *once, void *param, void **context 
 
     SIC_IconAppend(swShell32Name, IDI_SHELL_FILE - 1, hicons, 0);
     SIC_IconAppend(swShell32Name, -IDI_SHELL_FILE, hicons, 0);
+    SIC_ReloadShellIcons(TRUE);   /* the generic file icon may be replaced too */
 
     TRACE("small list=%p, large list=%p\n", shell_imagelists[SHIL_SMALL], shell_imagelists[SHIL_LARGE]);
 
@@ -564,6 +654,21 @@ INT SIC_GetIconIndex (LPCWSTR sSourceFile, INT dwSourceIndex, DWORD dwFlags )
 	return ret;
 }
 
+/*************************************************************************
+ * FileIconInit 				[SHELL32.660]
+ *
+ * Creates the system image list.  With bFullInit, the icons of shell32 already in it are loaded again in place, so
+ * a change of the Shell Icons key (a new theme) shows without new image indexes.
+ */
+BOOL WINAPI FileIconInit(BOOL bFullInit)
+{
+    TRACE("(%d)\n", bFullInit);
+
+    if (!InitOnceExecuteOnce( &sic_init_once, SIC_Initialize, NULL, NULL )) return FALSE;
+    if (bFullInit) SIC_ReloadShellIcons(FALSE);
+    return TRUE;
+}
+
 /*****************************************************************************
  * SIC_LoadOverlayIcon			[internal]
  *
@@ -571,43 +676,9 @@ INT SIC_GetIconIndex (LPCWSTR sSourceFile, INT dwSourceIndex, DWORD dwFlags )
  */
 static int SIC_LoadOverlayIcon(int icon_idx)
 {
-	WCHAR buffer[1024], wszIdx[12];
-	HKEY hKeyShellIcons;
-	LPCWSTR iconPath;
-	int iconIdx;
+    InitOnceExecuteOnce( &sic_init_once, SIC_Initialize, NULL, NULL );
 
-	iconPath = swShell32Name;	/* default: load icon from shell32.dll */
-	iconIdx = icon_idx;
-
-	if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Icons",
-                          0, KEY_READ, &hKeyShellIcons) == ERROR_SUCCESS)
-	{
-	    DWORD count = sizeof(buffer);
-
-	    swprintf(wszIdx, ARRAY_SIZE(wszIdx), L"%d", icon_idx);
-
-	    /* read icon path and index */
-	    if (RegQueryValueExW(hKeyShellIcons, wszIdx, NULL, NULL, (LPBYTE)buffer, &count) == ERROR_SUCCESS)
-	    {
-		LPWSTR p = wcschr(buffer, ',');
-
-		if (!p)
-		{
-		    ERR("Icon index in Shell Icons/%s corrupted, no comma.\n", debugstr_w(wszIdx));
-		    RegCloseKey(hKeyShellIcons);
-		    return -1;
-		}
-		*p++ = 0;
-		iconPath = buffer;
-		iconIdx = wcstol(p, NULL, 10);
-	    }
-
-	    RegCloseKey(hKeyShellIcons);
-	}
-
-        InitOnceExecuteOnce( &sic_init_once, SIC_Initialize, NULL, NULL );
-
-	return SIC_LoadIcon(iconPath, iconIdx, 0);
+    return SIC_LoadIcon(swShell32Name, icon_idx, 0);   /* Shell Icons may replace it */
 }
 
 /*************************************************************************
