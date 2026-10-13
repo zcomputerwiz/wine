@@ -496,6 +496,7 @@ static void wayland_configure_window(HWND hwnd)
     BOOL needs_enter_size_move = FALSE;
     BOOL needs_exit_size_move = FALSE;
     BOOL restoring_from_minimize = FALSE;
+    BOOL move_to_work_area = FALSE;
     struct wayland_win_data *data;
     RECT rect, surface_rect;
 
@@ -610,10 +611,19 @@ static void wayland_configure_window(HWND hwnd)
      * maximized window rectangle also includes its invisible resize borders. */
     if (surface->wex_window && width && height && (state & WAYLAND_SURFACE_CONFIG_STATE_MAXIMIZED))
     {
-        rect.right += data->rects.visible.left - data->rects.window.left +
-                      data->rects.window.right - data->rects.visible.right;
-        rect.bottom += data->rects.visible.top - data->rects.window.top +
-                       data->rects.window.bottom - data->rects.visible.bottom;
+        RECT borders = {0};
+        UINT dpi = NtUserCallHwnd(hwnd, NtUserCallHwnd_GetDpiForWindow);
+        DWORD style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
+        if (style & WS_THICKFRAME)
+        {
+            RECT work;
+            NtUserAdjustWindowRect(&borders, WS_THICKFRAME | WS_BORDER, FALSE, 0, dpi);
+            NtUserSystemParametersInfo(SPI_GETWORKAREA, 0, &work, 0);
+            rect.right += borders.right - borders.left;
+            rect.bottom += borders.bottom - borders.top;
+            OffsetRect(&rect, work.left + borders.left - rect.left, work.top + borders.top - rect.top);
+            move_to_work_area = TRUE;
+        }
     }
 
     wayland_win_data_release(data);
@@ -624,6 +634,7 @@ static void wayland_configure_window(HWND hwnd)
     if (needs_exit_size_move) send_message(hwnd, WM_EXITSIZEMOVE, 0, 0);
 
     flags |= SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOMOVE;
+    if (move_to_work_area) flags &= ~SWP_NOMOVE;
     if (rect.left == rect.right || rect.bottom == rect.top) flags |= SWP_NOSIZE;
 
     style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
