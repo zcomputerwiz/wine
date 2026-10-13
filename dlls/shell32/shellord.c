@@ -1829,8 +1829,11 @@ HRESULT WINAPI SHCreateStdEnumFmtEtc(
  */
 BOOL WINAPI SHFindFiles( LPCITEMIDLIST pidlFolder, LPCITEMIDLIST pidlSaveFile )
 {
-    FIXME("%p %p\n", pidlFolder, pidlSaveFile );
-    return FALSE;
+    /* like Windows and ReactOS: open the Search Results folder (CLSID_FindFolder), whose window searches */
+    if (pidlFolder || pidlSaveFile) FIXME("folder %p and saved search %p ignored\n", pidlFolder, pidlSaveFile);
+    if (SHRestricted( REST_NOFIND )) return FALSE;
+    return (INT_PTR)ShellExecuteW( NULL, NULL, L"explorer.exe", L"::{E17D4FC0-5564-11D1-83F2-00A0C90DC849}",
+                                   NULL, SW_SHOWNORMAL ) > 32;
 }
 
 /*************************************************************************
