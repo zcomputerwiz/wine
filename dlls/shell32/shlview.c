@@ -138,6 +138,10 @@ typedef struct
 	LPITEMIDLIST	*apidl;
         LISTVIEW_SORT_INFO ListViewSortInfo;
 	ULONG			hNotify;	/* change notification handle */
+	HANDLE			watch_thread;	/* watches the folder on disk: other programs change it too */
+	HANDLE			watch_stop;
+	WCHAR			watch_path[MAX_PATH];
+	BOOL			sync_pending;
 	HANDLE		hAccel;
 	DWORD		dwAspects;
 	DWORD		dwAdvf;
@@ -212,6 +216,7 @@ static inline IShellViewImpl *impl_from_IShellFolderViewDual3(IShellFolderViewDu
 #define ID_LISTVIEW     1
 
 #define SHV_CHANGE_NOTIFY WM_USER + 0x1111
+#define SHV_FOLDER_CHANGED WM_USER + 0x1112   /* the folder changed on disk (watch_folder) */
 
 /*windowsx.h */
 #define GET_WM_COMMAND_ID(wp, lp)               LOWORD(wp)
@@ -1237,6 +1242,106 @@ static HRESULT ShellView_FillList(IShellViewImpl *This)
 /**********************************************************
 *  ShellView_OnCreate()
 */
+/* Windows shows what other programs do in a folder: a thread waits for changes of the folder on disk
+ * (inotify behind FindFirstChangeNotification) and the view then takes the folder's items again. */
+static DWORD WINAPI watch_folder(void *arg)
+{
+    IShellViewImpl *This = arg;
+    HANDLE change = FindFirstChangeNotificationW(This->watch_path, FALSE, FILE_NOTIFY_CHANGE_FILE_NAME |
+                                                 FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_SIZE |
+                                                 FILE_NOTIFY_CHANGE_LAST_WRITE);
+    HANDLE handles[2] = { This->watch_stop, change };
+
+    if (change == INVALID_HANDLE_VALUE) return 0;
+    while (WaitForMultipleObjects(2, handles, FALSE, INFINITE) == WAIT_OBJECT_0 + 1)
+    {
+        /* a burst of changes is taken once */
+        if (WaitForSingleObject(This->watch_stop, 300) == WAIT_OBJECT_0) break;
+        if (!This->sync_pending)
+        {
+            This->sync_pending = TRUE;
+            PostMessageW(This->hWnd, SHV_FOLDER_CHANGED, 0, 0);
+        }
+        if (!FindNextChangeNotification(change)) break;
+    }
+    FindCloseChangeNotification(change);
+    return 0;
+}
+
+static void start_watching(IShellViewImpl *This, LPCITEMIDLIST folder)
+{
+    if (!SHGetPathFromIDListW(folder, This->watch_path) || !PathIsDirectoryW(This->watch_path)) return;
+    if (!(This->watch_stop = CreateEventW(NULL, TRUE, FALSE, NULL))) return;
+    if (!(This->watch_thread = CreateThread(NULL, 0, watch_folder, This, 0, NULL)))
+    {
+        CloseHandle(This->watch_stop);
+        This->watch_stop = NULL;
+    }
+}
+
+static void stop_watching(IShellViewImpl *This)
+{
+    if (!This->watch_thread) return;
+    SetEvent(This->watch_stop);
+    WaitForSingleObject(This->watch_thread, INFINITE);
+    CloseHandle(This->watch_thread);
+    CloseHandle(This->watch_stop);
+    This->watch_thread = This->watch_stop = NULL;
+}
+
+static int find_item_by_name(IShellViewImpl *This, const WCHAR *name)
+{
+    WCHAR current[MAX_PATH];
+    LVITEMW item = { LVIF_PARAM };
+
+    for (item.iItem = 0; SendMessageW(This->hWndList, LVM_GETITEMW, 0, (LPARAM)&item); item.iItem++)
+        if (_ILSimpleGetTextW((LPCITEMIDLIST)item.lParam, current, ARRAY_SIZE(current)) && !wcsicmp(name, current))
+            return item.iItem;
+    return -1;
+}
+
+/* the list takes the folder's items again: new ones are added at the end, gone ones removed, the others kept
+ * (with their new size and date) so that the selection and the scroll position stay */
+static void sync_with_folder(IShellViewImpl *This)
+{
+    IEnumIDList *enumerator;
+    LPITEMIDLIST pidl;
+    ULONG fetched;
+    WCHAR name[MAX_PATH];
+    BYTE *seen;
+    int count, i;
+
+    This->sync_pending = FALSE;
+    if (IShellFolder_EnumObjects(This->pSFParent, This->hWnd, SHCONTF_NONFOLDERS | SHCONTF_FOLDERS, &enumerator) != S_OK)
+        return;
+    count = SendMessageW(This->hWndList, LVM_GETITEMCOUNT, 0, 0);
+    seen = calloc(count + 1, 1);
+    while (IEnumIDList_Next(enumerator, 1, &pidl, &fetched) == S_OK && fetched)
+    {
+        if (!_ILSimpleGetTextW(pidl, name, ARRAY_SIZE(name)) || (i = find_item_by_name(This, name)) < 0)
+        {
+            shellview_add_item(This, pidl);   /* the list owns it */
+            continue;
+        }
+        if (i < count) seen[i] = 1;
+        if (!SendMessageW(This->hWndList, LVM_GETEDITCONTROL, 0, 0))   /* not while a name is edited */
+        {
+            LVITEMW item = { LVIF_PARAM, i };
+
+            SendMessageW(This->hWndList, LVM_GETITEMW, 0, (LPARAM)&item);
+            SHFree((LPITEMIDLIST)item.lParam);
+            item.lParam = (LPARAM)pidl;
+            SendMessageW(This->hWndList, LVM_SETITEMW, 0, (LPARAM)&item);
+            SendMessageW(This->hWndList, LVM_UPDATE, i, 0);
+        }
+        else SHFree(pidl);
+    }
+    IEnumIDList_Release(enumerator);
+    for (i = count - 1; i >= 0; i--)
+        if (!seen[i]) SendMessageW(This->hWndList, LVM_DELETEITEM, i, 0);
+    free(seen);
+}
+
 static LRESULT ShellView_OnCreate(IShellViewImpl *This)
 {
     IShellView3 *iface = &This->IShellView3_iface;
@@ -1286,6 +1391,7 @@ static LRESULT ShellView_OnCreate(IShellViewImpl *This)
             ntreg.fRecursive = TRUE;
             This->hNotify = SHChangeNotifyRegister(This->hWnd, SHCNRF_InterruptLevel, SHCNE_ALLEVENTS,
                                                    SHV_CHANGE_NOTIFY, 1, &ntreg);
+            start_watching(This, ntreg.pidl);
             SHFree((LPITEMIDLIST)ntreg.pidl);
             SHFree(computer_pidl);
         }
@@ -2256,6 +2362,7 @@ static LRESULT CALLBACK ShellView_WndProc(HWND hWnd, UINT uMessage, WPARAM wPara
 					GET_WM_COMMAND_CMD(wParam, lParam),
 					GET_WM_COMMAND_HWND(wParam, lParam));
 	  case SHV_CHANGE_NOTIFY: return ShellView_OnChange(pThis, (const LPCITEMIDLIST*)wParam, (LONG)lParam);
+	  case SHV_FOLDER_CHANGED: sync_with_folder(pThis); return 0;
 
 	  case WM_CONTEXTMENU:  ShellView_DoContextMenu(pThis, LOWORD(lParam), HIWORD(lParam), FALSE);
 	                        return 0;
@@ -2268,6 +2375,7 @@ static LRESULT CALLBACK ShellView_WndProc(HWND hWnd, UINT uMessage, WPARAM wPara
           case WM_GETFONT:      return SendMessageW(pThis->hWndList, WM_GETFONT, wParam, lParam);
 
 	  case WM_DESTROY:	
+				stop_watching(pThis);
 				SHChangeNotifyDeregister(pThis->hNotify);
 				RevokeDragDrop(pThis->hWnd);
 	                        break;
