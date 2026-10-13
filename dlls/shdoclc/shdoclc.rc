@@ -20,6 +20,9 @@
 
 #pragma makedep po
 
+/* @makedep: iexplore.ico */
+190 ICON "iexplore.ico"
+
 LANGUAGE LANG_ENGLISH, SUBLANG_DEFAULT
 
 STRINGTABLE

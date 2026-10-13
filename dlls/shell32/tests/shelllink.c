@@ -1460,6 +1460,32 @@ static void test_SHGetImageList(void)
     }
 }
 
+static void test_ie_desktop_icon(void)
+{
+    WCHAR path[MAX_PATH];
+    HMODULE module;
+    HICON large_icon = NULL, small_icon = NULL;
+    UINT count;
+
+    GetSystemDirectoryW(path, ARRAY_SIZE(path));
+    lstrcatW(path, L"\\shdoclc.dll");
+    module = LoadLibraryExW(path, NULL, LOAD_LIBRARY_AS_DATAFILE);
+    if (!module)
+    {
+        win_skip("shdoclc.dll is unavailable.\n");
+        return;
+    }
+    FreeLibrary(module);
+    count = ExtractIconExW(path, -190, &large_icon, NULL, 1);
+    ok(count == 1, "IE desktop icon: got large count %u.\n", count);
+    count = ExtractIconExW(path, -190, NULL, &small_icon, 1);
+    ok(count == 1, "IE desktop icon: got small count %u.\n", count);
+    ok(large_icon != NULL && small_icon != NULL, "IE desktop icon: got handles %p, %p.\n",
+       large_icon, small_icon);
+    DestroyIcon(large_icon);
+    DestroyIcon(small_icon);
+}
+
 START_TEST(shelllink)
 {
     HRESULT r;
@@ -1486,6 +1512,7 @@ START_TEST(shelllink)
     test_SHExtractIcons();
     test_propertystore();
     test_ExtractIcon();
+    test_ie_desktop_icon();
     test_ExtractAssociatedIcon();
     test_SHGetImageList();
 
