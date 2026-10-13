@@ -1239,15 +1239,6 @@ BOOL WINAPI WriteCabinetState(CABINETSTATE *cs)
 }
 
 /*************************************************************************
- * FileIconInit 				[SHELL32.660]
- *
- */
-BOOL WINAPI FileIconInit(BOOL bFullInit)
-{	FIXME("(%s)\n", bFullInit ? "true" : "false");
-	return FALSE;
-}
-
-/*************************************************************************
  * IsUserAnAdmin    [SHELL32.680] NT 4.0
  *
  * Checks whether the current user is a member of the Administrators group.
