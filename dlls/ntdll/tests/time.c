@@ -528,6 +528,56 @@ static void test_NtConvertBetweenAuxiliaryCounterAndPerformanceCounter(void)
     ok(error == 0xdeadbeef, "got %#I64x.\n", error);
 }
 
+static void test_timezone_cache_fixture(void)
+{
+    WCHAR directory[MAX_PATH], request[MAX_PATH], ready[MAX_PATH];
+    RTL_TIME_ZONE_INFORMATION info;
+    NTSTATUS status;
+    HANDLE file;
+    unsigned int i, attempt;
+    BOOL completed;
+
+    if (!GetEnvironmentVariableW(L"WINETEST_TIMEZONE_FIXTURE", directory, ARRAY_SIZE(directory)))
+    {
+        skip("No isolated timezone-change fixture configured.\n");
+        return;
+    }
+    if (!pRtlQueryTimeZoneInformation) return;
+    status = pRtlQueryTimeZoneInformation(&info);
+    ok(status == STATUS_SUCCESS, "Got timezone status %#lx.\n", status);
+    ok(info.Bias == 300 && info.DaylightDate.wMonth && info.StandardDate.wMonth,
+       "Unexpected initial timezone: bias %ld, daylight %u, standard %u.\n",
+       info.Bias, info.DaylightDate.wMonth, info.StandardDate.wMonth);
+    for (i = 1; i <= 2; ++i)
+    {
+        swprintf(request, ARRAY_SIZE(request), L"%s/request%u", directory, i);
+        swprintf(ready, ARRAY_SIZE(ready), L"%s/ready%u", directory, i);
+        file = CreateFileW(request, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+        ok(file != INVALID_HANDLE_VALUE, "Failed to request timezone change, error %lu.\n", GetLastError());
+        if (file == INVALID_HANDLE_VALUE) return;
+        CloseHandle(file);
+        for (attempt = 0; attempt < 1500; ++attempt)
+        {
+            if (GetFileAttributesW(ready) != INVALID_FILE_ATTRIBUTES) break;
+            Sleep(20);
+        }
+        completed = attempt < 1500;
+        ok(completed, "Timed out waiting for isolated timezone change %u.\n", i);
+        if (!completed) return;
+        status = pRtlQueryTimeZoneInformation(&info);
+        ok(status == STATUS_SUCCESS, "Got timezone status %#lx.\n", status);
+        ok(info.Bias == 300, "Timezone offset changed unexpectedly: %ld.\n", info.Bias);
+        if (i == 1)
+            ok(!info.DaylightDate.wMonth && !info.StandardDate.wMonth,
+               "Timezone cache retained DST rules: daylight %u, standard %u.\n",
+               info.DaylightDate.wMonth, info.StandardDate.wMonth);
+        else
+            ok(info.DaylightDate.wMonth && info.StandardDate.wMonth,
+               "Timezone cache failed to restore DST rules: daylight %u, standard %u.\n",
+               info.DaylightDate.wMonth, info.StandardDate.wMonth);
+    }
+}
+
 START_TEST(time)
 {
     HMODULE mod = GetModuleHandleA("ntdll.dll");
@@ -555,6 +605,7 @@ START_TEST(time)
         test_pRtlTimeToTimeFields();
     else
         win_skip("Required time conversion functions are not available\n");
+    test_timezone_cache_fixture();
     test_NtQueryPerformanceCounter();
     test_RtlQueryTimeZoneInformation();
     test_user_shared_data_time();
