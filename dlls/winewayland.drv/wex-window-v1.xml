@@ -29,7 +29,7 @@
     for shell components (taskbars), and activation without tokens.
   </description>
 
-  <interface name="wex_window_manager_v1" version="1">
+  <interface name="wex_window_manager_v1" version="2">
     <description summary="manager interface for privileged window controls">
       Allows obtaining a wex_window_v1 interface for an xdg_toplevel.
       Only advertised to privileged clients on the wex-shell socket.
@@ -46,7 +46,7 @@
     </request>
   </interface>
 
-  <interface name="wex_window_v1" version="1">
+  <interface name="wex_window_v1" version="2">
     <description summary="window controls interface">
       Provides operations for stacking, layering, shell edge reservation,
       and direct activation.
@@ -98,6 +98,30 @@
 
     <request name="activate">
       <description summary="give keyboard focus and raise within its layer"/>
+    </request>
+    <event name="handle" since="2">
+      <description summary="shared opaque window handle">
+        Sent once when the object is created. This compositor-generated token
+        identifies the window until its view or control object is destroyed.
+        Privileged clients may share it across connections. Treat it as opaque.
+      </description>
+      <arg name="handle" type="string"/>
+    </event>
+
+    <request name="place_above_handle" since="2">
+      <description summary="place above a shared sibling handle">
+        Like place_above, but accepts a sibling from another privileged client.
+        Unknown, stale, self, or different-layer handles are harmless no-ops.
+      </description>
+      <arg name="handle" type="string"/>
+    </request>
+
+    <request name="place_below_handle" since="2">
+      <description summary="place below a shared sibling handle">
+        Like place_below, but accepts a sibling from another privileged client.
+        Unknown, stale, self, or different-layer handles are harmless no-ops.
+      </description>
+      <arg name="handle" type="string"/>
     </request>
   </interface>
 </protocol>

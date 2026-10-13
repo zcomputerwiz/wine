@@ -314,6 +314,7 @@ struct wayland_surface
     BOOL zone_initial_position;
     struct wex_window_v1 *wex_window;
     unsigned int wex_layer, wex_edge, wex_size;
+    RTL_ATOM wex_handle_atom;
     BOOL wex_minimized;
     BOOL wex_activation_pending;
 
@@ -334,6 +335,7 @@ void wayland_zones_reposition(void);
 void wayland_zone_create_item(struct wayland_surface *surface);
 void wayland_zone_place(struct wayland_surface *surface);
 void wayland_wex_create(struct wayland_surface *surface);
+void wayland_wex_destroy(struct wayland_surface *surface);
 void wayland_wex_update(struct wayland_surface *surface, HWND insert_after, UINT flags);
 void WAYLAND_ActivateWindow(HWND hwnd, HWND previous);
 void wayland_wex_flush_activation(struct wayland_surface *surface);

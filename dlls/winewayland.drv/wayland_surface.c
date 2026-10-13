@@ -529,8 +529,7 @@ void wayland_surface_clear_role(struct wayland_surface *surface)
     case WAYLAND_SURFACE_ROLE_TOPLEVEL:
         if (surface->wex_window)
         {
-            wex_window_v1_destroy(surface->wex_window);
-            surface->wex_window = NULL;
+            wayland_wex_destroy(surface);
         }
         if (surface->zone_item)
         {
