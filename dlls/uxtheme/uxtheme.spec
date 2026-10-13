@@ -11,7 +11,7 @@
 13 stub -noname DrawNCPreview
 14 stub -noname RegisterDefaultTheme
 15 stub -noname DumpLoadedThemeToTextFile
-16 stub -noname OpenThemeDataFromFile
+16 stdcall -noname OpenThemeDataFromFile(ptr long wstr long)
 17 stub -noname OpenThemeFileFromData
 18 stub -noname GetThemeSysSize96
 19 stub -noname GetThemeSysFont96

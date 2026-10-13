@@ -680,6 +680,15 @@ HTHEME WINAPI OpenThemeData(HWND hwnd, LPCWSTR classlist)
     return OpenThemeDataEx(hwnd, classlist, 0);
 }
 
+/* Open preview theme data without changing the active desktop theme. */
+HTHEME WINAPI OpenThemeDataFromFile(HTHEMEFILE file, HWND hwnd, LPCWSTR classes, DWORD flags)
+{
+    UINT dpi = GetDpiForWindow(hwnd);
+    if (!file || !classes) return NULL;
+    if (!dpi) dpi = GetDpiForSystem();
+    return MSSTYLES_OpenThemeClassFromFile((PTHEME_FILE)file, NULL, classes, dpi);
+}
+
 /***********************************************************************
  *      GetWindowTheme                                      (UXTHEME.@)
  *
