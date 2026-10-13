@@ -949,10 +949,65 @@ static void test_CharToOem_OemToChar(void)
     }
 }
 
+static void test_DrawTextHidePrefix(void)
+{
+    BITMAPINFO info = {{sizeof(BITMAPINFOHEADER), 128, -64, 1, 32, BI_RGB}};
+    DWORD reference[128 * 64], *bits;
+    HBITMAP bitmap, old_bitmap;
+    HGDIOBJ old_font;
+    HDC dc;
+    RECT rect;
+    unsigned int i, differences;
+    int height;
+
+    dc = CreateCompatibleDC(NULL);
+    ok(dc != NULL, "Failed to create DC.\n");
+    if (!dc) return;
+    bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, (void **)&bits, NULL, 0);
+    ok(bitmap != NULL, "Failed to create bitmap.\n");
+    if (!bitmap)
+    {
+        DeleteDC(dc);
+        return;
+    }
+    old_bitmap = SelectObject(dc, bitmap);
+    old_font = SelectObject(dc, GetStockObject(SYSTEM_FONT));
+    SetTextColor(dc, RGB(0, 0, 0));
+    SetBkMode(dc, TRANSPARENT);
+    SetRect(&rect, 0, 0, 128, 64);
+    FillRect(dc, &rect, GetStockObject(WHITE_BRUSH));
+    height = DrawTextW(dc, L"A", -1, &rect, DT_SINGLELINE | DT_NOPREFIX);
+    ok(height > 0, "Got text height %d.\n", height);
+    GdiFlush();
+    memcpy(reference, bits, sizeof(reference));
+
+    FillRect(dc, &rect, GetStockObject(WHITE_BRUSH));
+    height = DrawTextW(dc, L"&A", -1, &rect, DT_SINGLELINE | DT_HIDEPREFIX);
+    ok(height > 0, "Got text height %d.\n", height);
+    GdiFlush();
+    for (i = differences = 0; i < ARRAY_SIZE(reference); ++i)
+        if ((reference[i] & 0xffffff) != (bits[i] & 0xffffff)) ++differences;
+    ok(!differences, "Hidden-prefix pixels differ at %u positions.\n", differences);
+
+    FillRect(dc, &rect, GetStockObject(WHITE_BRUSH));
+    height = DrawTextW(dc, L"&A", -1, &rect, DT_SINGLELINE);
+    ok(height > 0, "Got text height %d.\n", height);
+    GdiFlush();
+    for (i = differences = 0; i < ARRAY_SIZE(reference); ++i)
+        if ((reference[i] & 0xffffff) != (bits[i] & 0xffffff)) ++differences;
+    ok(differences != 0, "Visible prefix did not change any pixels.\n");
+
+    SelectObject(dc, old_font);
+    SelectObject(dc, old_bitmap);
+    DeleteObject(bitmap);
+    DeleteDC(dc);
+}
+
 START_TEST(text)
 {
     test_TabbedText();
     test_DrawTextCalcRect();
     test_DrawState();
+    test_DrawTextHidePrefix();
     test_CharToOem_OemToChar();
 }
