@@ -2029,6 +2029,29 @@ void init_locale( HMODULE module )
     RegCreateKeyExW( HKEY_CURRENT_USER, L"Control Panel\\International",
                      0, NULL, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, NULL, &intl_key, NULL );
 
+    /* The user locale follows the Unix one, unless another one was chosen in the Control Panel (Regional and Language
+     * Options) since the Unix locale last changed; WineUnixLocaleName remembers the Unix locale. */
+    user_locale_name = locale_strings + user_locale->sname + 1;
+    count = sizeof(bufferW);
+    if (!RegQueryValueExW( intl_key, L"WineUnixLocaleName", NULL, NULL, (BYTE *)bufferW, &count ) &&
+        !wcscmp( bufferW, user_locale_name ))
+    {
+        const NLS_LOCALE_DATA *chosen;
+        LCID lcid;
+
+        count = sizeof(bufferW);
+        if (!RegQueryValueExW( intl_key, L"LocaleName", NULL, NULL, (BYTE *)bufferW, &count ) &&
+            wcscmp( bufferW, user_locale_name ) && (chosen = get_locale_by_name( bufferW, &lcid )) &&
+            lcid != LOCALE_CUSTOM_UNSPECIFIED)
+        {
+            user_locale = chosen;
+            user_lcid = lcid;
+            NtSetDefaultLocale( TRUE, lcid );
+        }
+    }
+    else RegSetValueExW( intl_key, L"WineUnixLocaleName", 0, REG_SZ, (BYTE *)user_locale_name,
+                         (lstrlenW( user_locale_name ) + 1) * sizeof(WCHAR) );
+
     current_locale_sort = get_language_sort( LOCALE_NAME_USER_DEFAULT );
 
     if (GetDynamicTimeZoneInformation( &timezone ) != TIME_ZONE_ID_INVALID &&
