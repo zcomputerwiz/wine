@@ -824,6 +824,9 @@ static DWORD ViewModeToListStyle(UINT ViewMode)
 	  case FVM_DETAILS:	dwStyle = LVS_REPORT;		break;
 	  case FVM_SMALLICON:	dwStyle = LVS_SMALLICON;	break;
 	  case FVM_LIST:	dwStyle = LVS_LIST;		break;
+	  case FVM_TILE:	dwStyle = LVS_ICON;		break;   /* LVM_SETVIEW makes it tiles */
+	  case FVM_THUMBNAIL:	dwStyle = LVS_ICON;		break;
+	  case FVM_THUMBSTRIP:	dwStyle = LVS_ICON | LVS_ALIGNLEFT;	break;   /* one row: columns of one item */
 	  default:
 	  {
 		FIXME("ViewMode %d not implemented\n", ViewMode);
@@ -884,7 +887,7 @@ static BOOL ShellView_CreateList (IShellViewImpl * This)
 	TRACE("%p\n",This);
 
 	dwStyle = WS_TABSTOP | WS_VISIBLE | WS_CHILDWINDOW | WS_CLIPSIBLINGS | WS_CLIPCHILDREN |
-		  LVS_SHAREIMAGELISTS | LVS_EDITLABELS | LVS_ALIGNLEFT | LVS_AUTOARRANGE | LVS_SHOWSELALWAYS;
+		  LVS_SHAREIMAGELISTS | LVS_EDITLABELS | LVS_AUTOARRANGE | LVS_SHOWSELALWAYS;
         dwExStyle = WS_EX_CLIENTEDGE;
 
         dwStyle |= ViewModeToListStyle(This->FolderSettings.ViewMode);
@@ -984,6 +987,24 @@ static void ShellView_InitList(IShellViewImpl *This)
         else
             hr = IShellDetails_GetDetailsOf(details, NULL, This->columns, &sd);
         if (FAILED(hr)) break;
+
+        if (This->pSF2Parent && This->tile_column_count < ARRAY_SIZE(This->tile_columns))
+        {
+            SHCOLUMNID scid;
+
+            if (SUCCEEDED(IShellFolder2_MapColumnToSCID(This->pSF2Parent, This->columns, &scid)) &&
+                IsEqualGUID(&scid.fmtid, &FMTID_Storage) && (scid.pid == PID_STG_STORAGETYPE || scid.pid == PID_STG_SIZE))
+            {
+                /* the type above the size */
+                if (scid.pid == PID_STG_STORAGETYPE && This->tile_column_count)
+                {
+                    This->tile_columns[1] = This->tile_columns[0];
+                    This->tile_columns[0] = This->columns;
+                    This->tile_column_count++;
+                }
+                else This->tile_columns[This->tile_column_count++] = This->columns;
+            }
+        }
 
         lvColumn.fmt = sd.fmt;
         lvColumn.cx = MulDiv(sd.cxChar, tm.tmAveCharWidth * 3, 2); /* chars->pixel */
@@ -1131,7 +1152,68 @@ static int LV_FindItemByPidl(
 	    return lvItem.iItem;
 	  }
   	}
+	/* a notification's simple pidl of an item that is gone does not compare equal: look for its name */
+	{
+	  WCHAR name[MAX_PATH], current[MAX_PATH];
+
+	  if (!_ILSimpleGetTextW(ILFindLastID(pidl), name, ARRAY_SIZE(name))) return -1;
+	  for (lvItem.iItem = 0; SendMessageW(This->hWndList, LVM_GETITEMW, 0, (LPARAM)&lvItem); lvItem.iItem++)
+	    if (_ILSimpleGetTextW((LPCITEMIDLIST)lvItem.lParam, current, ARRAY_SIZE(current)) && !wcsicmp(name, current))
+	      return lvItem.iItem;
+	}
 	return -1;
+}
+
+/* Windows XP's groups of My Computer */
+static const UINT drive_group_ids[] = { IDS_DRIVES_SHAREDDOCS_GROUP, IDS_DRIVES_FIXED_GROUP, IDS_DRIVES_REMOVABLE_GROUP,
+                                        IDS_DRIVES_NETDRIVE_GROUP, IDS_DRIVES_OTHER_GROUP };
+
+static void create_drive_groups(IShellViewImpl *This)
+{
+    IPersist *persist;
+    CLSID clsid;
+    UINT i;
+
+    This->drive_groups = FALSE;
+    if (SUCCEEDED(IShellFolder_QueryInterface(This->pSFParent, &IID_IPersist, (void **)&persist)))
+    {
+        This->drive_groups = SUCCEEDED(IPersist_GetClassID(persist, &clsid)) && IsEqualCLSID(&clsid, &CLSID_MyComputer);
+        IPersist_Release(persist);
+    }
+    SendMessageW(This->hWndList, LVM_REMOVEALLGROUPS, 0, 0);
+    if (!This->drive_groups) return;
+    for (i = 0; i < ARRAY_SIZE(drive_group_ids); i++)
+    {
+        WCHAR header[64];
+        LVGROUP group = { sizeof(group), LVGF_HEADER | LVGF_GROUPID };
+
+        LoadStringW(shell32_hInstance, drive_group_ids[i], header, ARRAY_SIZE(header));
+        group.pszHeader = header;
+        group.iGroupId = drive_group_ids[i];
+        SendMessageW(This->hWndList, LVM_INSERTGROUP, -1, (LPARAM)&group);
+    }
+    SendMessageW(This->hWndList, LVM_ENABLEGROUPVIEW, TRUE, 0);
+}
+
+static UINT drive_group(LPCITEMIDLIST pidl)
+{
+    WCHAR root[MAX_PATH];
+
+    /* Shared Documents and the user's documents: "Files Stored on This Computer" */
+    if (_ILIsSpecialFolder(pidl))
+    {
+        GUID *guid = _ILGetGUIDPointer(pidl);
+        if (guid && (IsEqualGUID(guid, &CLSID_MyDocuments) || IsEqualGUID(guid, &CLSID_SharedDocuments)))
+            return IDS_DRIVES_SHAREDDOCS_GROUP;
+    }
+    if (!_ILIsDrive(pidl) || !_ILSimpleGetTextW(pidl, root, ARRAY_SIZE(root))) return IDS_DRIVES_OTHER_GROUP;
+    switch (GetDriveTypeW(root))
+    {
+    case DRIVE_REMOVABLE:
+    case DRIVE_CDROM:  return IDS_DRIVES_REMOVABLE_GROUP;
+    case DRIVE_REMOTE: return IDS_DRIVES_NETDRIVE_GROUP;
+    default:           return IDS_DRIVES_FIXED_GROUP;
+    }
 }
 
 static void shellview_add_item(IShellViewImpl *shellview, LPCITEMIDLIST pidl)
@@ -1214,6 +1296,8 @@ static HRESULT ShellView_FillList(IShellViewImpl *This)
     HRESULT hr;
 
     TRACE("(%p)\n", This);
+    free_thumbnails(This);
+    create_drive_groups(This);
 
     /* get the itemlist from the shfolder*/
     hr = IShellFolder_EnumObjects(This->pSFParent, This->hWnd, SHCONTF_NONFOLDERS | SHCONTF_FOLDERS, &pEnumIDList);
@@ -1234,6 +1318,8 @@ static HRESULT ShellView_FillList(IShellViewImpl *This)
     SendMessageW(This->hWndList, LVM_SORTITEMS, (WPARAM)This->pSFParent, (LPARAM)ShellView_CompareItems);
 
     IFolderView2_SetRedraw(folderview, TRUE);
+    /* sizes seen while the list did not redraw were not laid out */
+    SendMessageW(This->hWndList, LVM_ARRANGE, LVA_DEFAULT, 0);
 
     IEnumIDList_Release(pEnumIDList);
     return S_OK;
@@ -1355,6 +1441,8 @@ static LRESULT ShellView_OnCreate(IShellViewImpl *This)
     {
         ShellView_InitList(This);
         ShellView_FillList(This);
+        if (This->FolderSettings.ViewMode == FVM_TILE || HAS_THUMBNAILS(This->FolderSettings.ViewMode))
+            shellview_set_view(This, This->FolderSettings.ViewMode);
     }
 
     hr = IShellView3_QueryInterface(iface, &IID_IDropTarget, (void**)&pdt);
@@ -1714,6 +1802,26 @@ static void ShellView_DoContextMenu(IShellViewImpl * This, WORD x, WORD y, BOOL 
 
 	  BackgroundMenu_Constructor(This->pSFParent, FALSE, &IID_IContextMenu2, (void**)&pCM);
 	  IContextMenu2_QueryContextMenu(pCM, hMenu, 0, FCIDM_SHVIEWFIRST, FCIDM_SHVIEWLAST, 0);
+	  {
+	      /* the current view and arrangement, ids relative to FCIDM_SHVIEWFIRST */
+	      UINT current = This->FolderSettings.ViewMode == FVM_LIST ? FCIDM_SHVIEW_LISTVIEW :
+	                     This->FolderSettings.ViewMode == FVM_DETAILS ? FCIDM_SHVIEW_REPORTVIEW : FCIDM_SHVIEW_BIGICON;
+	      EnableMenuItem(hMenu, FCIDM_SHVIEW_TILE - 0x7000, MF_BYCOMMAND | MF_ENABLED);
+	      EnableMenuItem(hMenu, FCIDM_SHVIEW_THUMBNAIL - 0x7000, MF_BYCOMMAND | MF_ENABLED);
+	      /* Windows XP offers Filmstrip in picture folders */
+	      if (!is_picture_folder(This)) DeleteMenu(hMenu, FCIDM_SHVIEW_FILMSTRIP - 0x7000, MF_BYCOMMAND);
+	      if (This->FolderSettings.ViewMode == FVM_TILE || HAS_THUMBNAILS(This->FolderSettings.ViewMode))
+	      {
+	          UINT id = This->FolderSettings.ViewMode == FVM_TILE ? FCIDM_SHVIEW_TILE :
+	                    This->FolderSettings.ViewMode == FVM_THUMBSTRIP ? FCIDM_SHVIEW_FILMSTRIP : FCIDM_SHVIEW_THUMBNAIL;
+	          CheckMenuRadioItem(hMenu, id - 0x7000, id - 0x7000, id - 0x7000, MF_BYCOMMAND);
+	      }
+	      else
+	          CheckMenuRadioItem(hMenu, FCIDM_SHVIEW_BIGICON - 0x7000, FCIDM_SHVIEW_REPORTVIEW - 0x7000,
+	                             current - 0x7000, MF_BYCOMMAND);
+	      if (This->FolderSettings.fFlags & FWF_AUTOARRANGE)
+	          CheckMenuItem(hMenu, FCIDM_SHVIEW_AUTOARRANGE - 0x7000, MF_BYCOMMAND | MF_CHECKED);
+	  }
 
 	  uCommand = TrackPopupMenu( hMenu, TPM_LEFTALIGN | TPM_RETURNCMD,x,y,0,This->hWnd,NULL);
 	  DestroyMenu(hMenu);
@@ -3373,7 +3481,6 @@ static HRESULT WINAPI FolderView_GetCurrentViewMode(IFolderView2 *iface, UINT *m
 static HRESULT WINAPI FolderView_SetCurrentViewMode(IFolderView2 *iface, UINT mode)
 {
     IShellViewImpl *shellview = impl_from_IFolderView2(iface);
-    DWORD style;
 
     TRACE("folder view %p, mode %u.\n", iface, mode);
 
@@ -3382,9 +3489,8 @@ static HRESULT WINAPI FolderView_SetCurrentViewMode(IFolderView2 *iface, UINT mo
 
     if (mode >= FVM_FIRST && mode <= FVM_LAST)
     {
-        style = ViewModeToListStyle(mode);
-        SetStyle(shellview, style, LVS_TYPEMASK);
-        shellview->FolderSettings.ViewMode = mode;
+        if (shellview->hWndList) shellview_set_view(shellview, mode);
+        else shellview->FolderSettings.ViewMode = mode;
     }
 
     return S_OK;
