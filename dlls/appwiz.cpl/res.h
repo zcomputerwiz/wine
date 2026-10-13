@@ -74,3 +74,19 @@
 #define IDS_INVALID_SHA        16
 #define IDS_WAIT_COMPLETE      17
 #define IDS_DOWNLOAD_FAILED    18
+
+/* Create Shortcut wizard (createlink.c) */
+#define IDD_LINK_LOCATION   1300
+#define IDD_LINK_NAME       1301
+#define IDC_LINK_ART        1310
+#define IDC_LINK_LOCATION   1311
+#define IDC_LINK_BROWSE     1312
+#define IDC_LINK_NAME       1313
+#define IDB_SHORTCUT        5001   /* Windows XP's id of the wizard's picture */
+#define IDS_CREATE_SHORTCUT       1320
+#define IDS_LINK_TITLE_PAGE       1321
+#define IDS_LINK_NOT_FOUND        1322
+#define IDS_LINK_BROWSE_TITLE     1323
+#define IDS_LINK_BAD_NAME         1324
+#define IDS_LINK_FAILED           1325
+#define IDS_NEW_INTERNET_SHORTCUT 1326

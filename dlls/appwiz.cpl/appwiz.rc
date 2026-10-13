@@ -126,6 +126,42 @@ FONT 8, "MS Shell Dlg"
     PUSHBUTTON "Cancel", IDCANCEL, 144, 76, 50, 14, WS_GROUP | WS_TABSTOP
 }
 
+/* Create Shortcut, laid out as Windows XP's wizard */
+IDD_LINK_LOCATION DIALOGEX 0, 0, 293, 143
+STYLE DS_SHELLFONT | WS_CHILD | WS_DISABLED | WS_CAPTION
+CAPTION "Create Shortcut"
+FONT 8, "MS Shell Dlg"
+{
+    CONTROL "", IDC_LINK_ART, "Static", SS_BITMAP, 0, 0, 88, 154
+    LTEXT "This wizard helps you to create shortcuts to local or network programs, files, folders, computers, or Internet addresses.", -1, 100, 8, 186, 26
+    LTEXT "&Type the location of the item:", -1, 100, 40, 186, 9
+    EDITTEXT IDC_LINK_LOCATION, 100, 51, 133, 14, ES_AUTOHSCROLL
+    PUSHBUTTON "B&rowse...", IDC_LINK_BROWSE, 238, 51, 49, 14
+    LTEXT "Click Next to continue.", -1, 100, 81, 186, 9
+}
+
+IDD_LINK_NAME DIALOGEX 0, 0, 293, 143
+STYLE DS_SHELLFONT | WS_CHILD | WS_DISABLED | WS_CAPTION
+CAPTION "Select a Title for the Program"
+FONT 8, "MS Shell Dlg"
+{
+    CONTROL "", IDC_LINK_ART, "Static", SS_BITMAP, 0, 0, 88, 154
+    LTEXT "&Type a name for this shortcut:", -1, 100, 8, 186, 9
+    EDITTEXT IDC_LINK_NAME, 100, 20, 187, 14, ES_AUTOHSCROLL
+    LTEXT "Click Finish to create the shortcut.", -1, 100, 81, 186, 9
+}
+
+STRINGTABLE
+{
+    IDS_CREATE_SHORTCUT, "Create Shortcut"
+    IDS_LINK_TITLE_PAGE, "Select a Title for the Program"
+    IDS_LINK_NOT_FOUND, "Windows cannot find '%s'. Make sure you typed the name correctly, and then try again. To search for a file, click the Start button, and then click Search."
+    IDS_LINK_BROWSE_TITLE, "Select the target of the shortcut below:"
+    IDS_LINK_BAD_NAME, "A file name cannot contain any of the following characters:\n          \\ / : * ? \" < > |"
+    IDS_LINK_FAILED, "Unable to create the shortcut '%s'."
+    IDS_NEW_INTERNET_SHORTCUT, "New Internet Shortcut"
+}
+
 LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
 
 /* @makedep: appwiz.manifest */
@@ -133,3 +169,7 @@ LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
 
 /* @makedep: appwiz.ico */
 ICO_MAIN ICON "appwiz.ico"
+
+/* the art of the Create Shortcut wizard (ReactOS, resized); the genuine one comes from the resource pack */
+/* @makedep: shortcut.bmp */
+IDB_SHORTCUT BITMAP shortcut.bmp
