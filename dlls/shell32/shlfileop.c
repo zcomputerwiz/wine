@@ -234,7 +234,7 @@ static BOOL SHELL_ConfirmIDs(int nKindOfDialog, SHELL_ConfirmIDstruc *ids)
 	    return TRUE;
 	  case ASK_DELETE_MULTIPLE_ITEM:
             ids->icon_resource_id = IDI_SHELL_CONFIRM_DELETE;
-	    ids->caption_resource_id  = IDS_DELETEITEM_CAPTION;
+	    ids->caption_resource_id  = IDS_DELETEMULTIPLE_CAPTION;
 	    ids->text_resource_id  = IDS_DELETEMULTIPLE_TEXT;
 	    return TRUE;
           case ASK_TRASH_FILE:
@@ -249,7 +249,7 @@ static BOOL SHELL_ConfirmIDs(int nKindOfDialog, SHELL_ConfirmIDstruc *ids)
             return TRUE;
           case ASK_TRASH_MULTIPLE_ITEM:
             ids->icon_resource_id = IDI_SHELL_TRASH_FILE;
-            ids->caption_resource_id = IDS_DELETEITEM_CAPTION;
+            ids->caption_resource_id = IDS_DELETEMULTIPLE_CAPTION;
             ids->text_resource_id = IDS_TRASHMULTIPLE_TEXT;
             return TRUE;
           case ASK_CANT_TRASH_ITEM:
@@ -298,7 +298,18 @@ static BOOL SHELL_ConfirmDialogW(HWND hWnd, int nKindOfDialog, LPCWSTR szDir, FI
         LoadStringW(shell32_hInstance, ids.text_resource_id, szText, ARRAY_SIZE(szText));
 
         args[0] = (DWORD_PTR)szDir;
-        FormatMessageW(FORMAT_MESSAGE_FROM_STRING|FORMAT_MESSAGE_ARGUMENT_ARRAY,
+        /* Windows names the item to delete as the shell shows it, without its folder */
+        if (nKindOfDialog == ASK_DELETE_FILE || nKindOfDialog == ASK_DELETE_FOLDER || nKindOfDialog == ASK_TRASH_FILE ||
+            nKindOfDialog == ASK_TRASH_FOLDER || nKindOfDialog == ASK_CANT_TRASH_ITEM)
+        {
+            SHFILEINFOW info;
+
+            if (SHGetFileInfoW(szDir, 0, &info, sizeof(info), SHGFI_DISPLAYNAME))
+                args[0] = (DWORD_PTR)info.szDisplayName;
+            FormatMessageW(FORMAT_MESSAGE_FROM_STRING|FORMAT_MESSAGE_ARGUMENT_ARRAY,
+                szText, 0, 0, szBuffer, ARRAY_SIZE(szBuffer), (va_list*)args);
+        }
+        else FormatMessageW(FORMAT_MESSAGE_FROM_STRING|FORMAT_MESSAGE_ARGUMENT_ARRAY,
             szText, 0, 0, szBuffer, ARRAY_SIZE(szBuffer), (va_list*)args);
 
         hIcon = LoadIconW(ids.hIconInstance, (LPWSTR)MAKEINTRESOURCE(ids.icon_resource_id));
