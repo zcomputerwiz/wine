@@ -2435,7 +2435,37 @@ Window create_client_window( HWND hwnd, RECT client_rect, const XVisualInfo *vis
 
 
 /**********************************************************************
- *		create_whole_window
+ *              X11DRV_has_compositor
+ *
+ * Query ownership rather than caching it across compositor enable/disable.
+ */
+BOOL X11DRV_has_compositor( Display *display )
+{
+    char name[40];
+    Atom selection;
+    snprintf( name, sizeof(name), "_NET_WM_CM_S%d", DefaultScreen( display ) );
+    selection = XInternAtom( display, name, False );
+    return XGetSelectionOwner( display, selection ) != None;
+}
+
+/* Explorer cannot read another process's __wine_x11_whole_window property.
+ * Publish the shadow predicate on the actual X window before mapping it.
+ * This private hint has no effect without a compositing manager. */
+static void sync_window_shadow( struct x11drv_win_data *data )
+{
+    BOOL shadow = FALSE;
+    unsigned long value;
+    if (!(NtUserGetClassLongW( data->hwnd, GCL_STYLE ) & CS_DROPSHADOW) ||
+        !X11DRV_has_compositor( data->display )) return;
+    NtUserSystemParametersInfo( SPI_GETDROPSHADOW, 0, &shadow, 0 );
+    value = !!shadow;
+    XChangeProperty( data->display, data->whole_window,
+                     XInternAtom( data->display, "_WEX_DROPSHADOW", False ),
+                     XA_CARDINAL, 32, PropModeReplace, (unsigned char *)&value, 1 );
+}
+
+/**********************************************************************
+ *              create_whole_window
  *
  * Create the whole X window for a given window
  */
@@ -2482,6 +2512,8 @@ static void create_whole_window( struct x11drv_win_data *data )
     x11drv_xinput2_enable( data->display, data->whole_window );
     set_initial_wm_hints( data->display, data->whole_window );
     set_wm_hints( data );
+
+    sync_window_shadow( data );
 
     XSaveContext( data->display, data->whole_window, winContext, (char *)data->hwnd );
     NtUserSetProp( data->hwnd, whole_window_prop, (HANDLE)data->whole_window );
@@ -3351,6 +3383,7 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
 #endif
     }
 
+    if (swp_flags & SWP_SHOWWINDOW) sync_window_shadow( data );
     window_set_wm_state( data, get_desired_wm_state( new_style, new_rects ), activate );
     if (!data->wm_state_serial && data->pending_state.wm_state != WithdrawnState)
     {
