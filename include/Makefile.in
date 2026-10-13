@@ -1001,6 +1001,7 @@ SOURCES = \
 	werapi.h \
 	wexshell.h \
 	wexres.h \
+	wextheme.h \
 	wexhost.h \
 	wfext.h \
 	wia.h \
