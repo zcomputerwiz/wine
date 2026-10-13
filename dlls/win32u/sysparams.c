@@ -294,7 +294,6 @@ union sysparam_all_entry
 
 static const struct ratio no_dpi;
 UINT system_dpi;
-static RECT work_area;
 static DWORD process_layout = ~0u;
 
 static HDC display_dc;
@@ -2008,6 +2007,28 @@ static BOOL write_monitor_to_registry( struct monitor *monitor, const BYTE *edid
     return TRUE;
 }
 
+/* The work area the shell set with SPI_SETWORKAREA, by monitor path.  It is kept apart from the monitor keys, which
+ * every process entering a virtual desktop writes again from what the driver reports, and is volatile like the
+ * taskbar that set it. */
+static const char shell_work_area_keyA[] = "\\Registry\\Machine\\Software\\Wine\\WorkArea";
+
+static void get_shell_work_area( struct monitor *monitor, const RECT *rc_monitor )
+{
+    char buffer[offsetof(KEY_VALUE_PARTIAL_INFORMATION, Data[sizeof(RECT)])];
+    KEY_VALUE_PARTIAL_INFORMATION *value = (void *)buffer;
+    RECT rect, inside;
+    HKEY hkey;
+
+    if (!(hkey = reg_open_ascii_key( NULL, shell_work_area_keyA ))) return;
+    if (query_reg_ascii_value( hkey, monitor->path, value, sizeof(buffer) ) == sizeof(RECT))
+    {
+        rect = *(const RECT *)value->Data;
+        /* only while it still fits the monitor; the shell sets a new one when the resolution changes */
+        if (intersect_rect( &inside, &rect, rc_monitor ) && EqualRect( &inside, &rect )) monitor->rc_work = rect;
+    }
+    NtClose( hkey );
+}
+
 static void add_monitor( const struct gdi_monitor *gdi_monitor, void *param )
 {
     struct device_manager_ctx *ctx = param;
@@ -2038,6 +2059,7 @@ static void add_monitor( const struct gdi_monitor *gdi_monitor, void *param )
     snprintf( buffer, sizeof(buffer), "MonitorID%u", monitor->id );
     snprintf( monitor->path, sizeof(monitor->path), "DISPLAY\\%s\\%04X&%04X", monitor_id_string, source->id, monitor->id );
     set_reg_ascii_value( source->key, buffer, monitor->path );
+    get_shell_work_area( monitor, &gdi_monitor->rc_monitor );
 
     if (!write_monitor_to_registry( monitor, gdi_monitor->edid, gdi_monitor->edid_len ))
     {
@@ -2933,6 +2955,79 @@ BOOL update_display_cache( BOOL force )
     if (!lock_display_devices( force )) return FALSE;
     unlock_display_devices();
     return TRUE;
+}
+
+/* SPI_SETWORKAREA: like on Windows, the work area belongs to the monitor and every process sees it, so windows
+ * maximized in any process stop at the taskbar.  It goes to the monitor's registry key, which the other processes
+ * read again when the monitor serial changes, and to the shell's key that survives the driver rewriting the monitors. */
+static BOOL set_monitor_work_area( const RECT *rect, BOOL reposition )
+{
+    struct ratio dpi = get_thread_dpi();
+    struct monitor *monitor;
+    HMONITOR changed = 0;
+    LARGE_INTEGER now;
+    BOOL ret = FALSE;
+    HKEY hkey, subkey;
+    WCHAR nameW[MAX_PATH];
+    RECT work, old;
+    HWND *list;
+    UINT i;
+
+    if (!lock_display_devices( FALSE )) return FALSE;
+    LIST_FOR_EACH_ENTRY( monitor, &monitors, struct monitor, entry )
+    {
+        /* the rectangle has to lie on one monitor */
+        RECT rc = monitor_get_rect( monitor, dpi, MDT_DEFAULT );
+        if (!intersect_rect( &work, rect, &rc ) || !EqualRect( &work, rect )) continue;
+        old = monitor->rc_work;
+        monitor->rc_work = map_monitor_rect( monitor, work, dpi, MDT_DEFAULT, no_dpi, MDT_RAW_DPI );
+        if (!EqualRect( &old, &monitor->rc_work )) changed = monitor->handle;
+        if ((hkey = reg_create_ascii_key( NULL, shell_work_area_keyA, REG_OPTION_VOLATILE, NULL )))
+        {
+            asciiz_to_unicode( nameW, monitor->path );
+            set_reg_value( hkey, nameW, REG_BINARY, &monitor->rc_work, sizeof(monitor->rc_work) );
+            NtClose( hkey );
+        }
+        if ((hkey = reg_open_ascii_key( enum_key, monitor->path )))
+        {
+            if ((subkey = reg_create_ascii_key( hkey, wine_devpropkey_monitor_rcworkA, 0, NULL )))
+            {
+                set_reg_value( subkey, NULL, 0xffff0000 | DEVPROP_TYPE_BINARY, &monitor->rc_work, sizeof(monitor->rc_work) );
+                NtClose( subkey );
+            }
+            NtClose( hkey );
+        }
+        ret = TRUE;
+        break;
+    }
+    if (ret)
+    {
+        /* the other processes only read the registry again when the video key changed */
+        static const WCHAR work_area_changedW[] = {'W','o','r','k','A','r','e','a','C','h','a','n','g','e','d',0};
+        NtQuerySystemTime( &now );
+        set_reg_value( video_key, work_area_changedW, REG_BINARY, &now, sizeof(now) );
+        set_winstation_monitors( TRUE );
+    }
+    unlock_display_devices();
+
+    /* with a non-zero uiParam (the taskbar passes TRUE), the maximized windows on that monitor follow the new work
+     * area, as on Windows.  ponytail: asks every maximized window for WM_GETMINMAXINFO synchronously, a hung one
+     * holds up the caller; use a timeout if that ever bites. */
+    if (reposition && changed && (list = list_window_children( get_desktop_window() )))
+    {
+        for (i = 0; list[i]; i++)
+        {
+            MINMAXINFO minmax;
+            if ((get_window_long( list[i], GWL_STYLE ) & (WS_VISIBLE | WS_MAXIMIZE | WS_MINIMIZE)) != (WS_VISIBLE | WS_MAXIMIZE))
+                continue;
+            if (monitor_from_window( list[i], MONITOR_DEFAULTTONEAREST, dpi ) != changed) continue;
+            minmax = get_min_max_info( list[i] );
+            NtUserSetWindowPos( list[i], 0, minmax.ptMaxPosition.x, minmax.ptMaxPosition.y, minmax.ptMaxSize.x,
+                                minmax.ptMaxSize.y, SWP_NOZORDER | SWP_NOACTIVATE );
+        }
+        free( list );
+    }
+    return ret;
 }
 
 #define GAMMA_RAMP_SIZE 256
@@ -5804,16 +5899,6 @@ static USERPREF_ENTRY( CLIENTAREAANIMATION,      4, 0x02 );
 static USERPREF_ENTRY( CLEARTYPE,                4, 0x10 );
 static USERPREF_ENTRY( SPEECHRECOGNITION,        4, 0x20 );
 
-/* System parameter indexes */
-enum spi_index
-{
-    SPI_SETWORKAREA_IDX,
-    SPI_INDEX_COUNT
-};
-
-/* indicators whether system parameter value is loaded */
-static char spi_loaded[SPI_INDEX_COUNT];
-
 static struct sysparam_rgb_entry system_colors[] =
 {
 #define RGB_ENTRY(name,val,reg) { { get_rgb_entry, set_rgb_entry, init_rgb_entry, COLORS_KEY, reg }, (val) }
@@ -6200,7 +6285,6 @@ BOOL WINAPI NtUserSystemParametersInfo( UINT action, UINT val, void *ptr, UINT w
         break
 
     BOOL ret = user_driver->pSystemParametersInfo( action, val, ptr, winini );
-    unsigned spi_idx = 0;
 
     if (!ret) switch (action)
     {
@@ -6441,37 +6525,30 @@ BOOL WINAPI NtUserSystemParametersInfo( UINT action, UINT val, void *ptr, UINT w
     case SPI_SETWORKAREA:
     {
         if (!ptr) return FALSE;
-        spi_idx = SPI_SETWORKAREA_IDX;
-        work_area = *(RECT*)ptr;
-        spi_loaded[spi_idx] = TRUE;
-        ret = TRUE;
+        ret = set_monitor_work_area( ptr, val );
         break;
     }
     case SPI_GETWORKAREA:
     {
         MONITORINFO info = {.cbSize = sizeof(info)};
         struct ratio dpi = get_thread_dpi();
+        struct monitor *monitor;
+        RECT work_area = {0};
 
         if (!ptr) return FALSE;
 
-        spi_idx = SPI_SETWORKAREA_IDX;
-        if (!spi_loaded[spi_idx])
+        /* the primary monitor's, which any process may have changed */
+        if (!lock_display_devices( FALSE )) return FALSE;
+
+        LIST_FOR_EACH_ENTRY( monitor, &monitors, struct monitor, entry )
         {
-            struct monitor *monitor;
-
-            if (!lock_display_devices( FALSE )) return FALSE;
-
-            LIST_FOR_EACH_ENTRY( monitor, &monitors, struct monitor, entry )
-            {
-                if (!is_monitor_primary( monitor )) continue;
-                monitor_get_info( monitor, &info, dpi );
-                work_area = info.rcWork;
-                break;
-            }
-
-            unlock_display_devices();
-            spi_loaded[spi_idx] = TRUE;
+            if (!is_monitor_primary( monitor )) continue;
+            monitor_get_info( monitor, &info, dpi );
+            work_area = info.rcWork;
+            break;
         }
+
+        unlock_display_devices();
         *(RECT *)ptr = work_area;
         ret = TRUE;
         TRACE("work area %s\n", wine_dbgstr_rect( &work_area ));
