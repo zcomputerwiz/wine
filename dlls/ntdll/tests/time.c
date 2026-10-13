@@ -528,6 +528,47 @@ static void test_NtConvertBetweenAuxiliaryCounterAndPerformanceCounter(void)
     ok(error == 0xdeadbeef, "got %#I64x.\n", error);
 }
 
+static void test_server_dst_fixture(void)
+{
+    static const char *epochs[] = {"1768478400\n", "1784116800\n"};
+    KUSER_SHARED_DATA *shared = (void *)0x7ffe0000;
+    WCHAR directory[MAX_PATH], path[MAX_PATH], initial[2];
+    ULONGLONG expected, actual;
+    HANDLE file;
+    DWORD written;
+    unsigned int start, stage, state, attempt;
+    BOOL ret;
+
+    if (!GetEnvironmentVariableW(L"WINETEST_DST_FIXTURE", directory, ARRAY_SIZE(directory)))
+    {
+        skip("No isolated server clock fixture configured.\n");
+        return;
+    }
+    GetEnvironmentVariableW(L"WINETEST_DST_START", initial, ARRAY_SIZE(initial));
+    start = initial[0] == '1';
+    swprintf(path, ARRAY_SIZE(path), L"%s/clock", directory);
+    for (stage = 0; stage < 3; ++stage)
+    {
+        state = stage == 1 ? !start : start;
+        file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        ok(file != INVALID_HANDLE_VALUE, "Failed to update server clock, error %lu.\n", GetLastError());
+        if (file == INVALID_HANDLE_VALUE) return;
+        ret = WriteFile(file, epochs[state], strlen(epochs[state]), &written, NULL);
+        ok(ret && written == strlen(epochs[state]), "Failed to write server clock.\n");
+        CloseHandle(file);
+        expected = (state ? 240 : 300) * 60ULL * TICKSPERSEC;
+        for (attempt = 0; attempt < 250; ++attempt)
+        {
+            actual = read_ksystem_time(&shared->TimeZoneBias);
+            if (actual == expected) break;
+            Sleep(20);
+        }
+        ok(actual == expected, "Server DST bias stage %u, summer %u: got %s, expected %s.\n",
+           stage, state, wine_dbgstr_longlong(actual), wine_dbgstr_longlong(expected));
+    }
+}
+
 START_TEST(time)
 {
     HMODULE mod = GetModuleHandleA("ntdll.dll");
@@ -558,6 +599,7 @@ START_TEST(time)
     test_NtQueryPerformanceCounter();
     test_RtlQueryTimeZoneInformation();
     test_user_shared_data_time();
+    test_server_dst_fixture();
 #if (defined(__i386__) || defined(__x86_64__)) && !defined(__arm64ec__)
     test_RtlQueryPerformanceCounter();
 #endif
