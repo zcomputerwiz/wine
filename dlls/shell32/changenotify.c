@@ -349,10 +349,10 @@ void WINAPI SHChangeNotify(LONG wEventId, UINT uFlags, LPCVOID dwItem1, LPCVOID 
                     notify = TRUE;
                 else if( wEventId & SHCNE_NOITEMEVENTS )
                     notify = TRUE;
-                else if( wEventId & ( SHCNE_ONEITEMEVENTS | SHCNE_TWOITEMEVENTS ) )
+                else if( wEventId & SHCNE_ONEITEMEVENTS )
                     notify = should_notify( Pidls[0], pidl, subtree );
                 else if( wEventId & SHCNE_TWOITEMEVENTS )
-                    notify = should_notify( Pidls[1], pidl, subtree );
+                    notify = should_notify( Pidls[0], pidl, subtree ) || should_notify( Pidls[1], pidl, subtree );
             }
         }
 

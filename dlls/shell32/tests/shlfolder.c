@@ -5240,6 +5240,12 @@ struct ChNotifyTest {
     {"MKDIR", 1, 0, SHCNE_MKDIR, "C:\\shell32_cn_test\\test", ""},
     {"CREATE", 1, 0, SHCNE_CREATE, "C:\\shell32_cn_test\\test\\file.txt", ""},
     {"RMDIR", 1, 0, SHCNE_RMDIR, "C:\\shell32_cn_test\\test", ""},
+    {"RENAMEITEM source", 1, 0, SHCNE_RENAMEITEM, "C:\\shell32_cn_test\\old.txt", "C:\\outside\\new.txt"},
+    {"RENAMEITEM destination", 1, 0, SHCNE_RENAMEITEM, "C:\\outside\\old.txt", "C:\\shell32_cn_test\\new.txt"},
+    {"RENAMEITEM within", 1, 0, SHCNE_RENAMEITEM, "C:\\shell32_cn_test\\old.txt", "C:\\shell32_cn_test\\new.txt"},
+    {"RENAMEFOLDER source", 1, 0, SHCNE_RENAMEFOLDER, "C:\\shell32_cn_test\\old", "C:\\outside\\new"},
+    {"RENAMEFOLDER destination", 1, 0, SHCNE_RENAMEFOLDER, "C:\\outside\\old", "C:\\shell32_cn_test\\new"},
+    {"RENAMEFOLDER within", 1, 0, SHCNE_RENAMEFOLDER, "C:\\shell32_cn_test\\old", "C:\\shell32_cn_test\\new"},
 };
 
 struct ChNotifyTest *exp_data;
@@ -5352,7 +5358,8 @@ static void test_SHChangeNotify(BOOL test_new_delivery)
     entries[0].fRecursive = TRUE;
 
     notifyID = SHChangeNotifyRegister(wnd, !test_new_delivery ? SHCNRF_ShellLevel : SHCNRF_ShellLevel|SHCNRF_NewDelivery,
-            SHCNE_MKDIR | SHCNE_CREATE | SHCNE_RMDIR, WM_USER_NOTIFY, 1, entries);
+            SHCNE_MKDIR | SHCNE_CREATE | SHCNE_RMDIR | SHCNE_RENAMEITEM | SHCNE_RENAMEFOLDER,
+            WM_USER_NOTIFY, 1, entries);
     ok(notifyID != 0, "Failed to register a window for change notifications\n");
 
     for (i = 0; i < ARRAY_SIZE(chnotify_tests); ++i)
