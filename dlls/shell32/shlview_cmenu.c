@@ -578,22 +578,30 @@ static BOOL format_date(FILETIME *time, WCHAR *buffer, DWORD size)
     if (!FileTimeToSystemTime(&ft, &st))
         return FALSE;
 
-    ret = GetDateFormatW(LOCALE_USER_DEFAULT, DATE_LONGDATE, &st, NULL, buffer, size);
-    if (ret)
+    /* Windows XP: "Friday, October 09, 2026, 8:52:30 PM" */
+    ret = GetDateFormatW(LOCALE_USER_DEFAULT, 0, &st, L"dddd, MMMM dd, yyyy", buffer, size);
+    if (ret && ret + 1 < size)
     {
-        buffer[ret - 1] = ' ';
-        ret = GetTimeFormatW(LOCALE_USER_DEFAULT, 0, &st, NULL, buffer + ret , size - ret);
+        buffer[ret - 1] = ',';
+        buffer[ret] = ' ';
+        ret = GetTimeFormatW(LOCALE_USER_DEFAULT, 0, &st, NULL, buffer + ret + 1, size - ret - 1);
     }
     return ret != 0;
 }
 
 static BOOL get_program_description(WCHAR *path, WCHAR *buffer, DWORD size)
 {
-    WCHAR fileDescW[41], *desc;
+    WCHAR fileDescW[MAX_PATH + 32], *desc;
     DWORD versize, *lang;
     UINT dlen, llen, i;
     BOOL ret = FALSE;
     PVOID data;
+
+    /* the name the program is registered with, as Open With shows it */
+    swprintf(fileDescW, ARRAY_SIZE(fileDescW), L"Applications\\%s", PathFindFileNameW(path));
+    dlen = size * sizeof(WCHAR);
+    if (!RegGetValueW(HKEY_CLASSES_ROOT, fileDescW, L"FriendlyAppName", RRF_RT_REG_SZ, NULL, buffer, (DWORD *)&dlen))
+        return TRUE;
 
     versize = GetFileVersionInfoSizeW(path, NULL);
     if (!versize) return FALSE;
@@ -647,8 +655,10 @@ static void init_file_properties_dlg(HWND hwndDlg, struct file_properties_info *
     {
         if (shinfo.hIcon)
         {
+            /* the static keeps the handle: it is destroyed with the page */
             SendDlgItemMessageW(hwndDlg, IDC_FPROP_ICON, STM_SETICON, (WPARAM)shinfo.hIcon, 0);
-            DestroyIcon(shinfo.hIcon);
+            if (props->icon) DestroyIcon(props->icon);
+            props->icon = shinfo.hIcon;
         }
         if (shinfo.szTypeName[0])
             SetDlgItemTextW(hwndDlg, IDC_FPROP_TYPE, shinfo.szTypeName);
@@ -674,10 +684,22 @@ static void init_file_properties_dlg(HWND hwndDlg, struct file_properties_info *
         return;
     }
 
-    /* Information about files only */
-    StrFormatByteSizeW(((LONGLONG)exinfo.nFileSizeHigh << 32) | exinfo.nFileSizeLow,
-                       buffer, ARRAY_SIZE(buffer));
-    SetDlgItemTextW(hwndDlg, IDC_FPROP_SIZE, buffer);
+    /* Information about files only: "1.37 MB (1,441,792 bytes)" and the clusters it takes */
+    {
+        ULONGLONG size = ((ULONGLONG)exinfo.nFileSizeHigh << 32) | exinfo.nFileSizeLow, disk = size;
+        DWORD sectors, bytes, free_clusters, clusters;
+        WCHAR root[MAX_PATH];
+
+        format_size(size, buffer, ARRAY_SIZE(buffer));
+        SetDlgItemTextW(hwndDlg, IDC_FPROP_SIZE, buffer);
+        lstrcpynW(root, props->path, ARRAY_SIZE(root));
+        PathStripToRootW(root);
+        PathAddBackslashW(root);
+        if (GetDiskFreeSpaceW(root, &sectors, &bytes, &free_clusters, &clusters) && sectors && bytes)
+            disk = (size + sectors * bytes - 1) / (sectors * bytes) * (sectors * bytes);
+        format_size(disk, buffer, ARRAY_SIZE(buffer));
+        SetDlgItemTextW(hwndDlg, IDC_FPROP_SIZEONDISK, buffer);
+    }
 
     if (format_date(&exinfo.ftLastWriteTime, buffer, ARRAY_SIZE(buffer)))
         SetDlgItemTextW(hwndDlg, IDC_FPROP_MODIFIED, buffer);
@@ -689,7 +711,11 @@ static void init_file_properties_dlg(HWND hwndDlg, struct file_properties_info *
 
     /* Information about executables */
     if (SHGetFileInfoW(buffer, 0, &shinfo, sizeof(shinfo), SHGFI_ICON | SHGFI_SMALLICON) && shinfo.hIcon)
+    {
         SendDlgItemMessageW(hwndDlg, IDC_FPROP_PROG_ICON, STM_SETICON, (WPARAM)shinfo.hIcon, 0);
+        if (props->program_icon) DestroyIcon(props->program_icon);
+        props->program_icon = shinfo.hIcon;
+    }
 
     if (get_program_description(buffer, buffer2, ARRAY_SIZE(buffer2)))
         SetDlgItemTextW(hwndDlg, IDC_FPROP_PROG_NAME, buffer2);
@@ -715,8 +741,12 @@ static INT_PTR CALLBACK file_properties_proc(HWND hwndDlg, UINT uMsg, WPARAM wPa
         case WM_COMMAND:
             if (LOWORD(wParam) == IDC_FPROP_PROG_CHANGE)
             {
-                /* TODO: Implement file association dialog */
-                MessageBoxA(hwndDlg, "Not implemented yet.", "Error", MB_OK | MB_ICONEXCLAMATION);
+                /* Windows XP's Change...: Open With, always used for this kind of file */
+                struct file_properties_info *props = (struct file_properties_info *)GetWindowLongPtrW(hwndDlg, DWLP_USER);
+                OPENASINFO info = { props->path, NULL, OAIF_ALLOW_REGISTRATION | OAIF_FORCE_REGISTRATION | OAIF_REGISTER_EXT };
+
+                if (SHOpenWithDialog(hwndDlg, &info) == S_OK)
+                    init_file_properties_dlg(hwndDlg, props);
             }
             else if (LOWORD(wParam) == IDC_FPROP_READONLY ||
                      LOWORD(wParam) == IDC_FPROP_HIDDEN ||
@@ -798,6 +828,8 @@ static UINT CALLBACK file_properties_callback(HWND hwnd, UINT uMsg, LPPROPSHEETP
     struct file_properties_info *props = (struct file_properties_info *)page->lParam;
     if (uMsg == PSPCB_RELEASE)
     {
+        if (props->icon) DestroyIcon(props->icon);
+        if (props->program_icon) DestroyIcon(props->program_icon);
         free(props);
     }
     return 1;
@@ -813,7 +845,7 @@ static void init_file_properties_pages(IDataObject *dataobject, LPFNADDPROPSHEET
     HRESULT hr;
     WCHAR *p;
 
-    props = malloc(sizeof(*props));
+    props = calloc(1, sizeof(*props));
     if (!props) return;
 
     format.cfFormat = CF_HDROP;
@@ -924,7 +956,14 @@ static void DoOpenProperties(ContextMenu *This, HWND hwnd)
 	psh.phpage = hpages;
 	psh.nStartPage = 0;
 
-	_ILSimpleGetTextW(This->apidl[0], (LPVOID)wszFilename, MAX_PATH);
+	/* "test Properties": the name the shell shows */
+	{
+	    STRRET name;
+
+	    if (FAILED(IShellFolder_GetDisplayNameOf(This->parent, This->apidl[0], SHGDN_INFOLDER, &name)) ||
+	        FAILED(StrRetToBufW(&name, This->apidl[0], wszFilename, MAX_PATH)))
+	        _ILSimpleGetTextW(This->apidl[0], (LPVOID)wszFilename, MAX_PATH);
+	}
 	psh.pszCaption = (LPCWSTR)wszFilename;
 
     get_filetype(This->apidl[0], wszFiletype);
