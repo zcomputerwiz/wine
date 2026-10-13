@@ -1514,7 +1514,7 @@ static void test_shortcut_target_icon(void)
     GetSystemDirectoryW(explicit_icon, ARRAY_SIZE(explicit_icon));
     lstrcatW(explicit_icon, L"\\shell32.dll");
 
-    for (i = 0; i < 3; ++i)
+    for (i = 0; i < 4; ++i)
     {
         target = i ? executable : directory;
         expected[0] = 0;
@@ -1551,6 +1551,19 @@ static void test_shortcut_target_icon(void)
         {
             hr = IPersistFile_Save(persist, link, TRUE);
             ok(hr == S_OK, "Got Save hr %#lx.\n", hr);
+            if (i == 3 && SUCCEEDED(hr))
+            {
+                hr = SHParseDisplayName(link, NULL, &pidl, 0, NULL);
+                ok(hr == S_OK, "Got link PIDL hr %#lx.\n", hr);
+                if (SUCCEEDED(hr))
+                {
+                    hr = IShellLinkW_SetIDList(shell_link, pidl);
+                    ok(hr == S_OK, "Got self-target SetIDList hr %#lx.\n", hr);
+                    ILFree(pidl);
+                    hr = IPersistFile_Save(persist, link, TRUE);
+                    ok(hr == S_OK, "Got self-target Save hr %#lx.\n", hr);
+                }
+            }
             IPersistFile_Release(persist);
             if (SUCCEEDED(hr))
             {
@@ -1558,9 +1571,12 @@ static void test_shortcut_target_icon(void)
                 index = 0;
                 hr = get_item_icon_location(link, location, &index);
                 ok(hr == S_OK, "Got shortcut icon hr %#lx.\n", hr);
-                ok(!lstrcmpiW(location, expected) && index == expected_index,
-                   "Shortcut target icon %u: got %s,%d, expected %s,%d.\n",
-                   i, wine_dbgstr_w(location), index, wine_dbgstr_w(expected), expected_index);
+                if (i == 3)
+                    ok(location[0] != 0, "Self-referencing link returned an empty icon path.\n");
+                else
+                    ok(!lstrcmpiW(location, expected) && index == expected_index,
+                       "Shortcut target icon %u: got %s,%d, expected %s,%d.\n",
+                       i, wine_dbgstr_w(location), index, wine_dbgstr_w(expected), expected_index);
             }
         }
         IShellLinkW_Release(shell_link);
