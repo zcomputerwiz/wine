@@ -109,6 +109,8 @@ extern void UXTHEME_CheckReload(void);
 
 extern struct user_api_hook user_api;
 LRESULT WINAPI UXTHEME_DefDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, BOOL unicode);
+BOOL WINAPI UXTHEME_NonClientFrameDraw(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex_style, UINT flags);
+INT WINAPI UXTHEME_SetWindowRgn(HWND hwnd, HRGN region, BOOL redraw);
 void WINAPI UXTHEME_NonClientButtonDraw(HWND hwnd, HDC hdc, enum NONCLIENT_BUTTON_TYPE type,
                                         RECT rect, BOOL down, BOOL grayed);
 void WINAPI UXTHEME_ScrollBarDraw(HWND hwnd, HDC dc, INT bar, enum SCROLL_HITTEST hit_test,
