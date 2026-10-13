@@ -4895,14 +4895,16 @@ static void LISTVIEW_DrawItemPart(LISTVIEW_INFO *infoPtr, LVITEMW *item, const N
     /* in detail mode, we want to paint background for label rect when
      * item is not selected or listview has full row select; otherwise paint
      * background for text only */
-    if ( infoPtr->uView == LV_VIEW_ICON ||
+    if ( infoPtr->uView == LV_VIEW_ICON || infoPtr->uView == LV_VIEW_TILE ||
         (infoPtr->uView == LV_VIEW_DETAILS && (!(item->state & LVIS_SELECTED) ||
         (infoPtr->dwLvExStyle & LVS_EX_FULLROWSELECT))))
         background = &rcLabel;
     else
         background = &rcSelect;
 
-    if (nmlvcd->clrTextBk != CLR_NONE)
+    /* a selected item has its highlight also on a transparent text background (a watermark) */
+    if (nmlvcd->clrTextBk != CLR_NONE ||
+        ((item->state & LVIS_SELECTED) && (infoPtr->bFocus || (infoPtr->dwStyle & LVS_SHOWSELALWAYS))))
         ExtTextOutW(nmlvcd->nmcd.hdc, background->left, background->top, ETO_OPAQUE, background, NULL, 0, NULL);
 
     if (item->state & LVIS_FOCUSED)
@@ -4947,7 +4949,7 @@ static void LISTVIEW_DrawItemPart(LISTVIEW_INFO *infoPtr, LVITEMW *item, const N
     }
 
     /* item icons */
-    himl = (infoPtr->uView == LV_VIEW_ICON ? infoPtr->himlNormal : infoPtr->himlSmall);
+    himl = (infoPtr->uView == LV_VIEW_ICON || infoPtr->uView == LV_VIEW_TILE ? infoPtr->himlNormal : infoPtr->himlSmall);
     if (himl && item->iImage >= 0 && !IsRectEmpty(&rcIcon))
     {
         UINT style;
@@ -4967,6 +4969,12 @@ static void LISTVIEW_DrawItemPart(LISTVIEW_INFO *infoPtr, LVITEMW *item, const N
 
     /* Don't bother painting item being edited */
     if (infoPtr->hwndEdit && item->iItem == infoPtr->nEditLabelItem && item->iSubItem == 0) return;
+
+    if (infoPtr->uView == LV_VIEW_TILE)
+    {
+        LISTVIEW_DrawTileText(infoPtr, item, nmlvcd, &rcLabel);
+        return;
+    }
 
     /* figure out the text drawing flags */
     format = (infoPtr->uView == LV_VIEW_ICON ? (focus ? LV_FL_DT_FLAGS : LV_ML_DT_FLAGS) : LV_SL_DT_FLAGS);
