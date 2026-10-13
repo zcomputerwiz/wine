@@ -1850,7 +1850,15 @@ static LRESULT ShellView_OnSize(IShellViewImpl * This, WORD wWidth, WORD wHeight
 	TRACE("%p width=%u height=%u\n",This, wWidth,wHeight);
 
 	/*resize the ListView to fit our window*/
-	if(This->hWndList)
+	if (This->hWndList && This->preview)
+	{
+	  /* Filmstrip: the picture above, the row of thumbnails with its scroll bar below */
+	  int strip = min(wHeight, THUMBNAIL_SIZE + 44 + GetSystemMetrics(SM_CYHSCROLL));
+	  MoveWindow(This->preview, 0, 0, wWidth, wHeight - strip, TRUE);
+	  MoveWindow(This->hWndList, 0, wHeight - strip, wWidth, strip, TRUE);
+	  SendMessageW(This->hWndList, LVM_ARRANGE, LVA_DEFAULT, 0);
+	}
+	else if(This->hWndList)
 	{
 	  MoveWindow(This->hWndList, 0, 0, wWidth, wHeight, TRUE);
 	}
