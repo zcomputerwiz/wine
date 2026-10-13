@@ -18,6 +18,7 @@ void wayland_wex_create(struct wayland_surface *surface)
     surface->wex_window = wex_window_manager_v1_get_window(process_wayland.wex_manager, surface->xdg_toplevel);
     surface->wex_layer = ~0u;
     surface->wex_edge = ~0u;
+    surface->wex_activation_pending = surface->hwnd == NtUserGetForegroundWindow();
     wayland_wex_update(surface, HWND_TOP, SWP_NOZORDER);
 }
 
@@ -84,10 +85,21 @@ void wayland_wex_update(struct wayland_surface *surface, HWND insert_after, UINT
             }
         }
     }
-    if (surface->wex_minimized && !surface->window.minimized)
-        wex_window_v1_activate(surface->wex_window);
+    if (surface->wex_minimized && !surface->window.minimized &&
+        surface->hwnd == NtUserGetForegroundWindow()) surface->wex_activation_pending = TRUE;
     surface->wex_minimized = surface->window.minimized;
     wl_display_flush(process_wayland.wl_display);
+}
+
+void wayland_wex_flush_activation(struct wayland_surface *surface)
+{
+    if (!surface->wex_window || !surface->wex_activation_pending || !surface->content_width ||
+        surface->window.minimized) return;
+    surface->wex_activation_pending = FALSE;
+    /* A Win32 activation can precede the first buffer commit. The compositor
+     * can focus only mapped views, so send the request after that commit. */
+    if (surface->hwnd == NtUserGetForegroundWindow())
+        wex_window_v1_activate(surface->wex_window);
 }
 
 void WAYLAND_ActivateWindow(HWND hwnd, HWND previous)
@@ -96,7 +108,8 @@ void WAYLAND_ActivateWindow(HWND hwnd, HWND previous)
     if (!data) return;
     if (data->wayland_surface && data->wayland_surface->wex_window)
     {
-        wex_window_v1_activate(data->wayland_surface->wex_window);
+        data->wayland_surface->wex_activation_pending = TRUE;
+        wayland_wex_flush_activation(data->wayland_surface);
         wl_display_flush(process_wayland.wl_display);
     }
     wayland_win_data_release(data);

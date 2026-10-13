@@ -1526,6 +1526,7 @@ void wayland_surface_ensure_contents(struct wayland_surface *surface)
     {
         wayland_surface_attach_shm(surface, dummy_shm_buffer, damage);
         wl_surface_commit(surface->wl_surface);
+        wayland_wex_flush_activation(surface);
     }
 
     wayland_shm_buffer_unref(dummy_shm_buffer);

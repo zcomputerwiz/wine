@@ -314,6 +314,7 @@ struct wayland_surface
     struct wex_window_v1 *wex_window;
     unsigned int wex_layer, wex_edge, wex_size;
     BOOL wex_minimized;
+    BOOL wex_activation_pending;
 
     struct wayland_surface_config pending, requested, processing, current;
     BOOL resizing;
@@ -334,6 +335,7 @@ void wayland_zone_place(struct wayland_surface *surface);
 void wayland_wex_create(struct wayland_surface *surface);
 void wayland_wex_update(struct wayland_surface *surface, HWND insert_after, UINT flags);
 void WAYLAND_ActivateWindow(HWND hwnd, HWND previous);
+void wayland_wex_flush_activation(struct wayland_surface *surface);
 
 /**********************************************************************
  *          Wayland output

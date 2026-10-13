@@ -523,6 +523,17 @@ static void wayland_configure_window(HWND hwnd)
     surface->processing = surface->requested;
     memset(&surface->requested, 0, sizeof(surface->requested));
 
+    /* wex views restore only through explicit client activation. A configure
+     * after minimize may merely acknowledge geometry or a work-area change. */
+    if (surface->wex_window && surface->window.minimized)
+    {
+        surface->current = surface->processing;
+        memset(&surface->processing, 0, sizeof(surface->processing));
+        xdg_surface_ack_configure(surface->xdg_surface, surface->current.serial);
+        wayland_win_data_release(data);
+        return;
+    }
+
     state = surface->processing.state;
     /* Ignore size hints if we don't have a state that requires strict
      * size adherence, in order to avoid spurious resizes. */
@@ -594,6 +605,16 @@ static void wayland_configure_window(HWND hwnd)
     SetRect(&rect, 0, 0, width, height);
     rect = map_rect_from_surface(surface, rect);
     OffsetRect(&rect, data->rects.window.left, data->rects.window.top);
+
+    /* Compositor maximize dimensions describe the visible frame. Win32's
+     * maximized window rectangle also includes its invisible resize borders. */
+    if (surface->wex_window && width && height && (state & WAYLAND_SURFACE_CONFIG_STATE_MAXIMIZED))
+    {
+        rect.right += data->rects.visible.left - data->rects.window.left +
+                      data->rects.window.right - data->rects.visible.right;
+        rect.bottom += data->rects.visible.top - data->rects.window.top +
+                       data->rects.window.bottom - data->rects.visible.bottom;
+    }
 
     wayland_win_data_release(data);
 
@@ -865,6 +886,7 @@ BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffe
         {
             wayland_surface_attach_shm(wayland_surface, shm_buffer, damage_region);
             wl_surface_commit(wayland_surface->wl_surface);
+            wayland_wex_flush_activation(wayland_surface);
             committed = TRUE;
         }
         else
