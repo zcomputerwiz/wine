@@ -1031,4 +1031,6 @@ static inline UINT asciiz_to_unicode( WCHAR *dst, const char *src )
     return (p - dst) * sizeof(WCHAR);
 }
 
+extern BOOL X11DRV_has_compositor( Display *display );
+
 #endif  /* __WINE_X11DRV_H */
