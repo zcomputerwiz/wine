@@ -1397,7 +1397,7 @@ static BOOL MSSTYLES_GetNextToken(LPCWSTR lpStringStart, LPCWSTR lpStringEnd, LP
     start = cur;
     while(cur < lpStringEnd && *cur != ',') cur++;
     end = cur;
-    while(isSpace(*end)) end--;
+    while(end > start && isSpace(*(end - 1))) end--;
 
     lstrcpynW(lpBuff, start, min(buffSize, end-start+1));
 
