@@ -731,6 +731,7 @@ HKLM,SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86,"Version",2,"14.42.344
 [RegisterDllsSection]
 ;;some dlls have to be registered first
 11,,shell32.dll,1
+11,,stobject.dll,1
 11,,quartz.dll,1
 
 11,,colorcnv.dll,1
