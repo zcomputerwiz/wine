@@ -319,8 +319,10 @@ static HRESULT WINAPI IExtractIconW_fnGetIconLocation(IExtractIconW * iface, UIN
 		    LPCITEMIDLIST child;
 		    IExtractIconW *target_icon;
 		    UINT target_flags;
+		    char extension[MAX_PATH];
 
 		    if (IShellLinkW_GetIDList(psl, &target) == S_OK && target &&
+		        (!_ILGetExtension(target, extension, sizeof(extension)) || lstrcmpiA(extension, "lnk")) &&
 		        SUCCEEDED(SHBindToParent(target, &IID_IShellFolder, (void **)&parent, &child)))
 		    {
 		      if (SUCCEEDED(IShellFolder_GetUIObjectOf(parent, NULL, 1, &child, &IID_IExtractIconW, NULL, (void **)&target_icon)))
