@@ -1307,26 +1307,37 @@ static LRESULT ShellView_OnCommand(IShellViewImpl * This,DWORD dwCmdID, DWORD dw
 	switch(dwCmdID)
 	{
 	  case FCIDM_SHVIEW_SMALLICON:
-	    This->FolderSettings.ViewMode = FVM_SMALLICON;
-	    SetStyle (This, LVS_SMALLICON, LVS_TYPEMASK);
+	    shellview_set_view(This, FVM_SMALLICON);
 	    CheckToolbar(This);
 	    break;
 
 	  case FCIDM_SHVIEW_BIGICON:
-	    This->FolderSettings.ViewMode = FVM_ICON;
-	    SetStyle (This, LVS_ICON, LVS_TYPEMASK);
+	    shellview_set_view(This, FVM_ICON);
+	    CheckToolbar(This);
+	    break;
+
+	  case FCIDM_SHVIEW_TILE:
+	    shellview_set_view(This, FVM_TILE);
+	    CheckToolbar(This);
+	    break;
+
+	  case FCIDM_SHVIEW_THUMBNAIL:
+	    shellview_set_view(This, FVM_THUMBNAIL);
+	    CheckToolbar(This);
+	    break;
+
+	  case FCIDM_SHVIEW_FILMSTRIP:
+	    shellview_set_view(This, FVM_THUMBSTRIP);
 	    CheckToolbar(This);
 	    break;
 
 	  case FCIDM_SHVIEW_LISTVIEW:
-	    This->FolderSettings.ViewMode = FVM_LIST;
-	    SetStyle (This, LVS_LIST, LVS_TYPEMASK);
+	    shellview_set_view(This, FVM_LIST);
 	    CheckToolbar(This);
 	    break;
 
 	  case FCIDM_SHVIEW_REPORTVIEW:
-	    This->FolderSettings.ViewMode = FVM_DETAILS;
-	    SetStyle (This, LVS_REPORT, LVS_TYPEMASK);
+	    shellview_set_view(This, FVM_DETAILS);
 	    CheckToolbar(This);
 	    break;
 
@@ -1345,6 +1356,17 @@ static LRESULT ShellView_OnCommand(IShellViewImpl * This,DWORD dwCmdID, DWORD dw
 	    TRACE("-- COMMAND 0x%04lx unhandled\n", dwCmdID);
 	}
 	return 0;
+}
+
+/* a string verb of the item menu of the selection or of the background menu, for the keyboard shortcuts */
+static void invoke_view_verb(IShellViewImpl *This, UINT which, const char *verb)
+{
+    CMINVOKECOMMANDINFO info = { sizeof(info), 0, This->hWndParent, verb, NULL, NULL, SW_SHOWNORMAL };
+    IContextMenu *menu;
+
+    if (FAILED(IShellView3_GetItemObject(&This->IShellView3_iface, which, &IID_IContextMenu, (void **)&menu))) return;
+    IContextMenu_InvokeCommand(menu, &info);
+    IContextMenu_Release(menu);
 }
 
 /**********************************************************
