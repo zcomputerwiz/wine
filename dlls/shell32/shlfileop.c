@@ -1163,9 +1163,34 @@ static DWORD copy_move_dir(FILE_OPERATION *op, const WCHAR *dir, const WCHAR *ta
     return ret;
 }
 
+/* FOF_RENAMEONCOLLISION: "Copy of name", then "Copy (2) of name" ..., as Windows Explorer names a copy in place */
+static BOOL get_collision_name(WCHAR *target)
+{
+    WCHAR dir[MAX_PATH], name[MAX_PATH], format[64], new_name[MAX_PATH];
+    DWORD_PTR args[2];
+    UINT n;
+
+    wcscpy(dir, target);
+    PathRemoveFileSpecW(dir);
+    lstrcpynW(name, PathFindFileNameW(target), MAX_PATH);
+    for (n = 1; n < 1000; n++)
+    {
+        LoadStringW(shell32_hInstance, n == 1 ? IDS_COPY_OF : IDS_COPY_N_OF, format, ARRAY_SIZE(format));
+        args[0] = (DWORD_PTR)name;
+        args[1] = n;
+        if (!FormatMessageW(FORMAT_MESSAGE_FROM_STRING | FORMAT_MESSAGE_ARGUMENT_ARRAY, format, 0, 0,
+                            new_name, ARRAY_SIZE(new_name), (va_list *)args))
+            return FALSE;
+        if (!PathCombineW(target, dir, new_name)) return FALSE;
+        if (!PathFileExistsW(target)) return TRUE;
+    }
+    return FALSE;
+}
+
 static DWORD do_copy_move(FILE_OPERATION *op, const FILE_ENTRY *from, const FILE_ENTRY *to, BOOL append_file_name)
 {
     WCHAR target[MAX_PATH], target_dir[MAX_PATH];
+    DWORD ret;
 
     TRACE("Copying %s to %s, flags %#x, append_file_name %d.\n",
             debugstr_w(from->szFullPath), debugstr_w(to->szFullPath), op->req->fFlags, append_file_name);
@@ -1178,6 +1203,9 @@ static DWORD do_copy_move(FILE_OPERATION *op, const FILE_ENTRY *from, const FILE
         PathAppendW(target_dir, to->szFilename);
         PathAppendW(target, from->szFilename);
     }
+
+    if ((op->req->fFlags & FOF_RENAMEONCOLLISION) && PathFileExistsW(target) && !get_collision_name(target))
+        return DE_SAMEFILE;
 
     /* Fail if target is illegal. */
     if (PathFileExistsW(target))
