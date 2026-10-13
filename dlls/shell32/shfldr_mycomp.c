@@ -39,6 +39,7 @@
 #include "wine/debug.h"
 #include "debughlp.h"
 #include "shfldr.h"
+#include "lmcons.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL (shell);
 
@@ -80,6 +81,21 @@ static const shvheader mycomputer_header[] =
     { NULL, 0, IDS_SHV_COLUMN6, SHCOLSTATE_TYPE_STR | SHCOLSTATE_ONBYDEFAULT, LVCFMT_RIGHT, 10 },
     { NULL, 0, IDS_SHV_COLUMN7, SHCOLSTATE_TYPE_STR | SHCOLSTATE_ONBYDEFAULT, LVCFMT_RIGHT, 10 },
 };
+
+/* "Local Disk", "CD Drive" and so on, as Windows names a drive without a label and in the Type column */
+static void drive_type_name(const WCHAR *root, WCHAR *name, UINT size)
+{
+    UINT id;
+
+    switch (GetDriveTypeW(root))
+    {
+    case DRIVE_CDROM:     id = IDS_CD_DRIVE; break;
+    case DRIVE_REMOVABLE: id = IDS_REMOVABLE_DISK; break;
+    case DRIVE_REMOTE:    id = IDS_NETWORK_DRIVE; break;
+    default:              id = IDS_LOCAL_DISK; break;
+    }
+    LoadStringW(shell32_hInstance, id, name, size);
+}
 
 /**************************************************************************
 *    ISF_MyComputer_Constructor
@@ -272,6 +288,17 @@ static DWORD get_drive_map(void)
     return GetLogicalDrives() & ~drive_mask;
 }
 
+/* Windows XP lists Control Panel in the folder trees but not in the My Computer window, which enumerates
+ * non-folders too; HideMyComputerIcons names such items. */
+static BOOL hidden_in_view(const WCHAR *clsid, DWORD flags)
+{
+    DWORD value = 0, size = sizeof(value);
+
+    if (!(flags & SHCONTF_NONFOLDERS)) return FALSE;
+    return !RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\HideMyComputerIcons",
+                         clsid, RRF_RT_REG_DWORD, NULL, &value, &size) && value;
+}
+
 /**************************************************************************
  *  CreateMyCompEnumList()
  */
@@ -317,7 +344,8 @@ static BOOL CreateMyCompEnumList(IEnumIDListImpl *list, DWORD dwFlags)
                     {
                         /* FIXME: shell extensions, shouldn't the type be
                          * PT_SHELLEXT? */
-                        ret = AddToEnumList(list, _ILCreateGuidFromStrW(iid));
+                        if (!hidden_in_view(iid, dwFlags))
+                            ret = AddToEnumList(list, _ILCreateGuidFromStrW(iid));
                         i++;
                     }
                     else if (ERROR_NO_MORE_ITEMS == r)
@@ -654,8 +682,14 @@ static HRESULT WINAPI ISF_MyComputer_fnGetDisplayNameOf (IShellFolder2 *iface,
                 }
                 else
                 {
-                    /* user friendly name */
-                    HCR_GetClassNameW (clsid, pszPath, MAX_PATH);
+                    /* user friendly name; Windows XP lists My Documents here as "<user>'s Documents" */
+                    WCHAR user[UNLEN + 1];
+                    DWORD len = ARRAY_SIZE(user);
+
+                    if (IsEqualGUID(clsid, &CLSID_MyDocuments) && GetUserNameW(user, &len))
+                        swprintf(pszPath, MAX_PATH, L"%s's Documents", user);
+                    else
+                        HCR_GetClassNameW (clsid, pszPath, MAX_PATH);
                 }
             }
             else
@@ -668,13 +702,14 @@ static HRESULT WINAPI ISF_MyComputer_fnGetDisplayNameOf (IShellFolder2 *iface,
         {        
             _ILSimpleGetTextW (pidl, pszPath, MAX_PATH);    /* append my own path */
 
-            /* long view "lw_name (C:)" */
+            /* long view "lw_name (C:)", or "Local Disk (C:)" and the like without a label */
             if (!(dwFlags & SHGDN_FORPARSING))
             {
                 WCHAR wszDrive[32 /* label */ + 6 /* ' (C:)'\0 */] = {0};
 
                 GetVolumeInformationW (pszPath, wszDrive, ARRAY_SIZE(wszDrive) - 5, NULL, NULL,
                         NULL, NULL, 0);
+                if (!wszDrive[0]) drive_type_name (pszPath, wszDrive, ARRAY_SIZE(wszDrive) - 5);
                 lstrcatW (wszDrive, L" (");
                 lstrcpynW (wszDrive + lstrlenW(wszDrive), pszPath, 3);
                 lstrcatW (wszDrive, L")");
@@ -809,6 +844,15 @@ static HRESULT WINAPI ISF_MyComputer_fnGetDetailsOf (IShellFolder2 *iface,
 
     switch (iColumn)
     {
+        case 1:        /* type */
+            if (!_ILIsDrive (pidl))
+                return shellfolder_get_file_details( iface, pidl, mycomputer_header, iColumn, psd );
+
+            _ILSimpleGetTextW(pidl, path, MAX_PATH);
+            psd->str.uType = STRRET_WSTR;
+            psd->str.pOleStr = CoTaskMemAlloc(64 * sizeof(WCHAR));
+            drive_type_name(path, psd->str.pOleStr, 64);
+            break;
         case 2:        /* total size */
             if (!_ILIsDrive (pidl))
                 break;
