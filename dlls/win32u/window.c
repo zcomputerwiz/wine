@@ -5285,6 +5285,7 @@ BOOL WINAPI NtUserFlashWindowEx( FLASHWINFO *info )
         }
         release_win_ptr( win );
         user_driver->pFlashWindowEx( info );
+        if (info->dwFlags) notify_shell_hook( HSHELL_FLASH, info->hwnd );
         return TRUE;
     }
     else
@@ -5305,6 +5306,7 @@ BOOL WINAPI NtUserFlashWindowEx( FLASHWINFO *info )
             send_message( hwnd, WM_NCACTIVATE, wparam, 0 );
 
         user_driver->pFlashWindowEx( info );
+        if (info->dwFlags) notify_shell_hook( HSHELL_FLASH, hwnd );
         return wparam;
     }
 }
@@ -5569,6 +5571,7 @@ static BOOL user_destroy_window( HWND hwnd, BOOL winevent )
     else if (!get_window_relative( hwnd, GW_OWNER ))
     {
         call_hooks( WH_SHELL, HSHELL_WINDOWDESTROYED, (WPARAM)hwnd, 0, 0 );
+        notify_shell_hook( HSHELL_WINDOWDESTROYED, hwnd );
         /* FIXME: clean up palette - see "Internals" p.352 */
     }
 
@@ -6198,7 +6201,10 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
     /* Call WH_SHELL hook */
 
     if (!(get_window_long( hwnd, GWL_STYLE ) & WS_CHILD) && !get_window_relative( hwnd, GW_OWNER ))
+    {
         call_hooks( WH_SHELL, HSHELL_WINDOWCREATED, (WPARAM)hwnd, 0, 0 );
+        notify_shell_hook( HSHELL_WINDOWCREATED, hwnd );
+    }
 
     TRACE( "created window %p\n", hwnd );
     set_thread_dpi_awareness_context( context );
@@ -6689,6 +6695,25 @@ HWND get_taskman_window(void)
     }
     SERVER_END_REQ;
     return ret;
+}
+
+/* Tell the shell's registered hook window (see RegisterShellHookWindow) about top-level window events.
+ * The window is the desktop's taskman window; it receives the "SHELLHOOK" message with the HSHELL_* code
+ * in wparam and the window in lparam, like on Windows. Only one hook window per desktop is supported. */
+void notify_shell_hook( WPARAM code, HWND hwnd )
+{
+    static UINT shellhook_msg;
+    HWND target;
+
+    if (!(target = get_taskman_window())) return;
+    if (!shellhook_msg)
+    {
+        static const WCHAR shellhookW[] = { 'S','H','E','L','L','H','O','O','K',0 };
+        UNICODE_STRING name;
+        RtlInitUnicodeString( &name, shellhookW );
+        shellhook_msg = NtUserRegisterWindowMessage( &name );
+    }
+    NtUserPostMessage( target, shellhook_msg, code, (LPARAM)hwnd );
 }
 
 /***********************************************************************
