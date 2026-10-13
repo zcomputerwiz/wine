@@ -1000,6 +1000,7 @@ SOURCES = \
 	websocket.h \
 	werapi.h \
 	wexshell.h \
+	wexwayland.h \
 	wexres.h \
 	wextheme.h \
 	wexpower.h \

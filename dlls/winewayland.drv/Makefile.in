@@ -28,10 +28,12 @@ SOURCES = \
 	wayland_surface.c \
 	wayland_text_input.c \
 	wayland_zones.c \
+	wayland_wex.c \
 	waylanddrv_main.c \
 	window.c \
 	window_surface.c \
 	wlr-data-control-unstable-v1.xml \
+	wex-window-v1.xml \
 	xdg-output-unstable-v1.xml \
 	xdg-shell.xml \
 	xdg-toplevel-icon-v1.xml \

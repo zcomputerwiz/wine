@@ -479,6 +479,7 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     else if (wayland_win_data_create_wayland_surface(data, owner_surface))
     {
         wayland_win_data_update_wayland_state(data);
+        wayland_wex_update(data->wayland_surface, insert_after, swp_flags);
     }
 
     if (owner_data) wayland_win_data_release(owner_data);

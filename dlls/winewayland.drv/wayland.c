@@ -113,6 +113,8 @@ static void registry_handle_global(void *data, struct wl_registry *registry,
         wl_list_for_each(output, &process_wayland.output_list, link)
             wayland_output_use_xdg_extension(output);
     }
+    else if (strcmp(interface, "wex_window_manager_v1") == 0)
+        process_wayland.wex_manager = wl_registry_bind(registry, id, &wex_window_manager_v1_interface, 1);
     else if (strcmp(interface, "xx_zone_manager_v1") == 0)
         process_wayland.zone_manager = wl_registry_bind(registry, id, &xx_zone_manager_v1_interface, 1);
     else if (strcmp(interface, "wl_compositor") == 0)

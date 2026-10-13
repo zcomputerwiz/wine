@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="wex_window_v1">
+  <copyright>
+    Copyright © 2026 WineExplorer contributors
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice (including the next
+    paragraph) shall be included in all copies or substantial portions of the
+    Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+    THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+  </copyright>
+
+  <description summary="private privileged window management interface">
+    This protocol allows privileged clients to manage window layering,
+    relative stacking orders within layers, exclusive edge reservations
+    for shell components (taskbars), and activation without tokens.
+  </description>
+
+  <interface name="wex_window_manager_v1" version="1">
+    <description summary="manager interface for privileged window controls">
+      Allows obtaining a wex_window_v1 interface for an xdg_toplevel.
+      Only advertised to privileged clients on the wex-shell socket.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the manager object"/>
+    </request>
+
+    <request name="get_window">
+      <description summary="create a wex_window_v1 from an xdg_toplevel"/>
+      <arg name="id" type="new_id" interface="wex_window_v1"/>
+      <arg name="toplevel" type="object" interface="xdg_toplevel" summary="the toplevel surface"/>
+    </request>
+  </interface>
+
+  <interface name="wex_window_v1" version="1">
+    <description summary="window controls interface">
+      Provides operations for stacking, layering, shell edge reservation,
+      and direct activation.
+    </description>
+
+    <enum name="layer">
+      <entry name="normal" value="0" summary="normal application window"/>
+      <entry name="topmost" value="1" summary="above normal windows"/>
+      <entry name="desktop" value="2" summary="below everything, not in window cycling"/>
+      <entry name="shell" value="3" summary="above topmost, not in window cycling"/>
+    </enum>
+
+    <enum name="edge">
+      <entry name="none" value="0" summary="no exclusive edge"/>
+      <entry name="top" value="1" summary="top edge"/>
+      <entry name="bottom" value="2" summary="bottom edge"/>
+      <entry name="left" value="3" summary="left edge"/>
+      <entry name="right" value="4" summary="right edge"/>
+    </enum>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy this window object"/>
+    </request>
+
+    <request name="place_above">
+      <description summary="place above sibling in the same layer"/>
+      <arg name="sibling" type="object" interface="wex_window_v1"/>
+    </request>
+
+    <request name="place_below">
+      <description summary="place below sibling in the same layer"/>
+      <arg name="sibling" type="object" interface="wex_window_v1"/>
+    </request>
+
+    <request name="place_bottom">
+      <description summary="lower to the bottom of its layer"/>
+    </request>
+
+    <request name="set_layer">
+      <description summary="assign window to a layer"/>
+      <arg name="layer" type="uint" enum="layer" summary="layer type"/>
+    </request>
+
+    <request name="set_exclusive_edge">
+      <description summary="reserve edge for shell window"/>
+      <arg name="edge" type="uint" enum="edge" summary="reserved edge"/>
+      <arg name="size" type="uint" summary="reserved size in pixels"/>
+    </request>
+
+    <request name="activate">
+      <description summary="give keyboard focus and raise within its layer"/>
+    </request>
+  </interface>
+</protocol>

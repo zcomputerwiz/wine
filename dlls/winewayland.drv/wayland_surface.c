@@ -447,6 +447,7 @@ void wayland_surface_make_toplevel(struct wayland_surface *surface)
     wayland_surface_init_fractional_scale(surface, 1.0);
     wayland_zone_create_item(surface);
     wayland_zone_place(surface);
+    wayland_wex_create(surface);
 
     wl_surface_commit(surface->wl_surface);
     wl_display_flush(process_wayland.wl_display);
@@ -526,6 +527,11 @@ void wayland_surface_clear_role(struct wayland_surface *surface)
         break;
 
     case WAYLAND_SURFACE_ROLE_TOPLEVEL:
+        if (surface->wex_window)
+        {
+            wex_window_v1_destroy(surface->wex_window);
+            surface->wex_window = NULL;
+        }
         if (surface->zone_item)
         {
             xx_zone_item_v1_destroy(surface->zone_item);
