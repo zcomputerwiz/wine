@@ -1410,6 +1410,10 @@ IFSFldr_PersistFolder3_Initialize (IPersistFolder3 * iface, LPCITEMIDLIST pidl)
         {
             if (!SHGetSpecialFolderPathW( 0, wszTemp, CSIDL_PERSONAL, FALSE )) return E_FAIL;
         }
+        else if (IsEqualCLSID( This->pclsid, &CLSID_SharedDocuments ))
+        {
+            if (!SHGetSpecialFolderPathW( 0, wszTemp, CSIDL_COMMON_DOCUMENTS, FALSE )) return E_FAIL;
+        }
         else lstrcpyW( wszTemp, L"\\\\?\\unix\\" );
     }
     else SHGetPathFromIDListW( pidl, wszTemp );
@@ -1855,6 +1859,11 @@ HRESULT WINAPI UnixDosFolder_Constructor(IUnknown *outer_unk, REFIID riid, void 
 HRESULT WINAPI FolderShortcut_Constructor(IUnknown *outer_unk, REFIID riid, void **ppv)
 {
     return create_fs( outer_unk, riid, ppv, &CLSID_FolderShortcut, NULL );
+}
+
+HRESULT WINAPI SharedDocuments_Constructor(IUnknown *outer_unk, REFIID riid, void **ppv)
+{
+    return create_fs( outer_unk, riid, ppv, &CLSID_SharedDocuments, NULL );
 }
 
 HRESULT WINAPI MyDocuments_Constructor(IUnknown *outer_unk, REFIID riid, void **ppv)
