@@ -196,8 +196,8 @@ static void item_position(void *data, struct xx_zone_item_v1 *item, int32_t x, i
         wayland_win_data_release(win);
         return;
     }
-    point.x = x + win->wayland_surface->zone_frame.left;
-    point.y = y + win->wayland_surface->zone_frame.top;
+    point.x = x + win->wayland_surface->zone_frame.left - win->wayland_surface->window_geometry_offset.x;
+    point.y = y + win->wayland_surface->zone_frame.top - win->wayland_surface->window_geometry_offset.y;
     point = map_point_from_surface(win->wayland_surface, point);
     rect = win->rects.window;
     /* The Wayland surface may start inside the Win32 window rectangle. */
@@ -232,6 +232,7 @@ void wayland_zone_place(struct wayland_surface *surface)
     point.y = surface->window.rect.top;
     point = map_point_to_surface(surface, point);
     TRACE("hwnd %p request zone position %d,%d\n", surface->hwnd, point.x, point.y);
-    xx_zone_item_v1_set_position(surface->zone_item, point.x - surface->zone_frame.left,
-                                point.y - surface->zone_frame.top);
+    xx_zone_item_v1_set_position(surface->zone_item,
+        point.x + surface->window_geometry_offset.x - surface->zone_frame.left,
+        point.y + surface->window_geometry_offset.y - surface->zone_frame.top);
 }

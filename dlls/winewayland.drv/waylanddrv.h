@@ -310,6 +310,7 @@ struct wayland_surface
     struct wp_alpha_modifier_surface_v1 *wp_alpha_modifier_surface_v1;
     struct xx_zone_item_v1 *zone_item;
     RECT zone_frame;
+    POINT window_geometry_offset;
     BOOL zone_initial_position;
     struct wex_window_v1 *wex_window;
     unsigned int wex_layer, wex_edge, wex_size;
