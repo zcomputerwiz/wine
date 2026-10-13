@@ -1206,6 +1206,7 @@ void manage_desktop( WCHAR *arg )
     WCHAR *p = arg;
     const WCHAR *name = NULL;
     BOOL enable_shell, enable_launchers, show_systray, no_tray_items, force_shell = FALSE;
+    BOOL native_shell = !wcsnicmp(arg, L"/shell", 6) && (!arg[6] || is_whitespace(arg[6]));
     BOOL plugin_started = FALSE;
     HMODULE plugin = NULL;
     WEX_SHELL_START start = NULL;
@@ -1247,12 +1248,12 @@ void manage_desktop( WCHAR *arg )
         if (!p || !parse_size( p, &width, &height ))
             get_default_desktop_size( name, &width, &height );
     }
-    else if ((name = get_default_desktop_name()))
+    else if (!native_shell && (name = get_default_desktop_name()))
     {
         if (!get_default_desktop_size( name, &width, &height )) width = height = 0;
     }
 
-    enable_shell = force_shell || (name ? get_default_enable_shell( name ) : FALSE);
+    enable_shell = native_shell || force_shell || (name ? get_default_enable_shell( name ) : FALSE);
     enable_launchers = get_default_enable_launchers();
     show_systray = get_default_show_systray( name );
     no_tray_items = get_no_tray_items_display();
@@ -1300,8 +1301,13 @@ void manage_desktop( WCHAR *arg )
         if (thread) CloseHandle( thread );
         SystemParametersInfoW( SPI_SETDESKWALLPAPER, 0, NULL, FALSE );
         ClipCursor( NULL );
-        initialize_display_settings( width, height );
-        if (enable_shell && !using_root && (plugin = LoadLibraryW(L"wexshell.dll")))
+        if (!native_shell) initialize_display_settings( width, height );
+        if (native_shell)
+        {
+            width = GetSystemMetrics(SM_CXSCREEN);
+            height = GetSystemMetrics(SM_CYSCREEN);
+        }
+        if (enable_shell && (!using_root || native_shell) && (plugin = LoadLibraryW(L"wexshell.dll")))
         {
             start = (WEX_SHELL_START)GetProcAddress(plugin, "WexShellStart");
             stop = (WEX_SHELL_STOP)GetProcAddress(plugin, "WexShellStop");

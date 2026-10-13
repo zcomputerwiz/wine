@@ -892,6 +892,10 @@ static void parse_command_line(LPWSTR commandline,parameters_struct *parameters)
                 copy_path_root(parameters->root,
                                parameters->selection);
         }
+        else if (!wcsnicmp(p, L"/shell", 6) && (!p[6] || iswspace(p[6])))
+        {
+            manage_desktop(p); /* shell on the driver's desktop, without a virtual desktop */
+        }
         else if (wcsnicmp(p, arg_desktop, len_desktop )==0)
         {
             p += len_desktop;
