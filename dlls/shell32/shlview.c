@@ -2102,6 +2102,40 @@ static LRESULT ShellView_OnNotify(IShellViewImpl * This, UINT CtlID, LPNMHDR lpn
 
 	  case NM_CUSTOMDRAW:
 	    TRACE("-- NM_CUSTOMDRAW %p\n",This);
+	    if (HAS_THUMBNAILS(This->FolderSettings.ViewMode) && This->thumbnails)
+	    {
+	      /* Windows XP: a selected thumbnail keeps its picture and gets a thick frame of the selection color */
+	      NMLVCUSTOMDRAW *cd = (NMLVCUSTOMDRAW *)lpnmh;
+	      int item = cd->nmcd.dwItemSpec;
+	      RECT rc;
+
+	      if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
+	      if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) return CDRF_NOTIFYPOSTPAINT;
+	      if (cd->nmcd.dwDrawStage == CDDS_ITEMPOSTPAINT &&
+	          (SendMessageW(This->hWndList, LVM_GETITEMSTATE, item, LVIS_SELECTED) & LVIS_SELECTED))
+	      {
+	        LVITEMW lvitem = { LVIF_IMAGE, item };
+
+	        rc.left = LVIR_ICON;
+	        if (SendMessageW(This->hWndList, LVM_GETITEMRECT, item, (LPARAM)&rc) &&
+	            SendMessageW(This->hWndList, LVM_GETITEMW, 0, (LPARAM)&lvitem))
+	        {
+	          HBRUSH brush = GetSysColorBrush(COLOR_HIGHLIGHT);
+	          RECT frame;
+	          int x = rc.left + (rc.right - rc.left - THUMBNAIL_SIZE) / 2, y = rc.top + (rc.bottom - rc.top - THUMBNAIL_SIZE) / 2;
+	          int i;
+
+	          ImageList_Draw(This->thumbnails, lvitem.iImage, cd->nmcd.hdc, x, y, ILD_NORMAL);
+	          SetRect(&frame, x, y, x + THUMBNAIL_SIZE, y + THUMBNAIL_SIZE);
+	          for (i = 0; i < 3; i++)
+	          {
+	            FrameRect(cd->nmcd.hdc, &frame, brush);
+	            InflateRect(&frame, -1, -1);
+	          }
+	        }
+	      }
+	      return CDRF_DODEFAULT;
+	    }
 	    return CDRF_DODEFAULT;
 
 	  case NM_RELEASEDCAPTURE:
@@ -2217,12 +2251,16 @@ static LRESULT ShellView_OnNotify(IShellViewImpl * This, UINT CtlID, LPNMHDR lpn
 
 	    if(lpdi->item.mask & LVIF_IMAGE)	/* image requested */
 	    {
-	      lpdi->item.iImage = SHMapPIDLToSystemImageListIndex(This->pSFParent, pidl, 0);
+	      if (HAS_THUMBNAILS(This->FolderSettings.ViewMode) && This->thumbnails)
+	        lpdi->item.iImage = thumbnail_index(This, pidl);
+	      else
+	        lpdi->item.iImage = SHMapPIDLToSystemImageListIndex(This->pSFParent, pidl, 0);
 	    }
 	    break;
 
 	  case LVN_ITEMCHANGED:
 	    TRACE("-- LVN_ITEMCHANGED %p\n",This);
+	    if (This->preview) InvalidateRect(This->preview, NULL, TRUE);   /* the filmstrip shows the selection */
 	    OnStateChange(This, CDBOSC_SELCHANGE);  /* the browser will get the IDataObject now */
 	    break;
 
@@ -2596,6 +2634,8 @@ static ULONG WINAPI IShellView_fnRelease(IShellView3 *iface)
 
 	  if(This->pSFParent)
 	    IShellFolder_Release(This->pSFParent);
+	    free_thumbnails(This);
+	    if (This->thumbnails) ImageList_Destroy(This->thumbnails);
 
 	  if(This->pSF2Parent)
 	    IShellFolder2_Release(This->pSF2Parent);
