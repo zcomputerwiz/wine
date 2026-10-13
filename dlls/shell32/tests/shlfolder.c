@@ -6304,6 +6304,79 @@ static void test_copy_paste(void)
     SetCurrentDirectoryW(cwd);
 }
 
+static void test_folder_iconfile(void)
+{
+    WCHAR temp[MAX_PATH], path[MAX_PATH], ini[MAX_PATH], icon_path[MAX_PATH], location[MAX_PATH];
+    WCHAR old_env[32767];
+    const WCHAR *values[2];
+    const ITEMIDLIST *child;
+    ITEMIDLIST *pidl;
+    IShellFolder *parent;
+    IExtractIconW *extract;
+    DWORD env_length;
+    UINT flags, i;
+    int index;
+    HRESULT hr;
+    BOOL ret;
+
+    GetTempPathW(ARRAY_SIZE(temp), temp);
+    ret = GetTempFileNameW(temp, L"ico", 0, path);
+    ok(ret, "Failed to get temporary path, error %lu.\n", GetLastError());
+    if (!ret) return;
+    DeleteFileW(path);
+    ret = CreateDirectoryW(path, NULL);
+    ok(ret, "Failed to create directory, error %lu.\n", GetLastError());
+    if (!ret) return;
+    SetFileAttributesW(path, FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM);
+    lstrcpyW(ini, path);
+    lstrcatW(ini, L"\\desktop.ini");
+    GetSystemDirectoryW(icon_path, ARRAY_SIZE(icon_path));
+    lstrcatW(icon_path, L"\\shell32.dll");
+    env_length = GetEnvironmentVariableW(L"SHELL32_TEST_ICON", old_env, ARRAY_SIZE(old_env));
+    SetEnvironmentVariableW(L"SHELL32_TEST_ICON", icon_path);
+    values[0] = icon_path;
+    values[1] = L"%SHELL32_TEST_ICON%";
+
+    for (i = 0; i < ARRAY_SIZE(values); ++i)
+    {
+        ret = WritePrivateProfileStringW(L".ShellClassInfo", L"IconFile", values[i], ini);
+        ok(ret, "Failed to write IconFile, error %lu.\n", GetLastError());
+        ret = WritePrivateProfileStringW(L".ShellClassInfo", L"IconIndex", L"-7", ini);
+        ok(ret, "Failed to write IconIndex, error %lu.\n", GetLastError());
+        hr = SHParseDisplayName(path, NULL, &pidl, 0, NULL);
+        ok(hr == S_OK, "Got hr %#lx.\n", hr);
+        if (FAILED(hr)) continue;
+        hr = SHBindToParent(pidl, &IID_IShellFolder, (void **)&parent, &child);
+        ok(hr == S_OK, "Got hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            hr = IShellFolder_GetUIObjectOf(parent, NULL, 1, &child, &IID_IExtractIconW, NULL,
+                                           (void **)&extract);
+            ok(hr == S_OK, "Got hr %#lx.\n", hr);
+            if (SUCCEEDED(hr))
+            {
+                location[0] = 0;
+                index = 0;
+                flags = 0;
+                hr = IExtractIconW_GetIconLocation(extract, 0, location, ARRAY_SIZE(location),
+                                                  &index, &flags);
+                ok(hr == S_OK, "Got hr %#lx.\n", hr);
+                ok(!lstrcmpiW(location, icon_path), "Custom folder icon path %u: got %s, expected %s.\n",
+                   i, wine_dbgstr_w(location), wine_dbgstr_w(icon_path));
+                ok(index == -7, "Got icon index %d.\n", index);
+                IExtractIconW_Release(extract);
+            }
+            IShellFolder_Release(parent);
+        }
+        ILFree(pidl);
+    }
+
+    SetEnvironmentVariableW(L"SHELL32_TEST_ICON", env_length ? old_env : NULL);
+    DeleteFileW(ini);
+    SetFileAttributesW(path, FILE_ATTRIBUTE_NORMAL);
+    RemoveDirectoryW(path);
+}
+
 START_TEST(shlfolder)
 {
     init_function_pointers();
@@ -6351,6 +6424,7 @@ START_TEST(shlfolder)
     test_GetDefaultSearchGUID();
     test_SHLimitInputEdit();
     test_SHGetSetFolderCustomSettings();
+    test_folder_iconfile();
     test_SHOpenFolderAndSelectItems();
     test_copy_paste();
 

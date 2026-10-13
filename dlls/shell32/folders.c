@@ -140,6 +140,8 @@ static HRESULT getIconLocationForFolder(IExtractIconWImpl *This, UINT uFlags, LP
         SHELL32_GetCustomFolderAttribute(This->pidl, L".ShellClassInfo", L"IconIndex",
             wszIconIndex, 10);
         *piIndex = wcstol(wszIconIndex, NULL, 10);
+        if (!ExpandEnvironmentStringsW(wszPath, szIconFile, cchMax))
+            lstrcpynW(szIconFile, wszPath, cchMax);
     }
     else if (SHELL32_GetCustomFolderAttribute(This->pidl, L".ShellClassInfo", L"CLSID",
         wszCLSIDValue, CHARS_IN_GUID) &&
