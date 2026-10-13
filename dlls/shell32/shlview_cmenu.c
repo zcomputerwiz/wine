@@ -45,6 +45,19 @@ WINE_DEFAULT_DEBUG_CHANNEL(shell);
 
 #define VERB_ID_OFFSET 0x200
 
+#define SENDTO_ID_OFFSET 0x300
+
+#define OPENWITH_ID_OFFSET 0x380
+
+enum send_to_kind { SEND_TO_SHORTCUT, SEND_TO_COPY, SEND_TO_PROGRAM };
+
+struct send_to
+{
+    WCHAR *text;
+    WCHAR *path;   /* folder to copy to, folder for shortcuts or program to run */
+    enum send_to_kind kind;
+};
+
 struct verb
 {
     WCHAR *desc;
@@ -69,8 +82,16 @@ typedef struct
     LPITEMIDLIST *apidl; /* array of child pidls */
     UINT cidl;
 
+    /* Send To targets of the item menu */
+    struct send_to *send_to;
+    UINT send_to_count;
+
+    /* Open With of a single file */
+    struct open_with_menu *open_with;
+
     /* background menu data */
     BOOL desktop;
+    IContextMenu3 *new_menu;  /* its New submenu */
 } ContextMenu;
 
 static inline ContextMenu *impl_from_IContextMenu3(IContextMenu3 *iface)
@@ -144,6 +165,14 @@ static ULONG WINAPI ContextMenu_Release(IContextMenu3 *iface)
 
         SHFree(This->pidl);
         _ILFreeaPidl(This->apidl, This->cidl);
+        if (This->new_menu) IContextMenu3_Release(This->new_menu);
+        for (unsigned int i = 0; i < This->send_to_count; ++i)
+        {
+            free(This->send_to[i].text);
+            free(This->send_to[i].path);
+        }
+        free(This->send_to);
+        open_with_menu_free(This->open_with);
 
         for (unsigned int i = 0; i < This->verb_count; ++i)
         {
@@ -216,6 +245,19 @@ static UINT max_menu_id(HMENU hmenu, UINT offset, UINT last)
     }
     return max_id;
 }
+
+static void add_send_to_menu(ContextMenu *This, HMENU hmenu, UINT pos, UINT first);
+
+/* file system path of the first item */
+static BOOL get_item_path(ContextMenu *This, WCHAR *path)
+{
+    ITEMIDLIST *pidl = ILCombine(This->pidl, This->apidl[0]);
+    BOOL ret = pidl && SHGetPathFromIDListW(pidl, path);
+
+    ILFree(pidl);
+    return ret;
+}
+static void do_send_to(ContextMenu *This, HWND hwnd, UINT index);
 
 static HRESULT WINAPI ItemMenu_QueryContextMenu(
 	IContextMenu3 *iface,
@@ -429,6 +471,255 @@ static WCHAR *build_source_paths(ITEMIDLIST *root_pidl, ITEMIDLIST **pidls, unsi
     paths[pos++] = 0;
 
     return paths;
+}
+
+/* Copies pasted where their sources are get a new name ("Copy of ..."), as Windows Explorer does */
+static void rename_copies_in_place(SHFILEOPSTRUCTW *op, const WCHAR *first_source)
+{
+    WCHAR dir[MAX_PATH];
+
+    if (op->wFunc != FO_COPY) return;
+    lstrcpynW(dir, first_source, MAX_PATH);
+    PathRemoveFileSpecW(dir);
+    if (!wcsicmp(dir, op->pTo)) op->fFlags |= FOF_RENAMEONCOLLISION;
+}
+
+/* the folder of a background menu */
+static HRESULT get_parent_pidl(ContextMenu *This, ITEMIDLIST **pidl)
+{
+    IPersistFolder2 *persist;
+    HRESULT hr;
+
+    if (FAILED(hr = IShellFolder_QueryInterface(This->parent, &IID_IPersistFolder2, (void **)&persist))) return hr;
+    hr = IPersistFolder2_GetCurFolder(persist, pidl);
+    IPersistFolder2_Release(persist);
+    return hr;
+}
+
+/* "Shortcut to name.lnk" in dir, then "Shortcut (2) to name.lnk" ..., as Windows Explorer names them */
+HRESULT create_shortcut(const WCHAR *target, const WCHAR *dir)
+{
+    WCHAR base[MAX_PATH], format[64], name[MAX_PATH], path[MAX_PATH];
+    IPersistFile *file;
+    IShellLinkW *link;
+    DWORD_PTR args[2];
+    HRESULT hr;
+    UINT n;
+
+    {
+        /* named as the item is shown: without a known extension that is hidden, "Local Disk (C:)" for a drive */
+        SHFILEINFOW info;
+        if (SHGetFileInfoW(target, 0, &info, sizeof(info), SHGFI_DISPLAYNAME) && info.szDisplayName[0])
+            lstrcpynW(base, info.szDisplayName, MAX_PATH);
+        else
+        {
+            lstrcpynW(base, PathFindFileNameW(target), MAX_PATH);
+            PathRemoveBackslashW(base);
+        }
+    }
+    for (n = 1;; n++)
+    {
+        if (n == 1000) return E_FAIL;
+        LoadStringW(shell32_hInstance, n == 1 ? IDS_SHORTCUT_TO : IDS_SHORTCUT_N_TO, format, ARRAY_SIZE(format));
+        args[0] = (DWORD_PTR)base;
+        args[1] = n;
+        if (!FormatMessageW(FORMAT_MESSAGE_FROM_STRING | FORMAT_MESSAGE_ARGUMENT_ARRAY, format, 0, 0,
+                            name, ARRAY_SIZE(name) - 4, (va_list *)args))
+            return E_FAIL;
+        wcscat(name, L".lnk");
+        if (!PathCombineW(path, dir, name)) return E_FAIL;
+        if (!PathFileExistsW(path)) break;
+    }
+
+    if (FAILED(hr = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLinkW, (void **)&link)))
+        return hr;
+    if (SUCCEEDED(hr = IShellLinkW_SetPath(link, target)) &&
+        SUCCEEDED(hr = IShellLinkW_QueryInterface(link, &IID_IPersistFile, (void **)&file)))
+    {
+        hr = IPersistFile_Save(file, path, TRUE);
+        IPersistFile_Release(file);
+    }
+    IShellLinkW_Release(link);
+    if (SUCCEEDED(hr)) SHChangeNotify(SHCNE_CREATE, SHCNF_PATHW, path, NULL);
+    return hr;
+}
+
+static void add_send_to(ContextMenu *This, const WCHAR *text, const WCHAR *path, enum send_to_kind kind)
+{
+    struct send_to *entry;
+
+    if (!(entry = realloc(This->send_to, (This->send_to_count + 1) * sizeof(*entry)))) return;
+    This->send_to = entry;
+    entry += This->send_to_count++;
+    entry->text = wcsdup(text);
+    entry->path = wcsdup(path);
+    entry->kind = kind;
+}
+
+/* Send To, as on Windows XP: Desktop (create shortcut), My Documents, the shortcuts of the user's SendTo folder (to
+ * folders or programs) and the removable drives with media.  Mail Recipient and Compressed (zipped) Folder have no
+ * handler here. */
+static void add_send_to_menu(ContextMenu *This, HMENU hmenu, UINT pos, UINT first)
+{
+    WCHAR path[MAX_PATH], text[MAX_PATH], pattern[MAX_PATH], target[MAX_PATH], drive[] = L"A:\\";
+    WIN32_FIND_DATAW data;
+    SHFILEINFOW info;
+    HANDLE find;
+    HMENU submenu;
+    UINT i;
+
+    if (This->send_to_count || !This->cidl || !SHGetPathFromIDListW(This->pidl, path)) return;
+
+    LoadStringW(shell32_hInstance, IDS_SEND_TO_DESKTOP, text, ARRAY_SIZE(text));
+    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_DESKTOPDIRECTORY, NULL, SHGFP_TYPE_CURRENT, path)))
+        add_send_to(This, text, path, SEND_TO_SHORTCUT);
+    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_PERSONAL, NULL, SHGFP_TYPE_CURRENT, path)) &&
+        SHGetFileInfoW(path, 0, &info, sizeof(info), SHGFI_DISPLAYNAME))
+        add_send_to(This, info.szDisplayName, path, SEND_TO_COPY);
+
+    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_SENDTO, NULL, SHGFP_TYPE_CURRENT, path)))
+    {
+        swprintf(pattern, ARRAY_SIZE(pattern), L"%s\\*.lnk", path);
+        if ((find = FindFirstFileW(pattern, &data)) != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                IShellLinkW *link;
+                IPersistFile *file;
+
+                swprintf(pattern, ARRAY_SIZE(pattern), L"%s\\%s", path, data.cFileName);
+                if (FAILED(CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLinkW, (void **)&link)))
+                    continue;
+                target[0] = 0;
+                if (SUCCEEDED(IShellLinkW_QueryInterface(link, &IID_IPersistFile, (void **)&file)))
+                {
+                    if (SUCCEEDED(IPersistFile_Load(file, pattern, STGM_READ)))
+                        IShellLinkW_GetPath(link, target, MAX_PATH, NULL, 0);
+                    IPersistFile_Release(file);
+                }
+                IShellLinkW_Release(link);
+                if (!target[0]) continue;
+                lstrcpynW(text, data.cFileName, MAX_PATH);
+                PathRemoveExtensionW(text);
+                add_send_to(This, text, target, PathIsDirectoryW(target) ? SEND_TO_COPY : SEND_TO_PROGRAM);
+            } while (FindNextFileW(find, &data));
+            FindClose(find);
+        }
+    }
+
+    for (drive[0] = 'A'; drive[0] <= 'Z'; drive[0]++)
+    {
+        if (GetDriveTypeW(drive) != DRIVE_REMOVABLE || GetFileAttributesW(drive) == INVALID_FILE_ATTRIBUTES) continue;
+        if (SHGetFileInfoW(drive, 0, &info, sizeof(info), SHGFI_DISPLAYNAME))
+            add_send_to(This, info.szDisplayName, drive, SEND_TO_COPY);
+    }
+
+    if (!This->send_to_count) return;
+    submenu = CreatePopupMenu();
+    for (i = 0; i < This->send_to_count; i++)
+        AppendMenuW(submenu, MF_STRING, first + SENDTO_ID_OFFSET + i, This->send_to[i].text);
+    LoadStringW(shell32_hInstance, IDS_SEND_TO, text, ARRAY_SIZE(text));
+    InsertMenuW(hmenu, pos, MF_BYPOSITION | MF_POPUP, (UINT_PTR)submenu, text);
+    InsertMenuW(hmenu, pos + 1, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
+}
+
+static void do_send_to(ContextMenu *This, HWND hwnd, UINT index)
+{
+    const struct send_to *target = &This->send_to[index];
+    WCHAR *paths, *p, *args;
+    SHFILEOPSTRUCTW op = { 0 };
+    size_t len = 0;
+
+    if (!(paths = build_source_paths(This->pidl, This->apidl, This->cidl))) return;
+    switch (target->kind)
+    {
+    case SEND_TO_SHORTCUT:
+        for (p = paths; *p; p += wcslen(p) + 1) create_shortcut(p, target->path);
+        break;
+    case SEND_TO_COPY:
+        op.hwnd = hwnd;
+        op.wFunc = FO_COPY;
+        op.pFrom = paths;
+        op.pTo = target->path;
+        op.fFlags = FOF_ALLOWUNDO;
+        SHFileOperationW(&op);
+        break;
+    case SEND_TO_PROGRAM:
+        /* the program gets the items as arguments */
+        for (p = paths; *p; p += wcslen(p) + 1) len += wcslen(p) + 3;
+        if ((args = calloc(len + 1, sizeof(WCHAR))))
+        {
+            for (p = paths; *p; p += wcslen(p) + 1)
+            {
+                if (args[0]) wcscat(args, L" ");
+                wcscat(args, L"\"");
+                wcscat(args, p);
+                wcscat(args, L"\"");
+            }
+            ShellExecuteW(hwnd, NULL, target->path, args, NULL, SW_SHOWNORMAL);
+            free(args);
+        }
+        break;
+    }
+    free(paths);
+}
+
+/* Create Shortcut: next to each selected item */
+static void do_create_shortcuts(ContextMenu *menu)
+{
+    WCHAR dir[MAX_PATH], path[MAX_PATH];
+    ITEMIDLIST *pidl;
+    UINT i;
+
+    if (!SHGetPathFromIDListW(menu->pidl, dir)) return;
+    for (i = 0; i < menu->cidl; i++)
+    {
+        if (!(pidl = ILCombine(menu->pidl, menu->apidl[i]))) continue;
+        if (SHGetPathFromIDListW(pidl, path)) create_shortcut(path, dir);
+        ILFree(pidl);
+    }
+}
+
+/* Paste Shortcut: shortcuts to the files on the clipboard, in the folder of the background menu */
+static HRESULT do_paste_shortcut(ContextMenu *menu)
+{
+    WCHAR dir[MAX_PATH], *paths = NULL;
+    const WCHAR *path;
+    ITEMIDLIST *pidl;
+    IDataObject *data;
+    STGMEDIUM medium;
+    HRESULT hr;
+
+    if (FAILED(hr = get_parent_pidl(menu, &pidl))) return hr;
+    if (!SHGetPathFromIDListW(pidl, dir)) { ILFree(pidl); return E_FAIL; }
+    ILFree(pidl);
+    if (FAILED(hr = OleGetClipboard(&data))) return hr;
+
+    if (SUCCEEDED(hr = get_data_format(data, RegisterClipboardFormatW(CFSTR_SHELLIDLISTW), &medium)))
+    {
+        const CIDA *cida = GlobalLock(medium.hGlobal);
+        ITEMIDLIST **pidls, *root_pidl;
+
+        pidls = _ILCopyCidaToaPidl(&root_pidl, cida);
+        paths = build_source_paths(root_pidl, pidls, cida->cidl);
+        _ILFreeaPidl(pidls, cida->cidl);
+        ILFree(root_pidl);
+        GlobalUnlock(medium.hGlobal);
+        ReleaseStgMedium(&medium);
+        for (path = paths; path && *path; path += wcslen(path) + 1) create_shortcut(path, dir);
+        free(paths);
+    }
+    else if (SUCCEEDED(hr = get_data_format(data, CF_HDROP, &medium)))
+    {
+        const DROPFILES *dropfiles = GlobalLock(medium.hGlobal);
+
+        for (path = (const WCHAR *)((const char *)dropfiles + dropfiles->pFiles); *path; path += wcslen(path) + 1)
+            create_shortcut(path, dir);
+        GlobalUnlock(medium.hGlobal);
+        ReleaseStgMedium(&medium);
+    }
+    IDataObject_Release(data);
+    return hr;
 }
 
 static HRESULT do_paste(ContextMenu *menu, HWND hwnd)
