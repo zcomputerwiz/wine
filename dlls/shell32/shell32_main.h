@@ -118,6 +118,10 @@ HRESULT WINAPI ApplicationDocumentLists_Constructor(IUnknown *outer, REFIID riid
 
 HRESULT WINAPI new_menu_create(IUnknown *outer, REFIID iid, void **out);
 
+/* openwith.c */
+BOOL get_folder_shortcut_target(const WCHAR *folder, WCHAR *target);
+HRESULT create_shortcut(const WCHAR *target, const WCHAR *dir);   /* "Shortcut to target.lnk" in dir */
+
 HRESULT IShellLink_ConstructFromFile(IUnknown * pUnkOuter, REFIID riid, LPCITEMIDLIST pidl, IUnknown **ppv);
 
 LPEXTRACTICONA	IExtractIconA_Constructor(LPCITEMIDLIST);
