@@ -6770,7 +6770,9 @@ BOOL WINAPI NtUserSystemParametersInfo( UINT action, UINT val, void *ptr, UINT w
         ret = set_entry( &entry_POWEROFFACTIVE, val, ptr, winini );
         break;
 
-    WINE_SPI_FIXME(SPI_SETCURSORS);
+    case SPI_SETCURSORS:
+        ret = TRUE;   /* the scheme is read from HKCU\Control Panel\Cursors when a cursor is loaded */
+        break;
     WINE_SPI_FIXME(SPI_SETICONS);
 
     case SPI_GETDEFAULTINPUTLANG:

@@ -1353,6 +1353,41 @@ end:
     return hIcon;
 }
 
+/* Cursor schemes: HKCU\Control Panel\Cursors names a file for each system cursor ("Arrow" = arrow.cur ...).  A theme
+ * sets them; an empty value means the built-in cursor. */
+static const struct { UINT id; const WCHAR *name; } scheme_cursors[] =
+{
+    { 32512, L"Arrow" },     { 32513, L"IBeam" },     { 32514, L"Wait" },      { 32515, L"Crosshair" },
+    { 32516, L"UpArrow" },   { 32642, L"SizeNWSE" },  { 32643, L"SizeNESW" },  { 32644, L"SizeWE" },
+    { 32645, L"SizeNS" },    { 32646, L"SizeAll" },   { 32648, L"No" },        { 32649, L"Hand" },
+    { 32650, L"AppStarting" }, { 32651, L"Help" },
+};
+static HICON scheme_cursor_cache[ARRAY_SIZE(scheme_cursors)];
+static BOOL scheme_cursor_tried[ARRAY_SIZE(scheme_cursors)];
+
+static HICON load_scheme_cursor( UINT id, INT width, INT height, INT depth, UINT loadflags )
+{
+    unsigned int i;
+    HKEY key;
+    WCHAR path[MAX_PATH], expanded[MAX_PATH];
+    DWORD size = sizeof(path), type;
+
+    for (i = 0; i < ARRAY_SIZE(scheme_cursors); i++) if (scheme_cursors[i].id == id) break;
+    if (i == ARRAY_SIZE(scheme_cursors)) return 0;
+    if (scheme_cursor_tried[i]) return scheme_cursor_cache[i];
+    scheme_cursor_tried[i] = TRUE;
+
+    if (RegOpenKeyExW( HKEY_CURRENT_USER, L"Control Panel\\Cursors", 0, KEY_QUERY_VALUE, &key )) return 0;
+    if (!RegQueryValueExW( key, scheme_cursors[i].name, NULL, &type, (BYTE *)path, &size ) &&
+        (type == REG_SZ || type == REG_EXPAND_SZ) && path[0])
+    {
+        ExpandEnvironmentStringsW( path, expanded, ARRAY_SIZE(expanded) );
+        scheme_cursor_cache[i] = CURSORICON_LoadFromFile( expanded, width, height, depth, TRUE, loadflags | LR_SHARED );
+    }
+    RegCloseKey( key );
+    return scheme_cursor_cache[i];
+}
+
 /**********************************************************************
  *          CURSORICON_Load
  *
@@ -1377,6 +1412,12 @@ static HICON CURSORICON_Load(HINSTANCE hInstance, LPCWSTR name,
 
     if ((loadflags & LR_LOADFROMFILE) && get_app_version() >= 0x4000)    /* Load from file */
         return CURSORICON_LoadFromFile( name, width, height, depth, fCursor, loadflags );
+
+    if (!hInstance && fCursor && IS_INTRESOURCE(name))
+    {
+        HICON scheme = load_scheme_cursor( (UINT_PTR)name, width, height, depth, loadflags );
+        if (scheme) return scheme;
+    }
 
     if (!hInstance) hInstance = user32_module;  /* Load OEM cursor/icon */
 
