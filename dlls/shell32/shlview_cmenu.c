@@ -942,12 +942,28 @@ out:
     return ret;
 }
 
+/* "6 bytes (6 bytes)", "1.37 MB (1,441,792 bytes)" */
+static void format_size(ULONGLONG size, WCHAR *buffer, UINT len)
+{
+    WCHAR bytes[32], number[64], *short_size = malloc(len * sizeof(WCHAR));
+    NUMBERFMTW format = { 0, 0, 3, (WCHAR *)L".", (WCHAR *)L",", 0 };
+
+    swprintf(bytes, ARRAY_SIZE(bytes), L"%I64u", size);
+    if (!GetNumberFormatW(LOCALE_USER_DEFAULT, 0, bytes, &format, number, ARRAY_SIZE(number)))
+        lstrcpyW(number, bytes);
+    if (!short_size) return;
+    StrFormatByteSizeW(size, short_size, len);
+    swprintf(buffer, len, L"%s (%s bytes)", short_size, number);
+    free(short_size);
+}
+
 struct file_properties_info
 {
     WCHAR path[MAX_PATH];
     WCHAR dir[MAX_PATH];
     WCHAR *filename;
     DWORD attrib;
+    HICON icon, program_icon;   /* shown by the page, destroyed with it */
 };
 
 static void init_file_properties_dlg(HWND hwndDlg, struct file_properties_info *props)
