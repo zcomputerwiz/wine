@@ -42,6 +42,7 @@
 #include "alpha-modifier-v1-client-protocol.h"
 #include "fractional-scale-v1-client-protocol.h"
 #include "color-management-v1-client-protocol.h"
+#include "xx-zones-v1-client-protocol.h"
 
 #include "windef.h"
 #include "winbase.h"
@@ -187,6 +188,9 @@ struct wayland
     struct wp_pointer_warp_v1 *wp_pointer_warp_v1;
     struct wp_alpha_modifier_v1 *wp_alpha_modifier_v1;
     struct wp_color_manager_v1 *wp_color_manager_v1;
+    struct xx_zone_manager_v1 *zone_manager;
+    struct xx_zone_v1 *zone;
+    int zone_width, zone_height;
     struct wayland_seat seat;
     struct wayland_keyboard keyboard;
     struct wayland_pointer pointer;
@@ -302,6 +306,9 @@ struct wayland_surface
         };
     };
     struct wp_alpha_modifier_surface_v1 *wp_alpha_modifier_surface_v1;
+    struct xx_zone_item_v1 *zone_item;
+    RECT zone_frame;
+    BOOL zone_initial_position;
 
     struct wayland_surface_config pending, requested, processing, current;
     BOOL resizing;
@@ -315,6 +322,10 @@ struct wayland_surface
  */
 
 BOOL wayland_process_init(void);
+void wayland_zones_init(void);
+void wayland_zones_reposition(void);
+void wayland_zone_create_item(struct wayland_surface *surface);
+void wayland_zone_place(struct wayland_surface *surface);
 
 /**********************************************************************
  *          Wayland output
