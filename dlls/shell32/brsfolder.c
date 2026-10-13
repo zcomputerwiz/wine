@@ -871,6 +871,19 @@ static BOOL BrsFolder_OnCommand( browse_info *info, UINT id )
     case IDOK:
         if (info->pidlRet == NULL) /* A null pidl would mean a cancel */
             info->pidlRet = _ILCreateDesktop();
+        else if (!(lpBrowseInfo->ulFlags & BIF_NOTRANSLATETARGETS))
+        {
+            /* a folder shortcut such as My Music in My Documents returns its target */
+            WCHAR path[MAX_PATH], target[MAX_PATH];
+            LPITEMIDLIST pidl;
+
+            if (SHGetPathFromIDListW( info->pidlRet, path ) && get_folder_shortcut_target( path, target ) &&
+                (pidl = ILCreateFromPathW( target )))
+            {
+                ILFree( info->pidlRet );
+                info->pidlRet = pidl;
+            }
+        }
         pdump( info->pidlRet );
         if (lpBrowseInfo->pszDisplayName)
             SHGetPathFromIDListW( info->pidlRet, lpBrowseInfo->pszDisplayName );

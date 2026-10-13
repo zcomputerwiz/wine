@@ -250,6 +250,35 @@ static HRESULT SHELL32_CoCreateInitSF (LPCITEMIDLIST pidlRoot, LPCWSTR pathRoot,
  *  This function makes special assumptions on the shell namespace, which
  *  means you probably can't use it for your IShellFolder implementation.
  */
+/* A folder shortcut (as Windows makes for "My Network Places" entries and the like): a folder whose desktop.ini
+ * names CLSID_FolderShortcut and whose target.lnk points to the folder it stands for. */
+BOOL get_folder_shortcut_target(const WCHAR *folder, WCHAR *target)
+{
+    WCHAR value[CHARS_IN_GUID], path[MAX_PATH];
+    IPersistFile *file;
+    IShellLinkW *link;
+    BOOL ret = FALSE;
+    CLSID clsid;
+
+    lstrcpynW(path, folder, MAX_PATH);
+    if (!SHELL32_GetCustomFolderAttributeFromPath(path, L".ShellClassInfo", L"CLSID2", value, CHARS_IN_GUID) ||
+        CLSIDFromString(value, &clsid) || !IsEqualCLSID(&clsid, &CLSID_FolderShortcut))
+        return FALSE;
+
+    lstrcpynW(path, folder, MAX_PATH);
+    PathAppendW(path, L"target.lnk");
+    if (FAILED(CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLinkW, (void **)&link)))
+        return FALSE;
+    if (SUCCEEDED(IShellLinkW_QueryInterface(link, &IID_IPersistFile, (void **)&file)))
+    {
+        ret = SUCCEEDED(IPersistFile_Load(file, path, STGM_READ)) &&
+              IShellLinkW_GetPath(link, target, MAX_PATH, NULL, 0) == S_OK && PathIsDirectoryW(target);
+        IPersistFile_Release(file);
+    }
+    IShellLinkW_Release(link);
+    return ret;
+}
+
 HRESULT SHELL32_BindToChild (LPCITEMIDLIST pidlRoot, const CLSID *clsidChild,
                              LPCWSTR pathRoot, LPCITEMIDLIST pidlComplete, REFIID riid, LPVOID * ppvOut)
 {
@@ -277,6 +306,8 @@ HRESULT SHELL32_BindToChild (LPCITEMIDLIST pidlRoot, const CLSID *clsidChild,
         /* file system folder */
         CLSID clsidFolder = *clsidChild;
         WCHAR wszCLSIDValue[CHARS_IN_GUID], wszFolderPath[MAX_PATH], *pwszPathTail = wszFolderPath;
+        WCHAR wszTarget[MAX_PATH];
+        LPITEMIDLIST pidlTarget;
 
         /* see if folder CLSID should be overridden by desktop.ini file */
         if (pathRoot) {
@@ -286,12 +317,21 @@ HRESULT SHELL32_BindToChild (LPCITEMIDLIST pidlRoot, const CLSID *clsidChild,
 
         _ILSimpleGetTextW(pidlChild,pwszPathTail,MAX_PATH - (int)(pwszPathTail - wszFolderPath));
 
-        if (SHELL32_GetCustomFolderAttributeFromPath (wszFolderPath,
-            L".ShellClassInfo", L"CLSID", wszCLSIDValue, CHARS_IN_GUID))
-            CLSIDFromString (wszCLSIDValue, &clsidFolder);
+        if (get_folder_shortcut_target(wszFolderPath, wszTarget) && (pidlTarget = ILCreateFromPathW(wszTarget)))
+        {
+            /* a folder shortcut opens the folder it stands for */
+            hr = SHBindToObject(NULL, pidlTarget, NULL, &IID_IShellFolder, (void **)&pSF);
+            ILFree(pidlTarget);
+        }
+        else
+        {
+            if (SHELL32_GetCustomFolderAttributeFromPath (wszFolderPath,
+                L".ShellClassInfo", L"CLSID", wszCLSIDValue, CHARS_IN_GUID))
+                CLSIDFromString (wszCLSIDValue, &clsidFolder);
 
-        hr = SHELL32_CoCreateInitSF (pidlRoot, pathRoot, pidlChild,
-                                     &clsidFolder, (LPVOID *)&pSF);
+            hr = SHELL32_CoCreateInitSF (pidlRoot, pathRoot, pidlChild,
+                                         &clsidFolder, (LPVOID *)&pSF);
+        }
     }
     ILFree (pidlChild);
 
