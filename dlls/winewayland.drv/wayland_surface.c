@@ -445,6 +445,8 @@ void wayland_surface_make_toplevel(struct wayland_surface *surface)
     wayland_surface_assign_icon(surface);
 
     wayland_surface_init_fractional_scale(surface, 1.0);
+    wayland_zone_create_item(surface);
+    wayland_zone_place(surface);
 
     wl_surface_commit(surface->wl_surface);
     wl_display_flush(process_wayland.wl_display);
@@ -524,6 +526,11 @@ void wayland_surface_clear_role(struct wayland_surface *surface)
         break;
 
     case WAYLAND_SURFACE_ROLE_TOPLEVEL:
+        if (surface->zone_item)
+        {
+            xx_zone_item_v1_destroy(surface->zone_item);
+            surface->zone_item = NULL;
+        }
         if (surface->xdg_toplevel_icon)
         {
             xdg_toplevel_icon_manager_v1_set_icon(
@@ -900,6 +907,7 @@ BOOL wayland_surface_reconfigure(struct wayland_surface *surface)
     case WAYLAND_SURFACE_ROLE_TOPLEVEL:
         if (!surface->xdg_surface) break; /* surface role has been cleared */
         if (!wayland_surface_reconfigure_xdg(surface, rect)) return FALSE;
+        wayland_zone_place(surface);
         break;
     case WAYLAND_SURFACE_ROLE_SUBSURFACE:
         if (!surface->wl_subsurface) break; /* surface role has been cleared */

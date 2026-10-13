@@ -51,6 +51,19 @@ static int wayland_win_data_cmp_rb(const void *key,
 static pthread_mutex_t win_data_mutex;
 static struct rb_tree win_data_rb = { wayland_win_data_cmp_rb };
 
+void wayland_zones_reposition(void)
+{
+    struct wayland_win_data *data;
+    pthread_mutex_lock(&win_data_mutex);
+    RB_FOR_EACH_ENTRY(data, &win_data_rb, struct wayland_win_data, entry)
+    {
+        if (!data->wayland_surface || !data->wayland_surface->zone_item) continue;
+        wayland_zone_place(data->wayland_surface);
+        wl_surface_commit(data->wayland_surface->wl_surface);
+    }
+    pthread_mutex_unlock(&win_data_mutex);
+}
+
 /***********************************************************************
  *           wayland_win_data_create
  *
@@ -210,6 +223,8 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
     wl_surface_set_input_region(surface->wl_surface, input_region);
     if (input_region) wl_region_destroy(input_region);
 
+    wayland_win_data_get_config(data, &surface->window);
+
     /* If the window is a visible toplevel make it a wayland
      * xdg_toplevel. Otherwise keep it role-less to avoid polluting the
      * compositor with empty xdg_toplevels. */
@@ -225,8 +240,6 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
         wayland_surface_make_subsurface(surface, owner_surface);
         break;
     }
-
-    wayland_win_data_get_config(data, &surface->window);
 
     /* Size/position changes affect the effective pointer constraint, so update
      * it as needed. */

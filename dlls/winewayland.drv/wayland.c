@@ -113,6 +113,8 @@ static void registry_handle_global(void *data, struct wl_registry *registry,
         wl_list_for_each(output, &process_wayland.output_list, link)
             wayland_output_use_xdg_extension(output);
     }
+    else if (strcmp(interface, "xx_zone_manager_v1") == 0)
+        process_wayland.zone_manager = wl_registry_bind(registry, id, &xx_zone_manager_v1_interface, 1);
     else if (strcmp(interface, "wl_compositor") == 0)
     {
         process_wayland.wl_compositor =
@@ -329,6 +331,7 @@ BOOL wayland_process_init(void)
      * initial events produced from registering the globals. */
     wl_display_roundtrip_queue(process_wayland.wl_display, process_wayland.wl_event_queue);
     wl_display_roundtrip_queue(process_wayland.wl_display, process_wayland.wl_event_queue);
+    wayland_zones_init();
 
     /* Check for required protocol globals. */
     if (!process_wayland.wl_compositor)
