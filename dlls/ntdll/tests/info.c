@@ -1647,6 +1647,7 @@ static void test_query_firmware(void)
 static void test_query_battery(void)
 {
     SYSTEM_BATTERY_STATE bs;
+    SYSTEM_POWER_CAPABILITIES caps;
     NTSTATUS status;
     DWORD time_left;
 
@@ -1658,6 +1659,14 @@ static void test_query_battery(void)
         return;
     }
     ok(status == STATUS_SUCCESS, "expected success\n");
+
+    memset(&caps, 0x23, sizeof(caps));
+    status = NtPowerInformation(SystemPowerCapabilities, NULL, 0, &caps, sizeof(caps));
+    ok(status == STATUS_SUCCESS, "Got power capability status %#lx.\n", status);
+    if (status == STATUS_SUCCESS)
+        ok(caps.SystemBatteriesPresent == bs.BatteryPresent,
+           "Battery presence mismatch: capabilities %u, state %u.\n",
+           caps.SystemBatteriesPresent, bs.BatteryPresent);
 
     if (winetest_debug > 1)
     {
