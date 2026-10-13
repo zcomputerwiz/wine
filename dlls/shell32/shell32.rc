@@ -36,41 +36,39 @@ END
  shellview background menu
 */
 MENU_002 MENUEX
+/* Windows XP's folder background menu.  The ids are offsets from the caller's first id (shlview_cmenu.c):
+ * FCIDM_SHVIEW_* - FCIDM_BASE, 0x180+ sort columns, 0x190+ views not implemented yet; New is inserted before
+ * Properties by the New menu object. */
 BEGIN
 	POPUP ""
 	BEGIN
-	  POPUP "&View",                0x40   /* Submenus need ids <= FCIDM_SHVIEWLAST so they don't get removed by MergeMenu */
+	  POPUP "&View",                0x1f0
 	  BEGIN
-	    MENUITEM "Lar&ge Icons",	FCIDM_SHVIEW_BIGICON
-	    MENUITEM "S&mall Icons",	FCIDM_SHVIEW_SMALLICON
-	    MENUITEM "&List",		FCIDM_SHVIEW_LISTVIEW
-	    MENUITEM "&Details",	FCIDM_SHVIEW_REPORTVIEW
+	    MENUITEM "Fil&mstrip",	0x193
+	    MENUITEM "Thumb&nails",	0x190
+	    MENUITEM "Tile&s",		0x191
+	    MENUITEM "Ico&ns",		0x29
+	    MENUITEM "&List",		0x2b
+	    MENUITEM "&Details",	0x2c
 	  END
-	  MENUITEM SEPARATOR
-	  POPUP "Arrange &Icons",       0x41
+	  POPUP "Arrange &Icons By",    0x1f1
 	  BEGIN
-	    MENUITEM "By &Name",	0x30	/* column 0 */
-	    MENUITEM "By &Type",	0x32	/* column 2 */
-	    MENUITEM "By &Size",	0x31	/* ... */
-	    MENUITEM "By &Date",	0x33
+	    MENUITEM "&Name",		0x180
+	    MENUITEM "&Size",		0x181
+	    MENUITEM "&Type",		0x182
+	    MENUITEM "&Modified",	0x183
 	    MENUITEM SEPARATOR
-	    MENUITEM "&Auto Arrange",	FCIDM_SHVIEW_AUTOARRANGE
-	  END
-	  MENUITEM "Line up Icons",	FCIDM_SHVIEW_SNAPTOGRID
-	  MENUITEM SEPARATOR
-	  MENUITEM "Refresh",		FCIDM_SHVIEW_REFRESH
-	  MENUITEM SEPARATOR
-	  MENUITEM "Paste",		FCIDM_SHVIEW_INSERT
-	  MENUITEM "Paste as Link",	FCIDM_SHVIEW_INSERTLINK
-	  MENUITEM SEPARATOR
-	  POPUP "New",                  0x42
-	  BEGIN
-	    MENUITEM "New &Folder",	FCIDM_SHVIEW_NEWFOLDER
-	    MENUITEM "New &Link",	FCIDM_SHVIEW_NEWLINK
-	    MENUITEM SEPARATOR
+	    MENUITEM "Show in &Groups",	0x192, MFT_STRING, MFS_GRAYED
+	    MENUITEM "&Auto Arrange",	0x31
+	    MENUITEM "A&lign to Grid",	0x32
 	  END
 	  MENUITEM SEPARATOR
-	  MENUITEM "Properties",	FCIDM_SHVIEW_PROPERTIES
+	  MENUITEM "R&efresh",		0x100
+	  MENUITEM SEPARATOR
+	  MENUITEM "&Paste",		0x1a
+	  MENUITEM "Paste &Shortcut",	0x1c
+	  MENUITEM SEPARATOR
+	  MENUITEM "P&roperties",	0x13
 	END
 END
 
@@ -97,7 +95,7 @@ BEGIN
 	  MENUITEM "&Copy",		FCIDM_SHVIEW_COPY
 	  MENUITEM "&Paste",		FCIDM_SHVIEW_INSERT
 	  MENUITEM SEPARATOR
-	  MENUITEM "Create &Link",	FCIDM_SHVIEW_CREATELINK
+	  MENUITEM "Create &Shortcut",	FCIDM_SHVIEW_CREATELINK
 	  MENUITEM "&Delete",		FCIDM_SHVIEW_DELETE
 	  MENUITEM "&Rename",		FCIDM_SHVIEW_RENAME
 	  MENUITEM SEPARATOR
@@ -130,13 +128,13 @@ END
 STRINGTABLE
 {
         /* columns in the shellview */
-	IDS_SHV_COLUMN1		"File"
+	IDS_SHV_COLUMN1		"Name"
 	IDS_SHV_COLUMN2		"Size"
 	IDS_SHV_COLUMN3		"Type"
-	IDS_SHV_COLUMN4		"Modified"
+	IDS_SHV_COLUMN4		"Date Modified"
 	IDS_SHV_COLUMN5		"Attributes"
-	IDS_SHV_COLUMN6		"Size"
-	IDS_SHV_COLUMN7		"Size available"
+	IDS_SHV_COLUMN6		"Total Size"
+	IDS_SHV_COLUMN7		"Free Space"
 	IDS_SHV_COLUMN8		"Name"
 	IDS_SHV_COLUMN9		"Comments"
 	IDS_SHV_COLUMN_DELFROM	"Original location"
@@ -149,7 +147,15 @@ STRINGTABLE
         /* special folders */
 	IDS_DESKTOP		"#msgctxt#display name#Desktop"
 	IDS_MYCOMPUTER		"My Computer"
-	IDS_RECYCLEBIN_FOLDER_NAME      "Trash"
+	IDS_RECYCLEBIN_FOLDER_NAME      "Recycle Bin"
+	IDS_MYDOCUMENTS_FOLDER_NAME     "My Documents"
+	IDS_MYPICTURES_FOLDER_NAME      "My Pictures"
+	IDS_MYMUSIC_FOLDER_NAME         "My Music"
+	IDS_MYVIDEOS_FOLDER_NAME        "My Videos"
+	IDS_SHAREDDOCS_FOLDER_NAME      "Shared Documents"
+	IDS_SHAREDMUSIC_FOLDER_NAME     "Shared Music"
+	IDS_SHAREDVIDEO_FOLDER_NAME     "Shared Video"
+	IDS_SHAREDPICTURES_FOLDER_NAME  "Shared Pictures"
 	IDS_CONTROLPANEL	"Control Panel"
 
         /* context menus */
@@ -167,17 +173,17 @@ STRINGTABLE
 
 	IDS_CREATEFOLDER_DENIED "Unable to create new Folder: Permission denied."
 	IDS_CREATEFOLDER_CAPTION "Error during creation of a new folder"
-	IDS_DELETEITEM_CAPTION "Confirm file deletion"
-	IDS_DELETEFOLDER_CAPTION "Confirm folder deletion"
+	IDS_DELETEITEM_CAPTION "Confirm File Delete"
+	IDS_DELETEFOLDER_CAPTION "Confirm Folder Delete"
 	IDS_DELETEITEM_TEXT "Are you sure you want to delete '%1'?"
 	IDS_DELETEMULTIPLE_TEXT "Are you sure you want to delete these %1 items?"
 	IDS_DELETESELECTED_TEXT "Are you sure you want to delete the selected item(s)?"
-	IDS_TRASHITEM_TEXT "Are you sure that you want to send '%1' to the Trash?"
-	IDS_TRASHFOLDER_TEXT "Are you sure that you want to send '%1' and all its content to the Trash?"
-	IDS_TRASHMULTIPLE_TEXT "Are you sure that you want to send these %1 items to the Trash?"
-	IDS_CANTTRASH_TEXT "The item '%1' can't be sent to Trash. Do you want to delete it instead?"
+	IDS_TRASHITEM_TEXT "Are you sure you want to send '%1' to the Recycle Bin?"
+	IDS_TRASHFOLDER_TEXT "Are you sure you want to remove the folder '%1' and move all its contents to the Recycle Bin?"
+	IDS_TRASHMULTIPLE_TEXT "Are you sure you want to send these %1 items to the Recycle Bin?"
+	IDS_CANTTRASH_TEXT "The item '%1' can't be sent to the Recycle Bin. Do you want to delete it instead?"
 	IDS_OVERWRITEFILE_TEXT "This folder already contains a file called '%1'.\n\nDo you want to replace it?"
-	IDS_OVERWRITEFILE_CAPTION "Confirm file overwrite"
+	IDS_OVERWRITEFILE_CAPTION "Confirm File Replace"
 	IDS_OVERWRITEFOLDER_TEXT "This folder already contains a folder named '%1'.\n\
 \n\
 If the files in the destination folder have the same names as files in the\n\
@@ -236,7 +242,36 @@ the folder?"
 
 	IDS_NEWFOLDER		"New Folder"
 
-        IDS_NEW_MENU_FOLDER         "New &Folder"
+        IDS_NEW_MENU_FOLDER         "&Folder"
+        IDS_COPY_OF                 "Copy of %1"
+        IDS_COPY_N_OF               "Copy (%2!u!) of %1"
+        IDS_SHORTCUT_TO             "Shortcut to %1"
+        IDS_SHORTCUT_N_TO           "Shortcut (%2!u!) to %1"
+        IDS_NEW_ITEM                "New %1"
+        IDS_SEND_TO                 "Se&nd To"
+        IDS_SEND_TO_DESKTOP         "Desktop (create shortcut)"
+        IDS_OPEN_WITH               "Open Wit&h"
+        IDS_OPEN_WITH_DOTS          "Open Wit&h..."
+        IDS_OPEN_WITH_CHOOSE        "&Choose Program..."
+        IDS_OPEN_WITH_RECOMMENDED   "Recommended Programs:"
+        IDS_OPEN_WITH_OTHER         "Other Programs:"
+        IDS_OPEN_WITH_PROGRAMS      "Programs"
+        IDS_ALL_FILES               "All Files"
+        IDS_DELETEMULTIPLE_CAPTION  "Confirm Multiple File Delete"
+        IDS_LOCAL_DISK              "Local Disk"
+        IDS_CD_DRIVE                "CD Drive"
+        IDS_REMOVABLE_DISK          "Removable Disk"
+        IDS_NETWORK_DRIVE           "Network Drive"
+        IDS_UNDO                    "&Undo\tCtrl+Z"
+        IDS_UNDO_RENAME             "&Undo Rename\tCtrl+Z"
+        IDS_UNDO_MOVE               "&Undo Move\tCtrl+Z"
+        IDS_UNDO_COPY               "&Undo Copy\tCtrl+Z"
+        IDS_UNDO_DELETE             "&Undo Delete\tCtrl+Z"
+        IDS_DRIVES_SHAREDDOCS_GROUP "Files Stored on This Computer"
+        IDS_DRIVES_FIXED_GROUP      "Hard Disk Drives"
+        IDS_DRIVES_REMOVABLE_GROUP  "Devices with Removable Storage"
+        IDS_DRIVES_NETDRIVE_GROUP   "Network Drives"
+        IDS_DRIVES_OTHER_GROUP      "Other"
 
 	IDS_CPANEL_TITLE            "Wine Control Panel"
 	IDS_CPANEL_NAME             "Name"
@@ -353,7 +388,7 @@ BEGIN
     EDITTEXT IDC_FPROP_PATH, 70, 10, 160, 14, WS_TABSTOP
 
     LTEXT "", -1, 5, 30, 230, 1, SS_ETCHEDHORZ
-    LTEXT "File type:", IDC_FPROP_TYPE_LABEL, 10, 35, 60, 10
+    LTEXT "Type:", IDC_FPROP_TYPE_LABEL, 10, 35, 60, 10
     EDITTEXT IDC_FPROP_TYPE, 70, 35, 160, 10, ES_READONLY | NOT WS_BORDER | NOT WS_TABSTOP
 
     LTEXT "", -1, 5, 50, 230, 1, SS_ETCHEDHORZ
@@ -363,51 +398,70 @@ BEGIN
     EDITTEXT IDC_FPROP_SIZE, 70, 70, 160, 10, ES_READONLY | NOT WS_BORDER | NOT WS_TABSTOP
 
     LTEXT "", -1, 5, 85, 230, 1, SS_ETCHEDHORZ
-    LTEXT "Creation date:", IDC_FPROP_CREATED_LABEL, 10, 90, 60, 10
+    LTEXT "Created:", IDC_FPROP_CREATED_LABEL, 10, 90, 60, 10
     EDITTEXT IDC_FPROP_CREATED, 70, 90, 160, 10, ES_READONLY | NOT WS_BORDER | NOT WS_TABSTOP
 
     LTEXT "", -1, 5, 105, 230, 1, SS_ETCHEDHORZ
     LTEXT "Attributes:", IDC_FPROP_ATTRIB_LABEL, 10, 110, 60, 10
-    AUTOCHECKBOX "&Read Only", IDC_FPROP_READONLY, 70, 110, 70, 10
+    AUTOCHECKBOX "&Read-only", IDC_FPROP_READONLY, 70, 110, 70, 10
     AUTOCHECKBOX "H&idden", IDC_FPROP_HIDDEN, 70, 125, 70, 10
     AUTOCHECKBOX "&Archive", IDC_FPROP_ARCHIVE, 70, 140, 70, 10
 END
 
-IDD_FILE_PROPERTIES DIALOGEX 0, 0, 240, 200
+/* Open With, after the ReactOS dialog (LGPL) with Windows XP's texts */
+IDD_OPEN_WITH DIALOGEX 0, 0, 264, 256
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUPWINDOW | WS_CAPTION
+CAPTION "Open With"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    ICON IDI_SHELL_WINDOW, -1, 8, 12, 21, 20
+    LTEXT "Choose the program you want to use to open this file:", -1, 44, 12, 211, 10
+    LTEXT "File:    ", IDC_OPENWITH_FILE, 44, 25, 188, 20
+    GROUPBOX "&Programs", -1, 7, 42, 249, 187
+    CONTROL "Programs", IDC_OPENWITH_PROGRAMS, "SysTreeView32", WS_BORDER | WS_TABSTOP | 0x0020 /* TVS_SHOWSELALWAYS */, 16, 57, 230, 130
+    AUTOCHECKBOX "&Always use the selected program to open this kind of file", IDC_OPENWITH_ALWAYS, 16, 193, 232, 10
+    PUSHBUTTON "&Browse...", IDC_OPENWITH_BROWSE, 188, 207, 60, 14
+    DEFPUSHBUTTON "OK", IDOK, 150, 236, 50, 14
+    PUSHBUTTON "Cancel", IDCANCEL, 206, 236, 50, 14
+END
+
+IDD_FILE_PROPERTIES DIALOGEX 0, 0, 227, 215
 STYLE DS_SHELLFONT | WS_CHILD | WS_CAPTION
 CAPTION "General"
 FONT 8, "MS Shell Dlg"
 BEGIN
-    ICON "", IDC_FPROP_ICON, 10, 5, 32, 32, WS_VISIBLE
-    EDITTEXT IDC_FPROP_PATH, 70, 10, 160, 14, WS_TABSTOP
+    ICON "", IDC_FPROP_ICON, 7, 7, 32, 32, WS_VISIBLE
+    EDITTEXT IDC_FPROP_PATH, 54, 10, 166, 14, WS_TABSTOP
 
-    LTEXT "", -1, 5, 30, 230, 1, SS_ETCHEDHORZ
-    LTEXT "File type:", IDC_FPROP_TYPE_LABEL, 10, 35, 60, 10
-    EDITTEXT IDC_FPROP_TYPE, 70, 35, 160, 10, ES_READONLY | NOT WS_BORDER | NOT WS_TABSTOP
-    LTEXT "Open with:", IDC_FPROP_OPENWITH_LABEL, 10, 50, 60, 10
-    ICON "", IDC_FPROP_PROG_ICON, 70, 50, 16, 16, WS_VISIBLE
-    EDITTEXT IDC_FPROP_PROG_NAME, 85, 50, 80, 10, ES_READONLY | NOT WS_BORDER | NOT WS_TABSTOP
-    PUSHBUTTON "&Change...", IDC_FPROP_PROG_CHANGE, 170, 48, 60, 14, WS_CHILD | WS_TABSTOP
+    LTEXT "", -1, 7, 33, 213, 1, SS_ETCHEDHORZ
+    LTEXT "Type of file:", IDC_FPROP_TYPE_LABEL, 7, 41, 60, 10
+    EDITTEXT IDC_FPROP_TYPE, 70, 41, 150, 10, ES_READONLY | NOT WS_BORDER | NOT WS_TABSTOP
+    LTEXT "Opens with:", IDC_FPROP_OPENWITH_LABEL, 7, 58, 60, 10
+    ICON "", IDC_FPROP_PROG_ICON, 70, 56, 16, 16, WS_VISIBLE
+    EDITTEXT IDC_FPROP_PROG_NAME, 88, 58, 75, 10, ES_READONLY | NOT WS_BORDER | NOT WS_TABSTOP
+    PUSHBUTTON "&Change...", IDC_FPROP_PROG_CHANGE, 165, 55, 55, 14, WS_CHILD | WS_TABSTOP
 
-    LTEXT "", -1, 5, 65, 230, 1, SS_ETCHEDHORZ
-    LTEXT "Location:", IDC_FPROP_LOCATION_LABEL, 10, 70, 60, 10
-    EDITTEXT IDC_FPROP_LOCATION, 70, 70, 160, 10, ES_READONLY | NOT WS_BORDER | NOT WS_TABSTOP
-    LTEXT "Size:", IDC_FPROP_SIZE_LABEL, 10, 85, 60, 10
-    EDITTEXT IDC_FPROP_SIZE, 70, 85, 160, 10, ES_READONLY | NOT WS_BORDER | NOT WS_TABSTOP
+    LTEXT "", -1, 7, 75, 213, 1, SS_ETCHEDHORZ
+    LTEXT "Location:", IDC_FPROP_LOCATION_LABEL, 7, 83, 60, 10
+    EDITTEXT IDC_FPROP_LOCATION, 70, 83, 150, 10, ES_READONLY | ES_AUTOHSCROLL | NOT WS_BORDER | NOT WS_TABSTOP
+    LTEXT "Size:", IDC_FPROP_SIZE_LABEL, 7, 98, 60, 10
+    EDITTEXT IDC_FPROP_SIZE, 70, 98, 150, 10, ES_READONLY | NOT WS_BORDER | NOT WS_TABSTOP
+    LTEXT "Size on disk:", IDC_FPROP_SIZEONDISK_LABEL, 7, 113, 60, 10
+    EDITTEXT IDC_FPROP_SIZEONDISK, 70, 113, 150, 10, ES_READONLY | NOT WS_BORDER | NOT WS_TABSTOP
 
-    LTEXT "", -1, 5, 100, 230, 1, SS_ETCHEDHORZ
-    LTEXT "Creation date:", IDC_FPROP_CREATED_LABEL, 10, 105, 60, 10
-    EDITTEXT IDC_FPROP_CREATED, 70, 105, 160, 10, ES_READONLY | NOT WS_BORDER | NOT WS_TABSTOP
-    LTEXT "Last modified:", IDC_FPROP_MODIFIED_LABEL, 10, 120, 60, 10
-    EDITTEXT IDC_FPROP_MODIFIED, 70, 120, 160, 10, ES_READONLY | NOT WS_BORDER | NOT WS_TABSTOP
-    LTEXT "Last accessed:", IDC_FPROP_ACCESSED_LABEL, 10, 135, 60, 10
-    EDITTEXT IDC_FPROP_ACCESSED, 70, 135, 160, 10, ES_READONLY | NOT WS_BORDER | NOT WS_TABSTOP
+    LTEXT "", -1, 7, 129, 213, 1, SS_ETCHEDHORZ
+    LTEXT "Created:", IDC_FPROP_CREATED_LABEL, 7, 137, 60, 10
+    EDITTEXT IDC_FPROP_CREATED, 70, 137, 150, 10, ES_READONLY | NOT WS_BORDER | NOT WS_TABSTOP
+    LTEXT "Modified:", IDC_FPROP_MODIFIED_LABEL, 7, 152, 60, 10
+    EDITTEXT IDC_FPROP_MODIFIED, 70, 152, 150, 10, ES_READONLY | NOT WS_BORDER | NOT WS_TABSTOP
+    LTEXT "Accessed:", IDC_FPROP_ACCESSED_LABEL, 7, 167, 60, 10
+    EDITTEXT IDC_FPROP_ACCESSED, 70, 167, 150, 10, ES_READONLY | NOT WS_BORDER | NOT WS_TABSTOP
 
-    LTEXT "", -1, 5, 150, 230, 1, SS_ETCHEDHORZ
-    LTEXT "Attributes:", IDC_FPROP_ATTRIB_LABEL, 10, 155, 60, 10
-    AUTOCHECKBOX "&Read Only", IDC_FPROP_READONLY, 70, 155, 70, 10
-    AUTOCHECKBOX "H&idden", IDC_FPROP_HIDDEN, 70, 170, 70, 10
-    AUTOCHECKBOX "&Archive", IDC_FPROP_ARCHIVE, 70, 185, 70, 10
+    LTEXT "", -1, 7, 183, 213, 1, SS_ETCHEDHORZ
+    LTEXT "Attributes:", IDC_FPROP_ATTRIB_LABEL, 7, 193, 60, 10
+    AUTOCHECKBOX "&Read-only", IDC_FPROP_READONLY, 70, 192, 50, 10
+    AUTOCHECKBOX "H&idden", IDC_FPROP_HIDDEN, 122, 192, 45, 10
+    AUTOCHECKBOX "&Archive", IDC_FPROP_ARCHIVE, 169, 192, 50, 10
 END
 
 LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
