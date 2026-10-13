@@ -796,6 +796,8 @@ static BOOL parse_handle_nonclient_font (struct PARSENONCLIENTSTATE* state,
     if (SUCCEEDED (MSSTYLES_GetFont (lpValue, lpValue + dwValueLen, &lpValue,
         &font)))
     {
+        /* the ini gives points; system fonts are stored in (unscaled) pixels */
+        font.lfHeight = -MulDiv(font.lfHeight, 96, 72);
         switch (iPropertyId)
         {
 	  case TMT_CAPTIONFONT:
