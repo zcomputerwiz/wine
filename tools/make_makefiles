@@ -399,7 +399,7 @@ sub update_wine_inf()
     replace_in_file "loader/wine.inf.in", '^\[NlsFiles\]', '^\[WineSourceDirs\]', join( "\n", @lines );
 }
 
-my $git_dir = $ENV{GIT_DIR} || ".git";
+my $git_dir = $ENV{GIT_DIR} || (-e "../.git" ? "../.git" : ".git");
 die "needs to be run from a git checkout" unless -e $git_dir;
 
 my @all_files = split /\0/, `git ls-files -c -z` or die "cannot get files list";
