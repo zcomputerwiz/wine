@@ -83,12 +83,6 @@ INT WINAPI PickIconDlg(HWND hwndOwner, WCHAR *path, UINT path_len, INT *index)
     return 0xffffffff;
 }
 
-HRESULT WINAPI SHOpenWithDialog(HWND parent, const OPENASINFO *info)
-{
-    FIXME("stub\n");
-    return E_NOTIMPL;
-}
-
 /*************************************************************************
  * RunFileDlgW					[internal]
  *
