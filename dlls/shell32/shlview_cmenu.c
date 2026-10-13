@@ -269,7 +269,9 @@ static HRESULT WINAPI ItemMenu_QueryContextMenu(
 {
     ContextMenu *This = impl_from_IContextMenu3(iface);
     MENUITEMINFOW mi;
+    WCHAR path[MAX_PATH];
     INT uIDMax;
+    UINT pos;
 
     TRACE("(%p)->(%p %d 0x%x 0x%x 0x%x )\n", This, hmenu, indexMenu, idCmdFirst, idCmdLast, uFlags);
 
@@ -300,6 +302,19 @@ static HRESULT WINAPI ItemMenu_QueryContextMenu(
             mi.fType = MFT_SEPARATOR;
             InsertMenuItemW(hmenu, This->verb_count, MF_BYPOSITION, &mi);
         }
+
+        /* Windows XP: Open With after the verbs of a single file */
+        if (This->cidl == 1 && !This->open_with && !_ILIsFolder(This->apidl[0]) && get_item_path(This, path))
+        {
+            This->open_with = open_with_menu_add(hmenu, This->verb_count, idCmdFirst + OPENWITH_ID_OFFSET, path);
+            uIDMax = max(uIDMax, idCmdFirst + OPENWITH_ID_OFFSET + open_with_menu_count(This->open_with));
+        }
+
+        /* Windows XP: Send To and a separator after the verbs */
+        pos = This->verb_count + (This->open_with ? 1 : 0);
+        add_send_to_menu(This, hmenu, pos ? pos + 1 : 0, idCmdFirst);
+        if (This->send_to_count)
+            uIDMax = max(uIDMax, idCmdFirst + SENDTO_ID_OFFSET + This->send_to_count);
 
         SetMenuDefaultItem(hmenu, 0, MF_BYPOSITION);
 
@@ -1323,6 +1338,20 @@ static HRESULT WINAPI ItemMenu_InvokeCommand(
     if (IS_INTRESOURCE(lpcmi->lpVerb))
     {
         unsigned int id = LOWORD(lpcmi->lpVerb);
+
+        if (id >= OPENWITH_ID_OFFSET && id - OPENWITH_ID_OFFSET < open_with_menu_count(This->open_with))
+        {
+            WCHAR path[MAX_PATH];
+
+            if (get_item_path(This, path))
+                open_with_menu_invoke(This->open_with, lpcmi->hwnd, id - OPENWITH_ID_OFFSET, path);
+            return S_OK;
+        }
+        if (id >= SENDTO_ID_OFFSET && id - SENDTO_ID_OFFSET < This->send_to_count)
+        {
+            do_send_to(This, lpcmi->hwnd, id - SENDTO_ID_OFFSET);
+            return S_OK;
+        }
 
         if (id >= VERB_ID_OFFSET && id - VERB_ID_OFFSET < This->verb_count)
         {
