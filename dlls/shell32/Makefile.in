@@ -28,6 +28,8 @@ SOURCES = \
 	folders.c \
 	iconcache.c \
 	new_menu.c \
+	openwith.c \
+	undo.c \
 	pidl.c \
 	recyclebin.c \
 	resources/audio.svg \
