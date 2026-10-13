@@ -804,13 +804,64 @@ BOOL WINAPI BringWindowToTop( HWND hwnd )
 }
 
 
+/* Temporarily use uniform layered alpha. Preserve existing uniform-alpha and
+ * color-key attributes; a per-pixel layered surface cannot safely be converted
+ * to SetLayeredWindowAttributes, so it keeps the immediate show/hide path. */
+static void animate_window_blend( HWND hwnd, DWORD time, DWORD flags )
+{
+    LONG ex_style = GetWindowLongW( hwnd, GWL_EXSTYLE );
+    COLORREF key = 0;
+    BYTE old_alpha = 255, target = 255;
+    DWORD old_flags = 0;
+    BOOL layered = !!(ex_style & WS_EX_LAYERED), hide = !!(flags & AW_HIDE);
+    ULONGLONG start, elapsed;
+    int show = hide ? SW_HIDE : (flags & AW_ACTIVATE) ? SW_SHOW : SW_SHOWNA;
+
+    if (layered && !NtUserGetLayeredWindowAttributes( hwnd, &key, &old_alpha, &old_flags ))
+        goto done;
+    if (old_flags & LWA_ALPHA) target = old_alpha;
+    if (!layered)
+    {
+        SetWindowLongW( hwnd, GWL_EXSTYLE, ex_style | WS_EX_LAYERED );
+        if (!(GetWindowLongW( hwnd, GWL_EXSTYLE ) & WS_EX_LAYERED)) goto done;
+    }
+    if (!NtUserSetLayeredWindowAttributes( hwnd, key, hide ? target : 0, old_flags | LWA_ALPHA ))
+        goto restore;
+    if (!hide)
+    {
+        NtUserShowWindow( hwnd, show );
+        NtUserRedrawWindow( hwnd, NULL, 0, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME |
+                                    RDW_ALLCHILDREN | RDW_UPDATENOW );
+    }
+    start = GetTickCount64();
+    for (;;)
+    {
+        BYTE alpha;
+        elapsed = GetTickCount64() - start;
+        if (elapsed >= time) break;
+        alpha = (ULONGLONG)target * elapsed / time;
+        if (hide) alpha = target - alpha;
+        if (!NtUserSetLayeredWindowAttributes( hwnd, key, alpha, old_flags | LWA_ALPHA )) break;
+        Sleep( min( 16, time - elapsed ) );
+    }
+    NtUserSetLayeredWindowAttributes( hwnd, key, hide ? 0 : target, old_flags | LWA_ALPHA );
+    if (hide) NtUserShowWindow( hwnd, SW_HIDE );
+restore:
+    if (layered) NtUserSetLayeredWindowAttributes( hwnd, key, old_alpha, old_flags );
+    else SetWindowLongW( hwnd, GWL_EXSTYLE, GetWindowLongW( hwnd, GWL_EXSTYLE ) & ~WS_EX_LAYERED );
+done:
+    /* Even on an unsupported window or a failed alpha update, finish with the
+     * same visibility/activation as the nonanimated path. */
+    NtUserShowWindow( hwnd, show );
+    if (!hide) NtUserRedrawWindow( hwnd, NULL, 0, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME |
+                                          RDW_ALLCHILDREN | RDW_UPDATENOW );
+}
+
 /***********************************************************************
  *           AnimateWindow (USER32.@)
  */
 BOOL WINAPI AnimateWindow( HWND hwnd, DWORD time, DWORD flags )
 {
-    FIXME( "partial stub\n" );
-
     /* If trying to show/hide and it's already shown/hidden or invalid window,
      * fail with invalid parameter. */
     if (!IsWindow( hwnd ) || (!(flags & AW_HIDE)) == IsWindowVisible( hwnd ))
@@ -819,7 +870,12 @@ BOOL WINAPI AnimateWindow( HWND hwnd, DWORD time, DWORD flags )
         return FALSE;
     }
 
-    NtUserShowWindow( hwnd, (flags & AW_HIDE) ? SW_HIDE : ((flags & AW_ACTIVATE) ? SW_SHOW : SW_SHOWNA) );
+    if ((flags & AW_BLEND) && !(flags & AW_SLIDE)) animate_window_blend( hwnd, time, flags );
+    else
+    {
+        FIXME( "partial stub for flags %#lx\n", flags );
+        NtUserShowWindow( hwnd, (flags & AW_HIDE) ? SW_HIDE : ((flags & AW_ACTIVATE) ? SW_SHOW : SW_SHOWNA) );
+    }
     return TRUE;
 }
 
