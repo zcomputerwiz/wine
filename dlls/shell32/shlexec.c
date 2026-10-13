@@ -2174,22 +2174,6 @@ void WINAPI ShellExec_RunDLLA(HWND hwnd, HINSTANCE instance, CHAR *cmdline, int 
 }
 
 /*************************************************************************
- * OpenAs_RunDLLA          [SHELL32.@]
- */
-void WINAPI OpenAs_RunDLLA(HWND hwnd, HINSTANCE hinst, LPCSTR cmdline, int cmdshow)
-{
-    FIXME("%p, %p, %s, %d\n", hwnd, hinst, debugstr_a(cmdline), cmdshow);
-}
-
-/*************************************************************************
- * OpenAs_RunDLLW          [SHELL32.@]
- */
-void WINAPI OpenAs_RunDLLW(HWND hwnd, HINSTANCE hinst, LPCWSTR cmdline, int cmdshow)
-{
-    FIXME("%p, %p, %s, %d\n", hwnd, hinst, debugstr_w(cmdline), cmdshow);
-}
-
-/*************************************************************************
  * RegenerateUserEnvironment          [SHELL32.@]
  */
 BOOL WINAPI RegenerateUserEnvironment(WCHAR *wunknown, BOOL bunknown)
