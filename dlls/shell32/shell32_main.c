@@ -281,7 +281,7 @@ DWORD_PTR WINAPI SHGetFileInfoW(LPCWSTR path,DWORD dwFileAttributes,
         else
         {
             if (dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-                lstrcatW (psfi->szTypeName, L"Folder");
+                lstrcatW (psfi->szTypeName, L"File Folder");
             else 
             {
                 WCHAR sTemp[64];
