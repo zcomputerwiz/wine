@@ -1396,6 +1396,9 @@ static HRESULT WINAPI ItemMenu_InvokeCommand(
         case FCIDM_SHVIEW_INSERT:
             do_paste(This, lpcmi->hwnd);
             break;
+        case FCIDM_SHVIEW_CREATELINK:
+            do_create_shortcuts(This);
+            break;
         case FCIDM_SHVIEW_PROPERTIES:
             TRACE("Verb FCIDM_SHVIEW_PROPERTIES\n");
             DoOpenProperties(This, lpcmi->hwnd);
@@ -1416,6 +1419,8 @@ static HRESULT WINAPI ItemMenu_InvokeCommand(
             do_copy(This, lpcmi->hwnd, DROPEFFECT_MOVE);
         else if (!strcmp(lpcmi->lpVerb, "paste"))
             do_paste(This, lpcmi->hwnd);
+        else if (!strcmp(lpcmi->lpVerb, "link"))
+            do_create_shortcuts(This);
         else if (strcmp(lpcmi->lpVerb,"properties")==0)
             DoOpenProperties(This, lpcmi->hwnd);
         else {
