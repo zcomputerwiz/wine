@@ -4855,6 +4855,30 @@ static BOOL LISTVIEW_FillBkgnd(const LISTVIEW_INFO *infoPtr, HDC hdc, const RECT
     return TRUE;
 }
 
+/* The text of a tile: the name, then its subitems in gray, one line each */
+static void LISTVIEW_DrawTileText(LISTVIEW_INFO *infoPtr, const LVITEMW *item, const NMLVCUSTOMDRAW *nmlvcd, const RECT *label)
+{
+    UINT columns[4], count = tile_columns(infoPtr, item->iItem, columns), i;
+    const UINT format = DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS;
+    WCHAR text[DISP_TEXT_SIZE];
+    COLORREF color = GetTextColor(nmlvcd->nmcd.hdc);
+    BOOL selected = (item->state & LVIS_SELECTED) && (infoPtr->bFocus || (infoPtr->dwStyle & LVS_SHOWSELALWAYS));
+    RECT line = *label;
+
+    line.left += 1;
+    line.top += 1;
+    line.bottom = line.top + infoPtr->ntmHeight;
+    DrawTextW(nmlvcd->nmcd.hdc, item->pszText, -1, &line, format);
+    if (!selected) SetTextColor(nmlvcd->nmcd.hdc, comctl32_color.clrGrayText);
+    for (i = 0; i < count; i++)
+    {
+        OffsetRect(&line, 0, infoPtr->ntmHeight);
+        tile_line_text(infoPtr, item->iItem, columns[i], text, ARRAY_SIZE(text));
+        DrawTextW(nmlvcd->nmcd.hdc, text, -1, &line, format);
+    }
+    SetTextColor(nmlvcd->nmcd.hdc, color);
+}
+
 /* Draw main item or subitem */
 static void LISTVIEW_DrawItemPart(LISTVIEW_INFO *infoPtr, LVITEMW *item, const NMLVCUSTOMDRAW *nmlvcd, const POINT *pos)
 {
