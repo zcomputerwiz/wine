@@ -478,8 +478,13 @@ static void set_input_focus( struct x11drv_win_data *data )
         timestamp = CurrentTime;
 
     /* Set X focus and install colormap */
-    changes.stack_mode = Above;
-    XConfigureWindow( data->display, data->whole_window, CWStackMode, &changes );
+    /* WineExplorer: in a virtual desktop the stacking follows the Win32 z-order (sync_window_position); raising here
+     * would put the window above topmost ones such as the taskbar */
+    if (!is_virtual_desktop())
+    {
+        changes.stack_mode = Above;
+        XConfigureWindow( data->display, data->whole_window, CWStackMode, &changes );
+    }
 
     if (data->embedder)
         xembed_request_focus( data->display, data->embedder, timestamp );
@@ -1241,7 +1246,7 @@ static BOOL X11DRV_PropertyNotify( HWND hwnd, XEvent *xev )
 void X11DRV_ActivateWindow( HWND hwnd, HWND previous )
 {
     struct x11drv_win_data *data;
-    BOOL flush = FALSE;
+    BOOL flush = FALSE, raise = FALSE;
 
     if (!is_virtual_desktop())
     {
@@ -1256,10 +1261,15 @@ void X11DRV_ActivateWindow( HWND hwnd, HWND previous )
             set_input_focus( data );
             flush = TRUE;
         }
+        raise = is_virtual_desktop() && !data->managed && !data->embedded;
         release_win_data( data );
     }
 
     if (flush) XFlush( x11drv_thread_data()->display );
+    /* WineExplorer: Windows brings the window that becomes active to the top; in a virtual desktop no window manager
+     * does it and set_input_focus no longer raises in X, so raise it in the Win32 z-order, which the X stacking
+     * follows (below topmost windows such as the taskbar) */
+    if (raise) NtUserSetWindowPos( hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE );
 }
 
 static void drag_drop_enter( UINT entries_size, struct format_entry *entries )
