@@ -86,6 +86,7 @@ HRESULT WINAPI OpenThemeFile(LPCWSTR pszThemeFileName, LPCWSTR pszColorName,
                              LPCWSTR pszSizeName, HTHEMEFILE *hThemeFile,
                              DWORD unknown);
 HRESULT WINAPI CloseThemeFile(HTHEMEFILE hThemeFile);
+HTHEME WINAPI OpenThemeDataFromFile(HTHEMEFILE file, HWND hwnd, LPCWSTR classes, DWORD flags);
 HRESULT WINAPI ApplyTheme(HTHEMEFILE hThemeFile, char *unknown, HWND hWnd);
 HRESULT WINAPI GetThemeDefaults(LPCWSTR pszThemeFileName, LPWSTR pszColorName,
                                 DWORD dwColorNameLen, LPWSTR pszSizeName,
