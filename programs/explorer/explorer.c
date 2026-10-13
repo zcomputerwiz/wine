@@ -22,19 +22,12 @@
 
 #define COBJMACROS
 
-/* must precede every other header so the GUIDs used across explorer get defined here */
-#include <initguid.h>
 #include "wine/debug.h"
 #include "explorer_private.h"
+#include "wexshell.h"
 #include "resource.h"
-#include "browser.h"
-#include "search_ui.h"
-#include "shellres.h"
-#include "wlan_dialog.h"
-#include "wlan_status.h"
-#include "net_props.h"
-#include "power_mgmt.h"
 
+#include <initguid.h>
 #include <windows.h>
 #include <shellapi.h>
 #include <shobjidl.h>
@@ -46,6 +39,11 @@
 WINE_DEFAULT_DEBUG_CHANNEL(explorer);
 
 #define EXPLORER_INFO_INDEX 0
+
+#define NAV_TOOLBAR_HEIGHT 30
+#define PATHBOX_HEIGHT 240
+static int nav_toolbar_height;
+static int pathbox_height;
 
 #define DEFAULT_WIDTH 640
 #define DEFAULT_HEIGHT 480
@@ -60,6 +58,24 @@ typedef struct parametersTAG {
     WCHAR   root[MAX_PATH];
     WCHAR   selection[MAX_PATH];
 } parameters_struct;
+
+typedef struct
+{
+    IExplorerBrowser *browser;
+    HWND main_window,path_box;
+    INT rebar_height;
+    LPITEMIDLIST pidl;
+    IImageList *icon_list;
+    DWORD advise_cookie;
+
+    IShellWindows *sw;
+    LONG sw_cookie;
+} explorer_info;
+
+enum
+{
+    BACK_BUTTON,FORWARD_BUTTON,UP_BUTTON
+};
 
 static void variant_from_pidl(VARIANT *var, const ITEMIDLIST *pidl)
 {
@@ -244,98 +260,6 @@ static void update_path_box(explorer_info *info)
     CoTaskMemFree(main_item.pszText);
 }
 
-int WINAPI Shell_GetCachedImageIndexW(const WCHAR *path, int index, UINT flags);
-
-/* "Search Results" in the title, the address box and the window icon, like Windows' search folder */
-static void show_search_title(explorer_info *info)
-{
-    COMBOBOXEXITEMW item = { CBEIF_TEXT | CBEIF_IMAGE | CBEIF_SELECTEDIMAGE };
-    WCHAR srchui[MAX_PATH];
-    HICON icon = NULL, old;
-    HMODULE module;
-    int image = -1;
-
-    GetWindowsDirectoryW(srchui, MAX_PATH);
-    lstrcatW(srchui, L"\\srchasst\\srchui.dll");
-    if (GetFileAttributesW(srchui) != INVALID_FILE_ATTRIBUTES) image = Shell_GetCachedImageIndexW(srchui, -24000, 0);
-    if (image < 0) image = Shell_GetCachedImageIndexW(L"shell32.dll", -23, 0);
-    SetWindowTextW(info->main_window, L"Search Results");
-    item.iItem = -1;
-    item.pszText = (WCHAR *)L"Search Results";
-    item.iImage = item.iSelectedImage = max(image, 0);
-    SendMessageW(info->path_box, CBEM_SETITEMW, 0, (LPARAM)&item);
-    if ((module = LoadLibraryExW(srchui, NULL, LOAD_LIBRARY_AS_DATAFILE)))
-    {
-        icon = LoadImageW(module, MAKEINTRESOURCEW(24000), IMAGE_ICON, 16, 16, 0);
-        FreeLibrary(module);
-    }
-    if (!icon) icon = shellres_icon(23, 16);
-    if (icon && (old = (HICON)SendMessageW(info->main_window, WM_SETICON, ICON_SMALL, (LPARAM)icon))) DestroyIcon(old);
-}
-
-/* the title, address and icon of the folder being shown */
-static void show_folder_title(explorer_info *info)
-{
-    IShellFolder *parent;
-    PCUITEMID_CHILD child_pidl;
-    SHFILEINFOW sfi = {0};
-    STRRET strret;
-    WCHAR *name;
-
-    if (!info->pidl) return;
-    update_path_box(info);
-    if (SHGetFileInfoW((const WCHAR *)info->pidl, 0, &sfi, sizeof(sfi), SHGFI_PIDL | SHGFI_ICON | SHGFI_SMALLICON))
-    {
-        HICON old = (HICON)SendMessageW(info->main_window, WM_SETICON, ICON_SMALL, (LPARAM)sfi.hIcon);
-        if (old) DestroyIcon(old);
-    }
-    if (SUCCEEDED(SHBindToParent(info->pidl, &IID_IShellFolder, (void **)&parent, &child_pidl)))
-    {
-        if (SUCCEEDED(IShellFolder_GetDisplayNameOf(parent, child_pidl, SHGDN_FORADDRESSBAR, &strret)) &&
-            SUCCEEDED(StrRetToStrW(&strret, child_pidl, &name)))
-        {
-            SetWindowTextW(info->main_window, name);
-            CoTaskMemFree(name);
-        }
-        IShellFolder_Release(parent);
-    }
-}
-
-static void relayout_window(explorer_info *info)
-{
-    RECT rc;
-    GetClientRect(info->main_window, &rc);
-    browser_layout(info, rc.right, rc.bottom);
-}
-
-/* The Search button: the Search Companion on the left, looking in the folder shown */
-void browser_search(explorer_info *info, BOOL show)
-{
-    WCHAR folder[MAX_PATH];
-
-    if (!info->search)
-    {
-        if (!show) return;
-        if (!info->pidl || !view_folder_path(info, folder)) folder[0] = 0;
-        info->search = search_ui_create(info->main_window, folder[0] ? folder : NULL, FALSE);
-        if (info->show_folders) browser_command(info, FOLDERS_BUTTON);   /* one Explorer bar at a time */
-    }
-    else search_ui_show_pane(info->search, show);
-    relayout_window(info);
-    browser_update_ui(info);
-}
-
-/* Leave the search: the folder comes back with its title */
-void browser_exit_search(explorer_info *info)
-{
-    if (!info->search) return;
-    search_ui_destroy(info->search);
-    info->search = NULL;
-    show_folder_title(info);
-    relayout_window(info);
-    browser_update_ui(info);
-}
-
 static HRESULT WINAPI IExplorerBrowserEventsImpl_fnOnNavigationComplete(IExplorerBrowserEvents *iface, PCIDLIST_ABSOLUTE pidl)
 {
     IExplorerBrowserEventsImpl *This = impl_from_IExplorerBrowserEvents(iface);
@@ -356,46 +280,7 @@ static HRESULT WINAPI IExplorerBrowserEventsImpl_fnOnNavigationComplete(IExplore
 
     ILFree(This->info->pidl);
     This->info->pidl = ILClone(pidl);
-    if (This->info->search_started)
-    {
-        /* opened as Search Results: the folder behind it is not shown */
-        This->info->search_started = FALSE;
-        update_path_box(This->info);
-        browser_navigation_state(This->info, FALSE);
-        show_search_title(This->info);
-        return S_OK;
-    }
-    /* going to a folder while the results show: the results make way, the Search Companion stays */
-    if (search_ui_results_visible(This->info->search))
-    {
-        if (search_ui_pane_visible(This->info->search))
-        {
-            SEARCH_UI *ui = This->info->search;
-            This->info->search = NULL;
-            search_ui_destroy(ui);
-            browser_search(This->info, TRUE);
-        }
-        else browser_exit_search(This->info);
-    }
     update_path_box(This->info);
-    browser_navigation_state(This->info, FALSE);
-    browser_apply_folder_view(This->info);
-    taskpane_set_watermark(This->info);
-    if (This->info->search)
-    {
-        /* the Search Companion looks in the folder shown */
-        WCHAR folder[MAX_PATH];
-        search_ui_set_scope(This->info->search, view_folder_path(This->info, folder) ? folder : NULL);
-    }
-    {
-        /* the window shows the icon of the folder it is in */
-        SHFILEINFOW sfi = {0};
-        if (SHGetFileInfoW((const WCHAR *)pidl, 0, &sfi, sizeof(sfi), SHGFI_PIDL | SHGFI_ICON | SHGFI_SMALLICON))
-        {
-            HICON old = (HICON)SendMessageW(This->info->main_window, WM_SETICON, ICON_SMALL, (LPARAM)sfi.hIcon);
-            if (old) DestroyIcon(old);
-        }
-    }
 
     hres = SHBindToParent(pidl, &IID_IShellFolder, (void **)&parent, &child_pidl);
     if (SUCCEEDED(hres))
@@ -422,8 +307,6 @@ static HRESULT WINAPI IExplorerBrowserEventsImpl_fnOnNavigationFailed(IExplorerB
 
 static HRESULT WINAPI IExplorerBrowserEventsImpl_fnOnNavigationPending(IExplorerBrowserEvents *iface, PCIDLIST_ABSOLUTE pidl)
 {
-    IExplorerBrowserEventsImpl *This = impl_from_IExplorerBrowserEvents(iface);
-    browser_navigation_state(This->info, TRUE);
     return S_OK;
 }
 
@@ -485,17 +368,21 @@ static IShellFolder *get_starting_shell_folder(WCHAR *path)
 static void make_explorer_window(parameters_struct *params)
 {
     RECT rect;
+    HWND rebar,nav_toolbar;
     FOLDERSETTINGS fs;
     IExplorerBrowserEvents *events;
     explorer_info *info;
     HRESULT hres;
     WCHAR explorer_title[100];
     WCHAR pathbox_label[50];
+    TBADDBITMAP bitmap_info;
+    TBBUTTON nav_buttons[3];
+    int hist_offset,view_offset;
+    REBARBANDINFOW band_info;
     VARIANT var, empty_var;
     IShellFolder *folder;
     IDispatch *dispatch;
     WCHAR *path = NULL;
-    BOOL search_window = FALSE;
     IShellWindows *sw;
     ITEMIDLIST *pidl;
     UINT dpix, dpiy;
@@ -507,24 +394,11 @@ static void make_explorer_window(parameters_struct *params)
     CoCreateInstance(&CLSID_ShellWindows, NULL, CLSCTX_LOCAL_SERVER,
             &IID_IShellWindows, (void **)&sw);
 
-    if (!wcsicmp(params->root, FIND_FOLDER_PATH))
-    {
-        /* "Search Results" (SHFindFiles, Start > Search): the Search Companion over the desktop */
-        params->root[0] = 0;
-        search_window = TRUE;
-    }
     if (params->root[0])
     {
-        if (params->root[0] == ':' && params->root[1] == ':')
-        {
-            path = wcsdup(params->root);
-        }
-        else
-        {
-            size = GetFullPathNameW(params->root, 0, NULL, NULL);
-            path = malloc( size * sizeof(WCHAR) );
-            GetFullPathNameW(params->root, size, path, NULL);
-        }
+        size = GetFullPathNameW(params->root, 0, NULL, NULL);
+        path = malloc( size * sizeof(WCHAR) );
+        GetFullPathNameW(params->root, size, path, NULL);
     }
 
     if (sw && path)
@@ -552,6 +426,8 @@ static void make_explorer_window(parameters_struct *params)
         }
     }
 
+    memset(nav_buttons,0,sizeof(nav_buttons));
+
     LoadStringW(explorer_hInstance,IDS_EXPLORER_TITLE,explorer_title, ARRAY_SIZE( explorer_title ));
     LoadStringW(explorer_hInstance,IDS_PATHBOX_LABEL,pathbox_label, ARRAY_SIZE( pathbox_label ));
 
@@ -559,6 +435,8 @@ static void make_explorer_window(parameters_struct *params)
     dpix = GetDeviceCaps(hdc, LOGPIXELSX);
     dpiy = GetDeviceCaps(hdc, LOGPIXELSY);
     ReleaseDC(0, hdc);
+    nav_toolbar_height = MulDiv(NAV_TOOLBAR_HEIGHT, dpiy, USER_DEFAULT_SCREEN_DPI);
+    pathbox_height = MulDiv(PATHBOX_HEIGHT, dpiy, USER_DEFAULT_SCREEN_DPI);
     default_width = MulDiv(DEFAULT_WIDTH, dpix, USER_DEFAULT_SCREEN_DPI);
     default_height = MulDiv(DEFAULT_HEIGHT, dpiy, USER_DEFAULT_SCREEN_DPI);
 
@@ -582,9 +460,9 @@ static void make_explorer_window(parameters_struct *params)
     }
     info->rebar_height=0;
     info->main_window
-        = CreateWindowW(L"CabinetWClass",explorer_title,WS_OVERLAPPEDWINDOW,
+        = CreateWindowW(L"ExplorerWClass",explorer_title,WS_OVERLAPPEDWINDOW,
                         CW_USEDEFAULT,CW_USEDEFAULT,default_width,
-                        default_height,NULL,browser_create_menu(),explorer_hInstance,NULL);
+                        default_height,NULL,NULL,explorer_hInstance,NULL);
 
     if (sw)
     {
@@ -597,27 +475,69 @@ static void make_explorer_window(parameters_struct *params)
 
     SetRect(&rect, 0, 0, default_width, default_height);
     IExplorerBrowser_Initialize(info->browser,info->main_window,&rect,&fs);
-    IExplorerBrowser_SetOptions(info->browser,EBO_NONE);
+    IExplorerBrowser_SetOptions(info->browser,EBO_SHOWFRAMES);
     SetWindowLongPtrW(info->main_window,EXPLORER_INFO_INDEX,(LONG_PTR)info);
 
-    browser_create_bars(info, pathbox_label);
+    /*setup navbar*/
+    rebar = CreateWindowExW(WS_EX_TOOLWINDOW,REBARCLASSNAMEW,NULL,
+                            WS_CHILD|WS_VISIBLE|RBS_VARHEIGHT|CCS_TOP|CCS_NODIVIDER,
+                            0,0,0,0,info->main_window,NULL,explorer_hInstance,NULL);
+    nav_toolbar
+        = CreateWindowExW(TBSTYLE_EX_MIXEDBUTTONS,TOOLBARCLASSNAMEW,NULL,
+                          WS_CHILD|WS_VISIBLE|TBSTYLE_FLAT,0,0,0,0,rebar,NULL,
+                          explorer_hInstance,NULL);
+
+    bitmap_info.hInst = HINST_COMMCTRL;
+    bitmap_info.nID = IDB_HIST_LARGE_COLOR;
+    hist_offset= SendMessageW(nav_toolbar,TB_ADDBITMAP,0,(LPARAM)&bitmap_info);
+    bitmap_info.nID = IDB_VIEW_LARGE_COLOR;
+    view_offset= SendMessageW(nav_toolbar,TB_ADDBITMAP,0,(LPARAM)&bitmap_info);
+
+    nav_buttons[0].iBitmap=hist_offset+HIST_BACK;
+    nav_buttons[0].idCommand=BACK_BUTTON;
+    nav_buttons[0].fsState=TBSTATE_ENABLED;
+    nav_buttons[0].fsStyle=BTNS_BUTTON|BTNS_AUTOSIZE;
+    nav_buttons[1].iBitmap=hist_offset+HIST_FORWARD;
+    nav_buttons[1].idCommand=FORWARD_BUTTON;
+    nav_buttons[1].fsState=TBSTATE_ENABLED;
+    nav_buttons[1].fsStyle=BTNS_BUTTON|BTNS_AUTOSIZE;
+    nav_buttons[2].iBitmap=view_offset+VIEW_PARENTFOLDER;
+    nav_buttons[2].idCommand=UP_BUTTON;
+    nav_buttons[2].fsState=TBSTATE_ENABLED;
+    nav_buttons[2].fsStyle=BTNS_BUTTON|BTNS_AUTOSIZE;
+    SendMessageW(nav_toolbar,TB_BUTTONSTRUCTSIZE,sizeof(TBBUTTON),0);
+    SendMessageW(nav_toolbar,TB_ADDBUTTONSW,ARRAY_SIZE( nav_buttons ),(LPARAM)nav_buttons);
+
+    band_info.cbSize = sizeof(band_info);
+    band_info.fMask = RBBIM_STYLE|RBBIM_CHILD|RBBIM_CHILDSIZE|RBBIM_SIZE;
+    band_info.hwndChild = nav_toolbar;
+    band_info.fStyle=RBBS_GRIPPERALWAYS|RBBS_CHILDEDGE;
+    band_info.cyChild=nav_toolbar_height;
+    band_info.cx=0;
+    band_info.cyMinChild=nav_toolbar_height;
+    band_info.cxMinChild=0;
+    SendMessageW(rebar,RB_INSERTBANDW,-1,(LPARAM)&band_info);
+    info->path_box = CreateWindowW(WC_COMBOBOXEXW,L"",
+                                   WS_CHILD | WS_VISIBLE | CBS_DROPDOWN,
+                                   0,0,default_width,pathbox_height,rebar,NULL,
+                                   explorer_hInstance,NULL);
+    GetWindowRect(info->path_box, &rect);
+    band_info.cyChild = rect.bottom - rect.top;
+    band_info.cx=0;
+    band_info.cyMinChild = rect.bottom - rect.top;
+    band_info.cxMinChild=0;
+    band_info.fMask|=RBBIM_TEXT;
+    band_info.lpText=pathbox_label;
+    band_info.fStyle|=RBBS_BREAK;
+    band_info.hwndChild=info->path_box;
+    SendMessageW(rebar,RB_INSERTBANDW,-1,(LPARAM)&band_info);
     events = make_explorer_events(info);
     IExplorerBrowser_Advise(info->browser,events,&info->advise_cookie);
 
-    if (search_window)
-    {
-        info->search_started = TRUE;
-        info->search = search_ui_create(info->main_window, NULL, TRUE);
-    }
     folder = get_starting_shell_folder(path);
     IExplorerBrowser_BrowseToObject(info->browser, (IUnknown *)folder, SBSP_ABSOLUTE);
     IShellFolder_Release(folder);
     free(path);
-    if (search_window)
-    {
-        show_search_title(info);
-        relayout_window(info);
-    }
 
     ShowWindow(info->main_window,SW_SHOWDEFAULT);
     UpdateWindow(info->main_window);
@@ -625,14 +545,6 @@ static void make_explorer_window(parameters_struct *params)
 
     while (GetMessageW(&msg, NULL, 0, 0))
     {
-        /* F3 and Ctrl+F open the Search Companion, like in Windows Explorer */
-        if (msg.message == WM_KEYDOWN && GetAncestor(msg.hwnd, GA_ROOT) == info->main_window &&
-            (msg.wParam == VK_F3 || (msg.wParam == 'F' && GetKeyState(VK_CONTROL) < 0 && GetKeyState(VK_MENU) >= 0)))
-        {
-            browser_search(info, TRUE);
-            continue;
-        }
-        if (search_ui_translate(info->search, &msg)) continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
@@ -640,7 +552,12 @@ static void make_explorer_window(parameters_struct *params)
 
 static void update_window_size(explorer_info *info, int height, int width)
 {
-    browser_layout(info, width, height);
+    RECT new_rect;
+    new_rect.left = 0;
+    new_rect.top = info->rebar_height;
+    new_rect.right = width;
+    new_rect.bottom = height;
+    IExplorerBrowser_SetRect(info->browser,NULL,new_rect);
 }
 
 static void do_exit(int code)
@@ -688,10 +605,15 @@ static LRESULT explorer_on_end_edit(explorer_info *info,NMCBEENDEDITW *edit_info
 
 static LRESULT update_rebar_size(explorer_info* info,NMRBAUTOSIZE *size_info)
 {
-    RECT client;
+    RECT new_rect;
+    RECT window_rect;
     info->rebar_height = size_info->rcTarget.bottom-size_info->rcTarget.top;
-    GetClientRect(info->main_window,&client);
-    browser_layout(info, client.right, client.bottom);
+    GetWindowRect(info->main_window,&window_rect);
+    new_rect.left = 0;
+    new_rect.top = info->rebar_height;
+    new_rect.right = window_rect.right-window_rect.left;
+    new_rect.bottom = window_rect.bottom-window_rect.top;
+    IExplorerBrowser_SetRect(info->browser,NULL,new_rect);
     return 0;
 }
 
@@ -732,9 +654,6 @@ static LRESULT explorer_on_notify(explorer_info* info,NMHDR* notification)
         }
     case RBN_AUTOSIZE:
         return update_rebar_size(info,(NMRBAUTOSIZE*)notification);
-    case TBN_DROPDOWN:
-    case TTN_GETDISPINFOW:
-        return browser_toolbar_notify(info, notification);
     default:
         break;
     }
@@ -789,20 +708,7 @@ static LRESULT CALLBACK explorer_wnd_proc(HWND hwnd, UINT uMsg, WPARAM wParam, L
         browser = info->browser;
     switch(uMsg)
     {
-    case WM_SEARCHUI_CHANGED:
-        if (!info) break;
-        if (wParam == SEARCHUI_RESULTS_SHOWN && search_ui_results_visible(info->search)) show_search_title(info);
-        if (wParam == SEARCHUI_PANE_CLOSED && !search_ui_results_visible(info->search))
-        {
-            browser_exit_search(info);
-            break;
-        }
-        relayout_window(info);
-        browser_update_ui(info);
-        break;
     case WM_DESTROY:
-        search_ui_destroy(info->search);
-        info->search = NULL;
         if(info->sw)
         {
             IShellWindows_Revoke(info->sw, info->sw_cookie);
@@ -823,18 +729,20 @@ static LRESULT CALLBACK explorer_wnd_proc(HWND hwnd, UINT uMsg, WPARAM wParam, L
     case WM_NOTIFY:
         return explorer_on_notify(info,(NMHDR*)lParam);
     case WM_COMMAND:
-        if (LOWORD(wParam) >= BACK_BUTTON && HIWORD(wParam) == BN_CLICKED)   /* also menus: both are 0 */
-            browser_command(info, LOWORD(wParam));
-        break;
-    case WM_INITMENUPOPUP:
-        browser_init_menu_popup(info, (HMENU)wParam);
-        break;
-    case WM_TIMER:
-        if (wParam == IDT_BROWSER_STATUS) browser_update_ui(info);
-        else if (wParam == IDT_BROWSER_BRAND && info->navigating)
+        if(HIWORD(wParam)==BN_CLICKED)
         {
-            info->brand_frame++;
-            InvalidateRect(info->brand, NULL, FALSE);
+            switch(LOWORD(wParam))
+            {
+            case BACK_BUTTON:
+                IExplorerBrowser_BrowseToObject(browser,NULL,SBSP_NAVIGATEBACK);
+                break;
+            case FORWARD_BUTTON:
+                IExplorerBrowser_BrowseToObject(browser,NULL,SBSP_NAVIGATEFORWARD);
+                break;
+            case UP_BUTTON:
+                IExplorerBrowser_BrowseToObject(browser,NULL,SBSP_PARENT);
+                break;
+            }
         }
         break;
     case WM_APPCOMMAND:
@@ -849,17 +757,8 @@ static LRESULT CALLBACK explorer_wnd_proc(HWND hwnd, UINT uMsg, WPARAM wParam, L
         }
         break;
     case WM_SIZE:
-        if (info) update_window_size(info,HIWORD(lParam),LOWORD(lParam));
+        update_window_size(info,HIWORD(lParam),LOWORD(lParam));
         break;
-    case WM_THEMECHANGED:
-        /* a new theme can bring other shell icons (Shell Icons key): reload them in place and show them */
-        shellres_reset();
-        shellres_reload_shell_icons();
-        if (!info) {}
-        else if (info->search && search_ui_results_visible(info->search)) show_search_title(info);
-        else show_folder_title(info);
-        RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
-        return DefWindowProcW(hwnd, uMsg, wParam, lParam);
     case WM_COPYDATA:
         return handle_copydata(info, (const COPYDATASTRUCT *)lParam);
     default:
@@ -881,8 +780,7 @@ static void register_explorer_window_class(void)
     window_class.hCursor = NULL;
     window_class.hbrBackground = (HBRUSH)COLOR_BACKGROUND;
     window_class.lpszMenuName = NULL;
-    window_class.lpszClassName = L"CabinetWClass";
-    window_class.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    window_class.lpszClassName = L"ExplorerWClass";
     window_class.hIconSm = NULL;
     RegisterClassExW(&window_class);
 }
@@ -976,11 +874,6 @@ static void parse_command_line(LPWSTR commandline,parameters_struct *parameters)
             parameters->explorer_mode = TRUE;
             p += len_e;
         }
-        else if (wcsnicmp(p, L"/e", 2) == 0 && (p[2] == 0 || iswspace(p[2])))
-        {
-            parameters->explorer_mode = TRUE;
-            p += 2;
-        }
         else if (wcsnicmp(p, arg_cd, len_cd )==0)
         {
             p += len_cd;
@@ -1010,39 +903,6 @@ static void parse_command_line(LPWSTR commandline,parameters_struct *parameters)
             p += len_desktop_quotes;
             manage_desktop( p );  /* the rest of the command line is handled by desktop mode */
         }
-        else if (wcsnicmp(p, L"/theme", 6) == 0 && (p[6] == ' ' || p[6] == '=' || p[6] == ':'))
-        {
-            /* explorer /theme <file.theme>: apply a Windows theme file (visual style, colors, sounds, icons) */
-            THEME_CONFIG cfg;
-            WCHAR file[MAX_PATH];
-            p += 7;
-            while (*p == ' ') p++;
-            copy_path_string(file, p);
-            if (theme_load_file(file, &cfg)) theme_apply(&cfg);
-            ExitProcess(0);
-        }
-        else if (wcsnicmp(p, L"/turnoff", 8) == 0 || wcsnicmp(p, L"-turnoff", 8) == 0)
-        {
-            /* the Welcome screen's Turn off computer (logonui.exe) */
-            power_mgmt_show_shutdown_dialog(NULL);
-            ExitProcess(0);
-        }
-        else if (wcsnicmp(p, L"/wlan", 5) == 0 || wcsnicmp(p, L"-wlan", 5) == 0)
-        {
-            wlan_dialog_show(NULL);
-            ExitProcess(0);
-        }
-        else if (wcsnicmp(p, L"/netstatus", 10) == 0 || wcsnicmp(p, L"-netstatus", 10) == 0)
-        {
-            wlan_status_show(NULL);
-            ExitProcess(0);
-        }
-        else if (wcsnicmp(p, L"/netprops", 9) == 0 || wcsnicmp(p, L"-netprops", 9) == 0 ||
-                 wcsnicmp(p, L"/lanprops", 9) == 0 || wcsnicmp(p, L"-lanprops", 9) == 0)
-        {
-            net_props_show(NULL);
-            ExitProcess(0);
-        }
         else
         {
             /* left over command line is generally the path to be opened */
@@ -1062,6 +922,10 @@ int WINAPI wWinMain(HINSTANCE hinstance,
     HRESULT hres;
     INITCOMMONCONTROLSEX init_info;
 
+    HMODULE plugin = LoadLibraryW(L"wexshell.dll");
+    WEX_SHELL_COMMAND command = plugin ? (WEX_SHELL_COMMAND)GetProcAddress(plugin, "WexShellCommand") : NULL;
+    if (command && command(WEX_SHELL_VERSION, cmdline, cmdshow)) return 0;
+
     memset(&parameters,0,sizeof(parameters));
     explorer_hInstance = hinstance;
     parse_command_line(cmdline,&parameters);
@@ -1075,8 +939,7 @@ int WINAPI wWinMain(HINSTANCE hinstance,
         if(ShellExecuteW(NULL,NULL,parameters.root,NULL,NULL,SW_SHOWDEFAULT) > (HINSTANCE)32)
             ExitProcess(EXIT_SUCCESS);
     init_info.dwSize = sizeof(INITCOMMONCONTROLSEX);
-    init_info.dwICC = ICC_USEREX_CLASSES | ICC_BAR_CLASSES | ICC_COOL_CLASSES | ICC_DATE_CLASSES | ICC_UPDOWN_CLASS |
-                      ICC_LISTVIEW_CLASSES;
+    init_info.dwICC = ICC_USEREX_CLASSES | ICC_BAR_CLASSES | ICC_COOL_CLASSES;
     if(!InitCommonControlsEx(&init_info))
     {
         ERR( "Could not initialize Comctl\n" );

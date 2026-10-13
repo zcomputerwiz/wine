@@ -29,25 +29,11 @@
 #include <wine/list.h>
 
 #include "explorer_private.h"
-#include "shellres.h"
-#include "notifyprops.h"
-#include "desktop_view.h"
-#include "shellfolders.h"
 #include "resource.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(systray);
 
 #define TRAY_MINIMIZE_ALL 419
-
-/* the Windows key shortcuts of the taskbar, as on Windows XP (ids as in ReactOS) */
-#define IDHK_RUN            0x1f4
-#define IDHK_MINIMIZE_ALL   0x1f5
-#define IDHK_RESTORE_ALL    0x1f6
-#define IDHK_EXPLORE        0x1f8
-#define IDHK_FIND           0x1f9
-#define IDHK_SYS_PROPERTIES 0x1fd
-#define IDHK_DESKTOP        0x1fe
-#define IDHK_LOCK           0x1ff
 #define TRAY_MINIMIZE_ALL_UNDO 416
 
 struct notify_data_icon
@@ -104,9 +90,6 @@ struct icon
     UINT           info_timeout;    /* timeout for info balloon */
     HICON          info_icon;       /* info balloon icon */
     UINT           version;         /* notify icon api version */
-    DWORD          last_active;     /* tick of the last change by the program, for "hide inactive icons" */
-    BOOL           auto_hidden;     /* hidden only because it is inactive */
-    int            behavior;        /* NOTIFY_*, -1 until read from the registry */
 };
 
 static struct list icon_list = LIST_INIT( icon_list );
@@ -131,7 +114,7 @@ static BOOL show_systray; /* show a standalone systray window */
 static BOOL enable_dock; /* allow systray icons to be docked in the host systray */
 static BOOL no_tray_items; /* hide the systray and all systray icons */
 
-static int icon_cx, icon_cy, tray_width, tray_height, tray_top;
+static int icon_cx, icon_cy, tray_width, tray_height;
 static int start_button_width, taskbar_button_width;
 static WCHAR start_label[50];
 
@@ -352,180 +335,15 @@ static void update_tooltip_text(struct icon *icon)
     SendMessageW(icon->tooltip, TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
 }
 
-static RECT get_tray_clock_rect(void)
-{
-    RECT rc;
-    int clock_width = taskbar_settings_get()->show_clock ? 64 : 0;
-    rc.right = tray_width - 2;
-    rc.left = rc.right - clock_width;
-    rc.top = tray_top + 2;
-    rc.bottom = tray_top + tray_height - 2;
-    return rc;
-}
-
-#define INACTIVE_AFTER (5 * 60 * 1000)
-static BOOL tray_expanded;
-static DWORD tray_expanded_hover_tick;
-
-static void refresh_inactive_icons(void);
-
-/* ---- Customize Notifications: per icon behavior ---- */
-
-static const WCHAR behavior_key[] = L"Software\\WineExplorer\\TrayIcons";
-
-static void icon_key( struct icon *icon, WCHAR *key )
-{
-    WCHAR path[MAX_PATH] = L"", *name;
-    DWORD pid = 0, len = MAX_PATH;
-    HANDLE process;
-
-    GetWindowThreadProcessId( icon->owner, &pid );
-    if ((process = OpenProcess( PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid )))
-    {
-        QueryFullProcessImageNameW( process, 0, path, &len );
-        CloseHandle( process );
-    }
-    name = wcsrchr( path, '\\' );
-    swprintf( key, 300, L"%s|%u", name ? name + 1 : L"unknown", icon->id );
-    CharLowerW( key );
-}
-
-static int icon_behavior( struct icon *icon )
-{
-    if (icon->behavior < 0)
-    {
-        WCHAR key[300];
-        DWORD val = NOTIFY_HIDE_WHEN_INACTIVE, size = sizeof(val);
-
-        icon_key( icon, key );
-        if (RegGetValueW( HKEY_CURRENT_USER, behavior_key, key, RRF_RT_REG_DWORD, NULL, &val, &size )) val = NOTIFY_HIDE_WHEN_INACTIVE;
-        icon->behavior = val <= NOTIFY_ALWAYS_SHOW ? val : NOTIFY_HIDE_WHEN_INACTIVE;
-    }
-    return icon->behavior;
-}
-
-int systray_enum_icons( TRAY_ICON_INFO *out, int max )
-{
-    struct icon *icon;
-    int n = 0;
-
-    LIST_FOR_EACH_ENTRY( icon, &icon_list, struct icon, entry )
-    {
-        if (n >= max) break;
-        if (!icon->window || (icon->state & NIS_HIDDEN)) continue;
-        icon_key( icon, out[n].key );
-        lstrcpynW( out[n].text, icon->tiptext[0] ? icon->tiptext : out[n].key, ARRAY_SIZE(out[n].text) );
-        out[n].icon = icon->image ? CopyIcon( icon->image ) : NULL;
-        out[n].behavior = icon_behavior( icon );
-        n++;
-    }
-    return n;
-}
-
-void systray_set_behavior( const WCHAR *key, int behavior )
-{
-    HKEY hkey;
-    DWORD val = behavior;
-
-    if (behavior < NOTIFY_HIDE_WHEN_INACTIVE || behavior > NOTIFY_ALWAYS_SHOW) return;
-
-    if (!RegCreateKeyExW( HKEY_CURRENT_USER, behavior_key, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL ))
-    {
-        RegSetValueExW( hkey, key, 0, REG_DWORD, (BYTE *)&val, sizeof(val) );
-        RegCloseKey( hkey );
-    }
-    systray_reset_behaviors();
-}
-
-void systray_reset_behaviors(void)
-{
-    struct icon *icon;
-
-    LIST_FOR_EACH_ENTRY( icon, &icon_list, struct icon, entry ) icon->behavior = -1;
-    if (tray_window) refresh_inactive_icons();
-}
-
-static BOOL setting_hide_inactive(void)
-{
-    return taskbar_settings_get()->hide_inactive_icons;
-}
-
-static BOOL chevron_visible(void)
-{
-    struct icon *icon;
-
-    if (!setting_hide_inactive()) return FALSE;
-    if (tray_expanded) return TRUE;
-    LIST_FOR_EACH_ENTRY( icon, &icon_list, struct icon, entry )
-        if (icon->auto_hidden && !(icon->state & NIS_HIDDEN)) return TRUE;
-    return FALSE;
-}
-
-static SIZE get_tray_chevron_size(void)
-{
-    SIZE size = { GetSystemMetrics( SM_CXSMICON ), GetSystemMetrics( SM_CYSMICON ) };
-    HTHEME theme = theme_open( tray_window, tray_expanded ? L"TrayNotifyHorizOpen::Button" : L"TrayNotifyHoriz::Button" );
-
-    if (theme)
-    {
-        SIZE themed;
-        if (SUCCEEDED( GetThemePartSize( theme, NULL, BP_PUSHBUTTON, PBS_DEFAULTED, NULL, TS_TRUE, &themed ) ) &&
-            themed.cx > 0 && themed.cy > 0) size = themed;
-        CloseThemeData( theme );
-    }
-    return size;
-}
-
-static RECT get_tray_notify_rect(void)
-{
-    RECT rc;
-    RECT background = {0, 0, 200, 30}, content;
-    HTHEME theme = theme_open( tray_window, L"TrayNotifyHoriz::TrayNotify" );
-    int clock_width = taskbar_settings_get()->show_clock ? 64 : 0;
-    int icons_width = nb_displayed > 0 ? (nb_displayed * icon_cx + 4) : 0;
-    int left_padding = chevron_visible() ? get_tray_chevron_size().cx : 0;
-    int total_width;
-
-    /* The theme's left transition remains when the chevron is hidden.
-     * Keep icons inside its content area rather than over that transition. */
-    if (theme)
-    {
-        if (SUCCEEDED( GetThemeBackgroundContentRect( theme, NULL, TNP_BACKGROUND, 0,
-                                                     &background, &content ) ))
-            left_padding = max( left_padding, content.left - background.left );
-        CloseThemeData( theme );
-    }
-    total_width = clock_width + icons_width + 4 + left_padding;
-
-    rc.right = tray_width - 2;
-    rc.left = rc.right - total_width;
-    rc.top = tray_top + 2;
-    rc.bottom = tray_top + tray_height - 2;
-    return rc;
-}
-
-static RECT get_tray_chevron_rect(void)
-{
-    RECT notify = get_tray_notify_rect(), rect;
-    SIZE size = get_tray_chevron_size();
-    int height = min( size.cy, theme_taskbar_first_row() );
-    int top = tray_top + (theme_taskbar_first_row() - height) / 2;
-
-    SetRect( &rect, notify.left, top, notify.left + size.cx, top + height );
-    return rect;
-}
-
-/* get the position of an icon in the tray */
+/* get the position of an icon in the stand-alone tray */
 static POINT get_icon_pos( struct icon *icon )
 {
     POINT pos;
 
     if (enable_taskbar)
     {
-        RECT rcClock = get_tray_clock_rect();
-        int icons_width = nb_displayed * icon_cx;
-        pos.x = rcClock.left - 4 - icons_width + (icon->display * icon_cx);
-        pos.y = tray_top + (theme_taskbar_first_row() - icon_cy) / 2;   /* the icons stay in the first row */
+        pos.x = tray_width - icon_cx * (icon->display + 1);
+        pos.y = (tray_height - icon_cy) / 2;
     }
     else
     {
@@ -534,148 +352,6 @@ static POINT get_icon_pos( struct icon *icon )
     }
 
     return pos;
-}
-
-#define IDT_AUTOHIDE 9998
-#define IDT_THEMEREDRAW 9997
-static BOOL taskbar_hidden;
-
-static const WCHAR rows_key[] = L"Software\\WineExplorer\\Taskbar";
-static int tray_rows;   /* rows of task buttons; an unlocked taskbar is made taller by dragging its top edge */
-
-static int max_rows(void)
-{
-    return max( 1, (GetSystemMetrics( SM_CYSCREEN ) / 2 - theme_taskbar_first_row()) / theme_taskbar_row_pitch() + 1 );
-}
-
-/* an unlocked taskbar with a visual style has a sizing border of four pixels above the Start button */
-static void update_tray_top(void)
-{
-    if (!tray_rows)
-    {
-        DWORD rows = 1, size = sizeof(rows);
-        RegGetValueW( HKEY_CURRENT_USER, rows_key, L"Rows", RRF_RT_REG_DWORD, NULL, &rows, &size );
-        tray_rows = rows;
-    }
-    tray_rows = max( 1, min( tray_rows, max_rows() ));
-    tray_top = (theme_is_visual_styles_active() && !taskbar_settings_get()->lock_taskbar) ? 4 : 0;
-    tray_height = theme_taskbar_first_row() + (tray_rows - 1) * theme_taskbar_row_pitch();
-}
-
-static BOOL sizing_rows;
-
-/* the top edge of an unlocked taskbar changes its height */
-static BOOL on_sizing_edge( int y )
-{
-    return !taskbar_settings_get()->lock_taskbar && y >= 0 && y < max( tray_top, 3 );
-}
-
-static void place_start_button(void)
-{
-    /* the Start button stays in the first row */
-    if (theme_is_visual_styles_active()) startbutton_resize( 0, tray_top, start_button_width, theme_taskbar_first_row() );
-    else startbutton_resize( 1, tray_top + 3, start_button_width, theme_taskbar_first_row() - 5 );
-}
-
-/* Always on top, auto-hide and the work area follow the taskbar settings */
-static void position_taskbar(void)
-{
-    TASKBAR_SETTINGS *s = taskbar_settings_get();
-    int screen_w = GetSystemMetrics( SM_CXSCREEN ), screen_h = GetSystemMetrics( SM_CYSCREEN );
-    int total = tray_top + tray_height;
-    int y = (s->autohide && taskbar_hidden) ? screen_h - 2 : screen_h - total;
-    /* like Windows XP: the taskbar only takes its place out of the work area when it stays on top and does not hide */
-    RECT work = { 0, 0, screen_w, (s->autohide || !s->always_on_top) ? screen_h : screen_h - total }, current;
-
-    SetWindowPos( tray_window, (s->always_on_top || s->autohide) ? HWND_TOPMOST : HWND_NOTOPMOST, 0, y,
-                  tray_width, total, SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOCOPYBITS );
-    /* Off-screen auto-hide pixels cannot be reused when the tray is revealed. */
-    RedrawWindow( tray_window, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW );
-    if (SystemParametersInfoW( SPI_GETWORKAREA, 0, &current, 0 ) && !EqualRect( &current, &work ))
-        SystemParametersInfoW( SPI_SETWORKAREA, TRUE, &work, SPIF_SENDCHANGE );   /* TRUE: maximized windows follow */
-}
-
-static void autohide_tick(void)
-{
-    TASKBAR_SETTINGS *s = taskbar_settings_get();
-    int screen_h = GetSystemMetrics( SM_CYSCREEN );
-    POINT pt;
-    BOOL over;
-
-    if (!s->autohide)
-    {
-        if (taskbar_hidden) { taskbar_hidden = FALSE; position_taskbar(); }
-        return;
-    }
-    GetCursorPos( &pt );
-    over = pt.y >= (taskbar_hidden ? screen_h - 1 : screen_h - tray_top - tray_height);
-    if (over && taskbar_hidden) { taskbar_hidden = FALSE; position_taskbar(); }
-    else if (!over && !taskbar_hidden && !startmenu_view_is_open() &&
-             GetAncestor( GetForegroundWindow(), GA_ROOT ) != tray_window && !GetCapture())
-    {
-        taskbar_hidden = TRUE;
-        position_taskbar();
-    }
-}
-
-static void update_tray_layout(void);
-
-static void refresh_inactive_icons(void)
-{
-    struct icon *icon;
-    BOOL changed = FALSE, want_hide;
-
-    LIST_FOR_EACH_ENTRY( icon, &icon_list, struct icon, entry )
-    {
-        if (!icon->window || (icon->state & NIS_HIDDEN)) continue;
-        {
-            int behavior = icon_behavior( icon );
-            want_hide = setting_hide_inactive() && !tray_expanded && behavior != NOTIFY_ALWAYS_SHOW &&
-                        (behavior == NOTIFY_ALWAYS_HIDE || GetTickCount() - icon->last_active > INACTIVE_AFTER);
-        }
-        if (want_hide && !icon->auto_hidden && icon->display != ICON_DISPLAY_HIDDEN)
-        {
-            icon->auto_hidden = TRUE;
-            hide_icon( icon );
-            changed = TRUE;
-        }
-        else if (!want_hide && icon->auto_hidden)
-        {
-            icon->auto_hidden = FALSE;
-            show_icon( icon );
-            changed = TRUE;
-        }
-    }
-    if (changed && enable_taskbar) update_tray_layout();
-}
-
-static void update_tray_layout(void)
-{
-    if (!enable_taskbar || !tray_window) return;
-    {
-        RECT rcTray = get_tray_notify_rect();
-        RECT rcClock = get_tray_clock_rect();
-        int taskband_x, taskband_w;
-        struct icon *icon;
-
-        toolbars_layout( tray_window, start_button_width + (theme_is_visual_styles_active() ? 4 : 7), rcTray.left, tray_top, tray_height, &taskband_x, &taskband_w );
-        tray_clock_resize( rcClock.left + 2, rcClock.top + 2, rcClock.right - rcClock.left - 4, rcClock.bottom - rcClock.top - 4 );
-        taskband_resize( taskband_x, tray_top, taskband_w, tray_height );
-
-        /* Relayout tray icons */
-        LIST_FOR_EACH_ENTRY( icon, &icon_list, struct icon, entry )
-        {
-            if (icon->display >= 0 && icon->window)
-            {
-                POINT pos = get_icon_pos( icon );
-                SetWindowPos( icon->window, 0, pos.x, pos.y, 0, 0,
-                              SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER );
-                InvalidateRect( icon->window, NULL, TRUE );   /* the background under it may have changed */
-            }
-        }
-
-        InvalidateRect( tray_window, NULL, FALSE );
-    }
 }
 
 /* get the size of the stand-alone tray window */
@@ -808,49 +484,6 @@ static BOOL notify_owner( struct icon *icon, UINT msg, LPARAM lparam )
 }
 
 /* window procedure for the individual tray icon window */
-/* the background of the taskbar and the notification area, also used behind the icons of the tray */
-static void paint_tray_background( HWND hwnd, HDC hdc, RECT *rc )
-{
-    HTHEME theme = theme_open( hwnd, L"TaskBar" );
-    RECT rcTop;
-
-    if (theme)
-    {
-        HTHEME tray_theme = theme_open( hwnd, L"TrayNotifyHoriz::TrayNotify" );
-        RECT body = *rc;
-
-        /* XP keeps the background and controls fixed when unlocking: the
-         * additional four pixels are the theme's separate sizing strip. */
-        body.top += tray_top;
-        DrawThemeBackground( theme, hdc, TBP_BACKGROUNDBOTTOM, 0, &body, NULL );
-        if (tray_theme)
-        {
-            RECT rcTray = get_tray_notify_rect();
-            rcTray.top = body.top;
-            rcTray.bottom = rc->bottom;
-            DrawThemeBackground( tray_theme, hdc, TNP_BACKGROUND, 0, &rcTray, NULL );
-            CloseThemeData( tray_theme );
-        }
-        if (tray_top)
-        {
-            RECT sizing = *rc;
-            sizing.bottom = sizing.top + tray_top;
-            DrawThemeBackground( theme, hdc, TBP_SIZINGBARBOTTOM, 0, &sizing, NULL );
-        }
-        CloseThemeData( theme );
-    }
-    else
-    {
-        FillRect( hdc, rc, GetSysColorBrush( COLOR_BTNFACE ) );
-
-        /* Continuous 1px highlight line across the top of the taskbar */
-        rcTop = *rc;
-        rcTop.top = 1;
-        rcTop.bottom = 2;
-        FillRect( hdc, &rcTop, GetSysColorBrush( COLOR_3DHIGHLIGHT ) );
-    }
-}
-
 static LRESULT WINAPI tray_icon_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
 {
     struct icon *icon = (struct icon *)GetWindowLongPtrW( hwnd, GWLP_USERDATA );
@@ -887,15 +520,6 @@ static LRESULT WINAPI tray_icon_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPA
         if (icon->layered) paint_layered_icon( icon );
         break;
 
-    case WM_ERASEBKGND:
-        /* an icon on the taskbar shows the taskbar under it, not what was drawn there before */
-        if (icon && !icon->layered && GetParent( hwnd ) == tray_window)
-        {
-            DrawThemeParentBackground( hwnd, (HDC)wparam, NULL );
-            return 1;
-        }
-        break;
-
     case WM_PAINT:
     {
         PAINTSTRUCT ps;
@@ -928,7 +552,6 @@ static LRESULT WINAPI tray_icon_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPA
     case WM_MBUTTONDBLCLK:
     {
         MSG message = {.hwnd = hwnd, .message = msg, .wParam = wparam, .lParam = lparam};
-        if (msg != WM_MOUSEMOVE) icon->last_active = GetTickCount();
         SendMessageW( icon->tooltip, TTM_RELAYEVENT, 0, (LPARAM)&message );
         if (!notify_owner( icon, msg, lparam )) break;
         if (icon->version > 0)
@@ -964,24 +587,6 @@ static LRESULT WINAPI tray_icon_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPA
     return DefWindowProcW( hwnd, msg, wparam, lparam );
 }
 
-/* the icons of the notification area keep the order they were added in, whatever was hidden meanwhile */
-static void renumber_icons(void)
-{
-    struct icon *ptr;
-    int n = 0;
-
-    LIST_FOR_EACH_ENTRY( ptr, &icon_list, struct icon, entry )
-    {
-        POINT pos;
-        if (ptr->display < 0) continue;
-        ptr->display = n++;
-        if (!ptr->window) continue;
-        update_tooltip_position( ptr );
-        pos = get_icon_pos( ptr );
-        SetWindowPos( ptr->window, 0, pos.x, pos.y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER );
-    }
-}
-
 /* add an icon to the system tray window */
 static void systray_add_icon( struct icon *icon )
 {
@@ -989,15 +594,13 @@ static void systray_add_icon( struct icon *icon )
 
     if (icon->display != ICON_DISPLAY_HIDDEN) return;  /* already added */
 
-    SetWindowLongW( icon->window, GWL_STYLE, (GetWindowLongW( icon->window, GWL_STYLE ) & ~WS_POPUP) | WS_CHILD );
+    SetWindowLongW( icon->window, GWL_STYLE, GetWindowLongW( icon->window, GWL_STYLE ) | WS_CHILD );
     SetParent( icon->window, tray_window );
     icon->display = nb_displayed++;
-    renumber_icons();   /* icons that were hidden come back where they were */
     pos = get_icon_pos( icon );
     SetWindowPos( icon->window, 0, pos.x, pos.y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW );
 
-    if (enable_taskbar) update_tray_layout();
-    else if (nb_displayed == 1 && show_systray) do_show_systray();
+    if (nb_displayed == 1 && show_systray) do_show_systray();
     TRACE( "added %u now %d icons\n", icon->id, nb_displayed );
 }
 
@@ -1021,12 +624,11 @@ static void systray_remove_icon( struct icon *icon )
     }
 
     if (!--nb_displayed && !enable_taskbar) do_hide_systray();
-    if (enable_taskbar) update_tray_layout();
     TRACE( "removed %u now %d icons\n", icon->id, nb_displayed );
 
     icon->display = ICON_DISPLAY_HIDDEN;
     SetParent( icon->window, GetDesktopWindow() );
-    SetWindowLongW( icon->window, GWL_STYLE, (GetWindowLongW( icon->window, GWL_STYLE ) & ~WS_CHILD) | WS_POPUP );
+    SetWindowLongW( icon->window, GWL_STYLE, GetWindowLongW( icon->window, GWL_STYLE ) & ~WS_CHILD );
 }
 
 /* make an icon visible */
@@ -1084,54 +686,8 @@ static void hide_icon(struct icon *icon)
 }
 
 /* Modifies an existing icon record */
-/* TRUE if two icon handles show the same picture */
-static BOOL same_icon( HICON a, HICON b )
-{
-    ICONINFO ia, ib;
-    BITMAP ba, bb;
-    BOOL same = FALSE;
-
-    if (!GetIconInfo( a, &ia )) return FALSE;
-    if (!GetIconInfo( b, &ib )) { DeleteObject( ia.hbmColor ); DeleteObject( ia.hbmMask ); return FALSE; }
-    if (GetObjectW( ia.hbmMask, sizeof(ba), &ba ) && GetObjectW( ib.hbmMask, sizeof(bb), &bb ) &&
-        ba.bmWidth == bb.bmWidth && ba.bmHeight == bb.bmHeight)
-    {
-        int size = ba.bmWidthBytes * ba.bmHeight, cmp = 0;
-        BYTE *x = malloc( 2 * size ), *y;
-
-        if (x)
-        {
-            y = x + size;
-            GetBitmapBits( ia.hbmMask, size, x );
-            GetBitmapBits( ib.hbmMask, size, y );
-            cmp = memcmp( x, y, size );
-            free( x );
-        }
-        if (!cmp && ia.hbmColor && ib.hbmColor && GetObjectW( ia.hbmColor, sizeof(ba), &ba ) &&
-            GetObjectW( ib.hbmColor, sizeof(bb), &bb ) && ba.bmWidthBytes == bb.bmWidthBytes && ba.bmHeight == bb.bmHeight)
-        {
-            size = ba.bmWidthBytes * ba.bmHeight;
-            x = malloc( 2 * size );
-            if (x)
-            {
-                y = x + size;
-                GetBitmapBits( ia.hbmColor, size, x );
-                GetBitmapBits( ib.hbmColor, size, y );
-                same = !memcmp( x, y, size );
-                free( x );
-            }
-        }
-    }
-    DeleteObject( ia.hbmColor ); DeleteObject( ia.hbmMask );
-    DeleteObject( ib.hbmColor ); DeleteObject( ib.hbmMask );
-    return same;
-}
-
 static BOOL modify_icon( struct icon *icon, NOTIFYICONDATAW *nid )
 {
-    BOOL activity = FALSE;
-    BOOL had_chevron = chevron_visible();
-
     TRACE( "id=0x%x, hwnd=%p\n", nid->uID, nid->hWnd );
 
     /* demarshal the request from the NID */
@@ -1148,8 +704,6 @@ static BOOL modify_icon( struct icon *icon, NOTIFYICONDATAW *nid )
 
     if (nid->uFlags & NIF_ICON)
     {
-        /* a new picture counts as activity, the same picture again (a tooltip refresh) does not */
-        if (!icon->image || !nid->hIcon || !same_icon( icon->image, nid->hIcon )) activity = TRUE;
         if (icon->image) DestroyIcon(icon->image);
         icon->image = CopyIcon(nid->hIcon);
 
@@ -1183,17 +737,8 @@ static BOOL modify_icon( struct icon *icon, NOTIFYICONDATAW *nid )
 
         update_balloon( icon );
     }
-    if ((nid->uFlags & NIF_INFO) && nid->szInfo[0]) activity = TRUE;
-    if (activity) icon->last_active = GetTickCount();
-    icon->auto_hidden = setting_hide_inactive() && !tray_expanded &&
-                        icon_behavior( icon ) != NOTIFY_ALWAYS_SHOW &&
-                        (icon_behavior( icon ) == NOTIFY_ALWAYS_HIDE ||
-                         GetTickCount() - icon->last_active > INACTIVE_AFTER);
-    if ((icon->state & NIS_HIDDEN) || icon->auto_hidden) hide_icon( icon );
+    if (icon->state & NIS_HIDDEN) hide_icon( icon );
     else show_icon( icon );
-    /* An initially hidden icon changes the chevron without changing the
-     * visible icon count. Reserve its space before the task band paints it. */
-    if (enable_taskbar && had_chevron != chevron_visible()) update_tray_layout();
     return TRUE;
 }
 
@@ -1220,8 +765,6 @@ static BOOL add_icon(NOTIFYICONDATAW *nid)
     icon->id     = nid->uID;
     icon->owner  = nid->hWnd;
     icon->display = ICON_DISPLAY_HIDDEN;
-    icon->behavior = -1;
-    icon->last_active = GetTickCount();
 
     CreateWindowExW( 0, tray_icon_class.lpszClassName, NULL, WS_CLIPSIBLINGS | WS_POPUP,
                      0, 0, icon_cx, icon_cy, 0, NULL, NULL, icon );
@@ -1235,10 +778,8 @@ static BOOL add_icon(NOTIFYICONDATAW *nid)
 /* Deletes tray icon window and icon record */
 static BOOL delete_icon( struct icon *icon )
 {
-    BOOL had_chevron = chevron_visible();
     hide_icon( icon );
     list_remove( &icon->entry );
-    if (enable_taskbar && had_chevron != chevron_visible()) update_tray_layout();
     DestroyWindow( icon->tooltip );
     DestroyWindow( icon->window );
     DestroyIcon( icon->image );
@@ -1261,8 +802,45 @@ static void cleanup_systray_window( HWND hwnd )
 /* update the taskbar buttons when something changed */
 static void sync_taskbar_buttons(void)
 {
+    struct taskbar_button *win;
+    int pos = 0, count = 0;
+    int width = taskbar_button_width;
+    int right = tray_width - nb_displayed * icon_cx;
+    HWND foreground = GetAncestor( GetForegroundWindow(), GA_ROOTOWNER );
+
     if (!enable_taskbar) return;
-    taskband_sync_windows();
+    if (!IsWindowVisible( tray_window )) return;
+
+    LIST_FOR_EACH_ENTRY( win, &taskbar_buttons, struct taskbar_button, entry )
+    {
+        if (!win->hwnd)  /* start button */
+        {
+            SetWindowPos( win->button, 0, pos, 0, start_button_width, tray_height,
+                          SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW );
+            pos += start_button_width;
+            continue;
+        }
+        win->active = (win->hwnd == foreground);
+        win->visible = IsWindowVisible( win->hwnd ) && !GetWindow( win->hwnd, GW_OWNER );
+        if (win->visible) count++;
+    }
+
+    /* shrink buttons if space is tight */
+    if (count && (count * width > right - pos))
+        width = max( taskbar_button_width / 4, (right - pos) / count );
+
+    LIST_FOR_EACH_ENTRY( win, &taskbar_buttons, struct taskbar_button, entry )
+    {
+        if (!win->hwnd) continue;  /* start button */
+        if (win->visible && right - pos >= width)
+        {
+            SetWindowPos( win->button, 0, pos, 0, width, tray_height,
+                          SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW );
+            InvalidateRect( win->button, NULL, TRUE );
+            pos += width;
+        }
+        else SetWindowPos( win->button, 0, 0, 0, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW );
+    }
 }
 
 static BOOL handle_incoming(HWND hwndSource, COPYDATASTRUCT *cds)
@@ -1413,17 +991,12 @@ static void paint_taskbar_button( const DRAWITEMSTRUCT *dis )
 {
     RECT rect;
     UINT flags = DC_TEXT;
-    struct taskbar_button *win = NULL, *it;
+    struct taskbar_button *win = find_taskbar_button( LongToHandle( dis->CtlID ));
 
-    LIST_FOR_EACH_ENTRY( it, &taskbar_buttons, struct taskbar_button, entry )
-    {
-        if (it->button == dis->hwndItem) { win = it; break; }
-    }
     if (!win) return;
-
     GetClientRect( dis->hwndItem, &rect );
     DrawFrameControl( dis->hDC, &rect, DFC_BUTTON, DFCS_BUTTONPUSH | DFCS_ADJUSTRECT |
-                      (((dis->itemState & ODS_SELECTED) || win->active) ? DFCS_PUSHED : 0 ));
+                      ((dis->itemState & ODS_SELECTED) ? DFCS_PUSHED : 0 ));
     if (win->hwnd)
     {
         flags |= win->active ? DC_ACTIVE : DC_INBUTTON;
@@ -1435,33 +1008,8 @@ static void paint_taskbar_button( const DRAWITEMSTRUCT *dis )
 
 static void click_taskbar_button( HWND button )
 {
-    struct taskbar_button *win = NULL, *it;
-    HWND hwnd;
-
-    LIST_FOR_EACH_ENTRY( it, &taskbar_buttons, struct taskbar_button, entry )
-    {
-        if (it->button == button || (button && it->hwnd == (HWND)GetWindowLongPtrW(button, GWLP_ID)))
-        {
-            win = it;
-            break;
-        }
-    }
-    if (!win)
-    {
-        POINT pt;
-        GetCursorPos( &pt );
-        LIST_FOR_EACH_ENTRY( it, &taskbar_buttons, struct taskbar_button, entry )
-        {
-            RECT rc;
-            if (it->button && it->visible)
-            {
-                GetWindowRect( it->button, &rc );
-                if (PtInRect( &rc, pt )) { win = it; break; }
-            }
-        }
-    }
-    if (!win) return;
-    hwnd = win->hwnd;
+    LONG_PTR id = GetWindowLongPtrW( button, GWLP_ID );
+    HWND hwnd = (HWND)id;
 
     if (!hwnd)  /* start button */
     {
@@ -1471,21 +1019,15 @@ static void click_taskbar_button( HWND button )
 
     if (IsIconic( hwnd ))
     {
-        ShowWindow( hwnd, SW_RESTORE );
-        SetForegroundWindow( hwnd );
-        win->active = TRUE;
-        sync_taskbar_buttons();
+        SendMessageW( hwnd, WM_SYSCOMMAND, SC_RESTORE, 0 );
         return;
     }
 
     if (IsWindowEnabled( hwnd ))
     {
-        HWND fg = GetAncestor( GetForegroundWindow(), GA_ROOTOWNER );
-        if (hwnd == fg || win->active)
+        if (hwnd == GetForegroundWindow())
         {
-            ShowWindow( hwnd, SW_MINIMIZE );
-            win->active = FALSE;
-            sync_taskbar_buttons();
+            SendMessageW( hwnd, WM_SYSCOMMAND, SC_MINIMIZE, 0 );
             return;
         }
     }
@@ -1500,244 +1042,16 @@ static void click_taskbar_button( HWND button )
                 break;
             owned = GetWindow( owned, GW_HWNDNEXT );
         }
-        if (owned) hwnd = owned;
+        hwnd = owned;
     }
-    ShowWindow( hwnd, SW_SHOWNORMAL );
     SetForegroundWindow( hwnd );
-    win->active = TRUE;
-    sync_taskbar_buttons();
-}
-
-#define WM_TRAY_CLOCKMENU (WM_APP + 31)
-
-/* the positions of the windows before Cascade, Tile or Minimize All, for the Undo item */
-static struct
-{
-    HWND hwnd[64];
-    WINDOWPLACEMENT place[64];
-    int count;
-    const WCHAR *label;
-} undo_state;
-
-static void undo_save( const WCHAR *label )
-{
-    struct taskbar_button *it;
-
-    undo_state.count = 0;
-    undo_state.label = label;
-    LIST_FOR_EACH_ENTRY( it, &taskbar_buttons, struct taskbar_button, entry )
-    {
-        if (!it->hwnd || !IsWindow( it->hwnd ) || undo_state.count >= 64) continue;
-        undo_state.hwnd[undo_state.count] = it->hwnd;
-        undo_state.place[undo_state.count].length = sizeof(WINDOWPLACEMENT);
-        GetWindowPlacement( it->hwnd, &undo_state.place[undo_state.count] );
-        undo_state.count++;
-    }
-}
-
-static void undo_apply(void)
-{
-    int i;
-
-    for (i = 0; i < undo_state.count; i++)
-        if (IsWindow( undo_state.hwnd[i] )) SetWindowPlacement( undo_state.hwnd[i], &undo_state.place[i] );
-    undo_state.count = 0;
-}
-
-static int count_tileable_windows(void)
-{
-    struct taskbar_button *it;
-    int n = 0;
-
-    LIST_FOR_EACH_ENTRY( it, &taskbar_buttons, struct taskbar_button, entry )
-        if (it->hwnd && IsWindowVisible( it->hwnd ) && !IsIconic( it->hwnd )) n++;
-    return n;
-}
-
-/* The taskbar's own menu (MENU_TRAYCONTEXT of the Windows shell); the notification area adds the clock items */
-static void track_tray_menu( POINT pt, BOOL include_time )
-{
-    HMENU hMenu = CreatePopupMenu();
-    HMENU hToolbars = CreatePopupMenu();
-    TASKBAR_SETTINGS *settings = taskbar_settings_get();
-    UINT gray = count_tileable_windows() > 0 ? 0 : MF_GRAYED;
-    UINT cmd;
-
-    if (include_time)
-    {
-        AppendMenuW( hMenu, MF_STRING, IDM_TASKBAR_SETTIME, L"&Adjust Date/Time" );
-        SetMenuDefaultItem( hMenu, IDM_TASKBAR_SETTIME, FALSE );
-        AppendMenuW( hMenu, MF_STRING, IDM_TASKBAR_NOTIFYCUST, L"&Customize Notifications..." );
-        AppendMenuW( hMenu, MF_SEPARATOR, 0, NULL );
-    }
-    else
-    {
-        AppendMenuW( hToolbars, MF_STRING | (toolbars_is_visible( TOOLBAR_ADDRESS ) ? MF_CHECKED : 0), 3001, L"&Address" );
-        AppendMenuW( hToolbars, MF_STRING | (toolbars_is_visible( TOOLBAR_LINKS ) ? MF_CHECKED : 0), 3002, L"&Links" );
-        AppendMenuW( hToolbars, MF_STRING | (toolbars_is_visible( TOOLBAR_DESKTOP ) ? MF_CHECKED : 0), 3003, L"&Desktop" );
-        AppendMenuW( hToolbars, MF_STRING | (toolbars_is_visible( TOOLBAR_QUICKLAUNCH ) ? MF_CHECKED : 0), 3004, L"&Quick Launch" );
-        AppendMenuW( hToolbars, MF_STRING | (toolbars_is_visible( TOOLBAR_SEARCH ) ? MF_CHECKED : 0), 3006, L"&Search" );
-        {
-            int c;
-            WCHAR cname[MAX_PATH];
-            for (c = 0; c < TOOLBAR_CUSTOM_MAX; c++)
-                if (toolbars_custom_name( TOOLBAR_CUSTOM + c, cname, MAX_PATH ))
-                    AppendMenuW( hToolbars, MF_STRING | MF_CHECKED, 3010 + c, cname );
-        }
-        AppendMenuW( hToolbars, MF_SEPARATOR, 0, NULL );
-        AppendMenuW( hToolbars, MF_STRING, 3005, L"&New Toolbar..." );
-        AppendMenuW( hMenu, MF_POPUP, (UINT_PTR)hToolbars, L"&Toolbars" );
-        AppendMenuW( hMenu, MF_SEPARATOR, 0, NULL );
-    }
-    AppendMenuW( hMenu, MF_STRING | gray, IDM_TASKBAR_CASCADE, L"Ca&scade Windows" );
-    AppendMenuW( hMenu, MF_STRING | gray, IDM_TASKBAR_TILE_H, L"Tile Windows &Horizontally" );
-    AppendMenuW( hMenu, MF_STRING | gray, IDM_TASKBAR_TILE_V, L"Tile Windows V&ertically" );
-    AppendMenuW( hMenu, MF_STRING, IDM_TASKBAR_SHOWDESKTOP, toolbars_desktop_shown() ? L"&Show Open Windows" : L"&Show the Desktop" );
-    if (undo_state.count)
-    {
-        WCHAR text[64];
-        swprintf( text, ARRAY_SIZE(text), L"&Undo %s", undo_state.label );
-        AppendMenuW( hMenu, MF_STRING, IDM_TASKBAR_UNDO, text );
-    }
-    AppendMenuW( hMenu, MF_SEPARATOR, 0, NULL );
-    AppendMenuW( hMenu, MF_STRING, IDM_TASKBAR_TASKMGR, L"Tas&k Manager" );
-    AppendMenuW( hMenu, MF_SEPARATOR, 0, NULL );
-    AppendMenuW( hMenu, MF_STRING | (settings->lock_taskbar ? MF_CHECKED : 0), IDM_TASKBAR_LOCK, L"&Lock the Taskbar" );
-    AppendMenuW( hMenu, MF_STRING, IDM_TASKBAR_PROPERTIES, L"P&roperties" );
-
-    SetForegroundWindow( tray_window );
-    cmd = TrackPopupMenu( hMenu, TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, tray_window, NULL );
-    DestroyMenu( hMenu );
-
-    switch (cmd)
-    {
-    case IDM_TASKBAR_SETTIME:
-        ShellExecuteW( NULL, L"open", L"control.exe", L"timedate.cpl", NULL, SW_SHOWNORMAL );
-        break;
-    case IDM_TASKBAR_NOTIFYCUST:
-        taskbar_props_show( tray_window );
-        break;
-    case IDM_TASKBAR_CASCADE:
-        undo_save( L"Cascade" );
-        CascadeWindows( NULL, MDITILE_SKIPDISABLED, NULL, 0, NULL );
-        break;
-    case IDM_TASKBAR_TILE_H:
-        undo_save( L"Tile" );
-        TileWindows( NULL, MDITILE_HORIZONTAL | MDITILE_SKIPDISABLED, NULL, 0, NULL );
-        break;
-    case IDM_TASKBAR_TILE_V:
-        undo_save( L"Tile" );
-        TileWindows( NULL, MDITILE_VERTICAL | MDITILE_SKIPDISABLED, NULL, 0, NULL );
-        break;
-    case IDM_TASKBAR_SHOWDESKTOP:
-        if (!toolbars_desktop_shown()) undo_save( L"Minimize All" );
-        show_desktop_toggle();
-        break;
-    case IDM_TASKBAR_UNDO:
-        undo_apply();
-        break;
-    case IDM_TASKBAR_TASKMGR:
-        ShellExecuteW( NULL, L"open", L"taskmgr.exe", NULL, NULL, SW_SHOWNORMAL );
-        break;
-    case IDM_TASKBAR_LOCK:
-        settings->lock_taskbar = !settings->lock_taskbar;
-        taskbar_settings_save();
-        toolbars_refresh();
-        SendMessageW( tray_window, WM_SETTINGCHANGE, 0, 0 );
-        break;
-    case IDM_TASKBAR_PROPERTIES:
-        taskbar_props_show( tray_window );
-        break;
-    case 3001: toolbars_set_visible( tray_window, TOOLBAR_ADDRESS, !toolbars_is_visible( TOOLBAR_ADDRESS ) ); break;
-    case 3002: toolbars_set_visible( tray_window, TOOLBAR_LINKS, !toolbars_is_visible( TOOLBAR_LINKS ) ); break;
-    case 3003: toolbars_set_visible( tray_window, TOOLBAR_DESKTOP, !toolbars_is_visible( TOOLBAR_DESKTOP ) ); break;
-    case 3004: toolbars_set_visible( tray_window, TOOLBAR_QUICKLAUNCH, !toolbars_is_visible( TOOLBAR_QUICKLAUNCH ) ); break;
-    case 3005: toolbars_choose_new( tray_window ); break;
-    case 3006: toolbars_set_visible( tray_window, TOOLBAR_SEARCH, !toolbars_is_visible( TOOLBAR_SEARCH ) ); break;
-    case 3010: case 3011: case 3012: case 3013: toolbars_set_visible( tray_window, TOOLBAR_CUSTOM + cmd - 3010, FALSE ); break;
-    }
 }
 
 static void show_taskbar_contextmenu( HWND button, LPARAM lparam )
 {
-    struct taskbar_button *win = NULL, *it;
-    POINT pt = { (short)LOWORD(lparam), (short)HIWORD(lparam) };
+    ULONG_PTR id = GetWindowLongPtrW( button, GWLP_ID );
 
-    LIST_FOR_EACH_ENTRY( it, &taskbar_buttons, struct taskbar_button, entry )
-    {
-        if (it->button == button || (button && it->hwnd == (HWND)GetWindowLongPtrW(button, GWLP_ID)))
-        {
-            win = it;
-            break;
-        }
-    }
-    if (!win)
-    {
-        LIST_FOR_EACH_ENTRY( it, &taskbar_buttons, struct taskbar_button, entry )
-        {
-            RECT rc;
-            if (it->button && it->visible)
-            {
-                GetWindowRect( it->button, &rc );
-                if (PtInRect( &rc, pt )) { win = it; break; }
-            }
-        }
-    }
-
-    if (win && win->hwnd)
-    {
-        HMENU hMenu = CreatePopupMenu();
-        BOOL iconic = IsIconic( win->hwnd );
-        BOOL zoomed = IsZoomed( win->hwnd );
-        DWORD style = GetWindowLongW( win->hwnd, GWL_STYLE );
-        UINT cmd;
-
-        AppendMenuW( hMenu, (iconic || zoomed) ? MF_STRING : (MF_STRING | MF_GRAYED),
-                    1, L"&Restore" );
-        AppendMenuW( hMenu, (!iconic) ? MF_STRING : (MF_STRING | MF_GRAYED),
-                    2, L"&Move" );
-        AppendMenuW( hMenu, (!iconic && !zoomed && (style & WS_THICKFRAME)) ? MF_STRING : (MF_STRING | MF_GRAYED),
-                    3, L"&Size" );
-        AppendMenuW( hMenu, (!iconic) ? MF_STRING : (MF_STRING | MF_GRAYED),
-                    4, L"Mi&nimize" );
-        AppendMenuW( hMenu, (!zoomed && (style & WS_MAXIMIZEBOX)) ? MF_STRING : (MF_STRING | MF_GRAYED),
-                    5, L"Ma&ximize" );
-        AppendMenuW( hMenu, MF_SEPARATOR, 0, NULL );
-        AppendMenuW( hMenu, MF_STRING, 6, L"&Close\tAlt+F4" );
-
-        SetForegroundWindow( tray_window );
-        cmd = TrackPopupMenu( hMenu, TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD | TPM_RIGHTBUTTON,
-                             pt.x, pt.y, 0, tray_window, NULL );
-        DestroyMenu( hMenu );
-
-        switch (cmd)
-        {
-        case 1:
-            ShowWindow( win->hwnd, SW_RESTORE );
-            SetForegroundWindow( win->hwnd );
-            break;
-        case 2:
-            PostMessageW( win->hwnd, WM_SYSCOMMAND, SC_MOVE, 0 );
-            break;
-        case 3:
-            PostMessageW( win->hwnd, WM_SYSCOMMAND, SC_SIZE, 0 );
-            break;
-        case 4:
-            ShowWindow( win->hwnd, SW_MINIMIZE );
-            break;
-        case 5:
-            ShowWindow( win->hwnd, SW_MAXIMIZE );
-            SetForegroundWindow( win->hwnd );
-            break;
-        case 6:
-            PostMessageW( win->hwnd, WM_SYSCOMMAND, SC_CLOSE, 0 );
-            break;
-        }
-        sync_taskbar_buttons();
-        return;
-    }
-
-    track_tray_menu( pt, FALSE );
+    if (id) SendNotifyMessageW( (HWND)id, WM_POPUPSYSTEMMENU, 0, lparam );
 }
 
 static void do_hide_systray(void)
@@ -1776,95 +1090,19 @@ static void do_show_systray(void)
     DeleteObject( font );
 
     tray_width = GetSystemMetrics( SM_CXSCREEN );
-    /* an icon pack installed since the last session: shell32's icons come from it from now on */
-    if (shellres_sync_shell_icons()) shellres_reload_shell_icons();
-    taskbar_settings_load();
-    update_tray_top();
-    start_button_width = startbutton_get_desired_width();
-    position_taskbar();
-    SetTimer( tray_window, IDT_AUTOHIDE, 150, NULL );
-
-    /* Instantiate complete desktop taskbar components */
-    {
-        RECT rcTray = get_tray_notify_rect();
-        RECT rcClock = get_tray_clock_rect();
-        int taskband_x, taskband_w;
-
-        startbutton_create( tray_window, 2, 2, start_button_width, 24 );
-        place_start_button();
-
-        toolbars_create( tray_window );
-        toolbars_layout( tray_window, start_button_width + (theme_is_visual_styles_active() ? 4 : 7), rcTray.left, tray_top, tray_height, &taskband_x, &taskband_w );
-
-        tray_clock_create( tray_window, rcClock.left + 2, rcClock.top + 2, rcClock.right - rcClock.left - 4, rcClock.bottom - rcClock.top - 4 );
-        tray_clock_resize( rcClock.left + 2, rcClock.top + 2, rcClock.right - rcClock.left - 4, rcClock.bottom - rcClock.top - 4 );
-
-        taskband_create( tray_window, taskband_x, tray_top, taskband_w, tray_height );
-        taskband_resize( taskband_x, tray_top, taskband_w, tray_height );
-
-        nettray_init( tray_window );
-        volumetray_init( tray_window );
-        powertray_init( tray_window );
-    }
-
+    tray_height = max( icon_cy, size.cy );
+    start_button_width = size.cx;
+    SetWindowPos( tray_window, 0, 0, GetSystemMetrics( SM_CYSCREEN ) - tray_height,
+                  tray_width, tray_height, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW );
     sync_taskbar_buttons();
-}
-
-static void update_taskbar_layout(void)
-{
-    TASKBAR_SETTINGS *settings;
-    RECT rcTray;
-    RECT rcClock;
-    int taskband_x;
-    int taskband_w;
-
-    taskbar_settings_load();
-    update_tray_top();
-    settings = taskbar_settings_get();
-    rcTray = get_tray_notify_rect();
-    rcClock = get_tray_clock_rect();
-
-    start_button_width = startbutton_get_desired_width();
-    place_start_button();
-
-    toolbars_layout( tray_window, start_button_width + (theme_is_visual_styles_active() ? 4 : 7), rcTray.left, tray_top, tray_height, &taskband_x, &taskband_w );
-    tray_clock_resize( rcClock.left + 2, rcClock.top + 2, rcClock.right - rcClock.left - 4, rcClock.bottom - rcClock.top - 4 );
-    taskband_resize( taskband_x, tray_top, taskband_w, tray_height );
-    position_taskbar();
-    tray_clock_show( settings->show_clock );
-    update_tray_layout();   /* the icons follow the height of the taskbar */
 }
 
 static LRESULT WINAPI shell_traywnd_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
 {
-    if (enable_taskbar && toolbars_task_gripper_message(hwnd, msg, wparam, lparam))
-        return msg == WM_SETCURSOR ? TRUE : 0;
     switch (msg)
     {
-    case WM_DESTROY:
-        nettray_shutdown();
-        volumetray_shutdown();
-        powertray_shutdown();
-        break;
-
     case WM_COPYDATA:
-    {
-        COPYDATASTRUCT *data = (COPYDATASTRUCT *)lparam;
-        if (data->dwData == 0x57455448) /* Display Properties: apply a .theme file */
-        {
-            THEME_CONFIG config;
-            DWORD attrs;
-            if (!data->lpData || data->cbData < sizeof(WCHAR) || data->cbData > MAX_PATH * sizeof(WCHAR) ||
-                data->cbData % sizeof(WCHAR) ||
-                ((const WCHAR *)data->lpData)[data->cbData / sizeof(WCHAR) - 1]) return FALSE;
-            attrs = GetFileAttributesW(data->lpData);
-            if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY)) return FALSE;
-            if (!theme_load_file(data->lpData, &config) || !theme_apply(&config)) return FALSE;
-            PostMessageW(hwnd, WM_THEMECHANGED, 0, 0);
-            return TRUE;
-        }
-        return handle_incoming((HWND)wparam, data);
-    }
+        return handle_incoming((HWND)wparam, (COPYDATASTRUCT *)lparam);
 
     case WM_DISPLAYCHANGE:
         if (!enable_taskbar && (!show_systray || !nb_displayed)) do_hide_systray();
@@ -1895,122 +1133,31 @@ static LRESULT WINAPI shell_traywnd_proc( HWND hwnd, UINT msg, WPARAM wparam, LP
         return 0;
 
     case WM_DRAWITEM:
-        if (startmenu_view_menu_icon(msg, lparam)) return TRUE;
         if (((MEASUREITEMSTRUCT*)lparam)->CtlType == ODT_MENU)
             return menu_wndproc(hwnd, msg, wparam, lparam);
         paint_taskbar_button( (const DRAWITEMSTRUCT *)lparam );
         break;
 
     case WM_MEASUREITEM:
-        if (startmenu_view_menu_icon(msg, lparam)) return TRUE;
         if (((MEASUREITEMSTRUCT*)lparam)->CtlType == ODT_MENU)
             return menu_wndproc(hwnd, msg, wparam, lparam);
         break;
-
-    case WM_PAINT:
-    {
-        PAINTSTRUCT ps;
-        HDC real = BeginPaint( hwnd, &ps ), hdc;
-        /* paint into a buffer and copy it at once: no flashing while the bands are moved or resized */
-        HPAINTBUFFER buffer = BeginBufferedPaint( real, &ps.rcPaint, BPBF_COMPATIBLEBITMAP, NULL, &hdc );
-        RECT rc;
-
-        if (!buffer) hdc = real;
-        GetClientRect( hwnd, &rc );
-        paint_tray_background( hwnd, hdc, &rc );
-
-        if (chevron_visible())
-        {
-            RECT chev = get_tray_chevron_rect();
-            HTHEME button = theme_open( hwnd, tray_expanded ? L"TrayNotifyHorizOpen::Button" : L"TrayNotifyHoriz::Button" );
-            if (button)
-            {
-                DrawThemeBackground( button, hdc, 1, 1, &chev, NULL );
-                CloseThemeData( button );
-            }
-            else
-            {
-                /* Windows Classic: the two arrows are plain text, no button */
-                HFONT font = CreateFontW( -11, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, 0, 0, L"Tahoma" );
-                HFONT prev = SelectObject( hdc, font );
-                SetBkMode( hdc, TRANSPARENT );
-                SetTextColor( hdc, GetSysColor( COLOR_BTNTEXT ) );
-                DrawTextW( hdc, tray_expanded ? L"\u00bb" : L"\u00ab", -1, &chev, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
-                SelectObject( hdc, prev );
-                DeleteObject( font );
-            }
-        }
-
-        /* Draw sunken border around entire notification area in Classic mode */
-        if (enable_taskbar)
-        {
-            if (!theme_is_visual_styles_active())
-            {
-                RECT rcTray = get_tray_notify_rect();
-                DrawEdge( hdc, &rcTray, EDGE_SUNKEN, BF_RECT );
-            }
-        }
-
-        toolbars_draw_task_gripper( hwnd, hdc, tray_top, tray_height );
-
-        if (buffer) EndBufferedPaint( buffer, TRUE );
-        EndPaint( hwnd, &ps );
-        return 0;
-    }
-
-    case WM_PRINTCLIENT:
-    {
-        /* the background the bands, the clock, the Start button and the tray icons draw under themselves
-         * (DrawThemeParentBackground) */
-        RECT rc;
-        GetClientRect( hwnd, &rc );
-        paint_tray_background( hwnd, (HDC)wparam, &rc );
-        return 0;
-    }
-
-    case WM_ERASEBKGND:
-        return 1;
 
     case WM_COMMAND:
         if (HIWORD(wparam) == BN_CLICKED)
         {
             if (LOWORD(wparam) == TRAY_MINIMIZE_ALL || LOWORD(wparam) == TRAY_MINIMIZE_ALL_UNDO)
             {
-                show_desktop_toggle();
+                FIXME( "Shell command %u is not supported.\n", LOWORD(wparam) );
                 break;
             }
             click_taskbar_button( (HWND)lparam );
         }
         break;
 
-    case WM_TRAY_CLOCKMENU:
-    {
-        POINT pt = { (short)LOWORD(lparam), (short)HIWORD(lparam) };
-        track_tray_menu( pt, TRUE );
-        return 0;
-    }
-
     case WM_CONTEXTMENU:
         show_taskbar_contextmenu( (HWND)wparam, lparam );
         break;
-
-    case WM_HOTKEY:
-        switch (wparam)
-        {
-        case IDHK_RUN: startmenu_run( STARTMENU_CMD_RUN, hwnd ); break;
-        case IDHK_FIND: startmenu_run( STARTMENU_CMD_SEARCH, hwnd ); break;
-        case IDHK_EXPLORE: shellfolder_open( CSIDL_DRIVES, TRUE ); break;
-        case IDHK_SYS_PROPERTIES: ShellExecuteW( NULL, L"open", L"control.exe", L"sysdm.cpl", NULL, SW_SHOWNORMAL ); break;
-        case IDHK_RESTORE_ALL: undo_apply(); break;
-        case IDHK_LOCK: power_mgmt_execute_action( POWER_ACTION_LOCK ); break;
-        case IDHK_MINIMIZE_ALL:
-        case IDHK_DESKTOP:
-            if (wparam == IDHK_MINIMIZE_ALL && toolbars_desktop_shown()) break;
-            if (!toolbars_desktop_shown()) undo_save( L"Minimize All" );
-            show_desktop_toggle();
-            break;
-        }
-        return 0;
 
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;
@@ -2018,155 +1165,6 @@ static LRESULT WINAPI shell_traywnd_proc( HWND hwnd, UINT msg, WPARAM wparam, LP
     case WM_INITMENUPOPUP:
     case WM_MENUCOMMAND:
         return menu_wndproc(hwnd, msg, wparam, lparam);
-
-    case WM_ENTERMENULOOP:
-        startmenu_on_enter_menu_loop();
-        break;
-
-    case WM_THEMECHANGED:
-        /* the icon packs belong to the theme: reload them everywhere */
-        theme_reload();
-        theme_sync_colors();
-        shellres_reset();
-        shellres_sync_shell_icons();
-        shellres_reload_shell_icons();
-        desktop_view_refresh();
-        toolbars_refresh();
-        /* repaint everything once the change has settled (children paint late after a live switch) */
-        SetTimer( hwnd, IDT_THEMEREDRAW, 300, NULL );
-        /* fall through */
-    case WM_SETTINGCHANGE:
-        update_taskbar_layout();
-        RedrawWindow( hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN );
-        break;
-
-    case WM_TIMECHANGE:
-        tray_clock_update();
-        break;
-
-    case WM_SETCURSOR:
-    {
-        POINT pt;
-        GetCursorPos( &pt );
-        ScreenToClient( hwnd, &pt );
-        if (LOWORD(lparam) == HTCLIENT && on_sizing_edge( pt.y ))
-        {
-            SetCursor( LoadCursorW( 0, (const WCHAR *)IDC_SIZENS ) );
-            return TRUE;
-        }
-        return DefWindowProcW( hwnd, msg, wparam, lparam );
-    }
-
-    case WM_MOUSEMOVE:
-        if (sizing_rows && GetCapture() == hwnd)
-        {
-            /* the height snaps to whole rows of buttons, up to half the screen */
-            POINT pt;
-            int rows;
-
-            GetCursorPos( &pt );
-            rows = (GetSystemMetrics( SM_CYSCREEN ) - pt.y - tray_top - theme_taskbar_first_row() + theme_taskbar_row_pitch() / 2) / theme_taskbar_row_pitch() + 1;
-            rows = max( 1, min( rows, max_rows() ));
-            if (rows != tray_rows)
-            {
-                tray_rows = rows;
-                update_taskbar_layout();
-            }
-        }
-        return 0;
-
-    case WM_LBUTTONUP:
-    case WM_CAPTURECHANGED:
-        if (sizing_rows)
-        {
-            DWORD rows = tray_rows;
-            sizing_rows = FALSE;
-            if (msg == WM_LBUTTONUP && GetCapture() == hwnd) ReleaseCapture();
-            RegSetKeyValueW( HKEY_CURRENT_USER, rows_key, L"Rows", REG_DWORD, &rows, sizeof(rows) );
-        }
-        return 0;
-
-    case WM_LBUTTONDOWN:
-        if (on_sizing_edge( (short)HIWORD(lparam) ))
-        {
-            sizing_rows = TRUE;
-            SetCapture( hwnd );
-            return 0;
-        }
-        if (chevron_visible())
-        {
-            RECT chev = get_tray_chevron_rect();
-            POINT pt = { (short)LOWORD(lparam), (short)HIWORD(lparam) };
-            if (PtInRect( &chev, pt ))
-            {
-                tray_expanded = !tray_expanded;
-                tray_expanded_hover_tick = GetTickCount();
-                refresh_inactive_icons();
-                update_taskbar_layout();
-                InvalidateRect( hwnd, NULL, FALSE );
-                return 0;
-            }
-        }
-        break;
-
-    case WM_TIMER:
-        if (wparam == IDT_THEMEREDRAW)
-        {
-            KillTimer( hwnd, IDT_THEMEREDRAW );
-            update_taskbar_layout();
-            RedrawWindow( hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW );
-            break;
-        }
-        if (wparam == IDT_AUTOHIDE)
-        {
-            static DWORD last_inactive_check;
-            static BOOL was_down;
-            BOOL down = (GetAsyncKeyState( VK_LBUTTON ) & 0x8000) != 0;
-
-            autohide_tick();
-            /* the expanded notification area closes when something else is clicked */
-            if (tray_expanded && down && !was_down)
-            {
-                POINT pt;
-                RECT area = get_tray_notify_rect();
-                GetCursorPos( &pt );
-                ScreenToClient( tray_window, &pt );
-                if (!PtInRect( &area, pt ))
-                {
-                    tray_expanded = FALSE;
-                    refresh_inactive_icons();
-                    update_taskbar_layout();
-                }
-            }
-            if (tray_expanded)
-            {
-                POINT pt;
-                RECT area = get_tray_notify_rect();
-                GetCursorPos( &pt );
-                ScreenToClient( tray_window, &pt );
-                if (PtInRect( &area, pt ) || GetCapture()) tray_expanded_hover_tick = GetTickCount();
-                else if (GetTickCount() - tray_expanded_hover_tick >= 5000)
-                {
-                    tray_expanded = FALSE;
-                    refresh_inactive_icons();
-                    update_taskbar_layout();
-                }
-            }
-            was_down = down;
-            if (GetTickCount() - last_inactive_check > 1000)
-            {
-                last_inactive_check = GetTickCount();
-                refresh_inactive_icons();
-            }
-            return 0;
-        }
-        if (wparam == 9999)
-        {
-            KillTimer(hwnd, 9999);
-            startmenu_on_enter_menu_loop();
-            return 0;
-        }
-        break;
 
     case WM_USER + 0:
         update_systray_balloon_position();
@@ -2198,12 +1196,10 @@ void handle_parent_notify( HWND hwnd, WPARAM wp )
     switch (LOWORD(wp))
     {
     case WM_CREATE:
-        if (enable_taskbar) taskband_sync_windows();
-        else add_taskbar_button( hwnd );
+        add_taskbar_button( hwnd );
         break;
     case WM_DESTROY:
-        if (enable_taskbar) taskband_sync_windows();
-        else remove_taskbar_button( hwnd );
+        remove_taskbar_button( hwnd );
         cleanup_systray_window( hwnd );
         break;
     }
@@ -2256,7 +1252,7 @@ void initialize_systray( BOOL arg_using_root, BOOL arg_enable_shell, BOOL arg_sh
         SetRect( &primary_rect, 0, 0, GetSystemMetrics( SM_CXSCREEN ), GetSystemMetrics( SM_CYSCREEN ) );
         SubtractRect( &taskbar_rect, &primary_rect, &work_rect );
 
-        tray_window = CreateWindowExW( WS_EX_TOPMOST | WS_EX_TOOLWINDOW, shell_traywnd_class.lpszClassName, NULL, WS_POPUP | WS_CLIPCHILDREN,
+        tray_window = CreateWindowExW( WS_EX_NOACTIVATE, shell_traywnd_class.lpszClassName, NULL, WS_POPUP,
                                        taskbar_rect.left, taskbar_rect.top, taskbar_rect.right - taskbar_rect.left,
                                        taskbar_rect.bottom - taskbar_rect.top, 0, 0, 0, 0 );
     }
@@ -2276,19 +1272,8 @@ void initialize_systray( BOOL arg_using_root, BOOL arg_enable_shell, BOOL arg_sh
 
     LoadStringW( NULL, IDS_START_LABEL, start_label, ARRAY_SIZE( start_label ));
 
-    if (!enable_taskbar) add_taskbar_button( 0 );
+    add_taskbar_button( 0 );
 
-    if (enable_taskbar)
-    {
-        static const struct { int id; UINT mod, key; } hotkeys[] =
-        {
-            { IDHK_RUN, MOD_WIN, 'R' }, { IDHK_MINIMIZE_ALL, MOD_WIN, 'M' }, { IDHK_RESTORE_ALL, MOD_WIN | MOD_SHIFT, 'M' },
-            { IDHK_EXPLORE, MOD_WIN, 'E' }, { IDHK_FIND, MOD_WIN, 'F' }, { IDHK_SYS_PROPERTIES, MOD_WIN, VK_PAUSE },
-            { IDHK_DESKTOP, MOD_WIN, 'D' }, { IDHK_LOCK, MOD_WIN, 'L' },
-        };
-        unsigned int i;
-        for (i = 0; i < ARRAY_SIZE(hotkeys); i++) RegisterHotKey( tray_window, hotkeys[i].id, hotkeys[i].mod, hotkeys[i].key );
-        do_show_systray();
-    }
+    if (enable_taskbar) do_show_systray();
     else do_hide_systray();
 }
