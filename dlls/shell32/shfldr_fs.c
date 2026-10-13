@@ -987,6 +987,10 @@ static HRESULT WINAPI IShellFolder_fnSetNameOf (IShellFolder2 * iface,
     if (MoveFileW (szSrc, szDest)) {
         HRESULT hr = S_OK;
 
+        undo_begin(UNDO_RENAME);
+        undo_add(szSrc, szDest);
+        undo_end();
+
         if (pPidlOut)
             hr = _ILCreateFromPathW(szDest, pPidlOut);
 

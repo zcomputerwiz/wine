@@ -83,6 +83,7 @@ typedef struct
     SHFILEOPSTRUCTW *req;
     DWORD dwYesToAllMask;
     BOOL bManyItems;
+    int nested;   /* inside a folder that is copied or moved: its items are not recorded for undo */
     BOOL bCancelled;
 } FILE_OPERATION;
 
@@ -1164,7 +1165,9 @@ static DWORD copy_move_dir(FILE_OPERATION *op, const WCHAR *dir, const WCHAR *ta
     file_entry_init(&from_dir, buffer, INVALID_FILE_ATTRIBUTES, TRUE);
     file_entry_init(&to_dir, target, GetFileAttributesW(target), FALSE);
 
+    op->nested++;
     ret = do_copy_move(op, &from_dir, &to_dir, TRUE);
+    op->nested--;
 
     if (op->req->wFunc == FO_MOVE && ret == ERROR_SUCCESS)
         RemoveDirectoryW(dir);
@@ -1244,18 +1247,15 @@ static DWORD do_copy_move(FILE_OPERATION *op, const FILE_ENTRY *from, const FILE
 
     /* Source is a dir. */
     if (IsAttribDir(from->attributes))
-        return copy_move_dir(op, from->szFullPath, target);
-
+        ret = copy_move_dir(op, from->szFullPath, target);
     /* Source is a single file. */
-    switch (op->req->wFunc)
-    {
-        case FO_COPY:
-            return SHNotifyCopyFileW(from->szFullPath, target, FALSE);
-        case FO_MOVE:
-            return SHNotifyMoveFileW(from->szFullPath, target);
-        default:
-            assert(0); /* Should never be here. */
-    }
+    else if (op->req->wFunc == FO_COPY)
+        ret = SHNotifyCopyFileW(from->szFullPath, target, FALSE);
+    else
+        ret = SHNotifyMoveFileW(from->szFullPath, target);
+
+    if (!ret && !op->nested) undo_add(from->szFullPath, target);
+    return ret;
 }
 
 /* The FO_COPY operation. */
@@ -1359,7 +1359,10 @@ static int delete_files(LPSHFILEOPSTRUCTW lpFileOp, const FILE_LIST *flFrom)
         {
             BOOL bDelete;
             if (trash_file(fileEntry->szFullPath))
+            {
+                undo_add(fileEntry->szFullPath, NULL);
                 continue;
+            }
 
             /* Note: Windows silently deletes the file in such a situation, we show a dialog */
             if (!(lpFileOp->fFlags & FOF_NOCONFIRMATION) || (lpFileOp->fFlags & FOF_WANTNUKEWARNING))
@@ -1392,6 +1395,7 @@ static int delete_files(LPSHFILEOPSTRUCTW lpFileOp, const FILE_LIST *flFrom)
 static DWORD rename_files(SHFILEOPSTRUCTW *op, const FILE_LIST *from, const FILE_LIST *to)
 {
     const FILE_ENTRY *entry_from, *entry_to;
+    DWORD ret;
 
     if (from->dwNumFiles != 1)
         return DE_MANYSRC1DEST;
@@ -1412,15 +1416,16 @@ static DWORD rename_files(SHFILEOPSTRUCTW *op, const FILE_LIST *from, const FILE
     if (entry_to->bExists && IsAttribDir(entry_from->attributes) != IsAttribDir(entry_to->attributes))
         return IsAttribDir(entry_to->attributes) ? DE_FILEDESTISFLD : DE_FLDDESTISFILE;
 
-    return SHNotifyMoveFileW(entry_from->szFullPath, entry_to->szFullPath);
+    ret = SHNotifyMoveFileW(entry_from->szFullPath, entry_to->szFullPath);
+    if (!ret) undo_add(entry_from->szFullPath, entry_to->szFullPath);
+    return ret;
 }
 
 /* alert the user if an unsupported flag is used */
 static void check_flags(FILEOP_FLAGS fFlags)
 {
     WORD wUnsupportedFlags = FOF_NO_CONNECTED_ELEMENTS |
-        FOF_NOCOPYSECURITYATTRIBS | FOF_NORECURSEREPARSE |
-        FOF_RENAMEONCOLLISION | FOF_WANTMAPPINGHANDLE;
+        FOF_NOCOPYSECURITYATTRIBS | FOF_NORECURSEREPARSE | FOF_WANTMAPPINGHANDLE;
 
     if (fFlags & wUnsupportedFlags)
         FIXME("Unsupported flags: %04x\n", fFlags);
@@ -1464,6 +1469,13 @@ int WINAPI SHFileOperationW(LPSHFILEOPSTRUCTW lpFileOp)
         return ret;
     }
 
+    /* Windows can undo what is done with FOF_ALLOWUNDO */
+    if (lpFileOp->fFlags & FOF_ALLOWUNDO)
+    {
+        static const enum undo_kind kinds[] = { UNDO_NONE, UNDO_MOVE, UNDO_COPY, UNDO_DELETE, UNDO_RENAME };
+        undo_begin(kinds[lpFileOp->wFunc]);
+    }
+
     switch (lpFileOp->wFunc)
     {
         case FO_COPY:
@@ -1480,6 +1492,7 @@ int WINAPI SHFileOperationW(LPSHFILEOPSTRUCTW lpFileOp)
             assert(0); /* Should never be here. */
     }
 
+    if (lpFileOp->fFlags & FOF_ALLOWUNDO) undo_end();
     file_list_destroy(&flFrom);
     file_list_destroy(&flTo);
 

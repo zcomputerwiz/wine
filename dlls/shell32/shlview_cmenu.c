@@ -514,6 +514,7 @@ static HRESULT do_paste(ContextMenu *menu, HWND hwnd)
         if ((src_paths = build_source_paths(root_pidl, pidls, cida->cidl)))
         {
             op.pFrom = src_paths;
+            rename_copies_in_place(&op, src_paths);
             if ((ret = SHFileOperationW(&op)))
             {
                 WARN("Failed to copy, ret %d.\n", ret);
@@ -533,6 +534,7 @@ static HRESULT do_paste(ContextMenu *menu, HWND hwnd)
         const DROPFILES *dropfiles = GlobalLock(medium.hGlobal);
 
         op.pFrom = (const WCHAR *)((const char *)dropfiles + dropfiles->pFiles);
+        rename_copies_in_place(&op, op.pFrom);
         if ((ret = SHFileOperationW(&op)))
         {
             WARN("Failed to copy, ret %d.\n", ret);
