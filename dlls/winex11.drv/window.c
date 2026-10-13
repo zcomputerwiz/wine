@@ -978,6 +978,9 @@ static BOOL window_needs_net_wm_state_change_delay( struct x11drv_win_data *data
 
 static BOOL window_needs_config_change_delay( struct x11drv_win_data *data )
 {
+    /* A standalone Wine desktop can have no host window manager to acknowledge
+     * fullscreen hints. Its size is controlled by Wine's display mode. */
+    if (data->whole_window == root_window && is_virtual_desktop()) return FALSE;
     if (!data->managed || data->embedded) return FALSE; /* window is not managed or is embedded, safe to make changes */
     if (data->pending_state.wm_state == WithdrawnState) return FALSE; /* window is unmapped, should be safe to make any change */
     if (data->configure_serial) return TRUE; /* another config update is pending, wait for it to complete */
