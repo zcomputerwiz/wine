@@ -186,33 +186,29 @@ static ULONG WINAPI ContextMenu_Release(IContextMenu3 *iface)
     return ref;
 }
 
-static BOOL can_paste(const ITEMIDLIST *dst_pidl)
+/* files on the clipboard, cut or copied by a shell view or dragged out of another program */
+static BOOL clipboard_has_files(void)
 {
     IDataObject *data;
     FORMATETC format;
-
-    if (!(_ILIsFolder(dst_pidl) || _ILIsDrive(dst_pidl)))
-        return FALSE;
+    BOOL ret;
 
     if (FAILED(OleGetClipboard(&data)))
         return FALSE;
-
     InitFormatEtc(format, RegisterClipboardFormatW(CFSTR_SHELLIDLISTW), TYMED_HGLOBAL);
-    if (SUCCEEDED(IDataObject_QueryGetData(data, &format)))
+    ret = SUCCEEDED(IDataObject_QueryGetData(data, &format));
+    if (!ret)
     {
-        IDataObject_Release(data);
-        return TRUE;
+        InitFormatEtc(format, CF_HDROP, TYMED_HGLOBAL);
+        ret = SUCCEEDED(IDataObject_QueryGetData(data, &format));
     }
-
-    InitFormatEtc(format, CF_HDROP, TYMED_HGLOBAL);
-    if (SUCCEEDED(IDataObject_QueryGetData(data, &format)))
-    {
-        IDataObject_Release(data);
-        return TRUE;
-    }
-
     IDataObject_Release(data);
-    return FALSE;
+    return ret;
+}
+
+static BOOL can_paste(const ITEMIDLIST *dst_pidl)
+{
+    return (_ILIsFolder(dst_pidl) || _ILIsDrive(dst_pidl)) && clipboard_has_files();
 }
 
 static UINT max_menu_id(HMENU hmenu, UINT offset, UINT last)
@@ -1767,7 +1763,37 @@ HRESULT ItemMenu_Constructor(IShellFolder *parent, LPCITEMIDLIST pidl, const LPC
     return hr;
 }
 
-/* Background menu implementation */
+/* Background menu implementation.  Ids are offsets from the caller's first id: FCIDM_SHVIEW_* - FCIDM_BASE for
+ * the view's commands, then: */
+#define BG_SORT_FIRST 0x180   /* Arrange Icons By: name, size, type, modified (the view's sort commands 0x30-0x33) */
+#define BG_NEW_FIRST  0x200   /* the New menu object's items */
+
+/* copies a menu resource, adding first to every id */
+static void copy_menu_items(HMENU dst, UINT pos, HMENU src, UINT first)
+{
+    int i, count = GetMenuItemCount(src);
+
+    for (i = 0; i < count; i++)
+    {
+        MENUITEMINFOW info = { sizeof(info) };
+        WCHAR text[256];
+
+        info.fMask = MIIM_ID | MIIM_FTYPE | MIIM_STATE | MIIM_STRING | MIIM_SUBMENU;
+        info.dwTypeData = text;
+        info.cch = ARRAY_SIZE(text);
+        if (!GetMenuItemInfoW(src, i, TRUE, &info)) continue;
+        if (info.hSubMenu)
+        {
+            HMENU sub = CreatePopupMenu();
+            copy_menu_items(sub, 0, info.hSubMenu, first);
+            info.hSubMenu = sub;
+        }
+        if (!(info.fType & MFT_SEPARATOR)) info.wID += first;
+        info.dwTypeData = text;
+        InsertMenuItemW(dst, pos + i, TRUE, &info);
+    }
+}
+
 static HRESULT WINAPI BackgroundMenu_QueryContextMenu(
 	IContextMenu3 *iface,
 	HMENU hMenu,
@@ -1778,7 +1804,6 @@ static HRESULT WINAPI BackgroundMenu_QueryContextMenu(
 {
     ContextMenu *This = impl_from_IContextMenu3(iface);
     HMENU hMyMenu;
-    UINT idMax;
     HRESULT hr;
 
     TRACE("(%p)->(hmenu=%p indexmenu=%x cmdfirst=%x cmdlast=%x flags=%x )\n",
@@ -1799,10 +1824,44 @@ static HRESULT WINAPI BackgroundMenu_QueryContextMenu(
     }
     else
     {
-        Shell_MergeMenus (hMenu, GetSubMenu(hMyMenu,0), indexMenu,
-                          idCmdFirst - FCIDM_BASE, idCmdLast, MM_SUBMENUSHAVEIDS);
-        idMax = max_menu_id(GetSubMenu(hMyMenu, 0), idCmdFirst - FCIDM_BASE, idCmdLast);
-        hr =  MAKE_HRESULT(SEVERITY_SUCCESS, FACILITY_NULL, idMax-idCmdFirst);
+        UINT paste = clipboard_has_files() ? MF_ENABLED : MF_GRAYED, pos;
+        IShellExtInit *init;
+        ITEMIDLIST *pidl;
+
+        copy_menu_items(hMenu, indexMenu, GetSubMenu(hMyMenu, 0), idCmdFirst);
+        EnableMenuItem(hMenu, idCmdFirst + FCIDM_SHVIEW_INSERT - FCIDM_BASE, MF_BYCOMMAND | paste);
+        EnableMenuItem(hMenu, idCmdFirst + FCIDM_SHVIEW_INSERTLINK - FCIDM_BASE, MF_BYCOMMAND | paste);
+
+        /* Windows XP: "Undo Rename" and the like after Paste Shortcut while there is something to undo */
+        if (undo_top() != UNDO_NONE)
+        {
+            WCHAR text[64];
+
+            for (pos = 0; pos < GetMenuItemCount(hMenu); pos++)
+                if (GetMenuItemID(hMenu, pos) == idCmdFirst + FCIDM_SHVIEW_INSERTLINK - FCIDM_BASE) break;
+            undo_menu_text(text, ARRAY_SIZE(text));
+            InsertMenuW(hMenu, pos + 1, MF_BYPOSITION | MF_STRING, idCmdFirst + FCIDM_SHVIEW_UNDO - FCIDM_BASE, text);
+        }
+
+        /* New, above the separator before Properties */
+        if (!This->new_menu && SUCCEEDED(get_parent_pidl(This, &pidl)))
+        {
+            if (SUCCEEDED(new_menu_create(NULL, &IID_IShellExtInit, (void **)&init)))
+            {
+                if (SUCCEEDED(IShellExtInit_Initialize(init, pidl, NULL, NULL)))
+                    IShellExtInit_QueryInterface(init, &IID_IContextMenu3, (void **)&This->new_menu);
+                IShellExtInit_Release(init);
+            }
+            ILFree(pidl);
+        }
+        for (pos = 0; pos < GetMenuItemCount(hMenu); pos++)
+            if (GetMenuItemID(hMenu, pos) == idCmdFirst + FCIDM_SHVIEW_PROPERTIES - FCIDM_BASE) break;
+        if (This->new_menu && pos > 0)
+        {
+            InsertMenuW(hMenu, pos - 1, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
+            IContextMenu3_QueryContextMenu(This->new_menu, hMenu, pos, idCmdFirst + BG_NEW_FIRST, idCmdLast, uFlags);
+        }
+        hr = MAKE_HRESULT(SEVERITY_SUCCESS, FACILITY_NULL, BG_NEW_FIRST + 0x40);
     }
     DestroyMenu(hMyMenu);
 
@@ -1874,15 +1933,52 @@ static HRESULT WINAPI BackgroundMenu_InvokeCommand(
         {
             do_paste(This, lpcmi->hwnd);
         }
+        else if (!strcmp(lpcmi->lpVerb, "pastelink"))
+        {
+            do_paste_shortcut(This);
+        }
+        else if (!strcmp(lpcmi->lpVerb, "undo"))
+        {
+            undo_run(lpcmi->hwnd);
+        }
         else
         {
             FIXME("please report: unknown verb %s\n", debugstr_a(lpcmi->lpVerb));
         }
     }
+    else if (LOWORD(lpcmi->lpVerb) >= BG_NEW_FIRST)
+    {
+        if (This->new_menu)
+        {
+            CMINVOKECOMMANDINFO info = *lpcmi;
+            IObjectWithSite *site;
+
+            /* the view shows the new item for renaming */
+            if (view && SUCCEEDED(IContextMenu3_QueryInterface(This->new_menu, &IID_IObjectWithSite, (void **)&site)))
+            {
+                IObjectWithSite_SetSite(site, (IUnknown *)view);
+                IObjectWithSite_Release(site);
+            }
+            info.lpVerb = MAKEINTRESOURCEA(LOWORD(lpcmi->lpVerb) - BG_NEW_FIRST);
+            IContextMenu3_InvokeCommand(This->new_menu, &info);
+        }
+    }
+    else if (LOWORD(lpcmi->lpVerb) >= BG_SORT_FIRST && LOWORD(lpcmi->lpVerb) < BG_SORT_FIRST + 4)
+    {
+        if (hWnd) SendMessageA(hWnd, WM_COMMAND, MAKEWPARAM(0x30 + LOWORD(lpcmi->lpVerb) - BG_SORT_FIRST, 0), 0);
+    }
     else
     {
         switch (LOWORD(lpcmi->lpVerb) + FCIDM_BASE)
         {
+            case FCIDM_SHVIEW_INSERTLINK:
+                do_paste_shortcut(This);
+                break;
+
+            case FCIDM_SHVIEW_UNDO:
+                undo_run(lpcmi->hwnd);
+                break;
+
 	    case FCIDM_SHVIEW_REFRESH:
 	        if (view) IShellView_Refresh(view);
                 break;
@@ -1905,7 +2001,7 @@ static HRESULT WINAPI BackgroundMenu_InvokeCommand(
 
             default:
                 /* if it's an id just pass it to the parent shv */
-                if (hWnd) SendMessageA(hWnd, WM_COMMAND, MAKEWPARAM(LOWORD(lpcmi->lpVerb), 0), 0);
+                if (hWnd) SendMessageA(hWnd, WM_COMMAND, MAKEWPARAM(LOWORD(lpcmi->lpVerb) + FCIDM_BASE, 0), 0);
                 break;
          }
     }
