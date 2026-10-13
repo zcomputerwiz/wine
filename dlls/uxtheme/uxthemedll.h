@@ -105,6 +105,7 @@ BOOL WINAPI ThemeHooksRemove(void);
 extern void UXTHEME_InitSystem(HINSTANCE hInst);
 extern HRESULT UXTHEME_SetActiveTheme(PTHEME_FILE tf);
 extern void UXTHEME_UninitSystem(void);
+extern void UXTHEME_CheckReload(void);
 
 extern struct user_api_hook user_api;
 LRESULT WINAPI UXTHEME_DefDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, BOOL unicode);
