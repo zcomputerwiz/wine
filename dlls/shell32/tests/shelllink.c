@@ -1460,6 +1460,115 @@ static void test_SHGetImageList(void)
     }
 }
 
+static HRESULT get_item_icon_location(const WCHAR *path, WCHAR *location, int *index)
+{
+    ITEMIDLIST *pidl;
+    const ITEMIDLIST *child;
+    IShellFolder *parent;
+    IExtractIconW *extract;
+    HRESULT hr;
+    UINT flags;
+
+    hr = SHParseDisplayName(path, NULL, &pidl, 0, NULL);
+    if (FAILED(hr)) return hr;
+    hr = SHBindToParent(pidl, &IID_IShellFolder, (void **)&parent, &child);
+    if (SUCCEEDED(hr))
+    {
+        hr = IShellFolder_GetUIObjectOf(parent, NULL, 1, &child, &IID_IExtractIconW, NULL,
+                                       (void **)&extract);
+        if (SUCCEEDED(hr))
+        {
+            hr = IExtractIconW_GetIconLocation(extract, 0, location, MAX_PATH, index, &flags);
+            IExtractIconW_Release(extract);
+        }
+        IShellFolder_Release(parent);
+    }
+    ILFree(pidl);
+    return hr;
+}
+
+static void test_shortcut_target_icon(void)
+{
+    WCHAR temp[MAX_PATH], directory[MAX_PATH], link[MAX_PATH], executable[MAX_PATH];
+    WCHAR expected[MAX_PATH], location[MAX_PATH], explicit_icon[MAX_PATH];
+    const WCHAR *target;
+    IShellLinkW *shell_link;
+    IPersistFile *persist;
+    ITEMIDLIST *pidl;
+    int expected_index, index;
+    HRESULT hr;
+    unsigned int i;
+    BOOL ret;
+
+    GetTempPathW(ARRAY_SIZE(temp), temp);
+    ret = GetTempFileNameW(temp, L"lnk", 0, directory);
+    ok(ret, "Failed to get temporary path.\n");
+    if (!ret) return;
+    DeleteFileW(directory);
+    ret = CreateDirectoryW(directory, NULL);
+    ok(ret, "Failed to create directory.\n");
+    if (!ret) return;
+    lstrcpyW(link, directory);
+    lstrcatW(link, L"\\test.lnk");
+    GetModuleFileNameW(NULL, executable, ARRAY_SIZE(executable));
+    GetSystemDirectoryW(explicit_icon, ARRAY_SIZE(explicit_icon));
+    lstrcatW(explicit_icon, L"\\shell32.dll");
+
+    for (i = 0; i < 3; ++i)
+    {
+        target = i ? executable : directory;
+        expected[0] = 0;
+        hr = get_item_icon_location(target, expected, &expected_index);
+        ok(hr == S_OK, "Got target icon hr %#lx.\n", hr);
+        if (FAILED(hr)) continue;
+        if (i == 2)
+        {
+            lstrcpyW(expected, explicit_icon);
+            expected_index = -7;
+        }
+        hr = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLinkW,
+                              (void **)&shell_link);
+        ok(hr == S_OK, "Got hr %#lx.\n", hr);
+        if (FAILED(hr)) continue;
+        hr = IShellLinkW_SetPath(shell_link, target);
+        ok(hr == S_OK, "Got SetPath hr %#lx.\n", hr);
+        hr = SHParseDisplayName(target, NULL, &pidl, 0, NULL);
+        ok(hr == S_OK, "Got target PIDL hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            hr = IShellLinkW_SetIDList(shell_link, pidl);
+            ok(hr == S_OK, "Got SetIDList hr %#lx.\n", hr);
+            ILFree(pidl);
+        }
+        if (i == 2)
+        {
+            hr = IShellLinkW_SetIconLocation(shell_link, explicit_icon, -7);
+            ok(hr == S_OK, "Got SetIconLocation hr %#lx.\n", hr);
+        }
+        hr = IShellLinkW_QueryInterface(shell_link, &IID_IPersistFile, (void **)&persist);
+        ok(hr == S_OK, "Got hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            hr = IPersistFile_Save(persist, link, TRUE);
+            ok(hr == S_OK, "Got Save hr %#lx.\n", hr);
+            IPersistFile_Release(persist);
+            if (SUCCEEDED(hr))
+            {
+                location[0] = 0;
+                index = 0;
+                hr = get_item_icon_location(link, location, &index);
+                ok(hr == S_OK, "Got shortcut icon hr %#lx.\n", hr);
+                ok(!lstrcmpiW(location, expected) && index == expected_index,
+                   "Shortcut target icon %u: got %s,%d, expected %s,%d.\n",
+                   i, wine_dbgstr_w(location), index, wine_dbgstr_w(expected), expected_index);
+            }
+        }
+        IShellLinkW_Release(shell_link);
+        DeleteFileW(link);
+    }
+    RemoveDirectoryW(directory);
+}
+
 START_TEST(shelllink)
 {
     HRESULT r;
@@ -1482,6 +1591,7 @@ START_TEST(shelllink)
     test_datalink();
     test_shdefextracticon();
     test_GetIconLocation();
+    test_shortcut_target_icon();
     test_SHGetStockIconInfo();
     test_SHExtractIcons();
     test_propertystore();

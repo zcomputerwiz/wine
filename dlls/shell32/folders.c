@@ -309,6 +309,32 @@ static HRESULT WINAPI IExtractIconW_fnGetIconLocation(IExtractIconW * iface, UIN
 
 		  if (SUCCEEDED(hr) && *szIconFile)
 		    found = TRUE;
+                  else
+                  {
+                      ITEMIDLIST *target = NULL;
+                      IShellFolder *parent;
+                      const ITEMIDLIST *child;
+                      IExtractIconW *extract;
+                      char extension[MAX_PATH];
+                      UINT flags;
+
+                      /* Do not recursively follow links, which may form a cycle. */
+                      if (IShellLinkW_GetIDList(psl, &target) == S_OK && target &&
+                          (!_ILGetExtension(target, extension, sizeof(extension)) ||
+                           lstrcmpiA(extension, "lnk")) &&
+                          SUCCEEDED(SHBindToParent(target, &IID_IShellFolder, (void **)&parent, &child)))
+                      {
+                          if (SUCCEEDED(IShellFolder_GetUIObjectOf(parent, NULL, 1, &child,
+                              &IID_IExtractIconW, NULL, (void **)&extract)))
+                          {
+                              found = IExtractIconW_GetIconLocation(extract, uFlags, szIconFile,
+                                                                   cchMax, piIndex, &flags) == S_OK && *szIconFile;
+                              IExtractIconW_Release(extract);
+                          }
+                          IShellFolder_Release(parent);
+                      }
+                      ILFree(target);
+                  }
 
 		  IShellLinkW_Release(psl);
 		}
