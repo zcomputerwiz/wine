@@ -2082,7 +2082,8 @@ static void calc_menu_item_size( HDC hdc, struct menu_item *item, HWND owner, IN
             item->bmpsize = size;
             menu->textOffset = max( menu->textOffset, size.cx );
             item->rect.right += size.cx + 2;
-            item_height = size.cy + 2;
+            /* big pictures (the 32 pixel icons of the classic Start menu) fill the row */
+            item_height = size.cy + (size.cy >= 32 ? 0 : 2);
         }
         if (!(menu->dwStyle & MNS_NOCHECK)) item->rect.right += check_bitmap_width;
         item->rect.right += 4 + menucharsize.cx;
