@@ -2423,6 +2423,25 @@ static LRESULT ShellView_OnNotify(IShellViewImpl * This, UINT CtlID, LPNMHDR lpn
 	        }
 		break;
 
+	      case 'A':
+	      case 'C':
+	      case 'X':
+	      case 'V':
+	      case 'Z':
+		if (GetKeyState(VK_CONTROL) >= 0 || GetKeyState(VK_MENU) < 0) break;
+		if (plvKeyDown->wVKey == 'A')
+		{
+		  LVITEMW item = { .state = LVIS_SELECTED, .stateMask = LVIS_SELECTED };
+		  SendMessageW(This->hWndList, LVM_SETITEMSTATE, -1, (LPARAM)&item);
+		}
+		else if (plvKeyDown->wVKey == 'V')
+		  invoke_view_verb(This, SVGIO_BACKGROUND, "paste");
+		else if (plvKeyDown->wVKey == 'Z')
+		  invoke_view_verb(This, SVGIO_BACKGROUND, "undo");
+		else if (SendMessageW(This->hWndList, LVM_GETSELECTEDCOUNT, 0, 0))
+		  invoke_view_verb(This, SVGIO_SELECTION, plvKeyDown->wVKey == 'C' ? "copy" : "cut");
+		break;
+
 	      default:
 		FIXME("LVN_KEYDOWN key=0x%08x\n", plvKeyDown->wVKey);
 	      }
@@ -2440,10 +2459,42 @@ static LRESULT ShellView_OnNotify(IShellViewImpl * This, UINT CtlID, LPNMHDR lpn
 * ShellView_OnChange()
 */
 
+/* The notifications are recursive: is the item directly in the folder of the view? Items of
+ * folders without a file system path are taken to be. */
+static BOOL item_in_view(IShellViewImpl *This, LPCITEMIDLIST pidl)
+{
+    WCHAR dir[MAX_PATH], path[MAX_PATH];
+    IPersistFolder2 *folder;
+    LPITEMIDLIST folder_pidl;
+    BOOL ret = FALSE;
+
+    if (!SHGetPathFromIDListW(pidl, path) || !PathRemoveFileSpecW(path)) return TRUE;
+    if (FAILED(IShellFolder_QueryInterface(This->pSFParent, &IID_IPersistFolder2, (void **)&folder))) return TRUE;
+    if (SUCCEEDED(IPersistFolder2_GetCurFolder(folder, &folder_pidl)))
+    {
+        ret = !SHGetPathFromIDListW(folder_pidl, dir) || !wcsicmp(dir, path);
+        ILFree(folder_pidl);
+    }
+    IPersistFolder2_Release(folder);
+    return ret;
+}
+
+/* a notification by path has a simple pidl without the file's size and dates: read the item again */
+static LPITEMIDLIST reparse_item(IShellViewImpl *This, LPCITEMIDLIST pidl)
+{
+    WCHAR name[MAX_PATH];
+    LPITEMIDLIST full;
+
+    if (_ILSimpleGetTextW(ILFindLastID(pidl), name, ARRAY_SIZE(name)) &&
+        SUCCEEDED(IShellFolder_ParseDisplayName(This->pSFParent, NULL, NULL, name, NULL, &full, NULL)))
+        return full;
+    return ILClone(ILFindLastID(pidl));
+}
+
 static LRESULT ShellView_OnChange(IShellViewImpl * This, const LPCITEMIDLIST *pidls, LONG event)
 {
-    LPCITEMIDLIST pidl;
-    BOOL ret = TRUE;
+    LPITEMIDLIST pidl;
+    BOOL ret = TRUE, old_in, new_in;
 
     TRACE("(%p)->(%p, %p, 0x%08lx)\n", This, pidls[0], pidls[1], event);
 
