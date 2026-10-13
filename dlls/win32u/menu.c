@@ -156,6 +156,8 @@ static HMENU top_popup_hmenu;
 
 /* Flag set by NtUserEndMenu() to force an exit from menu tracking */
 static BOOL exit_menu = FALSE;
+/* accelerator underlines show once the keyboard is used in a menu, unless the user asked for them to be always on */
+static BOOL menu_show_cues;
 
 static SIZE menucharsize;
 static UINT od_item_height; /* default owner drawn item height */
@@ -2668,6 +2670,8 @@ static void draw_menu_item( HWND hwnd, struct menu *menu, HWND owner, HDC hdc,
             DT_CENTER | DT_VCENTER | DT_SINGLELINE :
             DT_LEFT | DT_VCENTER | DT_SINGLELINE;
 
+        if (!menu_show_cues) format |= DT_HIDEPREFIX;
+
         if (!(menu->dwStyle & MNS_CHECKORBMP))
             rect.left += menu->textOffset;
 
@@ -4105,6 +4109,11 @@ static BOOL track_menu( HMENU hmenu, UINT flags, int x, int y, HWND hwnd, const 
     MTRACKER mt;
     MSG msg;
 
+    {
+        BOOL cues = FALSE;
+        NtUserSystemParametersInfo( SPI_GETKEYBOARDCUES, 0, &cues, 0 );
+        menu_show_cues = cues || (NtUserGetAsyncKeyState( VK_MENU ) & 0x8000);
+    }
     mt.trackFlags = 0;
     mt.hCurrentMenu = hmenu;
     mt.hTopMenu = hmenu;
@@ -4239,6 +4248,14 @@ static BOOL track_menu( HMENU hmenu, UINT flags, int x, int y, HWND hwnd, const 
             {
             case WM_KEYDOWN:
             case WM_SYSKEYDOWN:
+                if (!menu_show_cues)
+                {
+                    struct menu *cur;
+
+                    menu_show_cues = TRUE;
+                    if ((cur = unsafe_menu_ptr( mt.hCurrentMenu )) && cur->hWnd)
+                        NtUserRedrawWindow( cur->hWnd, NULL, 0, RDW_INVALIDATE | RDW_ERASE );
+                }
                 switch(msg.wParam)
                 {
                 case VK_MENU:
