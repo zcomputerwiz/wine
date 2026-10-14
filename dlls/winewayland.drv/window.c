@@ -30,6 +30,7 @@
 #include "ntstatus.h"
 
 #include "waylanddrv.h"
+#include "wexwayland.h"
 
 #include "wine/debug.h"
 
@@ -199,7 +200,9 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
                (!(exstyle & WS_EX_LAYERED) || data->layered_attribs_set);
 
     if (!visible) role = WAYLAND_SURFACE_ROLE_NONE;
-    else if (owner_surface) role = WAYLAND_SURFACE_ROLE_SUBSURFACE;
+    else if (owner_surface && !(process_wayland.wex_manager &&
+             wex_window_manager_v1_get_version(process_wayland.wex_manager) >= 4 &&
+             NtUserGetProp(data->hwnd, WEX_WAYLAND_NATIVE_PROP))) role = WAYLAND_SURFACE_ROLE_SUBSURFACE;
     else role = WAYLAND_SURFACE_ROLE_TOPLEVEL;
 
     /* we can temporarily clear the role of a surface but cannot assign a different one after it's set */

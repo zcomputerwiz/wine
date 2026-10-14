@@ -49,10 +49,70 @@ done:
     wayland_win_data_release(data);
 }
 
-static const struct wex_window_v1_listener wex_listener = { wex_handle };
+static void wex_association(void *user_data, struct wex_window_v1 *window, uint32_t status)
+{
+    HWND hwnd = user_data;
+    struct wayland_win_data *data = wayland_win_data_get(hwnd);
+    struct wayland_surface *surface;
+    if (!data) return;
+    surface = data->wayland_surface;
+    if (surface && surface->wex_window == window)
+    {
+        /* Only one association request is outstanding. If the bridge changed
+         * its atoms in the meantime, suppress the old response and send the
+         * new pair after completing this one. */
+        surface->wex_association_pending = FALSE;
+        if ((ULONG_PTR)NtUserGetProp(hwnd, WEX_WAYLAND_NATIVE_PROP) == surface->wex_native_atom &&
+            (ULONG_PTR)NtUserGetProp(hwnd, WEX_WAYLAND_CONTROLLER_PROP) == surface->wex_controller_atom)
+        {
+            if (status) NtUserSetProp(hwnd, WEX_WAYLAND_ASSOCIATION_PROP, (HANDLE)(ULONG_PTR)status);
+            else NtUserRemoveProp(hwnd, WEX_WAYLAND_ASSOCIATION_PROP);
+        }
+        wayland_wex_update(surface, HWND_TOP, SWP_NOZORDER);
+    }
+    wayland_win_data_release(data);
+}
+static const struct wex_window_v1_listener wex_listener = {
+    .handle = wex_handle, .foreign_association = wex_association,
+};
+
+static BOOL get_atom_handle(RTL_ATOM id, char handle[33])
+{
+    union { ATOM_BASIC_INFORMATION info; char buffer[sizeof(ATOM_BASIC_INFORMATION) + 66]; } atom;
+    unsigned int i;
+    if (!id) { handle[0] = 0; return TRUE; }
+    if (NtQueryInformationAtom(id, AtomBasicInformation, &atom, sizeof(atom), NULL) ||
+        atom.info.NameLength != 32 * sizeof(WCHAR)) return FALSE;
+    for (i=0;i<32;i++)
+    {
+        WCHAR ch = atom.info.Name[i];
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) return FALSE;
+        handle[i] = ch;
+    }
+    handle[32] = 0;
+    return TRUE;
+}
+
+static void update_foreign_association(struct wayland_surface *surface)
+{
+    RTL_ATOM native, controller;
+    char token[33], handle[33];
+    if (wex_window_v1_get_version(surface->wex_window) < 4 || surface->wex_association_pending) return;
+    native = (ULONG_PTR)NtUserGetProp(surface->hwnd, WEX_WAYLAND_NATIVE_PROP);
+    controller = (ULONG_PTR)NtUserGetProp(surface->hwnd, WEX_WAYLAND_CONTROLLER_PROP);
+    if (native == surface->wex_native_atom && controller == surface->wex_controller_atom) return;
+    if (!get_atom_handle(native, token)) strcpy(token,"?");
+    if (!get_atom_handle(controller, handle)) strcpy(handle,"?");
+    surface->wex_native_atom = native;
+    surface->wex_controller_atom = controller;
+    surface->wex_association_pending = TRUE;
+    NtUserRemoveProp(surface->hwnd, WEX_WAYLAND_ASSOCIATION_PROP);
+    wex_window_v1_associate_foreign(surface->wex_window, token, handle);
+}
 
 void wayland_wex_destroy(struct wayland_surface *surface)
 {
+    NtUserRemoveProp(surface->hwnd, WEX_WAYLAND_ASSOCIATION_PROP);
     if (surface->wex_handle_atom)
     {
         if ((ULONG_PTR)NtUserGetProp(surface->hwnd, handle_prop) == surface->wex_handle_atom)
@@ -123,6 +183,7 @@ void wayland_wex_update(struct wayland_surface *surface, HWND insert_after, UINT
     HWND hwnd;
     unsigned int layer, edge = 0, size = 0;
     if (!surface->wex_window) return;
+    update_foreign_association(surface);
     layer = window_layer(surface->hwnd);
     if (layer != surface->wex_layer)
     {

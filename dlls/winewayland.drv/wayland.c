@@ -90,6 +90,14 @@ static const struct wl_seat_listener seat_listener =
  *          Registry handling
  */
 
+static void wex_native_environment(void *data, struct wex_window_manager_v1 *manager,
+                                   const char *socket, const char *xdisplay)
+{
+    /* Native launch routing belongs to wexhost. Wine processes retain their
+     * privileged socket and their own graphics-driver environment. */
+}
+static const struct wex_window_manager_v1_listener wex_manager_listener = { wex_native_environment };
+
 static void registry_handle_global(void *data, struct wl_registry *registry,
                                    uint32_t id, const char *interface,
                                    uint32_t version)
@@ -114,7 +122,10 @@ static void registry_handle_global(void *data, struct wl_registry *registry,
             wayland_output_use_xdg_extension(output);
     }
     else if (strcmp(interface, "wex_window_manager_v1") == 0)
-        process_wayland.wex_manager = wl_registry_bind(registry, id, &wex_window_manager_v1_interface, min(version, 2));
+    {
+        process_wayland.wex_manager = wl_registry_bind(registry, id, &wex_window_manager_v1_interface, min(version, 4));
+        wex_window_manager_v1_add_listener(process_wayland.wex_manager, &wex_manager_listener, NULL);
+    }
     else if (strcmp(interface, "xx_zone_manager_v1") == 0)
         process_wayland.zone_manager = wl_registry_bind(registry, id, &xx_zone_manager_v1_interface, 1);
     else if (strcmp(interface, "wl_compositor") == 0)

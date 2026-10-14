@@ -29,7 +29,7 @@
     for shell components (taskbars), and activation without tokens.
   </description>
 
-  <interface name="wex_window_manager_v1" version="2">
+  <interface name="wex_window_manager_v1" version="4">
     <description summary="manager interface for privileged window controls">
       Allows obtaining a wex_window_v1 interface for an xdg_toplevel.
       Only advertised to privileged clients on the wex-shell socket.
@@ -44,9 +44,31 @@
       <arg name="id" type="new_id" interface="wex_window_v1"/>
       <arg name="toplevel" type="object" interface="xdg_toplevel" summary="the toplevel surface"/>
     </request>
+    <request name="get_foreign" since="3">
+      <description summary="observe supplemental native window metadata">
+        The toplevel must belong to this connection's standard
+        zwlr_foreign_toplevel_manager_v1 inventory. Metadata and ordinary
+        controls remain on that standard interface. An ineligible or closed
+        toplevel yields a closed object without a token. This request neither
+        adopts the view nor changes its decoration or focus.
+      </description>
+      <arg name="id" type="new_id" interface="wex_foreign_window_v1"/>
+      <arg name="toplevel" type="object" interface="zwlr_foreign_toplevel_handle_v1"/>
+    </request>
+    <event name="native_environment" since="3">
+      <description summary="compositor-owned native application endpoints">
+        Sent once on binding. Native programs use the normal Wayland socket,
+        rather than inherit the shell's privileged socket. xwayland_display is
+        empty if XWayland is unavailable; remove DISPLAY in that case. These
+        values belong to this compositor, not an enclosing nested session.
+        Launch and D-Bus activation environments must agree on these endpoints.
+      </description>
+      <arg name="wayland_display" type="string"/>
+      <arg name="xwayland_display" type="string"/>
+    </event>
   </interface>
 
-  <interface name="wex_window_v1" version="2">
+  <interface name="wex_window_v1" version="4">
     <description summary="window controls interface">
       Provides operations for stacking, layering, shell edge reservation,
       and direct activation.
@@ -129,5 +151,70 @@
         activate instead when the client also wants to give keyboard focus.
       </description>
     </request>
+    <enum name="association_status" since="4">
+      <entry name="unbound" value="0"/>
+      <entry name="prepared" value="1" summary="reserved; native composition and focus unchanged"/>
+      <entry name="unavailable" value="2"/>
+    </enum>
+    <request name="associate_foreign" since="4">
+      <description summary="reserve a native view and live controller for this frame">
+        Both opaque handles must identify the same eligible native view and a
+        live privileged observer. Only one frame may reserve a native view.
+        An empty pair releases this frame's reservation. Unknown, stale,
+        mismatched or busy handles return unavailable without replacing an
+        existing reservation. Repeating the current pair is idempotent.
+        A prepared association does not change native decoration, scene nodes,
+        geometry or focus. Rendering/input preparation must precede adoption.
+        Controller, native-view or frame destruction releases the reservation.
+      </description>
+      <arg name="native_token" type="string"/>
+      <arg name="controller_handle" type="string"/>
+    </request>
+    <event name="foreign_association" since="4">
+      <arg name="status" type="uint" enum="association_status"/>
+    </event>
+  </interface>
+  <interface name="wex_foreign_window_v1" version="4">
+    <description summary="supplemental native window observation">
+      A compositor-generated token identifies a native view for its lifetime,
+      across privileged connections. Tokens are never reused for another view.
+      All geometry and size hints use compositor logical coordinates for the
+      native client area. Each initial or changed snapshot ends with done.
+      closed is terminal; requests other than destroy are ignored afterward.
+    </description>
+    <enum name="decoration">
+      <entry name="none" value="0" summary="borderless native view"/>
+      <entry name="client" value="1" summary="application draws its frame"/>
+      <entry name="server" value="2" summary="eligible for a Wine frame"/>
+    </enum>
+    <request name="destroy" type="destructor"/>
+    <request name="refresh">
+      <description summary="request a fresh supplemental snapshot"/>
+    </request>
+    <event name="token">
+      <arg name="token" type="string" summary="32 lowercase hexadecimal characters"/>
+    </event>
+    <event name="geometry">
+      <arg name="x" type="int"/><arg name="y" type="int"/>
+      <arg name="width" type="int"/><arg name="height" type="int"/>
+    </event>
+    <event name="decoration">
+      <arg name="mode" type="uint" enum="decoration"/>
+    </event>
+    <event name="size_hints">
+      <arg name="min_width" type="int"/><arg name="min_height" type="int"/>
+      <arg name="width_inc" type="int"/><arg name="height_inc" type="int"/>
+      <arg name="base_width" type="int"/><arg name="base_height" type="int"/>
+    </event>
+    <event name="done"/>
+    <event name="closed"/>
+    <event name="controller_handle" since="4">
+      <description summary="opaque handle valid only while this observer lives">
+        A privileged frame on another connection may pair this handle with the
+        native view token in associate_foreign. Unlike the view token, this
+        handle is unique to the controller and becomes invalid on disconnect.
+      </description>
+      <arg name="handle" type="string"/>
+    </event>
   </interface>
 </protocol>

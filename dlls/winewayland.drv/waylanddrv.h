@@ -317,6 +317,8 @@ struct wayland_surface
     unsigned int wex_layer, wex_edge, wex_size;
     unsigned int wex_activation_epoch;
     RTL_ATOM wex_handle_atom;
+    RTL_ATOM wex_native_atom, wex_controller_atom;
+    BOOL wex_association_pending;
     BOOL wex_minimized;
     BOOL wex_activation_pending;
 
