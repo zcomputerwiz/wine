@@ -203,6 +203,12 @@ static PTHEME_PROPERTY UXTHEME_SelectImage(HTHEME hTheme, int iPartId, int iStat
     }
 
     GetThemeEnumValue(hTheme, iPartId, iStateId, TMT_IMAGESELECTTYPE, &imageselecttype);
+    if (imageselecttype == IST_NONE)
+    {
+        int dummy;
+        if (SUCCEEDED(GetThemeInt(hTheme, iPartId, iStateId, TMT_MINDPI1, &dummy)))
+            imageselecttype = IST_DPI;
+    }
 
     if(imageselecttype == IST_DPI) {
         int reqdpi = 0;
@@ -225,8 +231,11 @@ static PTHEME_PROPERTY UXTHEME_SelectImage(HTHEME hTheme, int iPartId, int iStat
                 }
             }
         }
-        /* If an image couldn't be selected, choose the first one */
-        tp = MSSTYLES_FindProperty(hTheme, iPartId, iStateId, TMT_FILENAME, TMT_IMAGEFILE1);
+        /* If an image couldn't be selected because DPI < MINDPI1, try base IMAGEFILE first, then IMAGEFILE1 */
+        tp = MSSTYLES_FindProperty(hTheme, iPartId, iStateId, TMT_FILENAME,
+                                   glyph ? TMT_GLYPHIMAGEFILE : TMT_IMAGEFILE);
+        if (!tp)
+            tp = MSSTYLES_FindProperty(hTheme, iPartId, iStateId, TMT_FILENAME, TMT_IMAGEFILE1);
     }
     else if(imageselecttype == IST_SIZE) {
         POINT size = {pRect->right-pRect->left, pRect->bottom-pRect->top};
