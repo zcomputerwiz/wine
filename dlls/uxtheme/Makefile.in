@@ -13,6 +13,7 @@ SOURCES = \
 	main.c \
 	metric.c \
 	msstyles.c \
+	msstyles_v4.c \
 	property.c \
 	rsrc.rc \
 	scrollbar.c \
