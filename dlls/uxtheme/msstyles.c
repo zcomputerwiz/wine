@@ -94,6 +94,12 @@ HRESULT MSSTYLES_OpenThemeFile(LPCWSTR lpThemeFile, LPCWSTR pszColorName, LPCWST
         goto invalid_theme;
     }
 
+    if ((FindResourceW(hTheme, L"CMAP", L"CMAP") || FindResourceW(hTheme, MAKEINTRESOURCEW(1), L"CMAP")) &&
+        (FindResourceW(hTheme, L"NORMAL", L"VARIANT") || FindResourceW(hTheme, MAKEINTRESOURCEW(1), L"VARIANT")))
+    {
+        return MSSTYLES_OpenThemeFile_V4(hTheme, lpThemeFile, pszColorName, pszSizeName, tf);
+    }
+
     if(!(hrsc = FindResourceW(hTheme, MAKEINTRESOURCEW(1), L"PACKTHEM_VERSION"))) {
         TRACE("No version resource found\n");
         hr = HRESULT_FROM_WIN32(ERROR_BAD_FORMAT);
@@ -732,7 +738,28 @@ static inline void parse_init_color (struct PARSECOLORSTATE* state)
     memset (state, 0, sizeof (*state));
 }
 
-static BOOL parse_handle_color_property (struct PARSECOLORSTATE* state, 
+static void parse_set_color (struct PARSECOLORSTATE* state, int iPropertyId, COLORREF color)
+{
+    state->colorElements[state->colorCount] = iPropertyId - TMT_FIRSTCOLOR;
+    state->colorRgb[state->colorCount++] = color;
+    switch (iPropertyId)
+    {
+      case TMT_ACTIVECAPTION:
+        state->captionColors |= 0x1;
+        break;
+      case TMT_INACTIVECAPTION:
+        state->captionColors |= 0x2;
+        break;
+      case TMT_GRADIENTACTIVECAPTION:
+        state->captionColors |= 0x4;
+        break;
+      case TMT_GRADIENTINACTIVECAPTION:
+        state->captionColors |= 0x8;
+        break;
+    }
+}
+
+static BOOL parse_handle_color_property (struct PARSECOLORSTATE* state,
                                          int iPropertyId, LPCWSTR lpValue,
                                          DWORD dwValueLen)
 {
@@ -741,23 +768,7 @@ static BOOL parse_handle_color_property (struct PARSECOLORSTATE* state,
     if(MSSTYLES_GetNextInteger(lpValue, lpValueEnd, &lpValue, &r) &&
     MSSTYLES_GetNextInteger(lpValue, lpValueEnd, &lpValue, &g) &&
     MSSTYLES_GetNextInteger(lpValue, lpValueEnd, &lpValue, &b)) {
-	state->colorElements[state->colorCount] = iPropertyId - TMT_FIRSTCOLOR;
-	state->colorRgb[state->colorCount++] = RGB(r,g,b);
-	switch (iPropertyId)
-	{
-	  case TMT_ACTIVECAPTION: 
-	    state->captionColors |= 0x1; 
-	    break;
-	  case TMT_INACTIVECAPTION: 
-	    state->captionColors |= 0x2; 
-	    break;
-	  case TMT_GRADIENTACTIVECAPTION: 
-	    state->captionColors |= 0x4; 
-	    break;
-	  case TMT_GRADIENTINACTIVECAPTION: 
-	    state->captionColors |= 0x8; 
-	    break;
-	}
+	parse_set_color (state, iPropertyId, RGB(r,g,b));
 	return TRUE;
     }
     else {
@@ -840,13 +851,8 @@ static BOOL parse_handle_nonclient_font (struct PARSENONCLIENTSTATE* state,
         return FALSE;
 }
 
-static BOOL parse_handle_nonclient_size (struct PARSENONCLIENTSTATE* state, 
-                                         int iPropertyId, LPCWSTR lpValue,
-                                         DWORD dwValueLen)
+static void parse_set_nonclient_size (struct PARSENONCLIENTSTATE* state, int iPropertyId, int size)
 {
-    int size;
-    LPCWSTR lpValueEnd = lpValue + dwValueLen;
-    if(MSSTYLES_GetNextInteger(lpValue, lpValueEnd, &lpValue, &size)) {
         switch (iPropertyId)
         {
             case TMT_SIZINGBORDERWIDTH:
@@ -886,6 +892,16 @@ static BOOL parse_handle_nonclient_size (struct PARSENONCLIENTSTATE* state,
                 state->metricsDirty = TRUE;
                 break;
         }
+}
+
+static BOOL parse_handle_nonclient_size (struct PARSENONCLIENTSTATE* state,
+                                         int iPropertyId, LPCWSTR lpValue,
+                                         DWORD dwValueLen)
+{
+    int size;
+    LPCWSTR lpValueEnd = lpValue + dwValueLen;
+    if(MSSTYLES_GetNextInteger(lpValue, lpValueEnd, &lpValue, &size)) {
+        parse_set_nonclient_size (state, iPropertyId, size);
         return TRUE;
     }
     else
@@ -905,6 +921,35 @@ static void parse_apply_nonclient (struct PARSENONCLIENTSTATE* state)
             &state->iconTitleFont, 0);
         SetThreadDpiAwarenessContext(old_context);
     }
+}
+
+/* Vista+ styles have no theme ini; their [SysMetrics] were read from the binary stream. */
+static void apply_typed_metrics (PTHEME_FILE tf)
+{
+    struct PARSECOLORSTATE colorState;
+    struct PARSENONCLIENTSTATE nonClientState;
+    PTHEME_PROPERTY tp;
+
+    parse_init_color (&colorState);
+    parse_init_nonclient (&nonClientState);
+
+    for (tp = tf->metrics; tp; tp = tp->next)
+    {
+        if (!tp->is_typed) continue;
+        if (tp->iPropertyId >= TMT_FIRSTCOLOR && tp->iPropertyId <= TMT_LASTCOLOR &&
+            tp->iPrimitiveType == TMT_COLOR)
+            parse_set_color (&colorState, tp->iPropertyId, tp->v.color_val);
+        else if (tp->iPropertyId == TMT_FLATMENUS && tp->iPrimitiveType == TMT_BOOL)
+            SystemParametersInfoW (SPI_SETFLATMENU, 0, (PVOID)(INT_PTR)tp->v.bool_val, 0);
+        else if (tp->iPropertyId >= TMT_FIRSTFONT && tp->iPropertyId <= TMT_LASTFONT && tp->lpValue)
+            parse_handle_nonclient_font (&nonClientState, tp->iPropertyId, tp->lpValue, tp->dwValueLen);
+        else if (tp->iPropertyId >= TMT_FIRSTSIZE && tp->iPropertyId <= TMT_LASTSIZE &&
+                 (tp->iPrimitiveType == TMT_SIZE || tp->iPrimitiveType == TMT_INT))
+            parse_set_nonclient_size (&nonClientState, tp->iPropertyId, tp->v.int_val);
+    }
+
+    parse_apply_color (&colorState);
+    parse_apply_nonclient (&nonClientState);
 }
 
 /***********************************************************************
@@ -933,7 +978,11 @@ static void MSSTYLES_ParseThemeIni(PTHEME_FILE tf, BOOL setMetrics)
     DWORD dwValueLen;
     LPCWSTR lpValue;
 
-    ini = MSSTYLES_GetActiveThemeIni(tf);
+    if (!(ini = MSSTYLES_GetActiveThemeIni(tf)))
+    {
+        if (setMetrics) apply_typed_metrics(tf);
+        return;
+    }
 
     while((lpName=UXINI_GetNextSection(ini, &dwLen))) {
         if(CompareStringW(LOCALE_SYSTEM_DEFAULT, NORM_IGNORECASE, lpName, dwLen, L"SysMetrics", -1) == CSTR_EQUAL) {
