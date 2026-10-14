@@ -641,7 +641,20 @@ static LPWSTR UXTHEME_GetWindowProperty(HWND hwnd, ATOM aProp, LPWSTR pszBuffer,
     return NULL;
 }
 
+static HTHEME open_theme_data_internal(HWND hwnd, LPCWSTR pszClassList, DWORD flags, UINT dpi, BOOL controls);
+
 static HTHEME open_theme_data(HWND hwnd, LPCWSTR pszClassList, DWORD flags, UINT dpi)
+{
+    return open_theme_data_internal(hwnd, pszClassList, flags, dpi, TRUE);
+}
+
+/* The theme the non-client frame draws from; STAP_ALLOW_NONCLIENT is checked by the caller. */
+HTHEME UXTHEME_OpenNonClientTheme(UINT dpi)
+{
+    return open_theme_data_internal(NULL, L"Window", 0, dpi, FALSE);
+}
+
+static HTHEME open_theme_data_internal(HWND hwnd, LPCWSTR pszClassList, DWORD flags, UINT dpi, BOOL controls)
 {
     WCHAR szAppBuff[256];
     WCHAR szClassBuff[256];
@@ -660,7 +673,7 @@ static HTHEME open_theme_data(HWND hwnd, LPCWSTR pszClassList, DWORD flags, UINT
         FIXME("unhandled flags: %lx\n", flags);
 
     UXTHEME_CheckReload();
-    if(bThemeActive)
+    if(bThemeActive && (!controls || (dwThemeAppProperties & STAP_ALLOW_CONTROLS)))
     {
         pszAppName = UXTHEME_GetWindowProperty(hwnd, atSubAppName, szAppBuff, ARRAY_SIZE(szAppBuff));
         /* If SetWindowTheme was used on the window, that overrides the class list passed to this function */

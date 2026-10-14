@@ -235,12 +235,12 @@ BOOL WINAPI UXTHEME_NonClientFrameDraw(HWND hwnd, HDC hdc, RECT rect, DWORD styl
     RECT r;
     SIZE size;
 
-    if (!IsThemeActive())
+    if (!IsThemeActive() || !(GetThemeAppProperties() & STAP_ALLOW_NONCLIENT))
     {
         nc_update_region(hwnd, NULL, 0, 0, w, h, top_h);
         return FALSE;
     }
-    theme = OpenThemeDataForDpi(NULL, L"Window", GetDpiForWindow(hwnd));
+    theme = UXTHEME_OpenNonClientTheme(GetDpiForWindow(hwnd));
     if (!theme) return FALSE;
 
     if (tool)
