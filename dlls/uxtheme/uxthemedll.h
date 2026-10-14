@@ -127,4 +127,6 @@ LRESULT WINAPI UXTHEME_ScrollbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 /* Full alpha blending */
 #define ALPHABLEND_FULL             2
 
+HTHEME UXTHEME_OpenNonClientTheme(UINT dpi);
+
 #endif /* __WINE_UXTHEMEDLL_H */
