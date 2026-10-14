@@ -2305,6 +2305,8 @@ BOOL WINAPI IsThemeBackgroundPartiallyTransparent(HTHEME hTheme, int iPartId,
         return FALSE;
 
     GetThemeEnumValue(hTheme, iPartId, iStateId, TMT_BGTYPE, &bgtype);
+    if (bgtype == BT_BORDERFILL && MSSTYLES_FindProperty(hTheme, iPartId, iStateId, TMT_RECT, TMT_ATLASRECT))
+        bgtype = BT_IMAGEFILE;
 
     if (bgtype != BT_IMAGEFILE) return FALSE;
 
