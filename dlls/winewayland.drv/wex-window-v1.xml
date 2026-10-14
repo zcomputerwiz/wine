@@ -123,5 +123,11 @@
       </description>
       <arg name="handle" type="string"/>
     </request>
+    <request name="restore" since="2">
+      <description summary="restore without changing keyboard focus">
+        Clear minimization without activating or raising the window. Use
+        activate instead when the client also wants to give keyboard focus.
+      </description>
+    </request>
   </interface>
 </protocol>

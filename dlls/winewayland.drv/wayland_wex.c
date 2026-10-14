@@ -158,9 +158,17 @@ void wayland_wex_update(struct wayland_surface *surface, HWND insert_after, UINT
             }
         }
     }
-    if (surface->wex_minimized && !surface->window.minimized &&
-        surface->hwnd == NtUserGetForegroundWindow()) surface->wex_activation_pending = TRUE;
+    if (surface->wex_minimized && !surface->window.minimized)
+    {
+        if (surface->hwnd == NtUserGetForegroundWindow()) surface->wex_activation_pending = TRUE;
+        else if (wex_window_v1_get_version(surface->wex_window) >= 2)
+            wex_window_v1_restore(surface->wex_window);
+    }
     surface->wex_minimized = surface->window.minimized;
+    /* Restore can reuse its existing buffer without triggering a new paint.
+     * Once the updated Win32 state is non-minimized, flush a pending activation
+     * against that committed content instead of waiting for another buffer. */
+    wayland_wex_flush_activation(surface);
     wl_display_flush(process_wayland.wl_display);
 }
 
@@ -177,7 +185,14 @@ void wayland_wex_flush_activation(struct wayland_surface *surface)
 
 void WAYLAND_ActivateWindow(HWND hwnd, HWND previous)
 {
-    struct wayland_win_data *data = wayland_win_data_get(hwnd);
+    struct wayland_win_data *data;
+    TRACE("activate hwnd=%p previous=%p\n", hwnd, previous);
+    /* activate() raises the compositor view. Keep Wine's own hit-test order
+     * consistent with that raise, including cross-thread foreground changes. */
+    if (process_wayland.wex_manager)
+        NtUserSetWindowPos(hwnd, window_layer(hwnd) == WEX_WINDOW_V1_LAYER_DESKTOP ? HWND_BOTTOM : HWND_TOP,
+                           0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    data = wayland_win_data_get(hwnd);
     if (!data) return;
     if (data->wayland_surface && data->wayland_surface->wex_window)
     {
