@@ -85,6 +85,11 @@ HRESULT WINAPI GetThemeEnumValue(HTHEME hTheme, int iPartId, int iStateId,
     if(!(tp = MSSTYLES_FindProperty(hTheme, iPartId, iStateId, TMT_ENUM, iPropId)))
         return E_PROP_ID_UNSUPPORTED;
 
+    if (tp->is_typed) {
+        *piVal = tp->v.int_val;
+        return S_OK;
+    }
+
     hr = MSSTYLES_GetPropertyString(tp, val, ARRAY_SIZE(val));
     if(FAILED(hr))
         return hr;
@@ -260,6 +265,10 @@ HRESULT WINAPI GetThemeMetric(HTHEME hTheme, HDC hdc, int iPartId,
         case TMT_COLOR:
             return MSSTYLES_GetPropertyColor(tp, (COLORREF*)piVal);
         case TMT_ENUM:
+            if (tp->is_typed) {
+                *piVal = tp->v.int_val;
+                return S_OK;
+            }
             hr = MSSTYLES_GetPropertyString(tp, val, ARRAY_SIZE(val));
             if(FAILED(hr))
                 return hr;
