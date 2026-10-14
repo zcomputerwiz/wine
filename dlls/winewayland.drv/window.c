@@ -670,6 +670,11 @@ LRESULT WAYLAND_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         wayland_configure_window(hwnd);
         return 0;
     case WM_WAYLAND_SET_FOREGROUND:
+        /* Private shell views are focused only in response to Wine's own
+         * activation requests. A queued keyboard-enter is an acknowledgement,
+         * not a new foreground decision; echoing stale enters back to the
+         * compositor can endlessly alternate two windows during creation. */
+        if (process_wayland.wex_manager) return 0;
         NtUserSetForegroundWindowInternal(hwnd);
         return 0;
     default:
