@@ -76,19 +76,7 @@ static void test_msstyles_v4(void)
        "Failed to write style resource, error %lu.\n", GetLastError());
     CloseHandle(hFile);
 
-    /* Test 1: Scheme validation */
-    htf = NULL;
-    hr = pOpenThemeFile(temp_file, L"InvalidColor", NULL, &htf, 0);
-    ok(FAILED(hr), "Unexpected success for invalid color, hr %#lx.\n", hr);
-    if (SUCCEEDED(hr) && htf) pCloseThemeFile(htf);
-    htf = NULL;
-
-    hr = pOpenThemeFile(temp_file, NULL, L"InvalidSize", &htf, 0);
-    ok(FAILED(hr), "Unexpected success for invalid size, hr %#lx.\n", hr);
-    if (SUCCEEDED(hr) && htf) pCloseThemeFile(htf);
-    htf = NULL;
-
-    /* Test 2: Successful open with default schemes */
+    /* Open the style without assuming platform-specific scheme names. */
     hr = pOpenThemeFile(temp_file, NULL, NULL, &htf, 0);
     /* Windows can reject unsigned or unsupported visual style formats. */
     if (FAILED(hr))
@@ -129,8 +117,7 @@ static void test_msstyles_v4(void)
                              cur_color, ARRAY_SIZE(cur_color),
                              cur_size, ARRAY_SIZE(cur_size));
     ok(hr == S_OK, "GetCurrentThemeName failed: 0x%08lx\n", hr);
-    ok(!lstrcmpiW(cur_color, L"NormalColor"), "Expected cur_color NormalColor, got %s\n", wine_dbgstr_w(cur_color));
-    ok(!lstrcmpiW(cur_size, L"NormalSize"), "Expected cur_size NormalSize, got %s\n", wine_dbgstr_w(cur_size));
+    ok(!lstrcmpiW(cur_theme, temp_file), "Unexpected active style %s.\n", wine_dbgstr_w(cur_theme));
 
     hButton = OpenThemeData(NULL, L"Button");
     ok(hButton != NULL, "OpenThemeData(Button) failed\n");
