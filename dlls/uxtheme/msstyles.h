@@ -37,6 +37,18 @@ typedef struct _THEME_PROPERTY {
     LPCWSTR lpValue;
     DWORD dwValueLen;
 
+    BOOL is_typed;
+    union {
+        int int_val;
+        BOOL bool_val;
+        COLORREF color_val;
+        POINT point_val;
+        RECT rect_val;
+        MARGINS margins_val;
+        INTLIST intlist_val;
+        DWORD res_id;
+    } v;
+
     struct _THEME_PROPERTY *next;
 } THEME_PROPERTY, *PTHEME_PROPERTY;
 
@@ -96,6 +108,10 @@ HRESULT MSSTYLES_SetActiveTheme(PTHEME_FILE tf, BOOL setMetrics);
 PTHEME_CLASS MSSTYLES_OpenThemeClassFromFile(PTHEME_FILE file, LPCWSTR app, LPCWSTR classes, UINT dpi);
 PTHEME_CLASS MSSTYLES_OpenThemeClass(LPCWSTR pszAppName, LPCWSTR pszClassList, UINT dpi);
 HRESULT MSSTYLES_CloseThemeClass(PTHEME_CLASS tc);
+PTHEME_CLASS MSSTYLES_FindClass(PTHEME_FILE tf, LPCWSTR pszAppName, LPCWSTR pszClassName);
+PTHEME_CLASS MSSTYLES_AddClass(PTHEME_FILE tf, LPCWSTR pszAppName, LPCWSTR pszClassName);
+PTHEME_PARTSTATE MSSTYLES_AddPartState(PTHEME_CLASS tc, int iPartId, int iStateId);
+void parse_app_class_name(LPCWSTR name, LPWSTR app_name, LPWSTR class_name);
 BOOL MSSTYLES_LookupProperty(LPCWSTR pszPropertyName, int *dwPrimitive, int *dwId);
 BOOL MSSTYLES_LookupEnum(LPCWSTR pszValueName, int dwEnum, int *dwValue);
 BOOL MSSTYLES_LookupPartState(LPCWSTR pszClass, LPCWSTR pszPart, LPCWSTR pszState, int *iPartId, int *iStateId);

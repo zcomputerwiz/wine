@@ -93,6 +93,7 @@ HRESULT MSSTYLES_OpenThemeFile(LPCWSTR lpThemeFile, LPCWSTR pszColorName, LPCWST
         hr = HRESULT_FROM_WIN32(GetLastError());
         goto invalid_theme;
     }
+
     if(!(hrsc = FindResourceW(hTheme, MAKEINTRESOURCEW(1), L"PACKTHEM_VERSION"))) {
         TRACE("No version resource found\n");
         hr = HRESULT_FROM_WIN32(ERROR_BAD_FORMAT);
@@ -203,6 +204,8 @@ void MSSTYLES_CloseThemeFile(PTHEME_FILE tf)
                         while(ps->properties) {
                             PTHEME_PROPERTY prop = ps->properties;
                             ps->properties = prop->next;
+                            if (prop->is_typed && prop->lpValue)
+                                free((void*)prop->lpValue);
                             free(prop);
                         }
 
@@ -212,6 +215,14 @@ void MSSTYLES_CloseThemeFile(PTHEME_FILE tf)
                     pcls->signature = 0;
                     free(pcls);
                 }
+            }
+            while (tf->metrics)
+            {
+                PTHEME_PROPERTY prop = tf->metrics;
+                tf->metrics = prop->next;
+                if (prop->is_typed && prop->lpValue)
+                    free((void*)prop->lpValue);
+                free(prop);
             }
             while (tf->images)
             {
@@ -412,7 +423,7 @@ static BOOL MSSTYLES_ParseIniSectionName(LPCWSTR lpSection, DWORD dwLen, LPWSTR 
  * RETURNS
  *  The class found, or NULL
  */
-static PTHEME_CLASS MSSTYLES_FindClass(PTHEME_FILE tf, LPCWSTR pszAppName, LPCWSTR pszClassName)
+PTHEME_CLASS MSSTYLES_FindClass(PTHEME_FILE tf, LPCWSTR pszAppName, LPCWSTR pszClassName)
 {
     PTHEME_CLASS cur = tf->classes;
     while(cur) {
@@ -442,7 +453,7 @@ static PTHEME_CLASS MSSTYLES_FindClass(PTHEME_FILE tf, LPCWSTR pszAppName, LPCWS
  * RETURNS
  *  The class added, or a class previously added with the same name
  */
-static PTHEME_CLASS MSSTYLES_AddClass(PTHEME_FILE tf, LPCWSTR pszAppName, LPCWSTR pszClassName)
+PTHEME_CLASS MSSTYLES_AddClass(PTHEME_FILE tf, LPCWSTR pszAppName, LPCWSTR pszClassName)
 {
     PTHEME_CLASS cur = MSSTYLES_FindClass(tf, pszAppName, pszClassName);
     if(cur) return cur;
@@ -531,7 +542,7 @@ PTHEME_PARTSTATE MSSTYLES_FindPartState(PTHEME_CLASS tc, int iPartId, int iState
  * RETURNS
  *  The part/state added, or a part/state previously added with the same IDs
  */
-static PTHEME_PARTSTATE MSSTYLES_AddPartState(PTHEME_CLASS tc, int iPartId, int iStateId)
+PTHEME_PARTSTATE MSSTYLES_AddPartState(PTHEME_CLASS tc, int iPartId, int iStateId)
 {
     PTHEME_PARTSTATE cur = MSSTYLES_FindPartState(tc, iPartId, iStateId, NULL);
     if(cur) return cur;
@@ -1024,7 +1035,7 @@ static void MSSTYLES_ParseThemeIni(PTHEME_FILE tf, BOOL setMetrics)
     }
 }
 
-static void parse_app_class_name(LPCWSTR name, LPWSTR app_name, LPWSTR class_name)
+void parse_app_class_name(LPCWSTR name, LPWSTR app_name, LPWSTR class_name)
 {
     LPCWSTR p;
 
@@ -1418,6 +1429,10 @@ static BOOL MSSTYLES_GetNextToken(LPCWSTR lpStringStart, LPCWSTR lpStringEnd, LP
  */
 HRESULT MSSTYLES_GetPropertyBool(PTHEME_PROPERTY tp, BOOL *pfVal)
 {
+    if (tp->is_typed) {
+        *pfVal = tp->v.bool_val;
+        return S_OK;
+    }
     *pfVal = FALSE;
     if(*tp->lpValue == 't' || *tp->lpValue == 'T')
         *pfVal = TRUE;
@@ -1434,6 +1449,11 @@ HRESULT MSSTYLES_GetPropertyColor(PTHEME_PROPERTY tp, COLORREF *pColor)
     LPCWSTR lpEnd;
     LPCWSTR lpCur;
     int red, green, blue;
+
+    if (tp->is_typed) {
+        *pColor = tp->v.color_val;
+        return S_OK;
+    }
 
     lpCur = tp->lpValue;
     lpEnd = tp->lpValue + tp->dwValueLen;
@@ -1509,6 +1529,10 @@ HRESULT MSSTYLES_GetPropertyFont(PTHEME_PROPERTY tp, HDC hdc, LOGFONTW *pFont)
  */
 HRESULT MSSTYLES_GetPropertyInt(PTHEME_PROPERTY tp, int *piVal)
 {
+    if (tp->is_typed) {
+        *piVal = tp->v.int_val;
+        return S_OK;
+    }
     if(!MSSTYLES_GetNextInteger(tp->lpValue, (tp->lpValue + tp->dwValueLen), NULL, piVal)) {
         TRACE("Could not parse int property\n");
         return E_PROP_ID_UNSUPPORTED;
@@ -1527,6 +1551,10 @@ HRESULT MSSTYLES_GetPropertyIntList(PTHEME_PROPERTY tp, INTLIST *pIntList)
     LPCWSTR lpCur = tp->lpValue;
     LPCWSTR lpEnd = tp->lpValue + tp->dwValueLen;
 
+    if (tp->is_typed) {
+        *pIntList = tp->v.intlist_val;
+        return S_OK;
+    }
     for(i=0; i < MAX_INTLIST_COUNT; i++) {
         if(!MSSTYLES_GetNextInteger(lpCur, lpEnd, &lpCur, &pIntList->iValues[i]))
             break;
@@ -1546,6 +1574,10 @@ HRESULT MSSTYLES_GetPropertyPosition(PTHEME_PROPERTY tp, POINT *pPoint)
     LPCWSTR lpCur = tp->lpValue;
     LPCWSTR lpEnd = tp->lpValue + tp->dwValueLen;
 
+    if (tp->is_typed) {
+        *pPoint = tp->v.point_val;
+        return S_OK;
+    }
     if(!MSSTYLES_GetNextInteger(lpCur, lpEnd, &lpCur, &x)) {
         TRACE("Could not parse position property\n");
         return E_PROP_ID_UNSUPPORTED;
@@ -1580,6 +1612,10 @@ HRESULT MSSTYLES_GetPropertyRect(PTHEME_PROPERTY tp, RECT *pRect)
     LPCWSTR lpCur = tp->lpValue;
     LPCWSTR lpEnd = tp->lpValue + tp->dwValueLen;
 
+    if (tp->is_typed) {
+        *pRect = tp->v.rect_val;
+        return S_OK;
+    }
     MSSTYLES_GetNextLong(lpCur, lpEnd, &lpCur, &pRect->left);
     MSSTYLES_GetNextLong(lpCur, lpEnd, &lpCur, &pRect->top);
     MSSTYLES_GetNextLong(lpCur, lpEnd, &lpCur, &pRect->right);
@@ -1600,6 +1636,10 @@ HRESULT MSSTYLES_GetPropertyMargins(PTHEME_PROPERTY tp, RECT *prc, MARGINS *pMar
     LPCWSTR lpCur = tp->lpValue;
     LPCWSTR lpEnd = tp->lpValue + tp->dwValueLen;
 
+    if (tp->is_typed) {
+        *pMargins = tp->v.margins_val;
+        return S_OK;
+    }
     MSSTYLES_GetNextInteger(lpCur, lpEnd, &lpCur, &pMargins->cxLeftWidth);
     MSSTYLES_GetNextInteger(lpCur, lpEnd, &lpCur, &pMargins->cxRightWidth);
     MSSTYLES_GetNextInteger(lpCur, lpEnd, &lpCur, &pMargins->cyTopHeight);
