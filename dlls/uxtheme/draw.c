@@ -203,6 +203,12 @@ static PTHEME_PROPERTY UXTHEME_SelectImage(HTHEME hTheme, int iPartId, int iStat
     }
 
     GetThemeEnumValue(hTheme, iPartId, iStateId, TMT_IMAGESELECTTYPE, &imageselecttype);
+    if (imageselecttype == IST_NONE)
+    {
+        int dummy;
+        if (SUCCEEDED(GetThemeInt(hTheme, iPartId, iStateId, TMT_MINDPI1, &dummy)))
+            imageselecttype = IST_DPI;
+    }
 
     if(imageselecttype == IST_DPI) {
         int reqdpi = 0;
@@ -225,8 +231,11 @@ static PTHEME_PROPERTY UXTHEME_SelectImage(HTHEME hTheme, int iPartId, int iStat
                 }
             }
         }
-        /* If an image couldn't be selected, choose the first one */
-        tp = MSSTYLES_FindProperty(hTheme, iPartId, iStateId, TMT_FILENAME, TMT_IMAGEFILE1);
+        /* If an image couldn't be selected because DPI < MINDPI1, try base IMAGEFILE first, then IMAGEFILE1 */
+        tp = MSSTYLES_FindProperty(hTheme, iPartId, iStateId, TMT_FILENAME,
+                                   glyph ? TMT_GLYPHIMAGEFILE : TMT_IMAGEFILE);
+        if (!tp)
+            tp = MSSTYLES_FindProperty(hTheme, iPartId, iStateId, TMT_FILENAME, TMT_IMAGEFILE1);
     }
     else if(imageselecttype == IST_SIZE) {
         POINT size = {pRect->right-pRect->left, pRect->bottom-pRect->top};
@@ -297,6 +306,54 @@ static HRESULT UXTHEME_LoadImage(HTHEME hTheme, int iPartId, int iStateId, const
     BITMAP bmp;
     WCHAR szPath[MAX_PATH];
     PTHEME_PROPERTY tp;
+    RECT atlasRect;
+
+    if (!glyph && SUCCEEDED(GetThemeRect(hTheme, iPartId, iStateId, TMT_ATLASRECT, &atlasRect)))
+    {
+        /* Atlas stream image */
+        PTHEME_PROPERTY atlasProp = MSSTYLES_FindProperty(hTheme, iPartId, iStateId, 0, TMT_ATLASIMAGE);
+        if (!atlasProp)
+            atlasProp = MSSTYLES_FindProperty(hTheme, iPartId, iStateId, 0, TMT_IMAGEATLAS);
+        if (!atlasProp)
+            atlasProp = MSSTYLES_FindProperty(hTheme, 0, 0, 0, TMT_IMAGEATLAS);
+        if (!atlasProp)
+            atlasProp = MSSTYLES_FindProperty(hTheme, 0, 0, 0, TMT_ATLASIMAGE);
+
+        if (atlasProp)
+        {
+            lstrcpynW(szPath, atlasProp->lpValue, min(atlasProp->dwValueLen + 1, ARRAY_SIZE(szPath)));
+            *hBmp = MSSTYLES_LoadBitmap(hTheme, szPath, hasImageAlpha, hasDefaultTransparentColour);
+            if (*hBmp)
+            {
+                GetThemeEnumValue(hTheme, iPartId, iStateId, TMT_IMAGELAYOUT, &imagelayout);
+                GetThemeInt(hTheme, iPartId, iStateId, TMT_IMAGECOUNT, &imagecount);
+                if (imagecount < 1) imagecount = 1;
+
+                imagenum = max(min(imagecount, iStateId), 1) - 1;
+
+                if (imagelayout == IL_VERTICAL)
+                {
+                    int height = (atlasRect.bottom - atlasRect.top) / imagecount;
+                    bmpRect->left = atlasRect.left;
+                    bmpRect->right = atlasRect.right;
+                    bmpRect->top = atlasRect.top + imagenum * height;
+                    bmpRect->bottom = bmpRect->top + height;
+                }
+                else
+                {
+                    int width = (atlasRect.right - atlasRect.left) / imagecount;
+                    bmpRect->left = atlasRect.left + imagenum * width;
+                    bmpRect->right = bmpRect->left + width;
+                    bmpRect->top = atlasRect.top;
+                    bmpRect->bottom = atlasRect.bottom;
+                }
+
+                if (imageDpi)
+                    *imageDpi = MSSTYLES_GetThemeDPI(hTheme);
+                return S_OK;
+            }
+        }
+    }
 
     tp = UXTHEME_SelectImage(hTheme, iPartId, iStateId, pRect, glyph, imageDpi);
     if(!tp) {
@@ -1099,6 +1156,8 @@ HRESULT WINAPI DrawThemeBackgroundEx(HTHEME hTheme, HDC hdc, int iPartId,
 
     GetThemeEnumValue(hTheme, iPartId, iStateId, TMT_BGTYPE, &bgtype);
     if (bgtype == BT_NONE) return S_OK;
+    if (bgtype == BT_BORDERFILL && MSSTYLES_FindProperty(hTheme, iPartId, iStateId, TMT_RECT, TMT_ATLASRECT))
+        bgtype = BT_IMAGEFILE;
 
     /* Ensure we have a DTBGOPTS structure available, simplifies some of the code */
     opts = pOptions;

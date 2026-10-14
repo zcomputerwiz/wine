@@ -32,6 +32,10 @@
 
 #include "msstyles.h"
 
+#define COBJMACROS
+#include "initguid.h"
+#include "wincodec.h"
+
 #include "wine/exception.h"
 #include "wine/debug.h"
 
@@ -93,6 +97,13 @@ HRESULT MSSTYLES_OpenThemeFile(LPCWSTR lpThemeFile, LPCWSTR pszColorName, LPCWST
         hr = HRESULT_FROM_WIN32(GetLastError());
         goto invalid_theme;
     }
+
+    if ((FindResourceW(hTheme, L"CMAP", L"CMAP") || FindResourceW(hTheme, MAKEINTRESOURCEW(1), L"CMAP")) &&
+        (FindResourceW(hTheme, L"NORMAL", L"VARIANT") || FindResourceW(hTheme, MAKEINTRESOURCEW(1), L"VARIANT")))
+    {
+        return MSSTYLES_OpenThemeFile_V4(hTheme, lpThemeFile, pszColorName, pszSizeName, tf);
+    }
+
     if(!(hrsc = FindResourceW(hTheme, MAKEINTRESOURCEW(1), L"PACKTHEM_VERSION"))) {
         TRACE("No version resource found\n");
         hr = HRESULT_FROM_WIN32(ERROR_BAD_FORMAT);
@@ -203,6 +214,8 @@ void MSSTYLES_CloseThemeFile(PTHEME_FILE tf)
                         while(ps->properties) {
                             PTHEME_PROPERTY prop = ps->properties;
                             ps->properties = prop->next;
+                            if (prop->is_typed && prop->lpValue)
+                                free((void*)prop->lpValue);
                             free(prop);
                         }
 
@@ -212,6 +225,14 @@ void MSSTYLES_CloseThemeFile(PTHEME_FILE tf)
                     pcls->signature = 0;
                     free(pcls);
                 }
+            }
+            while (tf->metrics)
+            {
+                PTHEME_PROPERTY prop = tf->metrics;
+                tf->metrics = prop->next;
+                if (prop->is_typed && prop->lpValue)
+                    free((void*)prop->lpValue);
+                free(prop);
             }
             while (tf->images)
             {
@@ -412,7 +433,7 @@ static BOOL MSSTYLES_ParseIniSectionName(LPCWSTR lpSection, DWORD dwLen, LPWSTR 
  * RETURNS
  *  The class found, or NULL
  */
-static PTHEME_CLASS MSSTYLES_FindClass(PTHEME_FILE tf, LPCWSTR pszAppName, LPCWSTR pszClassName)
+PTHEME_CLASS MSSTYLES_FindClass(PTHEME_FILE tf, LPCWSTR pszAppName, LPCWSTR pszClassName)
 {
     PTHEME_CLASS cur = tf->classes;
     while(cur) {
@@ -442,7 +463,7 @@ static PTHEME_CLASS MSSTYLES_FindClass(PTHEME_FILE tf, LPCWSTR pszAppName, LPCWS
  * RETURNS
  *  The class added, or a class previously added with the same name
  */
-static PTHEME_CLASS MSSTYLES_AddClass(PTHEME_FILE tf, LPCWSTR pszAppName, LPCWSTR pszClassName)
+PTHEME_CLASS MSSTYLES_AddClass(PTHEME_FILE tf, LPCWSTR pszAppName, LPCWSTR pszClassName)
 {
     PTHEME_CLASS cur = MSSTYLES_FindClass(tf, pszAppName, pszClassName);
     if(cur) return cur;
@@ -531,7 +552,7 @@ PTHEME_PARTSTATE MSSTYLES_FindPartState(PTHEME_CLASS tc, int iPartId, int iState
  * RETURNS
  *  The part/state added, or a part/state previously added with the same IDs
  */
-static PTHEME_PARTSTATE MSSTYLES_AddPartState(PTHEME_CLASS tc, int iPartId, int iStateId)
+PTHEME_PARTSTATE MSSTYLES_AddPartState(PTHEME_CLASS tc, int iPartId, int iStateId)
 {
     PTHEME_PARTSTATE cur = MSSTYLES_FindPartState(tc, iPartId, iStateId, NULL);
     if(cur) return cur;
@@ -1024,7 +1045,7 @@ static void MSSTYLES_ParseThemeIni(PTHEME_FILE tf, BOOL setMetrics)
     }
 }
 
-static void parse_app_class_name(LPCWSTR name, LPWSTR app_name, LPWSTR class_name)
+void parse_app_class_name(LPCWSTR name, LPWSTR app_name, LPWSTR class_name)
 {
     LPCWSTR p;
 
@@ -1286,7 +1307,7 @@ static BOOL prepare_alpha (HBITMAP bmp, BOOL* hasAlpha, BOOL *hasDefaultTranspar
         return TRUE;
 
     /* If all alpha values are 0xff, don't use alpha blending */
-    for (n = 0, p = dib.dsBm.bmBits; n < dib.dsBmih.biWidth * dib.dsBmih.biHeight; n++, p += 4)
+    for (n = 0, p = dib.dsBm.bmBits; n < dib.dsBmih.biWidth * abs(dib.dsBmih.biHeight); n++, p += 4)
     {
         if ((*hasAlpha = (p[3] != 0xff)))
             break;
@@ -1298,7 +1319,7 @@ static BOOL prepare_alpha (HBITMAP bmp, BOOL* hasAlpha, BOOL *hasDefaultTranspar
         return TRUE;
 
     p = dib.dsBm.bmBits;
-    n = dib.dsBmih.biHeight * dib.dsBmih.biWidth;
+    n = abs(dib.dsBmih.biHeight) * dib.dsBmih.biWidth;
     /* AlphaBlend() wants premultiplied alpha, so do that now */
     while (n-- > 0)
     {
@@ -1312,12 +1333,94 @@ static BOOL prepare_alpha (HBITMAP bmp, BOOL* hasAlpha, BOOL *hasDefaultTranspar
     return TRUE;
 }
 
+HRESULT WINAPI WICCreateImagingFactory_Proxy(UINT, IWICImagingFactory**);
+
+static HBITMAP decode_png_wic(const void *buf, DWORD size, BOOL *hasAlpha, BOOL *hasDefaultTransparentColour)
+{
+    IWICImagingFactory *factory = NULL;
+    IWICStream *stream = NULL;
+    IWICBitmapDecoder *decoder = NULL;
+    IWICBitmapFrameDecode *frame = NULL;
+    IWICFormatConverter *converter = NULL;
+    UINT width = 0, height = 0;
+    BITMAPINFO bi = {0};
+    void *bits = NULL;
+    HBITMAP hbmp = NULL;
+    HRESULT hr;
+
+    hr = WICCreateImagingFactory_Proxy(WINCODEC_SDK_VERSION, &factory);
+    if (FAILED(hr)) return NULL;
+
+    hr = IWICImagingFactory_CreateStream(factory, &stream);
+    if (SUCCEEDED(hr))
+    {
+        hr = IWICStream_InitializeFromMemory(stream, (BYTE *)buf, size);
+        if (SUCCEEDED(hr))
+        {
+            hr = IWICImagingFactory_CreateDecoderFromStream(factory, (IStream *)stream, NULL,
+                                                           WICDecodeMetadataCacheOnLoad, &decoder);
+            if (SUCCEEDED(hr))
+            {
+                hr = IWICBitmapDecoder_GetFrame(decoder, 0, &frame);
+                if (SUCCEEDED(hr))
+                {
+                    hr = IWICImagingFactory_CreateFormatConverter(factory, &converter);
+                    if (SUCCEEDED(hr))
+                    {
+                        hr = IWICFormatConverter_Initialize(converter, (IWICBitmapSource *)frame,
+                                                            &GUID_WICPixelFormat32bppBGRA,
+                                                            WICBitmapDitherTypeNone, NULL, 0.0,
+                                                            WICBitmapPaletteTypeCustom);
+                        if (SUCCEEDED(hr))
+                        {
+                            hr = IWICFormatConverter_GetSize(converter, &width, &height);
+                            if (SUCCEEDED(hr) && width > 0 && height > 0)
+                            {
+                                bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+                                bi.bmiHeader.biWidth = width;
+                                bi.bmiHeader.biHeight = -(LONG)height;
+                                bi.bmiHeader.biPlanes = 1;
+                                bi.bmiHeader.biBitCount = 32;
+                                bi.bmiHeader.biCompression = BI_RGB;
+
+                                hbmp = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+                                if (hbmp && bits)
+                                {
+                                    hr = IWICFormatConverter_CopyPixels(converter, NULL, width * 4,
+                                                                        width * height * 4, (BYTE *)bits);
+                                    if (FAILED(hr))
+                                    {
+                                        DeleteObject(hbmp);
+                                        hbmp = NULL;
+                                    }
+                                }
+                            }
+                        }
+                        IWICFormatConverter_Release(converter);
+                    }
+                    IWICBitmapFrameDecode_Release(frame);
+                }
+                IWICBitmapDecoder_Release(decoder);
+            }
+        }
+        IWICStream_Release(stream);
+    }
+    IWICImagingFactory_Release(factory);
+
+    if (hbmp)
+        prepare_alpha(hbmp, hasAlpha, hasDefaultTransparentColour);
+
+    return hbmp;
+}
+
 HBITMAP MSSTYLES_LoadBitmap (PTHEME_CLASS tc, LPCWSTR lpFilename, BOOL* hasAlpha, BOOL *hasDefaultTransparentColour)
 {
     WCHAR szFile[MAX_PATH];
     LPWSTR tmp;
     PTHEME_IMAGE img;
     BOOL has_default;
+    BOOL alpha = FALSE;
+    HBITMAP hbmp;
 
     lstrcpynW(szFile, lpFilename, ARRAY_SIZE(szFile));
     tmp = szFile;
@@ -1341,19 +1444,70 @@ HBITMAP MSSTYLES_LoadBitmap (PTHEME_CLASS tc, LPCWSTR lpFilename, BOOL* hasAlpha
         }
         img = img->next;
     }
-    /* Not found? Load from resources */
+    /* Not found? Try loading as standard bitmap first (XP format) */
+    hbmp = LoadImageW(tc->hTheme, szFile, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
+    if (hbmp)
+    {
+        prepare_alpha(hbmp, &alpha, &has_default);
+    }
+    else
+    {
+        /* Not an RT_BITMAP: try finding PNG in IMAGE, STREAM, or RT_RCDATA (Vista+ format) */
+        HRSRC hrsc = NULL;
+        LPCWSTR res_name = szFile;
+        DWORD res_id = 0;
+
+        if (szFile[0] == '#')
+        {
+            res_id = wcstoul(szFile + 1, NULL, 10);
+            res_name = MAKEINTRESOURCEW(res_id);
+        }
+        else if (iswdigit(szFile[0]))
+        {
+            res_id = wcstoul(szFile, NULL, 10);
+            res_name = MAKEINTRESOURCEW(res_id);
+        }
+
+        hrsc = FindResourceW(tc->hTheme, res_name, L"IMAGE");
+        if (!hrsc)
+            hrsc = FindResourceW(tc->hTheme, res_name, L"STREAM");
+        if (!hrsc)
+            hrsc = FindResourceW(tc->hTheme, res_name, (LPCWSTR)RT_RCDATA);
+
+        if (hrsc)
+        {
+            DWORD size = SizeofResource(tc->hTheme, hrsc);
+            HGLOBAL hdata = LoadResource(tc->hTheme, hrsc);
+            if (hdata)
+            {
+                void *buf = LockResource(hdata);
+                if (buf && size > 0)
+                    hbmp = decode_png_wic(buf, size, &alpha, &has_default);
+            }
+        }
+    }
+
+    if (!hbmp)
+        return NULL;
+
     img = malloc(sizeof(*img));
-    img->image = LoadImageW(tc->hTheme, szFile, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
-    prepare_alpha (img->image, hasAlpha, &has_default);
-    img->hasAlpha = *hasAlpha;
+    if (!img)
+    {
+        DeleteObject(hbmp);
+        return NULL;
+    }
+    img->image = hbmp;
+    img->hasAlpha = alpha;
     img->hasDefaultTransparentColour = has_default;
+    *hasAlpha = alpha;
     if (hasDefaultTransparentColour)
         *hasDefaultTransparentColour = has_default;
+
     /* ...and stow away for later reuse. */
-    lstrcpyW (img->name, szFile);
+    lstrcpyW(img->name, szFile);
     img->next = tc->tf->images;
     tc->tf->images = img;
-    TRACE ("new %p %s: %p\n", img, debugstr_w (img->name), img->image);
+    TRACE("new %p %s: %p (hasAlpha=%d)\n", img, debugstr_w(img->name), img->image, alpha);
     return img->image;
 }
 
@@ -1418,6 +1572,10 @@ static BOOL MSSTYLES_GetNextToken(LPCWSTR lpStringStart, LPCWSTR lpStringEnd, LP
  */
 HRESULT MSSTYLES_GetPropertyBool(PTHEME_PROPERTY tp, BOOL *pfVal)
 {
+    if (tp->is_typed) {
+        *pfVal = tp->v.bool_val;
+        return S_OK;
+    }
     *pfVal = FALSE;
     if(*tp->lpValue == 't' || *tp->lpValue == 'T')
         *pfVal = TRUE;
@@ -1434,6 +1592,11 @@ HRESULT MSSTYLES_GetPropertyColor(PTHEME_PROPERTY tp, COLORREF *pColor)
     LPCWSTR lpEnd;
     LPCWSTR lpCur;
     int red, green, blue;
+
+    if (tp->is_typed) {
+        *pColor = tp->v.color_val;
+        return S_OK;
+    }
 
     lpCur = tp->lpValue;
     lpEnd = tp->lpValue + tp->dwValueLen;
@@ -1509,6 +1672,10 @@ HRESULT MSSTYLES_GetPropertyFont(PTHEME_PROPERTY tp, HDC hdc, LOGFONTW *pFont)
  */
 HRESULT MSSTYLES_GetPropertyInt(PTHEME_PROPERTY tp, int *piVal)
 {
+    if (tp->is_typed) {
+        *piVal = tp->v.int_val;
+        return S_OK;
+    }
     if(!MSSTYLES_GetNextInteger(tp->lpValue, (tp->lpValue + tp->dwValueLen), NULL, piVal)) {
         TRACE("Could not parse int property\n");
         return E_PROP_ID_UNSUPPORTED;
@@ -1527,6 +1694,10 @@ HRESULT MSSTYLES_GetPropertyIntList(PTHEME_PROPERTY tp, INTLIST *pIntList)
     LPCWSTR lpCur = tp->lpValue;
     LPCWSTR lpEnd = tp->lpValue + tp->dwValueLen;
 
+    if (tp->is_typed) {
+        *pIntList = tp->v.intlist_val;
+        return S_OK;
+    }
     for(i=0; i < MAX_INTLIST_COUNT; i++) {
         if(!MSSTYLES_GetNextInteger(lpCur, lpEnd, &lpCur, &pIntList->iValues[i]))
             break;
@@ -1546,6 +1717,10 @@ HRESULT MSSTYLES_GetPropertyPosition(PTHEME_PROPERTY tp, POINT *pPoint)
     LPCWSTR lpCur = tp->lpValue;
     LPCWSTR lpEnd = tp->lpValue + tp->dwValueLen;
 
+    if (tp->is_typed) {
+        *pPoint = tp->v.point_val;
+        return S_OK;
+    }
     if(!MSSTYLES_GetNextInteger(lpCur, lpEnd, &lpCur, &x)) {
         TRACE("Could not parse position property\n");
         return E_PROP_ID_UNSUPPORTED;
@@ -1580,6 +1755,10 @@ HRESULT MSSTYLES_GetPropertyRect(PTHEME_PROPERTY tp, RECT *pRect)
     LPCWSTR lpCur = tp->lpValue;
     LPCWSTR lpEnd = tp->lpValue + tp->dwValueLen;
 
+    if (tp->is_typed) {
+        *pRect = tp->v.rect_val;
+        return S_OK;
+    }
     MSSTYLES_GetNextLong(lpCur, lpEnd, &lpCur, &pRect->left);
     MSSTYLES_GetNextLong(lpCur, lpEnd, &lpCur, &pRect->top);
     MSSTYLES_GetNextLong(lpCur, lpEnd, &lpCur, &pRect->right);
@@ -1600,6 +1779,10 @@ HRESULT MSSTYLES_GetPropertyMargins(PTHEME_PROPERTY tp, RECT *prc, MARGINS *pMar
     LPCWSTR lpCur = tp->lpValue;
     LPCWSTR lpEnd = tp->lpValue + tp->dwValueLen;
 
+    if (tp->is_typed) {
+        *pMargins = tp->v.margins_val;
+        return S_OK;
+    }
     MSSTYLES_GetNextInteger(lpCur, lpEnd, &lpCur, &pMargins->cxLeftWidth);
     MSSTYLES_GetNextInteger(lpCur, lpEnd, &lpCur, &pMargins->cxRightWidth);
     MSSTYLES_GetNextInteger(lpCur, lpEnd, &lpCur, &pMargins->cyTopHeight);
