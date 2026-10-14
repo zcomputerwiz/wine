@@ -885,7 +885,11 @@ HRESULT WINAPI GetThemeDocumentationProperty(LPCWSTR pszThemeName,
     PTHEME_FILE pt;
     HRESULT hr;
     unsigned int i;
-    int iDocId;
+    int iDocId = 0;
+    const WCHAR *p, *slash, *name, *dot;
+    WCHAR mui_path[MAX_PATH];
+    HMODULE hMui = NULL;
+    int len, dir_len;
     TRACE("(%s,%s,%p,%d)\n", debugstr_w(pszThemeName), debugstr_w(pszPropertyName),
           pszValueBuff, cchMaxValChars);
 
@@ -916,6 +920,45 @@ HRESULT WINAPI GetThemeDocumentationProperty(LPCWSTR pszThemeName,
             }
         }
         UXINI_CloseINI(uf);
+    }
+    /* If still failed, try MUI file */
+    if(FAILED(hr) && MSSTYLES_LookupProperty(pszPropertyName, NULL, &iDocId)) {
+        p = wcsrchr(pszThemeName, '\\');
+        slash = p ? p + 1 : pszThemeName;
+
+        if (p) {
+            dir_len = (int)(p - pszThemeName);
+            swprintf(mui_path, ARRAY_SIZE(mui_path), L"%.*s\\en-US\\%s.mui", dir_len, pszThemeName, slash);
+            hMui = LoadLibraryExW(mui_path, 0, LOAD_LIBRARY_AS_DATAFILE);
+            if (!hMui) {
+                swprintf(mui_path, ARRAY_SIZE(mui_path), L"%.*s\\%s.mui", dir_len, pszThemeName, slash);
+                hMui = LoadLibraryExW(mui_path, 0, LOAD_LIBRARY_AS_DATAFILE);
+            }
+        }
+        if (hMui) {
+            for(i=0; i<ARRAY_SIZE(wDocToRes); i+=2) {
+                if(wDocToRes[i] == iDocId) {
+                    if(LoadStringW(hMui, wDocToRes[i+1], pszValueBuff, cchMaxValChars)) {
+                        hr = S_OK;
+                        break;
+                    }
+                }
+            }
+            FreeLibrary(hMui);
+        }
+    }
+    /* Fallback: derive displayname or tooltip from file name */
+    if(FAILED(hr) && (iDocId == TMT_DISPLAYNAME || iDocId == TMT_TOOLTIP) && cchMaxValChars > 0) {
+        p = wcsrchr(pszThemeName, '\\');
+        name = p ? p + 1 : pszThemeName;
+        dot = wcsrchr(name, '.');
+        len = dot ? (int)(dot - name) : lstrlenW(name);
+        if (len > 0 && len < cchMaxValChars) {
+            lstrcpynW(pszValueBuff, name, len + 1);
+            if (pszValueBuff[0] >= 'a' && pszValueBuff[0] <= 'z')
+                pszValueBuff[0] = pszValueBuff[0] - 'a' + 'A';
+            hr = S_OK;
+        }
     }
 
     MSSTYLES_CloseThemeFile(pt);
@@ -1167,10 +1210,12 @@ HRESULT WINAPI EnumThemeColors(LPWSTR pszThemeFileName, LPWSTR pszSizeName,
     if(!dwColorNum && *tmp) {
         TRACE("%s\n", debugstr_w(tmp));
         lstrcpyW(pszColorNames->szName, tmp);
-        LoadStringW(pt->hTheme, resourceId, pszColorNames->szDisplayName,
-            ARRAY_SIZE(pszColorNames->szDisplayName));
-        LoadStringW(pt->hTheme, resourceId+1000, pszColorNames->szTooltip,
-            ARRAY_SIZE(pszColorNames->szTooltip));
+        if (!LoadStringW(pt->hTheme, resourceId, pszColorNames->szDisplayName,
+                         ARRAY_SIZE(pszColorNames->szDisplayName)))
+            lstrcpyW(pszColorNames->szDisplayName, pszColorNames->szName);
+        if (!LoadStringW(pt->hTheme, resourceId+1000, pszColorNames->szTooltip,
+                         ARRAY_SIZE(pszColorNames->szTooltip)))
+            pszColorNames->szTooltip[0] = '\0';
     }
     else
         hr = E_PROP_ID_UNSUPPORTED;
@@ -1225,10 +1270,12 @@ HRESULT WINAPI EnumThemeSizes(LPWSTR pszThemeFileName, LPWSTR pszColorName,
     if(!dwSizeNum && *tmp) {
         TRACE("%s\n", debugstr_w(tmp));
         lstrcpyW(pszSizeNames->szName, tmp);
-        LoadStringW(pt->hTheme, resourceId, pszSizeNames->szDisplayName,
-            ARRAY_SIZE(pszSizeNames->szDisplayName));
-        LoadStringW(pt->hTheme, resourceId+1000, pszSizeNames->szTooltip,
-            ARRAY_SIZE(pszSizeNames->szTooltip));
+        if (!LoadStringW(pt->hTheme, resourceId, pszSizeNames->szDisplayName,
+                         ARRAY_SIZE(pszSizeNames->szDisplayName)))
+            lstrcpyW(pszSizeNames->szDisplayName, pszSizeNames->szName);
+        if (!LoadStringW(pt->hTheme, resourceId+1000, pszSizeNames->szTooltip,
+                         ARRAY_SIZE(pszSizeNames->szTooltip)))
+            pszSizeNames->szTooltip[0] = '\0';
     }
     else
         hr = E_PROP_ID_UNSUPPORTED;
