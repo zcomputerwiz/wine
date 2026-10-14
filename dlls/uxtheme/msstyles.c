@@ -32,6 +32,10 @@
 
 #include "msstyles.h"
 
+#define COBJMACROS
+#include "initguid.h"
+#include "wincodec.h"
+
 #include "wine/exception.h"
 #include "wine/debug.h"
 
@@ -1303,7 +1307,7 @@ static BOOL prepare_alpha (HBITMAP bmp, BOOL* hasAlpha, BOOL *hasDefaultTranspar
         return TRUE;
 
     /* If all alpha values are 0xff, don't use alpha blending */
-    for (n = 0, p = dib.dsBm.bmBits; n < dib.dsBmih.biWidth * dib.dsBmih.biHeight; n++, p += 4)
+    for (n = 0, p = dib.dsBm.bmBits; n < dib.dsBmih.biWidth * abs(dib.dsBmih.biHeight); n++, p += 4)
     {
         if ((*hasAlpha = (p[3] != 0xff)))
             break;
@@ -1315,7 +1319,7 @@ static BOOL prepare_alpha (HBITMAP bmp, BOOL* hasAlpha, BOOL *hasDefaultTranspar
         return TRUE;
 
     p = dib.dsBm.bmBits;
-    n = dib.dsBmih.biHeight * dib.dsBmih.biWidth;
+    n = abs(dib.dsBmih.biHeight) * dib.dsBmih.biWidth;
     /* AlphaBlend() wants premultiplied alpha, so do that now */
     while (n-- > 0)
     {
@@ -1329,12 +1333,94 @@ static BOOL prepare_alpha (HBITMAP bmp, BOOL* hasAlpha, BOOL *hasDefaultTranspar
     return TRUE;
 }
 
+HRESULT WINAPI WICCreateImagingFactory_Proxy(UINT, IWICImagingFactory**);
+
+static HBITMAP decode_png_wic(const void *buf, DWORD size, BOOL *hasAlpha, BOOL *hasDefaultTransparentColour)
+{
+    IWICImagingFactory *factory = NULL;
+    IWICStream *stream = NULL;
+    IWICBitmapDecoder *decoder = NULL;
+    IWICBitmapFrameDecode *frame = NULL;
+    IWICFormatConverter *converter = NULL;
+    UINT width = 0, height = 0;
+    BITMAPINFO bi = {0};
+    void *bits = NULL;
+    HBITMAP hbmp = NULL;
+    HRESULT hr;
+
+    hr = WICCreateImagingFactory_Proxy(WINCODEC_SDK_VERSION, &factory);
+    if (FAILED(hr)) return NULL;
+
+    hr = IWICImagingFactory_CreateStream(factory, &stream);
+    if (SUCCEEDED(hr))
+    {
+        hr = IWICStream_InitializeFromMemory(stream, (BYTE *)buf, size);
+        if (SUCCEEDED(hr))
+        {
+            hr = IWICImagingFactory_CreateDecoderFromStream(factory, (IStream *)stream, NULL,
+                                                           WICDecodeMetadataCacheOnLoad, &decoder);
+            if (SUCCEEDED(hr))
+            {
+                hr = IWICBitmapDecoder_GetFrame(decoder, 0, &frame);
+                if (SUCCEEDED(hr))
+                {
+                    hr = IWICImagingFactory_CreateFormatConverter(factory, &converter);
+                    if (SUCCEEDED(hr))
+                    {
+                        hr = IWICFormatConverter_Initialize(converter, (IWICBitmapSource *)frame,
+                                                            &GUID_WICPixelFormat32bppBGRA,
+                                                            WICBitmapDitherTypeNone, NULL, 0.0,
+                                                            WICBitmapPaletteTypeCustom);
+                        if (SUCCEEDED(hr))
+                        {
+                            hr = IWICFormatConverter_GetSize(converter, &width, &height);
+                            if (SUCCEEDED(hr) && width > 0 && height > 0)
+                            {
+                                bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+                                bi.bmiHeader.biWidth = width;
+                                bi.bmiHeader.biHeight = -(LONG)height;
+                                bi.bmiHeader.biPlanes = 1;
+                                bi.bmiHeader.biBitCount = 32;
+                                bi.bmiHeader.biCompression = BI_RGB;
+
+                                hbmp = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+                                if (hbmp && bits)
+                                {
+                                    hr = IWICFormatConverter_CopyPixels(converter, NULL, width * 4,
+                                                                        width * height * 4, (BYTE *)bits);
+                                    if (FAILED(hr))
+                                    {
+                                        DeleteObject(hbmp);
+                                        hbmp = NULL;
+                                    }
+                                }
+                            }
+                        }
+                        IWICFormatConverter_Release(converter);
+                    }
+                    IWICBitmapFrameDecode_Release(frame);
+                }
+                IWICBitmapDecoder_Release(decoder);
+            }
+        }
+        IWICStream_Release(stream);
+    }
+    IWICImagingFactory_Release(factory);
+
+    if (hbmp)
+        prepare_alpha(hbmp, hasAlpha, hasDefaultTransparentColour);
+
+    return hbmp;
+}
+
 HBITMAP MSSTYLES_LoadBitmap (PTHEME_CLASS tc, LPCWSTR lpFilename, BOOL* hasAlpha, BOOL *hasDefaultTransparentColour)
 {
     WCHAR szFile[MAX_PATH];
     LPWSTR tmp;
     PTHEME_IMAGE img;
     BOOL has_default;
+    BOOL alpha = FALSE;
+    HBITMAP hbmp;
 
     lstrcpynW(szFile, lpFilename, ARRAY_SIZE(szFile));
     tmp = szFile;
@@ -1358,19 +1444,70 @@ HBITMAP MSSTYLES_LoadBitmap (PTHEME_CLASS tc, LPCWSTR lpFilename, BOOL* hasAlpha
         }
         img = img->next;
     }
-    /* Not found? Load from resources */
+    /* Not found? Try loading as standard bitmap first (XP format) */
+    hbmp = LoadImageW(tc->hTheme, szFile, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
+    if (hbmp)
+    {
+        prepare_alpha(hbmp, &alpha, &has_default);
+    }
+    else
+    {
+        /* Not an RT_BITMAP: try finding PNG in IMAGE, STREAM, or RT_RCDATA (Vista+ format) */
+        HRSRC hrsc = NULL;
+        LPCWSTR res_name = szFile;
+        DWORD res_id = 0;
+
+        if (szFile[0] == '#')
+        {
+            res_id = wcstoul(szFile + 1, NULL, 10);
+            res_name = MAKEINTRESOURCEW(res_id);
+        }
+        else if (iswdigit(szFile[0]))
+        {
+            res_id = wcstoul(szFile, NULL, 10);
+            res_name = MAKEINTRESOURCEW(res_id);
+        }
+
+        hrsc = FindResourceW(tc->hTheme, res_name, L"IMAGE");
+        if (!hrsc)
+            hrsc = FindResourceW(tc->hTheme, res_name, L"STREAM");
+        if (!hrsc)
+            hrsc = FindResourceW(tc->hTheme, res_name, (LPCWSTR)RT_RCDATA);
+
+        if (hrsc)
+        {
+            DWORD size = SizeofResource(tc->hTheme, hrsc);
+            HGLOBAL hdata = LoadResource(tc->hTheme, hrsc);
+            if (hdata)
+            {
+                void *buf = LockResource(hdata);
+                if (buf && size > 0)
+                    hbmp = decode_png_wic(buf, size, &alpha, &has_default);
+            }
+        }
+    }
+
+    if (!hbmp)
+        return NULL;
+
     img = malloc(sizeof(*img));
-    img->image = LoadImageW(tc->hTheme, szFile, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
-    prepare_alpha (img->image, hasAlpha, &has_default);
-    img->hasAlpha = *hasAlpha;
+    if (!img)
+    {
+        DeleteObject(hbmp);
+        return NULL;
+    }
+    img->image = hbmp;
+    img->hasAlpha = alpha;
     img->hasDefaultTransparentColour = has_default;
+    *hasAlpha = alpha;
     if (hasDefaultTransparentColour)
         *hasDefaultTransparentColour = has_default;
+
     /* ...and stow away for later reuse. */
-    lstrcpyW (img->name, szFile);
+    lstrcpyW(img->name, szFile);
     img->next = tc->tf->images;
     tc->tf->images = img;
-    TRACE ("new %p %s: %p\n", img, debugstr_w (img->name), img->image);
+    TRACE("new %p %s: %p (hasAlpha=%d)\n", img, debugstr_w(img->name), img->image, alpha);
     return img->image;
 }
 
