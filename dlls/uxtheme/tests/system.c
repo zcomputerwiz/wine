@@ -2919,6 +2919,7 @@ static void test_DrawThemeTextEx(void)
 static void test_msstyles_v4(void)
 {
     WCHAR temp_path[MAX_PATH], temp_file[MAX_PATH];
+    WCHAR cur_theme[MAX_PATH], cur_color[MAX_PATH], cur_size[MAX_PATH];
     HANDLE hFile;
     DWORD written;
     HANDLE htf;
@@ -2972,6 +2973,8 @@ static void test_msstyles_v4(void)
         hr = pEnumThemeColors(temp_file, NULL, 0, &tn);
         ok(hr == S_OK, "EnumThemeColors(0) failed: 0x%08lx\n", hr);
         ok(!lstrcmpiW(tn.szName, L"NormalColor"), "Expected NormalColor, got %s\n", wine_dbgstr_w(tn.szName));
+        ok(!lstrcmpiW(tn.szDisplayName, L"NormalColor"), "Expected displayName NormalColor, got %s\n", wine_dbgstr_w(tn.szDisplayName));
+        ok(tn.szTooltip[0] == '\0', "Expected empty tooltip, got %s\n", wine_dbgstr_w(tn.szTooltip));
 
         hr = pEnumThemeColors(temp_file, NULL, 1, &tn);
         ok(hr == E_PROP_ID_UNSUPPORTED, "EnumThemeColors(1) expected E_PROP_ID_UNSUPPORTED, got 0x%08lx\n", hr);
@@ -2982,10 +2985,23 @@ static void test_msstyles_v4(void)
         hr = pEnumThemeSizes(temp_file, NULL, 0, &tn);
         ok(hr == S_OK, "EnumThemeSizes(0) failed: 0x%08lx\n", hr);
         ok(!lstrcmpiW(tn.szName, L"NormalSize"), "Expected NormalSize, got %s\n", wine_dbgstr_w(tn.szName));
+        ok(!lstrcmpiW(tn.szDisplayName, L"NormalSize"), "Expected displayName NormalSize, got %s\n", wine_dbgstr_w(tn.szDisplayName));
+        ok(tn.szTooltip[0] == '\0', "Expected empty tooltip, got %s\n", wine_dbgstr_w(tn.szTooltip));
 
         hr = pEnumThemeSizes(temp_file, NULL, 1, &tn);
         ok(hr == E_PROP_ID_UNSUPPORTED, "EnumThemeSizes(1) expected E_PROP_ID_UNSUPPORTED, got 0x%08lx\n", hr);
     }
+
+    /* Test GetThemeDocumentationProperty fallback */
+    str_val[0] = '\0';
+    hr = GetThemeDocumentationProperty(temp_file, L"displayname", str_val, ARRAY_SIZE(str_val));
+    ok(hr == S_OK, "GetThemeDocumentationProperty(displayname) failed: 0x%08lx\n", hr);
+    ok(str_val[0] != '\0', "Expected non-empty display name\n");
+
+    str_val[0] = '\0';
+    hr = GetThemeDocumentationProperty(temp_file, L"tooltip", str_val, ARRAY_SIZE(str_val));
+    ok(hr == S_OK, "GetThemeDocumentationProperty(tooltip) failed: 0x%08lx\n", hr);
+    ok(str_val[0] != '\0', "Expected non-empty tooltip\n");
 
     /* Test 4: Apply theme and verify properties */
     if (pApplyTheme)
@@ -2993,6 +3009,13 @@ static void test_msstyles_v4(void)
         hr = pApplyTheme(htf, NULL, NULL);
         ok(hr == S_OK, "ApplyTheme failed: 0x%08lx\n", hr);
     }
+
+    hr = GetCurrentThemeName(cur_theme, ARRAY_SIZE(cur_theme),
+                             cur_color, ARRAY_SIZE(cur_color),
+                             cur_size, ARRAY_SIZE(cur_size));
+    ok(hr == S_OK, "GetCurrentThemeName failed: 0x%08lx\n", hr);
+    ok(!lstrcmpiW(cur_color, L"NormalColor"), "Expected cur_color NormalColor, got %s\n", wine_dbgstr_w(cur_color));
+    ok(!lstrcmpiW(cur_size, L"NormalSize"), "Expected cur_size NormalSize, got %s\n", wine_dbgstr_w(cur_size));
 
     hButton = OpenThemeData(NULL, L"Button");
     ok(hButton != NULL, "OpenThemeData(Button) failed\n");
@@ -3007,6 +3030,10 @@ static void test_msstyles_v4(void)
         hr = GetThemeBool(hButton, 1, 0, 2201, &bool_val);
         ok(hr == S_OK, "GetThemeBool(TRANSPARENT) failed: 0x%08lx\n", hr);
         ok(bool_val == TRUE, "Expected TRANSPARENT=TRUE, got %d\n", bool_val);
+
+        /* IsThemeBackgroundPartiallyTransparent */
+        bool_val = IsThemeBackgroundPartiallyTransparent(hButton, 1, 0);
+        ok(bool_val == TRUE, "Expected IsThemeBackgroundPartiallyTransparent(Button) == TRUE\n");
 
         /* COLOR: BORDERCOLOR (3801) at state 0 = RGB(10, 20, 30) */
         hr = GetThemeColor(hButton, 1, 0, 3801, &color_val);
