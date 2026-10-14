@@ -2920,7 +2920,8 @@ static void test_msstyles_v4(void)
 {
     WCHAR temp_path[MAX_PATH], temp_file[MAX_PATH];
     WCHAR cur_theme[MAX_PATH], cur_color[MAX_PATH], cur_size[MAX_PATH];
-    HANDLE hFile;
+    WCHAR old_theme[MAX_PATH], old_color[MAX_PATH], old_size[MAX_PATH];
+    HANDLE hFile, old_htf;
     DWORD written;
     HANDLE htf;
     HRESULT hr;
@@ -3004,6 +3005,9 @@ static void test_msstyles_v4(void)
     ok(str_val[0] != '\0', "Expected non-empty tooltip\n");
 
     /* Test 4: Apply theme and verify properties */
+    if (FAILED(GetCurrentThemeName(old_theme, ARRAY_SIZE(old_theme), old_color, ARRAY_SIZE(old_color),
+                                   old_size, ARRAY_SIZE(old_size))))
+        old_theme[0] = 0;
     if (pApplyTheme)
     {
         hr = pApplyTheme(htf, NULL, NULL);
@@ -3202,6 +3206,18 @@ static void test_msstyles_v4(void)
         }
 
         CloseThemeData(hWindow);
+    }
+
+    /* Restore the theme that was active before, so the other tests are unaffected */
+    if (pApplyTheme)
+    {
+        if (old_theme[0] && SUCCEEDED(pOpenThemeFile(old_theme, old_color, old_size, &old_htf, 0)))
+        {
+            pApplyTheme(old_htf, NULL, NULL);
+            pCloseThemeFile(old_htf);
+        }
+        else
+            pApplyTheme(NULL, NULL, NULL);
     }
 
     pCloseThemeFile(htf);
