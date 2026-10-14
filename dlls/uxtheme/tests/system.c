@@ -3102,6 +3102,78 @@ static void test_msstyles_v4(void)
            "Expected {16, 0, 32, 16}, got {%ld, %ld, %ld, %ld}\n",
            rect_val.left, rect_val.top, rect_val.right, rect_val.bottom);
 
+        /* Drawing: Atlas stream and DPI variant rendering */
+        {
+            HDC hdc_screen = GetDC(NULL);
+            HDC hdc_mem = CreateCompatibleDC(hdc_screen);
+            BITMAPINFO bi = {0};
+            DWORD *bits = NULL;
+            HBITMAP hbmp;
+            HGDIOBJ old_bmp;
+            RECT rc = {0, 0, 16, 16};
+            COLORREF px;
+
+            bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            bi.bmiHeader.biWidth = 64;
+            bi.bmiHeader.biHeight = -64;
+            bi.bmiHeader.biPlanes = 1;
+            bi.bmiHeader.biBitCount = 32;
+            bi.bmiHeader.biCompression = BI_RGB;
+            hbmp = CreateDIBSection(hdc_mem, &bi, DIB_RGB_COLORS, (void**)&bits, NULL, 0);
+            old_bmp = SelectObject(hdc_mem, hbmp);
+
+            /* Window Part 1 State 1 (Active caption) -> Atlas Green tile */
+            memset(bits, 0, 64 * 64 * sizeof(DWORD));
+            hr = DrawThemeBackground(hWindow, hdc_mem, 1, 1, &rc, NULL);
+            ok(hr == S_OK, "DrawThemeBackground(Window state 1) failed: 0x%08lx\n", hr);
+            px = GetPixel(hdc_mem, 8, 8);
+            ok(px == RGB(50, 200, 80), "Expected Green RGB(50, 200, 80), got 0x%08lx\n", px);
+
+            /* Window Part 1 State 2 (Inactive caption) -> Atlas Gray tile */
+            memset(bits, 0, 64 * 64 * sizeof(DWORD));
+            hr = DrawThemeBackground(hWindow, hdc_mem, 1, 2, &rc, NULL);
+            ok(hr == S_OK, "DrawThemeBackground(Window state 2) failed: 0x%08lx\n", hr);
+            px = GetPixel(hdc_mem, 8, 8);
+            ok(px == RGB(190, 190, 190), "Expected Gray RGB(190, 190, 190), got 0x%08lx\n", px);
+
+            /* Button DPI variant selection */
+            if (pOpenThemeDataForDpi)
+            {
+                HTHEME hbtn_96, hbtn_144;
+
+                hbtn_96 = pOpenThemeDataForDpi(NULL, L"Button", 96);
+                ok(hbtn_96 != NULL, "OpenThemeDataForDpi(Button, 96) failed\n");
+                if (hbtn_96)
+                {
+                    RECT rc_btn = {0, 0, 20, 20};
+                    memset(bits, 0, 64 * 64 * sizeof(DWORD));
+                    hr = DrawThemeBackground(hbtn_96, hdc_mem, 1, 1, &rc_btn, NULL);
+                    ok(hr == S_OK, "DrawThemeBackground(Button 96 DPI) failed: 0x%08lx\n", hr);
+                    px = GetPixel(hdc_mem, 10, 10);
+                    ok(px == RGB(120, 180, 250), "Expected 96 DPI center RGB(120, 180, 250), got 0x%08lx\n", px);
+                    CloseThemeData(hbtn_96);
+                }
+
+                hbtn_144 = pOpenThemeDataForDpi(NULL, L"Button", 144);
+                ok(hbtn_144 != NULL, "OpenThemeDataForDpi(Button, 144) failed\n");
+                if (hbtn_144)
+                {
+                    RECT rc_btn = {0, 0, 24, 24};
+                    memset(bits, 0, 64 * 64 * sizeof(DWORD));
+                    hr = DrawThemeBackground(hbtn_144, hdc_mem, 1, 1, &rc_btn, NULL);
+                    ok(hr == S_OK, "DrawThemeBackground(Button 144 DPI) failed: 0x%08lx\n", hr);
+                    px = GetPixel(hdc_mem, 12, 12);
+                    ok(px == RGB(140, 200, 255), "Expected 144 DPI center RGB(140, 200, 255), got 0x%08lx\n", px);
+                    CloseThemeData(hbtn_144);
+                }
+            }
+
+            SelectObject(hdc_mem, old_bmp);
+            DeleteObject(hbmp);
+            DeleteDC(hdc_mem);
+            ReleaseDC(NULL, hdc_screen);
+        }
+
         CloseThemeData(hWindow);
     }
 
