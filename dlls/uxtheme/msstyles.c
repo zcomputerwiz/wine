@@ -94,6 +94,12 @@ HRESULT MSSTYLES_OpenThemeFile(LPCWSTR lpThemeFile, LPCWSTR pszColorName, LPCWST
         goto invalid_theme;
     }
 
+    if ((FindResourceW(hTheme, L"CMAP", L"CMAP") || FindResourceW(hTheme, MAKEINTRESOURCEW(1), L"CMAP")) &&
+        (FindResourceW(hTheme, L"NORMAL", L"VARIANT") || FindResourceW(hTheme, MAKEINTRESOURCEW(1), L"VARIANT")))
+    {
+        return MSSTYLES_OpenThemeFile_V4(hTheme, lpThemeFile, pszColorName, pszSizeName, tf);
+    }
+
     if(!(hrsc = FindResourceW(hTheme, MAKEINTRESOURCEW(1), L"PACKTHEM_VERSION"))) {
         TRACE("No version resource found\n");
         hr = HRESULT_FROM_WIN32(ERROR_BAD_FORMAT);
