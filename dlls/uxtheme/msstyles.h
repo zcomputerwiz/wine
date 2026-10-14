@@ -22,6 +22,7 @@
 #define __WINE_MSSTYLES_H
 
 #define TMT_ENUM 200
+#define TMT_IMAGEATLAS 213
 
 #define MAX_THEME_APP_NAME 60
 #define MAX_THEME_CLASS_NAME 60

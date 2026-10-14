@@ -306,6 +306,54 @@ static HRESULT UXTHEME_LoadImage(HTHEME hTheme, int iPartId, int iStateId, const
     BITMAP bmp;
     WCHAR szPath[MAX_PATH];
     PTHEME_PROPERTY tp;
+    RECT atlasRect;
+
+    if (!glyph && SUCCEEDED(GetThemeRect(hTheme, iPartId, iStateId, TMT_ATLASRECT, &atlasRect)))
+    {
+        /* Atlas stream image */
+        PTHEME_PROPERTY atlasProp = MSSTYLES_FindProperty(hTheme, iPartId, iStateId, 0, TMT_ATLASIMAGE);
+        if (!atlasProp)
+            atlasProp = MSSTYLES_FindProperty(hTheme, iPartId, iStateId, 0, TMT_IMAGEATLAS);
+        if (!atlasProp)
+            atlasProp = MSSTYLES_FindProperty(hTheme, 0, 0, 0, TMT_IMAGEATLAS);
+        if (!atlasProp)
+            atlasProp = MSSTYLES_FindProperty(hTheme, 0, 0, 0, TMT_ATLASIMAGE);
+
+        if (atlasProp)
+        {
+            lstrcpynW(szPath, atlasProp->lpValue, min(atlasProp->dwValueLen + 1, ARRAY_SIZE(szPath)));
+            *hBmp = MSSTYLES_LoadBitmap(hTheme, szPath, hasImageAlpha, hasDefaultTransparentColour);
+            if (*hBmp)
+            {
+                GetThemeEnumValue(hTheme, iPartId, iStateId, TMT_IMAGELAYOUT, &imagelayout);
+                GetThemeInt(hTheme, iPartId, iStateId, TMT_IMAGECOUNT, &imagecount);
+                if (imagecount < 1) imagecount = 1;
+
+                imagenum = max(min(imagecount, iStateId), 1) - 1;
+
+                if (imagelayout == IL_VERTICAL)
+                {
+                    int height = (atlasRect.bottom - atlasRect.top) / imagecount;
+                    bmpRect->left = atlasRect.left;
+                    bmpRect->right = atlasRect.right;
+                    bmpRect->top = atlasRect.top + imagenum * height;
+                    bmpRect->bottom = bmpRect->top + height;
+                }
+                else
+                {
+                    int width = (atlasRect.right - atlasRect.left) / imagecount;
+                    bmpRect->left = atlasRect.left + imagenum * width;
+                    bmpRect->right = bmpRect->left + width;
+                    bmpRect->top = atlasRect.top;
+                    bmpRect->bottom = atlasRect.bottom;
+                }
+
+                if (imageDpi)
+                    *imageDpi = MSSTYLES_GetThemeDPI(hTheme);
+                return S_OK;
+            }
+        }
+    }
 
     tp = UXTHEME_SelectImage(hTheme, iPartId, iStateId, pRect, glyph, imageDpi);
     if(!tp) {
@@ -1108,6 +1156,8 @@ HRESULT WINAPI DrawThemeBackgroundEx(HTHEME hTheme, HDC hdc, int iPartId,
 
     GetThemeEnumValue(hTheme, iPartId, iStateId, TMT_BGTYPE, &bgtype);
     if (bgtype == BT_NONE) return S_OK;
+    if (bgtype == BT_BORDERFILL && MSSTYLES_FindProperty(hTheme, iPartId, iStateId, TMT_RECT, TMT_ATLASRECT))
+        bgtype = BT_IMAGEFILE;
 
     /* Ensure we have a DTBGOPTS structure available, simplifies some of the code */
     opts = pOptions;
