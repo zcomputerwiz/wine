@@ -1,11 +1,31 @@
 /*
  * msstyles v4+ visual style format reader (Windows Vista through 11)
  *
- * Copyright (C) 2026 Wine project authors
+ * Copyright (C) 2026 zcomputerwiz
  *
  * Portions derived from libmsstyle (https://github.com/nptr/msstyleEditor)
  * Copyright (c) 2017-2022 nptr
- * SPDX-License-Identifier: MIT / LGPL-2.1-or-later
+ * Copyright (c) 2019 Jakob K.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ * The Wine implementation is distributed under the following license:
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -38,7 +58,6 @@
 #include "vssym32.h"
 
 #include "msstyles.h"
-#include "msstyles_v4_tables.h"
 
 #include "wine/debug.h"
 
@@ -47,27 +66,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(uxtheme);
 static const WCHAR normalColor[] = L"NormalColor\0";
 static const WCHAR normalSize[]  = L"NormalSize\0";
 
-struct platform_detect_ctx {
-    const WCHAR **names;
-    int count;
-};
-
-static int has_class_cb(const void *ctx, const char *name)
-{
-    const struct platform_detect_ctx *c = ctx;
-    int i;
-
-    for (i = 0; i < c->count; i++) {
-        const WCHAR *w = c->names[i];
-        const char *a = name;
-        while (*w && *a && (*w == (WCHAR)*a)) {
-            w++;
-            a++;
-        }
-        if (!*w && !*a) return 1;
-    }
-    return 0;
-}
+/* libmsstyle primitive type not yet declared in vssym32.h. */
+#define MSSTYLES_HIGHCONTRASTCOLORTYPE 241
 
 struct v4_class_record {
     int class_id;
@@ -98,9 +98,6 @@ HRESULT MSSTYLES_OpenThemeFile_V4(HMODULE hTheme, LPCWSTR lpThemeFile,
     int idx = 0;
     int i;
     struct v4_class_record *v4_classes = NULL;
-    const WCHAR **class_names = NULL;
-    struct platform_detect_ctx pctx;
-    enum msstyles_platform platform;
     DWORD cursor = 0;
     PTHEME_CLASS globals;
     PTHEME_CLASS cur_cls;
@@ -163,10 +160,8 @@ HRESULT MSSTYLES_OpenThemeFile_V4(HMODULE hTheme, LPCWSTR lpThemeFile,
     }
 
     v4_classes = calloc(class_count, sizeof(*v4_classes));
-    class_names = malloc(class_count * sizeof(WCHAR*));
-    if (!v4_classes || !class_names) {
+    if (!v4_classes) {
         free(v4_classes);
-        free(class_names);
         FreeLibrary(hTheme);
         *tf = NULL;
         return E_OUTOFMEMORY;
@@ -184,24 +179,18 @@ HRESULT MSSTYLES_OpenThemeFile_V4(HMODULE hTheme, LPCWSTR lpThemeFile,
             v4_classes[idx].class_id = idx;
             lstrcpynW(v4_classes[idx].raw_name, &cmap_data[start], min(len + 1, ARRAY_SIZE(v4_classes[idx].raw_name)));
             parse_app_class_name(v4_classes[idx].raw_name, v4_classes[idx].app_name, v4_classes[idx].class_name);
-            class_names[idx] = v4_classes[idx].raw_name;
             idx++;
         }
         if (pos < total_wchars && cmap_data[pos] == 0)
             pos++;
     }
 
-    /* Platform detection */
-    pctx.names = class_names;
-    pctx.count = class_count;
-    platform = msstyles_detect_platform_from_classes(has_class_cb, &pctx);
-    TRACE("Detected platform %d with %d classes\n", platform, class_count);
+    TRACE("Read %d classes\n", class_count);
 
     /* Allocate THEME_FILE structure */
     *tf = calloc(1, sizeof(THEME_FILE));
     if (!*tf) {
         free(v4_classes);
-        free(class_names);
         FreeLibrary(hTheme);
         return E_OUTOFMEMORY;
     }
@@ -227,7 +216,6 @@ HRESULT MSSTYLES_OpenThemeFile_V4(HMODULE hTheme, LPCWSTR lpThemeFile,
         MSSTYLES_CloseThemeFile(*tf);
         *tf = NULL;
         free(v4_classes);
-        free(class_names);
         return HRESULT_FROM_WIN32(ERROR_BAD_FORMAT);
     }
 
@@ -238,7 +226,6 @@ HRESULT MSSTYLES_OpenThemeFile_V4(HMODULE hTheme, LPCWSTR lpThemeFile,
         MSSTYLES_CloseThemeFile(*tf);
         *tf = NULL;
         free(v4_classes);
-        free(class_names);
         return HRESULT_FROM_WIN32(ERROR_BAD_FORMAT);
     }
 
@@ -298,7 +285,7 @@ HRESULT MSSTYLES_OpenThemeFile_V4(HMODULE hTheme, LPCWSTR lpThemeFile,
         case TMT_ENUM:
         case TMT_INT:
         case TMT_SIZE:
-        case MSSTYLE_TYPE_HIGHCONTRASTCOLORTYPE:
+        case MSSTYLES_HIGHCONTRASTCOLORTYPE:
             if (short_flag == 0) {
                 if (cursor + 4 > var_bytes) {
                     free(prop);
@@ -519,7 +506,6 @@ HRESULT MSSTYLES_OpenThemeFile_V4(HMODULE hTheme, LPCWSTR lpThemeFile,
     }
 
     free(v4_classes);
-    free(class_names);
     return S_OK;
 
 malformed:
@@ -527,13 +513,11 @@ malformed:
     MSSTYLES_CloseThemeFile(*tf);
     *tf = NULL;
     free(v4_classes);
-    free(class_names);
     return HRESULT_FROM_WIN32(ERROR_BAD_FORMAT);
 
 oom:
     MSSTYLES_CloseThemeFile(*tf);
     *tf = NULL;
     free(v4_classes);
-    free(class_names);
     return E_OUTOFMEMORY;
 }
