@@ -661,6 +661,8 @@ static void wayland_configure_window(HWND hwnd)
  */
 LRESULT WAYLAND_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    struct wayland_win_data *data;
+    BOOL clear;
     switch (msg)
     {
     case WM_WAYLAND_INIT_DISPLAY_DEVICES:
@@ -676,6 +678,20 @@ LRESULT WAYLAND_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
          * compositor can endlessly alternate two windows during creation. */
         if (process_wayland.wex_manager) return 0;
         NtUserSetForegroundWindowInternal(hwnd);
+        return 0;
+    case WM_WAYLAND_CLEAR_FOREGROUND:
+        clear = FALSE;
+        if ((data = wayland_win_data_get(hwnd)))
+        {
+            if (data->wayland_surface && data->wayland_surface->wex_window &&
+                data->wayland_surface->wex_activation_epoch == (unsigned int)wp) clear = TRUE;
+            wayland_win_data_release(data);
+        }
+        /* On native-app focus, deactivate on the owning UI thread so the next
+         * click can activate this window again. Reject old leave messages after
+         * a new Wine activation or a focus change to another Wine window. */
+        if (clear && !wayland_keyboard_get_focused_hwnd() && NtUserGetForegroundWindow() == hwnd)
+            NtUserSetActiveWindow(NULL);
         return 0;
     default:
         FIXME("got window msg %x hwnd %p wp %lx lp %lx\n", msg, hwnd, (long)wp, lp);

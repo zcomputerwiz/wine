@@ -695,7 +695,7 @@ static void release_all_keys(HWND hwnd)
  *          Keyboard handling
  */
 
-static HWND wayland_keyboard_get_focused_hwnd(void)
+HWND wayland_keyboard_get_focused_hwnd(void)
 {
     struct wayland_keyboard *keyboard = &process_wayland.keyboard;
     HWND hwnd;
@@ -826,6 +826,9 @@ static void keyboard_handle_leave(void *data, struct wl_keyboard *wl_keyboard,
                                   uint32_t serial, struct wl_surface *wl_surface)
 {
     struct wayland_keyboard *keyboard = &process_wayland.keyboard;
+    struct wayland_win_data *win;
+    unsigned int epoch = 0;
+    BOOL private_view = FALSE;
     HWND hwnd;
 
     InterlockedExchange(&process_wayland.input_serial, serial);
@@ -845,6 +848,17 @@ static void keyboard_handle_leave(void *data, struct wl_keyboard *wl_keyboard,
     /* The spec for the leave event tells us to treat all keys as released,
      * and for any key repetition to stop. */
     release_all_keys(hwnd);
+
+    if ((win = wayland_win_data_get(hwnd)))
+    {
+        if (win->wayland_surface && win->wayland_surface->wex_window)
+        {
+            private_view = TRUE;
+            epoch = win->wayland_surface->wex_activation_epoch;
+        }
+        wayland_win_data_release(win);
+    }
+    if (private_view) NtUserPostMessage(hwnd, WM_WAYLAND_CLEAR_FOREGROUND, epoch, 0);
 
     /* FIXME: update foreground window as well */
 }

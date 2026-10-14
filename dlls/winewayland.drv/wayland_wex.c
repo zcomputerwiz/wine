@@ -196,6 +196,7 @@ void WAYLAND_ActivateWindow(HWND hwnd, HWND previous)
     if (!data) return;
     if (data->wayland_surface && data->wayland_surface->wex_window)
     {
+        ++data->wayland_surface->wex_activation_epoch;
         data->wayland_surface->wex_activation_pending = TRUE;
         wayland_wex_flush_activation(data->wayland_surface);
         wl_display_flush(process_wayland.wl_display);

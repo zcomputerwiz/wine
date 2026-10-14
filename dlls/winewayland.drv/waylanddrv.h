@@ -73,6 +73,7 @@ enum wayland_window_message
     WM_WAYLAND_INIT_DISPLAY_DEVICES = WM_WINE_FIRST_DRIVER_MSG,
     WM_WAYLAND_CONFIGURE,
     WM_WAYLAND_SET_FOREGROUND,
+    WM_WAYLAND_CLEAR_FOREGROUND,
 };
 
 enum wayland_surface_config_state
@@ -314,6 +315,7 @@ struct wayland_surface
     BOOL zone_initial_position;
     struct wex_window_v1 *wex_window;
     unsigned int wex_layer, wex_edge, wex_size;
+    unsigned int wex_activation_epoch;
     RTL_ATOM wex_handle_atom;
     BOOL wex_minimized;
     BOOL wex_activation_pending;
@@ -339,6 +341,7 @@ void wayland_wex_destroy(struct wayland_surface *surface);
 void wayland_wex_update(struct wayland_surface *surface, HWND insert_after, UINT flags);
 void WAYLAND_ActivateWindow(HWND hwnd, HWND previous);
 void wayland_wex_flush_activation(struct wayland_surface *surface);
+HWND wayland_keyboard_get_focused_hwnd(void);
 
 /**********************************************************************
  *          Wayland output
