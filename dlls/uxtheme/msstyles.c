@@ -674,7 +674,7 @@ static PTHEME_PROPERTY MSSTYLES_AddProperty(PTHEME_PARTSTATE ps, int iPropertyPr
     /* Should duplicate properties overwrite the original, or be ignored? */
     if(cur) return cur;
 
-    cur = malloc(sizeof(*cur));
+    cur = calloc(1, sizeof(*cur));
     cur->iPrimitiveType = iPropertyPrimitive;
     cur->iPropertyId = iPropertyId;
     cur->lpValue = lpValue;
@@ -715,7 +715,7 @@ static PTHEME_PROPERTY MSSTYLES_AddMetric(PTHEME_FILE tf, int iPropertyPrimitive
     /* Should duplicate properties overwrite the original, or be ignored? */
     if(cur) return cur;
 
-    cur = malloc(sizeof(*cur));
+    cur = calloc(1, sizeof(*cur));
     cur->iPrimitiveType = iPropertyPrimitive;
     cur->iPropertyId = iPropertyId;
     cur->lpValue = lpValue;

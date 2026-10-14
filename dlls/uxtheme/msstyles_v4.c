@@ -496,7 +496,17 @@ HRESULT MSSTYLES_OpenThemeFile_V4(HMODULE hTheme, LPCWSTR lpThemeFile,
             PTHEME_PROPERTY m = calloc(1, sizeof(THEME_PROPERTY));
             if (m) {
                 *m = *prop;
-                if (prop->lpValue) m->lpValue = wcsdup(prop->lpValue);
+                if (prop->is_typed && prop->lpValue) {
+                    void *copy = malloc(prop->dwValueLen);
+                    if (copy) {
+                        memcpy(copy, prop->lpValue, prop->dwValueLen);
+                        m->lpValue = copy;
+                    } else {
+                        m->lpValue = NULL;
+                    }
+                } else if (prop->lpValue) {
+                    m->lpValue = wcsdup(prop->lpValue);
+                }
                 m->origin = PO_GLOBAL;
                 m->next = (*tf)->metrics;
                 (*tf)->metrics = m;
