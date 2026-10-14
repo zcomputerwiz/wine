@@ -2,7 +2,7 @@ EXTRADEFS = -D_UXTHEME_
 MODULE    = uxtheme.dll
 IMPORTLIB = uxtheme
 IMPORTS   = user32 gdi32 advapi32
-DELAYIMPORTS = msimg32
+DELAYIMPORTS = msimg32 windowscodecs
 
 VER_FILEDESCRIPTION_STR = "Wine uxtheme"
 
