@@ -153,6 +153,7 @@ static void wayland_win_data_get_config(struct wayland_win_data *data,
     DWORD style;
 
     conf->rect = data->rects.visible;
+    conf->client_rect = data->rects.client;
     style = NtUserGetWindowLongW(data->hwnd, GWL_STYLE);
 
     TRACE("window=%s style=%#x\n", wine_dbgstr_rect(&conf->rect), style);
@@ -687,7 +688,10 @@ LRESULT WAYLAND_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if ((data = wayland_win_data_get(hwnd)))
         {
             if (data->wayland_surface && data->wayland_surface->wex_window &&
-                data->wayland_surface->wex_activation_epoch == (unsigned int)wp) clear = TRUE;
+                data->wayland_surface->wex_activation_epoch == (unsigned int)wp &&
+                (data->wayland_surface->wex_group != WEX_WINDOW_V1_GROUP_STATUS_ACTIVE ||
+                 (data->wayland_surface->wex_focus == WEX_WINDOW_V1_FOCUS_TARGET_NONE &&
+                  data->wayland_surface->wex_focus_epoch == (unsigned int)wp))) clear = TRUE;
             wayland_win_data_release(data);
         }
         /* On native-app focus, deactivate on the owning UI thread so the next
@@ -695,6 +699,19 @@ LRESULT WAYLAND_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
          * a new Wine activation or a focus change to another Wine window. */
         if (clear && !wayland_keyboard_get_focused_hwnd() && NtUserGetForegroundWindow() == hwnd)
             NtUserSetActiveWindow(NULL);
+        return 0;
+    case WM_WAYLAND_FOREIGN_FOREGROUND:
+        clear = FALSE;
+        if ((data = wayland_win_data_get(hwnd)))
+        {
+            if (data->wayland_surface &&
+                data->wayland_surface->wex_activation_epoch == (unsigned int)wp &&
+                data->wayland_surface->wex_group == WEX_WINDOW_V1_GROUP_STATUS_ACTIVE &&
+                data->wayland_surface->wex_focus == WEX_WINDOW_V1_FOCUS_TARGET_NATIVE &&
+                !(NtUserGetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_NOACTIVATE)) clear = TRUE;
+            wayland_win_data_release(data);
+        }
+        if (clear && NtUserGetForegroundWindow() != hwnd) NtUserSetForegroundWindowInternal(hwnd);
         return 0;
     default:
         FIXME("got window msg %x hwnd %p wp %lx lp %lx\n", msg, hwnd, (long)wp, lp);

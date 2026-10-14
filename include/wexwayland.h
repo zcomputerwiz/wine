@@ -17,6 +17,19 @@
 #define WEX_WAYLAND_ASSOCIATION_UNBOUND 0
 #define WEX_WAYLAND_ASSOCIATION_PREPARED 1
 #define WEX_WAYLAND_ASSOCIATION_UNAVAILABLE 2
+/* Explicit opt-in: caller must exclude the client area from Win32 hit testing. */
+#define WEX_WAYLAND_HOST_PROP u"__wine_wayland_native_host"
+#define WEX_WAYLAND_GROUP_PROP u"__wine_wayland_native_group"
+#define WEX_WAYLAND_GROUP_DETACHED 0
+#define WEX_WAYLAND_GROUP_ACTIVE 1
+#define WEX_WAYLAND_GROUP_NOT_READY 2
+#define WEX_WAYLAND_FOCUS_PROP u"__wine_wayland_native_focus"
+/* One-shot command, consumed after SetWindowPos. Restore requires foreground. */
+#define WEX_WAYLAND_FOCUS_REQUEST_PROP u"__wine_wayland_native_focus_request"
+#define WEX_WAYLAND_FOCUS_NONE 0
+#define WEX_WAYLAND_FOCUS_NATIVE 1
+#define WEX_WAYLAND_FOCUS_FRAME 2
+#define WEX_WAYLAND_FOCUS_RESTORE_NATIVE 3
 #define WEX_WAYLAND_DESKTOP 2
 #define WEX_WAYLAND_SHELL 3
 #define WEX_WAYLAND_EDGE_NONE 0

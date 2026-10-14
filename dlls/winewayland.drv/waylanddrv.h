@@ -74,6 +74,7 @@ enum wayland_window_message
     WM_WAYLAND_CONFIGURE,
     WM_WAYLAND_SET_FOREGROUND,
     WM_WAYLAND_CLEAR_FOREGROUND,
+    WM_WAYLAND_FOREIGN_FOREGROUND,
 };
 
 enum wayland_surface_config_state
@@ -248,6 +249,7 @@ struct wayland_surface_config
 struct wayland_window_config
 {
     RECT rect;
+    RECT client_rect;
     enum wayland_surface_config_state state;
     /* The scale (i.e., normalized dpi) the window is rendering at. */
     double scale;
@@ -321,6 +323,10 @@ struct wayland_surface
     BOOL wex_association_pending;
     BOOL wex_minimized;
     BOOL wex_activation_pending;
+    unsigned int wex_group, wex_focus, wex_focus_epoch;
+    unsigned int wex_group_serial;
+    BOOL wex_group_pending, wex_host_attempted;
+    RECT wex_host_rect;
 
     struct wayland_surface_config pending, requested, processing, current;
     BOOL resizing;
@@ -343,6 +349,7 @@ void wayland_wex_destroy(struct wayland_surface *surface);
 void wayland_wex_update(struct wayland_surface *surface, HWND insert_after, UINT flags);
 void WAYLAND_ActivateWindow(HWND hwnd, HWND previous);
 void wayland_wex_flush_activation(struct wayland_surface *surface);
+void wayland_wex_update_hosting(struct wayland_surface *surface);
 HWND wayland_keyboard_get_focused_hwnd(void);
 
 /**********************************************************************

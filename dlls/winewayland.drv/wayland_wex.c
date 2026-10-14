@@ -14,6 +14,79 @@ WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
 
 static const WCHAR handle_prop[] = u"__wine_wayland_window_handle";
 
+static BOOL hosting_enabled(struct wayland_surface *surface)
+{
+    return wex_window_v1_get_version(surface->wex_window) >= 7 &&
+           NtUserGetProp(surface->hwnd, WEX_WAYLAND_HOST_PROP) &&
+           (ULONG_PTR)NtUserGetProp(surface->hwnd, WEX_WAYLAND_ASSOCIATION_PROP) ==
+               WEX_WAYLAND_ASSOCIATION_PREPARED && !surface->wex_association_pending;
+}
+
+static void wex_group(void *user_data, struct wex_window_v1 *window, uint32_t status)
+{
+    HWND hwnd = user_data;
+    struct wayland_win_data *data = wayland_win_data_get(hwnd);
+    struct wayland_surface *surface;
+    if (!data) return;
+    surface = data->wayland_surface;
+    if (surface && surface->wex_window == window)
+    {
+        surface->wex_group = status;
+        if (hosting_enabled(surface) && status)
+            NtUserSetProp(hwnd, WEX_WAYLAND_GROUP_PROP, (HANDLE)(ULONG_PTR)status);
+        else NtUserRemoveProp(hwnd, WEX_WAYLAND_GROUP_PROP);
+        if (status != WEX_WINDOW_V1_GROUP_STATUS_ACTIVE)
+        {
+            surface->wex_focus = WEX_WINDOW_V1_FOCUS_TARGET_NONE;
+            NtUserRemoveProp(hwnd, WEX_WAYLAND_FOCUS_PROP);
+            NtUserPostMessage(hwnd, WM_WAYLAND_CLEAR_FOREGROUND, surface->wex_activation_epoch, 0);
+        }
+    }
+    wayland_win_data_release(data);
+}
+
+static void wex_configured(void *user_data, struct wex_window_v1 *window, uint32_t serial, uint32_t status)
+{
+    struct wayland_win_data *data = wayland_win_data_get(user_data);
+    struct wayland_surface *surface;
+    if (!data) return;
+    surface = data->wayland_surface;
+    if (surface && surface->wex_window == window && serial == surface->wex_group_serial)
+    {
+        surface->wex_group_pending = FALSE;
+        wayland_wex_update_hosting(surface);
+        if (status == WEX_WINDOW_V1_GROUP_STATUS_ACTIVE && hosting_enabled(surface))
+        {
+            surface->wex_activation_pending = surface->hwnd == NtUserGetForegroundWindow();
+            wayland_wex_flush_activation(surface);
+        }
+        wl_display_flush(process_wayland.wl_display);
+    }
+    wayland_win_data_release(data);
+}
+
+static void wex_focus(void *user_data, struct wex_window_v1 *window, uint32_t epoch, uint32_t target)
+{
+    HWND hwnd = user_data;
+    struct wayland_win_data *data = wayland_win_data_get(hwnd);
+    struct wayland_surface *surface;
+    if (!data) return;
+    surface = data->wayland_surface;
+    if (surface && surface->wex_window == window && epoch == surface->wex_activation_epoch)
+    {
+        surface->wex_focus = target;
+        surface->wex_focus_epoch = epoch;
+        if (hosting_enabled(surface) && surface->wex_group == WEX_WINDOW_V1_GROUP_STATUS_ACTIVE)
+        {
+            if (target) NtUserSetProp(hwnd, WEX_WAYLAND_FOCUS_PROP, (HANDLE)(ULONG_PTR)target);
+            else NtUserRemoveProp(hwnd, WEX_WAYLAND_FOCUS_PROP);
+            NtUserPostMessage(hwnd, target == WEX_WINDOW_V1_FOCUS_TARGET_NATIVE ?
+                              WM_WAYLAND_FOREIGN_FOREGROUND : WM_WAYLAND_CLEAR_FOREGROUND, epoch, 0);
+        }
+    }
+    wayland_win_data_release(data);
+}
+
 static void wex_handle(void *user_data, struct wex_window_v1 *window, const char *handle)
 {
     HWND hwnd = user_data;
@@ -62,6 +135,7 @@ static void wex_association(void *user_data, struct wex_window_v1 *window, uint3
          * its atoms in the meantime, suppress the old response and send the
          * new pair after completing this one. */
         surface->wex_association_pending = FALSE;
+        surface->wex_host_attempted = FALSE;
         if ((ULONG_PTR)NtUserGetProp(hwnd, WEX_WAYLAND_NATIVE_PROP) == surface->wex_native_atom &&
             (ULONG_PTR)NtUserGetProp(hwnd, WEX_WAYLAND_CONTROLLER_PROP) == surface->wex_controller_atom)
         {
@@ -74,7 +148,49 @@ static void wex_association(void *user_data, struct wex_window_v1 *window, uint3
 }
 static const struct wex_window_v1_listener wex_listener = {
     .handle = wex_handle, .foreign_association = wex_association,
+    .foreign_group = wex_group, .foreign_focus = wex_focus,
+    .configured_foreign = wex_configured,
 };
+
+void wayland_wex_update_hosting(struct wayland_surface *surface)
+{
+    RECT rect = surface->window.client_rect;
+    BOOL enabled;
+    ULONG_PTR focus;
+    if (!surface->wex_window || wex_window_v1_get_version(surface->wex_window) < 7 ||
+        surface->wex_group_pending) return;
+    enabled = hosting_enabled(surface);
+    OffsetRect(&rect, -surface->window.rect.left, -surface->window.rect.top);
+    rect = map_rect_to_surface(surface, rect);
+    if (surface->wex_group == WEX_WINDOW_V1_GROUP_STATUS_ACTIVE &&
+        (!enabled || !EqualRect(&rect, &surface->wex_host_rect)))
+    {
+        surface->wex_group_pending = TRUE;
+        surface->wex_host_attempted = FALSE;
+        wex_window_v1_uncommit_foreign(surface->wex_window, ++surface->wex_group_serial);
+        return;
+    }
+    if (!enabled)
+    {
+        NtUserRemoveProp(surface->hwnd, WEX_WAYLAND_GROUP_PROP);
+        NtUserRemoveProp(surface->hwnd, WEX_WAYLAND_FOCUS_PROP);
+        return;
+    }
+    if (!surface->content_width || surface->window.minimized) return;
+    if (surface->wex_group != WEX_WINDOW_V1_GROUP_STATUS_ACTIVE &&
+        (!surface->wex_host_attempted || !EqualRect(&rect, &surface->wex_host_rect)))
+    {
+        surface->wex_host_rect = rect;
+        surface->wex_host_attempted = TRUE;
+        surface->wex_group_pending = TRUE;
+        wex_window_v1_configure_foreign(surface->wex_window, ++surface->wex_group_serial,
+                                      rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
+    }
+    if (surface->wex_group == WEX_WINDOW_V1_GROUP_STATUS_ACTIVE &&
+        (focus = (ULONG_PTR)NtUserRemoveProp(surface->hwnd, WEX_WAYLAND_FOCUS_REQUEST_PROP)) &&
+        surface->hwnd == NtUserGetForegroundWindow() && focus <= WEX_WAYLAND_FOCUS_RESTORE_NATIVE)
+        wex_window_v1_set_foreign_focus(surface->wex_window, ++surface->wex_activation_epoch, focus);
+}
 
 static BOOL get_atom_handle(RTL_ATOM id, char handle[33])
 {
@@ -107,12 +223,16 @@ static void update_foreign_association(struct wayland_surface *surface)
     surface->wex_controller_atom = controller;
     surface->wex_association_pending = TRUE;
     NtUserRemoveProp(surface->hwnd, WEX_WAYLAND_ASSOCIATION_PROP);
+    NtUserRemoveProp(surface->hwnd, WEX_WAYLAND_GROUP_PROP);
+    NtUserRemoveProp(surface->hwnd, WEX_WAYLAND_FOCUS_PROP);
     wex_window_v1_associate_foreign(surface->wex_window, token, handle);
 }
 
 void wayland_wex_destroy(struct wayland_surface *surface)
 {
     NtUserRemoveProp(surface->hwnd, WEX_WAYLAND_ASSOCIATION_PROP);
+    NtUserRemoveProp(surface->hwnd, WEX_WAYLAND_GROUP_PROP);
+    NtUserRemoveProp(surface->hwnd, WEX_WAYLAND_FOCUS_PROP);
     if (surface->wex_handle_atom)
     {
         if ((ULONG_PTR)NtUserGetProp(surface->hwnd, handle_prop) == surface->wex_handle_atom)
@@ -183,6 +303,7 @@ void wayland_wex_update(struct wayland_surface *surface, HWND insert_after, UINT
     HWND hwnd;
     unsigned int layer, edge = 0, size = 0;
     if (!surface->wex_window) return;
+    if (flags & SWP_FRAMECHANGED) surface->wex_host_attempted = FALSE;
     update_foreign_association(surface);
     layer = window_layer(surface->hwnd);
     if (layer != surface->wex_layer)
@@ -235,13 +356,19 @@ void wayland_wex_update(struct wayland_surface *surface, HWND insert_after, UINT
 
 void wayland_wex_flush_activation(struct wayland_surface *surface)
 {
+    wayland_wex_update_hosting(surface);
     if (!surface->wex_window || !surface->wex_activation_pending || !surface->content_width ||
         surface->window.minimized) return;
     surface->wex_activation_pending = FALSE;
     /* A Win32 activation can precede the first buffer commit. The compositor
      * can focus only mapped views, so send the request after that commit. */
     if (surface->hwnd == NtUserGetForegroundWindow())
-        wex_window_v1_activate(surface->wex_window);
+    {
+        if (surface->wex_group == WEX_WINDOW_V1_GROUP_STATUS_ACTIVE && hosting_enabled(surface))
+            wex_window_v1_set_foreign_focus(surface->wex_window, surface->wex_activation_epoch,
+                                          WEX_WINDOW_V1_FOCUS_TARGET_NATIVE);
+        else wex_window_v1_activate(surface->wex_window);
+    }
 }
 
 void WAYLAND_ActivateWindow(HWND hwnd, HWND previous)

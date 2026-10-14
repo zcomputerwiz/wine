@@ -123,7 +123,7 @@ static void registry_handle_global(void *data, struct wl_registry *registry,
     }
     else if (strcmp(interface, "wex_window_manager_v1") == 0)
     {
-        process_wayland.wex_manager = wl_registry_bind(registry, id, &wex_window_manager_v1_interface, min(version, 4));
+        process_wayland.wex_manager = wl_registry_bind(registry, id, &wex_window_manager_v1_interface, min(version, 7));
         wex_window_manager_v1_add_listener(process_wayland.wex_manager, &wex_manager_listener, NULL);
     }
     else if (strcmp(interface, "xx_zone_manager_v1") == 0)
