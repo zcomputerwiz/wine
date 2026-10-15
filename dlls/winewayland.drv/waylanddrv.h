@@ -328,6 +328,7 @@ struct wayland_surface
     unsigned int wex_group_serial;
     BOOL wex_group_pending, wex_host_attempted;
     RECT wex_host_rect;
+    int wex_host_content_width, wex_host_content_height;
 
     struct wayland_surface_config pending, requested, processing, current;
     BOOL resizing;

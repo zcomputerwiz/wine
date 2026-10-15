@@ -182,6 +182,9 @@ void wayland_wex_update_hosting(struct wayland_surface *surface)
     if (!surface->wex_window || wex_window_v1_get_version(surface->wex_window) < 7 ||
         surface->wex_group_pending) return;
     enabled = hosting_enabled(surface);
+    /* The Win32 icon rectangle is not a new native client size. Keep the
+     * hidden group intact so restore can still reach its associated native. */
+    if (enabled && surface->window.minimized) return;
     OffsetRect(&rect, -surface->window.rect.left, -surface->window.rect.top);
     rect = map_rect_to_surface(surface, rect);
     if (surface->wex_group == WEX_WINDOW_V1_GROUP_STATUS_ACTIVE &&
@@ -200,11 +203,17 @@ void wayland_wex_update_hosting(struct wayland_surface *surface)
     }
     if (!surface->content_width || surface->window.minimized) return;
     if (surface->wex_group != WEX_WINDOW_V1_GROUP_STATUS_ACTIVE &&
-        (!surface->wex_host_attempted || !EqualRect(&rect, &surface->wex_host_rect)))
+        (!surface->wex_host_attempted || !EqualRect(&rect, &surface->wex_host_rect) ||
+         surface->content_width != surface->wex_host_content_width ||
+         surface->content_height != surface->wex_host_content_height))
     {
         surface->wex_host_rect = rect;
+        surface->wex_host_content_width = surface->content_width;
+        surface->wex_host_content_height = surface->content_height;
         surface->wex_host_attempted = TRUE;
         surface->wex_group_pending = TRUE;
+        TRACE("host %p client %s content %dx%d\n", surface->hwnd, wine_dbgstr_rect(&rect),
+              surface->content_width, surface->content_height);
         wex_window_v1_configure_foreign(surface->wex_window, ++surface->wex_group_serial,
                                       rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
     }
@@ -365,9 +374,11 @@ void wayland_wex_update(struct wayland_surface *surface, HWND insert_after, UINT
     }
     if (surface->wex_minimized && !surface->window.minimized)
     {
-        if (surface->hwnd == NtUserGetForegroundWindow()) surface->wex_activation_pending = TRUE;
-        else if (wex_window_v1_get_version(surface->wex_window) >= 2)
+        /* Restoration is a state request. A later focus request must not undo
+         * a newer native-side minimize while this round trip is in flight. */
+        if (wex_window_v1_get_version(surface->wex_window) >= 2)
             wex_window_v1_restore(surface->wex_window);
+        if (surface->hwnd == NtUserGetForegroundWindow()) surface->wex_activation_pending = TRUE;
     }
     surface->wex_minimized = surface->window.minimized;
     /* Restore can reuse its existing buffer without triggering a new paint.
@@ -408,6 +419,9 @@ void WAYLAND_ActivateWindow(HWND hwnd, HWND previous)
     if (data->wayland_surface && data->wayland_surface->wex_window)
     {
         ++data->wayland_surface->wex_activation_epoch;
+        /* The previous epoch's observation cannot acknowledge this activation,
+         * in particular when restore precedes its native focus round trip. */
+        NtUserRemoveProp(hwnd, WEX_WAYLAND_FOCUS_PROP);
         data->wayland_surface->wex_activation_pending = TRUE;
         wayland_wex_flush_activation(data->wayland_surface);
         wl_display_flush(process_wayland.wl_display);

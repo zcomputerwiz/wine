@@ -950,6 +950,17 @@ BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffe
 
     if (!(data = wayland_win_data_get(hwnd))) return FALSE;
 
+    /* Hosted native groups retain the normal frame buffer while minimized.
+     * Painting Wine's iconic caption would shrink it and detach the native,
+     * leaving restore with only an obsolete frame to activate. Do not replace
+     * window_contents with that iconic buffer either. */
+    if (data->wayland_surface && data->wayland_surface->window.minimized &&
+        NtUserGetProp(hwnd, WEX_WAYLAND_HOST_PROP))
+    {
+        wayland_win_data_release(data);
+        return TRUE;
+    }
+
     if ((wayland_surface = data->wayland_surface))
     {
         if (wayland_surface_reconfigure(wayland_surface))

@@ -211,6 +211,8 @@
         echoing epoch, even if the requested transition was rejected. Unknown
         targets leave focus unchanged. The client must also check its current
         logical foreground window before restoring native focus.
+        Minimized groups reject focus requests. Restore them explicitly using
+        activate or restore; a delayed focus request must not undo a minimize.
       </description>
       <arg name="epoch" type="uint"/>
       <arg name="target" type="uint" enum="focus_target"/>
