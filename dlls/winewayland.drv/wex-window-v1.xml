@@ -29,7 +29,7 @@
     for shell components (taskbars), and activation without tokens.
   </description>
 
-  <interface name="wex_window_manager_v1" version="9">
+  <interface name="wex_window_manager_v1" version="10">
     <description summary="manager interface for privileged window controls">
       Allows obtaining a wex_window_v1 interface for an xdg_toplevel.
       Only advertised to privileged clients on the wex-shell socket.
@@ -68,7 +68,7 @@
     </event>
   </interface>
 
-  <interface name="wex_window_v1" version="9">
+  <interface name="wex_window_v1" version="10">
     <description summary="window controls interface">
       Provides operations for stacking, layering, shell edge reservation,
       and direct activation.
@@ -270,8 +270,81 @@
       <arg name="epoch" type="uint"/>
       <arg name="captured" type="uint"/>
     </event>
+    <enum name="resize_stage" since="10">
+      <entry name="accepted" value="0" summary="constrained request, not a buffer completion"/>
+      <entry name="acknowledged" value="1" summary="native xdg configure acknowledged, buffer not yet committed"/>
+      <entry name="native_ready" value="2" summary="actual native client geometry, awaiting matching frame"/>
+      <entry name="complete" value="3" summary="matching frame and native buffers made visible atomically"/>
+      <entry name="rolling_back" value="4" summary="restore this old geometry and submit its matching frame"/>
+      <entry name="cancelled" value="5" summary="old matching buffers and geometry restored"/>
+      <entry name="superseded" value="6" summary="a newer request replaced this transaction"/>
+      <entry name="unavailable" value="7" summary="unsupported client, invalid geometry or missing frame capture"/>
+      <entry name="stale" value="8" summary="serial is no longer current"/>
+      <entry name="failed" value="9" summary="bounded rollback failed; normal native scene restored"/>
+    </enum>
+    <request name="resize_foreign" since="10">
+      <description summary="negotiate a hosted native size without exposing mismatched buffers">
+        Requires an active group and pointer capture for the physically focused
+        frame at its current focus epoch. Initially supported for xdg toplevels;
+        other native types reply unavailable. Serial is nonzero and increases
+        modulo 2^32 within this frame resource. Coordinates are the desired native
+        client rectangle in compositor logical layout units, not Wine pixels.
+        Edges use wlroots edge bits: top=1, bottom=2, left=4, right=8; opposing
+        edges are invalid. Left/top retain the desired right/bottom anchor after
+        constraints or client-selected sizes. Current native hints are read at
+        request time. Accepted, acknowledged and native_ready are distinct.
+        Old matching root buffers remain visible until commit_foreign_resize.
+        Popup and subsurface ownership remains unchanged. A newer request
+        supersedes the old one while retaining the original rollback geometry.
+        No request here changes focus or implicitly activates a window.
+      </description>
+      <arg name="serial" type="uint"/>
+      <arg name="edges" type="uint"/>
+      <arg name="x" type="int"/><arg name="y" type="int"/>
+      <arg name="width" type="int"/><arg name="height" type="int"/>
+    </request>
+    <request name="commit_foreign_resize" since="10">
+      <description summary="publish an already committed matching frame">
+        Send after receiving native_ready and committing the corresponding
+        Wine frame buffer, in that connection's request order. The rectangle is
+        the native client hole in frame surface logical units. All four saved
+        frame margins and the actual native size must match. Early, stale or
+        mismatched requests reply unavailable/stale without changing the scene;
+        they may be retried. Complete is sent only after the atomic handover.
+        During rollback the same request submits the restored frame and produces
+        cancelled. Controllers must not coalesce these completion events.
+      </description>
+      <arg name="serial" type="uint"/>
+      <arg name="x" type="int"/><arg name="y" type="int"/>
+      <arg name="width" type="int"/><arg name="height" type="int"/>
+    </request>
+    <request name="cancel_foreign_resize" since="10">
+      <description summary="restore the original group before releasing capture">
+        Current serial only. Rolling_back supplies the old geometry; native
+        configure acknowledgement and native_ready follow as usual. Submit the
+        restored frame with commit_foreign_resize before releasing capture or
+        returning native focus. Loss of physical frame focus also starts rollback.
+        A two-second timeout starts rollback; a second timeout restores the
+        ordinary native scene and reports failed. Detachment also reports failed.
+      </description>
+      <arg name="serial" type="uint"/>
+    </request>
+    <event name="foreign_resize" since="10">
+      <description summary="serial-specific resize transition">
+        Geometry is constrained for accepted/rolling_back, actual committed
+        client geometry for native_ready/complete/cancelled, zero when unavailable
+        or stale. Configure_serial is the separate native xdg configure serial,
+        never the controller serial. Acknowledgement does not imply a buffer
+        commit. Old requests cannot complete or cancel a newer transaction.
+      </description>
+      <arg name="serial" type="uint"/>
+      <arg name="stage" type="uint" enum="resize_stage"/>
+      <arg name="configure_serial" type="uint"/>
+      <arg name="x" type="int"/><arg name="y" type="int"/>
+      <arg name="width" type="int"/><arg name="height" type="int"/>
+    </event>
   </interface>
-  <interface name="wex_foreign_window_v1" version="9">
+  <interface name="wex_foreign_window_v1" version="10">
     <description summary="supplemental native window observation">
       A compositor-generated token identifies a native view for its lifetime,
       across privileged connections. Tokens are never reused for another view.
