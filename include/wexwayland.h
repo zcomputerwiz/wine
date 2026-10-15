@@ -33,6 +33,45 @@
 #define WEX_WAYLAND_FOCUS_REQUEST_PROP u"__wine_wayland_native_focus_request"
 /* Observed compositor pointer capture for a hosted Win32 move/size loop. */
 #define WEX_WAYLAND_CAPTURE_PROP u"__wine_wayland_native_pointer_capture"
+/* v10 transaction transport, separate from coalescible native observation.
+ * All values fit 32 bits, including signed coordinates represented as LONG.
+ * Set request fields, then COMMAND last, followed by SetWindowPos. Coordinates
+ * are physical Win32 screen client coordinates; COMMIT uses the current frame
+ * client hole after painting, ignoring the request geometry fields.
+ * PROTOCOL advertises transport only: XWayland can still reply unavailable.
+ * EVENT_MESSAGE runs synchronously on the owning UI thread, with serial in
+ * WPARAM and stage in LPARAM. EVENT_* is an immutable snapshot for that call
+ * only; do not retain it or read it from an observer thread. No pointer crosses
+ * the Unix/PE boundary, including in WoW64. Every transition is delivered.
+ */
+#define WEX_WAYLAND_RESIZE_PROTOCOL_PROP u"__wine_wayland_resize_protocol"
+#define WEX_WAYLAND_RESIZE_COMMAND_PROP u"__wine_wayland_resize_command"
+#define WEX_WAYLAND_RESIZE_SERIAL_PROP u"__wine_wayland_resize_serial"
+#define WEX_WAYLAND_RESIZE_EDGES_PROP u"__wine_wayland_resize_edges"
+#define WEX_WAYLAND_RESIZE_X_PROP u"__wine_wayland_resize_x"
+#define WEX_WAYLAND_RESIZE_Y_PROP u"__wine_wayland_resize_y"
+#define WEX_WAYLAND_RESIZE_WIDTH_PROP u"__wine_wayland_resize_width"
+#define WEX_WAYLAND_RESIZE_HEIGHT_PROP u"__wine_wayland_resize_height"
+#define WEX_WAYLAND_RESIZE_EVENT_MESSAGE u"__wine_wayland_resize_event"
+#define WEX_WAYLAND_RESIZE_EVENT_CONFIGURE_PROP u"__wine_wayland_resize_event_configure"
+#define WEX_WAYLAND_RESIZE_EVENT_X_PROP u"__wine_wayland_resize_event_x"
+#define WEX_WAYLAND_RESIZE_EVENT_Y_PROP u"__wine_wayland_resize_event_y"
+#define WEX_WAYLAND_RESIZE_EVENT_WIDTH_PROP u"__wine_wayland_resize_event_width"
+#define WEX_WAYLAND_RESIZE_EVENT_HEIGHT_PROP u"__wine_wayland_resize_event_height"
+#define WEX_WAYLAND_RESIZE_REQUEST 1
+#define WEX_WAYLAND_RESIZE_COMMIT 2
+#define WEX_WAYLAND_RESIZE_CANCEL 3
+/* Edges are protocol bit flags (top=1,bottom=2,left=4,right=8), not EDGE_*. */
+#define WEX_WAYLAND_RESIZE_ACCEPTED 0
+#define WEX_WAYLAND_RESIZE_ACKNOWLEDGED 1
+#define WEX_WAYLAND_RESIZE_NATIVE_READY 2
+#define WEX_WAYLAND_RESIZE_COMPLETE 3
+#define WEX_WAYLAND_RESIZE_ROLLING_BACK 4
+#define WEX_WAYLAND_RESIZE_CANCELLED 5
+#define WEX_WAYLAND_RESIZE_SUPERSEDED 6
+#define WEX_WAYLAND_RESIZE_UNAVAILABLE 7
+#define WEX_WAYLAND_RESIZE_STALE 8
+#define WEX_WAYLAND_RESIZE_FAILED 9
 #define WEX_WAYLAND_FOCUS_NONE 0
 #define WEX_WAYLAND_FOCUS_NATIVE 1
 #define WEX_WAYLAND_FOCUS_FRAME 2
