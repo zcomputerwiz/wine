@@ -684,6 +684,16 @@ LRESULT WAYLAND_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_WAYLAND_CONFIGURE:
         wayland_configure_window(hwnd);
         return 0;
+    case WM_WAYLAND_WEX_UPDATE:
+        if ((data = wayland_win_data_get(hwnd)))
+        {
+            /* Pointer-free refresh of current state. Destroyed/recreated
+             * surfaces do not consume any callback's old surface pointer. */
+            if (data->wayland_surface && data->wayland_surface->wex_window)
+                wayland_wex_update(data->wayland_surface, HWND_TOP, wp & SWP_NOZORDER);
+            wayland_win_data_release(data);
+        }
+        return 0;
     case WM_WAYLAND_SET_FOREGROUND:
         /* Private shell views are focused only in response to Wine's own
          * activation requests. A queued keyboard-enter is an acknowledgement,

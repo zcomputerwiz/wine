@@ -27,6 +27,8 @@ static void wex_group(void *user_data, struct wex_window_v1 *window, uint32_t st
     HWND hwnd = user_data;
     struct wayland_win_data *data = wayland_win_data_get(hwnd);
     struct wayland_surface *surface;
+    BOOL clear = FALSE;
+    uint32_t epoch = 0;
     if (!data) return;
     surface = data->wayland_surface;
     if (surface && surface->wex_window == window)
@@ -39,10 +41,12 @@ static void wex_group(void *user_data, struct wex_window_v1 *window, uint32_t st
         {
             surface->wex_focus = WEX_WINDOW_V1_FOCUS_TARGET_NONE;
             NtUserRemoveProp(hwnd, WEX_WAYLAND_FOCUS_PROP);
-            NtUserPostMessage(hwnd, WM_WAYLAND_CLEAR_FOREGROUND, surface->wex_activation_epoch, 0);
+            epoch = surface->wex_activation_epoch;
+            clear = TRUE;
         }
     }
     wayland_win_data_release(data);
+    if (clear) NtUserPostMessage(hwnd, WM_WAYLAND_CLEAR_FOREGROUND, epoch, 0);
 }
 
 static void wex_configured(void *user_data, struct wex_window_v1 *window, uint32_t serial, uint32_t status)
@@ -70,6 +74,7 @@ static void wex_focus(void *user_data, struct wex_window_v1 *window, uint32_t ep
     HWND hwnd = user_data;
     struct wayland_win_data *data = wayland_win_data_get(hwnd);
     struct wayland_surface *surface;
+    BOOL notify = FALSE;
     if (!data) return;
     surface = data->wayland_surface;
     if (surface && surface->wex_window == window && epoch == surface->wex_activation_epoch)
@@ -80,11 +85,12 @@ static void wex_focus(void *user_data, struct wex_window_v1 *window, uint32_t ep
         {
             if (target) NtUserSetProp(hwnd, WEX_WAYLAND_FOCUS_PROP, (HANDLE)(ULONG_PTR)target);
             else NtUserRemoveProp(hwnd, WEX_WAYLAND_FOCUS_PROP);
-            NtUserPostMessage(hwnd, target == WEX_WINDOW_V1_FOCUS_TARGET_NATIVE ?
-                              WM_WAYLAND_FOREIGN_FOREGROUND : WM_WAYLAND_CLEAR_FOREGROUND, epoch, 0);
+            notify = TRUE;
         }
     }
     wayland_win_data_release(data);
+    if (notify) NtUserPostMessage(hwnd, target == WEX_WINDOW_V1_FOCUS_TARGET_NATIVE ?
+                                 WM_WAYLAND_FOREIGN_FOREGROUND : WM_WAYLAND_CLEAR_FOREGROUND, epoch, 0);
 }
 
 static void wex_handle(void *user_data, struct wex_window_v1 *window, const char *handle)
@@ -95,6 +101,7 @@ static void wex_handle(void *user_data, struct wex_window_v1 *window, const char
     WCHAR name[33];
     RTL_ATOM atom;
     unsigned int i;
+    BOOL update = FALSE;
     if (!data) return;
     surface = data->wayland_surface;
     if (!surface || surface->wex_window != window || surface->wex_handle_atom) goto done;
@@ -117,9 +124,10 @@ static void wex_handle(void *user_data, struct wex_window_v1 *window, const char
     surface->wex_handle_atom = atom;
     /* A late handle participates in the current global Win32 order, rather
      * than the order in which separate Wayland connections happened to map. */
-    wayland_wex_update(surface, HWND_TOP, 0);
+    update = TRUE;
 done:
     wayland_win_data_release(data);
+    if (update) NtUserPostMessage(hwnd, WM_WAYLAND_WEX_UPDATE, 0, 0);
 }
 
 static void wex_association(void *user_data, struct wex_window_v1 *window, uint32_t status)
@@ -127,6 +135,7 @@ static void wex_association(void *user_data, struct wex_window_v1 *window, uint3
     HWND hwnd = user_data;
     struct wayland_win_data *data = wayland_win_data_get(hwnd);
     struct wayland_surface *surface;
+    BOOL update = FALSE;
     if (!data) return;
     surface = data->wayland_surface;
     if (surface && surface->wex_window == window)
@@ -142,9 +151,13 @@ static void wex_association(void *user_data, struct wex_window_v1 *window, uint3
             if (status) NtUserSetProp(hwnd, WEX_WAYLAND_ASSOCIATION_PROP, (HANDLE)(ULONG_PTR)status);
             else NtUserRemoveProp(hwnd, WEX_WAYLAND_ASSOCIATION_PROP);
         }
-        wayland_wex_update(surface, HWND_TOP, SWP_NOZORDER);
+        update = TRUE;
     }
     wayland_win_data_release(data);
+    /* Refreshing styles/z-order takes the USER lock. Do that on the owning
+     * UI thread, never from a Wayland callback holding win_data_mutex: themed
+     * painting can hold USER while flushing content and waiting for win_data. */
+    if (update) NtUserPostMessage(hwnd, WM_WAYLAND_WEX_UPDATE, SWP_NOZORDER, 0);
 }
 static void wex_pointer_capture(void *user_data, struct wex_window_v1 *window,
                                 uint32_t epoch, uint32_t captured)

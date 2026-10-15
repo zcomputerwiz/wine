@@ -75,6 +75,7 @@ enum wayland_window_message
     WM_WAYLAND_SET_FOREGROUND,
     WM_WAYLAND_CLEAR_FOREGROUND,
     WM_WAYLAND_FOREIGN_FOREGROUND,
+    WM_WAYLAND_WEX_UPDATE,
 };
 
 enum wayland_surface_config_state
