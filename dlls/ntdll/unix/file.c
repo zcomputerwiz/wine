@@ -4694,31 +4694,21 @@ static void check_cow_break_symlink( int root_fd, const char *unix_name, ACCESS_
     if (fstatat( dir_fd, unix_name, &st_link, AT_SYMLINK_NOFOLLOW ) != 0 || !S_ISLNK( st_link.st_mode ))
         return;
 
-    n = readlinkat( dir_fd, unix_name, resolved, sizeof(resolved) - 1 );
-    if (n <= 0) return;
-    resolved[n] = 0;
-
-    if (resolved[0] != '/')
+    if (dir_fd == AT_FDCWD)
+    {
+        if (!realpath( unix_name, resolved )) return;
+    }
+    else
     {
         char dir_path[PATH_MAX];
         char proc_path[64];
+        char full_link[PATH_MAX * 2];
         ssize_t len;
-        if (dir_fd == AT_FDCWD)
-        {
-            char canonical[PATH_MAX];
-            if (realpath( resolved, canonical )) strcpy( resolved, canonical );
-        }
-        else
-        {
-            snprintf( proc_path, sizeof(proc_path), "/proc/self/fd/%d", dir_fd );
-            if ((len = readlink( proc_path, dir_path, sizeof(dir_path) - 1 )) > 0)
-            {
-                char canonical[PATH_MAX * 2];
-                dir_path[len] = 0;
-                snprintf( canonical, sizeof(canonical), "%s/%s", dir_path, resolved );
-                if (realpath( canonical, resolved )) {}
-            }
-        }
+        snprintf( proc_path, sizeof(proc_path), "/proc/self/fd/%d", dir_fd );
+        if ((len = readlink( proc_path, dir_path, sizeof(dir_path) - 1 )) <= 0) return;
+        dir_path[len] = 0;
+        snprintf( full_link, sizeof(full_link), "%s/%s", dir_path, unix_name );
+        if (!realpath( full_link, resolved )) return;
     }
 
     if (stat( resolved, &st_target ) != 0 || !S_ISREG( st_target.st_mode ))
