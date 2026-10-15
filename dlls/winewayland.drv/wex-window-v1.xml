@@ -29,7 +29,7 @@
     for shell components (taskbars), and activation without tokens.
   </description>
 
-  <interface name="wex_window_manager_v1" version="8">
+  <interface name="wex_window_manager_v1" version="9">
     <description summary="manager interface for privileged window controls">
       Allows obtaining a wex_window_v1 interface for an xdg_toplevel.
       Only advertised to privileged clients on the wex-shell socket.
@@ -68,7 +68,7 @@
     </event>
   </interface>
 
-  <interface name="wex_window_v1" version="8">
+  <interface name="wex_window_v1" version="9">
     <description summary="window controls interface">
       Provides operations for stacking, layering, shell edge reservation,
       and direct activation.
@@ -271,7 +271,7 @@
       <arg name="captured" type="uint"/>
     </event>
   </interface>
-  <interface name="wex_foreign_window_v1" version="4">
+  <interface name="wex_foreign_window_v1" version="9">
     <description summary="supplemental native window observation">
       A compositor-generated token identifies a native view for its lifetime,
       across privileged connections. Tokens are never reused for another view.
@@ -312,6 +312,16 @@
         handle is unique to the controller and becomes invalid on disconnect.
       </description>
       <arg name="handle" type="string"/>
+    </event>
+    <event name="maximum_size" since="9">
+      <description summary="native maximum client dimensions">
+        Compositor logical coordinates, with zero meaning no limit on that axis.
+        This supplements size_hints and belongs to the same done-delimited
+        snapshot. Minima equal to nonzero maxima describe a fixed-size axis.
+        Only managers bound at version 9 create version 9 observers; older
+        clients keep their original event set and infer no maximum.
+      </description>
+      <arg name="width" type="int"/><arg name="height" type="int"/>
     </event>
   </interface>
 </protocol>
