@@ -677,6 +677,7 @@ static void sys_command_size_move( HWND hwnd, WPARAM wparam )
 {
     DWORD msg_pos = NtUserGetMessagePos();
     BOOL thickframe, drag_full_windows = TRUE, moved = FALSE;
+    BOOL button_down = !!(NtUserGetKeyState( VK_LBUTTON ) & 0x8000);
     RECT sizing_rect, mouse_rect, orig_rect;
     UINT hittest = wparam & 0x0f;
     UINT syscommand = wparam & 0xfff0;
@@ -799,7 +800,11 @@ static void sys_command_size_move( HWND hwnd, WPARAM wparam )
 
             /* It's possible that the window proc that handled the dispatch consumed a
              * WM_LBUTTONUP. Detect that and terminate the loop as if we'd gotten it. */
-            if (!(NtUserGetKeyState( VK_LBUTTON ) & 0x8000))
+            /* A keyboard/menu move starts with no button pressed. Unrelated
+             * messages must not end it; detect a consumed release only after
+             * observing a press, including one made later in a menu move. */
+            if (NtUserGetKeyState( VK_LBUTTON ) & 0x8000) button_down = TRUE;
+            else if (button_down)
             {
                 DWORD last_pos = NtUserGetMessagePos();
                 pt.x = ((int)(short)LOWORD( last_pos ));
