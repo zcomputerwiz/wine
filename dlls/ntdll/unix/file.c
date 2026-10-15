@@ -4639,6 +4639,134 @@ NTSTATUS open_unix_file( HANDLE *handle, const char *unix_name, ACCESS_MASK acce
 }
 
 
+static BOOL check_dir_prefix( const char *target, const char *dir )
+{
+    char canonical[PATH_MAX];
+    size_t len;
+
+    if (!dir || !realpath( dir, canonical )) return FALSE;
+    len = strlen( canonical );
+    if (!strncmp( target, canonical, len ) && (target[len] == '/' || target[len] == 0))
+        return TRUE;
+    return FALSE;
+}
+
+static BOOL is_in_wine_dll_dirs( const char *target )
+{
+    int i;
+    if (!target) return FALSE;
+    if (build_dir && check_dir_prefix( target, build_dir )) return TRUE;
+    if (dll_paths)
+    {
+        for (i = 0; dll_paths[i]; i++)
+            if (check_dir_prefix( target, dll_paths[i] )) return TRUE;
+    }
+    if (system_dll_paths)
+    {
+        for (i = 0; system_dll_paths[i]; i++)
+            if (check_dir_prefix( target, system_dll_paths[i] )) return TRUE;
+    }
+    return FALSE;
+}
+
+static void check_cow_break_symlink( int root_fd, const char *unix_name, ACCESS_MASK access, ULONG disposition, ULONG options )
+{
+    struct stat st_link, st_target;
+    char resolved[PATH_MAX];
+    char tmp[PATH_MAX];
+    BOOL truncate_only;
+    int dir_fd;
+    int fd_src = -1, fd_dst = -1;
+    ssize_t n;
+    char buf[65536];
+
+    /* Do not break on delete */
+    if (options & FILE_DELETE_ON_CLOSE)
+        return;
+
+    /* Only break for data writes, overwrite, supersede, or truncation */
+    if (!(access & (FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE | GENERIC_ALL)) &&
+        disposition != FILE_OVERWRITE && disposition != FILE_OVERWRITE_IF && disposition != FILE_SUPERSEDE)
+        return;
+
+    dir_fd = (root_fd != -1) ? root_fd : AT_FDCWD;
+
+    if (fstatat( dir_fd, unix_name, &st_link, AT_SYMLINK_NOFOLLOW ) != 0 || !S_ISLNK( st_link.st_mode ))
+        return;
+
+    n = readlinkat( dir_fd, unix_name, resolved, sizeof(resolved) - 1 );
+    if (n <= 0) return;
+    resolved[n] = 0;
+
+    if (resolved[0] != '/')
+    {
+        char dir_path[PATH_MAX];
+        char proc_path[64];
+        ssize_t len;
+        if (dir_fd == AT_FDCWD)
+        {
+            char canonical[PATH_MAX];
+            if (realpath( resolved, canonical )) strcpy( resolved, canonical );
+        }
+        else
+        {
+            snprintf( proc_path, sizeof(proc_path), "/proc/self/fd/%d", dir_fd );
+            if ((len = readlink( proc_path, dir_path, sizeof(dir_path) - 1 )) > 0)
+            {
+                char canonical[PATH_MAX * 2];
+                dir_path[len] = 0;
+                snprintf( canonical, sizeof(canonical), "%s/%s", dir_path, resolved );
+                if (realpath( canonical, resolved )) {}
+            }
+        }
+    }
+
+    if (stat( resolved, &st_target ) != 0 || !S_ISREG( st_target.st_mode ))
+        return;
+
+    if (!is_in_wine_dll_dirs( resolved ))
+        return;
+
+    truncate_only = (disposition == FILE_OVERWRITE || disposition == FILE_OVERWRITE_IF || disposition == FILE_SUPERSEDE);
+
+    snprintf( tmp, sizeof(tmp), "%s.cow.%d", unix_name, (int)getpid() );
+
+    if (!truncate_only)
+    {
+        if ((fd_src = open( resolved, O_RDONLY )) == -1)
+            return;
+        if ((fd_dst = openat( dir_fd, tmp, O_WRONLY | O_CREAT | O_EXCL, st_target.st_mode & 0777 )) == -1)
+        {
+            close( fd_src );
+            return;
+        }
+        while ((n = read( fd_src, buf, sizeof(buf) )) > 0)
+        {
+            if (write( fd_dst, buf, n ) != n)
+            {
+                close( fd_src );
+                close( fd_dst );
+                unlinkat( dir_fd, tmp, 0 );
+                return;
+            }
+        }
+        close( fd_src );
+        close( fd_dst );
+    }
+    else
+    {
+        if ((fd_dst = openat( dir_fd, tmp, O_WRONLY | O_CREAT | O_EXCL, st_target.st_mode & 0777 )) == -1)
+            return;
+        close( fd_dst );
+    }
+
+    if (renameat( dir_fd, tmp, dir_fd, unix_name ) == -1)
+    {
+        unlinkat( dir_fd, tmp, 0 );
+    }
+}
+
+
 /******************************************************************************
  *              NtCreateFile   (NTDLL.@)
  */
@@ -4692,6 +4820,16 @@ NTSTATUS WINAPI NtCreateFile( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBU
 
     if (status == STATUS_SUCCESS)
     {
+        int root_fd = -1, needs_close = 0;
+        if (new_attr.RootDirectory)
+        {
+            enum server_fd_type type;
+            if (server_get_unix_fd( new_attr.RootDirectory, 0, &root_fd, &needs_close, &type, NULL ))
+                root_fd = -1;
+        }
+        check_cow_break_symlink( root_fd, unix_name, access, disposition, options );
+        if (needs_close) close( root_fd );
+
         name_hidden = is_hidden_file( unix_name );
         status = open_unix_file( handle, unix_name, access, &new_attr, attributes,
                                  sharing, disposition, options, ea_buffer, ea_length );
@@ -8019,6 +8157,7 @@ NTSTATUS WINAPI NtSetInformationObject( HANDLE handle, OBJECT_INFORMATION_CLASS 
 NTSTATUS unixcall_wine_create_symlink( void *args )
 {
     struct wine_create_symlink_params *params = args;
+    static const WCHAR dos_unix_prefixW[] = {'\\','\\','?','\\','u','n','i','x'};
     char *unix_link = NULL, *unix_target = NULL;
     NTSTATUS status;
     struct stat st;
@@ -8029,7 +8168,6 @@ NTSTATUS unixcall_wine_create_symlink( void *args )
     if (!params->target || !params->link) return STATUS_INVALID_PARAMETER;
 
     /* Parse target: if it starts with \??\unix or \\?\unix, extract the unix path directly */
-    static const WCHAR dos_unix_prefixW[] = {'\\','\\','?','\\','u','n','i','x'};
     if (!wcsncmp( params->target, unix_prefixW, ARRAY_SIZE(unix_prefixW) ) ||
         !wcsncmp( params->target, dos_unix_prefixW, ARRAY_SIZE(dos_unix_prefixW) ))
     {
@@ -8097,71 +8235,16 @@ NTSTATUS unixcall_wine_create_symlink( void *args )
 }
 
 #ifdef _WIN64
-static WCHAR *redirect_wow64_link( const WCHAR *link )
-{
-    static const WCHAR system32W[] = {'\\','s','y','s','t','e','m','3','2','\\'};
-    static const WCHAR syswow64W[] = {'\\','s','y','s','w','o','w','6','4','\\'};
-    static const WCHAR sysnativeW[] = {'\\','s','y','s','n','a','t','i','v','e','\\'};
-    static const WCHAR etcW[] = {'e','t','c'};
-    static const WCHAR catrootW[] = {'c','a','t','r','o','o','t'};
-    static const WCHAR spoolW[] = {'s','p','o','o','l'};
-    const WCHAR *p;
-    WCHAR *new_link;
-    int len;
-
-    if (!link) return NULL;
-    len = wcslen( link );
-
-    /* check for sysnative -> system32 */
-    for (p = link; p <= link + len - 11; p++)
-    {
-        if (p[0] == '\\' && !wcsnicmp( p, sysnativeW, 11 ))
-        {
-            new_link = malloc( (len + 1) * sizeof(WCHAR) );
-            if (!new_link) return NULL;
-            memcpy( new_link, link, (p - link) * sizeof(WCHAR) );
-            memcpy( new_link + (p - link), system32W, sizeof(system32W) );
-            wcscpy( new_link + (p - link) + 10, p + 11 );
-            return new_link;
-        }
-    }
-
-    /* check for system32 -> syswow64 */
-    for (p = link; p <= link + len - 10; p++)
-    {
-        if (p[0] == '\\' && !wcsnicmp( p, system32W, 10 ))
-        {
-            const WCHAR *rest = p + 10;
-            if (!wcsnicmp( rest, etcW, 3 ) ||
-                !wcsnicmp( rest, catrootW, 7 ) ||
-                !wcsnicmp( rest, spoolW, 5 ))
-                return NULL; /* no redirect */
-
-            new_link = malloc( (len + 1) * sizeof(WCHAR) );
-            if (!new_link) return NULL;
-            memcpy( new_link, link, (p - link) * sizeof(WCHAR) );
-            memcpy( new_link + (p - link), syswow64W, sizeof(syswow64W) );
-            wcscpy( new_link + (p - link) + 10, p + 10 );
-            return new_link;
-        }
-    }
-    return NULL;
-}
-
 NTSTATUS wow64_wine_create_symlink( void *args )
 {
     struct wine_create_symlink_params32 *params32 = args;
-    const WCHAR *target = ULongToPtr( params32->target );
-    const WCHAR *link = ULongToPtr( params32->link );
-    WCHAR *redir_link = redirect_wow64_link( link );
     struct wine_create_symlink_params params =
     {
-        target,
-        redir_link ? redir_link : link
+        ULongToPtr( params32->target ),
+        ULongToPtr( params32->link )
     };
-    NTSTATUS status = unixcall_wine_create_symlink( &params );
-    free( redir_link );
-    return status;
+    return unixcall_wine_create_symlink( &params );
 }
 #endif
+
 
