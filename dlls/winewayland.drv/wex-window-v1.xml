@@ -29,7 +29,7 @@
     for shell components (taskbars), and activation without tokens.
   </description>
 
-  <interface name="wex_window_manager_v1" version="7">
+  <interface name="wex_window_manager_v1" version="8">
     <description summary="manager interface for privileged window controls">
       Allows obtaining a wex_window_v1 interface for an xdg_toplevel.
       Only advertised to privileged clients on the wex-shell socket.
@@ -68,7 +68,7 @@
     </event>
   </interface>
 
-  <interface name="wex_window_v1" version="7">
+  <interface name="wex_window_v1" version="8">
     <description summary="window controls interface">
       Provides operations for stacking, layering, shell edge reservation,
       and direct activation.
@@ -248,6 +248,25 @@
     <event name="configured_foreign" since="7">
       <arg name="serial" type="uint"/>
       <arg name="status" type="uint" enum="group_status"/>
+    </event>
+    <request name="capture_foreign_pointer" since="8">
+      <description summary="temporary pointer capture for a hosted frame loop">
+        Capture requires an active group, physical frame keyboard focus and
+        the current focus epoch. Pointer events then target the frame surface,
+        including outside its input region. Release never changes keyboard focus.
+        Capture is revoked on focus loss, group detach or resource destruction.
+        Stale requests cannot acquire capture or displace another frame.
+      </description>
+      <arg name="epoch" type="uint"/>
+      <arg name="capture" type="uint"/>
+    </request>
+    <event name="foreign_pointer_capture" since="8">
+      <description summary="capture acknowledgement or asynchronous revocation">
+        Acknowledges every request. Revocation uses the epoch that acquired
+        capture. Captured is zero or one; keyboard focus is reported separately.
+      </description>
+      <arg name="epoch" type="uint"/>
+      <arg name="captured" type="uint"/>
     </event>
   </interface>
   <interface name="wex_foreign_window_v1" version="4">

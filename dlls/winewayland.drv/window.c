@@ -484,6 +484,15 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     {
         wayland_win_data_update_wayland_state(data);
         wayland_wex_update(data->wayland_surface, insert_after, swp_flags);
+        /* A pure move can reuse the existing buffer without another paint.
+         * Apply zone placement now, including rollback after Escape. */
+        if (!(swp_flags & SWP_NOMOVE) && (swp_flags & SWP_NOSIZE) &&
+            data->wayland_surface->zone_item && data->wayland_surface->content_width)
+        {
+            wayland_zone_place(data->wayland_surface);
+            wl_surface_commit(data->wayland_surface->wl_surface);
+            wl_display_flush(process_wayland.wl_display);
+        }
     }
 
     if (owner_data) wayland_win_data_release(owner_data);
@@ -841,6 +850,15 @@ LRESULT WAYLAND_SysCommand(HWND hwnd, WPARAM wparam, LPARAM lparam, const POINT 
 
     TRACE("cmd=%lx hwnd=%p, %lx, %lx\n",
           (long)command, hwnd, (long)wparam, lparam);
+
+    /* Hosted native frames use Wine's move loop and zone geometry. The xdg
+     * interactive move requires a live pointer serial, which a keyboard menu
+     * command does not have, and cannot supply Win32 move-loop focus/lifetime. */
+    if (command == SC_MOVE && process_wayland.wex_manager &&
+        wex_window_manager_v1_get_version(process_wayland.wex_manager) >= 8 &&
+        NtUserGetProp(hwnd, WEX_WAYLAND_HOST_PROP) &&
+        (ULONG_PTR)NtUserGetProp(hwnd, WEX_WAYLAND_GROUP_PROP) == WEX_WAYLAND_GROUP_ACTIVE)
+        return -1;
 
     pthread_mutex_lock(&process_wayland.pointer.mutex);
     if (process_wayland.pointer.focused_hwnd == hwnd)

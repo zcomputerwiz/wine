@@ -146,10 +146,32 @@ static void wex_association(void *user_data, struct wex_window_v1 *window, uint3
     }
     wayland_win_data_release(data);
 }
+static void wex_pointer_capture(void *user_data, struct wex_window_v1 *window,
+                                uint32_t epoch, uint32_t captured)
+{
+    HWND hwnd = user_data;
+    struct wayland_win_data *data = wayland_win_data_get(hwnd);
+    struct wayland_surface *surface;
+    if (!data) return;
+    surface = data->wayland_surface;
+    if (surface && surface->wex_window == window)
+    {
+        if (captured && epoch == surface->wex_activation_epoch && hosting_enabled(surface))
+        {
+            surface->wex_capture_epoch = epoch;
+            NtUserSetProp(hwnd, WEX_WAYLAND_CAPTURE_PROP, (HANDLE)1);
+        }
+        else if (!captured && epoch == surface->wex_capture_epoch)
+            NtUserRemoveProp(hwnd, WEX_WAYLAND_CAPTURE_PROP);
+    }
+    wayland_win_data_release(data);
+}
+
 static const struct wex_window_v1_listener wex_listener = {
     .handle = wex_handle, .foreign_association = wex_association,
     .foreign_group = wex_group, .foreign_focus = wex_focus,
     .configured_foreign = wex_configured,
+    .foreign_pointer_capture = wex_pointer_capture,
 };
 
 void wayland_wex_update_hosting(struct wayland_surface *surface)
@@ -230,6 +252,7 @@ static void update_foreign_association(struct wayland_surface *surface)
 
 void wayland_wex_destroy(struct wayland_surface *surface)
 {
+    NtUserRemoveProp(surface->hwnd, WEX_WAYLAND_CAPTURE_PROP);
     NtUserRemoveProp(surface->hwnd, WEX_WAYLAND_ASSOCIATION_PROP);
     NtUserRemoveProp(surface->hwnd, WEX_WAYLAND_GROUP_PROP);
     NtUserRemoveProp(surface->hwnd, WEX_WAYLAND_FOCUS_PROP);
@@ -390,4 +413,26 @@ void WAYLAND_ActivateWindow(HWND hwnd, HWND previous)
         wl_display_flush(process_wayland.wl_display);
     }
     wayland_win_data_release(data);
+}
+
+void WAYLAND_SetCapture(HWND hwnd, UINT flags, HWND previous)
+{
+    struct wayland_win_data *data;
+    struct wayland_surface *surface;
+    if (previous && previous != hwnd && (data = wayland_win_data_get(previous)))
+    {
+        surface = data->wayland_surface;
+        if (surface && surface->wex_window && wex_window_v1_get_version(surface->wex_window) >= 8)
+            wex_window_v1_capture_foreign_pointer(surface->wex_window, surface->wex_activation_epoch, FALSE);
+        wayland_win_data_release(data);
+    }
+    if (hwnd && (flags & GUI_INMOVESIZE) && (data = wayland_win_data_get(hwnd)))
+    {
+        surface = data->wayland_surface;
+        if (surface && surface->wex_window && wex_window_v1_get_version(surface->wex_window) >= 8 &&
+            hosting_enabled(surface) && surface->wex_group == WEX_WINDOW_V1_GROUP_STATUS_ACTIVE)
+            wex_window_v1_capture_foreign_pointer(surface->wex_window, surface->wex_activation_epoch, TRUE);
+        wayland_win_data_release(data);
+    }
+    wl_display_flush(process_wayland.wl_display);
 }

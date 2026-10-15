@@ -26,6 +26,8 @@
 #define WEX_WAYLAND_FOCUS_PROP u"__wine_wayland_native_focus"
 /* One-shot command, consumed after SetWindowPos. Restore requires foreground. */
 #define WEX_WAYLAND_FOCUS_REQUEST_PROP u"__wine_wayland_native_focus_request"
+/* Observed compositor pointer capture for a hosted Win32 move/size loop. */
+#define WEX_WAYLAND_CAPTURE_PROP u"__wine_wayland_native_pointer_capture"
 #define WEX_WAYLAND_FOCUS_NONE 0
 #define WEX_WAYLAND_FOCUS_NATIVE 1
 #define WEX_WAYLAND_FOCUS_FRAME 2

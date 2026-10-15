@@ -324,6 +324,7 @@ struct wayland_surface
     BOOL wex_minimized;
     BOOL wex_activation_pending;
     unsigned int wex_group, wex_focus, wex_focus_epoch;
+    unsigned int wex_capture_epoch;
     unsigned int wex_group_serial;
     BOOL wex_group_pending, wex_host_attempted;
     RECT wex_host_rect;
@@ -348,6 +349,7 @@ void wayland_wex_create(struct wayland_surface *surface);
 void wayland_wex_destroy(struct wayland_surface *surface);
 void wayland_wex_update(struct wayland_surface *surface, HWND insert_after, UINT flags);
 void WAYLAND_ActivateWindow(HWND hwnd, HWND previous);
+void WAYLAND_SetCapture(HWND hwnd, UINT flags, HWND previous);
 void wayland_wex_flush_activation(struct wayland_surface *surface);
 void wayland_wex_update_hosting(struct wayland_surface *surface);
 HWND wayland_keyboard_get_focused_hwnd(void);
