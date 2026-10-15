@@ -1871,6 +1871,60 @@ struct unicode_str get_nt_name( struct fd *fd )
     return name;
 }
 
+/* Copy-on-write helper: replaces a symbolic link with a regular local file
+ * when write, truncate, or delete is attempted, protecting shared directories. */
+static int cow_break_symlink( const char *name, int truncate, mode_t mode )
+{
+    char tmp[PATH_MAX];
+    int fd_src = -1, fd_dst = -1;
+    ssize_t n;
+    char buf[65536];
+    struct stat st;
+
+    snprintf( tmp, sizeof(tmp), "%s.cow.%d", name, (int)getpid() );
+
+    if (!truncate)
+    {
+        if ((fd_src = open( name, O_RDONLY )) == -1)
+            return -1;
+        if (fstat( fd_src, &st ) == -1)
+        {
+            close( fd_src );
+            return -1;
+        }
+        if ((fd_dst = open( tmp, O_WRONLY | O_CREAT | O_EXCL, (st.st_mode & 0777) | 0600 )) == -1)
+        {
+            close( fd_src );
+            return -1;
+        }
+        while ((n = read( fd_src, buf, sizeof(buf) )) > 0)
+        {
+            if (write( fd_dst, buf, n ) != n)
+            {
+                close( fd_src );
+                close( fd_dst );
+                unlink( tmp );
+                return -1;
+            }
+        }
+        close( fd_src );
+        close( fd_dst );
+    }
+    else
+    {
+        if ((fd_dst = open( tmp, O_WRONLY | O_CREAT | O_EXCL, mode ? mode : 0666 )) == -1)
+            return -1;
+        close( fd_dst );
+    }
+
+    if (rename( tmp, name ) == -1)
+    {
+        unlink( tmp );
+        return -1;
+    }
+    return 0;
+}
+
 /* open() wrapper that returns a struct fd with no fd user set */
 struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_name,
                     int flags, mode_t *mode, unsigned int access,
@@ -1930,6 +1984,19 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
         else rw_mode = O_WRONLY;
     }
     else rw_mode = O_RDONLY;
+
+    if (!(options & FILE_DIRECTORY_FILE) &&
+        ((access & (FILE_UNIX_WRITE_ACCESS | DELETE)) || (flags & O_TRUNC) || (options & FILE_DELETE_ON_CLOSE)))
+    {
+        struct stat st_link, st_target;
+        if (lstat( name, &st_link ) == 0 && S_ISLNK( st_link.st_mode ))
+        {
+            if (stat( name, &st_target ) == 0 && S_ISREG( st_target.st_mode ))
+            {
+                cow_break_symlink( name, (flags & O_TRUNC), *mode ? *mode : 0666 );
+            }
+        }
+    }
 
     if ((fd->unix_fd = open( name, rw_mode | (flags & ~O_TRUNC), *mode )) == -1)
     {
