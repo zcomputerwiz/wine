@@ -1972,7 +1972,25 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
 
         if ((path = dup_fd_name( root, name )))
         {
-            fd->unix_name = realpath( path, NULL );
+            struct stat st_link;
+            if (lstat( path, &st_link ) == 0 && S_ISLNK( st_link.st_mode ))
+            {
+                char *dir = strdup( path );
+                char *slash = strrchr( dir, '/' );
+                char *can_dir;
+                if (slash && slash != dir)
+                {
+                    *slash = 0;
+                    if ((can_dir = realpath( dir, NULL )))
+                    {
+                        if (asprintf( &fd->unix_name, "%s/%s", can_dir, slash + 1 ) == -1)
+                            fd->unix_name = NULL;
+                        free( can_dir );
+                    }
+                }
+                free( dir );
+            }
+            if (!fd->unix_name) fd->unix_name = realpath( path, NULL );
             free( path );
         }
 

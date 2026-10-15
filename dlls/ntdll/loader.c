@@ -3462,6 +3462,17 @@ NTSTATUS CDECL wine_server_handle_to_fd( HANDLE handle, unsigned int access, int
     return WINE_UNIX_CALL( unix_wine_server_handle_to_fd, &params );
 }
 
+
+/***********************************************************************
+ *           wine_create_symlink (NTDLL.@)
+ */
+NTSTATUS CDECL wine_create_symlink( const WCHAR *target, const WCHAR *link )
+{
+    struct wine_create_symlink_params params = { target, link };
+
+    return WINE_UNIX_CALL( unix_wine_create_symlink, &params );
+}
+
 /******************************************************************
  *		LdrLoadDll (NTDLL.@)
  */

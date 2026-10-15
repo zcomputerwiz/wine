@@ -32,12 +32,55 @@
 #include "winuser.h"
 #include "winnt.h"
 #include "winternl.h"
+#include "winreg.h"
 #include "wine/debug.h"
 #include "wine/list.h"
 #include "ole2.h"
 #include "atliface.h"
 
+extern NTSTATUS CDECL wine_create_symlink( const WCHAR *target, const WCHAR *link );
+
 WINE_DEFAULT_DEBUG_CHANNEL(setupapi);
+
+/* Check whether built-in fake DLLs should be installed as symlinks */
+static BOOL use_symlinks(void)
+{
+    static int cached = -1;
+    if (cached != -1) return cached;
+
+    const WCHAR *env = _wgetenv( L"WINELINKFAKEDLLS" );
+    if (env && (wcscmp( env, L"1" ) == 0 || !wcsicmp( env, L"yes" ) || !wcsicmp( env, L"true" )))
+    {
+        HKEY key;
+        if (RegCreateKeyExW( HKEY_LOCAL_MACHINE, L"Software\\Wine", 0, NULL, 0, KEY_SET_VALUE, NULL, &key, NULL ) == ERROR_SUCCESS)
+        {
+            DWORD val = 1;
+            RegSetValueExW( key, L"LinkFakeDlls", 0, REG_DWORD, (const BYTE *)&val, sizeof(val) );
+            RegCloseKey( key );
+        }
+        cached = 1;
+        return 1;
+    }
+
+    HKEY key;
+    if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"Software\\Wine", 0, KEY_READ, &key ) == ERROR_SUCCESS)
+    {
+        DWORD val = 0, size = sizeof(val), type;
+        if (RegQueryValueExW( key, L"LinkFakeDlls", NULL, &type, (BYTE *)&val, &size ) == ERROR_SUCCESS)
+        {
+            if (type == REG_DWORD && val)
+            {
+                RegCloseKey( key );
+                cached = 1;
+                return 1;
+            }
+        }
+        RegCloseKey( key );
+    }
+
+    cached = 0;
+    return 0;
+}
 
 #ifdef __i386__
 static const WCHAR pe_dir[] = L"\\i386-windows";
@@ -428,11 +471,11 @@ static const WCHAR *enum_load_path( unsigned int idx )
 }
 
 /* try to load a pre-compiled fake dll */
-static void *load_fake_dll( const WCHAR *name, SIZE_T *size )
+static void *load_fake_dll( const WCHAR *name, SIZE_T *size, WCHAR **source_path )
 {
     const WCHAR *build_dir = _wgetenv( L"WINEBUILDDIR" );
     const WCHAR *path;
-    WCHAR *file, *ptr;
+    WCHAR *file, *ptr = NULL;
     void *data = NULL;
     unsigned int i, pos, len, maxlen = 0;
     WCHAR *p;
@@ -476,6 +519,7 @@ static void *load_fake_dll( const WCHAR *name, SIZE_T *size )
     }
 
 done:
+    if (res == 1 && source_path && ptr) *source_path = wcsdup( ptr );
     free( file );
     if (res == 1) return data;
     return NULL;
@@ -935,6 +979,41 @@ static void register_fake_dll( const WCHAR *name, const void *data, size_t size,
     if (FAILED(hr)) ERR( "failed to register %s: %lx\n", debugstr_w(name), hr );
 }
 
+static const WCHAR *get_real_link_dest( const WCHAR *dest, WCHAR *buf, size_t buf_chars )
+{
+    static const WCHAR system32W[] = L"\\system32\\";
+    static const WCHAR syswow64W[] = L"\\syswow64\\";
+    static const WCHAR etcW[] = L"etc";
+    static const WCHAR catrootW[] = L"catroot";
+    static const WCHAR spoolW[] = L"spool";
+    BOOL is_wow64 = FALSE;
+    const WCHAR *p;
+    size_t len;
+
+    IsWow64Process( GetCurrentProcess(), &is_wow64 );
+    if (!is_wow64 || !dest) return dest;
+
+    len = wcslen( dest );
+    for (p = dest; p <= dest + len - 10; p++)
+    {
+        if (p[0] == '\\' && !wcsnicmp( p, system32W, 10 ))
+        {
+            const WCHAR *rest = p + 10;
+            if (!wcsnicmp( rest, etcW, 3 ) ||
+                !wcsnicmp( rest, catrootW, 7 ) ||
+                !wcsnicmp( rest, spoolW, 5 ))
+                return dest; /* preserve exceptions */
+
+            if (len + 1 > buf_chars) return dest;
+            memcpy( buf, dest, (p - dest) * sizeof(WCHAR) );
+            memcpy( buf + (p - dest), syswow64W, sizeof(syswow64W) );
+            wcscpy( buf + (p - dest) + 10, p + 10 );
+            return buf;
+        }
+    }
+    return dest;
+}
+
 /* copy a fake dll file to the dest directory */
 static int install_fake_dll( WCHAR *dest, WCHAR *file, BOOL delete, struct list *delay_copy )
 {
@@ -960,17 +1039,70 @@ static int install_fake_dll( WCHAR *dest, WCHAR *file, BOOL delete, struct list 
 
     if (ret != -1)
     {
-        HANDLE h = create_dest_file( dest, delete );
-
-        if (h && h != INVALID_HANDLE_VALUE)
+        if (use_symlinks())
         {
-            TRACE( "%s -> %s\n", debugstr_w(file), debugstr_w(dest) );
+            WCHAR real_dest[MAX_PATH];
+            const WCHAR *link_dest = get_real_link_dest( dest, real_dest, ARRAY_SIZE(real_dest) );
+            HANDLE hexist = CreateFileW( link_dest, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL );
+            if (hexist != INVALID_HANDLE_VALUE)
+            {
+                if (!is_fake_dll( hexist ))
+                {
+                    TRACE( "%s is not a fake dll, not overwriting it\n", debugstr_w(link_dest) );
+                    CloseHandle( hexist );
+                    *destname = 0;
+                    *end = 0;
+                    return 0;
+                }
+                CloseHandle( hexist );
+            }
 
-            ret = (WriteFile( h, data, size, &written, NULL ) && written == size);
-            if (!ret) ERR( "failed to write to %s (error=%lu)\n", debugstr_w(dest), GetLastError() );
-            CloseHandle( h );
-            if (ret) register_fake_dll( dest, data, size, delay_copy );
-            else DeleteFileW( dest );
+            if (delete)
+            {
+                DeleteFileW( link_dest );
+                ret = 1;
+            }
+            else
+            {
+                NTSTATUS sym_status;
+                create_directories( link_dest );
+                if ((sym_status = wine_create_symlink( file, link_dest )) == STATUS_SUCCESS)
+                {
+                    TRACE( "symlinked %s -> %s\n", debugstr_w(file), debugstr_w(link_dest) );
+                    register_fake_dll( link_dest, data, size, delay_copy );
+                    ret = 1;
+                }
+                else
+                {
+                    HANDLE h;
+                    WARN( "wine_create_symlink failed %lx: %s -> %s\n", sym_status, debugstr_w(file), debugstr_w(dest) );
+                    h = create_dest_file( dest, FALSE );
+                    if (h && h != INVALID_HANDLE_VALUE)
+                    {
+                        TRACE( "%s -> %s (fallback copy)\n", debugstr_w(file), debugstr_w(dest) );
+                        ret = (WriteFile( h, data, size, &written, NULL ) && written == size);
+                        if (!ret) ERR( "failed to write to %s (error=%lu)\n", debugstr_w(dest), GetLastError() );
+                        CloseHandle( h );
+                        if (ret) register_fake_dll( dest, data, size, delay_copy );
+                        else DeleteFileW( dest );
+                    }
+                }
+            }
+        }
+        else
+        {
+            HANDLE h = create_dest_file( dest, delete );
+
+            if (h && h != INVALID_HANDLE_VALUE)
+            {
+                TRACE( "%s -> %s\n", debugstr_w(file), debugstr_w(dest) );
+
+                ret = (WriteFile( h, data, size, &written, NULL ) && written == size);
+                if (!ret) ERR( "failed to write to %s (error=%lu)\n", debugstr_w(dest), GetLastError() );
+                CloseHandle( h );
+                if (ret) register_fake_dll( dest, data, size, delay_copy );
+                else DeleteFileW( dest );
+            }
         }
     }
     *destname = 0;  /* restore it for next file */
@@ -990,6 +1122,33 @@ static void delay_copy_files( struct list *delay_copy )
     LIST_FOR_EACH_ENTRY_SAFE( copy, next, delay_copy, struct delay_copy, entry )
     {
         list_remove( &copy->entry );
+
+        if (use_symlinks())
+        {
+            WCHAR real_dest[MAX_PATH];
+            const WCHAR *link_dest = get_real_link_dest( copy->dest, real_dest, ARRAY_SIZE(real_dest) );
+            HANDLE hexist = CreateFileW( link_dest, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL );
+            if (hexist != INVALID_HANDLE_VALUE)
+            {
+                if (!is_fake_dll( hexist ))
+                {
+                    TRACE( "%s is not a fake dll, not overwriting it\n", debugstr_w(link_dest) );
+                    CloseHandle( hexist );
+                    free( copy );
+                    continue;
+                }
+                CloseHandle( hexist );
+            }
+
+            create_directories( link_dest );
+            if (wine_create_symlink( copy->src, link_dest ) == STATUS_SUCCESS)
+            {
+                TRACE( "symlinked delay copy %s -> %s\n", debugstr_w(copy->src), debugstr_w(link_dest) );
+                free( copy );
+                continue;
+            }
+        }
+
         ret = read_file( copy->src, &data, &size );
         if (ret != 1)
         {
@@ -1102,6 +1261,7 @@ BOOL create_fake_dll( const WCHAR *name, const WCHAR *source )
     SIZE_T size;
     const WCHAR *filename;
     void *buffer;
+    WCHAR *source_path = NULL;
     BOOL delete = !wcscmp( source, L"-" );  /* '-' source means delete the file */
 
     if (!(filename = wcsrchr( name, '\\' ))) filename = name;
@@ -1117,6 +1277,57 @@ BOOL create_fake_dll( const WCHAR *name, const WCHAR *source )
 
     add_handled_dll( filename );
 
+    if (use_symlinks() && wcscmp( source, L"*" ))
+    {
+        WCHAR real_dest[MAX_PATH];
+        const WCHAR *link_dest = get_real_link_dest( name, real_dest, ARRAY_SIZE(real_dest) );
+        HANDLE hexist = CreateFileW( link_dest, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL );
+        if (hexist != INVALID_HANDLE_VALUE)
+        {
+            if (!is_fake_dll( hexist ))
+            {
+                TRACE( "%s is not a fake dll, not overwriting it\n", debugstr_w(link_dest) );
+                CloseHandle( hexist );
+                return TRUE;
+            }
+            CloseHandle( hexist );
+        }
+
+        if (delete)
+        {
+            DeleteFileW( link_dest );
+            return TRUE;
+        }
+
+        if ((buffer = load_fake_dll( source, &size, &source_path )))
+        {
+            create_directories( link_dest );
+            if (source_path && wine_create_symlink( source_path, link_dest ) == STATUS_SUCCESS)
+            {
+                TRACE( "symlinked %s -> %s\n", debugstr_w(source_path), debugstr_w(link_dest) );
+                register_fake_dll( link_dest, buffer, size, &delay_copy );
+                ret = TRUE;
+            }
+            else
+            {
+                DWORD written;
+                h = create_dest_file( name, FALSE );
+                if (h && h != INVALID_HANDLE_VALUE)
+                {
+                    ret = (WriteFile( h, buffer, size, &written, NULL ) && written == size);
+                    if (ret) register_fake_dll( name, buffer, size, &delay_copy );
+                    else ERR( "failed to write to %s (error=%lu)\n", debugstr_w(name), GetLastError() );
+                    CloseHandle( h );
+                    if (!ret) DeleteFileW( name );
+                }
+            }
+            free( source_path );
+        }
+
+        delay_copy_files( &delay_copy );
+        return ret;
+    }
+
     if (!(h = create_dest_file( name, delete ))) return TRUE;  /* not a fake dll */
     if (h == INVALID_HANDLE_VALUE) return FALSE;
 
@@ -1124,13 +1335,14 @@ BOOL create_fake_dll( const WCHAR *name, const WCHAR *source )
     {
         ret = build_fake_dll( h, name );
     }
-    else if ((buffer = load_fake_dll( source, &size )))
+    else if ((buffer = load_fake_dll( source, &size, &source_path )))
     {
         DWORD written;
 
         ret = (WriteFile( h, buffer, size, &written, NULL ) && written == size);
         if (ret) register_fake_dll( name, buffer, size, &delay_copy );
         else ERR( "failed to write to %s (error=%lu)\n", debugstr_w(name), GetLastError() );
+        free( source_path );
     }
 
     CloseHandle( h );
