@@ -409,12 +409,14 @@ extern NTSTATUS unixcall_wine_server_call( void *args );
 extern NTSTATUS unixcall_wine_server_fd_to_handle( void *args );
 extern NTSTATUS unixcall_wine_server_handle_to_fd( void *args );
 extern NTSTATUS unixcall_wine_spawnvp( void *args );
+extern NTSTATUS unixcall_wine_create_symlink( void *args );
 #ifdef _WIN64
 extern NTSTATUS wow64_wine_dbg_write( void *args );
 extern NTSTATUS wow64_wine_server_call( void *args );
 extern NTSTATUS wow64_wine_server_fd_to_handle( void *args );
 extern NTSTATUS wow64_wine_server_handle_to_fd( void *args );
 extern NTSTATUS wow64_wine_spawnvp( void *args );
+extern NTSTATUS wow64_wine_create_symlink( void *args );
 #endif
 
 extern void dbg_init(void);

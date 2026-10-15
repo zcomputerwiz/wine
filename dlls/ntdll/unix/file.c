@@ -8011,3 +8011,157 @@ NTSTATUS WINAPI NtSetInformationObject( HANDLE handle, OBJECT_INFORMATION_CLASS 
     }
     return status;
 }
+
+
+/******************************************************************************
+ *              wine_create_symlink (Unix implementation)
+ */
+NTSTATUS unixcall_wine_create_symlink( void *args )
+{
+    struct wine_create_symlink_params *params = args;
+    char *unix_link = NULL, *unix_target = NULL;
+    NTSTATUS status;
+    struct stat st;
+    char buf[PATH_MAX];
+    ssize_t len;
+    int i;
+
+    if (!params->target || !params->link) return STATUS_INVALID_PARAMETER;
+
+    /* Parse target: if it starts with \??\unix or \\?\unix, extract the unix path directly */
+    static const WCHAR dos_unix_prefixW[] = {'\\','\\','?','\\','u','n','i','x'};
+    if (!wcsncmp( params->target, unix_prefixW, ARRAY_SIZE(unix_prefixW) ) ||
+        !wcsncmp( params->target, dos_unix_prefixW, ARRAY_SIZE(dos_unix_prefixW) ))
+    {
+        const WCHAR *src = params->target + 8;
+        int target_len = wcslen( src );
+        if (!(unix_target = malloc( target_len + 1 ))) return STATUS_NO_MEMORY;
+        for (i = 0; i < target_len; i++)
+            unix_target[i] = (src[i] == '\\') ? '/' : (char)src[i];
+        unix_target[target_len] = 0;
+    }
+    else
+    {
+        status = ntdll_get_unix_file_name( params->target, &unix_target, FILE_OPEN );
+        if (status && status != STATUS_NO_SUCH_FILE) return status;
+    }
+
+    status = ntdll_get_unix_file_name( params->link, &unix_link, FILE_OPEN_IF );
+    if (status && status != STATUS_NO_SUCH_FILE)
+    {
+        free( unix_target );
+        return status;
+    }
+
+    if (unix_target)
+    {
+        char canonical_target[PATH_MAX];
+        if (realpath( unix_target, canonical_target ))
+        {
+            free( unix_target );
+            if (!(unix_target = strdup( canonical_target )))
+            {
+                free( unix_link );
+                return STATUS_NO_MEMORY;
+            }
+        }
+    }
+
+    if (lstat( unix_link, &st ) == 0)
+    {
+        if (S_ISLNK( st.st_mode ))
+        {
+            len = readlink( unix_link, buf, sizeof(buf) - 1 );
+            if (len != -1)
+            {
+                buf[len] = 0;
+                if (!strcmp( buf, unix_target ))
+                {
+                    free( unix_target );
+                    free( unix_link );
+                    return STATUS_SUCCESS;
+                }
+            }
+        }
+        unlink( unix_link );
+    }
+
+    if (symlink( unix_target, unix_link ) == -1)
+        status = errno_to_status( errno );
+    else
+        status = STATUS_SUCCESS;
+
+    free( unix_target );
+    free( unix_link );
+    return status;
+}
+
+#ifdef _WIN64
+static WCHAR *redirect_wow64_link( const WCHAR *link )
+{
+    static const WCHAR system32W[] = {'\\','s','y','s','t','e','m','3','2','\\'};
+    static const WCHAR syswow64W[] = {'\\','s','y','s','w','o','w','6','4','\\'};
+    static const WCHAR sysnativeW[] = {'\\','s','y','s','n','a','t','i','v','e','\\'};
+    static const WCHAR etcW[] = {'e','t','c'};
+    static const WCHAR catrootW[] = {'c','a','t','r','o','o','t'};
+    static const WCHAR spoolW[] = {'s','p','o','o','l'};
+    const WCHAR *p;
+    WCHAR *new_link;
+    int len;
+
+    if (!link) return NULL;
+    len = wcslen( link );
+
+    /* check for sysnative -> system32 */
+    for (p = link; p <= link + len - 11; p++)
+    {
+        if (p[0] == '\\' && !wcsnicmp( p, sysnativeW, 11 ))
+        {
+            new_link = malloc( (len + 1) * sizeof(WCHAR) );
+            if (!new_link) return NULL;
+            memcpy( new_link, link, (p - link) * sizeof(WCHAR) );
+            memcpy( new_link + (p - link), system32W, sizeof(system32W) );
+            wcscpy( new_link + (p - link) + 10, p + 11 );
+            return new_link;
+        }
+    }
+
+    /* check for system32 -> syswow64 */
+    for (p = link; p <= link + len - 10; p++)
+    {
+        if (p[0] == '\\' && !wcsnicmp( p, system32W, 10 ))
+        {
+            const WCHAR *rest = p + 10;
+            if (!wcsnicmp( rest, etcW, 3 ) ||
+                !wcsnicmp( rest, catrootW, 7 ) ||
+                !wcsnicmp( rest, spoolW, 5 ))
+                return NULL; /* no redirect */
+
+            new_link = malloc( (len + 1) * sizeof(WCHAR) );
+            if (!new_link) return NULL;
+            memcpy( new_link, link, (p - link) * sizeof(WCHAR) );
+            memcpy( new_link + (p - link), syswow64W, sizeof(syswow64W) );
+            wcscpy( new_link + (p - link) + 10, p + 10 );
+            return new_link;
+        }
+    }
+    return NULL;
+}
+
+NTSTATUS wow64_wine_create_symlink( void *args )
+{
+    struct wine_create_symlink_params32 *params32 = args;
+    const WCHAR *target = ULongToPtr( params32->target );
+    const WCHAR *link = ULongToPtr( params32->link );
+    WCHAR *redir_link = redirect_wow64_link( link );
+    struct wine_create_symlink_params params =
+    {
+        target,
+        redir_link ? redir_link : link
+    };
+    NTSTATUS status = unixcall_wine_create_symlink( &params );
+    free( redir_link );
+    return status;
+}
+#endif
+
