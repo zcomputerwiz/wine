@@ -26,6 +26,7 @@
 #include "winuser.h"
 #include "uxthemedll.h"
 #include "vssym32.h"
+#include "wexwayland.h"
 
 static void uxtheme_draw_menu_button(HTHEME theme, HWND hwnd, HDC hdc, enum NONCLIENT_BUTTON_TYPE type,
                                      RECT rect, BOOL down, BOOL grayed)
@@ -101,6 +102,11 @@ INT WINAPI UXTHEME_SetWindowRgn(HWND hwnd, HRGN region, BOOL redraw)
     HANDLE owned = GetPropW(hwnd, theme_region_owned), defined = GetPropW(hwnd, app_region_defined);
     INT ret;
 
+    /* Hosting clips the client out of the frame; it does not define a new
+     * application shape or transfer ownership of the themed outer region. */
+    if (GetPropW(hwnd, WEX_WAYLAND_FRAME_MASK_UPDATING_PROP))
+        return user_api.pSetWindowRgn(hwnd, region, redraw);
+
     /* Explicit application shapes take precedence over the themed frame. */
     RemovePropW(hwnd, theme_region_owned);
     if (region) SetPropW(hwnd, app_region_defined, (HANDLE)1);
@@ -120,6 +126,7 @@ static void nc_update_region(HWND hwnd, HTHEME theme, int part, int state, int w
     HRGN region = NULL, current, body;
     RECT caption = {0, 0, width, caption_height};
     BOOL owned = !!GetPropW(hwnd, theme_region_owned);
+    int current_type;
 
     if (GetPropW(hwnd, theme_region_updating) || GetPropW(hwnd, app_region_defined)) return;
     if (!theme)
@@ -132,7 +139,15 @@ static void nc_update_region(HWND hwnd, HTHEME theme, int part, int state, int w
         return;
     }
     current = CreateRectRgn(0, 0, 0, 0);
-    if (GetWindowRgn(hwnd, current) != ERROR && !owned)
+    if (!current) return;
+    if (GetPropW(hwnd, WEX_WAYLAND_HOST_PROP))
+    {
+        HRGN outer = GetPropW(hwnd, WEX_WAYLAND_FRAME_OUTER_PROP);
+        /* Borrowed only on the HWND's owning UI thread, never across IPC. */
+        current_type = outer ? CombineRgn(current, outer, NULL, RGN_COPY) : ERROR;
+    }
+    else current_type = GetWindowRgn(hwnd, current);
+    if (current_type != ERROR && !owned)
     {
         /* A region installed before uxtheme loaded also belongs to the app. */
         SetPropW(hwnd, app_region_defined, (HANDLE)1);

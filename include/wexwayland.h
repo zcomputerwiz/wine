@@ -19,6 +19,11 @@
 #define WEX_WAYLAND_ASSOCIATION_UNAVAILABLE 2
 /* Explicit opt-in: caller must exclude the client area from Win32 hit testing. */
 #define WEX_WAYLAND_HOST_PROP u"__wine_wayland_native_host"
+/* In-process bridge/uxtheme contract, never sent to the driver or compositor.
+ * OUTER is a borrowed HRGN owned by the bridge (absent means rectangular).
+ * MASK_UPDATING distinguishes bridge clipping from an application's shape. */
+#define WEX_WAYLAND_FRAME_OUTER_PROP u"__wine_wayland_frame_outer_region"
+#define WEX_WAYLAND_FRAME_MASK_UPDATING_PROP u"__wine_wayland_frame_mask_updating"
 #define WEX_WAYLAND_GROUP_PROP u"__wine_wayland_native_group"
 #define WEX_WAYLAND_GROUP_DETACHED 0
 #define WEX_WAYLAND_GROUP_ACTIVE 1
