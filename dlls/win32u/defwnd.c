@@ -772,8 +772,7 @@ static void sys_command_size_move( HWND hwnd, WPARAM wparam )
     /* Retrieve a default cache DC (without using the window style) */
     hdc = NtUserGetDCEx( parent, 0, DCX_CACHE );
 
-    /* we only allow disabling the full window drag for child windows */
-    if (parent) NtUserSystemParametersInfo( SPI_GETDRAGFULLWINDOWS, 0, &drag_full_windows, 0 );
+    NtUserSystemParametersInfo( SPI_GETDRAGFULLWINDOWS, 0, &drag_full_windows, 0 );
 
     /* repaint the window before moving it around */
     NtUserRedrawWindow( hwnd, NULL, 0, RDW_UPDATENOW | RDW_ALLCHILDREN );
