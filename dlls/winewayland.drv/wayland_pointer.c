@@ -32,6 +32,7 @@
 #define OEMRESOURCE
 
 #include "waylanddrv.h"
+#include "wexwayland.h"
 #include "wine/server.h"
 #include "wine/debug.h"
 
@@ -144,12 +145,17 @@ static void pointer_handle_motion_internal(wl_fixed_t sx, wl_fixed_t sy)
     screen = map_point_from_surface(surface, screen);
     screen.x += window_rect->left;
     screen.y += window_rect->top;
-    /* Sometimes, due to rounding, we may end up with pointer coordinates
-     * slightly outside the target window, so bring them within bounds. */
-    if (screen.x >= window_rect->right) screen.x = window_rect->right - 1;
-    else if (screen.x < window_rect->left) screen.x = window_rect->left;
-    if (screen.y >= window_rect->bottom) screen.y = window_rect->bottom - 1;
-    else if (screen.y < window_rect->top) screen.y = window_rect->top;
+    /* A hosted frame's explicit compositor capture deliberately reports points
+     * outside its old buffer during sizing. Clamping those points prevents a
+     * real foot window from growing past its original right/bottom edge. */
+    if (!surface->wex_window || !NtUserGetProp(hwnd, WEX_WAYLAND_CAPTURE_PROP))
+    {
+        /* Rounding can put ordinary, uncaptured events just outside the window. */
+        if (screen.x >= window_rect->right) screen.x = window_rect->right - 1;
+        else if (screen.x < window_rect->left) screen.x = window_rect->left;
+        if (screen.y >= window_rect->bottom) screen.y = window_rect->bottom - 1;
+        else if (screen.y < window_rect->top) screen.y = window_rect->top;
+    }
 
     wayland_win_data_release(data);
 
