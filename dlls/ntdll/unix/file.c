@@ -4677,6 +4677,7 @@ static void check_cow_break_symlink( int root_fd, const char *unix_name, ACCESS_
     BOOL truncate_only;
     int dir_fd;
     int fd_src = -1, fd_dst = -1;
+    mode_t cow_mode;
     ssize_t n;
     char buf[65536];
 
@@ -4718,6 +4719,7 @@ static void check_cow_break_symlink( int root_fd, const char *unix_name, ACCESS_
         return;
 
     truncate_only = (disposition == FILE_OVERWRITE || disposition == FILE_OVERWRITE_IF || disposition == FILE_SUPERSEDE);
+    cow_mode = (st_target.st_mode & 0777) | ((st_target.st_mode & S_IWUSR) ? S_IWGRP : 0);
 
     snprintf( tmp, sizeof(tmp), "%s.cow.%d", unix_name, (int)getpid() );
 
@@ -4725,7 +4727,7 @@ static void check_cow_break_symlink( int root_fd, const char *unix_name, ACCESS_
     {
         if ((fd_src = open( resolved, O_RDONLY )) == -1)
             return;
-        if ((fd_dst = openat( dir_fd, tmp, O_WRONLY | O_CREAT | O_EXCL, st_target.st_mode & 0777 )) == -1)
+        if ((fd_dst = openat( dir_fd, tmp, O_WRONLY | O_CREAT | O_EXCL, cow_mode )) == -1)
         {
             close( fd_src );
             return;
@@ -4745,7 +4747,7 @@ static void check_cow_break_symlink( int root_fd, const char *unix_name, ACCESS_
     }
     else
     {
-        if ((fd_dst = openat( dir_fd, tmp, O_WRONLY | O_CREAT | O_EXCL, st_target.st_mode & 0777 )) == -1)
+        if ((fd_dst = openat( dir_fd, tmp, O_WRONLY | O_CREAT | O_EXCL, cow_mode )) == -1)
             return;
         close( fd_dst );
     }
