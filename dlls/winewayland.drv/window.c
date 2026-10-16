@@ -714,6 +714,16 @@ LRESULT WAYLAND_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         wayland_configure_window(hwnd);
         return 0;
     case WM_WAYLAND_WEX_UPDATE:
+        if (wp & SWP_FRAMECHANGED)
+        {
+            /* A preferred-scale change affects zone placement, the reserved
+             * shell edge and client-hole extents even at unchanged Win32
+             * geometry. Refresh on the owner thread, outside callback locks. */
+            NtUserSetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                              SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                              SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            return 0;
+        }
         if ((data = wayland_win_data_get(hwnd)))
         {
             /* Pointer-free refresh of current state. Destroyed/recreated

@@ -29,6 +29,7 @@
 #include <unistd.h>
 
 #include "waylanddrv.h"
+#include "wexwayland.h"
 #include "wine/debug.h"
 #include "wine/server.h"
 
@@ -37,6 +38,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
 static struct wp_image_description_v1 *scrgb_desc;
 static struct wp_image_description_v1 *bt2100_desc;
 static BOOL color_manager_initialized;
+static UINT wex_scale_message;
 
 static void image_description_failed(void *user_data, struct wp_image_description_v1 *desc,
                                      uint32_t cause, const char *message)
@@ -245,6 +247,15 @@ void wp_fractional_scale_handle_scale(void* user_data,
     }
 
     surface->window.scale = scale;
+    if (process_wayland.wex_manager)
+    {
+        UNICODE_STRING name = RTL_CONSTANT_STRING(WEX_WAYLAND_SCALE_EVENT_MESSAGE);
+        NtUserSetProp(hwnd, WEX_WAYLAND_SCALE_PROP, (HANDLE)(ULONG_PTR)scale_fixed);
+        if (!wex_scale_message) wex_scale_message = NtUserRegisterWindowMessage(&name);
+        if (wex_scale_message) NtUserPostMessage(hwnd, wex_scale_message, scale_fixed, 0);
+        NtUserPostMessage(hwnd, WM_WAYLAND_WEX_UPDATE, SWP_FRAMECHANGED | SWP_NOZORDER, 0);
+        surface->wex_host_attempted = FALSE;
+    }
 
     /* reattach client surfaces as their rects have changed */
     update_client_surfaces(hwnd);
@@ -391,6 +402,9 @@ static void wayland_surface_init_fractional_scale(struct wayland_surface *surfac
                                                   double initial_scale)
 {
     surface->window.scale = initial_scale;
+    if (process_wayland.wex_manager)
+        NtUserSetProp(surface->hwnd, WEX_WAYLAND_SCALE_PROP,
+                      (HANDLE)(ULONG_PTR)(unsigned int)(initial_scale * 120));
 
     if (!process_wayland.wp_fractional_scale_manager_v1) return;
 

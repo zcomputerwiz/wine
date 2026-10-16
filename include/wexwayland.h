@@ -25,6 +25,11 @@
 #define WEX_WAYLAND_FRAME_OUTER_PROP u"__wine_wayland_frame_outer_region"
 #define WEX_WAYLAND_FRAME_MASK_UPDATING_PROP u"__wine_wayland_frame_mask_updating"
 #define WEX_WAYLAND_GROUP_PROP u"__wine_wayland_native_group"
+/* Read-only preferred wl_surface scale, in units of 1/120. Native inventory
+ * geometry is logical; the bridge maps it into this surface's Win32 pixels.
+ * A registered SCALE_EVENT_MESSAGE notifies the owning thread after changes. */
+#define WEX_WAYLAND_SCALE_PROP u"__wine_wayland_scale_120"
+#define WEX_WAYLAND_SCALE_EVENT_MESSAGE u"WineExplorer.WaylandScaleChanged"
 #define WEX_WAYLAND_GROUP_DETACHED 0
 #define WEX_WAYLAND_GROUP_ACTIVE 1
 #define WEX_WAYLAND_GROUP_NOT_READY 2
@@ -43,14 +48,14 @@
  * Set request fields, then COMMAND last, followed by SetWindowPos. Coordinates
  * are physical Win32 screen client coordinates; COMMIT uses the current frame
  * client hole after painting, ignoring the request geometry fields.
- * PROTOCOL advertises transport only: XWayland can still reply unavailable.
+ * PROTOCOL advertises transport only: a compositor can still reply unavailable.
  * EVENT_MESSAGE runs synchronously on the owning UI thread, with serial in
  * WPARAM and stage in LPARAM. EVENT_* is an immutable snapshot for that call
  * only; do not retain it or read it from an observer thread. No pointer crosses
  * the Unix/PE boundary, including in WoW64. Every transition is delivered.
  */
 #define WEX_WAYLAND_RESIZE_PROTOCOL_PROP u"__wine_wayland_resize_protocol"
-/* Test/lab controller opt-in; not an advertisement of native eligibility. */
+/* Owned controller opt-in; not an advertisement of native eligibility. */
 #define WEX_WAYLAND_RESIZE_ENABLE_PROP u"__wine_wayland_resize_enable"
 #define WEX_WAYLAND_RESIZE_COMMAND_PROP u"__wine_wayland_resize_command"
 #define WEX_WAYLAND_RESIZE_SERIAL_PROP u"__wine_wayland_resize_serial"
