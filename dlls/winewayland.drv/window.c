@@ -548,6 +548,31 @@ static void wayland_configure_window(HWND hwnd)
         return;
     }
 
+    /* The hosted frame controller owns Win32 maximize/restore geometry. An
+     * xdg state acknowledgement can still contain the old frame size; applying
+     * it with NOSENDCHANGING would bypass the controller and undo its matching
+     * native-ready frame (reproduced with real foot work-area maximize). */
+    if (surface->wex_window && NtUserGetProp(hwnd, WEX_WAYLAND_HOST_PROP) &&
+        NtUserGetProp(hwnd, WEX_WAYLAND_RESIZE_ENABLE_PROP) &&
+        surface->wex_group == WEX_WINDOW_V1_GROUP_STATUS_ACTIVE)
+    {
+        surface->processing.processed = TRUE;
+        if (wayland_surface_reconfigure(surface))
+        {
+            if (data->window_contents && !data->window_contents->busy)
+            {
+                wayland_surface_attach_shm(surface, data->window_contents, NULL);
+                wl_surface_damage_buffer(surface->wl_surface, 0, 0,
+                    data->window_contents->width, data->window_contents->height);
+            }
+            wl_surface_commit(surface->wl_surface);
+            wayland_wex_flush_activation(surface);
+        }
+        wl_display_flush(process_wayland.wl_display);
+        wayland_win_data_release(data);
+        return;
+    }
+
     state = surface->processing.state;
     /* Ignore size hints if we don't have a state that requires strict
      * size adherence, in order to avoid spurious resizes. */

@@ -33,6 +33,11 @@
 #define WEX_WAYLAND_FOCUS_REQUEST_PROP u"__wine_wayland_native_focus_request"
 /* Observed compositor pointer capture for a hosted Win32 move/size loop. */
 #define WEX_WAYLAND_CAPTURE_PROP u"__wine_wayland_native_pointer_capture"
+/* One-shot request for an owned foreground frame outside the move/size loop
+ * (work-area maximize/restore). The compositor still checks physical focus. */
+#define WEX_WAYLAND_CAPTURE_REQUEST_PROP u"__wine_wayland_native_pointer_capture_request"
+/* Captured frame state preceding its resize request: 1 maximize, 2 restore. */
+#define WEX_WAYLAND_MAXIMIZE_REQUEST_PROP u"__wine_wayland_native_maximize_request"
 /* v10 transaction transport, separate from coalescible native observation.
  * All values fit 32 bits, including signed coordinates represented as LONG.
  * Set request fields, then COMMAND last, followed by SetWindowPos. Coordinates

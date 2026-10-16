@@ -425,6 +425,10 @@ void wayland_wex_update_hosting(struct wayland_surface *surface)
         (focus = (ULONG_PTR)NtUserRemoveProp(surface->hwnd, WEX_WAYLAND_FOCUS_REQUEST_PROP)) &&
         surface->hwnd == NtUserGetForegroundWindow() && focus <= WEX_WAYLAND_FOCUS_RESTORE_NATIVE)
         wex_window_v1_set_foreign_focus(surface->wex_window, ++surface->wex_activation_epoch, focus);
+    if (surface->wex_group == WEX_WINDOW_V1_GROUP_STATUS_ACTIVE &&
+        NtUserRemoveProp(surface->hwnd, WEX_WAYLAND_CAPTURE_REQUEST_PROP) &&
+        surface->hwnd == NtUserGetForegroundWindow() && surface->wex_focus == WEX_WINDOW_V1_FOCUS_TARGET_FRAME)
+        wex_window_v1_capture_foreign_pointer(surface->wex_window, surface->wex_activation_epoch, TRUE);
 }
 
 static BOOL get_atom_handle(RTL_ATOM id, char handle[33])
@@ -556,6 +560,17 @@ void wayland_wex_update(struct wayland_surface *surface, HWND insert_after, UINT
     if (!surface->wex_window) return;
     if (flags & SWP_FRAMECHANGED) surface->wex_host_attempted = FALSE;
     update_foreign_association(surface);
+    if (hosting_enabled(surface) && surface->wex_group == WEX_WINDOW_V1_GROUP_STATUS_ACTIVE &&
+        surface->wex_focus == WEX_WINDOW_V1_FOCUS_TARGET_FRAME &&
+        NtUserGetProp(surface->hwnd, WEX_WAYLAND_CAPTURE_PROP))
+    {
+        ULONG_PTR state = (ULONG_PTR)NtUserRemoveProp(surface->hwnd, WEX_WAYLAND_MAXIMIZE_REQUEST_PROP);
+        /* State and resize travel on the same connection, before the native
+         * client's idle configure. The compositor can retain the original
+         * group while the client responds with maximized pixel dimensions. */
+        if (state == 1) xdg_toplevel_set_maximized(surface->xdg_toplevel);
+        else if (state == 2) xdg_toplevel_unset_maximized(surface->xdg_toplevel);
+    }
     update_resize_request(surface);
     layer = window_layer(surface->hwnd);
     if (layer != surface->wex_layer)
