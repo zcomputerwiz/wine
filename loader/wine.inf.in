@@ -72,6 +72,18 @@ AddReg=\
     SessionMgr,\
     ThemeManager
 
+[UserInstall]
+RegisterDlls=UserRegisterDlls
+AddReg=\
+    Classes,\
+    CurrentVersion,\
+    Debugger,\
+    Misc,\
+    ThemeManager
+
+[UserRegisterDlls]
+11,,shell32.dll,1
+
 [DefaultInstall]
 Needs=BaseInstall
 WineFakeDlls=FakeDllsWin32

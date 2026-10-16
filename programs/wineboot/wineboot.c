@@ -1696,36 +1696,58 @@ static void update_wineprefix( BOOL force )
 
     if (update_timestamp( config_dir, st.st_mtime ) || force)
     {
+        DWORD attr = GetFileAttributesW( L"C:\\windows" );
+        BOOL shared_machine = (attr != INVALID_FILE_ATTRIBUTES) && (attr & FILE_ATTRIBUTE_REPARSE_POINT);
         HANDLE process;
         DWORD count = 0;
 
-        if ((process = start_rundll32( inf_path, L"PreInstall", IMAGE_FILE_MACHINE_TARGET_HOST )))
+        if (shared_machine)
         {
-            HWND hwnd = show_wait_window();
-            for (;;)
+            if ((process = start_rundll32( inf_path, L"UserInstall", IMAGE_FILE_MACHINE_TARGET_HOST )))
             {
-                if (process)
+                HWND hwnd = show_wait_window();
+                for (;;)
                 {
                     MSG msg;
                     DWORD res = MsgWaitForMultipleObjects( 1, &process, FALSE, INFINITE, QS_ALLINPUT );
-                    if (res != WAIT_OBJECT_0)
-                    {
-                        while (PeekMessageW( &msg, 0, 0, 0, PM_REMOVE )) DispatchMessageW( &msg );
-                        continue;
-                    }
-                    CloseHandle( process );
+                    if (res == WAIT_OBJECT_0) break;
+                    while (PeekMessageW( &msg, 0, 0, 0, PM_REMOVE )) DispatchMessageW( &msg );
                 }
-                if (!machines[count].Machine) break;
-                if (machines[count].Native)
-                    process = start_rundll32( inf_path, L"DefaultInstall", IMAGE_FILE_MACHINE_TARGET_HOST );
-                else
-                    process = start_rundll32( inf_path, L"Wow64Install", machines[count].Machine );
-                count++;
+                CloseHandle( process );
+                DestroyWindow( hwnd );
             }
-            DestroyWindow( hwnd );
+            update_user_profile();
         }
-        install_root_pnp_devices();
-        update_user_profile();
+        else
+        {
+            if ((process = start_rundll32( inf_path, L"PreInstall", IMAGE_FILE_MACHINE_TARGET_HOST )))
+            {
+                HWND hwnd = show_wait_window();
+                for (;;)
+                {
+                    if (process)
+                    {
+                        MSG msg;
+                        DWORD res = MsgWaitForMultipleObjects( 1, &process, FALSE, INFINITE, QS_ALLINPUT );
+                        if (res != WAIT_OBJECT_0)
+                        {
+                            while (PeekMessageW( &msg, 0, 0, 0, PM_REMOVE )) DispatchMessageW( &msg );
+                            continue;
+                        }
+                        CloseHandle( process );
+                    }
+                    if (!machines[count].Machine) break;
+                    if (machines[count].Native)
+                        process = start_rundll32( inf_path, L"DefaultInstall", IMAGE_FILE_MACHINE_TARGET_HOST );
+                    else
+                        process = start_rundll32( inf_path, L"Wow64Install", machines[count].Machine );
+                    count++;
+                }
+                DestroyWindow( hwnd );
+            }
+            install_root_pnp_devices();
+            update_user_profile();
+        }
 
         TRACE( "wine: configuration in %s has been updated.\n", debugstr_w(prettyprint_configdir()) );
     }
