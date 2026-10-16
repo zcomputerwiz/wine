@@ -487,6 +487,15 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     else if (wayland_win_data_create_wayland_surface(data, owner_surface))
     {
         wayland_win_data_update_wayland_state(data);
+        /* A CSD host's entire client is a hole, so changing its size need not
+         * produce any GDI damage. Real gedit shrinks to the 150% work area
+         * during startup; keep its transparent proxy extent current using the
+         * same dummy-content path as native client surfaces. SSD frame pixels
+         * still require their ordinary paint/transaction, never a dummy. */
+        if (data->wayland_surface->wex_window && NtUserGetProp(hwnd, WEX_WAYLAND_HOST_PROP) &&
+            !data->wayland_surface->window.minimized &&
+            EqualRect(&data->wayland_surface->window.rect, &data->wayland_surface->window.client_rect))
+            wayland_surface_ensure_contents(data->wayland_surface);
         wayland_wex_update(data->wayland_surface, insert_after, swp_flags);
         /* A pure move can reuse the existing buffer without another paint.
          * Apply zone placement now, including rollback after Escape. */
