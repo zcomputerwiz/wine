@@ -244,7 +244,7 @@ BOOL WINAPI UXTHEME_NonClientFrameDraw(HWND hwnd, HDC hdc, RECT rect, DWORD styl
     int bh = GetSystemMetrics(thick ? SM_CYFRAME : SM_CYDLGFRAME);
     int cap_h = GetSystemMetrics(tool ? SM_CYSMCAPTION : SM_CYCAPTION);
     int top_h = bh + cap_h, state = active ? 1 : 2;
-    int cap_part, left_part, right_part, bottom_part, i, nbtn = 0, x, btn_sz, text_left, text_right;
+    int cap_part, left_part, right_part, bottom_part, i, nbtn = 0, x, btn_h, btn_w, text_left, text_right;
     struct nc_button btn[3];
     HTHEME theme;
     RECT r;
@@ -271,36 +271,39 @@ BOOL WINAPI UXTHEME_NonClientFrameDraw(HWND hwnd, HDC hdc, RECT rect, DWORD styl
 
     if (!target) nc_update_region(hwnd, theme, cap_part, state, w, h, top_h);
 
-    /* caption buttons, right to left */
-    btn_sz = 21;
+    /* Use the same caption slots as win32u's handle_nc_hit_test. A theme's
+     * natural bitmap width need not equal SM_CXSIZE (foot's maximize glyph
+     * otherwise occupied the minimize hit rectangle). Scale art into its slot. */
+    btn_h = cap_h - 3;
+    btn_w = GetSystemMetrics(SM_CXSIZE);
     size.cx = size.cy = 0;
-    if (SUCCEEDED(GetThemePartSize(theme, hdc, tool ? WP_SMALLCLOSEBUTTON : WP_CLOSEBUTTON, 1, NULL, TS_TRUE, &size)) && size.cx > 0)
-        btn_sz = size.cx;
-    x = w - bw - 1;
+    if (SUCCEEDED(GetThemePartSize(theme, hdc, tool ? WP_SMALLCLOSEBUTTON : WP_CLOSEBUTTON, 1, NULL, TS_TRUE, &size)) && size.cy > 0)
+        btn_h = min(btn_h, size.cy);
+    x = w - bw;
     if (style & WS_SYSMENU)
     {
         BOOL has_minmax = style & (WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
-        int y = (top_h - btn_sz + 1) / 2;
+        int y = bh + (cap_h - 1 - btn_h) / 2;
 
         btn[nbtn].which = NCFRAME_BTN_CLOSE;
         btn[nbtn].part = tool ? WP_SMALLCLOSEBUTTON : WP_CLOSEBUTTON;
         btn[nbtn].state = nc_button_state(flags, (flags & NCFRAME_GRAYED) && target == NCFRAME_BTN_CLOSE, target == NCFRAME_BTN_CLOSE);
-        SetRect(&btn[nbtn].rect, x - btn_sz, y, x, y + btn_sz);
-        x -= btn_sz + 2;
+        SetRect(&btn[nbtn].rect, x - cap_h + 1, y, x - 1, y + btn_h);
+        x -= cap_h;
         nbtn++;
         if (!tool && has_minmax)
         {
             btn[nbtn].which = NCFRAME_BTN_MAX;
             btn[nbtn].part = (style & WS_MAXIMIZE) ? WP_RESTOREBUTTON : WP_MAXBUTTON;
             btn[nbtn].state = nc_button_state(flags, !(style & WS_MAXIMIZEBOX), target == NCFRAME_BTN_MAX);
-            SetRect(&btn[nbtn].rect, x - btn_sz, y, x, y + btn_sz);
-            x -= btn_sz;
+            SetRect(&btn[nbtn].rect, x - btn_w + 1, y, x - 1, y + btn_h);
+            x -= btn_w;
             nbtn++;
             btn[nbtn].which = NCFRAME_BTN_MIN;
             btn[nbtn].part = WP_MINBUTTON;
             btn[nbtn].state = nc_button_state(flags, !(style & WS_MINIMIZEBOX), target == NCFRAME_BTN_MIN);
-            SetRect(&btn[nbtn].rect, x - btn_sz, y, x, y + btn_sz);
-            x -= btn_sz + 2;
+            SetRect(&btn[nbtn].rect, x - btn_w + 1, y, x - 1, y + btn_h);
+            x -= btn_w;
             nbtn++;
         }
     }
