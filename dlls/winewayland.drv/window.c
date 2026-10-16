@@ -867,7 +867,9 @@ LRESULT WAYLAND_SysCommand(HWND hwnd, WPARAM wparam, LPARAM lparam, const POINT 
     /* Hosted native frames use Wine's move loop and zone geometry. The xdg
      * interactive move requires a live pointer serial, which a keyboard menu
      * command does not have, and cannot supply Win32 move-loop focus/lifetime. */
-    if (command == SC_MOVE && process_wayland.wex_manager &&
+    if (process_wayland.wex_manager && (command == SC_MOVE || (command == SC_SIZE &&
+         wex_window_manager_v1_get_version(process_wayland.wex_manager) >= 10 &&
+         NtUserGetProp(hwnd, WEX_WAYLAND_RESIZE_ENABLE_PROP))) &&
         wex_window_manager_v1_get_version(process_wayland.wex_manager) >= 8 &&
         NtUserGetProp(hwnd, WEX_WAYLAND_HOST_PROP) &&
         (ULONG_PTR)NtUserGetProp(hwnd, WEX_WAYLAND_GROUP_PROP) == WEX_WAYLAND_GROUP_ACTIVE)

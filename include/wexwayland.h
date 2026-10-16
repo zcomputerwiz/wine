@@ -45,6 +45,8 @@
  * the Unix/PE boundary, including in WoW64. Every transition is delivered.
  */
 #define WEX_WAYLAND_RESIZE_PROTOCOL_PROP u"__wine_wayland_resize_protocol"
+/* Test/lab controller opt-in; not an advertisement of native eligibility. */
+#define WEX_WAYLAND_RESIZE_ENABLE_PROP u"__wine_wayland_resize_enable"
 #define WEX_WAYLAND_RESIZE_COMMAND_PROP u"__wine_wayland_resize_command"
 #define WEX_WAYLAND_RESIZE_SERIAL_PROP u"__wine_wayland_resize_serial"
 #define WEX_WAYLAND_RESIZE_EDGES_PROP u"__wine_wayland_resize_edges"
