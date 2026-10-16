@@ -167,6 +167,7 @@ struct save_branch_info
     struct timespec mtime;
     bool            has_stat;
     bool            has_ephemeral_mods;
+    bool            is_shared_machine;
     struct list     tombstones;
 };
 
@@ -316,6 +317,7 @@ static bool is_per_session_key( const struct key *key )
 
     branch = find_branch_info( key );
     if (!branch || !branch->key) return false;
+    if (!branch->is_shared_machine) return false;
     if (save_branch_count >= 3 && branch == &save_branch_info[2]) return false;
 
     rel_path = build_relative_key_path( key, branch->key, &rel_len );
@@ -366,6 +368,7 @@ static bool is_per_session_value( const struct key *key, struct unicode_str val_
 
     branch = find_branch_info( key );
     if (!branch || branch != &save_branch_info[0]) return false;
+    if (!branch->is_shared_machine) return false;
 
     rel_path = build_relative_key_path( key, branch->key, &rel_len );
     if (!rel_path) return false;
@@ -404,7 +407,7 @@ static void record_tombstone( struct key *key, const WCHAR *val_name, data_size_
     if (is_per_session_key( key )) return;
 
     branch = find_branch_info( key );
-    if (!branch) return;
+    if (!branch || !branch->is_shared_machine) return;
 
     path = build_relative_key_path( key, branch->key, &pathlen );
     if (!path && key != branch->key) return;
@@ -490,6 +493,28 @@ static void mark_subtree_mod_seq( struct key *key )
         key->values[i].mod_seq = ++next_mod_seq;
     for (i = 0; i <= key->last_subkey; i++)
         mark_subtree_mod_seq( key->subkeys[i] );
+}
+
+static void clear_branch_mod_seq( struct key *key )
+{
+    int i;
+    key->mod_seq = 0;
+    for (i = 0; i <= key->last_value; i++)
+        key->values[i].mod_seq = 0;
+    for (i = 0; i <= key->last_subkey; i++)
+        clear_branch_mod_seq( key->subkeys[i] );
+}
+
+static void free_tombstones( struct save_branch_info *info )
+{
+    struct reg_tombstone *ts, *next;
+    LIST_FOR_EACH_ENTRY_SAFE( ts, next, &info->tombstones, struct reg_tombstone, entry )
+    {
+        list_remove( &ts->entry );
+        free( ts->key_path );
+        free( ts->val_name );
+        free( ts );
+    }
 }
 
 unsigned int supported_machines_count = 0;
@@ -1194,7 +1219,7 @@ static struct key *create_key_recursive( struct key *root, struct unicode_str na
 {
     struct key *key, *parent = (struct key *)grab_object( root );
     struct key_init_data data = { .modif = modif };
-    struct object_params params = { .ops = &key_ops, .name = name, .attr = OBJ_OPENIF | OBJ_OPENLINK, .init_data = &data };
+    struct object_params params = { .ops = &key_ops, .name = name, .attr = OBJ_OPENIF | (in_merge ? OBJ_OPENLINK : 0), .init_data = &data };
     data_size_t len = name.len;
 
     while (len)
@@ -2177,6 +2202,36 @@ static void load_registry( struct key *key, obj_handle_t handle )
     }
 }
 
+static bool is_shared_machine_file( const char *filename )
+{
+    struct stat lst;
+    char target[PATH_MAX];
+    char machine_root[PATH_MAX];
+    const char *env_root = getenv( "WINE_MACHINE_ROOT" );
+    size_t root_len;
+
+    if (lstat( filename, &lst ) != 0 || !S_ISLNK( lst.st_mode ))
+        return false;
+
+    if (!realpath( filename, target ))
+        return false;
+
+    if (!env_root || !*env_root) env_root = "/var/lib/wineexplorer/machine";
+    if (!realpath( env_root, machine_root ))
+    {
+        snprintf( machine_root, sizeof(machine_root), "%s", env_root );
+    }
+
+    root_len = strlen( machine_root );
+    if (strncmp( target, machine_root, root_len ) == 0 &&
+        (target[root_len] == '/' || target[root_len] == '\0'))
+    {
+        return true;
+    }
+
+    return false;
+}
+
 /* load one of the initial registry files */
 static int load_init_registry_from_file( const char *filename, struct key *key )
 {
@@ -2209,6 +2264,7 @@ static int load_init_registry_from_file( const char *filename, struct key *key )
 
     info->filename = filename;
     info->key = (struct key *)grab_object( key );
+    info->is_shared_machine = is_shared_machine_file( filename );
     save_branch_count++;
     make_object_permanent( &key->obj );
     return (f != NULL);
@@ -2609,6 +2665,9 @@ static int save_branch( struct save_branch_info *info )
             if (errno == EACCES || errno == EROFS)
             {
                 make_clean( key );
+                clear_branch_mod_seq( key );
+                free_tombstones( info );
+                info->has_ephemeral_mods = false;
                 return 1;
             }
         }
@@ -2618,6 +2677,9 @@ static int save_branch( struct save_branch_info *info )
         if (errno == EACCES || errno == EROFS)
         {
             make_clean( key );
+            clear_branch_mod_seq( key );
+            free_tombstones( info );
+            info->has_ephemeral_mods = false;
             return 1;
         }
     }
@@ -2634,6 +2696,9 @@ static int save_branch( struct save_branch_info *info )
         if (errno == EACCES || errno == EROFS)
         {
             make_clean( key );
+            clear_branch_mod_seq( key );
+            free_tombstones( info );
+            info->has_ephemeral_mods = false;
             return 1;
         }
         return 0;
@@ -2660,9 +2725,9 @@ static int save_branch( struct save_branch_info *info )
         }
     }
 
-    /* For shared hives (symlinks or when ephemeral mods exist or external change occurred),
+    /* For shared hives (symlinks into machine root or when ephemeral mods exist or external change occurred),
      * load current on-disk hive into tmp_root, replay session tombstones, and replay session dirty tree. */
-    if (file_exists && (disk_changed || info->has_ephemeral_mods || is_symlink))
+    if (file_exists && info->is_shared_machine && (disk_changed || info->has_ephemeral_mods || is_symlink))
     {
         FILE *f_in = fopen( target_path, "r" );
         if (f_in)
@@ -2705,6 +2770,9 @@ static int save_branch( struct save_branch_info *info )
             flock( lock_fd, LOCK_UN );
             close( lock_fd );
             make_clean( key );
+            clear_branch_mod_seq( key );
+            free_tombstones( info );
+            info->has_ephemeral_mods = false;
             return 1;
         }
         if (errno != EEXIST) goto done;
@@ -2763,7 +2831,13 @@ done:
         close( lock_fd );
     }
 
-    if (ret) make_clean( key );
+    if (ret)
+    {
+        make_clean( key );
+        clear_branch_mod_seq( key );
+        free_tombstones( info );
+        info->has_ephemeral_mods = false;
+    }
     return ret;
 }
 
