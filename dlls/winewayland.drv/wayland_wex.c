@@ -230,6 +230,43 @@ done:
     if (notify) NtUserPostMessage(hwnd, WM_WAYLAND_WEX_RESIZE, 0, 0);
 }
 
+/* Match the frame-local hole as well as the global client position. Absolute
+ * endpoint rounding alone does not preserve either at fractional scales. */
+static RECT resize_rect_from_surface(struct wayland_surface *surface, RECT native)
+{
+    RECT rect = map_rect_from_surface(surface, native);
+    RECT physical_hole = surface->window.client_rect, hole, extent;
+    POINT origin, mapped, aligned;
+    int width = rect.right - rect.left, height = rect.bottom - rect.top;
+
+    if (IsRectEmpty(&native)) return rect;
+    OffsetRect(&physical_hole, -surface->window.rect.left, -surface->window.rect.top);
+    hole = map_rect_to_surface(surface, physical_hole);
+    origin.x = rect.left - physical_hole.left;
+    origin.y = rect.top - physical_hole.top;
+    mapped = map_point_to_surface(surface, origin);
+    aligned.x = native.left - hole.left;
+    aligned.y = native.top - hole.top;
+    aligned = map_point_from_surface(surface, aligned);
+    /* Preserve the usual physical rectangle wherever it already maps exactly. */
+    if (mapped.x + hole.left != native.left) rect.left = aligned.x + physical_hole.left;
+    if (mapped.y + hole.top != native.top) rect.top = aligned.y + physical_hole.top;
+
+    SetRect(&extent, physical_hole.left, physical_hole.top,
+            physical_hole.left + width, physical_hole.top + height);
+    extent = map_rect_to_surface(surface, extent);
+    aligned.x = hole.left + native.right - native.left;
+    aligned.y = hole.top + native.bottom - native.top;
+    aligned = map_point_from_surface(surface, aligned);
+    if (extent.right - hole.left != native.right - native.left)
+        width = aligned.x - physical_hole.left;
+    if (extent.bottom - hole.top != native.bottom - native.top)
+        height = aligned.y - physical_hole.top;
+    rect.right = rect.left + width;
+    rect.bottom = rect.top + height;
+    return rect;
+}
+
 void wayland_wex_dispatch_resize(HWND hwnd)
 {
     struct wayland_win_data *data;
@@ -251,7 +288,7 @@ void wayland_wex_dispatch_resize(HWND hwnd)
         surface->wex_resize_head = event->next;
         if (!event->next) surface->wex_resize_tail = NULL;
         surface->wex_resize_dispatching = TRUE;
-        rect = map_rect_from_surface(surface, event->rect);
+        rect = resize_rect_from_surface(surface, event->rect);
         if (event->stage == WEX_WINDOW_V1_RESIZE_STAGE_ACCEPTED)
         {
             surface->wex_resize_serial = event->serial;
