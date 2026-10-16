@@ -410,6 +410,10 @@ static BOOL is_window_managed(HWND hwnd, UINT swp_flags, BOOL fullscreen)
     /* application windows are managed */
     ex_style = NtUserGetWindowLongW(hwnd, GWL_EXSTYLE);
     if (ex_style & WS_EX_APPWINDOW) return TRUE;
+    /* The private shell compositor can position nonactivating topmost
+     * overlays independently. Explorer's Alt+Tab UI must not become a
+     * subsurface clipped by a hosted native frame's client hole. */
+    if (process_wayland.wex_manager && (ex_style & WS_EX_TOPMOST)) return TRUE;
     /* windows that own popups are managed */
     if (has_owned_popups(hwnd)) return TRUE;
     /* default: not managed */
