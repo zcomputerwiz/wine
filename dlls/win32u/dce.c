@@ -366,7 +366,7 @@ static void set_surface_shape_rect( BYTE *bits, UINT stride, const RECT *rect )
     if (r_mask == 0xff) { r--; r_mask = 0; } /* avoid writing to the next byte */
 
     if (rect->right - rect->left == 8 * stride) memset( begin, 0xff, end - begin );
-    else if (l == r) for (bits = begin; bits < end; bits += stride) bits[l] |= l_mask & r_mask;
+    else if (l == r) for (bits = begin; bits < end; bits += stride) bits[l] |= l_mask & ~r_mask;
     else if (l < r)
     {
         for (bits = begin; bits < end; bits += stride)
