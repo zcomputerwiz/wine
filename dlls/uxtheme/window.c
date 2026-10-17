@@ -198,17 +198,25 @@ static void nc_draw_caption_text(HTHEME theme, HDC hdc, HWND hwnd, int part, int
     NONCLIENTMETRICSW ncm = {.cbSize = sizeof(ncm)};
     WCHAR text[256];
     COLORREF color = RGB(255, 255, 255), shadow = 0;
-    int shadow_type = 0;
+    int shadow_type = 0, fallback;
     POINT offset = {1, 1};
     HFONT font, old_font;
 
     if (!GetWindowTextW(hwnd, text, ARRAY_SIZE(text)) || !SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0))
         return;
 
-    GetThemeColor(theme, part, state, TMT_TEXTCOLOR, &color);
-    GetThemeEnumValue(theme, part, state, TMT_TEXTSHADOWTYPE, &shadow_type);
-    GetThemeColor(theme, part, state, TMT_TEXTSHADOWCOLOR, &shadow);
-    GetThemePosition(theme, part, state, TMT_TEXTSHADOWOFFSET, &offset);
+    /* Visual styles may omit the text properties on the maximized caption parts: use the restored part's */
+    if (part == WP_MAXCAPTION) fallback = WP_CAPTION;
+    else if (part == WP_SMALLMAXCAPTION) fallback = WP_SMALLCAPTION;
+    else fallback = part;
+    if (FAILED(GetThemeColor(theme, part, state, TMT_TEXTCOLOR, &color)))
+        GetThemeColor(theme, fallback, state, TMT_TEXTCOLOR, &color);
+    if (FAILED(GetThemeEnumValue(theme, part, state, TMT_TEXTSHADOWTYPE, &shadow_type)))
+        GetThemeEnumValue(theme, fallback, state, TMT_TEXTSHADOWTYPE, &shadow_type);
+    if (FAILED(GetThemeColor(theme, part, state, TMT_TEXTSHADOWCOLOR, &shadow)))
+        GetThemeColor(theme, fallback, state, TMT_TEXTSHADOWCOLOR, &shadow);
+    if (FAILED(GetThemePosition(theme, part, state, TMT_TEXTSHADOWOFFSET, &offset)))
+        GetThemePosition(theme, fallback, state, TMT_TEXTSHADOWOFFSET, &offset);
 
     font = CreateFontIndirectW(small_caption ? &ncm.lfSmCaptionFont : &ncm.lfCaptionFont);
     old_font = SelectObject(hdc, font);
