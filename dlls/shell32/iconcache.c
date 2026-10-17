@@ -373,6 +373,40 @@ static BOOL SIC_IsShell32(const WCHAR *sourcefile)
     return !wcsicmp(PathFindFileNameW(sourcefile), PathFindFileNameW(swShell32Name));
 }
 
+/* A module in the system directory, or given without a directory */
+static BOOL SIC_IsSystemModule(const WCHAR *sourcefile)
+{
+    const WCHAR *file = PathFindFileNameW(sourcefile);
+    WCHAR dir[MAX_PATH], sysdir[MAX_PATH];
+
+    if (file == sourcefile) return TRUE;
+    lstrcpynW(dir, sourcefile, min(ARRAY_SIZE(dir), file - sourcefile));
+    return (GetSystemDirectoryW(sysdir, ARRAY_SIZE(sysdir)) && !wcsicmp(dir, sysdir)) ||
+           (GetSystemWow64DirectoryW(sysdir, ARRAY_SIZE(sysdir)) && !wcsicmp(dir, sysdir));
+}
+
+/*****************************************************************************
+ * SIC_GetModuleIconOverride		[internal]
+ *
+ * WineExplorer: an icon pack can replace the icons of a system module (desk.cpl, ...).  The value named after the
+ * module, without extension, in HKCU\Software\WineExplorer\Module Icons holds the file with the replacement icons,
+ * which keep the module's own icon ids.
+ */
+static BOOL SIC_GetModuleIconOverride(const WCHAR *sourcefile, WCHAR *path, DWORD size)
+{
+    WCHAR name[64];
+    DWORD len = size * sizeof(WCHAR);
+
+    if (SIC_IsShell32(sourcefile) || !SIC_IsSystemModule(sourcefile)) return FALSE;
+    lstrcpynW(name, PathFindFileNameW(sourcefile), ARRAY_SIZE(name));
+    PathRemoveExtensionW(name);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\WineExplorer\\Module Icons", name, RRF_RT_REG_SZ, NULL,
+                     path, &len) || !path[0])
+        return FALSE;
+    TRACE("icons of %s replaced by %s\n", debugstr_w(sourcefile), debugstr_w(path));
+    return TRUE;
+}
+
 /* One icon for each image list from the file; FALSE (and nothing kept) if any size is missing */
 static BOOL SIC_ExtractAllSizes (const WCHAR *file, INT index, HICON *hicons)
 {
@@ -408,6 +442,8 @@ static INT SIC_ExtractIcons (const WCHAR *sourcefile, INT index, DWORD flags, HI
 
     if (!(SIC_IsShell32(sourcefile) && SIC_GetShellIconOverride(index, override, ARRAY_SIZE(override), &override_index) &&
           SIC_ExtractAllSizes(override, override_index, hicons)) &&
+        !(SIC_GetModuleIconOverride(sourcefile, override, ARRAY_SIZE(override)) &&
+          SIC_ExtractAllSizes(override, index, hicons)) &&
         !SIC_ExtractAllSizes(sourcefile, index, hicons))
         return -1;
 
@@ -464,8 +500,9 @@ static INT SIC_LoadIcon (const WCHAR *sourcefile, INT index, DWORD flags)
 /****************************************************************************
  * SIC_ReloadShellIcons			[internal]
  *
- * Load the cached icons of shell32 again, in place, so that image indexes handed out stay valid: after the
- * Shell Icons key changed (FileIconInit(TRUE)), or only those it replaces (when the cache is created).
+ * Load the cached icons of shell32 and of system modules again, in place, so that image indexes handed out stay
+ * valid: after the Shell Icons or Module Icons key changed (FileIconInit(TRUE)), or only the shell32 icons Shell
+ * Icons replaces (when the cache is created).
  */
 static void SIC_ReloadShellIcons (BOOL replaced_only)
 {
@@ -479,7 +516,8 @@ static void SIC_ReloadShellIcons (BOOL replaced_only)
     {
         SIC_ENTRY *entry = DPA_GetPtr(sic_hdpa, n);
 
-        if (!SIC_IsShell32(entry->sSourceFile)) continue;
+        /* the icons of system modules may come from an icon pack (Module Icons) */
+        if (!SIC_IsShell32(entry->sSourceFile) && (replaced_only || !SIC_IsSystemModule(entry->sSourceFile))) continue;
         if (replaced_only && !SIC_GetShellIconOverride(entry->dwSourceIndex, override, ARRAY_SIZE(override), &override_index))
             continue;
         if (SIC_ExtractIcons(entry->sSourceFile, entry->dwSourceIndex, entry->dwFlags, hicons) == -1) continue;
