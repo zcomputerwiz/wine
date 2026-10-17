@@ -328,7 +328,7 @@ struct wayland_surface
     unsigned int wex_group, wex_focus, wex_focus_epoch;
     unsigned int wex_capture_epoch;
     unsigned int wex_group_serial;
-    BOOL wex_group_pending, wex_host_attempted;
+    BOOL wex_group_pending, wex_host_attempted, wex_host_reconfiguring;
     struct wex_resize_event *wex_resize_head, *wex_resize_tail;
     unsigned int wex_resize_serial;
     ULONGLONG wex_resize_generation;

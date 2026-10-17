@@ -1028,6 +1028,11 @@ BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffe
     {
         if (wayland_surface_reconfigure(wayland_surface))
         {
+            /* An active group's new logical client hole must reach the
+             * compositor before its differently sized frame buffer. It can
+             * retain both old roots until matching native content arrives. */
+            if (wayland_surface->wex_group == WEX_WINDOW_V1_GROUP_STATUS_ACTIVE)
+                wayland_wex_update_hosting(wayland_surface);
             wayland_surface_attach_shm(wayland_surface, shm_buffer, damage_region);
             wl_surface_commit(wayland_surface->wl_surface);
             wayland_wex_flush_activation(wayland_surface);

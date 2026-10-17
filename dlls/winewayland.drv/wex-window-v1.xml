@@ -242,6 +242,9 @@
         Same geometry and validation as commit_foreign. Replies with configured_foreign
         after reporting observed group state, distinguishing request completion
         from unsolicited detached notifications. Serial is opaque to the server.
+        An active group may change its client rectangle without detaching.
+        The server retains the previous roots until the updated frame and
+        matching native content have both committed, then replies ACTIVE.
       </description>
       <arg name="serial" type="uint"/>
       <arg name="x" type="int"/><arg name="y" type="int"/>

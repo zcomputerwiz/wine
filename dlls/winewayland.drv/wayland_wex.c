@@ -73,9 +73,13 @@ static void wex_configured(void *user_data, struct wex_window_v1 *window, uint32
     surface = data->wayland_surface;
     if (surface && surface->wex_window == window && serial == surface->wex_group_serial)
     {
+        BOOL reconfiguring = surface->wex_host_reconfiguring;
+        surface->wex_host_reconfiguring = FALSE;
         surface->wex_group_pending = FALSE;
         wayland_wex_update_hosting(surface);
-        if (status == WEX_WINDOW_V1_GROUP_STATUS_ACTIVE && hosting_enabled(surface))
+        /* First adoption activates the native client. A later layout reply
+         * must not override the frame focus requested by a resize controller. */
+        if (!reconfiguring && status == WEX_WINDOW_V1_GROUP_STATUS_ACTIVE && hosting_enabled(surface))
         {
             surface->wex_activation_pending = surface->hwnd == NtUserGetForegroundWindow();
             wayland_wex_flush_activation(surface);
@@ -392,7 +396,7 @@ void wayland_wex_update_hosting(struct wayland_surface *surface)
     OffsetRect(&rect, -surface->window.rect.left, -surface->window.rect.top);
     rect = map_rect_to_surface(surface, rect);
     if (surface->wex_group == WEX_WINDOW_V1_GROUP_STATUS_ACTIVE &&
-        (!enabled || (!surface->wex_resize_pending && !EqualRect(&rect, &surface->wex_host_rect))))
+        !enabled)
     {
         surface->wex_group_pending = TRUE;
         surface->wex_host_attempted = FALSE;
@@ -406,7 +410,7 @@ void wayland_wex_update_hosting(struct wayland_surface *surface)
         return;
     }
     if (!surface->content_width || surface->window.minimized) return;
-    if (surface->wex_group != WEX_WINDOW_V1_GROUP_STATUS_ACTIVE &&
+    if (!surface->wex_resize_pending &&
         (!surface->wex_host_attempted || !EqualRect(&rect, &surface->wex_host_rect) ||
          surface->content_width != surface->wex_host_content_width ||
          surface->content_height != surface->wex_host_content_height))
@@ -415,6 +419,7 @@ void wayland_wex_update_hosting(struct wayland_surface *surface)
         surface->wex_host_content_width = surface->content_width;
         surface->wex_host_content_height = surface->content_height;
         surface->wex_host_attempted = TRUE;
+        surface->wex_host_reconfiguring = surface->wex_group == WEX_WINDOW_V1_GROUP_STATUS_ACTIVE;
         surface->wex_group_pending = TRUE;
         TRACE("host %p client %s content %dx%d\n", surface->hwnd, wine_dbgstr_rect(&rect),
               surface->content_width, surface->content_height);
