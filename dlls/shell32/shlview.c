@@ -788,7 +788,7 @@ static void shellview_set_view(IShellViewImpl *This, UINT mode)
     else
     {
         SendMessageW(This->hWndList, LVM_SETIMAGELIST, LVSIL_NORMAL, (LPARAM)(tile_icons ? (HIMAGELIST)tile_icons : big_icons));
-        SendMessageW(This->hWndList, LVM_SETICONSPACING, 0, MAKELPARAM(-1, -1));
+        SendMessageW(This->hWndList, LVM_SETICONSPACING, 0, (LPARAM)-1);
     }
     if (tile_icons) IImageList_Release(tile_icons);   /* the system image list stays */
 

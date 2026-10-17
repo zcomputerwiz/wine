@@ -74,6 +74,9 @@ enum wayland_window_message
     WM_WAYLAND_CONFIGURE,
     WM_WAYLAND_SET_FOREGROUND,
     WM_WAYLAND_CLEAR_FOREGROUND,
+    WM_WAYLAND_FOREIGN_FOREGROUND,
+    WM_WAYLAND_WEX_UPDATE,
+    WM_WAYLAND_WEX_RESIZE,
 };
 
 enum wayland_surface_config_state
@@ -248,6 +251,7 @@ struct wayland_surface_config
 struct wayland_window_config
 {
     RECT rect;
+    RECT client_rect;
     enum wayland_surface_config_state state;
     /* The scale (i.e., normalized dpi) the window is rendering at. */
     double scale;
@@ -317,8 +321,20 @@ struct wayland_surface
     unsigned int wex_layer, wex_edge, wex_size;
     unsigned int wex_activation_epoch;
     RTL_ATOM wex_handle_atom;
+    RTL_ATOM wex_native_atom, wex_controller_atom;
+    BOOL wex_association_pending;
     BOOL wex_minimized;
     BOOL wex_activation_pending;
+    unsigned int wex_group, wex_focus, wex_focus_epoch;
+    unsigned int wex_capture_epoch;
+    unsigned int wex_group_serial;
+    BOOL wex_group_pending, wex_host_attempted;
+    struct wex_resize_event *wex_resize_head, *wex_resize_tail;
+    unsigned int wex_resize_serial;
+    ULONGLONG wex_resize_generation;
+    BOOL wex_resize_pending, wex_resize_dispatching;
+    RECT wex_host_rect;
+    int wex_host_content_width, wex_host_content_height;
 
     struct wayland_surface_config pending, requested, processing, current;
     BOOL resizing;
@@ -340,7 +356,10 @@ void wayland_wex_create(struct wayland_surface *surface);
 void wayland_wex_destroy(struct wayland_surface *surface);
 void wayland_wex_update(struct wayland_surface *surface, HWND insert_after, UINT flags);
 void WAYLAND_ActivateWindow(HWND hwnd, HWND previous);
+void WAYLAND_SetCapture(HWND hwnd, UINT flags, HWND previous);
 void wayland_wex_flush_activation(struct wayland_surface *surface);
+void wayland_wex_update_hosting(struct wayland_surface *surface);
+void wayland_wex_dispatch_resize(HWND hwnd);
 HWND wayland_keyboard_get_focused_hwnd(void);
 
 /**********************************************************************

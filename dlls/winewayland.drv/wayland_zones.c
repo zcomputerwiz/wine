@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include "ntstatus.h"
 #include "waylanddrv.h"
+#include "wexwayland.h"
 #include "wine/debug.h"
 WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
 
@@ -193,6 +194,13 @@ static void item_position(void *data, struct xx_zone_item_v1 *item, int32_t x, i
     if (win->wayland_surface->zone_initial_position)
     {
         win->wayland_surface->zone_initial_position = FALSE;
+        wayland_win_data_release(win);
+        return;
+    }
+    /* Hosted proxies reconcile actual native geometry through the bridge.
+     * An older zone placement echo must not undo a newer Win32 move/cancel. */
+    if (win->wayland_surface->wex_window && NtUserGetProp(data, WEX_WAYLAND_HOST_PROP))
+    {
         wayland_win_data_release(win);
         return;
     }
