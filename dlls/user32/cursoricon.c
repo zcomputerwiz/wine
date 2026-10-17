@@ -1365,6 +1365,16 @@ static const struct { UINT id; const WCHAR *name; } scheme_cursors[] =
 static HICON scheme_cursor_cache[ARRAY_SIZE(scheme_cursors)];
 static BOOL scheme_cursor_tried[ARRAY_SIZE(scheme_cursors)];
 
+void reset_scheme_cursors(void)
+{
+    unsigned int i;
+    for (i = 0; i < ARRAY_SIZE(scheme_cursors); i++)
+    {
+        scheme_cursor_cache[i] = 0;
+        scheme_cursor_tried[i] = FALSE;
+    }
+}
+
 static HICON load_scheme_cursor( UINT id, INT width, INT height, INT depth, UINT loadflags )
 {
     unsigned int i;

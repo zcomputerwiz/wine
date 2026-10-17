@@ -166,6 +166,11 @@ LRESULT WINAPI DefWindowProcW(
 
     switch(msg)
     {
+    case WM_SETTINGCHANGE:
+        if (wParam == SPI_SETCURSORS || wParam == 0)
+            reset_scheme_cursors();
+        result = NtUserMessageCall( hwnd, msg, wParam, lParam, 0, NtUserDefWindowProc, FALSE );
+        break;
     case WM_SYSCOMMAND:
         result = NC_HandleSysCommand( hwnd, wParam, lParam );
         break;

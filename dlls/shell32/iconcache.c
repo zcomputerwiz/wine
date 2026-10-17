@@ -368,6 +368,53 @@ static BOOL SIC_GetShellIconOverride(INT index, WCHAR *path, DWORD size, INT *ic
     return TRUE;
 }
 
+
+static BOOL SIC_GetModuleIconOverride(const WCHAR *sourcefile, INT index, WCHAR *override, DWORD size, INT *icon)
+{
+    const WCHAR *name = PathFindFileNameW(sourcefile);
+    WCHAR mod_name[64];
+    WCHAR theme_path[MAX_PATH], icon_pack[MAX_PATH], exp_pack[MAX_PATH], windir[MAX_PATH];
+    DWORD len = sizeof(theme_path);
+    const WCHAR *dot;
+
+    if (!name || !*name) return FALSE;
+    dot = wcsrchr(name, '.');
+    if (!dot || (wcsicmp(dot, L".cpl") && wcsicmp(dot, L".dll") && wcsicmp(dot, L".exe")))
+        return FALSE;
+
+    lstrcpynW(mod_name, name, min(ARRAY_SIZE(mod_name), (dot - name + 1)));
+
+    if (!RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes",
+                      L"CurrentTheme", RRF_RT_REG_SZ, NULL, theme_path, &len) && theme_path[0])
+    {
+        GetWindowsDirectoryW(windir, MAX_PATH);
+        if (GetPrivateProfileStringW(L"WineExplorer", L"IconPack", L"", icon_pack, MAX_PATH, theme_path) && icon_pack[0])
+        {
+            if (!wcsnicmp(icon_pack, L"%ResourceDir%", 13))
+                swprintf(exp_pack, MAX_PATH, L"%s\\Resources%s", windir, icon_pack + 13);
+            else
+                ExpandEnvironmentStringsW(icon_pack, exp_pack, MAX_PATH);
+
+            swprintf(override, size, L"%s\\xpres_%s.dll", exp_pack, mod_name);
+            if (GetFileAttributesW(override) != INVALID_FILE_ATTRIBUTES)
+            {
+                *icon = index;
+                return TRUE;
+            }
+        }
+    }
+
+    GetWindowsDirectoryW(windir, MAX_PATH);
+    swprintf(override, size, L"%s\\Resources\\Icons\\xpres_%s.dll", windir, mod_name);
+    if (GetFileAttributesW(override) != INVALID_FILE_ATTRIBUTES)
+    {
+        *icon = index;
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
 static BOOL SIC_IsShell32(const WCHAR *sourcefile)
 {
     return !wcsicmp(PathFindFileNameW(sourcefile), PathFindFileNameW(swShell32Name));
@@ -406,10 +453,21 @@ static INT SIC_ExtractIcons (const WCHAR *sourcefile, INT index, DWORD flags, HI
     unsigned int i;
     INT override_index;
 
-    if (!(SIC_IsShell32(sourcefile) && SIC_GetShellIconOverride(index, override, ARRAY_SIZE(override), &override_index) &&
-          SIC_ExtractAllSizes(override, override_index, hicons)) &&
-        !SIC_ExtractAllSizes(sourcefile, index, hicons))
+    if (SIC_IsShell32(sourcefile) && SIC_GetShellIconOverride(index, override, ARRAY_SIZE(override), &override_index))
+    {
+        if (SIC_ExtractAllSizes(override, override_index, hicons))
+            goto ok;
+    }
+    else if (SIC_GetModuleIconOverride(sourcefile, index, override, ARRAY_SIZE(override), &override_index))
+    {
+        if (SIC_ExtractAllSizes(override, override_index, hicons))
+            goto ok;
+    }
+
+    if (!SIC_ExtractAllSizes(sourcefile, index, hicons))
         return -1;
+
+ok:
 
     if (flags & GIL_FORSHORTCUT)
     {
@@ -479,9 +537,16 @@ static void SIC_ReloadShellIcons (BOOL replaced_only)
     {
         SIC_ENTRY *entry = DPA_GetPtr(sic_hdpa, n);
 
-        if (!SIC_IsShell32(entry->sSourceFile)) continue;
-        if (replaced_only && !SIC_GetShellIconOverride(entry->dwSourceIndex, override, ARRAY_SIZE(override), &override_index))
-            continue;
+        if (SIC_IsShell32(entry->sSourceFile))
+        {
+            if (replaced_only && !SIC_GetShellIconOverride(entry->dwSourceIndex, override, ARRAY_SIZE(override), &override_index))
+                continue;
+        }
+        else
+        {
+            if (replaced_only || !SIC_GetModuleIconOverride(entry->sSourceFile, entry->dwSourceIndex, override, ARRAY_SIZE(override), &override_index))
+                continue;
+        }
         if (SIC_ExtractIcons(entry->sSourceFile, entry->dwSourceIndex, entry->dwFlags, hicons) == -1) continue;
         for (i = 0; i < ARRAY_SIZE(shell_imagelists); i++)
         {

@@ -160,6 +160,7 @@ typedef struct
 
 extern int bitmap_info_size( const BITMAPINFO * info, WORD coloruse );
 extern BOOL get_icon_size( HICON handle, SIZE *size );
+void reset_scheme_cursors(void);
 
 extern struct user_api_hook *user_api;
 LRESULT WINAPI USER_DefDlgProc(HWND, UINT, WPARAM, LPARAM, BOOL);
