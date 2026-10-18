@@ -461,28 +461,6 @@ static struct d3d11_command_list *unsafe_impl_from_ID3D11CommandList(ID3D11Comma
     return impl_from_ID3D11CommandList(iface);
 }
 
-void d3d11_device_context_flush_pending_waits(struct d3d11_device_context *context)
-{
-    struct d3d11_context_fence_wait *wait, *next;
-
-    LIST_FOR_EACH_ENTRY_SAFE(wait, next, &context->pending_waits, struct d3d11_context_fence_wait, entry)
-    {
-        if (ID3D11Fence_GetCompletedValue(wait->fence) < wait->value)
-        {
-            HANDLE event = CreateEventW(NULL, FALSE, FALSE, NULL);
-            if (event)
-            {
-                if (SUCCEEDED(ID3D11Fence_SetEventOnCompletion(wait->fence, wait->value, event)))
-                    WaitForSingleObject(event, INFINITE);
-                CloseHandle(event);
-            }
-        }
-        list_remove(&wait->entry);
-        ID3D11Fence_Release(wait->fence);
-        free(wait);
-    }
-}
-
 void d3d11_device_context_flush_shared_resources(struct d3d11_device_context *context)
 {
     struct d3d_device *device = context->device;
@@ -551,14 +529,6 @@ void d3d11_device_context_flush_shared_resources(struct d3d11_device_context *co
 
 static void d3d11_device_context_cleanup(struct d3d11_device_context *context)
 {
-    struct d3d11_context_fence_wait *wait, *next;
-
-    LIST_FOR_EACH_ENTRY_SAFE(wait, next, &context->pending_waits, struct d3d11_context_fence_wait, entry)
-    {
-        list_remove(&wait->entry);
-        ID3D11Fence_Release(wait->fence);
-        free(wait);
-    }
     wined3d_private_store_cleanup(&context->private_store);
 }
 
@@ -1470,12 +1440,17 @@ static void STDMETHODCALLTYPE d3d11_device_context_CopyResource(ID3D11DeviceCont
 {
     struct d3d11_device_context *context = impl_from_ID3D11DeviceContext4(iface);
     struct wined3d_resource *wined3d_dst_resource, *wined3d_src_resource;
-    struct d3d_texture2d *src_tex = unsafe_impl_from_ID3D11Texture2D((ID3D11Texture2D *)src_resource);
-    struct d3d_texture2d *dst_tex = unsafe_impl_from_ID3D11Texture2D((ID3D11Texture2D *)dst_resource);
+    struct d3d_texture2d *src_tex = NULL, *dst_tex = NULL;
+    D3D11_RESOURCE_DIMENSION src_type, dst_type;
 
     TRACE("iface %p, dst_resource %p, src_resource %p.\n", iface, dst_resource, src_resource);
 
-    d3d11_device_context_flush_pending_waits(context);
+    ID3D11Resource_GetType(src_resource, &src_type);
+    ID3D11Resource_GetType(dst_resource, &dst_type);
+    if (src_type == D3D11_RESOURCE_DIMENSION_TEXTURE2D)
+        src_tex = unsafe_impl_from_ID3D11Texture2D((ID3D11Texture2D *)src_resource);
+    if (dst_type == D3D11_RESOURCE_DIMENSION_TEXTURE2D)
+        dst_tex = unsafe_impl_from_ID3D11Texture2D((ID3D11Texture2D *)dst_resource);
 
     if (src_tex && !src_tex->shared_memory && src_tex->dxgi_resource)
     {
@@ -3287,14 +3262,18 @@ static ULONG STDMETHODCALLTYPE d3d11_fence_AddRef(ID3D11Fence *iface)
     struct d3d11_fence *fence = impl_from_ID3D11Fence(iface);
     ULONG refcount = InterlockedIncrement(&fence->refcount);
 
+    if (refcount == 1)
+    {
+        InterlockedIncrement(&fence->private_refcount);
+        ID3D11Device5_AddRef(&fence->device->ID3D11Device5_iface);
+    }
     TRACE("%p increasing refcount to %lu.\n", fence, refcount);
     return refcount;
 }
 
-static ULONG STDMETHODCALLTYPE d3d11_fence_Release(ID3D11Fence *iface)
+static ULONG d3d11_fence_private_release(struct d3d11_fence *fence)
 {
-    struct d3d11_fence *fence = impl_from_ID3D11Fence(iface);
-    ULONG refcount = InterlockedDecrement(&fence->refcount);
+    ULONG refcount = InterlockedDecrement(&fence->private_refcount);
 
     TRACE("%p decreasing refcount to %lu.\n", fence, refcount);
 
@@ -3328,6 +3307,22 @@ static ULONG STDMETHODCALLTYPE d3d11_fence_Release(ID3D11Fence *iface)
         free(fence);
     }
 
+    return refcount;
+}
+
+static ULONG STDMETHODCALLTYPE d3d11_fence_Release(ID3D11Fence *iface)
+{
+    struct d3d11_fence *fence = impl_from_ID3D11Fence(iface);
+    ULONG refcount = InterlockedDecrement(&fence->refcount);
+
+    if (!refcount)
+    {
+        ID3D11Device5 *device = &fence->device->ID3D11Device5_iface;
+        d3d11_fence_private_release(fence);
+        /* Public ownership retains the device. CS commands own only private
+         * references, so their last release cannot destroy/join their own CS. */
+        ID3D11Device5_Release(device);
+    }
     return refcount;
 }
 
@@ -3508,7 +3503,7 @@ HRESULT d3d11_fence_create(struct d3d_device *device, UINT64 initial_value,
         return E_OUTOFMEMORY;
 
     object->ID3D11Fence_iface.lpVtbl = &d3d11_fence_vtbl;
-    object->refcount = 1;
+    object->private_refcount = 1;
     wined3d_private_store_init(&object->private_store);
     object->device = device;
     object->flags = flags;
@@ -3535,7 +3530,7 @@ HRESULT d3d11_fence_create(struct d3d_device *device, UINT64 initial_value,
     }
 
     hr = ID3D11Fence_QueryInterface(&object->ID3D11Fence_iface, iid, fence);
-    ID3D11Fence_Release(&object->ID3D11Fence_iface);
+    d3d11_fence_private_release(object);
     return hr;
 }
 
@@ -3573,7 +3568,7 @@ HRESULT d3d11_fence_open_shared(struct d3d_device *device, HANDLE handle,
     }
 
     object->ID3D11Fence_iface.lpVtbl = &d3d11_fence_vtbl;
-    object->refcount = 1;
+    object->private_refcount = 1;
     wined3d_private_store_init(&object->private_store);
     object->device = device;
     object->flags = D3D11_FENCE_FLAG_SHARED;
@@ -3587,7 +3582,7 @@ HRESULT d3d11_fence_open_shared(struct d3d_device *device, HANDLE handle,
         object->shared_event = OpenEventW(EVENT_ALL_ACCESS, FALSE, shared_data->event_name);
 
     hr = ID3D11Fence_QueryInterface(&object->ID3D11Fence_iface, iid, fence);
-    ID3D11Fence_Release(&object->ID3D11Fence_iface);
+    d3d11_fence_private_release(object);
     return hr;
 }
 
@@ -3600,25 +3595,19 @@ static inline LONG64 fence_exchange64(volatile LONG64 *dest, LONG64 val)
     return old;
 }
 
-static HRESULT STDMETHODCALLTYPE d3d11_device_context_Signal(ID3D11DeviceContext4 *iface,
-        ID3D11Fence *fence_iface, UINT64 value)
+struct d3d11_fence_command
 {
-    struct d3d11_device_context *context = impl_from_ID3D11DeviceContext4(iface);
     struct d3d11_fence *fence;
+    UINT64 value;
+    HANDLE event;
+};
+
+static void d3d11_fence_signal_complete(void *object, BOOL success)
+{
+    struct d3d11_fence_command *command = object;
+    struct d3d11_fence *fence = command->fence;
     struct d3d11_fence_waiter *waiter, *next;
-
-    TRACE("iface %p, fence %p, value %I64u.\n", iface, fence_iface, value);
-
-    if (!fence_iface)
-        return E_INVALIDARG;
-
-    fence = impl_from_ID3D11Fence(fence_iface);
-
-    d3d11_device_context_flush_pending_waits(context);
-
-    wined3d_device_context_flush(context->wined3d_context);
-
-    d3d11_device_context_flush_shared_resources(context);
+    UINT64 value = success ? command->value : ~(UINT64)0;
 
     if (fence->shared_data)
         fence_exchange64(&fence->shared_data->completed_value, (LONG64)value);
@@ -3639,33 +3628,103 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_context_Signal(ID3D11DeviceContext
 
     if (fence->shared_event)
         SetEvent(fence->shared_event);
+    d3d11_fence_private_release(fence);
+    free(command);
+}
 
-    return S_OK;
+static void d3d11_fence_wait_complete(void *object, BOOL success)
+{
+    struct d3d11_fence_command *command = object;
+
+    /* This blocks the CS, not the API caller. Every subsequent draw, dispatch,
+     * clear, query and copy in the queue is therefore behind the same barrier. */
+    WaitForSingleObject(command->event, INFINITE);
+    CloseHandle(command->event);
+    d3d11_fence_private_release(command->fence);
+    free(command);
+}
+
+static void d3d11_fence_command_destroy(struct d3d11_fence_command *command)
+{
+    struct d3d11_fence *fence = command->fence;
+    struct d3d11_fence_waiter *waiter, *next;
+
+    if (command->event)
+    {
+        EnterCriticalSection(&fence->cs);
+        LIST_FOR_EACH_ENTRY_SAFE(waiter, next, &fence->waiters, struct d3d11_fence_waiter, entry)
+        {
+            if (waiter->event != command->event)
+                continue;
+            list_remove(&waiter->entry);
+            free(waiter);
+        }
+        LeaveCriticalSection(&fence->cs);
+        CloseHandle(command->event);
+    }
+    d3d11_fence_private_release(fence);
+    free(command);
+}
+
+static HRESULT STDMETHODCALLTYPE d3d11_device_context_Signal(ID3D11DeviceContext4 *iface,
+        ID3D11Fence *fence_iface, UINT64 value)
+{
+    struct d3d11_device_context *context = impl_from_ID3D11DeviceContext4(iface);
+    struct d3d11_fence_command *command;
+    HRESULT hr;
+
+    if (!fence_iface || context->type != D3D11_DEVICE_CONTEXT_IMMEDIATE)
+        return E_INVALIDARG;
+    if (!(command = calloc(1, sizeof(*command))))
+        return E_OUTOFMEMORY;
+    command->fence = impl_from_ID3D11Fence(fence_iface);
+    InterlockedIncrement(&command->fence->private_refcount);
+    command->value = value;
+
+    /* The initial shared-image path still publishes through CPU readback.
+     * Completion itself is queued and waits for actual GL/Vulkan GPU work. */
+    d3d11_device_context_flush_shared_resources(context);
+    hr = wined3d_device_context_enqueue_fence(context->wined3d_context,
+            d3d11_fence_signal_complete, command, TRUE);
+    if (FAILED(hr))
+        d3d11_fence_command_destroy(command);
+    return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_device_context_Wait(ID3D11DeviceContext4 *iface,
         ID3D11Fence *fence_iface, UINT64 value)
 {
     struct d3d11_device_context *context = impl_from_ID3D11DeviceContext4(iface);
-    struct d3d11_context_fence_wait *wait;
+    struct d3d11_fence_command *command;
+    HRESULT hr;
 
     TRACE("iface %p, fence %p, value %I64u.\n", iface, fence_iface, value);
 
-    if (!fence_iface)
+    if (!fence_iface || context->type != D3D11_DEVICE_CONTEXT_IMMEDIATE)
         return E_INVALIDARG;
 
     if (ID3D11Fence_GetCompletedValue(fence_iface) >= value)
         return S_OK;
 
-    if (!(wait = malloc(sizeof(*wait))))
+    if (!(command = calloc(1, sizeof(*command))))
         return E_OUTOFMEMORY;
 
-    ID3D11Fence_AddRef(fence_iface);
-    wait->fence = fence_iface;
-    wait->value = value;
-    list_add_tail(&context->pending_waits, &wait->entry);
+    command->fence = impl_from_ID3D11Fence(fence_iface);
+    InterlockedIncrement(&command->fence->private_refcount);
+    command->event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (!command->event)
+    {
+        d3d11_fence_command_destroy(command);
+        return E_OUTOFMEMORY;
+    }
+    hr = ID3D11Fence_SetEventOnCompletion(fence_iface, value, command->event);
+    if (SUCCEEDED(hr))
+        hr = wined3d_device_context_enqueue_fence(context->wined3d_context,
+                d3d11_fence_wait_complete, command, FALSE);
+    if (FAILED(hr))
+        d3d11_fence_command_destroy(command);
 
-    return S_OK;
+    return hr;
 }
 
 static const struct ID3D11DeviceContext4Vtbl d3d11_device_context_vtbl =
@@ -4589,7 +4648,6 @@ static void d3d11_device_context_init(struct d3d11_device_context *context, stru
     context->device = device;
     ID3D11Device5_AddRef(&device->ID3D11Device5_iface);
 
-    list_init(&context->pending_waits);
     wined3d_private_store_init(&context->private_store);
 }
 

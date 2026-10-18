@@ -3293,6 +3293,12 @@ static void adapter_no3d_flush_context(struct wined3d_context *context)
     TRACE("context %p.\n", context);
 }
 
+static BOOL adapter_no3d_finish_context(struct wined3d_context *context)
+{
+    /* No GPU work is outstanding on the no-3D adapter. */
+    return TRUE;
+}
+
 static void adapter_no3d_draw_primitive(struct wined3d_device *device,
         const struct wined3d_state *state, const struct wined3d_draw_parameters *parameters)
 {
@@ -3347,6 +3353,7 @@ static const struct wined3d_adapter_ops wined3d_adapter_no3d_ops =
     .adapter_create_query = adapter_no3d_create_query,
     .adapter_destroy_query = adapter_no3d_destroy_query,
     .adapter_flush_context = adapter_no3d_flush_context,
+    .adapter_finish_context = adapter_no3d_finish_context,
     .adapter_draw_primitive = adapter_no3d_draw_primitive,
     .adapter_dispatch_compute = adapter_no3d_dispatch_compute,
     .adapter_clear_uav = adapter_no3d_clear_uav,

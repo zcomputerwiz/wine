@@ -119,6 +119,7 @@
 @ cdecl wined3d_device_context_draw_indirect(ptr ptr long long)
 @ cdecl wined3d_device_context_execute_command_list(ptr ptr long)
 @ cdecl wined3d_device_context_flush(ptr)
+@ cdecl wined3d_device_context_enqueue_fence(ptr ptr ptr long)
 @ cdecl wined3d_device_context_flush_mapped_buffer(ptr ptr)
 @ cdecl wined3d_device_context_generate_mipmaps(ptr ptr)
 @ cdecl wined3d_device_context_get_blend_state(ptr ptr ptr)
