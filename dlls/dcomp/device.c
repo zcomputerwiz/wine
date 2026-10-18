@@ -23,7 +23,9 @@
 #include <stdarg.h>
 #include <stdio.h>
 
+#define INITGUID
 #define COBJMACROS
+#include "initguid.h"
 #include "windef.h"
 #include "winbase.h"
 #include "wingdi.h"
