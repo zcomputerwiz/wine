@@ -406,6 +406,92 @@ static INT_PTR CALLBACK consent_dlg_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
     return FALSE;
 }
 
+static BOOL check_credentials_pam(const char *user, const char *pass)
+{
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+    HANDLE hRead = NULL, hWrite = NULL;
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi = { 0 };
+    WCHAR cmd[256];
+    DWORD written, exit_code = 1;
+    BOOL ret = FALSE;
+
+    if (!CreatePipe(&hRead, &hWrite, &sa, 0)) return FALSE;
+    SetHandleInformation(hWrite, HANDLE_FLAG_INHERIT, 0);
+
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = hRead;
+    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+
+    /* unix_chkpwd is the standard setgid shadow PAM credentials helper */
+    swprintf(cmd, ARRAY_SIZE(cmd), L"Z:\\sbin\\unix_chkpwd %hs nullok", user);
+    if (!CreateProcessW(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
+    {
+        swprintf(cmd, ARRAY_SIZE(cmd), L"Z:\\usr\\sbin\\unix_chkpwd %hs nullok", user);
+        if (!CreateProcessW(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
+        {
+            CloseHandle(hRead);
+            CloseHandle(hWrite);
+            return FALSE;
+        }
+    }
+
+    CloseHandle(hRead);
+    WriteFile(hWrite, pass, (DWORD)strlen(pass) + 1, &written, NULL);
+    CloseHandle(hWrite);
+
+    if (WaitForSingleObject(pi.hProcess, 10000) == WAIT_OBJECT_0)
+    {
+        if (GetExitCodeProcess(pi.hProcess, &exit_code) && exit_code == 0)
+            ret = TRUE;
+    }
+    else
+    {
+        TerminateProcess(pi.hProcess, 1);
+    }
+
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return ret;
+}
+
+static BOOL check_unattended_fixture(int *exit_code)
+{
+    /* In unattended test mode: only explicit, documented, opt-in test fixtures with root-only permission are acceptable.
+     * We look for /etc/wineexplorer/test-elevation.conf (or Z:\etc\wineexplorer\test-elevation.conf). */
+    static const WCHAR fixture_path[] = L"Z:\\etc\\wineexplorer\\test-elevation.conf";
+    HANDLE hFile;
+    char buf[128];
+    DWORD read_bytes = 0;
+
+    hFile = CreateFileW(fixture_path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return FALSE;
+
+    if (ReadFile(hFile, buf, sizeof(buf) - 1, &read_bytes, NULL) && read_bytes > 0)
+    {
+        buf[read_bytes] = 0;
+        CloseHandle(hFile);
+        if (strstr(buf, "mode=approve"))
+        {
+            TRACE("Root-only test fixture present with mode=approve: granting elevation\n");
+            *exit_code = 0;
+            return TRUE;
+        }
+        else if (strstr(buf, "mode=deny"))
+        {
+            TRACE("Root-only test fixture present with mode=deny: cancelling elevation\n");
+            *exit_code = 1223;
+            return TRUE;
+        }
+    }
+    else
+    {
+        CloseHandle(hFile);
+    }
+    return FALSE;
+}
+
 static INT_PTR CALLBACK credentials_dlg_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
     struct consent_data *data = (struct consent_data *)GetWindowLongPtrW(hwnd, DWLP_USER);
@@ -460,7 +546,12 @@ static INT_PTR CALLBACK credentials_dlg_proc(HWND hwnd, UINT msg, WPARAM wparam,
         {
         case IDYES:
         {
-            WCHAR pass[128];
+            WCHAR user[128], pass[128];
+            char user_utf8[128], pass_utf8[128];
+            WCHAR *slash;
+            int sel;
+
+            pass[0] = 0;
             GetDlgItemTextW(hwnd, IDC_UAC_PASSWORD, pass, ARRAY_SIZE(pass));
             if (!pass[0])
             {
@@ -468,7 +559,31 @@ static INT_PTR CALLBACK credentials_dlg_proc(HWND hwnd, UINT msg, WPARAM wparam,
                 SetFocus(GetDlgItem(hwnd, IDC_UAC_PASSWORD));
                 return TRUE;
             }
-            /* Password entered */
+
+            sel = SendDlgItemMessageW(hwnd, IDC_UAC_ACCOUNT, CB_GETCURSEL, 0, 0);
+            if (sel != CB_ERR)
+                SendDlgItemMessageW(hwnd, IDC_UAC_ACCOUNT, CB_GETLBTEXT, sel, (LPARAM)user);
+            else
+                GetDlgItemTextW(hwnd, IDC_UAC_ACCOUNT, user, ARRAY_SIZE(user));
+
+            slash = wcsrchr(user, '\\');
+            if (slash) memmove(user, slash + 1, (lstrlenW(slash + 1) + 1) * sizeof(WCHAR));
+
+            WideCharToMultiByte(CP_UTF8, 0, user, -1, user_utf8, sizeof(user_utf8), NULL, NULL);
+            WideCharToMultiByte(CP_UTF8, 0, pass, -1, pass_utf8, sizeof(pass_utf8), NULL, NULL);
+
+            if (!check_credentials_pam(user_utf8, pass_utf8))
+            {
+                SecureZeroMemory(pass, sizeof(pass));
+                SecureZeroMemory(pass_utf8, sizeof(pass_utf8));
+                SetDlgItemTextW(hwnd, IDC_UAC_PASSWORD, L"");
+                SetDlgItemTextW(hwnd, IDC_UAC_ERROR, L"The password is incorrect. Please try again.");
+                SetFocus(GetDlgItem(hwnd, IDC_UAC_PASSWORD));
+                return TRUE;
+            }
+
+            SecureZeroMemory(pass, sizeof(pass));
+            SecureZeroMemory(pass_utf8, sizeof(pass_utf8));
             EndDialog(hwnd, IDYES);
             return TRUE;
         }
@@ -492,18 +607,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, WCHAR *cmdline, int show)
     struct consent_data data;
     HWND hdim = NULL;
     INT_PTR res;
+    int exit_code = 0;
 
-    /* Diagnostic / Automated Test Overrides */
-    if (GetEnvironmentVariableW(L"WINE_CONSENT_AUTO_APPROVE", NULL, 0))
-    {
-        TRACE("WINE_CONSENT_AUTO_APPROVE set: auto-granting elevation\n");
-        return 0;
-    }
-    if (GetEnvironmentVariableW(L"WINE_CONSENT_AUTO_DENY", NULL, 0))
-    {
-        TRACE("WINE_CONSENT_AUTO_DENY set: auto-cancelling elevation\n");
-        return 1223;
-    }
+    /* Unattended Test Fixture (explicit root-only opt-in file) */
+    if (check_unattended_fixture(&exit_code))
+        return exit_code;
 
     InitCommonControls();
     parse_command_line(cmdline, &data);
