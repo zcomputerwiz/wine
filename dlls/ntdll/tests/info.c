@@ -2374,6 +2374,34 @@ static void test_query_process_handlecount(void)
     }
 }
 
+static void test_process_handle_table(void)
+{
+    ULONG handles[64];
+    ULONG return_length = 0xdeadbeef;
+    NTSTATUS status;
+
+    status = NtQueryInformationProcess( GetCurrentProcess(), ProcessHandleTable, handles, sizeof(handles), &return_length );
+    ok( status == STATUS_SUCCESS, "expected STATUS_SUCCESS, got %08lx\n", status );
+    ok( return_length != 0xdeadbeef, "expected return_length to be set\n" );
+}
+
+static void test_thread_page_priority(void)
+{
+    ULONG priority = 0;
+    ULONG return_length = 0xdeadbeef;
+    NTSTATUS status;
+
+    priority = 5;
+    status = NtSetInformationThread( GetCurrentThread(), ThreadPagePriority, &priority, sizeof(priority) );
+    ok( status == STATUS_SUCCESS, "expected STATUS_SUCCESS, got %08lx\n", status );
+
+    priority = 0;
+    status = NtQueryInformationThread( GetCurrentThread(), ThreadPagePriority, &priority, sizeof(priority), &return_length );
+    ok( status == STATUS_SUCCESS, "expected STATUS_SUCCESS, got %08lx\n", status );
+    ok( return_length == sizeof(ULONG), "expected sizeof(ULONG), got %ld\n", return_length );
+    ok( priority == 5, "expected priority 5, got %ld\n", priority );
+}
+
 static void test_query_process_image_file_name(void)
 {
     static const WCHAR deviceW[] = {'\\','D','e','v','i','c','e','\\'};
@@ -4758,4 +4786,6 @@ START_TEST(info)
     test_process_id();
     test_processor_idle_cycle_time();
     test_process_parameters_flags(argc, argv);
+    test_process_handle_table();
+    test_thread_page_priority();
 }

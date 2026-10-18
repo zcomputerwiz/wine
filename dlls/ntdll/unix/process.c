@@ -1386,7 +1386,7 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
         break;
 
     case ProcessHandleTable:
-        FIXME( "ProcessHandleTable (%p,%p,0x%08x,%p) stub\n", handle, info, size, ret_len );
+        TRACE( "ProcessHandleTable (%p,%p,0x%08x,%p)\n", handle, info, size, ret_len );
         len = 0;
         break;
 
