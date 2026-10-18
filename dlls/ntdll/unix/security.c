@@ -345,13 +345,13 @@ NTSTATUS WINAPI NtQueryInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS c
         0,    /* TokenCapabilities */
         sizeof(TOKEN_APPCONTAINER_INFORMATION) + sizeof(SID), /* TokenAppContainerSid */
         0,    /* TokenAppContainerNumber */
-        0,    /* TokenUserClaimAttributes*/
+        sizeof(CLAIM_SECURITY_ATTRIBUTES_INFORMATION),    /* TokenUserClaimAttributes*/
         0,    /* TokenDeviceClaimAttributes */
         0,    /* TokenRestrictedUserClaimAttributes */
         0,    /* TokenRestrictedDeviceClaimAttributes */
         0,    /* TokenDeviceGroups */
         0,    /* TokenRestrictedDeviceGroups */
-        0,    /* TokenSecurityAttributes */
+        sizeof(CLAIM_SECURITY_ATTRIBUTES_INFORMATION),    /* TokenSecurityAttributes */
         sizeof(DWORD), /* TokenIsRestricted */
         0,    /* TokenProcessTrustLevel */
         0,    /* TokenPrivateNameSpace  */
@@ -703,6 +703,18 @@ NTSTATUS WINAPI NtQueryInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS c
         }
         SERVER_END_REQ;
         break;
+
+    case TokenUserClaimAttributes:
+    case TokenSecurityAttributes:
+    {
+        CLAIM_SECURITY_ATTRIBUTES_INFORMATION *claims = info;
+        claims->Version = 1;
+        claims->Reserved = 0;
+        claims->AttributeCount = 0;
+        claims->Attribute.pAttributeV1 = NULL;
+        if (retlen) *retlen = sizeof(*claims);
+        break;
+    }
 
     default:
         ERR( "Unhandled token information class %s\n", debugstr_TokenInformationClass(class) );

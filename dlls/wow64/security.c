@@ -571,6 +571,26 @@ NTSTATUS WINAPI wow64_NtQueryInformationToken( UINT *args )
         return status;
     }
 
+    case TokenUserClaimAttributes:
+    case TokenSecurityAttributes:
+    {
+        struct
+        {
+            USHORT Version;
+            USHORT Reserved;
+            ULONG  AttributeCount;
+            ULONG  pAttributeV1;
+        } *claims32 = info;
+
+        if (retlen) *retlen = sizeof(*claims32);
+        if (len < sizeof(*claims32)) return STATUS_BUFFER_TOO_SMALL;
+        claims32->Version = 1;
+        claims32->Reserved = 0;
+        claims32->AttributeCount = 0;
+        claims32->pAttributeV1 = 0;
+        return STATUS_SUCCESS;
+    }
+
     default:
         FIXME( "unsupported class %u\n", class );
         return STATUS_INVALID_INFO_CLASS;
