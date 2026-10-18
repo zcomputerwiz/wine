@@ -31,6 +31,10 @@
 
 #include "dxgi1_6.h"
 #include "d3d11_4.h"
+#include "winternl.h"
+#include "ntstatus.h"
+#include "wine/d3dkmt_desc.h"
+#include "ntgdi.h"
 #ifdef D3D11_INIT_GUID
 #include "initguid.h"
 #endif
@@ -672,5 +676,46 @@ struct dxgi_device_layer
 HRESULT WINAPI DXGID3D10CreateDevice(HMODULE d3d10core, IDXGIFactory *factory, IDXGIAdapter *adapter,
         unsigned int flags, const D3D_FEATURE_LEVEL *feature_levels, unsigned int level_count, void **device);
 HRESULT WINAPI DXGID3D10RegisterLayers(const struct dxgi_device_layer *layers, UINT layer_count);
+
+/* ID3D11Fence */
+struct d3d11_fence_waiter
+{
+    struct list entry;
+    UINT64 value;
+    HANDLE event;
+};
+
+struct d3d11_fence_shared_data
+{
+    volatile LONG64 completed_value;
+    WCHAR event_name[64];
+};
+
+struct d3d11_fence
+{
+    ID3D11Fence ID3D11Fence_iface;
+    LONG refcount;
+    struct wined3d_private_store private_store;
+    struct d3d_device *device;
+    D3D11_FENCE_FLAG flags;
+    volatile LONG64 completed_value;
+    CRITICAL_SECTION cs;
+    struct list waiters;
+
+    HANDLE shared_mapping;
+    struct d3d11_fence_shared_data *shared_data;
+    HANDLE shared_event;
+    HANDLE wait_register;
+};
+
+static inline struct d3d11_fence *impl_from_ID3D11Fence(ID3D11Fence *iface)
+{
+    return CONTAINING_RECORD(iface, struct d3d11_fence, ID3D11Fence_iface);
+}
+
+HRESULT d3d11_fence_create(struct d3d_device *device, UINT64 initial_value,
+        D3D11_FENCE_FLAG flags, REFIID iid, void **fence);
+HRESULT d3d11_fence_open_shared(struct d3d_device *device, HANDLE handle,
+        REFIID iid, void **fence);
 
 #endif /* __WINE_D3D11_PRIVATE_H */
