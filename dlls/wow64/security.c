@@ -204,11 +204,27 @@ NTSTATUS WINAPI wow64_NtCreateLowBoxToken( UINT *args )
     ULONG handle_count = get_ulong( &args );
     ULONG *handles32 = get_ptr( &args );
 
-    FIXME( "%p %p %lx %p %p %lu %p %lu %p: stub\n",
-           handle_ptr, token, access, attr32, sid, count, capabilities32, handle_count, handles32 );
+    struct object_attr64 attr;
+    SID_AND_ATTRIBUTES *capabilities = NULL;
+    HANDLE handle = 0;
+    NTSTATUS status;
+
+    if (capabilities32 && count)
+    {
+        ULONG i;
+        capabilities = Wow64AllocateTemp( count * sizeof(*capabilities) );
+        for (i = 0; i < count; i++)
+        {
+            capabilities[i].Sid = ULongToPtr( capabilities32[i].Sid );
+            capabilities[i].Attributes = capabilities32[i].Attributes;
+        }
+    }
 
     *handle_ptr = 0;
-    return STATUS_SUCCESS;
+    status = NtCreateLowBoxToken( &handle, token, access, objattr_32to64( &attr, attr32 ),
+                                  sid, count, capabilities, 0, NULL );
+    put_handle( handle_ptr, handle );
+    return status;
 }
 
 
@@ -436,6 +452,8 @@ NTSTATUS WINAPI wow64_NtQueryInformationToken( UINT *args )
     case TokenVirtualizationEnabled:  /* ULONG */
     case TokenUIAccess:  /* ULONG */
     case TokenIsAppContainer:  /* ULONG */
+    case TokenIsRestricted:    /* ULONG */
+    case TokenHasRestrictions: /* ULONG */
         /* nothing to map */
         return NtQueryInformationToken( handle, class, info, len, retlen );
 
@@ -474,6 +492,13 @@ NTSTATUS WINAPI wow64_NtQueryInformationToken( UINT *args )
         status = NtQueryInformationToken( handle, class, &buffer, sizeof(buffer), &ret_size );
         if (status) return status;
         sid = owner->Owner;
+        if (!sid)
+        {
+            if (len >= sizeof(*owner32)) owner32->Owner = 0;
+            else status = STATUS_BUFFER_TOO_SMALL;
+            if (retlen) *retlen = sizeof(*owner32);
+            return status;
+        }
         sid_len = offsetof( SID, SubAuthority[sid->SubAuthorityCount] );
         if (len >= sizeof(*owner32) + sid_len)
         {
@@ -487,6 +512,7 @@ NTSTATUS WINAPI wow64_NtQueryInformationToken( UINT *args )
 
     case TokenGroups:  /* TOKEN_GROUPS */
     case TokenLogonSid:   /* TOKEN_GROUPS */
+    case TokenRestrictedSids: /* TOKEN_GROUPS */
     {
         TOKEN_GROUPS32 *groups32 = info;
         TOKEN_GROUPS *groups;

@@ -236,11 +236,13 @@ DECL_HANDLER(get_token_privileges);
 DECL_HANDLER(check_token_privileges);
 DECL_HANDLER(duplicate_token);
 DECL_HANDLER(filter_token);
+DECL_HANDLER(create_lowbox_token);
 DECL_HANDLER(access_check);
 DECL_HANDLER(get_token_sid);
 DECL_HANDLER(get_token_groups);
 DECL_HANDLER(get_token_default_dacl);
 DECL_HANDLER(set_token_default_dacl);
+DECL_HANDLER(set_token_integrity_level);
 DECL_HANDLER(set_security_object);
 DECL_HANDLER(get_security_object);
 DECL_HANDLER(get_system_handles);
@@ -549,11 +551,13 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_check_token_privileges,
     (req_handler)req_duplicate_token,
     (req_handler)req_filter_token,
+    (req_handler)req_create_lowbox_token,
     (req_handler)req_access_check,
     (req_handler)req_get_token_sid,
     (req_handler)req_get_token_groups,
     (req_handler)req_get_token_default_dacl,
     (req_handler)req_set_token_default_dacl,
+    (req_handler)req_set_token_integrity_level,
     (req_handler)req_set_security_object,
     (req_handler)req_get_security_object,
     (req_handler)req_get_system_handles,
@@ -1991,9 +1995,16 @@ C_ASSERT( sizeof(struct duplicate_token_reply) == 16 );
 C_ASSERT( offsetof(struct filter_token_request, handle) == 12 );
 C_ASSERT( offsetof(struct filter_token_request, flags) == 16 );
 C_ASSERT( offsetof(struct filter_token_request, privileges_size) == 20 );
-C_ASSERT( sizeof(struct filter_token_request) == 24 );
+C_ASSERT( offsetof(struct filter_token_request, disable_sids_size) == 24 );
+C_ASSERT( sizeof(struct filter_token_request) == 32 );
 C_ASSERT( offsetof(struct filter_token_reply, new_handle) == 8 );
 C_ASSERT( sizeof(struct filter_token_reply) == 16 );
+C_ASSERT( offsetof(struct create_lowbox_token_request, handle) == 12 );
+C_ASSERT( offsetof(struct create_lowbox_token_request, access) == 16 );
+C_ASSERT( offsetof(struct create_lowbox_token_request, package_sid_size) == 20 );
+C_ASSERT( sizeof(struct create_lowbox_token_request) == 24 );
+C_ASSERT( offsetof(struct create_lowbox_token_reply, token_handle) == 8 );
+C_ASSERT( sizeof(struct create_lowbox_token_reply) == 16 );
 C_ASSERT( offsetof(struct access_check_request, handle) == 12 );
 C_ASSERT( offsetof(struct access_check_request, desired_access) == 16 );
 C_ASSERT( offsetof(struct access_check_request, mapping) == 20 );
@@ -2009,6 +2020,7 @@ C_ASSERT( offsetof(struct get_token_sid_reply, sid_len) == 8 );
 C_ASSERT( sizeof(struct get_token_sid_reply) == 16 );
 C_ASSERT( offsetof(struct get_token_groups_request, handle) == 12 );
 C_ASSERT( offsetof(struct get_token_groups_request, attr_mask) == 16 );
+C_ASSERT( offsetof(struct get_token_groups_request, which_groups) == 20 );
 C_ASSERT( sizeof(struct get_token_groups_request) == 24 );
 C_ASSERT( offsetof(struct get_token_groups_reply, attr_len) == 8 );
 C_ASSERT( offsetof(struct get_token_groups_reply, sid_len) == 12 );
@@ -2019,6 +2031,9 @@ C_ASSERT( offsetof(struct get_token_default_dacl_reply, acl_len) == 8 );
 C_ASSERT( sizeof(struct get_token_default_dacl_reply) == 16 );
 C_ASSERT( offsetof(struct set_token_default_dacl_request, handle) == 12 );
 C_ASSERT( sizeof(struct set_token_default_dacl_request) == 16 );
+C_ASSERT( offsetof(struct set_token_integrity_level_request, handle) == 12 );
+C_ASSERT( offsetof(struct set_token_integrity_level_request, integrity_rid) == 16 );
+C_ASSERT( sizeof(struct set_token_integrity_level_request) == 24 );
 C_ASSERT( offsetof(struct set_security_object_request, handle) == 12 );
 C_ASSERT( offsetof(struct set_security_object_request, security_info) == 16 );
 C_ASSERT( sizeof(struct set_security_object_request) == 24 );
@@ -2165,7 +2180,10 @@ C_ASSERT( offsetof(struct get_token_info_reply, elevation_type) == 36 );
 C_ASSERT( offsetof(struct get_token_info_reply, is_elevated) == 40 );
 C_ASSERT( offsetof(struct get_token_info_reply, group_count) == 44 );
 C_ASSERT( offsetof(struct get_token_info_reply, privilege_count) == 48 );
-C_ASSERT( sizeof(struct get_token_info_reply) == 56 );
+C_ASSERT( offsetof(struct get_token_info_reply, integrity_rid) == 52 );
+C_ASSERT( offsetof(struct get_token_info_reply, is_app_container) == 56 );
+C_ASSERT( offsetof(struct get_token_info_reply, is_restricted) == 60 );
+C_ASSERT( sizeof(struct get_token_info_reply) == 64 );
 C_ASSERT( offsetof(struct create_linked_token_request, handle) == 12 );
 C_ASSERT( sizeof(struct create_linked_token_request) == 16 );
 C_ASSERT( offsetof(struct create_linked_token_reply, linked) == 8 );
