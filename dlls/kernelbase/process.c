@@ -27,6 +27,8 @@
 #include "winnls.h"
 #include "wincontypes.h"
 #include "winternl.h"
+#include "winreg.h"
+#include "winuser.h"
 #include "processsnapshot.h"
 
 #include "kernelbase.h"
@@ -502,6 +504,64 @@ done:
     return ret;
 }
 
+static BOOL is_elevation_required( HANDLE token, const WCHAR *filename )
+{
+    ACTIVATION_CONTEXT_RUN_LEVEL_INFORMATION run_level;
+    TOKEN_ELEVATION_TYPE elev_type;
+    HANDLE token_to_check;
+    ACTCTXW actctx_req;
+    HANDLE actctx;
+    HKEY hkey;
+    DWORD size, type, bytes;
+    WCHAR helper[MAX_PATH];
+    BOOL ret = FALSE;
+
+    if (!filename || !filename[0]) return FALSE;
+
+    /* If no elevation helper is configured in HKLM\Software\Wine\Elevation\Helper, keep stock behavior */
+    if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"Software\\Wine\\Elevation", 0, KEY_READ, &hkey ) != ERROR_SUCCESS)
+        return FALSE;
+
+    bytes = sizeof(helper);
+    if (RegQueryValueExW( hkey, L"Helper", NULL, &type, (BYTE *)helper, &bytes ) != ERROR_SUCCESS ||
+        bytes <= sizeof(WCHAR) || !helper[0])
+    {
+        RegCloseKey( hkey );
+        return FALSE;
+    }
+    RegCloseKey( hkey );
+
+    /* Determine token elevation type */
+    token_to_check = token ? token : GetCurrentThreadEffectiveToken();
+    if (!GetTokenInformation( token_to_check, TokenElevationType, &elev_type, sizeof(elev_type), &size ))
+        return FALSE;
+
+    /* An already elevated (Full) token satisfies all elevation requirements */
+    if (elev_type == TokenElevationTypeFull)
+        return FALSE;
+
+    /* Check target image manifest for requested execution level */
+    memset( &actctx_req, 0, sizeof(actctx_req) );
+    actctx_req.cbSize = sizeof(actctx_req);
+    actctx_req.dwFlags = ACTCTX_FLAG_RESOURCE_NAME_VALID;
+    actctx_req.lpSource = filename;
+    actctx_req.lpResourceName = (LPCWSTR)(ULONG_PTR)1;
+
+    actctx = CreateActCtxW( &actctx_req );
+    if (actctx == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    if (QueryActCtxW( 0, actctx, NULL, RunlevelInformationInActivationContext, &run_level, sizeof(run_level), NULL ))
+    {
+        if (run_level.RunLevel == ACTCTX_RUN_LEVEL_REQUIRE_ADMIN)
+            ret = TRUE;
+        else if (run_level.RunLevel == ACTCTX_RUN_LEVEL_HIGHEST_AVAILABLE && elev_type == TokenElevationTypeLimited)
+            ret = TRUE;
+    }
+    ReleaseActCtx( actctx );
+    return ret;
+}
+
 /**********************************************************************
  *           CreateProcessInternalW   (kernelbase.@)
  */
@@ -565,6 +625,13 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
     if (!(params = create_process_params( app_name, tidy_cmdline, cur_dir, env, flags, startup_info )))
     {
         status = STATUS_NO_MEMORY;
+        goto done;
+    }
+
+    if (is_elevation_required( token, params->ImagePathName.Buffer ))
+    {
+        TRACE( "Elevation required for %s\n", debugstr_w(params->ImagePathName.Buffer) );
+        status = STATUS_ELEVATION_REQUIRED;
         goto done;
     }
 
