@@ -349,11 +349,26 @@ static BOOL run_elevation_helper(const WCHAR *helper, HWND hwnd, const WCHAR *cm
 
     if (ok)
     {
-        WaitForSingleObject(pi.hProcess, INFINITE);
-        GetExitCodeProcess(pi.hProcess, &exit_code);
+        DWORD wait_res = WaitForSingleObject(pi.hProcess, 30000);
+        if (wait_res == WAIT_TIMEOUT)
+        {
+            WARN("elevation helper timed out after 30 seconds; terminating\n");
+            TerminateProcess(pi.hProcess, 1223);
+            exit_code = 1223;
+        }
+        else if (wait_res == WAIT_OBJECT_0)
+        {
+            GetExitCodeProcess(pi.hProcess, &exit_code);
+            TRACE("elevation helper finished with exit code %lu\n", exit_code);
+        }
+        else
+        {
+            WARN("WaitForSingleObject on elevation helper failed: %lu\n", GetLastError());
+            TerminateProcess(pi.hProcess, 1223);
+            exit_code = 1223;
+        }
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
-        TRACE("elevation helper finished with exit code %lu\n", exit_code);
     }
     else
     {
