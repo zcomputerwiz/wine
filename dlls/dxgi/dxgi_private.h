@@ -235,6 +235,14 @@ struct dxgi_resource
     D3DKMT_HANDLE kmt_keyed_mutex;
     D3DKMT_HANDLE kmt_global;
     UINT misc_flags;
+
+    /* Shared backing storage */
+    HANDLE shared_mapping;
+    void *shared_memory;
+    DWORD shared_memory_size;
+    DWORD shared_pitch;
+    DWORD shared_pid;
+    DWORD shared_seq;
 };
 
 HRESULT dxgi_resource_init(struct dxgi_resource *resource, IDXGIDevice *device,

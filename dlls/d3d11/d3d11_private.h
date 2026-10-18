@@ -147,6 +147,15 @@ struct d3d_texture2d
     struct wined3d_swapchain *swapchain;
     D3D11_TEXTURE2D_DESC desc;
     ID3D11Device5 *device;
+
+    /* Shared backing storage */
+    HANDLE shared_mapping;
+    void *shared_memory;
+    DWORD shared_memory_size;
+    DWORD shared_pitch;
+    BOOL is_shared;
+    BOOL modified;
+    struct list entry;
 };
 
 static inline struct d3d_texture2d *impl_from_ID3D11Texture2D(ID3D11Texture2D *iface)
@@ -554,6 +563,13 @@ struct d3d_device_context_state
     ID3D11Device5 *device;
 };
 
+struct d3d11_context_fence_wait
+{
+    struct list entry;
+    ID3D11Fence *fence;
+    UINT64 value;
+};
+
 /* ID3D11DeviceContext */
 struct d3d11_device_context
 {
@@ -568,6 +584,7 @@ struct d3d11_device_context
     struct d3d_device *device;
 
     struct wined3d_private_store private_store;
+    struct list pending_waits;
 };
 
 /* ID3D11Device, ID3D10Device1 */
@@ -598,7 +615,12 @@ struct d3d_device
     struct d3d_device_context_state **context_states;
     SIZE_T context_states_size;
     SIZE_T context_state_count;
+
+    struct list shared_textures;
 };
+
+void d3d11_device_context_flush_pending_waits(struct d3d11_device_context *context);
+void d3d11_device_context_flush_shared_resources(struct d3d11_device_context *context);
 
 struct d3d11_command_list
 {
