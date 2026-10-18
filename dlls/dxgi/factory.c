@@ -387,13 +387,115 @@ static void STDMETHODCALLTYPE dxgi_factory_UnregisterOcclusionStatus(IWineDXGIFa
     FIXME("iface %p, cookie %#lx stub!\n", iface, cookie);
 }
 
+static LRESULT CALLBACK dcomp_swapchain_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    switch (msg)
+    {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_NCHITTEST:
+            return HTTRANSPARENT;
+        case WM_CLOSE:
+            DestroyWindow(hwnd);
+            return 0;
+        case WM_PAINT:
+        {
+            PAINTSTRUCT ps;
+            BeginPaint(hwnd, &ps);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        case WM_WINE_DCOMP_SET_TARGET:
+        {
+            HWND target_hwnd = (HWND)lparam;
+            IDXGISwapChain4 *iface = (IDXGISwapChain4 *)GetPropW(hwnd, L"__wine_dcomp_swapchain");
+            if (iface && target_hwnd)
+            {
+                struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
+                TRACE("DComp: binding swapchain %p to target_hwnd %p.\n", swapchain, target_hwnd);
+                wined3d_swapchain_set_window(swapchain->wined3d_swapchain, target_hwnd);
+                swapchain->target_hwnd = target_hwnd;
+            }
+            return 0;
+        }
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+static BOOL dcomp_register_window_class(void)
+{
+    static BOOL registered;
+    WNDCLASSW wc;
+
+    if (registered)
+        return TRUE;
+
+    memset(&wc, 0, sizeof(wc));
+    wc.lpfnWndProc = dcomp_swapchain_wndproc;
+    wc.style = CS_OWNDC;
+    wc.lpszClassName = L"WineDCompSwapchain";
+    wc.hInstance = GetModuleHandleW(NULL);
+
+    if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+    {
+        ERR("Failed to register WineDCompSwapchain class, error %lu.\n", GetLastError());
+        return FALSE;
+    }
+
+    registered = TRUE;
+    return TRUE;
+}
+
 static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWineDXGIFactory *iface,
         IUnknown *device, const DXGI_SWAP_CHAIN_DESC1 *desc, IDXGIOutput *output, IDXGISwapChain1 **swapchain)
 {
-    FIXME("iface %p, device %p, desc %p, output %p, swapchain %p stub!\n",
+    WCHAR prop_name[64];
+    HWND window;
+    HRESULT hr;
+
+    TRACE("iface %p, device %p, desc %p, output %p, swapchain %p.\n",
             iface, device, desc, output, swapchain);
 
-    return E_NOTIMPL;
+    if (!device || !desc || !swapchain)
+    {
+        WARN("Invalid pointer.\n");
+        return DXGI_ERROR_INVALID_CALL;
+    }
+
+    if (!dcomp_register_window_class())
+        return E_FAIL;
+
+    window = CreateWindowExW(WS_EX_NOPARENTNOTIFY,
+            L"WineDCompSwapchain", L"DComp Swapchain",
+            WS_CHILD, 0, 0, desc->Width, desc->Height,
+            GetDesktopWindow(), NULL, GetModuleHandleW(NULL), NULL);
+    if (!window)
+    {
+        ERR("Failed to create composition window, error %lu.\n", GetLastError());
+        return E_FAIL;
+    }
+
+    hr = dxgi_factory_CreateSwapChainForHwnd(iface, device, window,
+            desc, NULL, output, swapchain);
+    if (SUCCEEDED(hr))
+    {
+        struct d3d11_swapchain *d3d11_sc = d3d11_swapchain_from_IDXGISwapChain4((IDXGISwapChain4 *)*swapchain);
+        d3d11_sc->comp_wnd = window;
+
+        swprintf(prop_name, ARRAY_SIZE(prop_name),
+                WINE_DCOMP_WND_PROP_FMT, GetCurrentProcessId(), (UINT_PTR)*swapchain);
+        SetPropW(GetDesktopWindow(), prop_name, (HANDLE)window);
+        SetPropW(window, L"__wine_dcomp_swapchain", (HANDLE)*swapchain);
+        TRACE("Created composition window %p (%ux%u) for swapchain %p.\n",
+                window, desc->Width, desc->Height, *swapchain);
+    }
+    else
+    {
+        ERR("CreateSwapChainForHwnd failed, hr %#lx.\n", hr);
+        DestroyWindow(window);
+    }
+
+    return hr;
 }
 
 static UINT STDMETHODCALLTYPE dxgi_factory_GetCreationFlags(IWineDXGIFactory *iface)

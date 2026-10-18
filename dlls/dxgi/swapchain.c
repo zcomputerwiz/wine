@@ -202,11 +202,6 @@ static HWND d3d11_swapchain_get_hwnd(struct d3d11_swapchain *swapchain)
     return wined3d_desc.device_window;
 }
 
-static inline struct d3d11_swapchain *d3d11_swapchain_from_IDXGISwapChain4(IDXGISwapChain4 *iface)
-{
-    return CONTAINING_RECORD(iface, struct d3d11_swapchain, IDXGISwapChain4_iface);
-}
-
 /* IUnknown methods */
 
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_QueryInterface(IDXGISwapChain4 *iface, REFIID riid, void **object)
@@ -256,6 +251,15 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
     if (!refcount)
     {
         IWineDXGIDevice *device = swapchain->device;
+        if (swapchain->comp_wnd)
+        {
+            WCHAR prop_name[64];
+            swprintf(prop_name, ARRAY_SIZE(prop_name),
+                    WINE_DCOMP_WND_PROP_FMT, GetCurrentProcessId(), (UINT_PTR)&swapchain->IDXGISwapChain4_iface);
+            RemovePropW(GetDesktopWindow(), prop_name);
+            RemovePropW(swapchain->comp_wnd, L"__wine_dcomp_swapchain");
+            DestroyWindow(swapchain->comp_wnd);
+        }
         if (swapchain->target)
         {
             WARN("Releasing fullscreen swapchain.\n");
@@ -345,7 +349,8 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
         return S_OK;
     }
 
-    if (SUCCEEDED(hr = wined3d_swapchain_present(swapchain->wined3d_swapchain, NULL, NULL, NULL, sync_interval, 0)))
+    if (SUCCEEDED(hr = wined3d_swapchain_present(swapchain->wined3d_swapchain, NULL, NULL,
+            swapchain->target_hwnd, sync_interval, 0)))
         InterlockedIncrement(&swapchain->present_count);
     return hr;
 }

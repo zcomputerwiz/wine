@@ -39,6 +39,7 @@
 #endif
 #include "wine/wined3d.h"
 #include "wine/winedxgi.h"
+#include "wine/dcomp_layer.h"
 
 enum dxgi_frame_latency
 {
@@ -186,7 +187,14 @@ struct d3d11_swapchain
     IDXGIOutput *target;
     LONG present_count;
     LONG in_set_fullscreen_state;
+    HWND comp_wnd;
+    HWND target_hwnd;
 };
+
+static inline struct d3d11_swapchain *d3d11_swapchain_from_IDXGISwapChain4(IDXGISwapChain4 *iface)
+{
+    return CONTAINING_RECORD(iface, struct d3d11_swapchain, IDXGISwapChain4_iface);
+}
 
 HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_device *device,
         struct wined3d_swapchain_desc *desc, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *fullscreen_desc);
