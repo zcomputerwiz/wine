@@ -32,7 +32,11 @@
 
 #include "dxgi1_6.h"
 #include "d3d10_1.h"
+#include "d3d11_4.h"
 #include "d3d12.h"
+#include "ntstatus.h"
+#include "wine/d3dkmt_desc.h"
+#include "ntgdi.h"
 #ifdef DXGI_INIT_GUID
 #include "initguid.h"
 #endif
@@ -210,6 +214,7 @@ struct dxgi_resource
 {
     IDXGISurface2 IDXGISurface2_iface;
     IDXGIResource1 IDXGIResource1_iface;
+    IDXGIKeyedMutex IDXGIKeyedMutex_iface;
     IUnknown IUnknown_iface;
     IUnknown *outer_unknown;
     LONG refcount;
@@ -219,6 +224,17 @@ struct dxgi_resource
     struct wined3d_resource *wined3d_resource;
     unsigned int subresource_idx;
     HDC dc;
+
+    /* Keyed mutex and sharing state */
+    BOOL has_keyed_mutex;
+    BOOL keyed_mutex_owned;
+    UINT64 keyed_mutex_key;
+    CRITICAL_SECTION keyed_mutex_cs;
+    CONDITION_VARIABLE keyed_mutex_cv;
+    D3DKMT_HANDLE kmt_resource;
+    D3DKMT_HANDLE kmt_keyed_mutex;
+    D3DKMT_HANDLE kmt_global;
+    UINT misc_flags;
 };
 
 HRESULT dxgi_resource_init(struct dxgi_resource *resource, IDXGIDevice *device,

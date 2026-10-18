@@ -941,7 +941,7 @@ NTSTATUS WINAPI NtGdiDdDDIShareObjects( UINT count, const D3DKMT_HANDLE *handles
         else if (object->type == D3DKMT_SYNC) sync = object;
         else goto failed;
     }
-    else if (count == 3)
+    else if (count == 2 || count == 3)
     {
         if (!(object = get_d3dkmt_object( handles[0], -1 )) || !object->shared) goto failed;
         if (object->type != D3DKMT_RESOURCE) goto failed;
@@ -951,9 +951,12 @@ NTSTATUS WINAPI NtGdiDdDDIShareObjects( UINT count, const D3DKMT_HANDLE *handles
         if (object->type != D3DKMT_MUTEX) goto failed;
         mutex = object;
 
-        if (!(object = get_d3dkmt_object( handles[2], -1 )) || !object->shared) goto failed;
-        if (object->type != D3DKMT_SYNC) goto failed;
-        sync = object;
+        if (count == 3)
+        {
+            if (!(object = get_d3dkmt_object( handles[2], -1 )) || !object->shared) goto failed;
+            if (object->type != D3DKMT_SYNC) goto failed;
+            sync = object;
+        }
     }
     else goto failed;
 
@@ -989,7 +992,7 @@ NTSTATUS WINAPI NtGdiDdDDICreateAllocation2( D3DKMT_CREATEALLOCATION *params )
 {
     D3DKMT_CREATESTANDARDALLOCATION *standard;
     struct d3dkmt_resource *resource = NULL;
-    D3DDDI_ALLOCATIONINFO *alloc_info;
+    D3DDDI_ALLOCATIONINFO *alloc_info = NULL;
     struct d3dkmt_object *allocation;
     struct d3dkmt_device *device;
     NTSTATUS status;
@@ -997,19 +1000,21 @@ NTSTATUS WINAPI NtGdiDdDDICreateAllocation2( D3DKMT_CREATEALLOCATION *params )
     FIXME( "params %p semi-stub!\n", params );
 
     if (!params) return STATUS_INVALID_PARAMETER;
-    if (!(device = get_d3dkmt_object( params->hDevice, D3DKMT_DEVICE ))) return STATUS_INVALID_PARAMETER;
+    if (params->hDevice && !(device = get_d3dkmt_object( params->hDevice, D3DKMT_DEVICE ))) return STATUS_INVALID_PARAMETER;
 
-    if (!params->Flags.StandardAllocation) return STATUS_INVALID_PARAMETER;
     if (params->PrivateDriverDataSize) return STATUS_INVALID_PARAMETER;
 
-    if (params->NumAllocations != 1) return STATUS_INVALID_PARAMETER;
-    if (!(alloc_info = params->pAllocationInfo)) return STATUS_INVALID_PARAMETER;
+    if (params->Flags.StandardAllocation)
+    {
+        if (params->NumAllocations != 1) return STATUS_INVALID_PARAMETER;
+        if (!(alloc_info = params->pAllocationInfo)) return STATUS_INVALID_PARAMETER;
 
-    if (!(standard = params->pStandardAllocation)) return STATUS_INVALID_PARAMETER;
-    if (standard->Type != D3DKMT_STANDARDALLOCATIONTYPE_EXISTINGHEAP) return STATUS_INVALID_PARAMETER;
-    if (standard->ExistingHeapData.Size & 0xfff) return STATUS_INVALID_PARAMETER;
-    if (!params->Flags.ExistingSysMem) return STATUS_INVALID_PARAMETER;
-    if (!alloc_info->pSystemMem) return STATUS_INVALID_PARAMETER;
+        if (!(standard = params->pStandardAllocation)) return STATUS_INVALID_PARAMETER;
+        if (standard->Type != D3DKMT_STANDARDALLOCATIONTYPE_EXISTINGHEAP) return STATUS_INVALID_PARAMETER;
+        if (standard->ExistingHeapData.Size & 0xfff) return STATUS_INVALID_PARAMETER;
+        if (!params->Flags.ExistingSysMem) return STATUS_INVALID_PARAMETER;
+        if (!alloc_info->pSystemMem) return STATUS_INVALID_PARAMETER;
+    }
 
     if (params->Flags.CreateResource)
     {
@@ -1040,7 +1045,7 @@ NTSTATUS WINAPI NtGdiDdDDICreateAllocation2( D3DKMT_CREATEALLOCATION *params )
 
     if ((status = alloc_object_handle( allocation ))) goto failed;
     if (resource) resource->allocation = allocation->local;
-    alloc_info->hAllocation = allocation->local;
+    if (params->pAllocationInfo) params->pAllocationInfo[0].hAllocation = allocation->local;
     return STATUS_SUCCESS;
 
 failed:
