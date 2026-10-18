@@ -86,6 +86,7 @@ struct thread
     affinity_t             affinity;      /* affinity mask */
     int                    priority;      /* current thread priority */
     int                    base_priority; /* base priority level (relative to process base priority class) */
+    int                    page_priority; /* page priority level */
     int                    disable_boost; /* disable thread priority boost */
     int                    suspend;       /* suspend count */
     bool                   is_system;     /* system thread (kernel mode only) */

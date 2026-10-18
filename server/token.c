@@ -964,6 +964,14 @@ int token_sid_present( struct token *token, const struct sid *sid, int deny )
         if (equal_sid( &group->sid, sid )) return TRUE;
     }
 
+    if (token->app_container && equal_sid( token->app_container, sid )) return TRUE;
+
+    LIST_FOR_EACH_ENTRY( group, &token->capabilities, struct group, entry )
+    {
+        if (!(group->attrs & SE_GROUP_ENABLED)) continue;
+        if (equal_sid( &group->sid, sid )) return TRUE;
+    }
+
     return FALSE;
 }
 
@@ -1153,26 +1161,70 @@ static unsigned int token_access_check( struct token *token,
 
     if (!list_empty( &token->restricted_sids ))
     {
-        unsigned int restricted_access = 0;
+        unsigned int restricted_allowed = 0;
+        unsigned int restricted_denied = 0;
+
         for (i = 0, ace = ace_first( dacl ); i < dacl->count; i++, ace = ace_next( ace ))
         {
             const struct sid *sid = (const struct sid *)(ace + 1);
+            struct group *rg;
+            int match = 0;
 
             if (ace->flags & INHERIT_ONLY_ACE) continue;
-            if (ace->type == ACCESS_ALLOWED_ACE_TYPE)
+
+            LIST_FOR_EACH_ENTRY( rg, &token->restricted_sids, struct group, entry )
             {
-                struct group *rg;
-                LIST_FOR_EACH_ENTRY( rg, &token->restricted_sids, struct group, entry )
+                if (equal_sid( &rg->sid, sid ))
                 {
-                    if (equal_sid( &rg->sid, sid ))
-                    {
-                        restricted_access |= map_access( ace->mask, mapping );
-                        break;
-                    }
+                    match = 1;
+                    break;
                 }
             }
+            if (!match) continue;
+
+            switch (ace->type)
+            {
+            case ACCESS_DENIED_ACE_TYPE:
+            {
+                unsigned int access = map_access( ace->mask, mapping );
+                if (desired_access & MAXIMUM_ALLOWED)
+                    restricted_denied |= access;
+                else
+                {
+                    restricted_denied |= (access & ~restricted_allowed);
+                    if (desired_access & access)
+                    {
+                        *status = STATUS_ACCESS_DENIED;
+                        *granted_access = 0;
+                        return STATUS_SUCCESS;
+                    }
+                }
+                break;
+            }
+            case ACCESS_ALLOWED_ACE_TYPE:
+            {
+                unsigned int access = map_access( ace->mask, mapping );
+                if (desired_access & MAXIMUM_ALLOWED)
+                    restricted_allowed |= access;
+                else
+                    restricted_allowed |= (access & ~restricted_denied);
+                break;
+            }
+            }
         }
-        current_access &= restricted_access;
+
+        if (desired_access & MAXIMUM_ALLOWED)
+            current_access &= (restricted_allowed & ~restricted_denied);
+        else
+        {
+            if ((restricted_allowed & desired_access) != desired_access)
+            {
+                *status = STATUS_ACCESS_DENIED;
+                *granted_access = 0;
+                return STATUS_SUCCESS;
+            }
+            current_access &= restricted_allowed;
+        }
     }
 
 done:
@@ -1575,19 +1627,63 @@ DECL_HANDLER(filter_token)
                 }
             }
 
-            if (restrict_count)
+            if (!list_empty( &src_token->restricted_sids ))
+            {
+                if (restrict_count)
+                {
+                    struct list *cursor, *cursor_next;
+                    LIST_FOR_EACH_SAFE( cursor, cursor_next, &token->restricted_sids )
+                    {
+                        struct group *rg = LIST_ENTRY( cursor, struct group, entry );
+                        const struct sid *s = restrict_groups;
+                        unsigned int j, matched = 0;
+                        for (j = 0; j < restrict_count; j++)
+                        {
+                            if (equal_sid( &rg->sid, s )) { matched = 1; break; }
+                            s = (const struct sid *)((const char *)s + sid_len( s ));
+                        }
+                        if (!matched)
+                        {
+                            list_remove( &rg->entry );
+                            free( rg );
+                        }
+                    }
+                    if (list_empty( &token->restricted_sids ))
+                    {
+                        static const struct sid null_sid = { SID_REVISION, 1, SECURITY_NULL_SID_AUTHORITY, { SECURITY_NULL_RID } };
+                        size_t size = offsetof( struct group, sid.sub_auth[1] );
+                        struct group *res_group = mem_alloc( size );
+                        if (res_group)
+                        {
+                            res_group->attrs = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY;
+                            copy_sid( &res_group->sid, &null_sid );
+                            list_add_tail( &token->restricted_sids, &res_group->entry );
+                        }
+                    }
+                }
+            }
+            else if (restrict_count)
             {
                 const struct sid *sid = restrict_groups;
                 unsigned int i;
                 for (i = 0; i < restrict_count; i++)
                 {
-                    size_t size = offsetof( struct group, sid.sub_auth[sid->sub_count] );
-                    struct group *res_group = mem_alloc( size );
-                    if (res_group)
+                    struct group *existing;
+                    int found = 0;
+                    LIST_FOR_EACH_ENTRY( existing, &token->restricted_sids, struct group, entry )
                     {
-                        res_group->attrs = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY;
-                        copy_sid( &res_group->sid, sid );
-                        list_add_tail( &token->restricted_sids, &res_group->entry );
+                        if (equal_sid( &existing->sid, sid )) { found = 1; break; }
+                    }
+                    if (!found)
+                    {
+                        size_t size = offsetof( struct group, sid.sub_auth[sid->sub_count] );
+                        struct group *res_group = mem_alloc( size );
+                        if (res_group)
+                        {
+                            res_group->attrs = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY;
+                            copy_sid( &res_group->sid, sid );
+                            list_add_tail( &token->restricted_sids, &res_group->entry );
+                        }
                     }
                     sid = (const struct sid *)((char *)sid + sid_len( sid ));
                 }

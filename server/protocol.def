@@ -1270,6 +1270,15 @@ typedef volatile struct
 @END
 
 
+/* Retrieve open handles of a process */
+@REQ(get_process_handle_table)
+    obj_handle_t handle;           /* process handle */
+@REPLY
+    unsigned int count;            /* total number of handles */
+    VARARG(handles,uints);         /* array of handle IDs (obj_handle_t) */
+@END
+
+
 /* Fetch the name of the process image */
 @REQ(get_process_image_name)
     obj_handle_t handle;           /* process handle */
@@ -1333,6 +1342,21 @@ typedef volatile struct
 #define GET_THREAD_INFO_FLAG_TERMINATED    0x02
 #define GET_THREAD_INFO_FLAG_LAST          0x04
 #define GET_THREAD_INFO_FLAG_DISABLE_BOOST 0x08
+
+
+/* Retrieve thread page priority */
+@REQ(get_thread_page_priority)
+    obj_handle_t handle;        /* thread handle */
+@REPLY
+    int          page_priority; /* page priority level */
+@END
+
+
+/* Set thread page priority */
+@REQ(set_thread_page_priority)
+    obj_handle_t handle;        /* thread handle */
+    int          page_priority; /* page priority level */
+@END
 
 
 /* Retrieve information about thread times */

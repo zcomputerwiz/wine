@@ -2430,11 +2430,19 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
         return STATUS_SUCCESS;
 
     case ThreadPagePriority:
+    {
         if (length != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
         if (!data) return STATUS_ACCESS_VIOLATION;
-        *(ULONG *)data = 5; /* MEMORY_PRIORITY_NORMAL */
-        if (ret_len) *ret_len = sizeof(ULONG);
-        return STATUS_SUCCESS;
+        SERVER_START_REQ( get_thread_page_priority )
+        {
+            req->handle = wine_server_obj_handle( handle );
+            status = wine_server_call( req );
+            if (!status) *(ULONG *)data = reply->page_priority;
+        }
+        SERVER_END_REQ;
+        if (!status && ret_len) *ret_len = sizeof(ULONG);
+        return status;
+    }
 
     case ThreadPriorityBoost:
     {
@@ -2711,8 +2719,14 @@ NTSTATUS WINAPI NtSetInformationThread( HANDLE handle, THREADINFOCLASS class,
         if (length != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
         if (!priority) return STATUS_ACCESS_VIOLATION;
         if (*priority > 5) return STATUS_INVALID_PARAMETER;
-        TRACE( "(%p, priority=%u)\n", handle, *priority );
-        return STATUS_SUCCESS;
+        SERVER_START_REQ( set_thread_page_priority )
+        {
+            req->handle        = wine_server_obj_handle( handle );
+            req->page_priority = *priority;
+            status = wine_server_call( req );
+        }
+        SERVER_END_REQ;
+        return status;
     }
 
     case ThreadManageWritesToExecutableMemory:

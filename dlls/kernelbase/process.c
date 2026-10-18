@@ -573,6 +573,8 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
                                                       PROCESS_INFORMATION *info, HANDLE *new_token )
 {
     const struct proc_thread_attr *handle_list = NULL, *job_list = NULL;
+    const SECURITY_CAPABILITIES *sec_cap = NULL;
+    HANDLE appcontainer_token = NULL;
     WCHAR name[MAX_PATH];
     WCHAR *p, *tidy_cmdline = cmd_line;
     RTL_USER_PROCESS_PARAMETERS *params = NULL;
@@ -704,6 +706,10 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
                     case PROC_THREAD_ATTRIBUTE_WIN32K_FILTER:
                         TRACE( "PROC_THREAD_ATTRIBUTE %Iu size %Iu\n", attrs->attrs[i].attr & PROC_THREAD_ATTRIBUTE_NUMBER, attrs->attrs[i].size );
                         break;
+                    case PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES:
+                        sec_cap = attrs->attrs[i].value;
+                        TRACE( "PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES %p\n", sec_cap );
+                        break;
                     default:
                         FIXME("Unsupported attribute %#Ix.\n", attrs->attrs[i].attr);
                         break;
@@ -716,6 +722,25 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
     if (flags & DEBUG_ONLY_THIS_PROCESS) nt_flags |= PROCESS_CREATE_FLAGS_NO_DEBUG_INHERIT;
     if (flags & CREATE_BREAKAWAY_FROM_JOB) nt_flags |= PROCESS_CREATE_FLAGS_BREAKAWAY;
     if (flags & CREATE_SUSPENDED) nt_flags |= PROCESS_CREATE_FLAGS_SUSPENDED;
+
+    if (sec_cap && sec_cap->AppContainerSid)
+    {
+        HANDLE base_token = token ? token : GetCurrentProcessToken();
+        OBJECT_ATTRIBUTES oa = { sizeof(oa) };
+        status = NtCreateLowBoxToken( &appcontainer_token, base_token,
+                                      TOKEN_ALL_ACCESS, &oa,
+                                      sec_cap->AppContainerSid,
+                                      sec_cap->CapabilityCount,
+                                      sec_cap->Capabilities ? (SID_AND_ATTRIBUTES *)sec_cap->Capabilities : NULL,
+                                      0, NULL );
+        if (!status)
+            token = appcontainer_token;
+        else
+        {
+            WARN( "NtCreateLowBoxToken failed: %08lx\n", status );
+            goto done;
+        }
+    }
 
     status = create_nt_process( token, debug, process_attr, thread_attr,
                                 nt_flags, params, &rtl_info, parent, machine, handle_list, job_list );
@@ -759,6 +784,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
     }
 
  done:
+    if (appcontainer_token) NtClose( appcontainer_token );
     RtlDestroyProcessParameters( params );
     if (tidy_cmdline != cmd_line) HeapFree( GetProcessHeap(), 0, tidy_cmdline );
     return set_ntstatus( status );
