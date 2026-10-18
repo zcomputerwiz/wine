@@ -4949,13 +4949,32 @@ struct filter_token_request
     obj_handle_t  handle;
     unsigned int  flags;
     data_size_t   privileges_size;
+    data_size_t   disable_sids_size;
     /* VARARG(privileges,luid_attr,privileges_size); */
-    /* VARARG(disable_sids,sid); */
+    /* VARARG(disable_sids,sids,disable_sids_size); */
+    /* VARARG(restrict_sids,sids); */
+    char __pad_28[4];
 };
 struct filter_token_reply
 {
     struct reply_header __header;
     obj_handle_t  new_handle;
+    char __pad_12[4];
+};
+
+struct create_lowbox_token_request
+{
+    struct request_header __header;
+    obj_handle_t  handle;
+    unsigned int  access;
+    data_size_t   package_sid_size;
+    /* VARARG(package_sid,sid,package_sid_size); */
+    /* VARARG(capabilities,sids); */
+};
+struct create_lowbox_token_reply
+{
+    struct reply_header __header;
+    obj_handle_t  token_handle;
     char __pad_12[4];
 };
 
@@ -4998,7 +5017,7 @@ struct get_token_groups_request
     struct request_header __header;
     obj_handle_t    handle;
     unsigned int    attr_mask;
-    char __pad_20[4];
+    unsigned int    which_groups;
 };
 struct get_token_groups_reply
 {
@@ -5029,6 +5048,18 @@ struct set_token_default_dacl_request
     /* VARARG(acl,acl); */
 };
 struct set_token_default_dacl_reply
+{
+    struct reply_header __header;
+};
+
+struct set_token_integrity_level_request
+{
+    struct request_header __header;
+    obj_handle_t    handle;
+    unsigned int    integrity_rid;
+    char __pad_20[4];
+};
+struct set_token_integrity_level_reply
 {
     struct reply_header __header;
 };
@@ -5513,7 +5544,9 @@ struct get_token_info_reply
     int            is_elevated;
     int            group_count;
     int            privilege_count;
-    char __pad_52[4];
+    unsigned int   integrity_rid;
+    int            is_app_container;
+    int            is_restricted;
 };
 
 
@@ -6476,11 +6509,13 @@ enum request
     REQ_check_token_privileges,
     REQ_duplicate_token,
     REQ_filter_token,
+    REQ_create_lowbox_token,
     REQ_access_check,
     REQ_get_token_sid,
     REQ_get_token_groups,
     REQ_get_token_default_dacl,
     REQ_set_token_default_dacl,
+    REQ_set_token_integrity_level,
     REQ_set_security_object,
     REQ_get_security_object,
     REQ_get_system_handles,
@@ -6791,11 +6826,13 @@ union generic_request
     struct check_token_privileges_request check_token_privileges_request;
     struct duplicate_token_request duplicate_token_request;
     struct filter_token_request filter_token_request;
+    struct create_lowbox_token_request create_lowbox_token_request;
     struct access_check_request access_check_request;
     struct get_token_sid_request get_token_sid_request;
     struct get_token_groups_request get_token_groups_request;
     struct get_token_default_dacl_request get_token_default_dacl_request;
     struct set_token_default_dacl_request set_token_default_dacl_request;
+    struct set_token_integrity_level_request set_token_integrity_level_request;
     struct set_security_object_request set_security_object_request;
     struct get_security_object_request get_security_object_request;
     struct get_system_handles_request get_system_handles_request;
@@ -7104,11 +7141,13 @@ union generic_reply
     struct check_token_privileges_reply check_token_privileges_reply;
     struct duplicate_token_reply duplicate_token_reply;
     struct filter_token_reply filter_token_reply;
+    struct create_lowbox_token_reply create_lowbox_token_reply;
     struct access_check_reply access_check_reply;
     struct get_token_sid_reply get_token_sid_reply;
     struct get_token_groups_reply get_token_groups_reply;
     struct get_token_default_dacl_reply get_token_default_dacl_reply;
     struct set_token_default_dacl_reply set_token_default_dacl_reply;
+    struct set_token_integrity_level_reply set_token_integrity_level_reply;
     struct set_security_object_reply set_security_object_reply;
     struct get_security_object_reply get_security_object_reply;
     struct get_system_handles_reply get_system_handles_reply;
@@ -7186,6 +7225,6 @@ union generic_reply
     struct alpc_create_port_reply alpc_create_port_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 963
+#define SERVER_PROTOCOL_VERSION 964
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

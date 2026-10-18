@@ -934,6 +934,12 @@ BOOL WINAPI /* DECLSPEC_HOTPATCH */ GetProcessMitigationPolicy( HANDLE process, 
                                                           void *buffer, SIZE_T length )
 {
     FIXME( "(%p, %u, %p, %Iu): stub\n", process, policy, buffer, length );
+    if (!buffer)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+    memset( buffer, 0, length );
     return TRUE;
 }
 
@@ -1827,6 +1833,9 @@ static inline DWORD validate_proc_thread_attribute( DWORD_PTR attr, SIZE_T size 
         break;
     case PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY:
        if (size != sizeof(DWORD) && size != sizeof(DWORD64)) return ERROR_BAD_LENGTH;
+       break;
+    case PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES:
+       if (size != sizeof(SECURITY_CAPABILITIES)) return ERROR_BAD_LENGTH;
        break;
     case PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY:
         if (size != sizeof(DWORD) && size != sizeof(DWORD64) && size != sizeof(DWORD64) * 2)
