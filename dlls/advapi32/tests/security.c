@@ -81,6 +81,7 @@ static DWORD (WINAPI *pRtlAdjustPrivilege)(ULONG,BOOLEAN,BOOLEAN,PBOOLEAN);
 static NTSTATUS (WINAPI *pNtAccessCheck)(PSECURITY_DESCRIPTOR, HANDLE, ACCESS_MASK, PGENERIC_MAPPING,
                                          PPRIVILEGE_SET, PULONG, PULONG, NTSTATUS*);
 static BOOL     (WINAPI *pRtlDosPathNameToNtPathName_U)(LPCWSTR,PUNICODE_STRING,PWSTR*,CURDIR*);
+static NTSTATUS (WINAPI *pNtCreateLowBoxToken)(HANDLE*,HANDLE,ACCESS_MASK,OBJECT_ATTRIBUTES*,SID*,ULONG,SID_AND_ATTRIBUTES*,ULONG,HANDLE*);
 
 static HMODULE hmod;
 static int     myARGC;
@@ -117,6 +118,7 @@ static void init(void)
     hntdll = GetModuleHandleA("ntdll.dll");
     pNtAccessCheck = (void *)GetProcAddress( hntdll, "NtAccessCheck" );
     pRtlDosPathNameToNtPathName_U = (void *)GetProcAddress(hntdll, "RtlDosPathNameToNtPathName_U");
+    pNtCreateLowBoxToken = (void *)GetProcAddress(hntdll, "NtCreateLowBoxToken");
 
     hmod = GetModuleHandleA("advapi32.dll");
     pAddMandatoryAce = (void *)GetProcAddress(hmod, "AddMandatoryAce");
@@ -8725,6 +8727,435 @@ static void test_window_security(void)
     LocalFree(sd);
 }
 
+static void test_token_integrity_level_roundtrip(void)
+{
+    HANDLE process_token, token;
+    TOKEN_MANDATORY_LABEL *tml;
+    BYTE buffer[sizeof(TOKEN_MANDATORY_LABEL) + sizeof(SID) + sizeof(ULONG) * 2];
+    BYTE qbuf[sizeof(TOKEN_MANDATORY_LABEL) + sizeof(SID) + sizeof(ULONG) * 2];
+    DWORD size, len;
+    BOOL ret;
+    SID *sid;
+    static SID_IDENTIFIER_AUTHORITY sia_ml = {SECURITY_MANDATORY_LABEL_AUTHORITY};
+
+    ret = OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &process_token);
+    ok(ret, "OpenProcessToken failed with error %lu\n", GetLastError());
+
+    ret = DuplicateTokenEx(process_token, TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_IMPERSONATE,
+                           NULL, SecurityImpersonation, TokenImpersonation, &token);
+    CloseHandle(process_token);
+    ok(ret, "DuplicateTokenEx failed with error %lu\n", GetLastError());
+
+    /* Query initial integrity */
+    ret = GetTokenInformation(token, TokenIntegrityLevel, qbuf, sizeof(qbuf), &size);
+    if (!ret && (GetLastError() == ERROR_INVALID_PARAMETER || GetLastError() == ERROR_INVALID_FUNCTION))
+    {
+        win_skip("TokenIntegrityLevel not supported\n");
+        CloseHandle(token);
+        return;
+    }
+    ok(ret, "GetTokenInformation(TokenIntegrityLevel) failed with error %lu\n", GetLastError());
+    tml = (TOKEN_MANDATORY_LABEL *)qbuf;
+    ok(tml->Label.Attributes == (SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED),
+       "got attributes %#lx\n", tml->Label.Attributes);
+    sid = (SID *)tml->Label.Sid;
+    ok(sid->SubAuthority[0] == SECURITY_MANDATORY_MEDIUM_RID || sid->SubAuthority[0] == SECURITY_MANDATORY_HIGH_RID,
+       "got initial RID %#lx\n", sid->SubAuthority[0]);
+
+    /* Set integrity to Low (0x1000) */
+    memset(buffer, 0, sizeof(buffer));
+    tml = (TOKEN_MANDATORY_LABEL *)buffer;
+    tml->Label.Attributes = SE_GROUP_INTEGRITY;
+    tml->Label.Sid = (PSID)(tml + 1);
+    sid = (SID *)tml->Label.Sid;
+    sid->Revision = SID_REVISION;
+    sid->SubAuthorityCount = 1;
+    sid->IdentifierAuthority = sia_ml;
+    sid->SubAuthority[0] = SECURITY_MANDATORY_LOW_RID;
+    len = sizeof(TOKEN_MANDATORY_LABEL) + GetLengthSid(sid);
+
+    ret = SetTokenInformation(token, TokenIntegrityLevel, buffer, len);
+    ok(ret, "SetTokenInformation(TokenIntegrityLevel, Low) failed with error %lu\n", GetLastError());
+
+    /* Query back and verify */
+    ret = GetTokenInformation(token, TokenIntegrityLevel, qbuf, sizeof(qbuf), &size);
+    ok(ret, "GetTokenInformation(TokenIntegrityLevel) failed with error %lu\n", GetLastError());
+    tml = (TOKEN_MANDATORY_LABEL *)qbuf;
+    sid = (SID *)tml->Label.Sid;
+    ok(sid->SubAuthority[0] == SECURITY_MANDATORY_LOW_RID,
+       "expected SECURITY_MANDATORY_LOW_RID (0x1000), got %#lx\n", sid->SubAuthority[0]);
+
+    /* Set integrity to Untrusted (0x0000) */
+    tml = (TOKEN_MANDATORY_LABEL *)buffer;
+    sid = (SID *)tml->Label.Sid;
+    sid->SubAuthority[0] = SECURITY_MANDATORY_UNTRUSTED_RID;
+    ret = SetTokenInformation(token, TokenIntegrityLevel, buffer, len);
+    ok(ret, "SetTokenInformation(TokenIntegrityLevel, Untrusted) failed with error %lu\n", GetLastError());
+
+    ret = GetTokenInformation(token, TokenIntegrityLevel, qbuf, sizeof(qbuf), &size);
+    ok(ret, "GetTokenInformation(TokenIntegrityLevel) failed with error %lu\n", GetLastError());
+    tml = (TOKEN_MANDATORY_LABEL *)qbuf;
+    sid = (SID *)tml->Label.Sid;
+    ok(sid->SubAuthority[0] == SECURITY_MANDATORY_UNTRUSTED_RID,
+       "expected SECURITY_MANDATORY_UNTRUSTED_RID (0), got %#lx\n", sid->SubAuthority[0]);
+
+    CloseHandle(token);
+}
+
+static void test_restricted_token_sids(void)
+{
+    HANDLE process_token, r_token;
+    BOOL is_restricted, has_restrictions;
+    DWORD size;
+    BOOL ret;
+    SID_AND_ATTRIBUTES restrict_sids[2];
+    SID_IDENTIFIER_AUTHORITY sia_world = {SECURITY_WORLD_SID_AUTHORITY};
+    SID_IDENTIFIER_AUTHORITY sia_res = {SECURITY_NT_AUTHORITY};
+    PSID sid_world = NULL, sid_res = NULL;
+    PTOKEN_GROUPS r_groups;
+
+    ret = OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &process_token);
+    ok(ret, "OpenProcessToken failed with error %lu\n", GetLastError());
+
+    /* Query process token is_restricted / has_restrictions */
+    is_restricted = TRUE;
+    ret = GetTokenInformation(process_token, TokenIsRestricted, &is_restricted, sizeof(is_restricted), &size);
+    if (!ret && (GetLastError() == ERROR_INVALID_PARAMETER || GetLastError() == ERROR_INVALID_FUNCTION))
+    {
+        win_skip("TokenIsRestricted not supported\n");
+        CloseHandle(process_token);
+        return;
+    }
+    ok(ret, "GetTokenInformation(TokenIsRestricted) failed with error %lu\n", GetLastError());
+    ok(!is_restricted, "process token unexpectedly reported as restricted\n");
+
+    has_restrictions = TRUE;
+    ret = GetTokenInformation(process_token, TokenHasRestrictions, &has_restrictions, sizeof(has_restrictions), &size);
+    ok(ret, "GetTokenInformation(TokenHasRestrictions) failed with error %lu\n", GetLastError());
+    ok(!has_restrictions, "process token unexpectedly reported as having restrictions\n");
+
+    /* Create SIDs for restricting */
+    ret = AllocateAndInitializeSid(&sia_world, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &sid_world);
+    ok(ret, "AllocateAndInitializeSid failed\n");
+    ret = AllocateAndInitializeSid(&sia_res, 1, SECURITY_RESTRICTED_CODE_RID, 0, 0, 0, 0, 0, 0, 0, &sid_res);
+    ok(ret, "AllocateAndInitializeSid failed\n");
+
+    restrict_sids[0].Sid = sid_world;
+    restrict_sids[0].Attributes = 0;
+    restrict_sids[1].Sid = sid_res;
+    restrict_sids[1].Attributes = 0;
+
+    r_token = NULL;
+    ret = CreateRestrictedToken(process_token, DISABLE_MAX_PRIVILEGE | LUA_TOKEN, 0, NULL, 0, NULL, 2, restrict_sids, &r_token);
+    ok(ret, "CreateRestrictedToken failed with error %lu\n", GetLastError());
+    ok(r_token != NULL, "expected valid token handle\n");
+
+    /* Verify restricted queries on r_token */
+    is_restricted = FALSE;
+    ret = GetTokenInformation(r_token, TokenIsRestricted, &is_restricted, sizeof(is_restricted), &size);
+    ok(ret, "GetTokenInformation(TokenIsRestricted) failed with error %lu\n", GetLastError());
+    ok(is_restricted, "expected TokenIsRestricted == TRUE\n");
+
+    has_restrictions = FALSE;
+    ret = GetTokenInformation(r_token, TokenHasRestrictions, &has_restrictions, sizeof(has_restrictions), &size);
+    ok(ret, "GetTokenInformation(TokenHasRestrictions) failed with error %lu\n", GetLastError());
+    ok(has_restrictions, "expected TokenHasRestrictions == TRUE\n");
+
+    /* Query TokenRestrictedSids */
+    ret = GetTokenInformation(r_token, TokenRestrictedSids, NULL, 0, &size);
+    ok(!ret && GetLastError() == ERROR_INSUFFICIENT_BUFFER,
+       "expected ERROR_INSUFFICIENT_BUFFER, got %d with error %lu\n", ret, GetLastError());
+    ok(size > 0, "expected size > 0\n");
+
+    r_groups = malloc(size);
+    ret = GetTokenInformation(r_token, TokenRestrictedSids, r_groups, size, &size);
+    ok(ret, "GetTokenInformation(TokenRestrictedSids) failed with error %lu\n", GetLastError());
+    ok(r_groups->GroupCount == 2, "expected 2 restricting SIDs, got %lu\n", r_groups->GroupCount);
+    if (r_groups->GroupCount == 2)
+    {
+        ok(EqualSid(r_groups->Groups[0].Sid, sid_world), "Group 0 SID mismatch\n");
+        ok(EqualSid(r_groups->Groups[1].Sid, sid_res), "Group 1 SID mismatch\n");
+    }
+    free(r_groups);
+
+    CloseHandle(r_token);
+    CloseHandle(process_token);
+    FreeSid(sid_world);
+    FreeSid(sid_res);
+}
+
+static void test_lowbox_token(void)
+{
+    HANDLE process_token, lowbox;
+    DWORD is_app_container, size;
+    NTSTATUS status;
+    BOOL ret;
+    SID_IDENTIFIER_AUTHORITY sia_app = {SECURITY_APP_PACKAGE_AUTHORITY};
+    PSID package_sid = NULL, cap_sid = NULL;
+    SID_AND_ATTRIBUTES caps[1];
+    TOKEN_APPCONTAINER_INFORMATION *aci;
+    BYTE aci_buffer[sizeof(TOKEN_APPCONTAINER_INFORMATION) + 64];
+    TOKEN_MANDATORY_LABEL *tml;
+    BYTE tml_buffer[sizeof(TOKEN_MANDATORY_LABEL) + 64];
+
+    if (!pNtCreateLowBoxToken)
+    {
+        win_skip("NtCreateLowBoxToken not available\n");
+        return;
+    }
+
+    ret = OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &process_token);
+    ok(ret, "OpenProcessToken failed with error %lu\n", GetLastError());
+
+    /* Check normal token is NOT app container */
+    is_app_container = 0xdeadbeef;
+    ret = GetTokenInformation(process_token, TokenIsAppContainer, &is_app_container, sizeof(is_app_container), &size);
+    if (!ret && (GetLastError() == ERROR_INVALID_PARAMETER || GetLastError() == ERROR_INVALID_FUNCTION))
+    {
+        win_skip("TokenIsAppContainer not supported\n");
+        CloseHandle(process_token);
+        return;
+    }
+    ok(ret, "GetTokenInformation(TokenIsAppContainer) failed with error %lu\n", GetLastError());
+    ok(is_app_container == 0, "process token unexpectedly reported as app container\n");
+
+    /* Package SID: S-1-15-2-1-2-3-4-5-6-7 */
+    ret = AllocateAndInitializeSid(&sia_app, 8, 2, 1, 2, 3, 4, 5, 6, 7, &package_sid);
+    ok(ret, "AllocateAndInitializeSid package_sid failed\n");
+
+    /* Capability SID: S-1-15-3-1 */
+    ret = AllocateAndInitializeSid(&sia_app, 2, 3, 1, 0, 0, 0, 0, 0, 0, &cap_sid);
+    ok(ret, "AllocateAndInitializeSid cap_sid failed\n");
+
+    caps[0].Sid = cap_sid;
+    caps[0].Attributes = SE_GROUP_ENABLED;
+
+    lowbox = NULL;
+    status = pNtCreateLowBoxToken(&lowbox, process_token, TOKEN_ALL_ACCESS, NULL, package_sid, 1, caps, 0, NULL);
+    ok(status == STATUS_SUCCESS, "NtCreateLowBoxToken failed with status %#lx\n", status);
+    ok(lowbox != NULL, "expected valid lowbox handle\n");
+
+    /* Verify lowbox is app container */
+    is_app_container = 0;
+    ret = GetTokenInformation(lowbox, TokenIsAppContainer, &is_app_container, sizeof(is_app_container), &size);
+    ok(ret, "GetTokenInformation(TokenIsAppContainer) failed with error %lu\n", GetLastError());
+    ok(is_app_container != 0, "expected TokenIsAppContainer != 0\n");
+
+    /* Verify AppContainer SID */
+    memset(aci_buffer, 0, sizeof(aci_buffer));
+    ret = GetTokenInformation(lowbox, TokenAppContainerSid, aci_buffer, sizeof(aci_buffer), &size);
+    ok(ret, "GetTokenInformation(TokenAppContainerSid) failed with error %lu\n", GetLastError());
+    aci = (TOKEN_APPCONTAINER_INFORMATION *)aci_buffer;
+    ok(aci->TokenAppContainer != NULL, "expected non-NULL TokenAppContainer\n");
+    if (aci->TokenAppContainer)
+        ok(EqualSid(aci->TokenAppContainer, package_sid), "TokenAppContainer mismatch: got %s, expected %s\n",
+           debugstr_sid(aci->TokenAppContainer), debugstr_sid(package_sid));
+
+    /* Verify integrity level is Low (0x1000) */
+    memset(tml_buffer, 0, sizeof(tml_buffer));
+    ret = GetTokenInformation(lowbox, TokenIntegrityLevel, tml_buffer, sizeof(tml_buffer), &size);
+    ok(ret, "GetTokenInformation(TokenIntegrityLevel) failed with error %lu\n", GetLastError());
+    tml = (TOKEN_MANDATORY_LABEL *)tml_buffer;
+    ok(*GetSidSubAuthority(tml->Label.Sid, 0) == SECURITY_MANDATORY_LOW_RID,
+       "expected SECURITY_MANDATORY_LOW_RID, got %#lx\n", *GetSidSubAuthority(tml->Label.Sid, 0));
+
+    CloseHandle(lowbox);
+    CloseHandle(process_token);
+    FreeSid(package_sid);
+    FreeSid(cap_sid);
+}
+
+static void test_mandatory_integrity_access_check(void)
+{
+    HANDLE process_token, token;
+    BOOL ret, access_status;
+    DWORD access, priv_set_len;
+    BYTE priv_set_buf[FIELD_OFFSET(PRIVILEGE_SET, Privilege[16])];
+    PRIVILEGE_SET *priv_set = (PRIVILEGE_SET *)priv_set_buf;
+    SECURITY_DESCRIPTOR sd;
+    char dacl_buf[128], sacl_buf[128];
+    static SID_IDENTIFIER_AUTHORITY sia_world = {SECURITY_WORLD_SID_AUTHORITY};
+    static SID_IDENTIFIER_AUTHORITY sia_ml = {SECURITY_MANDATORY_LABEL_AUTHORITY};
+    PSID sid_world = NULL;
+    static SID medium_level = {SID_REVISION, 1, {SECURITY_MANDATORY_LABEL_AUTHORITY}, {SECURITY_MANDATORY_MEDIUM_RID}};
+    BYTE tml_buf[sizeof(TOKEN_MANDATORY_LABEL) + sizeof(SID) + sizeof(ULONG) * 2];
+    TOKEN_MANDATORY_LABEL *tml;
+    SID *sid;
+    GENERIC_MAPPING mapping = {KEY_READ, KEY_WRITE, KEY_EXECUTE, KEY_ALL_ACCESS};
+
+    if (!pAddMandatoryAce)
+    {
+        win_skip("AddMandatoryAce not supported, skipping\n");
+        return;
+    }
+
+    ret = OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &process_token);
+    ok(ret, "OpenProcessToken failed\n");
+
+    ret = DuplicateTokenEx(process_token, TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_IMPERSONATE,
+                           NULL, SecurityImpersonation, TokenImpersonation, &token);
+    CloseHandle(process_token);
+    ok(ret, "DuplicateTokenEx failed\n");
+
+    /* Create World SID */
+    ret = AllocateAndInitializeSid(&sia_world, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &sid_world);
+    ok(ret, "AllocateAndInitializeSid failed\n");
+
+    /* Set up DACL granting KEY_READ | KEY_WRITE to World */
+    ret = InitializeAcl((ACL *)dacl_buf, sizeof(dacl_buf), ACL_REVISION);
+    ok(ret, "InitializeAcl dacl failed\n");
+    ret = AddAccessAllowedAce((ACL *)dacl_buf, ACL_REVISION, KEY_READ | KEY_WRITE, sid_world);
+    ok(ret, "AddAccessAllowedAce failed\n");
+
+    /* Set up SACL with Medium mandatory label and SYSTEM_MANDATORY_LABEL_NO_WRITE_UP */
+    ret = InitializeAcl((ACL *)sacl_buf, sizeof(sacl_buf), ACL_REVISION);
+    ok(ret, "InitializeAcl sacl failed\n");
+    ret = pAddMandatoryAce((ACL *)sacl_buf, ACL_REVISION, 0, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, &medium_level);
+    ok(ret, "AddMandatoryAce failed\n");
+
+    /* Build SD */
+    ret = InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+    ok(ret, "InitializeSecurityDescriptor failed\n");
+    ret = SetSecurityDescriptorOwner(&sd, sid_world, FALSE);
+    ok(ret, "SetSecurityDescriptorOwner failed\n");
+    ret = SetSecurityDescriptorGroup(&sd, sid_world, FALSE);
+    ok(ret, "SetSecurityDescriptorGroup failed\n");
+    ret = SetSecurityDescriptorDacl(&sd, TRUE, (ACL *)dacl_buf, FALSE);
+    ok(ret, "SetSecurityDescriptorDacl failed\n");
+    ret = SetSecurityDescriptorSacl(&sd, TRUE, (ACL *)sacl_buf, FALSE);
+    ok(ret, "SetSecurityDescriptorSacl failed\n");
+
+    /* 1. Medium (normal) token: should have KEY_WRITE access */
+    memset(priv_set_buf, 0, sizeof(priv_set_buf));
+    priv_set->PrivilegeCount = 16;
+    priv_set_len = sizeof(priv_set_buf);
+    access = access_status = 0;
+    ret = AccessCheck(&sd, token, KEY_WRITE, &mapping, priv_set, &priv_set_len, &access, &access_status);
+    ok(ret, "AccessCheck failed with %lu\n", GetLastError());
+    ok(access_status && access == KEY_WRITE, "expected KEY_WRITE granted for Medium token, got status %d, access %#lx\n",
+       access_status, access);
+
+    /* Lower token integrity level to Low (0x1000) */
+    memset(tml_buf, 0, sizeof(tml_buf));
+    tml = (TOKEN_MANDATORY_LABEL *)tml_buf;
+    tml->Label.Attributes = SE_GROUP_INTEGRITY;
+    tml->Label.Sid = (PSID)(tml + 1);
+    sid = (SID *)tml->Label.Sid;
+    sid->Revision = SID_REVISION;
+    sid->SubAuthorityCount = 1;
+    sid->IdentifierAuthority = sia_ml;
+    sid->SubAuthority[0] = SECURITY_MANDATORY_LOW_RID;
+
+    ret = SetTokenInformation(token, TokenIntegrityLevel, tml_buf, sizeof(TOKEN_MANDATORY_LABEL) + GetLengthSid(sid));
+    ok(ret, "SetTokenInformation(Low) failed with error %lu\n", GetLastError());
+
+    /* 2. Low token on Medium object: KEY_READ should SUCCEED */
+    memset(priv_set_buf, 0, sizeof(priv_set_buf));
+    priv_set->PrivilegeCount = 16;
+    priv_set_len = sizeof(priv_set_buf);
+    access = access_status = 0;
+    ret = AccessCheck(&sd, token, KEY_READ, &mapping, priv_set, &priv_set_len, &access, &access_status);
+    ok(ret, "AccessCheck failed with %lu\n", GetLastError());
+    ok(access_status && access == KEY_READ, "expected KEY_READ granted for Low token, got status %d, access %#lx\n",
+       access_status, access);
+
+    /* 3. Low token on Medium object: KEY_WRITE MUST BE DENIED by NO_WRITE_UP */
+    memset(priv_set_buf, 0, sizeof(priv_set_buf));
+    priv_set->PrivilegeCount = 16;
+    priv_set_len = sizeof(priv_set_buf);
+    access = access_status = 0;
+    ret = AccessCheck(&sd, token, KEY_WRITE, &mapping, priv_set, &priv_set_len, &access, &access_status);
+    ok(ret, "AccessCheck call returned %d with error %lu\n", ret, GetLastError());
+    ok(!access_status, "expected KEY_WRITE DENIED for Low token by NO_WRITE_UP, but access was granted!\n");
+
+    CloseHandle(token);
+    FreeSid(sid_world);
+}
+
+static void test_restricted_token_access_check(void)
+{
+    HANDLE process_token, r_token, imp_token;
+    BOOL ret, access_status;
+    DWORD access, priv_set_len;
+    BYTE priv_set_buf[FIELD_OFFSET(PRIVILEGE_SET, Privilege[16])];
+    PRIVILEGE_SET *priv_set = (PRIVILEGE_SET *)priv_set_buf;
+    SECURITY_DESCRIPTOR sd;
+    char dacl_buf[256];
+    static SID_IDENTIFIER_AUTHORITY sia_world = {SECURITY_WORLD_SID_AUTHORITY};
+    static SID_IDENTIFIER_AUTHORITY sia_nt = {SECURITY_NT_AUTHORITY};
+    PSID sid_world = NULL, sid_res = NULL;
+    SID_AND_ATTRIBUTES restrict_sids[1];
+    GENERIC_MAPPING mapping = {KEY_READ, KEY_WRITE, KEY_EXECUTE, KEY_ALL_ACCESS};
+
+    ret = OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &process_token);
+    ok(ret, "OpenProcessToken failed\n");
+
+    ret = AllocateAndInitializeSid(&sia_world, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &sid_world);
+    ok(ret, "AllocateAndInitializeSid world failed\n");
+    ret = AllocateAndInitializeSid(&sia_nt, 1, SECURITY_RESTRICTED_CODE_RID, 0, 0, 0, 0, 0, 0, 0, &sid_res);
+    ok(ret, "AllocateAndInitializeSid res failed\n");
+
+    /* Create restricted token restricting to RESTRICTED_CODE SID */
+    restrict_sids[0].Sid = sid_res;
+    restrict_sids[0].Attributes = 0;
+
+    r_token = NULL;
+    ret = CreateRestrictedToken(process_token, 0, 0, NULL, 0, NULL, 1, restrict_sids, &r_token);
+    CloseHandle(process_token);
+    ok(ret, "CreateRestrictedToken failed\n");
+
+    ret = DuplicateToken(r_token, SecurityImpersonation, &imp_token);
+    CloseHandle(r_token);
+    ok(ret, "DuplicateToken failed\n");
+
+    /* Case A: DACL only grants KEY_READ to World (not to RESTRICTED_CODE) */
+    ret = InitializeAcl((ACL *)dacl_buf, sizeof(dacl_buf), ACL_REVISION);
+    ok(ret, "InitializeAcl failed\n");
+    ret = AddAccessAllowedAce((ACL *)dacl_buf, ACL_REVISION, KEY_READ, sid_world);
+    ok(ret, "AddAccessAllowedAce failed\n");
+
+    ret = InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+    ok(ret, "InitializeSecurityDescriptor failed\n");
+    ret = SetSecurityDescriptorOwner(&sd, sid_world, FALSE);
+    ok(ret, "SetSecurityDescriptorOwner failed\n");
+    ret = SetSecurityDescriptorGroup(&sd, sid_world, FALSE);
+    ok(ret, "SetSecurityDescriptorGroup failed\n");
+    ret = SetSecurityDescriptorDacl(&sd, TRUE, (ACL *)dacl_buf, FALSE);
+    ok(ret, "SetSecurityDescriptorDacl failed\n");
+
+    /* Both normal groups AND restricting SIDs must grant access.
+     * World is in normal groups, but restricting SIDs contains only RESTRICTED_CODE.
+     * So restricting check will find NO match in DACL and access MUST be denied! */
+    memset(priv_set_buf, 0, sizeof(priv_set_buf));
+    priv_set->PrivilegeCount = 16;
+    priv_set_len = sizeof(priv_set_buf);
+    access = access_status = 0;
+    ret = AccessCheck(&sd, imp_token, KEY_READ, &mapping, priv_set, &priv_set_len, &access, &access_status);
+    ok(ret, "AccessCheck call returned %d with %lu\n", ret, GetLastError());
+    ok(!access_status, "expected AccessCheck DENIED because restricting SID is not in DACL\n");
+
+    /* Case B: Add RESTRICTED_CODE to DACL with KEY_READ */
+    ret = AddAccessAllowedAce((ACL *)dacl_buf, ACL_REVISION, KEY_READ, sid_res);
+    ok(ret, "AddAccessAllowedAce for sid_res failed\n");
+    ret = SetSecurityDescriptorDacl(&sd, TRUE, (ACL *)dacl_buf, FALSE);
+    ok(ret, "SetSecurityDescriptorDacl failed\n");
+
+    /* Now both World (in normal groups) and RESTRICTED_CODE (in restricting SIDs) are granted KEY_READ */
+    memset(priv_set_buf, 0, sizeof(priv_set_buf));
+    priv_set->PrivilegeCount = 16;
+    priv_set_len = sizeof(priv_set_buf);
+    access = access_status = 0;
+    ret = AccessCheck(&sd, imp_token, KEY_READ, &mapping, priv_set, &priv_set_len, &access, &access_status);
+    ok(ret, "AccessCheck call returned %d with %lu\n", ret, GetLastError());
+    ok(access_status && access == KEY_READ,
+       "expected KEY_READ granted when both normal and restricting SIDs match, got status %d, access %#lx\n",
+       access_status, access);
+
+    CloseHandle(imp_token);
+    FreeSid(sid_world);
+    FreeSid(sid_res);
+}
+
 START_TEST(security)
 {
     init();
@@ -8797,6 +9228,11 @@ START_TEST(security)
     test_group_as_file_owner();
     test_IsValidSecurityDescriptor();
     test_window_security();
+    test_token_integrity_level_roundtrip();
+    test_restricted_token_sids();
+    test_lowbox_token();
+    test_mandatory_integrity_access_check();
+    test_restricted_token_access_check();
 
     /* Must be the last test, modifies process token */
     test_token_security_descriptor();
