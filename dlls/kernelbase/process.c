@@ -697,6 +697,13 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
                         machine = *(USHORT *)attrs->attrs[i].value;
                         TRACE( "PROC_THREAD_ATTRIBUTE_MACHINE %x.\n", machine );
                         break;
+                    case PROC_THREAD_ATTRIBUTE_COMPONENT_FILTER:
+                    case PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY:
+                    case PROC_THREAD_ATTRIBUTE_DESKTOP_APP_POLICY:
+                    case PROC_THREAD_ATTRIBUTE_MITIGATION_AUDIT_POLICY:
+                    case PROC_THREAD_ATTRIBUTE_WIN32K_FILTER:
+                        TRACE( "PROC_THREAD_ATTRIBUTE %Iu size %Iu\n", attrs->attrs[i].attr & PROC_THREAD_ATTRIBUTE_NUMBER, attrs->attrs[i].size );
+                        break;
                     default:
                         FIXME("Unsupported attribute %#Ix.\n", attrs->attrs[i].attr);
                         break;
@@ -1000,7 +1007,7 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetProcessId( HANDLE process )
 BOOL WINAPI /* DECLSPEC_HOTPATCH */ GetProcessMitigationPolicy( HANDLE process, PROCESS_MITIGATION_POLICY policy,
                                                           void *buffer, SIZE_T length )
 {
-    FIXME( "(%p, %u, %p, %Iu): stub\n", process, policy, buffer, length );
+    TRACE( "(%p, %u, %p, %Iu)\n", process, policy, buffer, length );
     if (!buffer)
     {
         SetLastError( ERROR_INVALID_PARAMETER );
@@ -1919,6 +1926,18 @@ static inline DWORD validate_proc_thread_attribute( DWORD_PTR attr, SIZE_T size 
         break;
     case PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY:
         if (size != sizeof(GROUP_AFFINITY)) return ERROR_BAD_LENGTH;
+        break;
+    case PROC_THREAD_ATTRIBUTE_COMPONENT_FILTER:
+    case PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY:
+    case PROC_THREAD_ATTRIBUTE_DESKTOP_APP_POLICY:
+        if (size != sizeof(DWORD)) return ERROR_BAD_LENGTH;
+        break;
+    case PROC_THREAD_ATTRIBUTE_MITIGATION_AUDIT_POLICY:
+        if (size != sizeof(DWORD) && size != sizeof(DWORD64) && size != sizeof(DWORD64) * 2)
+            return ERROR_BAD_LENGTH;
+        break;
+    case PROC_THREAD_ATTRIBUTE_WIN32K_FILTER:
+        if (size < sizeof(DWORD)) return ERROR_BAD_LENGTH;
         break;
     default:
         FIXME( "Unhandled attribute %Iu\n", attr & PROC_THREAD_ATTRIBUTE_NUMBER );

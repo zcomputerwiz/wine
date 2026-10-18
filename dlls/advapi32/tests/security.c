@@ -9156,6 +9156,88 @@ static void test_restricted_token_access_check(void)
     FreeSid(sid_res);
 }
 
+static void test_claim_security_attributes(void)
+{
+    HANDLE token;
+    BOOL ret;
+    DWORD ret_len = 0;
+    CLAIM_SECURITY_ATTRIBUTES_INFORMATION claims;
+
+    ret = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token);
+    ok(ret, "OpenProcessToken failed with %lu\n", GetLastError());
+
+    /* Test TokenUserClaimAttributes (33) */
+    SetLastError(0xdeadbeef);
+    ret = GetTokenInformation(token, (TOKEN_INFORMATION_CLASS)33, NULL, 0, &ret_len);
+    ok(!ret, "expected GetTokenInformation to fail with empty buffer\n");
+    ok(GetLastError() == ERROR_INSUFFICIENT_BUFFER, "expected ERROR_INSUFFICIENT_BUFFER, got %lu\n", GetLastError());
+    ok(ret_len >= sizeof(DWORD) * 3, "expected ret_len >= 12, got %lu\n", ret_len);
+
+    memset(&claims, 0xcc, sizeof(claims));
+    ret = GetTokenInformation(token, (TOKEN_INFORMATION_CLASS)33, &claims, sizeof(claims), &ret_len);
+    ok(ret, "GetTokenInformation(TokenUserClaimAttributes) failed with %lu\n", GetLastError());
+    ok(claims.Version == 1, "expected Version 1, got %u\n", claims.Version);
+    ok(claims.AttributeCount == 0, "expected AttributeCount 0, got %lu\n", claims.AttributeCount);
+    ok(claims.Attribute.pAttributeV1 == NULL, "expected NULL pAttributeV1\n");
+
+    /* Test TokenSecurityAttributes (39) */
+    ret_len = 0;
+    SetLastError(0xdeadbeef);
+    ret = GetTokenInformation(token, (TOKEN_INFORMATION_CLASS)39, NULL, 0, &ret_len);
+    ok(!ret, "expected GetTokenInformation to fail with empty buffer\n");
+    ok(GetLastError() == ERROR_INSUFFICIENT_BUFFER, "expected ERROR_INSUFFICIENT_BUFFER, got %lu\n", GetLastError());
+    ok(ret_len >= sizeof(DWORD) * 3, "expected ret_len >= 12, got %lu\n", ret_len);
+
+    memset(&claims, 0xcc, sizeof(claims));
+    ret = GetTokenInformation(token, (TOKEN_INFORMATION_CLASS)39, &claims, sizeof(claims), &ret_len);
+    ok(ret, "GetTokenInformation(TokenSecurityAttributes) failed with %lu\n", GetLastError());
+    ok(claims.Version == 1, "expected Version 1, got %u\n", claims.Version);
+    ok(claims.AttributeCount == 0, "expected AttributeCount 0, got %lu\n", claims.AttributeCount);
+    ok(claims.Attribute.pAttributeV1 == NULL, "expected NULL pAttributeV1\n");
+
+    CloseHandle(token);
+}
+
+static void test_revoke_access_acl(void)
+{
+    BYTE acl_buf[256];
+    PACL acl = (PACL)acl_buf;
+    PACL new_acl = NULL;
+    PSID sid_world = NULL;
+    SID_IDENTIFIER_AUTHORITY world_auth = { SECURITY_WORLD_SID_AUTHORITY };
+    EXPLICIT_ACCESS_W ea;
+    DWORD res;
+    BOOL ret;
+
+    ret = AllocateAndInitializeSid(&world_auth, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &sid_world);
+    ok(ret, "AllocateAndInitializeSid failed\n");
+
+    ret = InitializeAcl(acl, sizeof(acl_buf), ACL_REVISION);
+    ok(ret, "InitializeAcl failed\n");
+    ret = AddAccessAllowedAce(acl, ACL_REVISION, GENERIC_ALL, sid_world);
+    ok(ret, "AddAccessAllowedAce failed\n");
+    ok(acl->AceCount == 1, "expected AceCount 1\n");
+
+    memset(&ea, 0, sizeof(ea));
+    ea.grfAccessPermissions = GENERIC_ALL;
+    ea.grfAccessMode = REVOKE_ACCESS;
+    ea.grfInheritance = NO_INHERITANCE;
+    ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    ea.Trustee.ptstrName = (LPWSTR)sid_world;
+
+    res = SetEntriesInAclW(1, &ea, acl, &new_acl);
+    ok(res == ERROR_SUCCESS, "SetEntriesInAclW failed with %lu\n", res);
+    ok(new_acl != NULL, "expected valid new_acl\n");
+    if (new_acl)
+    {
+        ok(new_acl->AceCount == 0, "expected AceCount 0 after REVOKE_ACCESS, got %u\n", new_acl->AceCount);
+        LocalFree(new_acl);
+    }
+
+    FreeSid(sid_world);
+}
+
 START_TEST(security)
 {
     init();
@@ -9233,6 +9315,8 @@ START_TEST(security)
     test_lowbox_token();
     test_mandatory_integrity_access_check();
     test_restricted_token_access_check();
+    test_claim_security_attributes();
+    test_revoke_access_acl();
 
     /* Must be the last test, modifies process token */
     test_token_security_descriptor();
