@@ -35,11 +35,11 @@
 #include "d3d11_4.h"
 #include "d3d12.h"
 #include "ntstatus.h"
-#include "wine/d3dkmt_desc.h"
 #include "ntgdi.h"
 #ifdef DXGI_INIT_GUID
 #include "initguid.h"
 #endif
+#include "wine/d3dkmt_desc.h"
 #include "wine/wined3d.h"
 #include "wine/winedxgi.h"
 #include "wine/dcomp_layer.h"

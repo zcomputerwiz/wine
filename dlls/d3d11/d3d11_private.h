@@ -33,11 +33,11 @@
 #include "d3d11_4.h"
 #include "winternl.h"
 #include "ntstatus.h"
-#include "wine/d3dkmt_desc.h"
 #include "ntgdi.h"
 #ifdef D3D11_INIT_GUID
 #include "initguid.h"
 #endif
+#include "wine/d3dkmt_desc.h"
 #include "wine/wined3d.h"
 #include "wine/winedxgi.h"
 #include "wine/rbtree.h"
