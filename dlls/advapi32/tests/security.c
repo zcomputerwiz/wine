@@ -9151,10 +9151,131 @@ static void test_restricted_token_access_check(void)
        "expected KEY_READ granted when both normal and restricting SIDs match, got status %d, access %#lx\n",
        access_status, access);
 
+    /* Case C: DACL contains ACCESS_DENIED_ACE for restricting SID preceding an ALLOW ACE.
+     * Deny ACE on restricting SID must deny access! */
+    ret = InitializeAcl((ACL *)dacl_buf, sizeof(dacl_buf), ACL_REVISION);
+    ok(ret, "InitializeAcl failed\n");
+    ret = AddAccessDeniedAce((ACL *)dacl_buf, ACL_REVISION, KEY_READ, sid_res);
+    ok(ret, "AddAccessDeniedAce for sid_res failed\n");
+    ret = AddAccessAllowedAce((ACL *)dacl_buf, ACL_REVISION, KEY_READ, sid_res);
+    ok(ret, "AddAccessAllowedAce for sid_res failed\n");
+    ret = AddAccessAllowedAce((ACL *)dacl_buf, ACL_REVISION, KEY_READ, sid_world);
+    ok(ret, "AddAccessAllowedAce for sid_world failed\n");
+    ret = SetSecurityDescriptorDacl(&sd, TRUE, (ACL *)dacl_buf, FALSE);
+    ok(ret, "SetSecurityDescriptorDacl failed\n");
+
+    memset(priv_set_buf, 0, sizeof(priv_set_buf));
+    priv_set->PrivilegeCount = 16;
+    priv_set_len = sizeof(priv_set_buf);
+    access = access_status = 0;
+    ret = AccessCheck(&sd, imp_token, KEY_READ, &mapping, priv_set, &priv_set_len, &access, &access_status);
+    ok(ret, "AccessCheck call returned %d with %lu\n", ret, GetLastError());
+    ok(!access_status, "expected AccessCheck DENIED due to ACCESS_DENIED_ACE on restricting SID\n");
+
     CloseHandle(imp_token);
     FreeSid(sid_world);
     FreeSid(sid_res);
 }
+
+static void test_restricted_sid_intersection(void)
+{
+    HANDLE process_token, token1, token2, token3;
+    BOOL ret, is_restricted;
+    DWORD size;
+    static SID_IDENTIFIER_AUTHORITY sia_nt = {SECURITY_NT_AUTHORITY};
+    PSID sid1 = NULL, sid2 = NULL, sid3 = NULL;
+    SID_AND_ATTRIBUTES sids_initial[2];
+    SID_AND_ATTRIBUTES sids_second[2];
+    SID_AND_ATTRIBUTES sids_third[1];
+    TOKEN_GROUPS *r_groups;
+
+    ret = OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &process_token);
+    ok(ret, "OpenProcessToken failed\n");
+
+    ret = AllocateAndInitializeSid(&sia_nt, 1, SECURITY_RESTRICTED_CODE_RID, 0, 0, 0, 0, 0, 0, 0, &sid1);
+    ok(ret, "AllocateAndInitializeSid sid1 failed\n");
+    ret = AllocateAndInitializeSid(&sia_nt, 1, SECURITY_LOCAL_RID, 0, 0, 0, 0, 0, 0, 0, &sid2);
+    ok(ret, "AllocateAndInitializeSid sid2 failed\n");
+    ret = AllocateAndInitializeSid(&sia_nt, 1, SECURITY_ANONYMOUS_LOGON_RID, 0, 0, 0, 0, 0, 0, 0, &sid3);
+    ok(ret, "AllocateAndInitializeSid sid3 failed\n");
+
+    /* Create token1 with {sid1, sid2} */
+    sids_initial[0].Sid = sid1;
+    sids_initial[0].Attributes = 0;
+    sids_initial[1].Sid = sid2;
+    sids_initial[1].Attributes = 0;
+
+    ret = CreateRestrictedToken(process_token, 0, 0, NULL, 0, NULL, 2, sids_initial, &token1);
+    ok(ret, "CreateRestrictedToken token1 failed with error %lu\n", GetLastError());
+    CloseHandle(process_token);
+
+    /* Verify token1 has 2 restricting SIDs */
+    ret = GetTokenInformation(token1, TokenRestrictedSids, NULL, 0, &size);
+    ok(!ret && GetLastError() == ERROR_INSUFFICIENT_BUFFER, "expected ERROR_INSUFFICIENT_BUFFER\n");
+    r_groups = malloc(size);
+    ret = GetTokenInformation(token1, TokenRestrictedSids, r_groups, size, &size);
+    ok(ret, "GetTokenInformation token1 failed\n");
+    ok(r_groups->GroupCount == 2, "expected 2 restricting SIDs in token1, got %lu\n", r_groups->GroupCount);
+    free(r_groups);
+
+    /* Filter token1 with {sid2, sid3}. The intersection must be {sid2}. Never union to {sid1, sid2, sid3} */
+    sids_second[0].Sid = sid2;
+    sids_second[0].Attributes = 0;
+    sids_second[1].Sid = sid3;
+    sids_second[1].Attributes = 0;
+
+    ret = CreateRestrictedToken(token1, 0, 0, NULL, 0, NULL, 2, sids_second, &token2);
+    ok(ret, "CreateRestrictedToken token2 failed with error %lu\n", GetLastError());
+
+    ret = GetTokenInformation(token2, TokenRestrictedSids, NULL, 0, &size);
+    ok(!ret && GetLastError() == ERROR_INSUFFICIENT_BUFFER, "expected ERROR_INSUFFICIENT_BUFFER\n");
+    r_groups = malloc(size);
+    ret = GetTokenInformation(token2, TokenRestrictedSids, r_groups, size, &size);
+    ok(ret, "GetTokenInformation token2 failed\n");
+    ok(r_groups->GroupCount == 1, "expected 1 restricting SID (intersection), got %lu\n", r_groups->GroupCount);
+    if (r_groups->GroupCount == 1)
+    {
+        ok(EqualSid(r_groups->Groups[0].Sid, sid2), "expected restricting SID to be sid2\n");
+    }
+    free(r_groups);
+    CloseHandle(token2);
+
+    /* Filter token1 with {sid3} (completely disjoint from {sid1, sid2}).
+     * Must remain restricted with an unmatchable restricting SID (S-1-0-0 / null SID), NOT revert to unrestricted! */
+    sids_third[0].Sid = sid3;
+    sids_third[0].Attributes = 0;
+
+    ret = CreateRestrictedToken(token1, 0, 0, NULL, 0, NULL, 1, sids_third, &token3);
+    ok(ret, "CreateRestrictedToken token3 failed with error %lu\n", GetLastError());
+
+    is_restricted = FALSE;
+    ret = GetTokenInformation(token3, TokenIsRestricted, &is_restricted, sizeof(is_restricted), &size);
+    ok(ret, "GetTokenInformation(TokenIsRestricted) failed\n");
+    ok(is_restricted, "token3 must remain restricted when filtering sets are disjoint\n");
+
+    ret = GetTokenInformation(token3, TokenRestrictedSids, NULL, 0, &size);
+    ok(!ret && GetLastError() == ERROR_INSUFFICIENT_BUFFER, "expected ERROR_INSUFFICIENT_BUFFER\n");
+    r_groups = malloc(size);
+    ret = GetTokenInformation(token3, TokenRestrictedSids, r_groups, size, &size);
+    ok(ret, "GetTokenInformation token3 failed\n");
+    ok(r_groups->GroupCount == 1, "expected 1 restricting SID (null_sid), got %lu\n", r_groups->GroupCount);
+    if (r_groups->GroupCount == 1)
+    {
+        static SID_IDENTIFIER_AUTHORITY sia_null = {SECURITY_NULL_SID_AUTHORITY};
+        PSID sid_null = NULL;
+        AllocateAndInitializeSid(&sia_null, 1, SECURITY_NULL_RID, 0, 0, 0, 0, 0, 0, 0, &sid_null);
+        ok(EqualSid(r_groups->Groups[0].Sid, sid_null), "expected null SID (S-1-0-0)\n");
+        FreeSid(sid_null);
+    }
+    free(r_groups);
+
+    CloseHandle(token1);
+    CloseHandle(token3);
+    FreeSid(sid1);
+    FreeSid(sid2);
+    FreeSid(sid3);
+}
+
 
 static void test_claim_security_attributes(void)
 {
@@ -9315,6 +9436,7 @@ START_TEST(security)
     test_lowbox_token();
     test_mandatory_integrity_access_check();
     test_restricted_token_access_check();
+    test_restricted_sid_intersection();
     test_claim_security_attributes();
     test_revoke_access_acl();
 

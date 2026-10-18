@@ -949,3 +949,41 @@ DECL_HANDLER(compare_objects)
     release_object( obj2 );
     release_object( obj1 );
 }
+
+DECL_HANDLER(get_process_handle_table)
+{
+    struct process *process = get_process_from_handle( req->handle, PROCESS_QUERY_INFORMATION );
+    if (process)
+    {
+        struct handle_table *table = process->handles;
+        if (table)
+        {
+            unsigned int count = 0, i;
+            obj_handle_t *handles;
+
+            for (i = 0; i <= table->last; i++)
+            {
+                if (table->entries[i].ptr) count++;
+            }
+
+            reply->count = count;
+            if (count * sizeof(obj_handle_t) <= get_reply_max_size())
+            {
+                if ((handles = set_reply_data_size( count * sizeof(obj_handle_t) )))
+                {
+                    unsigned int pos = 0;
+                    for (i = 0; i <= table->last; i++)
+                    {
+                        if (table->entries[i].ptr)
+                            handles[pos++] = index_to_handle( i );
+                    }
+                }
+            }
+            else
+            {
+                set_error( STATUS_INFO_LENGTH_MISMATCH );
+            }
+        }
+        release_object( process );
+    }
+}

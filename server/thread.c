@@ -368,6 +368,7 @@ static inline void init_thread_structure( struct thread *thread )
     thread->exit_code       = 0;
     thread->priority        = 0;
     thread->base_priority   = 0;
+    thread->page_priority   = 5;
     thread->disable_boost   = 0;
     thread->suspend         = 0;
     thread->dbg_hidden      = 0;
@@ -1855,6 +1856,35 @@ DECL_HANDLER(get_thread_info)
                 set_error( STATUS_BUFFER_TOO_SMALL );
         }
 
+        release_object( thread );
+    }
+}
+
+/* fetch page priority of a thread */
+DECL_HANDLER(get_thread_page_priority)
+{
+    struct thread *thread = get_thread_from_handle( req->handle, THREAD_QUERY_LIMITED_INFORMATION );
+    if (thread)
+    {
+        reply->page_priority = thread->page_priority;
+        release_object( thread );
+    }
+}
+
+/* set page priority of a thread */
+DECL_HANDLER(set_thread_page_priority)
+{
+    struct thread *thread;
+
+    if (req->page_priority < 0 || req->page_priority > 5)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+
+    if ((thread = get_thread_from_handle( req->handle, THREAD_SET_LIMITED_INFORMATION )))
+    {
+        thread->page_priority = req->page_priority;
         release_object( thread );
     }
 }

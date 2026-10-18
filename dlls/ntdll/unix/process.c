@@ -1386,8 +1386,16 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
         break;
 
     case ProcessHandleTable:
-        TRACE( "ProcessHandleTable (%p,%p,0x%08x,%p)\n", handle, info, size, ret_len );
-        len = 0;
+        SERVER_START_REQ( get_process_handle_table )
+        {
+            req->handle = wine_server_obj_handle( handle );
+            wine_server_set_reply( req, info, size );
+            ret = wine_server_call( req );
+            len = reply->count * sizeof(ULONG);
+        }
+        SERVER_END_REQ;
+        if (ret == STATUS_BUFFER_OVERFLOW || ret == STATUS_BUFFER_TOO_SMALL)
+            ret = STATUS_INFO_LENGTH_MISMATCH;
         break;
 
     case ProcessAffinityMask:

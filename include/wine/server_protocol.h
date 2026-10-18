@@ -1323,6 +1323,21 @@ struct get_process_debug_info_reply
 
 
 
+struct get_process_handle_table_request
+{
+    struct request_header __header;
+    obj_handle_t handle;
+};
+struct get_process_handle_table_reply
+{
+    struct reply_header __header;
+    unsigned int count;
+    /* VARARG(handles,uints); */
+    char __pad_12[4];
+};
+
+
+
 struct get_process_image_name_request
 {
     struct request_header __header;
@@ -1409,6 +1424,34 @@ struct get_thread_info_reply
 #define GET_THREAD_INFO_FLAG_TERMINATED    0x02
 #define GET_THREAD_INFO_FLAG_LAST          0x04
 #define GET_THREAD_INFO_FLAG_DISABLE_BOOST 0x08
+
+
+
+struct get_thread_page_priority_request
+{
+    struct request_header __header;
+    obj_handle_t handle;
+};
+struct get_thread_page_priority_reply
+{
+    struct reply_header __header;
+    int          page_priority;
+    char __pad_12[4];
+};
+
+
+
+struct set_thread_page_priority_request
+{
+    struct request_header __header;
+    obj_handle_t handle;
+    int          page_priority;
+    char __pad_20[4];
+};
+struct set_thread_page_priority_reply
+{
+    struct reply_header __header;
+};
 
 
 
@@ -6292,10 +6335,13 @@ enum request
     REQ_terminate_thread,
     REQ_get_process_info,
     REQ_get_process_debug_info,
+    REQ_get_process_handle_table,
     REQ_get_process_image_name,
     REQ_get_process_vm_counters,
     REQ_set_process_info,
     REQ_get_thread_info,
+    REQ_get_thread_page_priority,
+    REQ_set_thread_page_priority,
     REQ_get_thread_times,
     REQ_set_thread_info,
     REQ_suspend_thread,
@@ -6609,10 +6655,13 @@ union generic_request
     struct terminate_thread_request terminate_thread_request;
     struct get_process_info_request get_process_info_request;
     struct get_process_debug_info_request get_process_debug_info_request;
+    struct get_process_handle_table_request get_process_handle_table_request;
     struct get_process_image_name_request get_process_image_name_request;
     struct get_process_vm_counters_request get_process_vm_counters_request;
     struct set_process_info_request set_process_info_request;
     struct get_thread_info_request get_thread_info_request;
+    struct get_thread_page_priority_request get_thread_page_priority_request;
+    struct set_thread_page_priority_request set_thread_page_priority_request;
     struct get_thread_times_request get_thread_times_request;
     struct set_thread_info_request set_thread_info_request;
     struct suspend_thread_request suspend_thread_request;
@@ -6924,10 +6973,13 @@ union generic_reply
     struct terminate_thread_reply terminate_thread_reply;
     struct get_process_info_reply get_process_info_reply;
     struct get_process_debug_info_reply get_process_debug_info_reply;
+    struct get_process_handle_table_reply get_process_handle_table_reply;
     struct get_process_image_name_reply get_process_image_name_reply;
     struct get_process_vm_counters_reply get_process_vm_counters_reply;
     struct set_process_info_reply set_process_info_reply;
     struct get_thread_info_reply get_thread_info_reply;
+    struct get_thread_page_priority_reply get_thread_page_priority_reply;
+    struct set_thread_page_priority_reply set_thread_page_priority_reply;
     struct get_thread_times_reply get_thread_times_reply;
     struct set_thread_info_reply set_thread_info_reply;
     struct suspend_thread_reply suspend_thread_reply;
@@ -7225,6 +7277,6 @@ union generic_reply
     struct alpc_create_port_reply alpc_create_port_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 964
+#define SERVER_PROTOCOL_VERSION 966
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

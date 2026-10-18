@@ -18,10 +18,13 @@ DECL_HANDLER(terminate_process);
 DECL_HANDLER(terminate_thread);
 DECL_HANDLER(get_process_info);
 DECL_HANDLER(get_process_debug_info);
+DECL_HANDLER(get_process_handle_table);
 DECL_HANDLER(get_process_image_name);
 DECL_HANDLER(get_process_vm_counters);
 DECL_HANDLER(set_process_info);
 DECL_HANDLER(get_thread_info);
+DECL_HANDLER(get_thread_page_priority);
+DECL_HANDLER(set_thread_page_priority);
 DECL_HANDLER(get_thread_times);
 DECL_HANDLER(set_thread_info);
 DECL_HANDLER(suspend_thread);
@@ -332,10 +335,13 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_terminate_thread,
     (req_handler)req_get_process_info,
     (req_handler)req_get_process_debug_info,
+    (req_handler)req_get_process_handle_table,
     (req_handler)req_get_process_image_name,
     (req_handler)req_get_process_vm_counters,
     (req_handler)req_set_process_info,
     (req_handler)req_get_thread_info,
+    (req_handler)req_get_thread_page_priority,
+    (req_handler)req_set_thread_page_priority,
     (req_handler)req_get_thread_times,
     (req_handler)req_set_thread_info,
     (req_handler)req_suspend_thread,
@@ -779,6 +785,10 @@ C_ASSERT( sizeof(struct get_process_debug_info_request) == 16 );
 C_ASSERT( offsetof(struct get_process_debug_info_reply, debug) == 8 );
 C_ASSERT( offsetof(struct get_process_debug_info_reply, debug_children) == 12 );
 C_ASSERT( sizeof(struct get_process_debug_info_reply) == 16 );
+C_ASSERT( offsetof(struct get_process_handle_table_request, handle) == 12 );
+C_ASSERT( sizeof(struct get_process_handle_table_request) == 16 );
+C_ASSERT( offsetof(struct get_process_handle_table_reply, count) == 8 );
+C_ASSERT( sizeof(struct get_process_handle_table_reply) == 16 );
 C_ASSERT( offsetof(struct get_process_image_name_request, handle) == 12 );
 C_ASSERT( offsetof(struct get_process_image_name_request, pid) == 16 );
 C_ASSERT( offsetof(struct get_process_image_name_request, win32) == 20 );
@@ -817,6 +827,13 @@ C_ASSERT( offsetof(struct get_thread_info_reply, suspend_count) == 52 );
 C_ASSERT( offsetof(struct get_thread_info_reply, flags) == 56 );
 C_ASSERT( offsetof(struct get_thread_info_reply, desc_len) == 60 );
 C_ASSERT( sizeof(struct get_thread_info_reply) == 64 );
+C_ASSERT( offsetof(struct get_thread_page_priority_request, handle) == 12 );
+C_ASSERT( sizeof(struct get_thread_page_priority_request) == 16 );
+C_ASSERT( offsetof(struct get_thread_page_priority_reply, page_priority) == 8 );
+C_ASSERT( sizeof(struct get_thread_page_priority_reply) == 16 );
+C_ASSERT( offsetof(struct set_thread_page_priority_request, handle) == 12 );
+C_ASSERT( offsetof(struct set_thread_page_priority_request, page_priority) == 16 );
+C_ASSERT( sizeof(struct set_thread_page_priority_request) == 24 );
 C_ASSERT( offsetof(struct get_thread_times_request, handle) == 12 );
 C_ASSERT( sizeof(struct get_thread_times_request) == 16 );
 C_ASSERT( offsetof(struct get_thread_times_reply, creation_time) == 8 );
