@@ -4844,6 +4844,34 @@ static void adapter_gl_flush_context(struct wined3d_context *context)
         context_gl->gl_info->gl_ops.gl.p_glFlush();
 }
 
+static BOOL adapter_gl_finish_context(struct wined3d_context *context)
+{
+    struct wined3d_device *device = context->device;
+    struct wined3d_context_gl *context_gl;
+    BOOL success = TRUE;
+    unsigned int i;
+
+    /* glFinish is context-local. Earlier work may target another swapchain,
+     * so complete every context owned by this device's CS, not only the current
+     * drawable. This conservative barrier is deliberately not a fast path. */
+    for (i = 0; i < device->context_count; ++i)
+    {
+        context_gl = wined3d_context_gl(device->contexts[i]);
+        if (context_gl->tid != GetCurrentThreadId() || !context_gl->valid
+                || !wined3d_context_gl_set_current(context_gl))
+        {
+            success = FALSE;
+            break;
+        }
+        context_gl->gl_info->gl_ops.gl.p_glFinish();
+    }
+    /* Do not use reacquire here: a context without a current RT may resolve to
+     * another context. Also preserve the caller's acquired context/level. */
+    if (!wined3d_context_gl_set_current(wined3d_context_gl(context)))
+        success = FALSE;
+    return success;
+}
+
 static void adapter_gl_clear_uav(struct wined3d_context *context,
         struct wined3d_unordered_access_view *view, const struct wined3d_uvec4 *clear_value, bool fp)
 {
@@ -4897,6 +4925,7 @@ static const struct wined3d_adapter_ops wined3d_adapter_gl_ops =
     .adapter_create_query = adapter_gl_create_query,
     .adapter_destroy_query = adapter_gl_destroy_query,
     .adapter_flush_context = adapter_gl_flush_context,
+    .adapter_finish_context = adapter_gl_finish_context,
     .adapter_draw_primitive = draw_primitive,
     .adapter_dispatch_compute = dispatch_compute,
     .adapter_clear_uav = adapter_gl_clear_uav,

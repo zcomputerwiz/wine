@@ -1721,6 +1721,16 @@ static void adapter_vk_flush_context(struct wined3d_context *context)
     wined3d_context_vk_submit_command_buffer(context_vk, 0, NULL, NULL, 0, NULL);
 }
 
+static BOOL adapter_vk_finish_context(struct wined3d_context *context)
+{
+    struct wined3d_context_vk *context_vk = wined3d_context_vk(context);
+    struct wined3d_device_vk *device_vk = wined3d_device_vk(context->device);
+    const struct wined3d_vk_info *vk_info = context_vk->vk_info;
+
+    adapter_vk_flush_context(context);
+    return VK_CALL(vkQueueWaitIdle(device_vk->graphics_queue.vk_queue)) == VK_SUCCESS;
+}
+
 static void adapter_vk_draw_primitive(struct wined3d_device *device,
         const struct wined3d_state *state, const struct wined3d_draw_parameters *parameters)
 {
@@ -1895,6 +1905,7 @@ static const struct wined3d_adapter_ops wined3d_adapter_vk_ops =
     .adapter_create_query = adapter_vk_create_query,
     .adapter_destroy_query = adapter_vk_destroy_query,
     .adapter_flush_context = adapter_vk_flush_context,
+    .adapter_finish_context = adapter_vk_finish_context,
     .adapter_draw_primitive = adapter_vk_draw_primitive,
     .adapter_dispatch_compute = adapter_vk_dispatch_compute,
     .adapter_clear_uav = adapter_vk_clear_uav,

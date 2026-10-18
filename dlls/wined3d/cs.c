@@ -128,6 +128,7 @@ enum wined3d_cs_op
     WINED3D_CS_OP_PUSH_CONSTANTS,
     WINED3D_CS_OP_RESET_STATE,
     WINED3D_CS_OP_CALLBACK,
+    WINED3D_CS_OP_FENCE_CALLBACK,
     WINED3D_CS_OP_QUERY_ISSUE,
     WINED3D_CS_OP_PRELOAD_RESOURCE,
     WINED3D_CS_OP_UNLOAD_RESOURCE,
@@ -447,6 +448,14 @@ struct wined3d_cs_query_issue
     uint32_t flags;
 };
 
+struct wined3d_cs_fence_callback
+{
+    enum wined3d_cs_op opcode;
+    void (*callback)(void *object, BOOL success);
+    void *object;
+    BOOL wait_gpu;
+};
+
 struct wined3d_cs_preload_resource
 {
     enum wined3d_cs_op opcode;
@@ -629,6 +638,7 @@ static const char *debug_cs_op(enum wined3d_cs_op op)
         WINED3D_TO_STR(WINED3D_CS_OP_PUSH_CONSTANTS);
         WINED3D_TO_STR(WINED3D_CS_OP_RESET_STATE);
         WINED3D_TO_STR(WINED3D_CS_OP_CALLBACK);
+        WINED3D_TO_STR(WINED3D_CS_OP_FENCE_CALLBACK);
         WINED3D_TO_STR(WINED3D_CS_OP_QUERY_ISSUE);
         WINED3D_TO_STR(WINED3D_CS_OP_PRELOAD_RESOURCE);
         WINED3D_TO_STR(WINED3D_CS_OP_UNLOAD_RESOURCE);
@@ -2361,6 +2371,42 @@ static void wined3d_cs_exec_callback(struct wined3d_cs *cs, const void *data)
     op->callback(op->object);
 }
 
+static void wined3d_cs_exec_fence_callback(struct wined3d_cs *cs, const void *data)
+{
+    const struct wined3d_cs_fence_callback *op = data;
+    struct wined3d_device *device = cs->c.device;
+    struct wined3d_context *context;
+    BOOL success = TRUE;
+
+    if (op->wait_gpu)
+    {
+        context = context_acquire(device, NULL, 0);
+        success = context && device->adapter->adapter_ops->adapter_finish_context(context);
+        if (context)
+            context_release(context);
+    }
+    op->callback(op->object, success);
+}
+
+HRESULT CDECL wined3d_device_context_enqueue_fence(struct wined3d_device_context *context,
+        void (*callback)(void *object, BOOL success), void *object, BOOL wait_gpu)
+{
+    struct wined3d_cs_fence_callback *op;
+
+    /* A CPU-blocking Wait is not a substitute when the asynchronous CS is off. */
+    if (!context->device->cs->thread || context != &context->device->cs->c)
+        return E_NOTIMPL;
+    wined3d_device_context_lock(context);
+    op = wined3d_device_context_require_space(context, sizeof(*op), WINED3D_CS_QUEUE_DEFAULT);
+    op->opcode = WINED3D_CS_OP_FENCE_CALLBACK;
+    op->callback = callback;
+    op->object = object;
+    op->wait_gpu = wait_gpu;
+    wined3d_device_context_submit(context, WINED3D_CS_QUEUE_DEFAULT);
+    wined3d_device_context_unlock(context);
+    return S_OK;
+}
+
 static void wined3d_cs_emit_callback(struct wined3d_cs *cs, void (*callback)(void *object), void *object)
 {
     struct wined3d_cs_callback *op;
@@ -3110,6 +3156,7 @@ static void (* const wined3d_cs_op_handlers[])(struct wined3d_cs *cs, const void
     /* WINED3D_CS_OP_PUSH_CONSTANTS              */ wined3d_cs_exec_push_constants,
     /* WINED3D_CS_OP_RESET_STATE                 */ wined3d_cs_exec_reset_state,
     /* WINED3D_CS_OP_CALLBACK                    */ wined3d_cs_exec_callback,
+    /* WINED3D_CS_OP_FENCE_CALLBACK              */ wined3d_cs_exec_fence_callback,
     /* WINED3D_CS_OP_QUERY_ISSUE                 */ wined3d_cs_exec_query_issue,
     /* WINED3D_CS_OP_PRELOAD_RESOURCE            */ wined3d_cs_exec_preload_resource,
     /* WINED3D_CS_OP_UNLOAD_RESOURCE             */ wined3d_cs_exec_unload_resource,

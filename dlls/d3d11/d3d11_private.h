@@ -563,13 +563,6 @@ struct d3d_device_context_state
     ID3D11Device5 *device;
 };
 
-struct d3d11_context_fence_wait
-{
-    struct list entry;
-    ID3D11Fence *fence;
-    UINT64 value;
-};
-
 /* ID3D11DeviceContext */
 struct d3d11_device_context
 {
@@ -584,7 +577,6 @@ struct d3d11_device_context
     struct d3d_device *device;
 
     struct wined3d_private_store private_store;
-    struct list pending_waits;
 };
 
 /* ID3D11Device, ID3D10Device1 */
@@ -619,7 +611,6 @@ struct d3d_device
     struct list shared_textures;
 };
 
-void d3d11_device_context_flush_pending_waits(struct d3d11_device_context *context);
 void d3d11_device_context_flush_shared_resources(struct d3d11_device_context *context);
 
 struct d3d11_command_list
@@ -717,6 +708,7 @@ struct d3d11_fence
 {
     ID3D11Fence ID3D11Fence_iface;
     LONG refcount;
+    LONG private_refcount;
     struct wined3d_private_store private_store;
     struct d3d_device *device;
     D3D11_FENCE_FLAG flags;
