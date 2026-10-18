@@ -980,7 +980,10 @@ HRESULT dxgi_resource_init(struct dxgi_resource *resource, IDXGIDevice *device,
         ID3D11Texture1D *tex1d;
         ID3D11Texture3D *tex3d;
 
-        if (SUCCEEDED(IUnknown_QueryInterface(outer, &IID_ID3D11Texture2D, (void **)&tex2d)))
+        /* The outer D3D object is still being constructed. Querying an unrelated
+         * resource interface may forward to its not-yet-assigned DXGI inner. */
+        if (desc.resource_type == WINED3D_RTYPE_TEXTURE_2D
+                && SUCCEEDED(IUnknown_QueryInterface(outer, &IID_ID3D11Texture2D, (void **)&tex2d)))
         {
             D3D11_TEXTURE2D_DESC d3d_desc;
             ID3D11Texture2D_GetDesc(tex2d, &d3d_desc);
@@ -989,7 +992,8 @@ HRESULT dxgi_resource_init(struct dxgi_resource *resource, IDXGIDevice *device,
                 resource->has_keyed_mutex = TRUE;
             ID3D11Texture2D_Release(tex2d);
         }
-        else if (SUCCEEDED(IUnknown_QueryInterface(outer, &IID_ID3D11Buffer, (void **)&buf)))
+        else if (desc.resource_type == WINED3D_RTYPE_BUFFER
+                && SUCCEEDED(IUnknown_QueryInterface(outer, &IID_ID3D11Buffer, (void **)&buf)))
         {
             D3D11_BUFFER_DESC d3d_desc;
             ID3D11Buffer_GetDesc(buf, &d3d_desc);
@@ -998,7 +1002,8 @@ HRESULT dxgi_resource_init(struct dxgi_resource *resource, IDXGIDevice *device,
                 resource->has_keyed_mutex = TRUE;
             ID3D11Buffer_Release(buf);
         }
-        else if (SUCCEEDED(IUnknown_QueryInterface(outer, &IID_ID3D11Texture1D, (void **)&tex1d)))
+        else if (desc.resource_type == WINED3D_RTYPE_TEXTURE_1D
+                && SUCCEEDED(IUnknown_QueryInterface(outer, &IID_ID3D11Texture1D, (void **)&tex1d)))
         {
             D3D11_TEXTURE1D_DESC d3d_desc;
             ID3D11Texture1D_GetDesc(tex1d, &d3d_desc);
@@ -1007,7 +1012,8 @@ HRESULT dxgi_resource_init(struct dxgi_resource *resource, IDXGIDevice *device,
                 resource->has_keyed_mutex = TRUE;
             ID3D11Texture1D_Release(tex1d);
         }
-        else if (SUCCEEDED(IUnknown_QueryInterface(outer, &IID_ID3D11Texture3D, (void **)&tex3d)))
+        else if (desc.resource_type == WINED3D_RTYPE_TEXTURE_3D
+                && SUCCEEDED(IUnknown_QueryInterface(outer, &IID_ID3D11Texture3D, (void **)&tex3d)))
         {
             D3D11_TEXTURE3D_DESC d3d_desc;
             ID3D11Texture3D_GetDesc(tex3d, &d3d_desc);
