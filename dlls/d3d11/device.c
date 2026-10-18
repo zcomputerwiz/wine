@@ -461,8 +461,104 @@ static struct d3d11_command_list *unsafe_impl_from_ID3D11CommandList(ID3D11Comma
     return impl_from_ID3D11CommandList(iface);
 }
 
+void d3d11_device_context_flush_pending_waits(struct d3d11_device_context *context)
+{
+    struct d3d11_context_fence_wait *wait, *next;
+
+    LIST_FOR_EACH_ENTRY_SAFE(wait, next, &context->pending_waits, struct d3d11_context_fence_wait, entry)
+    {
+        if (ID3D11Fence_GetCompletedValue(wait->fence) < wait->value)
+        {
+            HANDLE event = CreateEventW(NULL, FALSE, FALSE, NULL);
+            if (event)
+            {
+                if (SUCCEEDED(ID3D11Fence_SetEventOnCompletion(wait->fence, wait->value, event)))
+                    WaitForSingleObject(event, INFINITE);
+                CloseHandle(event);
+            }
+        }
+        list_remove(&wait->entry);
+        ID3D11Fence_Release(wait->fence);
+        free(wait);
+    }
+}
+
+void d3d11_device_context_flush_shared_resources(struct d3d11_device_context *context)
+{
+    struct d3d_device *device = context->device;
+    struct d3d_texture2d *texture;
+
+    if (!device)
+        return;
+
+    LIST_FOR_EACH_ENTRY(texture, &device->shared_textures, struct d3d_texture2d, entry)
+    {
+        if (!texture->shared_memory && texture->dxgi_resource)
+        {
+            IDXGIResource1 *dxgi_res = NULL;
+            if (SUCCEEDED(IUnknown_QueryInterface(texture->dxgi_resource, &IID_IDXGIResource1, (void **)&dxgi_res)))
+            {
+                struct wine_dxgi_shared_data sdata;
+                UINT size = sizeof(sdata);
+                if (SUCCEEDED(IDXGIResource1_GetPrivateData(dxgi_res, &IID_WineDXGISharedData, &size, &sdata)))
+                {
+                    texture->shared_mapping = sdata.shared_mapping;
+                    texture->shared_memory = sdata.shared_memory;
+                    texture->shared_memory_size = sdata.shared_memory_size;
+                    texture->shared_pitch = sdata.shared_pitch;
+                }
+                IDXGIResource1_Release(dxgi_res);
+            }
+        }
+
+        if (texture->shared_memory && texture->desc.Usage == D3D11_USAGE_DEFAULT)
+        {
+            D3D11_TEXTURE2D_DESC staging_desc = texture->desc;
+            ID3D11Texture2D *staging = NULL;
+            HRESULT hr;
+
+            staging_desc.Usage = D3D11_USAGE_STAGING;
+            staging_desc.BindFlags = 0;
+            staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            staging_desc.MiscFlags = 0;
+
+            hr = ID3D11Device5_CreateTexture2D(&device->ID3D11Device5_iface, &staging_desc, NULL, &staging);
+            if (SUCCEEDED(hr) && staging)
+            {
+                struct wined3d_resource *dst = wined3d_resource_from_d3d11_resource((ID3D11Resource *)staging);
+                struct wined3d_resource *src = wined3d_texture_get_resource(texture->wined3d_texture);
+                struct wined3d_map_desc map_desc;
+
+                wined3d_device_context_copy_resource(context->wined3d_context, dst, src);
+                wined3d_device_context_flush(context->wined3d_context);
+
+                if (SUCCEEDED(wined3d_device_context_map(context->wined3d_context, dst, 0,
+                        &map_desc, NULL, WINED3D_MAP_READ)))
+                {
+                    BYTE *dst_mem = texture->shared_memory;
+                    const BYTE *src_mem = map_desc.data;
+                    DWORD row_pitch = min(texture->shared_pitch, map_desc.row_pitch);
+                    DWORD y;
+                    for (y = 0; y < texture->desc.Height; ++y)
+                        memcpy(dst_mem + y * texture->shared_pitch, src_mem + y * map_desc.row_pitch, row_pitch);
+                    wined3d_device_context_unmap(context->wined3d_context, dst, 0);
+                }
+                ID3D11Texture2D_Release(staging);
+            }
+        }
+    }
+}
+
 static void d3d11_device_context_cleanup(struct d3d11_device_context *context)
 {
+    struct d3d11_context_fence_wait *wait, *next;
+
+    LIST_FOR_EACH_ENTRY_SAFE(wait, next, &context->pending_waits, struct d3d11_context_fence_wait, entry)
+    {
+        list_remove(&wait->entry);
+        ID3D11Fence_Release(wait->fence);
+        free(wait);
+    }
     wined3d_private_store_cleanup(&context->private_store);
 }
 
@@ -1374,11 +1470,51 @@ static void STDMETHODCALLTYPE d3d11_device_context_CopyResource(ID3D11DeviceCont
 {
     struct d3d11_device_context *context = impl_from_ID3D11DeviceContext4(iface);
     struct wined3d_resource *wined3d_dst_resource, *wined3d_src_resource;
+    struct d3d_texture2d *src_tex = unsafe_impl_from_ID3D11Texture2D((ID3D11Texture2D *)src_resource);
+    struct d3d_texture2d *dst_tex = unsafe_impl_from_ID3D11Texture2D((ID3D11Texture2D *)dst_resource);
 
     TRACE("iface %p, dst_resource %p, src_resource %p.\n", iface, dst_resource, src_resource);
 
+    d3d11_device_context_flush_pending_waits(context);
+
+    if (src_tex && !src_tex->shared_memory && src_tex->dxgi_resource)
+    {
+        IDXGIResource1 *dxgi_res = NULL;
+        if (SUCCEEDED(IUnknown_QueryInterface(src_tex->dxgi_resource, &IID_IDXGIResource1, (void **)&dxgi_res)))
+        {
+            struct wine_dxgi_shared_data sdata;
+            UINT size = sizeof(sdata);
+            if (SUCCEEDED(IDXGIResource1_GetPrivateData(dxgi_res, &IID_WineDXGISharedData, &size, &sdata)))
+            {
+                src_tex->shared_mapping = sdata.shared_mapping;
+                src_tex->shared_memory = sdata.shared_memory;
+                src_tex->shared_memory_size = sdata.shared_memory_size;
+                src_tex->shared_pitch = sdata.shared_pitch;
+            }
+            IDXGIResource1_Release(dxgi_res);
+        }
+    }
+
     wined3d_dst_resource = wined3d_resource_from_d3d11_resource(dst_resource);
     wined3d_src_resource = wined3d_resource_from_d3d11_resource(src_resource);
+
+    if (src_tex && src_tex->shared_memory && dst_tex && dst_tex->desc.Usage == D3D11_USAGE_STAGING)
+    {
+        struct wined3d_map_desc map_desc;
+        if (SUCCEEDED(wined3d_device_context_map(context->wined3d_context, wined3d_dst_resource, 0,
+                &map_desc, NULL, WINED3D_MAP_WRITE)))
+        {
+            const BYTE *src_mem = src_tex->shared_memory;
+            BYTE *dst_mem = map_desc.data;
+            DWORD row_pitch = min(src_tex->shared_pitch, map_desc.row_pitch);
+            DWORD y;
+            for (y = 0; y < src_tex->desc.Height; ++y)
+                memcpy(dst_mem + y * map_desc.row_pitch, src_mem + y * src_tex->shared_pitch, row_pitch);
+            wined3d_device_context_unmap(context->wined3d_context, wined3d_dst_resource, 0);
+            return;
+        }
+    }
+
     wined3d_device_context_copy_resource(context->wined3d_context, wined3d_dst_resource, wined3d_src_resource);
 }
 
@@ -3467,6 +3603,7 @@ static inline LONG64 fence_exchange64(volatile LONG64 *dest, LONG64 val)
 static HRESULT STDMETHODCALLTYPE d3d11_device_context_Signal(ID3D11DeviceContext4 *iface,
         ID3D11Fence *fence_iface, UINT64 value)
 {
+    struct d3d11_device_context *context = impl_from_ID3D11DeviceContext4(iface);
     struct d3d11_fence *fence;
     struct d3d11_fence_waiter *waiter, *next;
 
@@ -3476,6 +3613,12 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_context_Signal(ID3D11DeviceContext
         return E_INVALIDARG;
 
     fence = impl_from_ID3D11Fence(fence_iface);
+
+    d3d11_device_context_flush_pending_waits(context);
+
+    wined3d_device_context_flush(context->wined3d_context);
+
+    d3d11_device_context_flush_shared_resources(context);
 
     if (fence->shared_data)
         fence_exchange64(&fence->shared_data->completed_value, (LONG64)value);
@@ -3503,6 +3646,9 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_context_Signal(ID3D11DeviceContext
 static HRESULT STDMETHODCALLTYPE d3d11_device_context_Wait(ID3D11DeviceContext4 *iface,
         ID3D11Fence *fence_iface, UINT64 value)
 {
+    struct d3d11_device_context *context = impl_from_ID3D11DeviceContext4(iface);
+    struct d3d11_context_fence_wait *wait;
+
     TRACE("iface %p, fence %p, value %I64u.\n", iface, fence_iface, value);
 
     if (!fence_iface)
@@ -3511,16 +3657,13 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_context_Wait(ID3D11DeviceContext4 
     if (ID3D11Fence_GetCompletedValue(fence_iface) >= value)
         return S_OK;
 
-    {
-        HANDLE event = CreateEventW(NULL, FALSE, FALSE, NULL);
-        if (!event)
-            return E_FAIL;
+    if (!(wait = malloc(sizeof(*wait))))
+        return E_OUTOFMEMORY;
 
-        if (SUCCEEDED(ID3D11Fence_SetEventOnCompletion(fence_iface, value, event)))
-            WaitForSingleObject(event, INFINITE);
-
-        CloseHandle(event);
-    }
+    ID3D11Fence_AddRef(fence_iface);
+    wait->fence = fence_iface;
+    wait->value = value;
+    list_add_tail(&context->pending_waits, &wait->entry);
 
     return S_OK;
 }
@@ -4446,6 +4589,7 @@ static void d3d11_device_context_init(struct d3d11_device_context *context, stru
     context->device = device;
     ID3D11Device5_AddRef(&device->ID3D11Device5_iface);
 
+    list_init(&context->pending_waits);
     wined3d_private_store_init(&context->private_store);
 }
 
@@ -5812,17 +5956,23 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_OpenSharedResource1(ID3D11Device5 
     else
     {
         ID3D11Texture2D *texture;
+        struct d3d_texture2d *tex_impl;
         D3D11_TEXTURE2D_DESC tex_desc;
+        DWORD width = 256, height = 256, pitch;
+        HANDLE shared_mapping = NULL;
+        void *shared_memory = NULL;
 
         if (desc.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D)
         {
             tex_desc = desc.d3d11_2d;
+            width = tex_desc.Width;
+            height = tex_desc.Height;
         }
         else
         {
             memset(&tex_desc, 0, sizeof(tex_desc));
-            tex_desc.Width = desc.dxgi.width ? desc.dxgi.width : 256;
-            tex_desc.Height = desc.dxgi.height ? desc.dxgi.height : 256;
+            tex_desc.Width = width = desc.dxgi.width ? desc.dxgi.width : 256;
+            tex_desc.Height = height = desc.dxgi.height ? desc.dxgi.height : 256;
             tex_desc.Format = desc.dxgi.format ? desc.dxgi.format : DXGI_FORMAT_R8G8B8A8_UNORM;
             tex_desc.MipLevels = 1;
             tex_desc.ArraySize = 1;
@@ -5834,9 +5984,57 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_OpenSharedResource1(ID3D11Device5 
                 tex_desc.MiscFlags |= D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
         }
 
+        pitch = width * 4;
+
+        if (desc.dxgi.unknown_2)
+        {
+            WCHAR map_name[64];
+            swprintf(map_name, ARRAY_SIZE(map_name), L"WineSharedTex_%08lx_%08lx",
+                     (DWORD)desc.dxgi.unknown_2, (DWORD)desc.dxgi.unknown_3);
+            shared_mapping = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, map_name);
+            if (shared_mapping)
+                shared_memory = MapViewOfFile(shared_mapping, FILE_MAP_ALL_ACCESS, 0, 0, height * pitch);
+        }
+
         hr = ID3D11Device5_CreateTexture2D(iface, &tex_desc, NULL, &texture);
         if (FAILED(hr))
+        {
+            if (shared_memory) UnmapViewOfFile(shared_memory);
+            if (shared_mapping) CloseHandle(shared_mapping);
             return hr;
+        }
+
+        tex_impl = unsafe_impl_from_ID3D11Texture2D(texture);
+        if (tex_impl)
+        {
+            tex_impl->shared_mapping = shared_mapping;
+            tex_impl->shared_memory = shared_memory;
+            tex_impl->shared_memory_size = height * pitch;
+            tex_impl->shared_pitch = pitch;
+            tex_impl->is_shared = TRUE;
+
+            if (shared_memory && tex_impl->wined3d_texture)
+                wined3d_texture_update_desc(tex_impl->wined3d_texture, 0, shared_memory, pitch);
+        }
+
+        /* Pass KMT resource and keyed mutex handles to DXGI resource */
+        {
+            IDXGIResource1 *dxgi_res;
+            if (SUCCEEDED(ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIResource1, (void **)&dxgi_res)))
+            {
+                struct wine_dxgi_shared_data sdata = {0};
+                sdata.kmt_resource = open.hResource;
+                sdata.kmt_keyed_mutex = open.hKeyedMutex;
+                sdata.nt_handle = handle;
+                sdata.shared_mapping = shared_mapping;
+                sdata.shared_memory = shared_memory;
+                sdata.shared_memory_size = height * pitch;
+                sdata.shared_pitch = pitch;
+                IDXGIResource1_SetPrivateData(dxgi_res, &IID_WineDXGISharedData, sizeof(sdata), &sdata);
+                IDXGIResource1_Release(dxgi_res);
+            }
+        }
+
         d3d_resource = (ID3D11Resource *)texture;
     }
 
@@ -5851,7 +6049,6 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_OpenSharedResourceByName(ID3D11Dev
     OBJECT_ATTRIBUTES attr;
     UNICODE_STRING name_str;
     WCHAR bufferW[MAX_PATH * 2];
-    char s_buf[MAX_PATH];
     D3DKMT_OPENNTHANDLEFROMNAME open_name = {0};
     NTSTATUS status;
     HRESULT hr;
@@ -5864,12 +6061,9 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_OpenSharedResourceByName(ID3D11Dev
 
     *resource = NULL;
 
-    snprintf(s_buf, sizeof(s_buf), "\\Sessions\\%lu\\BaseNamedObjects\\",
-             (unsigned long)NtCurrentTeb()->Peb->SessionId);
-    name_str.Buffer = bufferW;
-    name_str.MaximumLength = sizeof(bufferW);
-    RtlCreateUnicodeStringFromAsciiz(&name_str, s_buf);
-    RtlAppendUnicodeToString(&name_str, name);
+    swprintf(bufferW, ARRAY_SIZE(bufferW), L"\\Sessions\\%lu\\BaseNamedObjects\\%s",
+             (unsigned long)NtCurrentTeb()->Peb->SessionId, name);
+    RtlInitUnicodeString(&name_str, bufferW);
     InitializeObjectAttributes(&attr, &name_str, OBJ_CASE_INSENSITIVE, NULL, NULL);
 
     open_name.dwDesiredAccess = access ? access : GENERIC_ALL;
@@ -8813,4 +9007,6 @@ void d3d_device_init(struct d3d_device *device, void *outer_unknown)
     wine_rb_init(&device->depthstencil_states, d3d_depthstencil_state_compare);
     wine_rb_init(&device->rasterizer_states, d3d_rasterizer_state_compare);
     wine_rb_init(&device->sampler_states, d3d_sampler_state_compare);
+
+    list_init(&device->shared_textures);
 }

@@ -23,6 +23,21 @@
 #include <d3d11.h>
 #include <ddk/d3dkmthk.h>
 
+/* {64b8bb26-4b20-4a99-b1d5-c9c0fb53c9f1} */
+DEFINE_GUID(IID_WineDXGISharedData,
+    0x64b8bb26, 0x4b20, 0x4a99, 0xb1, 0xd5, 0xc9, 0xc0, 0xfb, 0x53, 0xc9, 0xf1);
+
+struct wine_dxgi_shared_data
+{
+    D3DKMT_HANDLE kmt_resource;
+    D3DKMT_HANDLE kmt_keyed_mutex;
+    HANDLE nt_handle;
+    HANDLE shared_mapping;
+    void *shared_memory;
+    DWORD shared_memory_size;
+    DWORD shared_pitch;
+};
+
 struct d3dkmt_dxgi_desc
 {
     UINT                        size;

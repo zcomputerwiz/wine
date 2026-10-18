@@ -573,6 +573,12 @@ static ULONG STDMETHODCALLTYPE d3d11_texture2d_Release(ID3D11Texture2D *iface)
     if (!refcount)
     {
         ID3D11Device5 *device = texture->device;
+        if (texture->is_shared)
+            list_remove(&texture->entry);
+        if (texture->shared_memory)
+            UnmapViewOfFile(texture->shared_memory);
+        if (texture->shared_mapping)
+            CloseHandle(texture->shared_mapping);
         if (texture->swapchain)
             wined3d_swapchain_decref(texture->swapchain);
         /* Releasing the texture may free the d3d11 object, so do not access it
@@ -1043,6 +1049,12 @@ HRESULT d3d_texture2d_create(struct d3d_device *device, const D3D11_TEXTURE2D_DE
     wined3d_mutex_unlock();
 
     ID3D11Device5_AddRef(texture->device = &device->ID3D11Device5_iface);
+
+    if (desc->MiscFlags & (D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX | D3D11_RESOURCE_MISC_SHARED_NTHANDLE))
+    {
+        texture->is_shared = TRUE;
+        list_add_tail(&device->shared_textures, &texture->entry);
+    }
 
     TRACE("Created texture %p.\n", texture);
     *out = texture;

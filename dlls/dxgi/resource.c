@@ -93,6 +93,10 @@ static ULONG STDMETHODCALLTYPE dxgi_resource_inner_Release(IUnknown *iface)
     {
         if (resource->has_keyed_mutex)
             DeleteCriticalSection(&resource->keyed_mutex_cs);
+        if (resource->shared_memory)
+            UnmapViewOfFile(resource->shared_memory);
+        if (resource->shared_mapping)
+            CloseHandle(resource->shared_mapping);
         if (resource->parent_resource)
             IDXGIResource1_Release(resource->parent_resource);
         wined3d_private_store_cleanup(&resource->private_store);
@@ -353,6 +357,22 @@ static HRESULT STDMETHODCALLTYPE dxgi_resource_SetPrivateData(IDXGIResource1 *if
 
     TRACE("iface %p, guid %s, data_size %u, data %p.\n", iface, debugstr_guid(guid), data_size, data);
 
+    if (IsEqualGUID(guid, &IID_WineDXGISharedData))
+    {
+        const struct wine_dxgi_shared_data *sdata = data;
+        if (!sdata || data_size < sizeof(*sdata))
+            return E_INVALIDARG;
+        resource->kmt_resource = sdata->kmt_resource;
+        resource->kmt_keyed_mutex = sdata->kmt_keyed_mutex;
+        if (sdata->kmt_keyed_mutex)
+            resource->has_keyed_mutex = TRUE;
+        resource->shared_mapping = sdata->shared_mapping;
+        resource->shared_memory = sdata->shared_memory;
+        resource->shared_memory_size = sdata->shared_memory_size;
+        resource->shared_pitch = sdata->shared_pitch;
+        return S_OK;
+    }
+
     return dxgi_set_private_data(&resource->private_store, guid, data_size, data);
 }
 
@@ -372,6 +392,30 @@ static HRESULT STDMETHODCALLTYPE dxgi_resource_GetPrivateData(IDXGIResource1 *if
     struct dxgi_resource *resource = impl_from_IDXGIResource1(iface);
 
     TRACE("iface %p, guid %s, data_size %p, data %p.\n", iface, debugstr_guid(guid), data_size, data);
+
+    if (IsEqualGUID(guid, &IID_WineDXGISharedData))
+    {
+        struct wine_dxgi_shared_data sdata;
+        if (!data_size)
+            return E_INVALIDARG;
+        if (*data_size < sizeof(sdata))
+        {
+            *data_size = sizeof(sdata);
+            return DXGI_ERROR_MORE_DATA;
+        }
+        if (!data)
+            return E_INVALIDARG;
+        sdata.kmt_resource = resource->kmt_resource;
+        sdata.kmt_keyed_mutex = resource->kmt_keyed_mutex;
+        sdata.nt_handle = NULL;
+        sdata.shared_mapping = resource->shared_mapping;
+        sdata.shared_memory = resource->shared_memory;
+        sdata.shared_memory_size = resource->shared_memory_size;
+        sdata.shared_pitch = resource->shared_pitch;
+        memcpy(data, &sdata, sizeof(sdata));
+        *data_size = sizeof(sdata);
+        return S_OK;
+    }
 
     return dxgi_get_private_data(&resource->private_store, guid, data_size, data);
 }
@@ -748,6 +792,8 @@ static HRESULT STDMETHODCALLTYPE dxgi_resource_CreateSharedHandle(IDXGIResource1
     {
         struct d3dkmt_d3d11_desc desc = {0};
         D3DKMT_CREATEALLOCATION alloc = {0};
+        DWORD width = 256, height = 256, pitch;
+        static LONG tex_seq;
 
         desc.dxgi.size = sizeof(desc);
         desc.dxgi.keyed_mutex = resource->has_keyed_mutex;
@@ -760,10 +806,39 @@ static HRESULT STDMETHODCALLTYPE dxgi_resource_CreateSharedHandle(IDXGIResource1
             {
                 ID3D11Texture2D_GetDesc(tex2d, &desc.d3d11_2d);
                 desc.dimension = D3D11_RESOURCE_DIMENSION_TEXTURE2D;
-                desc.dxgi.width = desc.d3d11_2d.Width;
-                desc.dxgi.height = desc.d3d11_2d.Height;
+                desc.dxgi.width = width = desc.d3d11_2d.Width;
+                desc.dxgi.height = height = desc.d3d11_2d.Height;
                 desc.dxgi.format = desc.d3d11_2d.Format;
                 ID3D11Texture2D_Release(tex2d);
+            }
+        }
+
+        resource->shared_pid = GetCurrentProcessId();
+        resource->shared_seq = InterlockedIncrement(&tex_seq);
+        desc.dxgi.unknown_2 = resource->shared_pid;
+        desc.dxgi.unknown_3 = resource->shared_seq;
+
+        pitch = width * 4;
+        resource->shared_pitch = pitch;
+        resource->shared_memory_size = height * pitch;
+
+        if (!resource->shared_mapping)
+        {
+            WCHAR map_name[64];
+            swprintf(map_name, ARRAY_SIZE(map_name), L"WineSharedTex_%08lx_%08lx",
+                     resource->shared_pid, resource->shared_seq);
+            resource->shared_mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
+                                                          0, resource->shared_memory_size, map_name);
+            if (resource->shared_mapping)
+            {
+                resource->shared_memory = MapViewOfFile(resource->shared_mapping, FILE_MAP_ALL_ACCESS,
+                                                        0, 0, resource->shared_memory_size);
+                if (resource->shared_memory && resource->wined3d_resource)
+                {
+                    struct wined3d_texture *wined3d_tex = wined3d_texture_from_resource(resource->wined3d_resource);
+                    if (wined3d_tex)
+                        wined3d_texture_update_desc(wined3d_tex, 0, resource->shared_memory, pitch);
+                }
             }
         }
 
@@ -808,13 +883,9 @@ static HRESULT STDMETHODCALLTYPE dxgi_resource_CreateSharedHandle(IDXGIResource1
 
     if (name)
     {
-        char s_buf[MAX_PATH];
-        snprintf(s_buf, sizeof(s_buf), "\\Sessions\\%lu\\BaseNamedObjects\\",
-                 (unsigned long)NtCurrentTeb()->Peb->SessionId);
-        name_str.Buffer = bufferW;
-        name_str.MaximumLength = sizeof(bufferW);
-        RtlCreateUnicodeStringFromAsciiz(&name_str, s_buf);
-        RtlAppendUnicodeToString(&name_str, name);
+        swprintf(bufferW, ARRAY_SIZE(bufferW), L"\\Sessions\\%lu\\BaseNamedObjects\\%s",
+                 (unsigned long)NtCurrentTeb()->Peb->SessionId, name);
+        RtlInitUnicodeString(&name_str, bufferW);
         InitializeObjectAttributes(&attr, &name_str, OBJ_CASE_INSENSITIVE | (attributes && attributes->bInheritHandle ? OBJ_INHERIT : 0),
                                    NULL, attributes ? attributes->lpSecurityDescriptor : NULL);
     }
@@ -825,8 +896,6 @@ static HRESULT STDMETHODCALLTYPE dxgi_resource_CreateSharedHandle(IDXGIResource1
     }
 
     status = NtGdiDdDDIShareObjects(count, handles, &attr, access, handle);
-    if (name)
-        RtlFreeUnicodeString(&name_str);
 
     if (status)
     {
@@ -947,6 +1016,22 @@ HRESULT dxgi_resource_init(struct dxgi_resource *resource, IDXGIDevice *device,
                 resource->has_keyed_mutex = TRUE;
             ID3D11Texture3D_Release(tex3d);
         }
+    }
+
+    resource->shared_mapping = NULL;
+    resource->shared_memory = NULL;
+    resource->shared_memory_size = 0;
+    resource->shared_pitch = 0;
+    resource->shared_pid = 0;
+    resource->shared_seq = 0;
+
+    if (resource->has_keyed_mutex && !resource->kmt_keyed_mutex)
+    {
+        D3DKMT_CREATEKEYEDMUTEX2 km_params = {0};
+        km_params.InitialValue = 0;
+        km_params.Flags.NtSecuritySharing = 1;
+        if (NtGdiDdDDICreateKeyedMutex2(&km_params) == STATUS_SUCCESS)
+            resource->kmt_keyed_mutex = km_params.hKeyedMutex;
     }
 
     if (is_subresource)
