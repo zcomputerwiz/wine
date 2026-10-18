@@ -2429,6 +2429,13 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
         if (ret_len) *ret_len = sizeof(BOOLEAN);
         return STATUS_SUCCESS;
 
+    case ThreadPagePriority:
+        if (length != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+        if (!data) return STATUS_ACCESS_VIOLATION;
+        *(ULONG *)data = 5; /* MEMORY_PRIORITY_NORMAL */
+        if (ret_len) *ret_len = sizeof(ULONG);
+        return STATUS_SUCCESS;
+
     case ThreadPriorityBoost:
     {
         if (length != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
@@ -2696,6 +2703,16 @@ NTSTATUS WINAPI NtSetInformationThread( HANDLE handle, THREADINFOCLASS class,
         }
         SERVER_END_REQ;
         return status;
+    }
+
+    case ThreadPagePriority:
+    {
+        const ULONG *priority = data;
+        if (length != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+        if (!priority) return STATUS_ACCESS_VIOLATION;
+        if (*priority > 5) return STATUS_INVALID_PARAMETER;
+        TRACE( "(%p, priority=%u)\n", handle, *priority );
+        return STATUS_SUCCESS;
     }
 
     case ThreadManageWritesToExecutableMemory:
