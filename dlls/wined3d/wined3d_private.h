@@ -4128,6 +4128,9 @@ struct wined3d_swapchain
     struct wined3d_swapchain_state state;
     HWND win_handle;
     HDC dc;
+    struct wined3d_dcomp_target_scene target_scene;
+    BOOL has_target_scene;
+    struct wined3d_texture *composite_texture;
 };
 
 void wined3d_swapchain_activate(struct wined3d_swapchain *swapchain, BOOL activate);

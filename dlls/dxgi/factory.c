@@ -396,10 +396,14 @@ static void dcomp_layer_compute_placement(const struct wine_dcomp_layer_params *
     RECT full, visible;
     LONGLONG w, h;
 
-    SetRect(&full, params->offset_x, params->offset_y,
-            params->offset_x + params->width, params->offset_y + params->height);
-    w = params->width;
-    h = params->height;
+    LONG x0 = min(params->offset_x, params->offset_x + params->width);
+    LONG x1 = max(params->offset_x, params->offset_x + params->width);
+    LONG y0 = min(params->offset_y, params->offset_y + params->height);
+    LONG y1 = max(params->offset_y, params->offset_y + params->height);
+
+    SetRect(&full, x0, y0, x1, y1);
+    w = x1 - x0;
+    h = y1 - y0;
     visible = full;
     SetRectEmpty(src);
     *fully_clipped = FALSE;

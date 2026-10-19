@@ -390,12 +390,84 @@ static HRESULT STDMETHODCALLTYPE dcomp_binding_set_target(IWineDCompSwapChain *i
     return S_OK;
 }
 
+static HRESULT STDMETHODCALLTYPE dcomp_binding_set_target_scene(IWineDCompSwapChain *iface,
+        HWND target, const void *scene)
+{
+    struct d3d11_swapchain *swapchain = impl_from_IWineDCompSwapChain(iface);
+    const struct wine_dcomp_target_scene *dcomp_scene = (const struct wine_dcomp_target_scene *)scene;
+    struct wined3d_dcomp_target_scene wined3d_scene;
+    unsigned int i;
+
+    AcquireSRWLockExclusive(&dcomp_binding_lock);
+    if (!target || !dcomp_scene)
+    {
+        if (swapchain->target_hwnd)
+        {
+            RECT empty = {0};
+            wined3d_swapchain_present(swapchain->wined3d_swapchain, &empty, &empty,
+                    swapchain->target_hwnd, 0, WINED3D_PRESENT_CLEAR | WINED3D_PRESENT_CLEAR_ONLY);
+        }
+        wined3d_swapchain_set_target_scene(swapchain->wined3d_swapchain, NULL);
+        dcomp_swapchain_apply_target(swapchain, WINE_DCOMP_SET_TARGET_LEGACY, 0);
+        ReleaseSRWLockExclusive(&dcomp_binding_lock);
+        return S_OK;
+    }
+
+    memset(&wined3d_scene, 0, sizeof(wined3d_scene));
+    wined3d_scene.target_hwnd = target;
+    wined3d_scene.layer_count = dcomp_scene->layer_count;
+
+    for (i = 0; i < dcomp_scene->layer_count; ++i)
+    {
+        const struct wine_dcomp_layer_desc *src_layer = &dcomp_scene->layers[i];
+        struct wined3d_dcomp_layer *dst_layer = &wined3d_scene.layers[i];
+        IWineDCompSwapChain *layer_binding = NULL;
+
+        if (src_layer->content && SUCCEEDED(IUnknown_QueryInterface(src_layer->content,
+                &IID_IWineDCompSwapChain, (void **)&layer_binding)))
+        {
+            struct d3d11_swapchain *layer_sc = impl_from_IWineDCompSwapChain(layer_binding);
+            dst_layer->swapchain = layer_sc->wined3d_swapchain;
+            IWineDCompSwapChain_Release(layer_binding);
+        }
+
+        dst_layer->m11 = src_layer->m11;
+        dst_layer->m12 = src_layer->m12;
+        dst_layer->m21 = src_layer->m21;
+        dst_layer->m22 = src_layer->m22;
+        dst_layer->m31 = src_layer->m31;
+        dst_layer->m32 = src_layer->m32;
+        dst_layer->width = src_layer->width;
+        dst_layer->height = src_layer->height;
+        dst_layer->has_clip = src_layer->has_clip;
+        dst_layer->clip_rect = src_layer->clip_rect;
+        dst_layer->radius_tl_x = src_layer->radius_tl_x;
+        dst_layer->radius_tl_y = src_layer->radius_tl_y;
+        dst_layer->radius_tr_x = src_layer->radius_tr_x;
+        dst_layer->radius_tr_y = src_layer->radius_tr_y;
+        dst_layer->radius_bl_x = src_layer->radius_bl_x;
+        dst_layer->radius_bl_y = src_layer->radius_bl_y;
+        dst_layer->radius_br_x = src_layer->radius_br_x;
+        dst_layer->radius_br_y = src_layer->radius_br_y;
+        dst_layer->opacity = src_layer->opacity;
+    }
+
+    swapchain->target_hwnd = target;
+    swapchain->fully_clipped = FALSE;
+    wined3d_swapchain_set_window(swapchain->wined3d_swapchain, target);
+    wined3d_swapchain_set_target_scene(swapchain->wined3d_swapchain, &wined3d_scene);
+
+    ReleaseSRWLockExclusive(&dcomp_binding_lock);
+    return S_OK;
+}
+
 static const struct IWineDCompSwapChainVtbl dcomp_binding_vtbl =
 {
     dcomp_binding_QueryInterface,
     dcomp_binding_AddRef,
     dcomp_binding_Release,
     dcomp_binding_set_target,
+    dcomp_binding_set_target_scene,
 };
 
 static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
