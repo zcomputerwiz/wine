@@ -224,7 +224,7 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
             swapchain, wine_dbgstr_rect(src_rect), wine_dbgstr_rect(dst_rect),
             dst_window_override, swap_interval, flags);
 
-    if (flags)
+    if (flags & ~(WINED3D_PRESENT_CLEAR | WINED3D_PRESENT_CLEAR_ONLY))
         FIXME("Ignoring flags %#x.\n", flags);
 
     if (!(swapchain->state.desc.flags & WINED3D_SWAPCHAIN_FRAME_LATENCY_WAITABLE_OBJECT))
@@ -645,7 +645,14 @@ static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
             || (pixel_format->swap_method != WGL_SWAP_COPY_ARB
             && swapchain_present_is_partial_copy(swapchain, dst_rect)))
     {
-        swapchain_blit_gdi(swapchain, context, src_rect, dst_rect);
+        if (flags & WINED3D_PRESENT_CLEAR)
+        {
+            RECT rc;
+            GetClientRect(swapchain->win_handle, &rc);
+            PatBlt(swapchain->dc, 0, 0, rc.right, rc.bottom, BLACKNESS);
+        }
+        if (!(flags & WINED3D_PRESENT_CLEAR_ONLY))
+            swapchain_blit_gdi(swapchain, context, src_rect, dst_rect);
     }
     else
     {
@@ -655,7 +662,20 @@ static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
 
         wined3d_texture_load_location(back_buffer, 0, context, back_buffer->resource.draw_binding);
 
-        swapchain_blit(swapchain, context, src_rect, dst_rect);
+        if (flags & WINED3D_PRESENT_CLEAR)
+        {
+            wined3d_context_gl_apply_fbo_state_explicit(context_gl, GL_FRAMEBUFFER,
+                    NULL, 0, NULL, 0, WINED3D_LOCATION_DRAWABLE);
+            gl_info->gl_ops.gl.p_glDisable(GL_SCISSOR_TEST);
+            gl_info->gl_ops.gl.p_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            context_invalidate_state(context, STATE_RASTERIZER);
+            context_invalidate_state(context, STATE_BLEND);
+            context_invalidate_state(context, STATE_FRAMEBUFFER);
+            gl_info->gl_ops.gl.p_glClearColor(0, 0, 0, 0);
+            gl_info->gl_ops.gl.p_glClear(GL_COLOR_BUFFER_BIT);
+        }
+        if (!(flags & WINED3D_PRESENT_CLEAR_ONLY))
+            swapchain_blit(swapchain, context, src_rect, dst_rect);
 
         if (swapchain->device->context_count > 1)
         {
@@ -1078,7 +1098,8 @@ static void wined3d_swapchain_vk_set_swap_interval(struct wined3d_swapchain_vk *
 }
 
 static VkResult wined3d_swapchain_vk_blit(struct wined3d_swapchain_vk *swapchain_vk,
-        struct wined3d_context_vk *context_vk, const RECT *src_rect, const RECT *dst_rect, unsigned int swap_interval)
+        struct wined3d_context_vk *context_vk, const RECT *src_rect, const RECT *dst_rect,
+        unsigned int swap_interval, uint32_t flags)
 {
     struct wined3d_texture_vk *back_buffer_vk = wined3d_texture_vk(swapchain_vk->s.back_buffers[0]);
     struct wined3d_device_vk *device_vk = wined3d_device_vk(swapchain_vk->s.device);
@@ -1094,6 +1115,7 @@ static VkResult wined3d_swapchain_vk_blit(struct wined3d_swapchain_vk *swapchain
     VkImageBlit blit;
     VkFilter filter;
     VkResult vr;
+    static const VkClearColorValue clear_color = {{0}};
 
     static const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 
@@ -1146,6 +1168,16 @@ static VkResult wined3d_swapchain_vk_blit(struct wined3d_swapchain_vk *swapchain
             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             swapchain_vk->vk_images[image_idx], &vk_range);
 
+    if (flags & WINED3D_PRESENT_CLEAR)
+    {
+        VK_CALL(vkCmdClearColorImage(vk_command_buffer, swapchain_vk->vk_images[image_idx],
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &vk_range));
+        wined3d_context_vk_image_barrier(context_vk, vk_command_buffer,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                swapchain_vk->vk_images[image_idx], &vk_range);
+    }
     blit.srcSubresource.aspectMask = vk_range.aspectMask;
     blit.srcSubresource.mipLevel = vk_range.baseMipLevel;
     blit.srcSubresource.baseArrayLayer = vk_range.baseArrayLayer;
@@ -1163,7 +1195,8 @@ static VkResult wined3d_swapchain_vk_blit(struct wined3d_swapchain_vk *swapchain
     blit.dstOffsets[1].x = dst_rect->right;
     blit.dstOffsets[1].y = dst_rect->bottom;
     blit.dstOffsets[1].z = 1;
-    VK_CALL(vkCmdBlitImage(vk_command_buffer,
+    if (!(flags & WINED3D_PRESENT_CLEAR_ONLY))
+        VK_CALL(vkCmdBlitImage(vk_command_buffer,
             back_buffer_vk->image.vk_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             swapchain_vk->vk_images[image_idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             1, &blit, filter));
@@ -1273,20 +1306,27 @@ static void swapchain_vk_present(struct wined3d_swapchain *swapchain, const RECT
 
     if (!swapchain_vk->vk_swapchain || swapchain_present_is_partial_copy(swapchain, dst_rect))
     {
-        swapchain_blit_gdi(swapchain, &context_vk->c, src_rect, dst_rect);
+        if (flags & WINED3D_PRESENT_CLEAR)
+        {
+            RECT rc;
+            GetClientRect(swapchain->win_handle, &rc);
+            PatBlt(swapchain->dc, 0, 0, rc.right, rc.bottom, BLACKNESS);
+        }
+        if (!(flags & WINED3D_PRESENT_CLEAR_ONLY))
+            swapchain_blit_gdi(swapchain, &context_vk->c, src_rect, dst_rect);
     }
     else
     {
         wined3d_texture_load_location(back_buffer, 0, &context_vk->c, back_buffer->resource.draw_binding);
 
-        if ((vr = wined3d_swapchain_vk_blit(swapchain_vk, context_vk, src_rect, dst_rect, swap_interval)))
+        if ((vr = wined3d_swapchain_vk_blit(swapchain_vk, context_vk, src_rect, dst_rect, swap_interval, flags)))
         {
             if (vr == VK_ERROR_OUT_OF_DATE_KHR || vr == VK_SUBOPTIMAL_KHR)
             {
                 if (FAILED(hr = wined3d_swapchain_vk_recreate(swapchain_vk)))
                     ERR("Failed to recreate swapchain, hr %#lx.\n", hr);
                 else if (vr == VK_ERROR_OUT_OF_DATE_KHR && (vr = wined3d_swapchain_vk_blit(
-                        swapchain_vk, context_vk, src_rect, dst_rect, swap_interval)))
+                        swapchain_vk, context_vk, src_rect, dst_rect, swap_interval, flags)))
                     ERR("Failed to blit image, vr %s.\n", wined3d_debug_vkresult(vr));
             }
             else

@@ -22,6 +22,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <math.h>
 
 #define INITGUID
 #define COBJMACROS
@@ -32,6 +33,10 @@
 #include "winuser.h"
 #include "objidl.h"
 #include "dxgi.h"
+struct wined3d_resource;
+struct wined3d_texture;
+struct wined3d_device_parent;
+#include "wine/winedxgi.h"
 #include "dcomp.h"
 #include "wine/debug.h"
 #include "wine/list.h"
@@ -213,12 +218,14 @@ static ULONG STDMETHODCALLTYPE dcomp_effect_group_Release(IDCompositionEffectGro
 static HRESULT STDMETHODCALLTYPE dcomp_effect_group_SetOpacityAnimation(IDCompositionEffectGroup *iface,
         IDCompositionAnimation *animation)
 {
-    return S_OK;
+    return E_NOTIMPL;
 }
 
 static HRESULT STDMETHODCALLTYPE dcomp_effect_group_SetOpacity(IDCompositionEffectGroup *iface, float opacity)
 {
     struct dcomp_effect_group *group = impl_from_IDCompositionEffectGroup(iface);
+    if (!isfinite(opacity) || opacity < 0.0f || opacity > 1.0f) return E_INVALIDARG;
+    if (opacity != 1.0f) return E_NOTIMPL;
     group->opacity = opacity;
     return S_OK;
 }
@@ -228,7 +235,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_effect_group_SetTransform3D(IDComposition
 {
     struct dcomp_effect_group *group = impl_from_IDCompositionEffectGroup(iface);
     if (transform)
-        IDCompositionTransform3D_AddRef(transform);
+        return E_NOTIMPL;
     if (group->transform_3d)
         IDCompositionTransform3D_Release(group->transform_3d);
     group->transform_3d = transform;
@@ -294,34 +301,34 @@ static ULONG STDMETHODCALLTYPE dcomp_rectangle_clip_Release(IDCompositionRectang
     return refcount;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetLeftAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return S_OK; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetLeft(IDCompositionRectangleClip *iface, float left) { impl_from_IDCompositionRectangleClip(iface)->left = left; return S_OK; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return S_OK; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTop(IDCompositionRectangleClip *iface, float top) { impl_from_IDCompositionRectangleClip(iface)->top = top; return S_OK; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetRightAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return S_OK; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetRight(IDCompositionRectangleClip *iface, float right) { impl_from_IDCompositionRectangleClip(iface)->right = right; return S_OK; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return S_OK; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottom(IDCompositionRectangleClip *iface, float bottom) { impl_from_IDCompositionRectangleClip(iface)->bottom = bottom; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetLeftAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetLeft(IDCompositionRectangleClip *iface, float left) { if (!isfinite(left) || fabsf(left) > 1048576) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->left = left; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTop(IDCompositionRectangleClip *iface, float top) { if (!isfinite(top) || fabsf(top) > 1048576) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->top = top; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetRightAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetRight(IDCompositionRectangleClip *iface, float right) { if (!isfinite(right) || fabsf(right) > 1048576) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->right = right; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottom(IDCompositionRectangleClip *iface, float bottom) { if (!isfinite(bottom) || fabsf(bottom) > 1048576) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->bottom = bottom; return S_OK; }
 
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopLeftRadiusXAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return S_OK; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopLeftRadiusX(IDCompositionRectangleClip *iface, float r) { impl_from_IDCompositionRectangleClip(iface)->top_left_radius_x = r; return S_OK; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopLeftRadiusYAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return S_OK; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopLeftRadiusY(IDCompositionRectangleClip *iface, float r) { impl_from_IDCompositionRectangleClip(iface)->top_left_radius_y = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopLeftRadiusXAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopLeftRadiusX(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; if (r != 0.0f) return E_NOTIMPL; impl_from_IDCompositionRectangleClip(iface)->top_left_radius_x = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopLeftRadiusYAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopLeftRadiusY(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; if (r != 0.0f) return E_NOTIMPL; impl_from_IDCompositionRectangleClip(iface)->top_left_radius_y = r; return S_OK; }
 
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopRightRadiusXAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return S_OK; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopRightRadiusX(IDCompositionRectangleClip *iface, float r) { impl_from_IDCompositionRectangleClip(iface)->top_right_radius_x = r; return S_OK; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopRightRadiusYAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return S_OK; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopRightRadiusY(IDCompositionRectangleClip *iface, float r) { impl_from_IDCompositionRectangleClip(iface)->top_right_radius_y = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopRightRadiusXAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopRightRadiusX(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; if (r != 0.0f) return E_NOTIMPL; impl_from_IDCompositionRectangleClip(iface)->top_right_radius_x = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopRightRadiusYAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopRightRadiusY(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; if (r != 0.0f) return E_NOTIMPL; impl_from_IDCompositionRectangleClip(iface)->top_right_radius_y = r; return S_OK; }
 
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomLeftRadiusXAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return S_OK; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomLeftRadiusX(IDCompositionRectangleClip *iface, float r) { impl_from_IDCompositionRectangleClip(iface)->bottom_left_radius_x = r; return S_OK; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomLeftRadiusYAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return S_OK; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomLeftRadiusY(IDCompositionRectangleClip *iface, float r) { impl_from_IDCompositionRectangleClip(iface)->bottom_left_radius_y = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomLeftRadiusXAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomLeftRadiusX(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; if (r != 0.0f) return E_NOTIMPL; impl_from_IDCompositionRectangleClip(iface)->bottom_left_radius_x = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomLeftRadiusYAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomLeftRadiusY(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; if (r != 0.0f) return E_NOTIMPL; impl_from_IDCompositionRectangleClip(iface)->bottom_left_radius_y = r; return S_OK; }
 
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomRightRadiusXAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return S_OK; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomRightRadiusX(IDCompositionRectangleClip *iface, float r) { impl_from_IDCompositionRectangleClip(iface)->bottom_right_radius_x = r; return S_OK; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomRightRadiusYAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return S_OK; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomRightRadiusY(IDCompositionRectangleClip *iface, float r) { impl_from_IDCompositionRectangleClip(iface)->bottom_right_radius_y = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomRightRadiusXAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomRightRadiusX(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; if (r != 0.0f) return E_NOTIMPL; impl_from_IDCompositionRectangleClip(iface)->bottom_right_radius_x = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomRightRadiusYAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomRightRadiusY(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; if (r != 0.0f) return E_NOTIMPL; impl_from_IDCompositionRectangleClip(iface)->bottom_right_radius_y = r; return S_OK; }
 
 static const struct IDCompositionRectangleClipVtbl dcomp_rectangle_clip_vtbl =
 {
@@ -479,13 +486,14 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetOffsetXAnimation(IDCompositionV
         IDCompositionAnimation *animation)
 {
     TRACE("iface %p, animation %p.\n", iface, animation);
-    return S_OK;
+    return E_NOTIMPL;
 }
 
 static HRESULT STDMETHODCALLTYPE dcomp_visual_SetOffsetX(IDCompositionVisual2 *iface, float offset_x)
 {
     struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
     TRACE("iface %p, offset_x %f.\n", iface, offset_x);
+    if (!isfinite(offset_x) || fabsf(offset_x) > 1048576) return E_INVALIDARG;
     visual->pending.offset_x = offset_x;
     return S_OK;
 }
@@ -494,13 +502,14 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetOffsetYAnimation(IDCompositionV
         IDCompositionAnimation *animation)
 {
     TRACE("iface %p, animation %p.\n", iface, animation);
-    return S_OK;
+    return E_NOTIMPL;
 }
 
 static HRESULT STDMETHODCALLTYPE dcomp_visual_SetOffsetY(IDCompositionVisual2 *iface, float offset_y)
 {
     struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
     TRACE("iface %p, offset_y %f.\n", iface, offset_y);
+    if (!isfinite(offset_y) || fabsf(offset_y) > 1048576) return E_INVALIDARG;
     visual->pending.offset_y = offset_y;
     return S_OK;
 }
@@ -519,6 +528,13 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetTransform(IDCompositionVisual2 
     TRACE("iface %p, matrix %p.\n", iface, matrix);
     if (matrix)
     {
+        if (!isfinite(matrix->_11) || !isfinite(matrix->_12) || !isfinite(matrix->_21)
+                || !isfinite(matrix->_22) || !isfinite(matrix->_31) || !isfinite(matrix->_32))
+            return E_INVALIDARG;
+        if (matrix->_12 || matrix->_21 || matrix->_11 < 0 || matrix->_22 < 0)
+            return E_NOTIMPL;
+        if (matrix->_11 > 64 || matrix->_22 > 64 || fabsf(matrix->_31) > 1048576
+                || fabsf(matrix->_32) > 1048576) return E_INVALIDARG;
         visual->pending.has_transform = TRUE;
         visual->pending.transform = *matrix;
     }
@@ -546,6 +562,14 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetEffect(IDCompositionVisual2 *if
     if (effect)
     {
         IDCompositionEffectGroup *group = NULL;
+        if (FAILED(IDCompositionEffect_QueryInterface(effect, &IID_IDCompositionEffectGroup, (void **)&group)))
+            return E_NOTIMPL;
+        if (group->lpVtbl != &dcomp_effect_group_vtbl)
+        {
+            IDCompositionEffectGroup_Release(group);
+            return E_NOTIMPL;
+        }
+        IDCompositionEffectGroup_Release(group);
         IDCompositionEffect_AddRef(effect);
         if (SUCCEEDED(IDCompositionEffect_QueryInterface(effect, &IID_IDCompositionEffectGroup, (void **)&group)))
         {
@@ -588,6 +612,14 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetClipObject(IDCompositionVisual2
     if (clip)
     {
         IDCompositionRectangleClip *rclip = NULL;
+        if (FAILED(IDCompositionClip_QueryInterface(clip, &IID_IDCompositionRectangleClip, (void **)&rclip)))
+            return E_NOTIMPL;
+        if (rclip->lpVtbl != &dcomp_rectangle_clip_vtbl)
+        {
+            IDCompositionRectangleClip_Release(rclip);
+            return E_NOTIMPL;
+        }
+        IDCompositionRectangleClip_Release(rclip);
         IDCompositionClip_AddRef(clip);
         if (SUCCEEDED(IDCompositionClip_QueryInterface(clip, &IID_IDCompositionRectangleClip, (void **)&rclip)))
         {
@@ -618,6 +650,10 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetClip(IDCompositionVisual2 *ifac
 
     TRACE("iface %p, rect %p.\n", iface, rect);
 
+    if (rect && (!isfinite(rect->left) || !isfinite(rect->top) || !isfinite(rect->right)
+            || !isfinite(rect->bottom) || fabsf(rect->left) > 1048576
+            || fabsf(rect->top) > 1048576 || fabsf(rect->right) > 1048576
+            || fabsf(rect->bottom) > 1048576)) return E_INVALIDARG;
     if (visual->pending.clip_obj)
     {
         IDCompositionClip_Release(visual->pending.clip_obj);
@@ -981,18 +1017,25 @@ static HRESULT dcomp_target_create(struct dcomp_device *device, HWND hwnd, BOOL 
  * IDCompositionDevice Traversal and Commit
  * ===================================================================== */
 
+static HRESULT dcomp_bind_content(IUnknown *content, HWND hwnd, const RECT *dst, const RECT *clip)
+{
+    IWineDCompSwapChain *binding;
+    HRESULT hr;
+
+    if (!content) return S_OK;
+    if (FAILED(hr = IUnknown_QueryInterface(content, &IID_IWineDCompSwapChain, (void **)&binding)))
+        return E_NOTIMPL;
+    hr = IWineDCompSwapChain_set_target(binding, hwnd, dst, clip);
+    IWineDCompSwapChain_Release(binding);
+    return hr;
+}
+
 static void dcomp_visual_unbind_tree(struct dcomp_visual *visual)
 {
     struct dcomp_visual *child;
 
     if (!visual) return;
-
-    if (visual->last_comp_wnd && IsWindow(visual->last_comp_wnd))
-    {
-        SendMessageW(visual->last_comp_wnd, WM_WINE_DCOMP_SET_TARGET, WINE_DCOMP_SET_TARGET_LEGACY, 0);
-        visual->last_comp_wnd = NULL;
-    }
-
+    dcomp_bind_content(visual->active.content, NULL, NULL, NULL);
     for (child = visual->active_children; child; child = child->active_next_sibling)
         dcomp_visual_unbind_tree(child);
 }
@@ -1003,6 +1046,9 @@ static void dcomp_visual_apply_commit(struct dcomp_visual *visual)
 
     if (!visual) return;
 
+    /* Detach while the old active content still owns its COM reference. */
+    if (visual->active.content != visual->pending.content)
+        dcomp_bind_content(visual->active.content, NULL, NULL, NULL);
     /* Apply visual state: pending -> active */
     dcomp_visual_state_copy(&visual->active, &visual->pending);
 
@@ -1034,12 +1080,6 @@ static void dcomp_visual_apply_commit(struct dcomp_visual *visual)
         }
     }
 
-    if (!visual->pending.content && visual->last_comp_wnd && IsWindow(visual->last_comp_wnd))
-    {
-        SendMessageW(visual->last_comp_wnd, WM_WINE_DCOMP_SET_TARGET, WINE_DCOMP_SET_TARGET_LEGACY, 0);
-        visual->last_comp_wnd = NULL;
-    }
-
     /* Release old active children list */
     while (visual->active_children)
     {
@@ -1066,113 +1106,109 @@ static void dcomp_visual_apply_commit(struct dcomp_visual *visual)
     }
 }
 
-static void dcomp_visual_commit_content_tree(struct dcomp_visual *visual, HWND target_hwnd,
+static HRESULT dcomp_visual_commit_content_tree(struct dcomp_visual *visual, HWND target_hwnd,
         float cur_x, float cur_y, float scale_x, float scale_y,
         const RECT *cur_clip, BOOL has_clip, float cur_opacity)
 {
     struct dcomp_visual *child;
-    float next_scale_x = scale_x;
-    float next_scale_y = scale_y;
-    float next_x = cur_x + visual->active.offset_x * scale_x;
-    float next_y = cur_y + visual->active.offset_y * scale_y;
-    float next_opacity = cur_opacity * visual->active.opacity;
-    RECT next_clip;
-    BOOL next_has_clip = has_clip;
+    float sx = scale_x, sy = scale_y, x, y;
+    RECT clip, dst;
+    IDXGISwapChain1 *swapchain;
+    DXGI_SWAP_CHAIN_DESC1 desc;
+    HRESULT hr;
 
-    if (!visual) return;
-
+    if (!visual) return S_OK;
+    x = cur_x + visual->active.offset_x * scale_x;
+    y = cur_y + visual->active.offset_y * scale_y;
     if (visual->active.has_transform)
     {
-        next_scale_x *= visual->active.transform._11;
-        next_scale_y *= visual->active.transform._22;
-        next_x += visual->active.transform._31 * scale_x;
-        next_y += visual->active.transform._32 * scale_y;
+        sx *= visual->active.transform._11;
+        sy *= visual->active.transform._22;
+        x += visual->active.transform._31 * scale_x;
+        y += visual->active.transform._32 * scale_y;
     }
-
-    if (has_clip)
-        next_clip = *cur_clip;
-
+    if (has_clip) clip = *cur_clip;
     if (visual->active.has_clip)
     {
-        RECT vclip;
-        vclip.left = (int)(next_x + visual->active.clip.left * next_scale_x);
-        vclip.top = (int)(next_y + visual->active.clip.top * next_scale_y);
-        vclip.right = (int)(next_x + visual->active.clip.right * next_scale_x);
-        vclip.bottom = (int)(next_y + visual->active.clip.bottom * next_scale_y);
-
-        if (next_has_clip)
-            IntersectRect(&next_clip, &next_clip, &vclip);
-        else
-        {
-            next_clip = vclip;
-            next_has_clip = TRUE;
-        }
+        RECT local = {(LONG)(x + visual->active.clip.left * sx),
+                (LONG)(y + visual->active.clip.top * sy),
+                (LONG)(x + visual->active.clip.right * sx),
+                (LONG)(y + visual->active.clip.bottom * sy)};
+        if (has_clip) IntersectRect(&clip, &clip, &local);
+        else clip = local;
+        has_clip = TRUE;
     }
-
     if (visual->active.content && target_hwnd)
     {
-        WCHAR prop_name[64];
-        HWND comp_wnd;
-
-        swprintf(prop_name, ARRAY_SIZE(prop_name),
-                WINE_DCOMP_WND_PROP_FMT, GetCurrentProcessId(), (UINT_PTR)visual->active.content);
-        comp_wnd = (HWND)GetPropW(GetDesktopWindow(), prop_name);
-        if (comp_wnd)
-        {
-            struct wine_dcomp_layer_params params;
-            RECT client_rc;
-
-            if (visual->last_comp_wnd && visual->last_comp_wnd != comp_wnd && IsWindow(visual->last_comp_wnd))
-                SendMessageW(visual->last_comp_wnd, WM_WINE_DCOMP_SET_TARGET, WINE_DCOMP_SET_TARGET_LEGACY, 0);
-            visual->last_comp_wnd = comp_wnd;
-
-            GetClientRect(comp_wnd, &client_rc);
-            params.target_hwnd = target_hwnd;
-            params.offset_x = (int)next_x;
-            params.offset_y = (int)next_y;
-            params.width = (int)((client_rc.right - client_rc.left) * next_scale_x);
-            params.height = (int)((client_rc.bottom - client_rc.top) * next_scale_y);
-            params.has_clip = next_has_clip;
-            params.clip_rect = next_clip;
-            params.opacity = next_opacity;
-
-            TRACE("Commit: notifying comp_wnd %p of target_hwnd %p, offset (%d,%d), size %dx%d, clip %d.\n",
-                  comp_wnd, target_hwnd, params.offset_x, params.offset_y, params.width, params.height, params.has_clip);
-
-            if (GetWindowThreadProcessId(comp_wnd, NULL) == GetCurrentThreadId())
-            {
-                SendMessageW(comp_wnd, WM_WINE_DCOMP_SET_TARGET, WINE_DCOMP_SET_TARGET_PARAMS, (LPARAM)&params);
-            }
-            else
-            {
-                struct wine_dcomp_layer_params *owned = HeapAlloc(GetProcessHeap(), 0, sizeof(*owned));
-                if (owned)
-                {
-                    *owned = params;
-                    if (!PostMessageW(comp_wnd, WM_WINE_DCOMP_SET_TARGET, WINE_DCOMP_SET_TARGET_PARAMS_OWNED, (LPARAM)owned))
-                        HeapFree(GetProcessHeap(), 0, owned);
-                }
-            }
-        }
+        if (FAILED(hr = IUnknown_QueryInterface(visual->active.content,
+                &IID_IDXGISwapChain1, (void **)&swapchain))) return hr;
+        hr = IDXGISwapChain1_GetDesc1(swapchain, &desc);
+        IDXGISwapChain1_Release(swapchain);
+        if (FAILED(hr)) return hr;
+        SetRect(&dst, x, y, x + desc.Width * sx, y + desc.Height * sy);
+        if (FAILED(hr = dcomp_bind_content(visual->active.content, target_hwnd,
+                &dst, has_clip ? &clip : NULL))) return hr;
     }
-    else if (visual->last_comp_wnd && IsWindow(visual->last_comp_wnd))
-    {
-        SendMessageW(visual->last_comp_wnd, WM_WINE_DCOMP_SET_TARGET, WINE_DCOMP_SET_TARGET_LEGACY, 0);
-        visual->last_comp_wnd = NULL;
-    }
-
     for (child = visual->active_children; child; child = child->active_next_sibling)
-        dcomp_visual_commit_content_tree(child, target_hwnd, next_x, next_y, next_scale_x, next_scale_y,
-                &next_clip, next_has_clip, next_opacity);
+        if (FAILED(hr = dcomp_visual_commit_content_tree(child, target_hwnd,
+                x, y, sx, sy, &clip, has_clip, cur_opacity))) return hr;
+    return S_OK;
+}
+
+/* Until a retained multilayer renderer exists, do not pretend independent blits
+ * to the same HWND implement stacking/alpha. Validate before changing any target.
+ * This initial coherent slice supports one content leaf per device. */
+static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int *contents,
+        float scale_x, float scale_y, float x, float y, unsigned int depth)
+{
+    struct dcomp_visual *child;
+    IWineDCompSwapChain *binding;
+    HRESULT hr;
+
+    if (!visual) return S_OK;
+    if (depth > 128) return E_INVALIDARG;
+    x += visual->pending.offset_x * scale_x;
+    y += visual->pending.offset_y * scale_y;
+    if (visual->pending.has_transform)
+    {
+        x += visual->pending.transform._31 * scale_x;
+        y += visual->pending.transform._32 * scale_y;
+        scale_x *= visual->pending.transform._11;
+        scale_y *= visual->pending.transform._22;
+    }
+    if (!isfinite(x) || !isfinite(y) || !isfinite(scale_x) || !isfinite(scale_y)
+            || fabsf(x) > 1048576 || fabsf(y) > 1048576
+            || scale_x > 64 || scale_y > 64) return E_INVALIDARG;
+    if (visual->pending.content)
+    {
+        if (++*contents > 1) return E_NOTIMPL;
+        if (FAILED(hr = IUnknown_QueryInterface(visual->pending.content,
+                &IID_IWineDCompSwapChain, (void **)&binding))) return E_NOTIMPL;
+        IWineDCompSwapChain_Release(binding);
+    }
+    for (child = visual->pending_children; child; child = child->pending_next_sibling)
+        if (FAILED(hr = dcomp_validate_pending(child, contents, scale_x, scale_y, x, y, depth + 1)))
+            return hr;
+    return S_OK;
 }
 
 static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
 {
     struct dcomp_target *target;
+    unsigned int contents = 0;
+    HRESULT hr;
 
     TRACE("device %p.\n", dev);
 
     EnterCriticalSection(&dev->cs);
+    LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
+    {
+        if (FAILED(hr = dcomp_validate_pending(target->pending_root, &contents, 1, 1, 0, 0, 0)))
+        {
+            LeaveCriticalSection(&dev->cs);
+            return hr;
+        }
+    }
     LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
     {
         /* Apply pending root to active root */
@@ -1279,7 +1315,10 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_Commit(IDCompositionDevice *iface)
 
 static HRESULT STDMETHODCALLTYPE dcomp_device_WaitForCommitCompletion(IDCompositionDevice *iface)
 {
-    TRACE("iface %p.\n", iface);
+    struct dcomp_device *dev = impl_from_IDCompositionDevice(iface);
+    /* Direct binding has completed before Commit releases this lock. */
+    EnterCriticalSection(&dev->cs);
+    LeaveCriticalSection(&dev->cs);
     return S_OK;
 }
 
@@ -1532,7 +1571,10 @@ static HRESULT STDMETHODCALLTYPE dcomp_device2_Commit(IDCompositionDevice2 *ifac
 
 static HRESULT STDMETHODCALLTYPE dcomp_device2_WaitForCommitCompletion(IDCompositionDevice2 *iface)
 {
-    TRACE("iface %p.\n", iface);
+    struct dcomp_device *dev = impl_from_IDCompositionDevice2(iface);
+    /* Direct binding has completed before Commit releases this lock. */
+    EnterCriticalSection(&dev->cs);
+    LeaveCriticalSection(&dev->cs);
     return S_OK;
 }
 
@@ -1748,7 +1790,10 @@ static HRESULT STDMETHODCALLTYPE dcomp_device3_Commit(IDCompositionDevice3 *ifac
 
 static HRESULT STDMETHODCALLTYPE dcomp_device3_WaitForCommitCompletion(IDCompositionDevice3 *iface)
 {
-    TRACE("iface %p.\n", iface);
+    struct dcomp_device *dev = impl_from_IDCompositionDevice3(iface);
+    /* Direct binding has completed before Commit releases this lock. */
+    EnterCriticalSection(&dev->cs);
+    LeaveCriticalSection(&dev->cs);
     return S_OK;
 }
 
@@ -2054,7 +2099,10 @@ static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_Commit(IDCompositionDeskto
 
 static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_WaitForCommitCompletion(IDCompositionDesktopDevice *iface)
 {
-    TRACE("iface %p.\n", iface);
+    struct dcomp_device *dev = impl_from_IDCompositionDesktopDevice(iface);
+    /* Direct binding has completed before Commit releases this lock. */
+    EnterCriticalSection(&dev->cs);
+    LeaveCriticalSection(&dev->cs);
     return S_OK;
 }
 

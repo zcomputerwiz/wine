@@ -426,7 +426,7 @@ static void dcomp_layer_compute_placement(const struct wine_dcomp_layer_params *
         *fully_clipped = TRUE;
 }
 
-static void dcomp_swapchain_apply_target(struct d3d11_swapchain *swapchain, WPARAM mode, LPARAM lparam)
+void dcomp_swapchain_apply_target(struct d3d11_swapchain *swapchain, WPARAM mode, LPARAM lparam)
 {
     HWND target_hwnd = NULL;
 

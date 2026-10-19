@@ -20,6 +20,20 @@
 
 import "dxgi1_6.idl";
 
+/* Builtin application composition binding. Native DXVK must reject this
+ * interface until it has a corresponding implementation. No window-message
+ * thread or raw posted pointer is involved in commit completion. */
+[
+    object,
+    local,
+    uuid(31bd05bc-c6e4-4dbe-975c-a9707848e67b)
+]
+interface IWineDCompSwapChain : IUnknown
+{
+    HRESULT set_target([in] HWND target, [in] const RECT *destination,
+            [in] const RECT *clip);
+}
+
 [
     object,
     local,

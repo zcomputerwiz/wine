@@ -206,7 +206,16 @@ static HWND d3d11_swapchain_get_hwnd(struct d3d11_swapchain *swapchain)
 
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_QueryInterface(IDXGISwapChain4 *iface, REFIID riid, void **object)
 {
+    struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
+
     TRACE("iface %p, riid %s, object %p\n", iface, debugstr_guid(riid), object);
+
+    if (IsEqualGUID(riid, &IID_IWineDCompSwapChain) && swapchain->comp_wnd)
+    {
+        *object = &swapchain->IWineDCompSwapChain_iface;
+        IUnknown_AddRef(iface);
+        return S_OK;
+    }
 
     if (IsEqualGUID(riid, &IID_IUnknown)
             || IsEqualGUID(riid, &IID_IDXGIObject)
@@ -327,11 +336,74 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetDevice(IDXGISwapChain4 *ifac
 
 /* IDXGISwapChain1 methods */
 
+static inline struct d3d11_swapchain *impl_from_IWineDCompSwapChain(IWineDCompSwapChain *iface)
+{
+    return CONTAINING_RECORD(iface, struct d3d11_swapchain, IWineDCompSwapChain_iface);
+}
+
+/* Binding/DC changes must not race Present's parameter snapshot/enqueue. */
+static SRWLOCK dcomp_binding_lock = SRWLOCK_INIT;
+
+static HRESULT STDMETHODCALLTYPE dcomp_binding_QueryInterface(IWineDCompSwapChain *iface, REFIID iid, void **out)
+{
+    return d3d11_swapchain_QueryInterface(&impl_from_IWineDCompSwapChain(iface)->IDXGISwapChain4_iface, iid, out);
+}
+
+static ULONG STDMETHODCALLTYPE dcomp_binding_AddRef(IWineDCompSwapChain *iface)
+{
+    return d3d11_swapchain_AddRef(&impl_from_IWineDCompSwapChain(iface)->IDXGISwapChain4_iface);
+}
+
+static ULONG STDMETHODCALLTYPE dcomp_binding_Release(IWineDCompSwapChain *iface)
+{
+    return d3d11_swapchain_Release(&impl_from_IWineDCompSwapChain(iface)->IDXGISwapChain4_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_binding_set_target(IWineDCompSwapChain *iface,
+        HWND target, const RECT *destination, const RECT *clip)
+{
+    struct d3d11_swapchain *swapchain = impl_from_IWineDCompSwapChain(iface);
+    struct wine_dcomp_layer_params params = {0};
+    RECT empty = {0};
+
+    if (target && !destination) return E_INVALIDARG;
+    AcquireSRWLockExclusive(&dcomp_binding_lock);
+    if (!target)
+    {
+        if (swapchain->target_hwnd)
+            wined3d_swapchain_present(swapchain->wined3d_swapchain, &empty, &empty,
+                    swapchain->target_hwnd, 0, WINED3D_PRESENT_CLEAR | WINED3D_PRESENT_CLEAR_ONLY);
+        dcomp_swapchain_apply_target(swapchain, WINE_DCOMP_SET_TARGET_LEGACY, 0);
+        ReleaseSRWLockExclusive(&dcomp_binding_lock);
+        return S_OK;
+    }
+    params.target_hwnd = target;
+    params.offset_x = destination->left;
+    params.offset_y = destination->top;
+    params.width = destination->right - destination->left;
+    params.height = destination->bottom - destination->top;
+    params.has_clip = !!clip;
+    if (clip) params.clip_rect = *clip;
+    params.opacity = 1.0f;
+    dcomp_swapchain_apply_target(swapchain, WINE_DCOMP_SET_TARGET_PARAMS, (LPARAM)&params);
+    ReleaseSRWLockExclusive(&dcomp_binding_lock);
+    return S_OK;
+}
+
+static const struct IWineDCompSwapChainVtbl dcomp_binding_vtbl =
+{
+    dcomp_binding_QueryInterface,
+    dcomp_binding_AddRef,
+    dcomp_binding_Release,
+    dcomp_binding_set_target,
+};
+
 static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
         unsigned int sync_interval, unsigned int flags)
 {
     HWND target_hwnd;
     BOOL has_dst_rect;
+    BOOL fully_clipped;
     RECT src_rect, dst_rect;
     HWND hwnd;
     HRESULT hr;
@@ -342,32 +414,47 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
         return DXGI_ERROR_INVALID_CALL;
     }
 
+    AcquireSRWLockShared(&dcomp_binding_lock);
     wined3d_mutex_lock();
     target_hwnd = swapchain->target_hwnd;
     has_dst_rect = swapchain->has_dst_rect;
+    fully_clipped = swapchain->fully_clipped;
     src_rect = swapchain->src_rect;
     dst_rect = swapchain->dst_rect;
     wined3d_mutex_unlock();
 
     hwnd = target_hwnd ? target_hwnd : d3d11_swapchain_get_hwnd(swapchain);
     if (hwnd && IsIconic(hwnd))
+    {
+        ReleaseSRWLockShared(&dcomp_binding_lock);
         return DXGI_STATUS_OCCLUDED;
+    }
 
     if (flags & ~(DXGI_PRESENT_TEST | DXGI_PRESENT_ALLOW_TEARING))
         FIXME("Unimplemented flags %#x.\n", flags);
     if (flags & DXGI_PRESENT_TEST)
     {
         WARN("Returning S_OK for DXGI_PRESENT_TEST.\n");
+        ReleaseSRWLockShared(&dcomp_binding_lock);
+        return S_OK;
+    }
+
+    /* Empty clipping must not be sent to the backend as a zero-area blit. */
+    if (swapchain->comp_wnd && !target_hwnd)
+    {
+        ReleaseSRWLockShared(&dcomp_binding_lock);
         return S_OK;
     }
 
     if (SUCCEEDED(hr = wined3d_swapchain_present(swapchain->wined3d_swapchain,
             has_dst_rect ? &src_rect : NULL,
             has_dst_rect ? &dst_rect : NULL,
-            target_hwnd, sync_interval, 0)))
+            target_hwnd, sync_interval, swapchain->comp_wnd ? WINED3D_PRESENT_CLEAR
+                    | (fully_clipped ? WINED3D_PRESENT_CLEAR_ONLY : 0) : 0)))
     {
         InterlockedIncrement(&swapchain->present_count);
     }
+    ReleaseSRWLockShared(&dcomp_binding_lock);
     return hr;
 }
 
@@ -1099,6 +1186,7 @@ HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_devi
     IWineDXGIDevice_AddRef(swapchain->device = &device->IWineDXGIDevice_iface);
 
     swapchain->IDXGISwapChain4_iface.lpVtbl = &d3d11_swapchain_vtbl;
+    swapchain->IWineDCompSwapChain_iface.lpVtbl = &dcomp_binding_vtbl;
     swapchain->state_parent.ops = &d3d11_swapchain_state_parent_ops;
     swapchain->fullscreen_desc = *fullscreen_desc;
     swapchain->refcount = 1;
