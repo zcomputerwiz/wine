@@ -3401,7 +3401,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_fence_CreateSharedHandle(ID3D11Fence *ifa
         fence->shared_data->completed_value = fence->completed_value;
         swprintf(fence->shared_data->event_name, ARRAY_SIZE(fence->shared_data->event_name),
                  L"WineD3D11FenceEv_%08lx_%08lx", GetCurrentProcessId(), (DWORD)InterlockedIncrement(&fence_seq));
-        fence->shared_event = CreateEventW(NULL, FALSE, FALSE, fence->shared_data->event_name);
+        fence->shared_event = CreateEventW(NULL, TRUE, FALSE, fence->shared_data->event_name);
     }
 
     if (!DuplicateHandle(GetCurrentProcess(), fence->shared_mapping, GetCurrentProcess(), handle,
@@ -3524,7 +3524,7 @@ HRESULT d3d11_fence_create(struct d3d_device *device, UINT64 initial_value,
                 object->shared_data->completed_value = (LONG64)initial_value;
                 swprintf(object->shared_data->event_name, ARRAY_SIZE(object->shared_data->event_name),
                          L"WineD3D11FenceEv_%08lx_%08lx", GetCurrentProcessId(), (DWORD)InterlockedIncrement(&fence_seq));
-                object->shared_event = CreateEventW(NULL, FALSE, FALSE, object->shared_data->event_name);
+                object->shared_event = CreateEventW(NULL, TRUE, FALSE, object->shared_data->event_name);
             }
         }
     }
@@ -3600,6 +3600,7 @@ struct d3d11_fence_command
     struct d3d11_fence *fence;
     UINT64 value;
     HANDLE event;
+    struct d3d11_device_context *context;
 };
 
 static void d3d11_fence_signal_complete(void *object, BOOL success)
@@ -3627,7 +3628,7 @@ static void d3d11_fence_signal_complete(void *object, BOOL success)
     LeaveCriticalSection(&fence->cs);
 
     if (fence->shared_event)
-        SetEvent(fence->shared_event);
+        PulseEvent(fence->shared_event);
     d3d11_fence_private_release(fence);
     free(command);
 }
@@ -3640,6 +3641,16 @@ static void d3d11_fence_wait_complete(void *object, BOOL success)
      * clear, query and copy in the queue is therefore behind the same barrier. */
     WaitForSingleObject(command->event, INFINITE);
     CloseHandle(command->event);
+    if (command->context && command->context->device)
+    {
+        struct d3d_device *device = command->context->device;
+        struct d3d_texture2d *texture;
+        LIST_FOR_EACH_ENTRY(texture, &device->shared_textures, struct d3d_texture2d, entry)
+        {
+            if (texture->shared_memory && texture->wined3d_texture)
+                wined3d_texture_update_desc(texture->wined3d_texture, 0, texture->shared_memory, texture->shared_pitch);
+        }
+    }
     d3d11_fence_private_release(command->fence);
     free(command);
 }
@@ -3711,6 +3722,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_context_Wait(ID3D11DeviceContext4 
 
     command->fence = impl_from_ID3D11Fence(fence_iface);
     InterlockedIncrement(&command->fence->private_refcount);
+    command->context = context;
     command->event = CreateEventW(NULL, FALSE, FALSE, NULL);
     if (!command->event)
     {
@@ -6011,38 +6023,46 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_OpenSharedResource1(ID3D11Device5 
             return hr;
         d3d_resource = (ID3D11Resource *)buffer;
     }
-    else
+    else if (desc.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D)
     {
         ID3D11Texture2D *texture;
         struct d3d_texture2d *tex_impl;
-        D3D11_TEXTURE2D_DESC tex_desc;
-        DWORD width = 256, height = 256, pitch;
+        D3D11_TEXTURE2D_DESC tex_desc = desc.d3d11_2d;
+        DWORD width = tex_desc.Width, height = tex_desc.Height, pitch;
         HANDLE shared_mapping = NULL;
         void *shared_memory = NULL;
 
-        if (desc.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE2D)
+        if (tex_desc.MipLevels != 1 || tex_desc.ArraySize != 1 || tex_desc.SampleDesc.Count != 1)
         {
-            tex_desc = desc.d3d11_2d;
-            width = tex_desc.Width;
-            height = tex_desc.Height;
-        }
-        else
-        {
-            memset(&tex_desc, 0, sizeof(tex_desc));
-            tex_desc.Width = width = desc.dxgi.width ? desc.dxgi.width : 256;
-            tex_desc.Height = height = desc.dxgi.height ? desc.dxgi.height : 256;
-            tex_desc.Format = desc.dxgi.format ? desc.dxgi.format : DXGI_FORMAT_R8G8B8A8_UNORM;
-            tex_desc.MipLevels = 1;
-            tex_desc.ArraySize = 1;
-            tex_desc.SampleDesc.Count = 1;
-            tex_desc.Usage = D3D11_USAGE_DEFAULT;
-            tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-            tex_desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
-            if (desc.dxgi.keyed_mutex)
-                tex_desc.MiscFlags |= D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+            WARN("Rejecting unsupported layout: mips %u, array %u, samples %u.\n",
+                 tex_desc.MipLevels, tex_desc.ArraySize, tex_desc.SampleDesc.Count);
+            return E_INVALIDARG;
         }
 
-        pitch = width * 4;
+        if (!width || !height || width > 16384 || height > 16384)
+        {
+            WARN("Rejecting invalid dimensions %ux%u.\n", (unsigned int)width, (unsigned int)height);
+            return E_INVALIDARG;
+        }
+
+        switch (tex_desc.Format)
+        {
+            case DXGI_FORMAT_R8G8B8A8_UNORM:
+            case DXGI_FORMAT_B8G8R8A8_UNORM:
+            case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+            case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+            case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+            case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+            case DXGI_FORMAT_R10G10B10A2_UNORM:
+                pitch = width * 4;
+                break;
+            default:
+                WARN("Rejecting unsupported format %#x.\n", tex_desc.Format);
+                return E_INVALIDARG;
+        }
+
+        if (pitch / 4 != width || (size_t)height * pitch / pitch != height)
+            return E_INVALIDARG;
 
         if (desc.dxgi.unknown_2)
         {
@@ -6094,6 +6114,11 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_OpenSharedResource1(ID3D11Device5 
         }
 
         d3d_resource = (ID3D11Resource *)texture;
+    }
+    else
+    {
+        WARN("Rejecting unknown resource dimension %u.\n", desc.dimension);
+        return E_INVALIDARG;
     }
 
     hr = ID3D11Resource_QueryInterface(d3d_resource, iid, resource);

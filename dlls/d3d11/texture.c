@@ -575,10 +575,6 @@ static ULONG STDMETHODCALLTYPE d3d11_texture2d_Release(ID3D11Texture2D *iface)
         ID3D11Device5 *device = texture->device;
         if (texture->is_shared)
             list_remove(&texture->entry);
-        if (texture->shared_memory)
-            UnmapViewOfFile(texture->shared_memory);
-        if (texture->shared_mapping)
-            CloseHandle(texture->shared_mapping);
         if (texture->swapchain)
             wined3d_swapchain_decref(texture->swapchain);
         /* Releasing the texture may free the d3d11 object, so do not access it
