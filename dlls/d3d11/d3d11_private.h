@@ -702,6 +702,9 @@ struct d3d11_fence_shared_data
 {
     volatile LONG64 completed_value;
     WCHAR event_name[64];
+    /* Each imported fence observer owns a persistent auto-reset notification.
+     * A single shared event cannot reliably broadcast to separate processes. */
+    WCHAR observers[64][96];
 };
 
 struct d3d11_fence
@@ -720,6 +723,8 @@ struct d3d11_fence
     struct d3d11_fence_shared_data *shared_data;
     HANDLE shared_event;
     HANDLE wait_register;
+    HANDLE shared_lock;
+    unsigned int shared_slot;
 };
 
 static inline struct d3d11_fence *impl_from_ID3D11Fence(ID3D11Fence *iface)

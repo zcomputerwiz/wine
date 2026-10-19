@@ -3204,6 +3204,67 @@ static void STDMETHODCALLTYPE d3d11_device_context_GetHardwareProtectionState(ID
 
 static LONG fence_seq = 0;
 
+static BOOL fence_shared_lock(struct d3d11_fence *fence)
+{
+    DWORD ret = WaitForSingleObject(fence->shared_lock, INFINITE);
+    return ret == WAIT_OBJECT_0 || ret == WAIT_ABANDONED;
+}
+
+static HRESULT fence_shared_init_lock(struct d3d11_fence *fence)
+{
+    WCHAR name[80];
+    swprintf(name, ARRAY_SIZE(name), L"%s_lock", fence->shared_data->event_name);
+    if (!(fence->shared_lock = CreateMutexW(NULL, FALSE, name)))
+        return HRESULT_FROM_WIN32(GetLastError());
+    return S_OK;
+}
+
+/* Called with the local fence lock held. Publish a persistent notification
+ * before checking completion again; a signal before threadpool registration
+ * stays signaled instead of disappearing like PulseEvent. */
+static HRESULT fence_shared_observe(struct d3d11_fence *fence)
+{
+    WCHAR name[96];
+    unsigned int i;
+    HANDLE stale;
+
+    if (fence->shared_event)
+        return S_OK;
+    swprintf(name, ARRAY_SIZE(name), L"WineD3D11FenceObs_%08lx_%08lx",
+            GetCurrentProcessId(), (DWORD)InterlockedIncrement(&fence_seq));
+    if (!(fence->shared_event = CreateEventW(NULL, FALSE, FALSE, name)))
+        return HRESULT_FROM_WIN32(GetLastError());
+    if (!fence_shared_lock(fence))
+    {
+        CloseHandle(fence->shared_event);
+        fence->shared_event = NULL;
+        return E_FAIL;
+    }
+    for (i = 0; i < ARRAY_SIZE(fence->shared_data->observers); ++i)
+    {
+        if (fence->shared_data->observers[i][0])
+        {
+            stale = OpenEventW(EVENT_MODIFY_STATE, FALSE, fence->shared_data->observers[i]);
+            if (stale)
+            {
+                CloseHandle(stale);
+                continue;
+            }
+        }
+        wcscpy(fence->shared_data->observers[i], name);
+        fence->shared_slot = i + 1;
+        break;
+    }
+    ReleaseMutex(fence->shared_lock);
+    if (!fence->shared_slot)
+    {
+        CloseHandle(fence->shared_event);
+        fence->shared_event = NULL;
+        return HRESULT_FROM_WIN32(ERROR_TOO_MANY_OPEN_FILES);
+    }
+    return S_OK;
+}
+
 static VOID CALLBACK fence_signal_callback(PVOID context, BOOLEAN timer_or_wait_fired)
 {
     struct d3d11_fence *fence = context;
@@ -3287,6 +3348,13 @@ static ULONG d3d11_fence_private_release(struct d3d11_fence *fence)
         LeaveCriticalSection(&fence->cs);
         DeleteCriticalSection(&fence->cs);
 
+        if (fence->shared_slot && fence_shared_lock(fence))
+        {
+            fence->shared_data->observers[fence->shared_slot - 1][0] = 0;
+            ReleaseMutex(fence->shared_lock);
+        }
+        if (fence->shared_lock)
+            CloseHandle(fence->shared_lock);
         if (fence->shared_data)
             UnmapViewOfFile(fence->shared_data);
         if (fence->shared_mapping)
@@ -3392,9 +3460,12 @@ static HRESULT STDMETHODCALLTYPE d3d11_fence_CreateSharedHandle(ID3D11Fence *ifa
         fence->shared_data->completed_value = fence->completed_value;
         swprintf(fence->shared_data->event_name, ARRAY_SIZE(fence->shared_data->event_name),
                  L"WineD3D11FenceEv_%08lx_%08lx", GetCurrentProcessId(), (DWORD)InterlockedIncrement(&fence_seq));
-        fence->shared_event = CreateEventW(NULL, TRUE, FALSE, fence->shared_data->event_name);
+        if (FAILED(fence_shared_init_lock(fence)))
+            return E_FAIL;
     }
 
+    if (!fence->shared_lock && FAILED(fence_shared_init_lock(fence)))
+        return E_FAIL;
     if (!DuplicateHandle(GetCurrentProcess(), fence->shared_mapping, GetCurrentProcess(), handle,
                          access ? access : GENERIC_ALL, attributes && attributes->bInheritHandle, 0))
     {
@@ -3420,6 +3491,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_fence_SetEventOnCompletion(ID3D11Fence *i
     struct d3d11_fence *fence = impl_from_ID3D11Fence(iface);
     struct d3d11_fence_waiter *waiter;
     UINT64 cur_val;
+    HRESULT hr;
 
     TRACE("iface %p, value %I64u, event %p.\n", iface, value, event);
 
@@ -3452,10 +3524,21 @@ static HRESULT STDMETHODCALLTYPE d3d11_fence_SetEventOnCompletion(ID3D11Fence *i
     waiter->event = event;
     list_add_tail(&fence->waiters, &waiter->entry);
 
-    if (fence->shared_event && !fence->wait_register)
+    if (fence->shared_data && !fence->wait_register)
     {
-        RegisterWaitForSingleObject(&fence->wait_register, fence->shared_event,
-                fence_signal_callback, fence, INFINITE, WT_EXECUTEDEFAULT);
+        if (FAILED(hr = fence_shared_observe(fence))
+                || !RegisterWaitForSingleObject(&fence->wait_register, fence->shared_event,
+                        fence_signal_callback, fence, INFINITE, WT_EXECUTEDEFAULT))
+        {
+            if (SUCCEEDED(hr)) hr = HRESULT_FROM_WIN32(GetLastError());
+            list_remove(&waiter->entry);
+            free(waiter);
+            LeaveCriticalSection(&fence->cs);
+            return hr;
+        }
+        /* Signal may have happened before this observer was published. */
+        if (d3d11_fence_GetCompletedValue(iface) >= value)
+            SetEvent(fence->shared_event);
     }
 
     LeaveCriticalSection(&fence->cs);
@@ -3515,7 +3598,11 @@ HRESULT d3d11_fence_create(struct d3d_device *device, UINT64 initial_value,
                 object->shared_data->completed_value = (LONG64)initial_value;
                 swprintf(object->shared_data->event_name, ARRAY_SIZE(object->shared_data->event_name),
                          L"WineD3D11FenceEv_%08lx_%08lx", GetCurrentProcessId(), (DWORD)InterlockedIncrement(&fence_seq));
-                object->shared_event = CreateEventW(NULL, TRUE, FALSE, object->shared_data->event_name);
+                if (FAILED(hr = fence_shared_init_lock(object)))
+                {
+                    d3d11_fence_private_release(object);
+                    return hr;
+                }
             }
         }
     }
@@ -3569,8 +3656,11 @@ HRESULT d3d11_fence_open_shared(struct d3d_device *device, HANDLE handle,
     InitializeCriticalSection(&object->cs);
     list_init(&object->waiters);
 
-    if (shared_data->event_name[0])
-        object->shared_event = OpenEventW(EVENT_ALL_ACCESS, FALSE, shared_data->event_name);
+    if (!shared_data->event_name[0] || FAILED(hr = fence_shared_init_lock(object)))
+    {
+        d3d11_fence_private_release(object);
+        return E_INVALIDARG;
+    }
 
     hr = ID3D11Fence_QueryInterface(&object->ID3D11Fence_iface, iid, fence);
     d3d11_fence_private_release(object);
@@ -3600,9 +3690,32 @@ static void d3d11_fence_signal_complete(void *object, BOOL success)
     struct d3d11_fence *fence = command->fence;
     struct d3d11_fence_waiter *waiter, *next;
     UINT64 value = success ? command->value : ~(UINT64)0;
+    unsigned int i;
+    HANDLE notification;
 
     if (fence->shared_data)
+    {
+        if (!fence_shared_lock(fence))
+        {
+            d3d11_fence_private_release(fence);
+            free(command);
+            return;
+        }
         fence_exchange64(&fence->shared_data->completed_value, (LONG64)value);
+        for (i = 0; i < ARRAY_SIZE(fence->shared_data->observers); ++i)
+        {
+            if (!fence->shared_data->observers[i][0]) continue;
+            notification = OpenEventW(EVENT_MODIFY_STATE, FALSE, fence->shared_data->observers[i]);
+            if (notification)
+            {
+                SetEvent(notification);
+                CloseHandle(notification);
+            }
+            else
+                fence->shared_data->observers[i][0] = 0;
+        }
+        ReleaseMutex(fence->shared_lock);
+    }
     else
         fence_exchange64(&fence->completed_value, (LONG64)value);
 
@@ -3618,8 +3731,6 @@ static void d3d11_fence_signal_complete(void *object, BOOL success)
     }
     LeaveCriticalSection(&fence->cs);
 
-    if (fence->shared_event)
-        PulseEvent(fence->shared_event);
     d3d11_fence_private_release(fence);
     free(command);
 }
