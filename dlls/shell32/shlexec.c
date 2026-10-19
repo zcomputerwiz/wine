@@ -333,11 +333,15 @@ static BOOL run_elevation_helper(const WCHAR *helper, HWND hwnd, const WCHAR *cm
     PROCESS_INFORMATION pi;
     WCHAR *helper_cmd;
     const WCHAR *cur_dir = (dir && dir[0]) ? dir : NULL;
-    DWORD len, exit_code = 1;
+    DWORD len, exit_code = ERROR_GEN_FAILURE, error = ERROR_SUCCESS;
     BOOL ok;
 
     len = lstrlenW(helper) + lstrlenW(cmd) + (dir ? lstrlenW(dir) : 0) + 64;
-    if (!(helper_cmd = malloc(len * sizeof(WCHAR)))) return FALSE;
+    if (!(helper_cmd = malloc(len * sizeof(WCHAR))))
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
 
     if (helper[0] == '"')
         swprintf(helper_cmd, len, L"%s /hwnd %p /cmd %s", helper, hwnd, cmd);
@@ -353,29 +357,38 @@ static BOOL run_elevation_helper(const WCHAR *helper, HWND hwnd, const WCHAR *cm
         if (wait_res == WAIT_TIMEOUT)
         {
             WARN("elevation helper timed out after 30 seconds; terminating\n");
-            TerminateProcess(pi.hProcess, 1223);
-            exit_code = 1223;
+            error = ERROR_TIMEOUT;
+            TerminateProcess(pi.hProcess, error);
+            WaitForSingleObject(pi.hProcess, 5000);
         }
         else if (wait_res == WAIT_OBJECT_0)
         {
-            GetExitCodeProcess(pi.hProcess, &exit_code);
+            if (!GetExitCodeProcess(pi.hProcess, &exit_code))
+                error = GetLastError() ? GetLastError() : ERROR_GEN_FAILURE;
+            else
+                error = exit_code;
             TRACE("elevation helper finished with exit code %lu\n", exit_code);
         }
         else
         {
-            WARN("WaitForSingleObject on elevation helper failed: %lu\n", GetLastError());
-            TerminateProcess(pi.hProcess, 1223);
-            exit_code = 1223;
+            error = GetLastError();
+            if (!error) error = ERROR_GEN_FAILURE;
+            WARN("WaitForSingleObject on elevation helper failed: %lu\n", error);
+            TerminateProcess(pi.hProcess, error);
+            WaitForSingleObject(pi.hProcess, 5000);
         }
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
     }
     else
     {
-        WARN("failed to execute elevation helper %s: %lu\n", debugstr_w(helper), GetLastError());
+        error = GetLastError();
+        if (!error) error = ERROR_GEN_FAILURE;
+        WARN("failed to execute elevation helper %s: %lu\n", debugstr_w(helper), error);
     }
     free(helper_cmd);
-    return (ok && exit_code == 0);
+    SetLastError(error);
+    return !error;
 }
 
 /*************************************************************************
@@ -394,6 +407,7 @@ static UINT_PTR SHELL_ExecuteW(const WCHAR *lpCmd, WCHAR *env, BOOL shWait,
     HANDLE token = NULL;
     WCHAR helper[MAX_PATH];
     BOOL has_helper;
+    DWORD launch_error;
 
     TRACE("Execute %s from directory %s\n", debugstr_w(lpCmd), debugstr_w(psei->lpDirectory));
 
@@ -417,6 +431,7 @@ static UINT_PTR SHELL_ExecuteW(const WCHAR *lpCmd, WCHAR *env, BOOL shWait,
         dwCreationFlags |= CREATE_NEW_CONSOLE;
 
     has_helper = get_elevation_helper(helper, ARRAY_SIZE(helper));
+    psei_out->hProcess = NULL;
 
     if (psei->lpVerb && !wcsicmp(psei->lpVerb, L"runas"))
     {
@@ -424,10 +439,11 @@ static UINT_PTR SHELL_ExecuteW(const WCHAR *lpCmd, WCHAR *env, BOOL shWait,
         {
             if (!run_elevation_helper(helper, psei->hwnd, lpCmd, psei->lpDirectory))
             {
-                SetLastError(ERROR_CANCELLED);
+                DWORD error = GetLastError();
                 psei_out->hInstApp = (HINSTANCE)SE_ERR_ACCESSDENIED;
                 psei_out->hProcess = NULL;
                 if (gcdret) SetCurrentDirectoryW(curdir);
+                SetLastError(error);
                 return SE_ERR_ACCESSDENIED;
             }
         }
@@ -476,7 +492,6 @@ static UINT_PTR SHELL_ExecuteW(const WCHAR *lpCmd, WCHAR *env, BOOL shWait,
         }
         else
         {
-            SetLastError(ERROR_CANCELLED);
             retval = SE_ERR_ACCESSDENIED;
         }
     }
@@ -486,6 +501,7 @@ static UINT_PTR SHELL_ExecuteW(const WCHAR *lpCmd, WCHAR *env, BOOL shWait,
         retval = ERROR_BAD_FORMAT;
     }
 
+    launch_error = GetLastError();
     if (token) CloseHandle(token);
 
     TRACE("returning %Iu\n", retval);
@@ -495,8 +511,8 @@ static UINT_PTR SHELL_ExecuteW(const WCHAR *lpCmd, WCHAR *env, BOOL shWait,
         if( !SetCurrentDirectoryW( curdir))
             ERR("cannot return to directory %s\n", debugstr_w(curdir));
 
-    if (retval == SE_ERR_ACCESSDENIED)
-        SetLastError(ERROR_CANCELLED);
+    if (retval <= 32)
+        SetLastError(launch_error);
 
     return retval;
 }
