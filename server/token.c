@@ -117,6 +117,7 @@ struct token
     struct list    kernel_object;   /* list of kernel object pointers */
     unsigned int   integrity_rid;   /* integrity level RID */
     struct list    restricted_sids; /* list of restricting SIDs */
+    int            is_restricted;   /* token has restricting SIDs */
     struct sid    *app_container;   /* AppContainer package SID */
     struct list    capabilities;    /* capability SIDs */
 };
@@ -510,6 +511,7 @@ static struct token *create_token( unsigned int primary, unsigned int session_id
         token->elevation = elevation;
         token->integrity_rid = SECURITY_MANDATORY_HIGH_RID;
         token->app_container = NULL;
+        token->is_restricted = 0;
 
         /* copy user */
         token->user = memdup( user, sid_len( user ));
@@ -676,6 +678,7 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
         memcpy( newgroup, group, size );
         list_add_tail( &token->restricted_sids, &newgroup->entry );
     }
+    token->is_restricted = src_token->is_restricted;
 
     /* copy capabilities */
     LIST_FOR_EACH_ENTRY( group, &src_token->capabilities, struct group, entry )
@@ -1161,7 +1164,7 @@ static unsigned int token_access_check( struct token *token,
             break;
     }
 
-    if (!list_empty( &token->restricted_sids ))
+    if (token->is_restricted)
     {
         unsigned int restricted_allowed = 0;
         unsigned int restricted_denied = 0;
@@ -1613,7 +1616,9 @@ DECL_HANDLER(filter_token)
                 }
             }
 
-            if (!list_empty( &src_token->restricted_sids ))
+            token->is_restricted = (src_token->is_restricted || restrict_count > 0);
+
+            if (src_token->is_restricted)
             {
                 if (restrict_count)
                 {
@@ -1634,18 +1639,6 @@ DECL_HANDLER(filter_token)
                             free( rg );
                         }
                     }
-                    if (list_empty( &token->restricted_sids ))
-                    {
-                        static const struct sid null_sid = { SID_REVISION, 1, SECURITY_NULL_SID_AUTHORITY, { SECURITY_NULL_RID } };
-                        size_t size = offsetof( struct group, sid.sub_auth[1] );
-                        struct group *res_group = mem_alloc( size );
-                        if (res_group)
-                        {
-                            res_group->attrs = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY;
-                            copy_sid( &res_group->sid, &null_sid );
-                            list_add_tail( &token->restricted_sids, &res_group->entry );
-                        }
-                    }
                 }
             }
             else if (restrict_count)
@@ -1664,12 +1657,16 @@ DECL_HANDLER(filter_token)
                     {
                         size_t size = offsetof( struct group, sid.sub_auth[sid->sub_count] );
                         struct group *res_group = mem_alloc( size );
-                        if (res_group)
+                        if (!res_group)
                         {
-                            res_group->attrs = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY;
-                            copy_sid( &res_group->sid, sid );
-                            list_add_tail( &token->restricted_sids, &res_group->entry );
+                            set_error( STATUS_NO_MEMORY );
+                            release_object( token );
+                            release_object( src_token );
+                            return;
                         }
+                        res_group->attrs = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY;
+                        copy_sid( &res_group->sid, sid );
+                        list_add_tail( &token->restricted_sids, &res_group->entry );
                     }
                     sid = (const struct sid *)((char *)sid + sid_len( sid ));
                 }
@@ -1924,7 +1921,7 @@ DECL_HANDLER(get_token_info)
         reply->privilege_count = list_count( &token->privileges );
         reply->integrity_rid = token->integrity_rid;
         reply->is_app_container = (token->app_container != NULL);
-        reply->is_restricted = !list_empty( &token->restricted_sids );
+        reply->is_restricted = token->is_restricted;
         release_object( token );
     }
 }

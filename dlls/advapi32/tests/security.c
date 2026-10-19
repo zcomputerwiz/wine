@@ -9258,15 +9258,7 @@ static void test_restricted_sid_intersection(void)
     r_groups = malloc(size);
     ret = GetTokenInformation(token3, TokenRestrictedSids, r_groups, size, &size);
     ok(ret, "GetTokenInformation token3 failed\n");
-    ok(r_groups->GroupCount == 1, "expected 1 restricting SID (null_sid), got %lu\n", r_groups->GroupCount);
-    if (r_groups->GroupCount == 1)
-    {
-        static SID_IDENTIFIER_AUTHORITY sia_null = {SECURITY_NULL_SID_AUTHORITY};
-        PSID sid_null = NULL;
-        AllocateAndInitializeSid(&sia_null, 1, SECURITY_NULL_RID, 0, 0, 0, 0, 0, 0, 0, &sid_null);
-        ok(EqualSid(r_groups->Groups[0].Sid, sid_null), "expected null SID (S-1-0-0)\n");
-        FreeSid(sid_null);
-    }
+    ok(r_groups->GroupCount == 0, "expected 0 restricting SIDs in disjoint intersection, got %lu\n", r_groups->GroupCount);
     free(r_groups);
 
     CloseHandle(token1);

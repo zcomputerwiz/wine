@@ -309,22 +309,81 @@ static HANDLE get_admin_token(void)
     return linked.LinkedToken;
 }
 
-static BOOL get_elevation_helper(WCHAR *helper, DWORD size)
+enum elevation_helper_status
+{
+    HELPER_UNSET = 0,       /* Key or value absent, or explicitly empty (L"") */
+    HELPER_CONFIGURED = 1,  /* Valid non-empty path in Helper */
+    HELPER_INVALID = 2      /* Read denied, invalid type, odd bytes, oversized, invalid path */
+};
+
+static enum elevation_helper_status get_elevation_helper(WCHAR *helper, DWORD size, DWORD *error_code)
 {
     HKEY hkey;
-    DWORD type, bytes = (size - 1) * sizeof(WCHAR);
-    BOOL ret = FALSE;
+    DWORD type, bytes;
+    LSTATUS status;
 
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Wine\\Elevation", 0, KEY_READ, &hkey) == ERROR_SUCCESS)
+    if (error_code) *error_code = ERROR_SUCCESS;
+    if (size > 0) helper[0] = 0;
+
+    status = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Wine\\Elevation", 0, KEY_READ, &hkey);
+    if (status == ERROR_FILE_NOT_FOUND)
+        return HELPER_UNSET;
+    if (status != ERROR_SUCCESS)
     {
-        if (RegQueryValueExW(hkey, L"Helper", NULL, &type, (BYTE *)helper, &bytes) == ERROR_SUCCESS && bytes >= sizeof(WCHAR))
-        {
-            helper[bytes / sizeof(WCHAR)] = 0;
-            ret = (helper[0] != 0);
-        }
-        RegCloseKey(hkey);
+        if (error_code) *error_code = status;
+        return HELPER_INVALID;
     }
-    return ret;
+
+    bytes = (size - 1) * sizeof(WCHAR);
+    status = RegQueryValueExW(hkey, L"Helper", NULL, &type, (BYTE *)helper, &bytes);
+    RegCloseKey(hkey);
+
+    if (status == ERROR_FILE_NOT_FOUND)
+        return HELPER_UNSET;
+    if (status != ERROR_SUCCESS)
+    {
+        if (error_code) *error_code = (status == ERROR_MORE_DATA) ? ERROR_FILENAME_EXCED_RANGE : status;
+        return HELPER_INVALID;
+    }
+
+    if (type != REG_SZ && type != REG_EXPAND_SZ)
+    {
+        if (error_code) *error_code = ERROR_DATATYPE_MISMATCH;
+        return HELPER_INVALID;
+    }
+
+    if (bytes == 0)
+        return HELPER_UNSET;
+
+    if (bytes % sizeof(WCHAR) != 0)
+    {
+        if (error_code) *error_code = ERROR_INVALID_DATA;
+        return HELPER_INVALID;
+    }
+
+    helper[bytes / sizeof(WCHAR)] = 0;
+    if (!helper[0])
+        return HELPER_UNSET;
+
+    {
+        const WCHAR *p = helper;
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p)
+        {
+            if (error_code) *error_code = ERROR_BAD_PATHNAME;
+            return HELPER_INVALID;
+        }
+        for (p = helper; *p; p++)
+        {
+            if (*p < 32 && *p != '\t')
+            {
+                if (error_code) *error_code = ERROR_BAD_PATHNAME;
+                return HELPER_INVALID;
+            }
+        }
+    }
+
+    return HELPER_CONFIGURED;
 }
 
 static BOOL run_elevation_helper(const WCHAR *helper, HWND hwnd, const WCHAR *cmd, const WCHAR *dir)
@@ -406,7 +465,8 @@ static UINT_PTR SHELL_ExecuteW(const WCHAR *lpCmd, WCHAR *env, BOOL shWait,
     DWORD dwCreationFlags;
     HANDLE token = NULL;
     WCHAR helper[MAX_PATH];
-    BOOL has_helper;
+    enum elevation_helper_status helper_status;
+    DWORD helper_error = ERROR_SUCCESS;
     DWORD launch_error;
 
     TRACE("Execute %s from directory %s\n", debugstr_w(lpCmd), debugstr_w(psei->lpDirectory));
@@ -430,12 +490,12 @@ static UINT_PTR SHELL_ExecuteW(const WCHAR *lpCmd, WCHAR *env, BOOL shWait,
     if (!(psei->fMask & SEE_MASK_NO_CONSOLE))
         dwCreationFlags |= CREATE_NEW_CONSOLE;
 
-    has_helper = get_elevation_helper(helper, ARRAY_SIZE(helper));
+    helper_status = get_elevation_helper(helper, ARRAY_SIZE(helper), &helper_error);
     psei_out->hProcess = NULL;
 
     if (psei->lpVerb && !wcsicmp(psei->lpVerb, L"runas"))
     {
-        if (has_helper)
+        if (helper_status == HELPER_CONFIGURED)
         {
             if (!run_elevation_helper(helper, psei->hwnd, lpCmd, psei->lpDirectory))
             {
@@ -446,8 +506,20 @@ static UINT_PTR SHELL_ExecuteW(const WCHAR *lpCmd, WCHAR *env, BOOL shWait,
                 SetLastError(error);
                 return SE_ERR_ACCESSDENIED;
             }
+            token = get_admin_token();
         }
-        token = get_admin_token();
+        else if (helper_status == HELPER_INVALID)
+        {
+            psei_out->hInstApp = (HINSTANCE)SE_ERR_ACCESSDENIED;
+            psei_out->hProcess = NULL;
+            if (gcdret) SetCurrentDirectoryW(curdir);
+            SetLastError(helper_error ? helper_error : ERROR_INVALID_DATA);
+            return SE_ERR_ACCESSDENIED;
+        }
+        else /* HELPER_UNSET */
+        {
+            token = get_admin_token();
+        }
     }
 
     if (CreateProcessAsUserW(token, NULL, (LPWSTR)lpCmd, NULL, NULL, FALSE,
@@ -465,34 +537,50 @@ static UINT_PTR SHELL_ExecuteW(const WCHAR *lpCmd, WCHAR *env, BOOL shWait,
             CloseHandle( info.hProcess );
         CloseHandle( info.hThread );
     }
-    else if (GetLastError() == ERROR_ELEVATION_REQUIRED && has_helper)
+    else if (GetLastError() == ERROR_ELEVATION_REQUIRED)
     {
-        TRACE("CreateProcess returned ERROR_ELEVATION_REQUIRED; prompting elevation helper\n");
-        if (run_elevation_helper(helper, psei->hwnd, lpCmd, psei->lpDirectory))
+        if (helper_status == HELPER_CONFIGURED)
         {
-            token = get_admin_token();
-            if (CreateProcessAsUserW(token, NULL, (LPWSTR)lpCmd, NULL, NULL, FALSE,
-                    dwCreationFlags, env, NULL, &startup, &info))
+            TRACE("CreateProcess returned ERROR_ELEVATION_REQUIRED; prompting elevation helper\n");
+            if (run_elevation_helper(helper, psei->hwnd, lpCmd, psei->lpDirectory))
             {
-                if (shWait)
-                    if (WaitForInputIdle( info.hProcess, 30000 ) == WAIT_FAILED)
-                        WARN("WaitForInputIdle failed: Error %ld\n", GetLastError() );
-                retval = 33;
-                if (psei->fMask & SEE_MASK_NOCLOSEPROCESS)
-                    psei_out->hProcess = info.hProcess;
+                token = get_admin_token();
+                if (CreateProcessAsUserW(token, NULL, (LPWSTR)lpCmd, NULL, NULL, FALSE,
+                        dwCreationFlags, env, NULL, &startup, &info))
+                {
+                    if (shWait)
+                        if (WaitForInputIdle( info.hProcess, 30000 ) == WAIT_FAILED)
+                            WARN("WaitForInputIdle failed: Error %ld\n", GetLastError() );
+                    retval = 33;
+                    if (psei->fMask & SEE_MASK_NOCLOSEPROCESS)
+                        psei_out->hProcess = info.hProcess;
+                    else
+                        CloseHandle( info.hProcess );
+                    CloseHandle( info.hThread );
+                }
                 else
-                    CloseHandle( info.hProcess );
-                CloseHandle( info.hThread );
+                {
+                    retval = GetLastError();
+                    if (retval >= 32) retval = ERROR_BAD_FORMAT;
+                }
             }
             else
             {
-                retval = GetLastError();
-                if (retval >= 32) retval = ERROR_BAD_FORMAT;
+                DWORD error = GetLastError();
+                psei_out->hInstApp = (HINSTANCE)SE_ERR_ACCESSDENIED;
+                psei_out->hProcess = NULL;
+                if (gcdret) SetCurrentDirectoryW(curdir);
+                SetLastError(error);
+                return SE_ERR_ACCESSDENIED;
             }
         }
-        else
+        else if (helper_status == HELPER_INVALID)
         {
-            retval = SE_ERR_ACCESSDENIED;
+            psei_out->hInstApp = (HINSTANCE)SE_ERR_ACCESSDENIED;
+            psei_out->hProcess = NULL;
+            if (gcdret) SetCurrentDirectoryW(curdir);
+            SetLastError(helper_error ? helper_error : ERROR_INVALID_DATA);
+            return SE_ERR_ACCESSDENIED;
         }
     }
     else if ((retval = GetLastError()) >= 32)

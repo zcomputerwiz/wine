@@ -514,22 +514,11 @@ static BOOL is_elevation_required( HANDLE token, const WCHAR *filename )
     HKEY hkey;
     DWORD size, type, bytes;
     WCHAR helper[MAX_PATH];
+    LSTATUS status;
+    BOOL helper_unset = FALSE;
     BOOL ret = FALSE;
 
     if (!filename || !filename[0]) return FALSE;
-
-    /* If no elevation helper is configured in HKLM\Software\Wine\Elevation\Helper, keep stock behavior */
-    if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"Software\\Wine\\Elevation", 0, KEY_READ, &hkey ) != ERROR_SUCCESS)
-        return FALSE;
-
-    bytes = sizeof(helper);
-    if (RegQueryValueExW( hkey, L"Helper", NULL, &type, (BYTE *)helper, &bytes ) != ERROR_SUCCESS ||
-        bytes <= sizeof(WCHAR) || !helper[0])
-    {
-        RegCloseKey( hkey );
-        return FALSE;
-    }
-    RegCloseKey( hkey );
 
     /* Determine token elevation type */
     token_to_check = token ? token : GetCurrentThreadEffectiveToken();
@@ -559,7 +548,41 @@ static BOOL is_elevation_required( HANDLE token, const WCHAR *filename )
             ret = TRUE;
     }
     ReleaseActCtx( actctx );
-    return ret;
+
+    if (!ret) return FALSE;
+
+    /* Manifest requires elevation. Audit Helper configuration in HKLM\Software\Wine\Elevation\Helper.
+     * Absent or explicitly empty configuration selects stock Wine behavior (silent elevation).
+     * Denied reads, wrong registry types, odd/truncated/oversized data or invalid paths must NOT
+     * silently select helper-unset elevation; they must fail closed by requiring elevation. */
+    status = RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"Software\\Wine\\Elevation", 0, KEY_READ, &hkey );
+    if (status == ERROR_FILE_NOT_FOUND)
+        helper_unset = TRUE;
+    else if (status == ERROR_SUCCESS)
+    {
+        bytes = sizeof(helper) - sizeof(WCHAR);
+        status = RegQueryValueExW( hkey, L"Helper", NULL, &type, (BYTE *)helper, &bytes );
+        RegCloseKey( hkey );
+        if (status == ERROR_FILE_NOT_FOUND)
+            helper_unset = TRUE;
+        else if (status == ERROR_SUCCESS)
+        {
+            if (type == REG_SZ || type == REG_EXPAND_SZ)
+            {
+                if (bytes == 0) helper_unset = TRUE;
+                else if (bytes % sizeof(WCHAR) == 0)
+                {
+                    helper[bytes / sizeof(WCHAR)] = 0;
+                    if (!helper[0]) helper_unset = TRUE;
+                }
+            }
+        }
+    }
+
+    if (helper_unset)
+        return FALSE; /* Stock compatibility: silent elevation in loader */
+
+    return TRUE; /* Helper configured or invalid/denied: enforce elevation requirement */
 }
 
 /**********************************************************************
