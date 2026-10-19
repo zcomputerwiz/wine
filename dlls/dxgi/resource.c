@@ -536,6 +536,12 @@ static HRESULT STDMETHODCALLTYPE dxgi_keyed_mutex_AcquireSync(IDXGIKeyedMutex *i
         {
             resource->keyed_mutex_owned = TRUE;
             resource->keyed_mutex_key = key;
+            if (resource->shared_memory && resource->wined3d_resource)
+            {
+                struct wined3d_texture *wined3d_tex = wined3d_texture_from_resource(resource->wined3d_resource);
+                if (wined3d_tex)
+                    wined3d_texture_update_desc(wined3d_tex, 0, resource->shared_memory, resource->shared_pitch);
+            }
             LeaveCriticalSection(&resource->keyed_mutex_cs);
             return S_OK;
         }
@@ -570,6 +576,12 @@ static HRESULT STDMETHODCALLTYPE dxgi_keyed_mutex_AcquireSync(IDXGIKeyedMutex *i
     }
 
     resource->keyed_mutex_owned = TRUE;
+    if (resource->shared_memory && resource->wined3d_resource)
+    {
+        struct wined3d_texture *wined3d_tex = wined3d_texture_from_resource(resource->wined3d_resource);
+        if (wined3d_tex)
+            wined3d_texture_update_desc(wined3d_tex, 0, resource->shared_memory, resource->shared_pitch);
+    }
     LeaveCriticalSection(&resource->keyed_mutex_cs);
     return S_OK;
 }
@@ -792,33 +804,69 @@ static HRESULT STDMETHODCALLTYPE dxgi_resource_CreateSharedHandle(IDXGIResource1
     {
         struct d3dkmt_d3d11_desc desc = {0};
         D3DKMT_CREATEALLOCATION alloc = {0};
-        DWORD width = 256, height = 256, pitch;
+        ID3D11Texture2D *tex2d;
+        DWORD width, height, pitch;
         static LONG tex_seq;
 
+        if (!resource->outer_unknown)
+            return E_INVALIDARG;
+
+        if (FAILED(IUnknown_QueryInterface(resource->outer_unknown, &IID_ID3D11Texture2D, (void **)&tex2d)))
+        {
+            WARN("Rejecting non-Texture2D resource for shared NT handle.\n");
+            return E_INVALIDARG;
+        }
+
+        ID3D11Texture2D_GetDesc(tex2d, &desc.d3d11_2d);
+        ID3D11Texture2D_Release(tex2d);
+
+        if (desc.d3d11_2d.MipLevels != 1 || desc.d3d11_2d.ArraySize != 1 || desc.d3d11_2d.SampleDesc.Count != 1)
+        {
+            WARN("Rejecting unsupported texture layout: mips %u, array %u, samples %u.\n",
+                 desc.d3d11_2d.MipLevels, desc.d3d11_2d.ArraySize, desc.d3d11_2d.SampleDesc.Count);
+            return E_INVALIDARG;
+        }
+
+        width = desc.d3d11_2d.Width;
+        height = desc.d3d11_2d.Height;
+        if (!width || !height || width > 16384 || height > 16384)
+        {
+            WARN("Rejecting invalid texture dimensions %ux%u.\n", (unsigned int)width, (unsigned int)height);
+            return E_INVALIDARG;
+        }
+
+        switch (desc.d3d11_2d.Format)
+        {
+            case DXGI_FORMAT_R8G8B8A8_UNORM:
+            case DXGI_FORMAT_B8G8R8A8_UNORM:
+            case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+            case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+            case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+            case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+            case DXGI_FORMAT_R10G10B10A2_UNORM:
+                pitch = width * 4;
+                break;
+            default:
+                WARN("Rejecting unsupported shared texture format %#x.\n", desc.d3d11_2d.Format);
+                return E_INVALIDARG;
+        }
+
+        if (pitch / 4 != width || (size_t)height * pitch / pitch != height)
+            return E_INVALIDARG;
+
+        desc.dimension = D3D11_RESOURCE_DIMENSION_TEXTURE2D;
         desc.dxgi.size = sizeof(desc);
         desc.dxgi.keyed_mutex = resource->has_keyed_mutex;
         desc.dxgi.nt_shared = 1;
-
-        if (resource->outer_unknown)
-        {
-            ID3D11Texture2D *tex2d;
-            if (SUCCEEDED(IUnknown_QueryInterface(resource->outer_unknown, &IID_ID3D11Texture2D, (void **)&tex2d)))
-            {
-                ID3D11Texture2D_GetDesc(tex2d, &desc.d3d11_2d);
-                desc.dimension = D3D11_RESOURCE_DIMENSION_TEXTURE2D;
-                desc.dxgi.width = width = desc.d3d11_2d.Width;
-                desc.dxgi.height = height = desc.d3d11_2d.Height;
-                desc.dxgi.format = desc.d3d11_2d.Format;
-                ID3D11Texture2D_Release(tex2d);
-            }
-        }
+        desc.dxgi.width = width;
+        desc.dxgi.height = height;
+        desc.dxgi.format = desc.d3d11_2d.Format;
 
         resource->shared_pid = GetCurrentProcessId();
         resource->shared_seq = InterlockedIncrement(&tex_seq);
         desc.dxgi.unknown_2 = resource->shared_pid;
         desc.dxgi.unknown_3 = resource->shared_seq;
 
-        pitch = width * 4;
         resource->shared_pitch = pitch;
         resource->shared_memory_size = height * pitch;
 
