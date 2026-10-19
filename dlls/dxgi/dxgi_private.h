@@ -191,10 +191,13 @@ struct d3d11_swapchain
     LONG present_count;
     LONG in_set_fullscreen_state;
     HWND comp_wnd;
+    /* Layer placement published by dcomp. Written by the composition window's
+     * thread and read by Present, so every access holds the wined3d mutex. */
     HWND target_hwnd;
-    RECT dst_rect;
+    RECT dst_rect;      /* visible destination in target client coordinates */
+    RECT src_rect;      /* matching back buffer source rectangle */
     BOOL has_dst_rect;
-    UINT current_buffer_index;
+    BOOL fully_clipped;
 };
 
 static inline struct d3d11_swapchain *d3d11_swapchain_from_IDXGISwapChain4(IDXGISwapChain4 *iface)
