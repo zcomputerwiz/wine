@@ -192,6 +192,8 @@ struct d3d11_swapchain
     LONG in_set_fullscreen_state;
     HWND comp_wnd;
     HWND target_hwnd;
+    RECT dst_rect;
+    BOOL has_dst_rect;
 };
 
 static inline struct d3d11_swapchain *d3d11_swapchain_from_IDXGISwapChain4(IDXGISwapChain4 *iface)
