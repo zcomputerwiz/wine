@@ -349,7 +349,8 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
         return S_OK;
     }
 
-    if (SUCCEEDED(hr = wined3d_swapchain_present(swapchain->wined3d_swapchain, NULL, NULL,
+    if (SUCCEEDED(hr = wined3d_swapchain_present(swapchain->wined3d_swapchain, NULL,
+            swapchain->has_dst_rect ? &swapchain->dst_rect : NULL,
             swapchain->target_hwnd, sync_interval, 0)))
         InterlockedIncrement(&swapchain->present_count);
     return hr;

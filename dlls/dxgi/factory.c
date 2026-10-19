@@ -407,14 +407,37 @@ static LRESULT CALLBACK dcomp_swapchain_wndproc(HWND hwnd, UINT msg, WPARAM wpar
         }
         case WM_WINE_DCOMP_SET_TARGET:
         {
-            HWND target_hwnd = (HWND)lparam;
             IDXGISwapChain4 *iface = (IDXGISwapChain4 *)GetPropW(hwnd, L"__wine_dcomp_swapchain");
-            if (iface && target_hwnd)
+            if (iface)
             {
                 struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
-                TRACE("DComp: binding swapchain %p to target_hwnd %p.\n", swapchain, target_hwnd);
-                wined3d_swapchain_set_window(swapchain->wined3d_swapchain, target_hwnd);
-                swapchain->target_hwnd = target_hwnd;
+                HWND target_hwnd = NULL;
+
+                if (wparam == 1 && lparam)
+                {
+                    const struct wine_dcomp_layer_params *params = (const struct wine_dcomp_layer_params *)lparam;
+                    target_hwnd = params->target_hwnd;
+                    swapchain->target_hwnd = target_hwnd;
+                    swapchain->has_dst_rect = TRUE;
+                    SetRect(&swapchain->dst_rect, params->offset_x, params->offset_y,
+                            params->offset_x + params->width, params->offset_y + params->height);
+                    if (params->has_clip)
+                    {
+                        IntersectRect(&swapchain->dst_rect, &swapchain->dst_rect, &params->clip_rect);
+                    }
+                }
+                else
+                {
+                    target_hwnd = (HWND)lparam;
+                    swapchain->target_hwnd = target_hwnd;
+                    swapchain->has_dst_rect = FALSE;
+                }
+
+                if (target_hwnd)
+                {
+                    TRACE("DComp: binding swapchain %p to target_hwnd %p.\n", swapchain, target_hwnd);
+                    wined3d_swapchain_set_window(swapchain->wined3d_swapchain, target_hwnd);
+                }
             }
             return 0;
         }

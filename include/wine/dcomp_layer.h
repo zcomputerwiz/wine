@@ -25,4 +25,16 @@
 
 #define WINE_DCOMP_WND_PROP_FMT       L"__wine_dcomp_wnd_%lx_%Ix"
 
+struct wine_dcomp_layer_params
+{
+    HWND target_hwnd;
+    int offset_x;
+    int offset_y;
+    int width;
+    int height;
+    BOOL has_clip;
+    RECT clip_rect;
+    float opacity;
+};
+
 #endif /* __WINE_DCOMP_LAYER_H */
