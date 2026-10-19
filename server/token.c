@@ -959,8 +959,13 @@ int token_sid_present( struct token *token, const struct sid *sid, int deny )
 
     LIST_FOR_EACH_ENTRY( group, &token->groups, struct group, entry )
     {
-        if (!(group->attrs & SE_GROUP_ENABLED)) continue;
-        if (!deny && (group->attrs & SE_GROUP_USE_FOR_DENY_ONLY)) continue;
+        /* Disabled deny-only groups must still participate in deny ACEs, but
+         * must never grant access, even if ENABLED is also present. */
+        if (group->attrs & SE_GROUP_USE_FOR_DENY_ONLY)
+        {
+            if (!deny) continue;
+        }
+        else if (!(group->attrs & SE_GROUP_ENABLED)) continue;
         if (equal_sid( &group->sid, sid )) return TRUE;
     }
 
