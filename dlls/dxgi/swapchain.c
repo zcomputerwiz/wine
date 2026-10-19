@@ -330,6 +330,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetDevice(IDXGISwapChain4 *ifac
 static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
         unsigned int sync_interval, unsigned int flags)
 {
+    HWND hwnd;
     HRESULT hr;
 
     if (sync_interval > 4)
@@ -338,7 +339,8 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
         return DXGI_ERROR_INVALID_CALL;
     }
 
-    if (IsIconic(d3d11_swapchain_get_hwnd(swapchain)))
+    hwnd = swapchain->target_hwnd ? swapchain->target_hwnd : d3d11_swapchain_get_hwnd(swapchain);
+    if (hwnd && IsIconic(hwnd))
         return DXGI_STATUS_OCCLUDED;
 
     if (flags & ~(DXGI_PRESENT_TEST | DXGI_PRESENT_ALLOW_TEARING))
@@ -352,7 +354,20 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
     if (SUCCEEDED(hr = wined3d_swapchain_present(swapchain->wined3d_swapchain, NULL,
             swapchain->has_dst_rect ? &swapchain->dst_rect : NULL,
             swapchain->target_hwnd, sync_interval, 0)))
+    {
+        struct wined3d_swapchain_desc wined3d_desc;
         InterlockedIncrement(&swapchain->present_count);
+
+        wined3d_mutex_lock();
+        wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &wined3d_desc);
+        if (wined3d_desc.swap_effect == WINED3D_SWAP_EFFECT_FLIP_SEQUENTIAL
+                || wined3d_desc.swap_effect == WINED3D_SWAP_EFFECT_FLIP_DISCARD)
+        {
+            if (wined3d_desc.backbuffer_count)
+                swapchain->current_buffer_index = (swapchain->current_buffer_index + 1) % wined3d_desc.backbuffer_count;
+        }
+        wined3d_mutex_unlock();
+    }
     return hr;
 }
 
@@ -602,6 +617,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_ResizeBuffers(IDXGISwapChain4 *
      * and therefore they are not actually holding a reference to the wined3d
      * swapchain, and will not do anything with it when they are destroyed. */
     d3d11_swapchain_create_d3d11_textures(swapchain, swapchain->device, &wined3d_desc);
+    swapchain->current_buffer_index = 0;
     wined3d_mutex_unlock();
 
     return hr;
@@ -881,9 +897,22 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetMatrixTransform(IDXGISwapCha
 
 static UINT STDMETHODCALLTYPE d3d11_swapchain_GetCurrentBackBufferIndex(IDXGISwapChain4 *iface)
 {
-    FIXME("iface %p stub!\n", iface);
+    struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
+    struct wined3d_swapchain_desc wined3d_desc;
+    UINT index = 0;
 
-    return 0;
+    TRACE("iface %p.\n", iface);
+
+    wined3d_mutex_lock();
+    wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &wined3d_desc);
+    if (wined3d_desc.swap_effect == WINED3D_SWAP_EFFECT_FLIP_SEQUENTIAL
+            || wined3d_desc.swap_effect == WINED3D_SWAP_EFFECT_FLIP_DISCARD)
+    {
+        index = swapchain->current_buffer_index;
+    }
+    wined3d_mutex_unlock();
+
+    return index;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_CheckColorSpaceSupport(IDXGISwapChain4 *iface,
@@ -907,11 +936,16 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_ResizeBuffers1(IDXGISwapChain4 
         UINT buffer_count, UINT width, UINT height, DXGI_FORMAT format, UINT flags,
         const UINT *node_mask, IUnknown * const *present_queue)
 {
-    FIXME("iface %p, buffer_count %u, width %u, height %u, format %s, flags %#x, "
-            "node_mask %p, present_queue %p stub!\n",
+    TRACE("iface %p, buffer_count %u, width %u, height %u, format %s, flags %#x, "
+            "node_mask %p, present_queue %p.\n",
             iface, buffer_count, width, height, debug_dxgi_format(format), flags, node_mask, present_queue);
 
-    return E_NOTIMPL;
+    if (node_mask)
+        FIXME("node_mask ignored.\n");
+    if (present_queue)
+        FIXME("present_queue ignored.\n");
+
+    return d3d11_swapchain_ResizeBuffers(iface, buffer_count, width, height, format, flags);
 }
 
 /* IDXGISwapChain4 methods */

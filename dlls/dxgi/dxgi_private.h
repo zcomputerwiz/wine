@@ -194,6 +194,7 @@ struct d3d11_swapchain
     HWND target_hwnd;
     RECT dst_rect;
     BOOL has_dst_rect;
+    UINT current_buffer_index;
 };
 
 static inline struct d3d11_swapchain *d3d11_swapchain_from_IDXGISwapChain4(IDXGISwapChain4 *iface)
