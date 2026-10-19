@@ -25,6 +25,26 @@
 
 #define WINE_DCOMP_WND_PROP_FMT       L"__wine_dcomp_wnd_%lx_%Ix"
 
+/* WM_WINE_DCOMP_SET_TARGET wparam values.
+ *   0: lparam is the target HWND, no placement (legacy, whole-window present).
+ *   1: lparam points to a wine_dcomp_layer_params that the sender keeps alive
+ *      for the duration of a synchronous SendMessage (same-thread delivery).
+ *   2: lparam points to a wine_dcomp_layer_params allocated from the process
+ *      heap (HeapAlloc) which the receiver frees; used with PostMessage when the
+ *      swapchain window belongs to another thread, so a commit never blocks on,
+ *      or dangles a pointer into, a thread that is not pumping messages. */
+#define WINE_DCOMP_SET_TARGET_LEGACY          0
+#define WINE_DCOMP_SET_TARGET_PARAMS          1
+#define WINE_DCOMP_SET_TARGET_PARAMS_OWNED    2
+
+/* Geometry is in the target window's client coordinates.
+ * (offset_x, offset_y, width, height) is the *unclipped* destination rectangle
+ * of the whole back buffer after the visual tree's offsets and scale.
+ * clip_rect (when has_clip) is already in the same space; the receiver derives
+ * the visible destination and the matching source rectangle from the two.
+ * opacity is carried for completeness but is always 1.0 today: the window
+ * delivery path has no per-layer alpha blending, so non-unity opacity is
+ * rejected by dcomp before it can reach this message. */
 struct wine_dcomp_layer_params
 {
     HWND target_hwnd;

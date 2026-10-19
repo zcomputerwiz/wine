@@ -98,6 +98,7 @@ struct dcomp_visual
     struct dcomp_visual *active_parent;
     struct dcomp_visual *active_children;
     struct dcomp_visual *active_next_sibling;
+    HWND last_comp_wnd;
 };
 
 struct dcomp_target
@@ -441,6 +442,12 @@ static ULONG STDMETHODCALLTYPE dcomp_visual_Release(IDCompositionVisual2 *iface)
 
     if (!refcount)
     {
+        if (visual->last_comp_wnd && IsWindow(visual->last_comp_wnd))
+        {
+            SendMessageW(visual->last_comp_wnd, WM_WINE_DCOMP_SET_TARGET, WINE_DCOMP_SET_TARGET_LEGACY, 0);
+            visual->last_comp_wnd = NULL;
+        }
+
         dcomp_visual_state_cleanup(&visual->pending);
         dcomp_visual_state_cleanup(&visual->active);
 
@@ -611,6 +618,12 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetClip(IDCompositionVisual2 *ifac
 
     TRACE("iface %p, rect %p.\n", iface, rect);
 
+    if (visual->pending.clip_obj)
+    {
+        IDCompositionClip_Release(visual->pending.clip_obj);
+        visual->pending.clip_obj = NULL;
+    }
+
     if (rect)
     {
         visual->pending.has_clip = TRUE;
@@ -643,7 +656,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_AddVisual(IDCompositionVisual2 *if
         IDCompositionVisual *visual, BOOL insert_above, IDCompositionVisual *reference_visual)
 {
     struct dcomp_visual *parent = impl_from_IDCompositionVisual2(iface);
-    struct dcomp_visual *child, *ref = NULL, **p;
+    struct dcomp_visual *child, *ref = NULL, *cur, **p;
 
     TRACE("iface %p, visual %p, insert_above %d, reference_visual %p.\n",
             iface, visual, insert_above, reference_visual);
@@ -652,8 +665,25 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_AddVisual(IDCompositionVisual2 *if
         return E_INVALIDARG;
 
     child = impl_from_IDCompositionVisual(visual);
+
+    /* Cycle detection: parent cannot be child or any descendant of child */
+    for (cur = parent; cur; cur = cur->pending_parent)
+    {
+        if (cur == child)
+            return E_INVALIDARG;
+    }
+
     if (reference_visual)
+    {
+        if (reference_visual == visual)
+            return E_INVALIDARG;
         ref = impl_from_IDCompositionVisual(reference_visual);
+        p = &parent->pending_children;
+        while (*p && *p != ref)
+            p = &(*p)->pending_next_sibling;
+        if (!*p)
+            return E_INVALIDARG;
+    }
 
     /* If child is already in a parent's pending list, reparent it */
     if (child->pending_parent)
@@ -695,13 +725,6 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_AddVisual(IDCompositionVisual2 *if
         p = &parent->pending_children;
         while (*p && *p != ref)
             p = &(*p)->pending_next_sibling;
-
-        if (!*p)
-        {
-            IDCompositionVisual2_Release(&child->IDCompositionVisual2_iface);
-            child->pending_parent = NULL;
-            return E_INVALIDARG;
-        }
 
         if (insert_above)
         {
@@ -958,6 +981,22 @@ static HRESULT dcomp_target_create(struct dcomp_device *device, HWND hwnd, BOOL 
  * IDCompositionDevice Traversal and Commit
  * ===================================================================== */
 
+static void dcomp_visual_unbind_tree(struct dcomp_visual *visual)
+{
+    struct dcomp_visual *child;
+
+    if (!visual) return;
+
+    if (visual->last_comp_wnd && IsWindow(visual->last_comp_wnd))
+    {
+        SendMessageW(visual->last_comp_wnd, WM_WINE_DCOMP_SET_TARGET, WINE_DCOMP_SET_TARGET_LEGACY, 0);
+        visual->last_comp_wnd = NULL;
+    }
+
+    for (child = visual->active_children; child; child = child->active_next_sibling)
+        dcomp_visual_unbind_tree(child);
+}
+
 static void dcomp_visual_apply_commit(struct dcomp_visual *visual)
 {
     struct dcomp_visual *child, **p;
@@ -967,6 +1006,40 @@ static void dcomp_visual_apply_commit(struct dcomp_visual *visual)
     /* Apply visual state: pending -> active */
     dcomp_visual_state_copy(&visual->active, &visual->pending);
 
+    /* Dynamically evaluate attached clip_obj and effect */
+    if (visual->active.clip_obj)
+    {
+        IDCompositionRectangleClip *rclip = NULL;
+        if (SUCCEEDED(IDCompositionClip_QueryInterface(visual->active.clip_obj,
+                &IID_IDCompositionRectangleClip, (void **)&rclip)))
+        {
+            struct dcomp_rectangle_clip *rc = impl_from_IDCompositionRectangleClip(rclip);
+            visual->active.has_clip = TRUE;
+            visual->active.clip.left = rc->left;
+            visual->active.clip.top = rc->top;
+            visual->active.clip.right = rc->right;
+            visual->active.clip.bottom = rc->bottom;
+            IDCompositionRectangleClip_Release(rclip);
+        }
+    }
+    if (visual->active.effect)
+    {
+        IDCompositionEffectGroup *egroup = NULL;
+        if (SUCCEEDED(IDCompositionEffect_QueryInterface(visual->active.effect,
+                &IID_IDCompositionEffectGroup, (void **)&egroup)))
+        {
+            struct dcomp_effect_group *eg = impl_from_IDCompositionEffectGroup(egroup);
+            visual->active.opacity = eg->opacity;
+            IDCompositionEffectGroup_Release(egroup);
+        }
+    }
+
+    if (!visual->pending.content && visual->last_comp_wnd && IsWindow(visual->last_comp_wnd))
+    {
+        SendMessageW(visual->last_comp_wnd, WM_WINE_DCOMP_SET_TARGET, WINE_DCOMP_SET_TARGET_LEGACY, 0);
+        visual->last_comp_wnd = NULL;
+    }
+
     /* Release old active children list */
     while (visual->active_children)
     {
@@ -974,6 +1047,8 @@ static void dcomp_visual_apply_commit(struct dcomp_visual *visual)
         visual->active_children = old_child->active_next_sibling;
         old_child->active_parent = NULL;
         old_child->active_next_sibling = NULL;
+        if (!old_child->pending_parent)
+            dcomp_visual_unbind_tree(old_child);
         IDCompositionVisual2_Release(&old_child->IDCompositionVisual2_iface);
     }
 
@@ -992,16 +1067,27 @@ static void dcomp_visual_apply_commit(struct dcomp_visual *visual)
 }
 
 static void dcomp_visual_commit_content_tree(struct dcomp_visual *visual, HWND target_hwnd,
-        float cur_x, float cur_y, const RECT *cur_clip, BOOL has_clip, float cur_opacity)
+        float cur_x, float cur_y, float scale_x, float scale_y,
+        const RECT *cur_clip, BOOL has_clip, float cur_opacity)
 {
     struct dcomp_visual *child;
-    float next_x = cur_x + visual->active.offset_x;
-    float next_y = cur_y + visual->active.offset_y;
+    float next_scale_x = scale_x;
+    float next_scale_y = scale_y;
+    float next_x = cur_x + visual->active.offset_x * scale_x;
+    float next_y = cur_y + visual->active.offset_y * scale_y;
     float next_opacity = cur_opacity * visual->active.opacity;
     RECT next_clip;
     BOOL next_has_clip = has_clip;
 
     if (!visual) return;
+
+    if (visual->active.has_transform)
+    {
+        next_scale_x *= visual->active.transform._11;
+        next_scale_y *= visual->active.transform._22;
+        next_x += visual->active.transform._31 * scale_x;
+        next_y += visual->active.transform._32 * scale_y;
+    }
 
     if (has_clip)
         next_clip = *cur_clip;
@@ -1009,10 +1095,10 @@ static void dcomp_visual_commit_content_tree(struct dcomp_visual *visual, HWND t
     if (visual->active.has_clip)
     {
         RECT vclip;
-        vclip.left = (int)(next_x + visual->active.clip.left);
-        vclip.top = (int)(next_y + visual->active.clip.top);
-        vclip.right = (int)(next_x + visual->active.clip.right);
-        vclip.bottom = (int)(next_y + visual->active.clip.bottom);
+        vclip.left = (int)(next_x + visual->active.clip.left * next_scale_x);
+        vclip.top = (int)(next_y + visual->active.clip.top * next_scale_y);
+        vclip.right = (int)(next_x + visual->active.clip.right * next_scale_x);
+        vclip.bottom = (int)(next_y + visual->active.clip.bottom * next_scale_y);
 
         if (next_has_clip)
             IntersectRect(&next_clip, &next_clip, &vclip);
@@ -1036,24 +1122,48 @@ static void dcomp_visual_commit_content_tree(struct dcomp_visual *visual, HWND t
             struct wine_dcomp_layer_params params;
             RECT client_rc;
 
+            if (visual->last_comp_wnd && visual->last_comp_wnd != comp_wnd && IsWindow(visual->last_comp_wnd))
+                SendMessageW(visual->last_comp_wnd, WM_WINE_DCOMP_SET_TARGET, WINE_DCOMP_SET_TARGET_LEGACY, 0);
+            visual->last_comp_wnd = comp_wnd;
+
             GetClientRect(comp_wnd, &client_rc);
             params.target_hwnd = target_hwnd;
             params.offset_x = (int)next_x;
             params.offset_y = (int)next_y;
-            params.width = client_rc.right - client_rc.left;
-            params.height = client_rc.bottom - client_rc.top;
+            params.width = (int)((client_rc.right - client_rc.left) * next_scale_x);
+            params.height = (int)((client_rc.bottom - client_rc.top) * next_scale_y);
             params.has_clip = next_has_clip;
             params.clip_rect = next_clip;
             params.opacity = next_opacity;
 
             TRACE("Commit: notifying comp_wnd %p of target_hwnd %p, offset (%d,%d), size %dx%d, clip %d.\n",
                   comp_wnd, target_hwnd, params.offset_x, params.offset_y, params.width, params.height, params.has_clip);
-            SendMessageW(comp_wnd, WM_WINE_DCOMP_SET_TARGET, 1, (LPARAM)&params);
+
+            if (GetWindowThreadProcessId(comp_wnd, NULL) == GetCurrentThreadId())
+            {
+                SendMessageW(comp_wnd, WM_WINE_DCOMP_SET_TARGET, WINE_DCOMP_SET_TARGET_PARAMS, (LPARAM)&params);
+            }
+            else
+            {
+                struct wine_dcomp_layer_params *owned = HeapAlloc(GetProcessHeap(), 0, sizeof(*owned));
+                if (owned)
+                {
+                    *owned = params;
+                    if (!PostMessageW(comp_wnd, WM_WINE_DCOMP_SET_TARGET, WINE_DCOMP_SET_TARGET_PARAMS_OWNED, (LPARAM)owned))
+                        HeapFree(GetProcessHeap(), 0, owned);
+                }
+            }
         }
+    }
+    else if (visual->last_comp_wnd && IsWindow(visual->last_comp_wnd))
+    {
+        SendMessageW(visual->last_comp_wnd, WM_WINE_DCOMP_SET_TARGET, WINE_DCOMP_SET_TARGET_LEGACY, 0);
+        visual->last_comp_wnd = NULL;
     }
 
     for (child = visual->active_children; child; child = child->active_next_sibling)
-        dcomp_visual_commit_content_tree(child, target_hwnd, next_x, next_y, &next_clip, next_has_clip, next_opacity);
+        dcomp_visual_commit_content_tree(child, target_hwnd, next_x, next_y, next_scale_x, next_scale_y,
+                &next_clip, next_has_clip, next_opacity);
 }
 
 static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
@@ -1071,7 +1181,10 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
             if (target->pending_root)
                 IDCompositionVisual2_AddRef(&target->pending_root->IDCompositionVisual2_iface);
             if (target->active_root)
+            {
+                dcomp_visual_unbind_tree(target->active_root);
                 IDCompositionVisual2_Release(&target->active_root->IDCompositionVisual2_iface);
+            }
             target->active_root = target->pending_root;
         }
 
@@ -1080,7 +1193,7 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
             dcomp_visual_apply_commit(target->active_root);
 
             if (target->hwnd && IsWindow(target->hwnd))
-                dcomp_visual_commit_content_tree(target->active_root, target->hwnd, 0, 0, NULL, FALSE, 1.0f);
+                dcomp_visual_commit_content_tree(target->active_root, target->hwnd, 0, 0, 1.0f, 1.0f, NULL, FALSE, 1.0f);
         }
     }
     LeaveCriticalSection(&dev->cs);

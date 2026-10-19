@@ -330,6 +330,9 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetDevice(IDXGISwapChain4 *ifac
 static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
         unsigned int sync_interval, unsigned int flags)
 {
+    HWND target_hwnd;
+    BOOL has_dst_rect;
+    RECT src_rect, dst_rect;
     HWND hwnd;
     HRESULT hr;
 
@@ -339,7 +342,14 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
         return DXGI_ERROR_INVALID_CALL;
     }
 
-    hwnd = swapchain->target_hwnd ? swapchain->target_hwnd : d3d11_swapchain_get_hwnd(swapchain);
+    wined3d_mutex_lock();
+    target_hwnd = swapchain->target_hwnd;
+    has_dst_rect = swapchain->has_dst_rect;
+    src_rect = swapchain->src_rect;
+    dst_rect = swapchain->dst_rect;
+    wined3d_mutex_unlock();
+
+    hwnd = target_hwnd ? target_hwnd : d3d11_swapchain_get_hwnd(swapchain);
     if (hwnd && IsIconic(hwnd))
         return DXGI_STATUS_OCCLUDED;
 
@@ -351,22 +361,12 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
         return S_OK;
     }
 
-    if (SUCCEEDED(hr = wined3d_swapchain_present(swapchain->wined3d_swapchain, NULL,
-            swapchain->has_dst_rect ? &swapchain->dst_rect : NULL,
-            swapchain->target_hwnd, sync_interval, 0)))
+    if (SUCCEEDED(hr = wined3d_swapchain_present(swapchain->wined3d_swapchain,
+            has_dst_rect ? &src_rect : NULL,
+            has_dst_rect ? &dst_rect : NULL,
+            target_hwnd, sync_interval, 0)))
     {
-        struct wined3d_swapchain_desc wined3d_desc;
         InterlockedIncrement(&swapchain->present_count);
-
-        wined3d_mutex_lock();
-        wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &wined3d_desc);
-        if (wined3d_desc.swap_effect == WINED3D_SWAP_EFFECT_FLIP_SEQUENTIAL
-                || wined3d_desc.swap_effect == WINED3D_SWAP_EFFECT_FLIP_DISCARD)
-        {
-            if (wined3d_desc.backbuffer_count)
-                swapchain->current_buffer_index = (swapchain->current_buffer_index + 1) % wined3d_desc.backbuffer_count;
-        }
-        wined3d_mutex_unlock();
     }
     return hr;
 }
@@ -617,7 +617,6 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_ResizeBuffers(IDXGISwapChain4 *
      * and therefore they are not actually holding a reference to the wined3d
      * swapchain, and will not do anything with it when they are destroyed. */
     d3d11_swapchain_create_d3d11_textures(swapchain, swapchain->device, &wined3d_desc);
-    swapchain->current_buffer_index = 0;
     wined3d_mutex_unlock();
 
     return hr;
@@ -852,6 +851,10 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_SetMaximumFrameLatency(IDXGISwa
     wined3d_mutex_lock();
     hr = wined3d_swapchain_set_max_frame_latency(swapchain->wined3d_swapchain, max_latency);
     wined3d_mutex_unlock();
+
+    if (hr == WINED3DERR_INVALIDCALL)
+        hr = DXGI_ERROR_INVALID_CALL;
+
     return hr;
 }
 
@@ -862,9 +865,16 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetMaximumFrameLatency(IDXGISwa
 
     TRACE("iface %p, max_latency %p.\n", iface, max_latency);
 
+    if (!max_latency)
+        return DXGI_ERROR_INVALID_CALL;
+
     wined3d_mutex_lock();
     hr = wined3d_swapchain_get_max_frame_latency(swapchain->wined3d_swapchain, max_latency);
     wined3d_mutex_unlock();
+
+    if (hr == WINED3DERR_INVALIDCALL)
+        hr = DXGI_ERROR_INVALID_CALL;
+
     return hr;
 }
 
@@ -897,22 +907,9 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetMatrixTransform(IDXGISwapCha
 
 static UINT STDMETHODCALLTYPE d3d11_swapchain_GetCurrentBackBufferIndex(IDXGISwapChain4 *iface)
 {
-    struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
-    struct wined3d_swapchain_desc wined3d_desc;
-    UINT index = 0;
-
     TRACE("iface %p.\n", iface);
 
-    wined3d_mutex_lock();
-    wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &wined3d_desc);
-    if (wined3d_desc.swap_effect == WINED3D_SWAP_EFFECT_FLIP_SEQUENTIAL
-            || wined3d_desc.swap_effect == WINED3D_SWAP_EFFECT_FLIP_DISCARD)
-    {
-        index = swapchain->current_buffer_index;
-    }
-    wined3d_mutex_unlock();
-
-    return index;
+    return 0;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_CheckColorSpaceSupport(IDXGISwapChain4 *iface,
