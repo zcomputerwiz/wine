@@ -6557,7 +6557,11 @@ static HRESULT STDMETHODCALLTYPE d3d_device_inner_QueryInterface(IUnknown *iface
     {
         *out = &device->IWineDXGIDeviceParent_iface;
     }
-    else if (IsEqualGUID(riid, &IID_ID3D11VideoDevice) || IsEqualGUID(riid, &IID_ID3D11VideoDevice1))
+    /* Do not advertise VideoDevice1 until the paired VideoContext1 contract
+     * exists. Consumers rely on that Windows invariant even for optional HDR
+     * capability queries, before creating any video processor or decoder. The
+     * VideoDevice1-only entry points below are also still unimplemented. */
+    else if (IsEqualGUID(riid, &IID_ID3D11VideoDevice))
     {
         *out = &device->ID3D11VideoDevice1_iface;
     }
