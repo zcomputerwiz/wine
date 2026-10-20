@@ -30,6 +30,14 @@ WINE_DECLARE_DEBUG_CHANNEL(winediag);
 /* Binding/DC changes must not race Present's parameter snapshot/enqueue. */
 static SRWLOCK dcomp_binding_lock = SRWLOCK_INIT;
 
+static void d3d11_present_history_cleanup(struct d3d11_swapchain *swapchain)
+{
+    if (swapchain->present_history) wined3d_texture_decref(swapchain->present_history);
+    if (swapchain->present_next) wined3d_texture_decref(swapchain->present_next);
+    swapchain->present_history = swapchain->present_next = NULL;
+    swapchain->present_history_valid = FALSE;
+}
+
 static DXGI_SWAP_EFFECT dxgi_swap_effect_from_wined3d(enum wined3d_swap_effect swap_effect)
 {
     switch (swap_effect)
@@ -278,6 +286,9 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
             IDXGIOutput_Release(swapchain->target);
         }
         IWineDXGIFactory_Release(swapchain->factory);
+        wined3d_mutex_lock();
+        d3d11_present_history_cleanup(swapchain);
+        wined3d_mutex_unlock();
         wined3d_swapchain_decref(swapchain->wined3d_swapchain);
         IWineDXGIDevice_Release(device);
     }
@@ -534,8 +545,167 @@ static const struct IWineDCompSwapChainVtbl dcomp_binding_vtbl =
     dcomp_binding_prepare_target_scene,
 };
 
-static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
-        unsigned int sync_interval, unsigned int flags)
+#define DXGI_MAX_DIRTY_RECTS 64
+
+struct dxgi_damage_interval { LONG left, right; };
+
+static int dxgi_compare_long(const void *a, const void *b)
+{
+    LONG x = *(const LONG *)a, y = *(const LONG *)b;
+    return (x > y) - (x < y);
+}
+
+static int dxgi_compare_interval(const void *a, const void *b)
+{
+    const struct dxgi_damage_interval *x = a, *y = b;
+    return (x->left > y->left) - (x->left < y->left);
+}
+
+static void STDMETHODCALLTYPE dxgi_present_texture_destroyed(void *parent) {}
+static const struct wined3d_parent_ops dxgi_present_texture_ops = {dxgi_present_texture_destroyed};
+
+/* Reconstruct only undirtied pixels from an independent, coherent previous
+ * frame. No CPU image readback, per-frame completion wait or caller pointer
+ * survives this function: the normal CS blit packets own their rectangles. */
+static HRESULT d3d11_present_copy_undirtied(struct wined3d_device_context *context,
+        struct wined3d_texture *dst, struct wined3d_texture *src, const RECT *area,
+        const RECT *dirty, UINT count, POINT offset)
+{
+    struct dxgi_damage_interval intervals[DXGI_MAX_DIRTY_RECTS];
+    LONG edges[2 * DXGI_MAX_DIRTY_RECTS + 2];
+    UINT edge_count = 2, interval_count, i, j;
+    RECT to, from;
+    LONG cursor;
+    HRESULT hr;
+
+    if (IsRectEmpty(area)) return S_OK;
+    edges[0] = area->top; edges[1] = area->bottom;
+    for (i = 0; i < count; ++i)
+    {
+        if (!IntersectRect(&to, area, &dirty[i])) continue;
+        edges[edge_count++] = to.top;
+        edges[edge_count++] = to.bottom;
+    }
+    qsort(edges, edge_count, sizeof(*edges), dxgi_compare_long);
+    for (i = 1; i < edge_count; ++i)
+    {
+        if (edges[i] == edges[i - 1]) continue;
+        interval_count = 0;
+        for (j = 0; j < count; ++j)
+        {
+            if (dirty[j].top >= edges[i] || dirty[j].bottom <= edges[i - 1]
+                    || dirty[j].left >= area->right || dirty[j].right <= area->left) continue;
+            intervals[interval_count++] = (struct dxgi_damage_interval)
+                    {max(area->left, dirty[j].left), min(area->right, dirty[j].right)};
+        }
+        qsort(intervals, interval_count, sizeof(*intervals), dxgi_compare_interval);
+        cursor = area->left;
+        for (j = 0; j <= interval_count; ++j)
+        {
+            LONG right = j == interval_count ? area->right : intervals[j].left;
+            if (cursor < right)
+            {
+                SetRect(&to, cursor, edges[i - 1], right, edges[i]);
+                SetRect(&from, (LONGLONG)to.left - offset.x, (LONGLONG)to.top - offset.y,
+                        (LONGLONG)to.right - offset.x, (LONGLONG)to.bottom - offset.y);
+                if (FAILED(hr = wined3d_device_context_blt(context, dst, 0, &to, src, 0,
+                        &from, WINED3D_BLT_RAW, NULL, WINED3D_TEXF_POINT))) return hr;
+            }
+            if (j < interval_count) cursor = max(cursor, intervals[j].right);
+        }
+    }
+    return S_OK;
+}
+
+/* Called with present_lock and the builtin binding read lock held. Allocate
+ * both history images before replacing either; failed Present does not advance
+ * the active history. Full Presents are recorded too, so a subsequent Present1
+ * can preserve pixels across the rotating producer buffers. */
+static HRESULT d3d11_present_prepare(struct d3d11_swapchain *swapchain,
+        const DXGI_PRESENT_PARAMETERS *parameters)
+{
+    struct wined3d_texture *back_buffer, *history = NULL, *next = NULL;
+    struct wined3d_resource_desc desc, old_desc;
+    struct wined3d_device_context *context;
+    struct wined3d_swapchain_desc sc_desc;
+    RECT dirty[DXGI_MAX_DIRTY_RECTS], bounds, scroll, destination;
+    POINT offset = {0, 0};
+    UINT count = parameters ? parameters->DirtyRectsCount : 0, i;
+    HRESULT hr = S_FALSE;
+
+    if (count > DXGI_MAX_DIRTY_RECTS) return E_NOTIMPL;
+    if (parameters && ((count && !parameters->pDirtyRects)
+            || (!parameters->pScrollRect != !parameters->pScrollOffset))) return DXGI_ERROR_INVALID_CALL;
+    wined3d_mutex_lock();
+    wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &sc_desc);
+    if ((sc_desc.swap_effect != WINED3D_SWAP_EFFECT_SEQUENTIAL
+            && sc_desc.swap_effect != WINED3D_SWAP_EFFECT_FLIP_SEQUENTIAL)
+            || sc_desc.multisample_type != WINED3D_MULTISAMPLE_NONE)
+    {
+        if (count) hr = DXGI_ERROR_INVALID_CALL;
+        goto done;
+    }
+    back_buffer = wined3d_swapchain_get_back_buffer(swapchain->wined3d_swapchain, 0);
+    wined3d_resource_get_desc(wined3d_texture_get_resource(back_buffer), &desc);
+    SetRect(&bounds, 0, 0, desc.width, desc.height);
+    for (i = 0; i < count; ++i)
+    {
+        dirty[i] = parameters->pDirtyRects[i];
+        if (IsRectEmpty(&dirty[i]) || dirty[i].left < 0 || dirty[i].top < 0
+                || dirty[i].right > bounds.right || dirty[i].bottom > bounds.bottom)
+        { hr = DXGI_ERROR_INVALID_CALL; goto done; }
+    }
+    if (parameters && parameters->pScrollRect)
+    {
+        if (sc_desc.swap_effect != WINED3D_SWAP_EFFECT_FLIP_SEQUENTIAL)
+        { hr = DXGI_ERROR_INVALID_CALL; goto done; }
+        scroll = *parameters->pScrollRect;
+        offset = *parameters->pScrollOffset;
+        if (IsRectEmpty(&scroll) || scroll.left < 0 || scroll.top < 0
+                || scroll.right > bounds.right || scroll.bottom > bounds.bottom)
+        { hr = DXGI_ERROR_INVALID_CALL; goto done; }
+        /* pScrollRect bounds the destination. Its previous-frame source is
+         * destination minus offset; clip to both images in 64-bit arithmetic. */
+        destination.left = max(scroll.left, min((LONGLONG)bounds.right, (LONGLONG)offset.x));
+        destination.right = min(scroll.right, max(0, (LONGLONG)bounds.right + offset.x));
+        destination.top = max(scroll.top, min((LONGLONG)bounds.bottom, (LONGLONG)offset.y));
+        destination.bottom = min(scroll.bottom, max(0, (LONGLONG)bounds.bottom + offset.y));
+    }
+    if (swapchain->present_history)
+        wined3d_resource_get_desc(wined3d_texture_get_resource(swapchain->present_history), &old_desc);
+    if (!swapchain->present_history || desc.width != old_desc.width || desc.height != old_desc.height
+            || desc.format != old_desc.format)
+    {
+        desc.bind_flags = WINED3D_BIND_RENDER_TARGET | WINED3D_BIND_SHADER_RESOURCE;
+        desc.access = WINED3D_RESOURCE_ACCESS_GPU;
+        desc.usage = 0;
+        if (FAILED(hr = wined3d_texture_create(swapchain->present_device, &desc, 1, 1, 0,
+                NULL, NULL, &dxgi_present_texture_ops, &history))) goto done;
+        if (FAILED(hr = wined3d_texture_create(swapchain->present_device, &desc, 1, 1, 0,
+                NULL, NULL, &dxgi_present_texture_ops, &next))) goto done;
+        d3d11_present_history_cleanup(swapchain);
+        swapchain->present_history = history; history = NULL;
+        swapchain->present_next = next; next = NULL;
+    }
+    context = wined3d_device_get_immediate_context(swapchain->present_device);
+    if (count && swapchain->present_history_valid)
+    {
+        if (FAILED(hr = d3d11_present_copy_undirtied(context, back_buffer, swapchain->present_history,
+                &bounds, dirty, count, (POINT){0, 0}))) goto done;
+        if (parameters->pScrollRect && FAILED(hr = d3d11_present_copy_undirtied(context,
+                back_buffer, swapchain->present_history, &destination, dirty, count, offset))) goto done;
+    }
+    hr = wined3d_device_context_blt(context, swapchain->present_next, 0, &bounds,
+            back_buffer, 0, &bounds, WINED3D_BLT_RAW, NULL, WINED3D_TEXF_POINT);
+done:
+    if (history) wined3d_texture_decref(history);
+    if (next) wined3d_texture_decref(next);
+    wined3d_mutex_unlock();
+    return hr;
+}
+
+static HRESULT d3d11_swapchain_present_locked(struct d3d11_swapchain *swapchain,
+        unsigned int sync_interval, unsigned int flags, const DXGI_PRESENT_PARAMETERS *parameters)
 {
     HWND target_hwnd;
     BOOL has_dst_rect;
@@ -543,6 +713,7 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
     RECT src_rect, dst_rect;
     HWND hwnd;
     HRESULT hr;
+    BOOL history_ready = FALSE;
 
     if (sync_interval > 4)
     {
@@ -582,6 +753,16 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
         return S_OK;
     }
 
+    if (!fully_clipped)
+    {
+        hr = d3d11_present_prepare(swapchain, parameters);
+        if (FAILED(hr))
+        {
+            ReleaseSRWLockShared(&dcomp_binding_lock);
+            return hr;
+        }
+        history_ready = hr == S_OK;
+    }
     if (SUCCEEDED(hr = wined3d_swapchain_present(swapchain->wined3d_swapchain,
             has_dst_rect ? &src_rect : NULL,
             has_dst_rect ? &dst_rect : NULL,
@@ -589,8 +770,25 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
                     | (fully_clipped ? WINED3D_PRESENT_CLEAR_ONLY : 0) : 0)))
     {
         InterlockedIncrement(&swapchain->present_count);
+        if (history_ready)
+        {
+            struct wined3d_texture *old = swapchain->present_history;
+            swapchain->present_history = swapchain->present_next;
+            swapchain->present_next = old;
+            swapchain->present_history_valid = TRUE;
+        }
     }
     ReleaseSRWLockShared(&dcomp_binding_lock);
+    return hr;
+}
+
+static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
+        unsigned int sync_interval, unsigned int flags, const DXGI_PRESENT_PARAMETERS *parameters)
+{
+    HRESULT hr;
+    AcquireSRWLockExclusive(&swapchain->present_lock);
+    hr = d3d11_swapchain_present_locked(swapchain, sync_interval, flags, parameters);
+    ReleaseSRWLockExclusive(&swapchain->present_lock);
     return hr;
 }
 
@@ -600,7 +798,7 @@ static HRESULT STDMETHODCALLTYPE DECLSPEC_HOTPATCH d3d11_swapchain_Present(IDXGI
 
     TRACE("iface %p, sync_interval %u, flags %#x.\n", iface, sync_interval, flags);
 
-    return d3d11_swapchain_present(swapchain, sync_interval, flags);
+    return d3d11_swapchain_present(swapchain, sync_interval, flags, NULL);
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetBuffer(IDXGISwapChain4 *iface,
@@ -790,7 +988,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetDesc(IDXGISwapChain4 *iface,
 static HRESULT d3d11_swapchain_create_d3d11_textures(struct d3d11_swapchain *swapchain,
         IWineDXGIDevice *device, struct wined3d_swapchain_desc *desc);
 
-static HRESULT STDMETHODCALLTYPE d3d11_swapchain_ResizeBuffers(IDXGISwapChain4 *iface,
+static HRESULT d3d11_swapchain_resize_buffers_locked(IDXGISwapChain4 *iface,
         UINT buffer_count, UINT width, UINT height, DXGI_FORMAT format, UINT flags)
 {
     static const UINT supported_flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH
@@ -840,8 +1038,20 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_ResizeBuffers(IDXGISwapChain4 *
      * and therefore they are not actually holding a reference to the wined3d
      * swapchain, and will not do anything with it when they are destroyed. */
     d3d11_swapchain_create_d3d11_textures(swapchain, swapchain->device, &wined3d_desc);
+    if (SUCCEEDED(hr)) d3d11_present_history_cleanup(swapchain);
     wined3d_mutex_unlock();
 
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE d3d11_swapchain_ResizeBuffers(IDXGISwapChain4 *iface,
+        UINT buffer_count, UINT width, UINT height, DXGI_FORMAT format, UINT flags)
+{
+    struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
+    HRESULT hr;
+    AcquireSRWLockExclusive(&swapchain->present_lock);
+    hr = d3d11_swapchain_resize_buffers_locked(iface, buffer_count, width, height, format, flags);
+    ReleaseSRWLockExclusive(&swapchain->present_lock);
     return hr;
 }
 
@@ -993,10 +1203,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_Present1(IDXGISwapChain4 *iface
     TRACE("iface %p, sync_interval %u, flags %#x, present_parameters %p.\n",
             iface, sync_interval, flags, present_parameters);
 
-    if (present_parameters)
-        FIXME("Ignored present parameters %p.\n", present_parameters);
-
-    return d3d11_swapchain_present(swapchain, sync_interval, flags);
+    return d3d11_swapchain_present(swapchain, sync_interval, flags, present_parameters);
 }
 
 static BOOL STDMETHODCALLTYPE d3d11_swapchain_IsTemporaryMonoSupported(IDXGISwapChain4 *iface)
@@ -1326,6 +1533,8 @@ HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_devi
         return hr;
     }
     IWineDXGIDevice_AddRef(swapchain->device = &device->IWineDXGIDevice_iface);
+    swapchain->present_device = device->wined3d_device;
+    InitializeSRWLock(&swapchain->present_lock);
 
     swapchain->IDXGISwapChain4_iface.lpVtbl = &d3d11_swapchain_vtbl;
     swapchain->IWineDCompSwapChain_iface.lpVtbl = &dcomp_binding_vtbl;
