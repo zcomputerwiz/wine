@@ -305,17 +305,33 @@ HRESULT CDECL wined3d_swapchain_set_target_scene(struct wined3d_swapchain *swapc
     }
     if (scene)
     {
+        unsigned int ends[WINED3D_DCOMP_MAX_LAYERS], depth = 0;
         if (scene->layer_count > WINED3D_DCOMP_MAX_LAYERS)
         {
             hr = E_INVALIDARG;
             goto done;
+        }
+        /* Validate the preorder intervals before any retained references are
+         * acquired. Rendering must never follow an invalid/non-advancing link. */
+        for (i = 0; i < scene->layer_count; ++i)
+        {
+            unsigned int end = scene->layers[i].subtree_end;
+            while (depth && ends[depth - 1] == i) --depth;
+            if (end <= i || end > scene->layer_count || (depth && end > ends[depth - 1])
+                    || (!i && end != scene->layer_count))
+            {
+                hr = E_INVALIDARG;
+                goto done;
+            }
+            ends[depth++] = end;
         }
         if (FAILED(hr = dcomp_surface_for_window(swapchain, scene->target_hwnd, &surface))) goto done;
         snapshot = *scene;
         for (i = 0; i < snapshot.layer_count; ++i)
         {
             struct wined3d_swapchain *source = snapshot.layers[i].swapchain;
-            if (!source || source->device != swapchain->device)
+            if (!source) continue; /* Contentless retained visual. */
+            if (source->device != swapchain->device)
             {
                 hr = E_NOTIMPL;
                 snapshot.layer_count = i;
@@ -838,215 +854,145 @@ static BOOL swapchain_capture_frame(struct wined3d_swapchain *swapchain, struct 
     return TRUE;
 }
 
+/* Per-pixel isolation avoids allocating one full-window surface per group.
+ * Scene entries retain contentless ancestors; clipping is evaluated in each
+ * ancestor's own (pre-offset/pre-2D-transform) coordinates. */
+struct dcomp_color
+{
+    float r, g, b, a;
+};
+
+struct dcomp_sample_transform
+{
+    float inv11, inv12, inv21, inv22;
+    BOOL valid;
+};
+
+static BOOL dcomp_inside_corner(float u, float v, float cx, float cy, float rx, float ry)
+{
+    float x, y;
+    if (rx <= 0.0f || ry <= 0.0f) return TRUE;
+    x = (u - cx) / rx;
+    y = (v - cy) / ry;
+    return x * x + y * y <= 1.0f;
+}
+
+static BOOL dcomp_inside_clip(const struct wined3d_dcomp_layer *layer, float u, float v)
+{
+    const struct wined3d_dcomp_clip_rect *rect = &layer->clip_rect;
+    float cx, cy;
+    if (!layer->has_clip) return TRUE;
+    if (u < rect->left || u >= rect->right || v < rect->top || v >= rect->bottom) return FALSE;
+
+    cx = rect->left + layer->radius_tl_x; cy = rect->top + layer->radius_tl_y;
+    if (u < cx && v < cy && !dcomp_inside_corner(u, v, cx, cy, layer->radius_tl_x, layer->radius_tl_y))
+        return FALSE;
+    cx = rect->right - layer->radius_tr_x; cy = rect->top + layer->radius_tr_y;
+    if (u > cx && v < cy && !dcomp_inside_corner(u, v, cx, cy, layer->radius_tr_x, layer->radius_tr_y))
+        return FALSE;
+    cx = rect->left + layer->radius_bl_x; cy = rect->bottom - layer->radius_bl_y;
+    if (u < cx && v > cy && !dcomp_inside_corner(u, v, cx, cy, layer->radius_bl_x, layer->radius_bl_y))
+        return FALSE;
+    cx = rect->right - layer->radius_br_x; cy = rect->bottom - layer->radius_br_y;
+    if (u > cx && v > cy && !dcomp_inside_corner(u, v, cx, cy, layer->radius_br_x, layer->radius_br_y))
+        return FALSE;
+    return TRUE;
+}
+
+static void dcomp_blend(struct dcomp_color *dst, const struct dcomp_color *src, float opacity)
+{
+    float inverse_alpha = 1.0f - src->a * opacity;
+    dst->r = src->r * opacity + dst->r * inverse_alpha;
+    dst->g = src->g * opacity + dst->g * inverse_alpha;
+    dst->b = src->b * opacity + dst->b * inverse_alpha;
+    dst->a = src->a * opacity + dst->a * inverse_alpha;
+}
+
+static void dcomp_render_pixel(const struct wined3d_dcomp_target_scene *scene,
+        const struct dcomp_sample_transform *transforms, unsigned int index,
+        float x, float y, float inherited_opacity, struct dcomp_color *destination)
+{
+    const struct wined3d_dcomp_layer *layer = &scene->layers[index];
+    const struct dcomp_sample_transform *transform = &transforms[index];
+    const struct wined3d_dcomp_frame *frame = layer->frame;
+    struct dcomp_color isolated = {0}, color;
+    struct dcomp_color *output = destination;
+    float px = x - layer->m31, py = y - layer->m32;
+    float u, v, opacity = inherited_opacity * layer->opacity, content_opacity = opacity;
+    unsigned int child;
+    uint32_t pixel;
+
+    if (!transform->valid || opacity <= 0.0f) return;
+    u = px * transform->inv11 + py * transform->inv21;
+    v = px * transform->inv12 + py * transform->inv22;
+    if (!dcomp_inside_clip(layer, u, v)) return;
+
+    /* LAYER starts its subtree at unit opacity, then blends the result once.
+     * MULTIPLY instead passes effective opacity to each descendant surface. */
+    if (!layer->opacity_mode)
+    {
+        output = &isolated;
+        content_opacity = 1.0f;
+    }
+    if (frame && frame->pixels && u >= 0.0f && v >= 0.0f && u < frame->width && v < frame->height)
+    {
+        pixel = frame->pixels[(unsigned int)v * frame->width + (unsigned int)u];
+        color.r = ((pixel >> 16) & 0xff) / 255.0f;
+        color.g = ((pixel >> 8) & 0xff) / 255.0f;
+        color.b = (pixel & 0xff) / 255.0f;
+        color.a = layer->ignore_alpha ? 1.0f : (pixel >> 24) / 255.0f;
+        dcomp_blend(output, &color, content_opacity);
+    }
+    for (child = index + 1; child < layer->subtree_end; child = scene->layers[child].subtree_end)
+        dcomp_render_pixel(scene, transforms, child, x, y, content_opacity, output);
+    if (!layer->opacity_mode) dcomp_blend(destination, &isolated, opacity);
+}
+
 static void swapchain_composite_layers(struct wined3d_swapchain *swapchain, struct wined3d_context *context)
 {
     const struct wined3d_dcomp_target_scene *scene = &swapchain->target_scene;
-    RECT client_rect;
-    int dst_w, dst_h;
-    uint32_t *dst_pixels;
-    unsigned int k, dst_pitch, slice_pitch, dst_stride;
+    struct dcomp_sample_transform transforms[WINED3D_DCOMP_MAX_LAYERS];
+    unsigned int width, height, pitch, slice_pitch, i, x, y;
+    struct dcomp_color color;
+    uint32_t *row;
+    RECT client;
 
-    GetClientRect(swapchain->win_handle, &client_rect);
-    dst_w = client_rect.right - client_rect.left;
-    dst_h = client_rect.bottom - client_rect.top;
-    if (dst_w <= 0 || dst_h <= 0)
+    if (!GetClientRect(swapchain->win_handle, &client) || client.right <= 0 || client.bottom <= 0)
+        return;
+    width = client.right;
+    height = client.bottom;
+    if (!swapchain->composite_texture || swapchain->composite_texture->resource.width != width
+            || swapchain->composite_texture->resource.height != height)
         return;
 
-    if (!swapchain->composite_texture ||
-        swapchain->composite_texture->resource.width != (unsigned int)dst_w ||
-        swapchain->composite_texture->resource.height != (unsigned int)dst_h)
-        return;
+    for (i = 0; i < scene->layer_count; ++i)
+    {
+        const struct wined3d_dcomp_layer *layer = &scene->layers[i];
+        float det = layer->m11 * layer->m22 - layer->m12 * layer->m21;
+        transforms[i].valid = fabsf(det) >= 1e-7f;
+        if (!transforms[i].valid) continue;
+        transforms[i].inv11 = layer->m22 / det;
+        transforms[i].inv12 = -layer->m12 / det;
+        transforms[i].inv21 = -layer->m21 / det;
+        transforms[i].inv22 = layer->m11 / det;
+    }
 
     wined3d_texture_prepare_location(swapchain->composite_texture, 0, context, WINED3D_LOCATION_SYSMEM);
-    wined3d_texture_get_pitch(swapchain->composite_texture, 0, &dst_pitch, &slice_pitch);
-    dst_stride = dst_pitch / sizeof(uint32_t);
-    dst_pixels = (uint32_t *)swapchain->composite_texture->resource.heap_memory;
-    if (!dst_pixels)
+    wined3d_texture_get_pitch(swapchain->composite_texture, 0, &pitch, &slice_pitch);
+    if (!swapchain->composite_texture->resource.heap_memory) return;
+    for (y = 0; y < height; ++y)
     {
-        ERR("No heap_memory for composite texture.\n");
-        return;
-    }
-
-    memset(dst_pixels, 0, (size_t)dst_pitch * dst_h);
-
-    for (k = 0; k < scene->layer_count; ++k)
-    {
-        const struct wined3d_dcomp_layer *layer = &scene->layers[k];
-        struct wined3d_dcomp_frame *frame = layer->frame;
-        unsigned int row_pitch;
-        const uint8_t *src_bytes;
-        int src_w, src_h;
-        float opacity;
-        float det, inv11, inv12, inv21, inv22;
-        float c0x, c0y, c1x, c1y, c2x, c2y, c3x, c3y;
-        float min_xf, max_xf, min_yf, max_yf;
-        int min_x, max_x, min_y, max_y;
-        int dx, dy;
-
-        if (!frame) continue;
-        row_pitch = frame->width * sizeof(uint32_t);
-        src_bytes = (const BYTE *)frame->pixels;
-        if (!src_bytes)
-            continue;
-
-        src_w = frame->width;
-        src_h = frame->height;
-        opacity = layer->opacity;
-        if (opacity <= 0.0f)
-            continue;
-        if (opacity > 1.0f)
-            opacity = 1.0f;
-
-        det = layer->m11 * layer->m22 - layer->m12 * layer->m21;
-        if (fabsf(det) < 1e-7f)
-            continue;
-
-        inv11 = layer->m22 / det;
-        inv12 = -layer->m12 / det;
-        inv21 = -layer->m21 / det;
-        inv22 = layer->m11 / det;
-
-        c0x = layer->m31;
-        c0y = layer->m32;
-        c1x = src_w * layer->m11 + layer->m31;
-        c1y = src_w * layer->m12 + layer->m32;
-        c2x = src_w * layer->m11 + src_h * layer->m21 + layer->m31;
-        c2y = src_w * layer->m12 + src_h * layer->m22 + layer->m32;
-        c3x = src_h * layer->m21 + layer->m31;
-        c3y = src_h * layer->m22 + layer->m32;
-
-        min_xf = fminf(fminf(c0x, c1x), fminf(c2x, c3x));
-        max_xf = fmaxf(fmaxf(c0x, c1x), fmaxf(c2x, c3x));
-        min_yf = fminf(fminf(c0y, c1y), fminf(c2y, c3y));
-        max_yf = fmaxf(fmaxf(c0y, c1y), fmaxf(c2y, c3y));
-
-        /* Clamp in floating point before conversion, even for composed transforms. */
-        min_x = (int)fmaxf(0, fminf(dst_w, floorf(min_xf)));
-        max_x = (int)fmaxf(0, fminf(dst_w, ceilf(max_xf)));
-        min_y = (int)fmaxf(0, fminf(dst_h, floorf(min_yf)));
-        max_y = (int)fmaxf(0, fminf(dst_h, ceilf(max_yf)));
-
-        if (min_x < 0) min_x = 0;
-        if (max_x > dst_w) max_x = dst_w;
-        if (min_y < 0) min_y = 0;
-        if (max_y > dst_h) max_y = dst_h;
-
-        for (dy = min_y; dy < max_y; ++dy)
+        row = (uint32_t *)((BYTE *)swapchain->composite_texture->resource.heap_memory + y * pitch);
+        for (x = 0; x < width; ++x)
         {
-            float py = dy + 0.5f - layer->m32;
-            for (dx = min_x; dx < max_x; ++dx)
-            {
-                float px = dx + 0.5f - layer->m31;
-                float u = px * inv11 + py * inv21;
-                float v = px * inv12 + py * inv22;
-                int su, sv;
-                uint32_t spix;
-                float sa, sr, sg, sb;
-                float fa, fr, fg, fb;
-                uint32_t dpix;
-                float da, dr, dg, db;
-                float inv_fa;
-                uint32_t out_r, out_g, out_b, out_a;
-
-                if (u < 0.0f || u >= (float)src_w || v < 0.0f || v >= (float)src_h)
-                    continue;
-
-                if (layer->has_clip)
-                {
-                    if (u < (float)layer->clip_rect.left || u >= (float)layer->clip_rect.right ||
-                        v < (float)layer->clip_rect.top  || v >= (float)layer->clip_rect.bottom)
-                        continue;
-
-                    if (layer->radius_tl_x > 0.0f && layer->radius_tl_y > 0.0f)
-                    {
-                        float cx = (float)layer->clip_rect.left + layer->radius_tl_x;
-                        float cy = (float)layer->clip_rect.top + layer->radius_tl_y;
-                        if (u < cx && v < cy)
-                        {
-                            float qx = (u - cx) / layer->radius_tl_x;
-                            float qy = (v - cy) / layer->radius_tl_y;
-                            if (qx * qx + qy * qy > 1.0f)
-                                continue;
-                        }
-                    }
-                    if (layer->radius_tr_x > 0.0f && layer->radius_tr_y > 0.0f)
-                    {
-                        float cx = (float)layer->clip_rect.right - layer->radius_tr_x;
-                        float cy = (float)layer->clip_rect.top + layer->radius_tr_y;
-                        if (u > cx && v < cy)
-                        {
-                            float qx = (u - cx) / layer->radius_tr_x;
-                            float qy = (v - cy) / layer->radius_tr_y;
-                            if (qx * qx + qy * qy > 1.0f)
-                                continue;
-                        }
-                    }
-                    if (layer->radius_bl_x > 0.0f && layer->radius_bl_y > 0.0f)
-                    {
-                        float cx = (float)layer->clip_rect.left + layer->radius_bl_x;
-                        float cy = (float)layer->clip_rect.bottom - layer->radius_bl_y;
-                        if (u < cx && v > cy)
-                        {
-                            float qx = (u - cx) / layer->radius_bl_x;
-                            float qy = (v - cy) / layer->radius_bl_y;
-                            if (qx * qx + qy * qy > 1.0f)
-                                continue;
-                        }
-                    }
-                    if (layer->radius_br_x > 0.0f && layer->radius_br_y > 0.0f)
-                    {
-                        float cx = (float)layer->clip_rect.right - layer->radius_br_x;
-                        float cy = (float)layer->clip_rect.bottom - layer->radius_br_y;
-                        if (u > cx && v > cy)
-                        {
-                            float qx = (u - cx) / layer->radius_br_x;
-                            float qy = (v - cy) / layer->radius_br_y;
-                            if (qx * qx + qy * qy > 1.0f)
-                                continue;
-                        }
-                    }
-                }
-
-                su = (int)u;
-                sv = (int)v;
-                if (su >= src_w) su = src_w - 1;
-                if (sv >= src_h) sv = src_h - 1;
-
-                spix = *(const uint32_t *)(src_bytes + sv * row_pitch + su * 4);
-                sb = (float)(spix & 0xFF);
-                sg = (float)((spix >> 8) & 0xFF);
-                sr = (float)((spix >> 16) & 0xFF);
-                sa = (float)((spix >> 24) & 0xFF);
-                if (layer->ignore_alpha) { sa = 255.0f; spix |= 0xff000000; }
-
-                if (opacity >= 0.999f && sa >= 254.5f)
-                {
-                    dst_pixels[dy * dst_stride + dx] = spix;
-                    continue;
-                }
-
-                fa = (sa / 255.0f) * opacity;
-                fr = sr * opacity;
-                fg = sg * opacity;
-                fb = sb * opacity;
-
-                dpix = dst_pixels[dy * dst_stride + dx];
-                db = (float)(dpix & 0xFF);
-                dg = (float)((dpix >> 8) & 0xFF);
-                dr = (float)((dpix >> 16) & 0xFF);
-                da = (float)((dpix >> 24) & 0xFF);
-
-                inv_fa = 1.0f - fa;
-                out_r = (uint32_t)fminf(255.0f, fr + dr * inv_fa + 0.5f);
-                out_g = (uint32_t)fminf(255.0f, fg + dg * inv_fa + 0.5f);
-                out_b = (uint32_t)fminf(255.0f, fb + db * inv_fa + 0.5f);
-                out_a = (uint32_t)fminf(255.0f, fa * 255.0f + da * inv_fa + 0.5f);
-
-                dst_pixels[dy * dst_stride + dx] = out_b | (out_g << 8) | (out_r << 16) | (out_a << 24);
-            }
+            color = (struct dcomp_color){0};
+            if (scene->layer_count) dcomp_render_pixel(scene, transforms, 0, x + 0.5f, y + 0.5f, 1.0f, &color);
+            row[x] = (uint32_t)(fminf(1.0f, color.b) * 255.0f + 0.5f)
+                    | ((uint32_t)(fminf(1.0f, color.g) * 255.0f + 0.5f) << 8)
+                    | ((uint32_t)(fminf(1.0f, color.r) * 255.0f + 0.5f) << 16)
+                    | ((uint32_t)(fminf(1.0f, color.a) * 255.0f + 0.5f) << 24);
         }
     }
-
     wined3d_texture_validate_location(swapchain->composite_texture, 0, WINED3D_LOCATION_SYSMEM);
     wined3d_texture_invalidate_location(swapchain->composite_texture, 0, ~WINED3D_LOCATION_SYSMEM);
 }

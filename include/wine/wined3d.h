@@ -2943,13 +2943,14 @@ HRESULT __cdecl wined3d_swapchain_set_max_frame_latency(struct wined3d_swapchain
 void __cdecl wined3d_swapchain_set_palette(struct wined3d_swapchain *swapchain, struct wined3d_palette *palette);
 void __cdecl wined3d_swapchain_set_window(struct wined3d_swapchain *swapchain, HWND window);
 
-#define WINED3D_DCOMP_MAX_LAYERS 32
+#define WINED3D_DCOMP_MAX_LAYERS 128
 
 struct wined3d_dcomp_frame;
 struct wined3d_dcomp_clip_rect { float left, top, right, bottom; };
 
 struct wined3d_dcomp_layer
 {
+    unsigned int subtree_end;
     struct wined3d_swapchain *swapchain;
     struct wined3d_dcomp_frame *frame;
     BOOL ignore_alpha;
@@ -2964,6 +2965,7 @@ struct wined3d_dcomp_layer
     float radius_bl_x, radius_bl_y;
     float radius_br_x, radius_br_y;
     float opacity;
+    int opacity_mode;
 };
 
 struct wined3d_dcomp_target_scene
