@@ -60,6 +60,7 @@ struct dcomp_effect_group
 {
     IDCompositionEffectGroup IDCompositionEffectGroup_iface;
     LONG refcount;
+    struct dcomp_device *device;
     float opacity;
     IDCompositionTransform3D *transform_3d;
 };
@@ -68,6 +69,7 @@ struct dcomp_rectangle_clip
 {
     IDCompositionRectangleClip IDCompositionRectangleClip_iface;
     LONG refcount;
+    struct dcomp_device *device;
     float left, top, right, bottom;
     float top_left_radius_x, top_left_radius_y;
     float top_right_radius_x, top_right_radius_y;
@@ -218,6 +220,7 @@ static ULONG STDMETHODCALLTYPE dcomp_effect_group_Release(IDCompositionEffectGro
     {
         if (group->transform_3d)
             IDCompositionTransform3D_Release(group->transform_3d);
+        IDCompositionDevice_Release(&group->device->IDCompositionDevice_iface);
         free(group);
     }
     return refcount;
@@ -233,7 +236,9 @@ static HRESULT STDMETHODCALLTYPE dcomp_effect_group_SetOpacity(IDCompositionEffe
 {
     struct dcomp_effect_group *group = impl_from_IDCompositionEffectGroup(iface);
     if (!isfinite(opacity) || opacity < 0.0f || opacity > 1.0f) return E_INVALIDARG;
+    EnterCriticalSection(&group->device->cs);
     group->opacity = opacity;
+    LeaveCriticalSection(&group->device->cs);
     return S_OK;
 }
 
@@ -243,9 +248,11 @@ static HRESULT STDMETHODCALLTYPE dcomp_effect_group_SetTransform3D(IDComposition
     struct dcomp_effect_group *group = impl_from_IDCompositionEffectGroup(iface);
     if (transform)
         return E_NOTIMPL;
+    EnterCriticalSection(&group->device->cs);
     if (group->transform_3d)
         IDCompositionTransform3D_Release(group->transform_3d);
     group->transform_3d = transform;
+    LeaveCriticalSection(&group->device->cs);
     return S_OK;
 }
 
@@ -259,13 +266,15 @@ static const struct IDCompositionEffectGroupVtbl dcomp_effect_group_vtbl =
     dcomp_effect_group_SetTransform3D,
 };
 
-static HRESULT dcomp_effect_group_create(IDCompositionEffectGroup **out)
+static HRESULT dcomp_effect_group_create(struct dcomp_device *device, IDCompositionEffectGroup **out)
 {
     struct dcomp_effect_group *group;
     if (!out) return E_POINTER;
     if (!(group = calloc(1, sizeof(*group)))) return E_OUTOFMEMORY;
     group->IDCompositionEffectGroup_iface.lpVtbl = &dcomp_effect_group_vtbl;
     group->refcount = 1;
+    group->device = device;
+    IDCompositionDevice_AddRef(&device->IDCompositionDevice_iface);
     group->opacity = 1.0f;
     *out = &group->IDCompositionEffectGroup_iface;
     return S_OK;
@@ -304,38 +313,99 @@ static ULONG STDMETHODCALLTYPE dcomp_rectangle_clip_Release(IDCompositionRectang
     struct dcomp_rectangle_clip *clip = impl_from_IDCompositionRectangleClip(iface);
     ULONG refcount = InterlockedDecrement(&clip->refcount);
     if (!refcount)
+    {
+        IDCompositionDevice_Release(&clip->device->IDCompositionDevice_iface);
         free(clip);
+    }
     return refcount;
 }
 
+static HRESULT dcomp_rectangle_clip_set_value(struct dcomp_rectangle_clip *clip,
+        float *field, float value, BOOL radius)
+{
+    if (!isfinite(value) || (radius ? value < 0.0f : fabsf(value) > 1048576)) return E_INVALIDARG;
+    EnterCriticalSection(&clip->device->cs);
+    *field = value;
+    LeaveCriticalSection(&clip->device->cs);
+    return S_OK;
+}
+
 static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetLeftAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetLeft(IDCompositionRectangleClip *iface, float left) { if (!isfinite(left) || fabsf(left) > 1048576) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->left = left; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetLeft(IDCompositionRectangleClip *iface, float left)
+{
+    struct dcomp_rectangle_clip *clip = impl_from_IDCompositionRectangleClip(iface);
+    return dcomp_rectangle_clip_set_value(clip, &clip->left, left, FALSE);
+}
 static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTop(IDCompositionRectangleClip *iface, float top) { if (!isfinite(top) || fabsf(top) > 1048576) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->top = top; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTop(IDCompositionRectangleClip *iface, float top)
+{
+    struct dcomp_rectangle_clip *clip = impl_from_IDCompositionRectangleClip(iface);
+    return dcomp_rectangle_clip_set_value(clip, &clip->top, top, FALSE);
+}
 static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetRightAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetRight(IDCompositionRectangleClip *iface, float right) { if (!isfinite(right) || fabsf(right) > 1048576) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->right = right; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetRight(IDCompositionRectangleClip *iface, float right)
+{
+    struct dcomp_rectangle_clip *clip = impl_from_IDCompositionRectangleClip(iface);
+    return dcomp_rectangle_clip_set_value(clip, &clip->right, right, FALSE);
+}
 static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottom(IDCompositionRectangleClip *iface, float bottom) { if (!isfinite(bottom) || fabsf(bottom) > 1048576) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->bottom = bottom; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottom(IDCompositionRectangleClip *iface, float bottom)
+{
+    struct dcomp_rectangle_clip *clip = impl_from_IDCompositionRectangleClip(iface);
+    return dcomp_rectangle_clip_set_value(clip, &clip->bottom, bottom, FALSE);
+}
 
 static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopLeftRadiusXAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopLeftRadiusX(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->top_left_radius_x = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopLeftRadiusX(IDCompositionRectangleClip *iface, float r)
+{
+    struct dcomp_rectangle_clip *clip = impl_from_IDCompositionRectangleClip(iface);
+    return dcomp_rectangle_clip_set_value(clip, &clip->top_left_radius_x, r, TRUE);
+}
 static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopLeftRadiusYAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopLeftRadiusY(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->top_left_radius_y = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopLeftRadiusY(IDCompositionRectangleClip *iface, float r)
+{
+    struct dcomp_rectangle_clip *clip = impl_from_IDCompositionRectangleClip(iface);
+    return dcomp_rectangle_clip_set_value(clip, &clip->top_left_radius_y, r, TRUE);
+}
 
 static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopRightRadiusXAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopRightRadiusX(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->top_right_radius_x = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopRightRadiusX(IDCompositionRectangleClip *iface, float r)
+{
+    struct dcomp_rectangle_clip *clip = impl_from_IDCompositionRectangleClip(iface);
+    return dcomp_rectangle_clip_set_value(clip, &clip->top_right_radius_x, r, TRUE);
+}
 static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopRightRadiusYAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopRightRadiusY(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->top_right_radius_y = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopRightRadiusY(IDCompositionRectangleClip *iface, float r)
+{
+    struct dcomp_rectangle_clip *clip = impl_from_IDCompositionRectangleClip(iface);
+    return dcomp_rectangle_clip_set_value(clip, &clip->top_right_radius_y, r, TRUE);
+}
 
 static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomLeftRadiusXAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomLeftRadiusX(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->bottom_left_radius_x = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomLeftRadiusX(IDCompositionRectangleClip *iface, float r)
+{
+    struct dcomp_rectangle_clip *clip = impl_from_IDCompositionRectangleClip(iface);
+    return dcomp_rectangle_clip_set_value(clip, &clip->bottom_left_radius_x, r, TRUE);
+}
 static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomLeftRadiusYAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomLeftRadiusY(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->bottom_left_radius_y = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomLeftRadiusY(IDCompositionRectangleClip *iface, float r)
+{
+    struct dcomp_rectangle_clip *clip = impl_from_IDCompositionRectangleClip(iface);
+    return dcomp_rectangle_clip_set_value(clip, &clip->bottom_left_radius_y, r, TRUE);
+}
 
 static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomRightRadiusXAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomRightRadiusX(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->bottom_right_radius_x = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomRightRadiusX(IDCompositionRectangleClip *iface, float r)
+{
+    struct dcomp_rectangle_clip *clip = impl_from_IDCompositionRectangleClip(iface);
+    return dcomp_rectangle_clip_set_value(clip, &clip->bottom_right_radius_x, r, TRUE);
+}
 static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomRightRadiusYAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomRightRadiusY(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->bottom_right_radius_y = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomRightRadiusY(IDCompositionRectangleClip *iface, float r)
+{
+    struct dcomp_rectangle_clip *clip = impl_from_IDCompositionRectangleClip(iface);
+    return dcomp_rectangle_clip_set_value(clip, &clip->bottom_right_radius_y, r, TRUE);
+}
 
 static const struct IDCompositionRectangleClipVtbl dcomp_rectangle_clip_vtbl =
 {
@@ -368,13 +438,15 @@ static const struct IDCompositionRectangleClipVtbl dcomp_rectangle_clip_vtbl =
     dcomp_rectangle_clip_SetBottomRightRadiusY,
 };
 
-static HRESULT dcomp_rectangle_clip_create(IDCompositionRectangleClip **out)
+static HRESULT dcomp_rectangle_clip_create(struct dcomp_device *device, IDCompositionRectangleClip **out)
 {
     struct dcomp_rectangle_clip *clip;
     if (!out) return E_POINTER;
     if (!(clip = calloc(1, sizeof(*clip)))) return E_OUTOFMEMORY;
     clip->IDCompositionRectangleClip_iface.lpVtbl = &dcomp_rectangle_clip_vtbl;
     clip->refcount = 1;
+    clip->device = device;
+    IDCompositionDevice_AddRef(&device->IDCompositionDevice_iface);
     clip->left = clip->top = -FLT_MAX;
     clip->right = clip->bottom = FLT_MAX;
     *out = &clip->IDCompositionRectangleClip_iface;
@@ -458,6 +530,8 @@ static ULONG STDMETHODCALLTYPE dcomp_visual_Release(IDCompositionVisual2 *iface)
 
     if (!refcount)
     {
+        struct dcomp_device *device = visual->device;
+        EnterCriticalSection(&device->cs);
         if (visual->last_comp_wnd && IsWindow(visual->last_comp_wnd))
         {
             SendMessageW(visual->last_comp_wnd, WM_WINE_DCOMP_SET_TARGET, WINE_DCOMP_SET_TARGET_LEGACY, 0);
@@ -485,7 +559,9 @@ static ULONG STDMETHODCALLTYPE dcomp_visual_Release(IDCompositionVisual2 *iface)
             IDCompositionVisual2_Release(&child->IDCompositionVisual2_iface);
         }
 
+        LeaveCriticalSection(&device->cs);
         free(visual);
+        IDCompositionDevice_Release(&device->IDCompositionDevice_iface);
     }
 
     return refcount;
@@ -498,13 +574,24 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetOffsetXAnimation(IDCompositionV
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_visual_SetOffsetX(IDCompositionVisual2 *iface, float offset_x)
+static HRESULT STDMETHODCALLTYPE dcomp_visual_SetOffsetX_locked(IDCompositionVisual2 *iface, float offset_x)
 {
     struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
     TRACE("iface %p, offset_x %f.\n", iface, offset_x);
     if (!isfinite(offset_x) || fabsf(offset_x) > 1048576) return E_INVALIDARG;
     visual->pending.offset_x = offset_x;
     return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_visual_SetOffsetX(IDCompositionVisual2 *iface, float offset_x)
+{
+    struct dcomp_device *device = impl_from_IDCompositionVisual2(iface)->device;
+    HRESULT hr;
+
+    EnterCriticalSection(&device->cs);
+    hr = dcomp_visual_SetOffsetX_locked(iface, offset_x);
+    LeaveCriticalSection(&device->cs);
+    return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE dcomp_visual_SetOffsetYAnimation(IDCompositionVisual2 *iface,
@@ -514,7 +601,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetOffsetYAnimation(IDCompositionV
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_visual_SetOffsetY(IDCompositionVisual2 *iface, float offset_y)
+static HRESULT STDMETHODCALLTYPE dcomp_visual_SetOffsetY_locked(IDCompositionVisual2 *iface, float offset_y)
 {
     struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
     TRACE("iface %p, offset_y %f.\n", iface, offset_y);
@@ -523,14 +610,29 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetOffsetY(IDCompositionVisual2 *i
     return S_OK;
 }
 
+static HRESULT STDMETHODCALLTYPE dcomp_visual_SetOffsetY(IDCompositionVisual2 *iface, float offset_y)
+{
+    struct dcomp_device *device = impl_from_IDCompositionVisual2(iface)->device;
+    HRESULT hr;
+
+    EnterCriticalSection(&device->cs);
+    hr = dcomp_visual_SetOffsetY_locked(iface, offset_y);
+    LeaveCriticalSection(&device->cs);
+    return hr;
+}
+
 static HRESULT STDMETHODCALLTYPE dcomp_visual_SetTransformObject(IDCompositionVisual2 *iface,
         IDCompositionTransform *transform)
 {
-    FIXME("iface %p, transform %p stub!\n", iface, transform);
+    struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
+    if (transform) return E_NOTIMPL;
+    EnterCriticalSection(&visual->device->cs);
+    visual->pending.has_transform = FALSE;
+    LeaveCriticalSection(&visual->device->cs);
     return S_OK;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_visual_SetTransform(IDCompositionVisual2 *iface,
+static HRESULT STDMETHODCALLTYPE dcomp_visual_SetTransform_locked(IDCompositionVisual2 *iface,
         const D2D_MATRIX_3X2_F *matrix)
 {
     struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
@@ -554,14 +656,26 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetTransform(IDCompositionVisual2 
     return S_OK;
 }
 
+static HRESULT STDMETHODCALLTYPE dcomp_visual_SetTransform(IDCompositionVisual2 *iface,
+        const D2D_MATRIX_3X2_F *matrix)
+{
+    struct dcomp_device *device = impl_from_IDCompositionVisual2(iface)->device;
+    HRESULT hr;
+
+    EnterCriticalSection(&device->cs);
+    hr = dcomp_visual_SetTransform_locked(iface, matrix);
+    LeaveCriticalSection(&device->cs);
+    return hr;
+}
+
 static HRESULT STDMETHODCALLTYPE dcomp_visual_SetTransformParent(IDCompositionVisual2 *iface,
         IDCompositionVisual *visual)
 {
     TRACE("iface %p, visual %p.\n", iface, visual);
-    return S_OK;
+    return visual ? E_NOTIMPL : S_OK;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_visual_SetEffect(IDCompositionVisual2 *iface,
+static HRESULT STDMETHODCALLTYPE dcomp_visual_SetEffect_locked(IDCompositionVisual2 *iface,
         IDCompositionEffect *effect)
 {
     struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
@@ -577,6 +691,11 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetEffect(IDCompositionVisual2 *if
         {
             IDCompositionEffectGroup_Release(group);
             return E_NOTIMPL;
+        }
+        if (impl_from_IDCompositionEffectGroup(group)->device != visual->device)
+        {
+            IDCompositionEffectGroup_Release(group);
+            return E_INVALIDARG;
         }
         IDCompositionEffectGroup_Release(group);
         IDCompositionEffect_AddRef(effect);
@@ -598,6 +717,18 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetEffect(IDCompositionVisual2 *if
     return S_OK;
 }
 
+static HRESULT STDMETHODCALLTYPE dcomp_visual_SetEffect(IDCompositionVisual2 *iface,
+        IDCompositionEffect *effect)
+{
+    struct dcomp_device *device = impl_from_IDCompositionVisual2(iface)->device;
+    HRESULT hr;
+
+    EnterCriticalSection(&device->cs);
+    hr = dcomp_visual_SetEffect_locked(iface, effect);
+    LeaveCriticalSection(&device->cs);
+    return hr;
+}
+
 static HRESULT STDMETHODCALLTYPE dcomp_visual_SetBitmapInterpolationMode(IDCompositionVisual2 *iface,
         enum DCOMPOSITION_BITMAP_INTERPOLATION_MODE interpolation_mode)
 {
@@ -612,7 +743,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetBorderMode(IDCompositionVisual2
     return S_OK;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_visual_SetClipObject(IDCompositionVisual2 *iface,
+static HRESULT STDMETHODCALLTYPE dcomp_visual_SetClipObject_locked(IDCompositionVisual2 *iface,
         IDCompositionClip *clip)
 {
     struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
@@ -627,6 +758,11 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetClipObject(IDCompositionVisual2
         {
             IDCompositionRectangleClip_Release(rclip);
             return E_NOTIMPL;
+        }
+        if (impl_from_IDCompositionRectangleClip(rclip)->device != visual->device)
+        {
+            IDCompositionRectangleClip_Release(rclip);
+            return E_INVALIDARG;
         }
         IDCompositionRectangleClip_Release(rclip);
         IDCompositionClip_AddRef(clip);
@@ -664,7 +800,19 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetClipObject(IDCompositionVisual2
     return S_OK;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_visual_SetClip(IDCompositionVisual2 *iface,
+static HRESULT STDMETHODCALLTYPE dcomp_visual_SetClipObject(IDCompositionVisual2 *iface,
+        IDCompositionClip *clip)
+{
+    struct dcomp_device *device = impl_from_IDCompositionVisual2(iface)->device;
+    HRESULT hr;
+
+    EnterCriticalSection(&device->cs);
+    hr = dcomp_visual_SetClipObject_locked(iface, clip);
+    LeaveCriticalSection(&device->cs);
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_visual_SetClip_locked(IDCompositionVisual2 *iface,
         const D2D_RECT_F *rect)
 {
     struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
@@ -698,7 +846,19 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetClip(IDCompositionVisual2 *ifac
     return S_OK;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_visual_SetContent(IDCompositionVisual2 *iface,
+static HRESULT STDMETHODCALLTYPE dcomp_visual_SetClip(IDCompositionVisual2 *iface,
+        const D2D_RECT_F *rect)
+{
+    struct dcomp_device *device = impl_from_IDCompositionVisual2(iface)->device;
+    HRESULT hr;
+
+    EnterCriticalSection(&device->cs);
+    hr = dcomp_visual_SetClip_locked(iface, rect);
+    LeaveCriticalSection(&device->cs);
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_visual_SetContent_locked(IDCompositionVisual2 *iface,
         IUnknown *content)
 {
     struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
@@ -714,7 +874,19 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetContent(IDCompositionVisual2 *i
     return S_OK;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_visual_AddVisual(IDCompositionVisual2 *iface,
+static HRESULT STDMETHODCALLTYPE dcomp_visual_SetContent(IDCompositionVisual2 *iface,
+        IUnknown *content)
+{
+    struct dcomp_device *device = impl_from_IDCompositionVisual2(iface)->device;
+    HRESULT hr;
+
+    EnterCriticalSection(&device->cs);
+    hr = dcomp_visual_SetContent_locked(iface, content);
+    LeaveCriticalSection(&device->cs);
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_visual_AddVisual_locked(IDCompositionVisual2 *iface,
         IDCompositionVisual *visual, BOOL insert_above, IDCompositionVisual *reference_visual)
 {
     struct dcomp_visual *parent = impl_from_IDCompositionVisual2(iface);
@@ -808,7 +980,19 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_AddVisual(IDCompositionVisual2 *if
     return S_OK;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_visual_RemoveVisual(IDCompositionVisual2 *iface,
+static HRESULT STDMETHODCALLTYPE dcomp_visual_AddVisual(IDCompositionVisual2 *iface,
+        IDCompositionVisual *visual, BOOL insert_above, IDCompositionVisual *reference_visual)
+{
+    struct dcomp_device *device = impl_from_IDCompositionVisual2(iface)->device;
+    HRESULT hr;
+
+    EnterCriticalSection(&device->cs);
+    hr = dcomp_visual_AddVisual_locked(iface, visual, insert_above, reference_visual);
+    LeaveCriticalSection(&device->cs);
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_visual_RemoveVisual_locked(IDCompositionVisual2 *iface,
         IDCompositionVisual *visual)
 {
     struct dcomp_visual *parent = impl_from_IDCompositionVisual2(iface);
@@ -836,7 +1020,19 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_RemoveVisual(IDCompositionVisual2 
     return E_INVALIDARG;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_visual_RemoveAllVisuals(IDCompositionVisual2 *iface)
+static HRESULT STDMETHODCALLTYPE dcomp_visual_RemoveVisual(IDCompositionVisual2 *iface,
+        IDCompositionVisual *visual)
+{
+    struct dcomp_device *device = impl_from_IDCompositionVisual2(iface)->device;
+    HRESULT hr;
+
+    EnterCriticalSection(&device->cs);
+    hr = dcomp_visual_RemoveVisual_locked(iface, visual);
+    LeaveCriticalSection(&device->cs);
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_visual_RemoveAllVisuals_locked(IDCompositionVisual2 *iface)
 {
     struct dcomp_visual *parent = impl_from_IDCompositionVisual2(iface);
 
@@ -854,6 +1050,17 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_RemoveAllVisuals(IDCompositionVisu
     return S_OK;
 }
 
+static HRESULT STDMETHODCALLTYPE dcomp_visual_RemoveAllVisuals(IDCompositionVisual2 *iface)
+{
+    struct dcomp_device *device = impl_from_IDCompositionVisual2(iface)->device;
+    HRESULT hr;
+
+    EnterCriticalSection(&device->cs);
+    hr = dcomp_visual_RemoveAllVisuals_locked(iface);
+    LeaveCriticalSection(&device->cs);
+    return hr;
+}
+
 static HRESULT STDMETHODCALLTYPE dcomp_visual_SetCompositeMode(IDCompositionVisual2 *iface,
         enum DCOMPOSITION_COMPOSITE_MODE composite_mode)
 {
@@ -862,7 +1069,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetCompositeMode(IDCompositionVisu
     return S_OK;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_visual_SetOpacityMode(IDCompositionVisual2 *iface,
+static HRESULT STDMETHODCALLTYPE dcomp_visual_SetOpacityMode_locked(IDCompositionVisual2 *iface,
         enum DCOMPOSITION_OPACITY_MODE opacity_mode)
 {
     struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
@@ -879,6 +1086,18 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetOpacityMode(IDCompositionVisual
 
     visual->pending.opacity_mode = opacity_mode;
     return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_visual_SetOpacityMode(IDCompositionVisual2 *iface,
+        enum DCOMPOSITION_OPACITY_MODE opacity_mode)
+{
+    struct dcomp_device *device = impl_from_IDCompositionVisual2(iface)->device;
+    HRESULT hr;
+
+    EnterCriticalSection(&device->cs);
+    hr = dcomp_visual_SetOpacityMode_locked(iface, opacity_mode);
+    LeaveCriticalSection(&device->cs);
+    return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE dcomp_visual_SetBackFaceVisibility(IDCompositionVisual2 *iface,
@@ -924,6 +1143,7 @@ static HRESULT dcomp_visual_create(struct dcomp_device *device, struct dcomp_vis
     visual->IDCompositionVisual2_iface.lpVtbl = &dcomp_visual_vtbl;
     visual->refcount = 1;
     visual->device = device;
+    IDCompositionDevice_AddRef(&device->IDCompositionDevice_iface);
     visual->pending.opacity = 1.0f;
     visual->active.opacity = 1.0f;
     visual->pending.opacity_mode = DCOMPOSITION_OPACITY_MODE_INHERIT;
@@ -978,23 +1198,25 @@ static ULONG STDMETHODCALLTYPE dcomp_target_Release(IDCompositionTarget *iface)
 
     if (!refcount)
     {
+        struct dcomp_device *device = target->device;
+        EnterCriticalSection(&device->cs);
         if (target->active_root) dcomp_visual_unbind_tree(target->active_root);
         if (target->pending_root)
             IDCompositionVisual2_Release(&target->pending_root->IDCompositionVisual2_iface);
         if (target->active_root)
             IDCompositionVisual2_Release(&target->active_root->IDCompositionVisual2_iface);
 
-        EnterCriticalSection(&target->device->cs);
         list_remove(&target->entry);
-        LeaveCriticalSection(&target->device->cs);
+        LeaveCriticalSection(&device->cs);
 
         free(target);
+        IDCompositionDevice_Release(&device->IDCompositionDevice_iface);
     }
 
     return refcount;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_target_SetRoot(IDCompositionTarget *iface,
+static HRESULT STDMETHODCALLTYPE dcomp_target_SetRoot_locked(IDCompositionTarget *iface,
         IDCompositionVisual *visual)
 {
     struct dcomp_target *target = impl_from_IDCompositionTarget(iface);
@@ -1015,6 +1237,18 @@ static HRESULT STDMETHODCALLTYPE dcomp_target_SetRoot(IDCompositionTarget *iface
 
     target->pending_root = new_root;
     return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_target_SetRoot(IDCompositionTarget *iface,
+        IDCompositionVisual *visual)
+{
+    struct dcomp_device *device = impl_from_IDCompositionTarget(iface)->device;
+    HRESULT hr;
+
+    EnterCriticalSection(&device->cs);
+    hr = dcomp_target_SetRoot_locked(iface, visual);
+    LeaveCriticalSection(&device->cs);
+    return hr;
 }
 
 static const struct IDCompositionTargetVtbl dcomp_target_vtbl =
@@ -1039,6 +1273,7 @@ static HRESULT dcomp_target_create(struct dcomp_device *device, HWND hwnd, BOOL 
     target->IDCompositionTarget_iface.lpVtbl = &dcomp_target_vtbl;
     target->refcount = 1;
     target->device = device;
+    IDCompositionDevice_AddRef(&device->IDCompositionDevice_iface);
     target->hwnd = hwnd;
     target->topmost = topmost;
 
@@ -1630,14 +1865,14 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_CreateEffectGroup(IDCompositionDev
         IDCompositionEffectGroup **effect_group)
 {
     TRACE("iface %p, effect_group %p.\n", iface, effect_group);
-    return dcomp_effect_group_create(effect_group);
+    return dcomp_effect_group_create(impl_from_IDCompositionDevice(iface), effect_group);
 }
 
 static HRESULT STDMETHODCALLTYPE dcomp_device_CreateRectangleClip(IDCompositionDevice *iface,
         IDCompositionRectangleClip **clip)
 {
     TRACE("iface %p, clip %p.\n", iface, clip);
-    return dcomp_rectangle_clip_create(clip);
+    return dcomp_rectangle_clip_create(impl_from_IDCompositionDevice(iface), clip);
 }
 
 static HRESULT STDMETHODCALLTYPE dcomp_device_CreateAnimation(IDCompositionDevice *iface,
@@ -1862,14 +2097,14 @@ static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateEffectGroup(IDCompositionDe
         IDCompositionEffectGroup **effect_group)
 {
     TRACE("iface %p, effect_group %p.\n", iface, effect_group);
-    return dcomp_effect_group_create(effect_group);
+    return dcomp_effect_group_create(impl_from_IDCompositionDevice2(iface), effect_group);
 }
 
 static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateRectangleClip(IDCompositionDevice2 *iface,
         IDCompositionRectangleClip **clip)
 {
     TRACE("iface %p, clip %p.\n", iface, clip);
-    return dcomp_rectangle_clip_create(clip);
+    return dcomp_rectangle_clip_create(impl_from_IDCompositionDevice2(iface), clip);
 }
 
 static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateAnimation(IDCompositionDevice2 *iface,
@@ -2067,14 +2302,14 @@ static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateEffectGroup(IDCompositionDe
         IDCompositionEffectGroup **effect_group)
 {
     TRACE("iface %p, effect_group %p.\n", iface, effect_group);
-    return dcomp_effect_group_create(effect_group);
+    return dcomp_effect_group_create(impl_from_IDCompositionDevice3(iface), effect_group);
 }
 
 static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateRectangleClip(IDCompositionDevice3 *iface,
         IDCompositionRectangleClip **clip)
 {
     TRACE("iface %p, clip %p.\n", iface, clip);
-    return dcomp_rectangle_clip_create(clip);
+    return dcomp_rectangle_clip_create(impl_from_IDCompositionDevice3(iface), clip);
 }
 
 static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateAnimation(IDCompositionDevice3 *iface,
@@ -2376,14 +2611,14 @@ static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateEffectGroup(IDCompos
         IDCompositionEffectGroup **effect_group)
 {
     TRACE("iface %p, effect_group %p.\n", iface, effect_group);
-    return dcomp_effect_group_create(effect_group);
+    return dcomp_effect_group_create(impl_from_IDCompositionDesktopDevice(iface), effect_group);
 }
 
 static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateRectangleClip(IDCompositionDesktopDevice *iface,
         IDCompositionRectangleClip **clip)
 {
     TRACE("iface %p, clip %p.\n", iface, clip);
-    return dcomp_rectangle_clip_create(clip);
+    return dcomp_rectangle_clip_create(impl_from_IDCompositionDesktopDevice(iface), clip);
 }
 
 static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateAnimation(IDCompositionDesktopDevice *iface,
