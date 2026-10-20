@@ -2978,6 +2978,14 @@ struct wined3d_dcomp_target_scene
 HRESULT __cdecl wined3d_swapchain_set_target_scene(struct wined3d_swapchain *swapchain,
         const struct wined3d_dcomp_target_scene *scene, BOOL prepare);
 
+/* Private diagnostic counters, not public presentation/scanout statistics. */
+struct wined3d_dcomp_stats
+{
+    UINT64 gpu_captures, cpu_readbacks, gpu_compositions, cpu_compositions;
+};
+void __cdecl wined3d_swapchain_get_dcomp_stats(struct wined3d_swapchain *swapchain,
+        struct wined3d_dcomp_stats *stats);
+
 HRESULT __cdecl wined3d_swapchain_state_create(const struct wined3d_swapchain_desc *desc,
         HWND window, struct wined3d *wined3d, struct wined3d_swapchain_state_parent *state_parent,
         struct wined3d_swapchain_state **state);

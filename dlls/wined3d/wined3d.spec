@@ -318,6 +318,7 @@
 @ cdecl wined3d_swapchain_set_palette(ptr ptr)
 @ cdecl wined3d_swapchain_set_window(ptr ptr)
 @ cdecl wined3d_swapchain_set_target_scene(ptr ptr long)
+@ cdecl wined3d_swapchain_get_dcomp_stats(ptr ptr)
 
 @ cdecl wined3d_swapchain_state_create(ptr ptr ptr ptr ptr)
 @ cdecl wined3d_swapchain_state_destroy(ptr)

@@ -27,19 +27,23 @@
 WINE_DEFAULT_DEBUG_CHANNEL(d3d);
 WINE_DECLARE_DEBUG_CHANNEL(d3d_perf);
 
-/* CPU reference-composition frames are independent of rotating back buffers and
+/* Retained composition frames are independent of rotating back buffers and
  * of the lifetime of their producing swapchains. Only the device CS accesses
  * pixels; scene publication drains that CS before replacing frame references. */
 struct wined3d_dcomp_frame
 {
     unsigned int refcount, width, height;
     uint32_t *pixels;
+    struct wined3d_texture *gpu_texture;
+    BOOL gpu_valid;
+    UINT64 gpu_captures, cpu_readbacks;
 };
 
 static void dcomp_frame_release(struct wined3d_dcomp_frame *frame)
 {
     if (frame && !--frame->refcount)
     {
+        if (frame->gpu_texture) wined3d_texture_decref(frame->gpu_texture);
         free(frame->pixels);
         free(frame);
     }
@@ -51,6 +55,44 @@ static void dcomp_scene_cleanup(struct wined3d_dcomp_target_scene *scene)
     for (i = 0; i < scene->layer_count; ++i)
         dcomp_frame_release(scene->layers[i].frame);
     memset(scene, 0, sizeof(*scene));
+}
+
+/* A deliberately narrow GL route, with no CPU readback: opaque content,
+ * unit opacity, no masks, unit affine scale and integer placement.
+ * More complex scenes continue to use the explicit reference compositor. */
+static BOOL dcomp_gpu_scene(const struct wined3d_dcomp_target_scene *scene)
+{
+    BOOL content = FALSE;
+    unsigned int i;
+    if (GetWindowLongW(scene->target_hwnd, GWL_EXSTYLE) & WS_EX_LAYERED) return FALSE;
+    for (i = 0; i < scene->layer_count; ++i)
+    {
+        const struct wined3d_dcomp_layer *layer = &scene->layers[i];
+        if (layer->opacity != 1.0f || layer->has_clip) return FALSE;
+        if (!layer->frame && !layer->swapchain) continue;
+        if (!layer->ignore_alpha || layer->m11 != 1.0f || layer->m22 != 1.0f
+                || layer->m12 != 0.0f || layer->m21 != 0.0f
+                || floorf(layer->m31) != layer->m31 || floorf(layer->m32) != layer->m32)
+            return FALSE;
+        content = TRUE;
+    }
+    return content;
+}
+
+void CDECL wined3d_swapchain_get_dcomp_stats(struct wined3d_swapchain *swapchain,
+        struct wined3d_dcomp_stats *stats)
+{
+    wined3d_mutex_lock();
+    wined3d_cs_finish(swapchain->device->cs, WINED3D_CS_QUEUE_DEFAULT);
+    memset(stats, 0, sizeof(*stats));
+    if (swapchain->dcomp_frame)
+    {
+        stats->gpu_captures = swapchain->dcomp_frame->gpu_captures;
+        stats->cpu_readbacks = swapchain->dcomp_frame->cpu_readbacks;
+    }
+    stats->gpu_compositions = swapchain->dcomp_gpu_compositions;
+    stats->cpu_compositions = swapchain->dcomp_cpu_compositions;
+    wined3d_mutex_unlock();
 }
 
 static BOOL set_window_present_rect(HWND hwnd, UINT x, UINT y, UINT width, UINT height)
@@ -378,6 +420,38 @@ done:
     return hr;
 }
 
+static HRESULT dcomp_prepare_gpu_frame(struct wined3d_swapchain *swapchain)
+{
+    struct wined3d_dcomp_frame *frame = swapchain->dcomp_frame;
+    const struct wined3d_resource *source = &swapchain->back_buffers[0]->resource;
+    struct wined3d_resource_desc desc = {0};
+    struct wined3d_texture *texture;
+    HRESULT hr;
+
+    if (!(source->format_caps & WINED3D_FORMAT_CAP_FBO_ATTACHABLE)
+            || !wined3d_adapter_gl(swapchain->device->adapter)->gl_info.fbo_ops.glBlitFramebuffer) return S_FALSE;
+    if (frame->gpu_texture && frame->gpu_texture->resource.width == source->width
+            && frame->gpu_texture->resource.height == source->height
+            && frame->gpu_texture->resource.format->id == source->format->id) return S_OK;
+    /* Only allocation/resize drains the CS. Ordinary frames copy in the ordered
+     * GPU stream, with no new per-frame CPU completion/readback barrier. */
+    wined3d_cs_finish(swapchain->device->cs, WINED3D_CS_QUEUE_DEFAULT);
+    desc.resource_type = WINED3D_RTYPE_TEXTURE_2D;
+    desc.format = source->format->id;
+    desc.multisample_type = WINED3D_MULTISAMPLE_NONE;
+    desc.bind_flags = WINED3D_BIND_RENDER_TARGET | WINED3D_BIND_SHADER_RESOURCE;
+    desc.access = WINED3D_RESOURCE_ACCESS_GPU | WINED3D_RESOURCE_ACCESS_MAP_R;
+    desc.width = source->width;
+    desc.height = source->height;
+    desc.depth = 1;
+    if (FAILED(hr = wined3d_texture_create(swapchain->device, &desc, 1, 1, 0,
+            NULL, NULL, &wined3d_null_parent_ops, &texture))) return hr;
+    if (frame->gpu_texture) wined3d_texture_decref(frame->gpu_texture);
+    frame->gpu_texture = texture;
+    frame->gpu_valid = FALSE;
+    return S_OK;
+}
+
 HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
         const RECT *src_rect, const RECT *dst_rect, HWND dst_window_override,
         unsigned int swap_interval, uint32_t flags)
@@ -417,6 +491,16 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
         WARN("Swapchain doesn't have a backbuffer, returning WINED3DERR_INVALIDCALL.\n");
         wined3d_mutex_unlock();
         return WINED3DERR_INVALIDCALL;
+    }
+
+    if (swapchain->has_target_scene && !(flags & WINED3D_PRESENT_CLEAR_ONLY)
+            && wined3d_get_renderer() == WINED3D_RENDERER_OPENGL && dcomp_gpu_scene(&swapchain->target_scene)
+            && FAILED(hr = dcomp_prepare_gpu_frame(swapchain)))
+    {
+        if (!(desc->flags & WINED3D_SWAPCHAIN_FRAME_LATENCY_WAITABLE_OBJECT))
+            ReleaseSemaphore(swapchain->frame_latency_semaphore, 1, NULL);
+        wined3d_mutex_unlock();
+        return hr;
     }
 
     if (swapchain->has_target_scene && GetClientRect(swapchain->win_handle, &client)
@@ -821,19 +905,14 @@ static bool swapchain_present_is_partial_copy(struct wined3d_swapchain *swapchai
     return false;
 }
 
-static BOOL swapchain_capture_frame(struct wined3d_swapchain *swapchain, struct wined3d_context *context)
+static BOOL dcomp_read_texture(struct wined3d_dcomp_frame *frame,
+        struct wined3d_texture *texture, struct wined3d_context *context)
 {
-    struct wined3d_texture *texture = swapchain->back_buffers[0];
-    struct wined3d_dcomp_frame *frame = swapchain->dcomp_frame;
     unsigned int pitch, slice, x, y, width = texture->resource.width, height = texture->resource.height;
     uint32_t *pixels;
 
-    if (!frame || !width || !height || width > SIZE_MAX / sizeof(*pixels) / height)
-        return FALSE;
-    wined3d_texture_load_location(texture, 0, context, texture->resource.draw_binding);
-    wined3d_texture_invalidate_location(texture, 0, WINED3D_LOCATION_SYSMEM);
-    if (!wined3d_texture_load_location(texture, 0, context, WINED3D_LOCATION_SYSMEM))
-        return FALSE;
+    if (!width || !height || width > SIZE_MAX / sizeof(*pixels) / height) return FALSE;
+    if (!wined3d_texture_load_location(texture, 0, context, WINED3D_LOCATION_SYSMEM)) return FALSE;
     if (!(pixels = malloc((size_t)width * height * sizeof(*pixels)))) return FALSE;
     wined3d_texture_get_pitch(texture, 0, &pitch, &slice);
     for (y = 0; y < height; ++y)
@@ -851,6 +930,47 @@ static BOOL swapchain_capture_frame(struct wined3d_swapchain *swapchain, struct 
     frame->pixels = pixels;
     frame->width = width;
     frame->height = height;
+    ++frame->cpu_readbacks;
+    return TRUE;
+}
+
+static BOOL swapchain_capture_frame(struct wined3d_swapchain *swapchain, struct wined3d_context *context)
+{
+    struct wined3d_texture *texture = swapchain->back_buffers[0];
+    struct wined3d_dcomp_frame *frame = swapchain->dcomp_frame;
+
+    if (!frame) return FALSE;
+    if (wined3d_get_renderer() == WINED3D_RENDERER_OPENGL && dcomp_gpu_scene(&swapchain->target_scene)
+            && frame->gpu_texture && frame->gpu_texture->resource.width == texture->resource.width
+            && frame->gpu_texture->resource.height == texture->resource.height
+            && frame->gpu_texture->resource.format->id == texture->resource.format->id
+            && (texture->resource.format_caps & WINED3D_FORMAT_CAP_FBO_ATTACHABLE)
+            && wined3d_context_gl(context)->gl_info->fbo_ops.glBlitFramebuffer)
+    {
+        RECT rect = {0, 0, texture->resource.width, texture->resource.height};
+        DWORD location;
+
+        if (!wined3d_texture_load_location(texture, 0, context, WINED3D_LOCATION_TEXTURE_RGB)
+                || !wined3d_texture_prepare_location(frame->gpu_texture, 0, context, WINED3D_LOCATION_TEXTURE_RGB))
+            return FALSE;
+        location = swapchain->device->blitter->ops->blitter_blit(swapchain->device->blitter,
+                WINED3D_BLIT_OP_COLOR_BLIT, context, texture, 0, WINED3D_LOCATION_TEXTURE_RGB, &rect,
+                frame->gpu_texture, 0, WINED3D_LOCATION_TEXTURE_RGB, &rect, NULL, WINED3D_TEXF_POINT, NULL);
+        if (!location) return FALSE;
+        wined3d_texture_validate_location(frame->gpu_texture, 0, location);
+        wined3d_texture_invalidate_location(frame->gpu_texture, 0, ~location);
+        free(frame->pixels);
+        frame->pixels = NULL;
+        frame->width = texture->resource.width;
+        frame->height = texture->resource.height;
+        frame->gpu_valid = TRUE;
+        ++frame->gpu_captures;
+        return TRUE;
+    }
+    wined3d_texture_load_location(texture, 0, context, texture->resource.draw_binding);
+    wined3d_texture_invalidate_location(texture, 0, WINED3D_LOCATION_SYSMEM);
+    if (!dcomp_read_texture(frame, texture, context)) return FALSE;
+    frame->gpu_valid = FALSE;
     return TRUE;
 }
 
@@ -969,6 +1089,8 @@ static void swapchain_composite_layers(struct wined3d_swapchain *swapchain, stru
     {
         const struct wined3d_dcomp_layer *layer = &scene->layers[i];
         float det = layer->m11 * layer->m22 - layer->m12 * layer->m21;
+        if (layer->frame && !layer->frame->pixels && layer->frame->gpu_valid)
+            dcomp_read_texture(layer->frame, layer->frame->gpu_texture, context);
         transforms[i].valid = fabsf(det) >= 1e-7f;
         if (!transforms[i].valid) continue;
         transforms[i].inv11 = layer->m22 / det;
@@ -995,6 +1117,55 @@ static void swapchain_composite_layers(struct wined3d_swapchain *swapchain, stru
     }
     wined3d_texture_validate_location(swapchain->composite_texture, 0, WINED3D_LOCATION_SYSMEM);
     wined3d_texture_invalidate_location(swapchain->composite_texture, 0, ~WINED3D_LOCATION_SYSMEM);
+    ++swapchain->dcomp_cpu_compositions;
+}
+
+static BOOL swapchain_gl_composite_opaque(struct wined3d_swapchain *swapchain,
+        struct wined3d_context_gl *context_gl)
+{
+    const struct wined3d_dcomp_target_scene *scene = &swapchain->target_scene;
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+    struct wined3d_texture *back_buffer = swapchain->back_buffers[0];
+    struct wined3d_context *context = &context_gl->c;
+    struct wined3d_dcomp_frame *frame;
+    RECT client, src, dst;
+    unsigned int i;
+    int x, y;
+
+    if (!dcomp_gpu_scene(scene) || !gl_info->fbo_ops.glBlitFramebuffer) return FALSE;
+    for (i = 0; i < scene->layer_count; ++i)
+        if ((frame = scene->layers[i].frame) && !frame->gpu_valid && frame->pixels) return FALSE;
+    if (!GetClientRect(swapchain->win_handle, &client)) return FALSE;
+    wined3d_context_gl_apply_fbo_state_explicit(context_gl, GL_FRAMEBUFFER,
+            NULL, 0, NULL, 0, WINED3D_LOCATION_DRAWABLE);
+    gl_info->gl_ops.gl.p_glDisable(GL_SCISSOR_TEST);
+    gl_info->gl_ops.gl.p_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    gl_info->gl_ops.gl.p_glClearColor(0, 0, 0, 1);
+    gl_info->gl_ops.gl.p_glClear(GL_COLOR_BUFFER_BIT);
+    context_invalidate_state(context, STATE_RASTERIZER);
+    context_invalidate_state(context, STATE_BLEND);
+    context_invalidate_state(context, STATE_FRAMEBUFFER);
+    for (i = 0; i < scene->layer_count; ++i)
+    {
+        const struct wined3d_dcomp_layer *layer = &scene->layers[i];
+        if (!(frame = layer->frame) || !frame->gpu_valid) continue;
+        x = layer->m31;
+        y = layer->m32;
+        SetRect(&src, max(0, -x), max(0, -y), min((int)frame->width, client.right - x),
+                min((int)frame->height, client.bottom - y));
+        if (src.right > src.left && src.bottom > src.top)
+        {
+            SetRect(&dst, src.left + x, src.top + y, src.right + x, src.bottom + y);
+            wined3d_texture_load_location(frame->gpu_texture, 0, context, WINED3D_LOCATION_TEXTURE_RGB);
+            wined3d_texture_validate_location(back_buffer, 0, WINED3D_LOCATION_DRAWABLE);
+            swapchain->device->blitter->ops->blitter_blit(swapchain->device->blitter,
+                    WINED3D_BLIT_OP_COLOR_BLIT, context, frame->gpu_texture, 0, WINED3D_LOCATION_TEXTURE_RGB,
+                    &src, back_buffer, 0, WINED3D_LOCATION_DRAWABLE, &dst, NULL, WINED3D_TEXF_POINT, NULL);
+            wined3d_texture_invalidate_location(back_buffer, 0, WINED3D_LOCATION_DRAWABLE);
+        }
+    }
+    ++swapchain->dcomp_gpu_compositions;
+    return TRUE;
 }
 
 static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
@@ -1024,6 +1195,12 @@ static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
         /* CPU reference composition, followed by Wine's normal drawable blit.
          * The drawable belongs to the real swapchain, NOT the scratch texture. */
         if (!(flags & WINED3D_PRESENT_CLEAR_ONLY)) swapchain_capture_frame(swapchain, context);
+        if (swapchain_gl_composite_opaque(swapchain, context_gl))
+        {
+            swapchain_gl_set_swap_interval(swapchain, context_gl, swap_interval);
+            context_gl->gl_info->gl_ops.wgl.p_wglSwapBuffers(context_gl->dc);
+            goto frame_done;
+        }
         GetClientRect(swapchain->win_handle, &client);
         swapchain_composite_layers(swapchain, context);
         if (swapchain->composite_texture)
