@@ -546,77 +546,8 @@ static const struct IWineDCompSwapChainVtbl dcomp_binding_vtbl =
     dcomp_binding_prepare_target_scene,
 };
 
-#define DXGI_MAX_DIRTY_RECTS 64
-
-struct dxgi_damage_interval { LONG left, right; };
-
-static int dxgi_compare_long(const void *a, const void *b)
-{
-    LONG x = *(const LONG *)a, y = *(const LONG *)b;
-    return (x > y) - (x < y);
-}
-
-static int dxgi_compare_interval(const void *a, const void *b)
-{
-    const struct dxgi_damage_interval *x = a, *y = b;
-    return (x->left > y->left) - (x->left < y->left);
-}
-
 static void STDMETHODCALLTYPE dxgi_present_texture_destroyed(void *parent) {}
 static const struct wined3d_parent_ops dxgi_present_texture_ops = {dxgi_present_texture_destroyed};
-
-/* Reconstruct only undirtied pixels from an independent, coherent previous
- * frame. No CPU image readback, per-frame completion wait or caller pointer
- * survives this function: the normal CS blit packets own their rectangles. */
-static HRESULT d3d11_present_copy_undirtied(struct wined3d_device_context *context,
-        struct wined3d_texture *dst, struct wined3d_texture *src, const RECT *area,
-        const RECT *dirty, UINT count, POINT offset)
-{
-    struct dxgi_damage_interval intervals[DXGI_MAX_DIRTY_RECTS];
-    LONG edges[2 * DXGI_MAX_DIRTY_RECTS + 2];
-    UINT edge_count = 2, interval_count, i, j;
-    RECT to, from;
-    LONG cursor;
-    HRESULT hr;
-
-    if (IsRectEmpty(area)) return S_OK;
-    edges[0] = area->top; edges[1] = area->bottom;
-    for (i = 0; i < count; ++i)
-    {
-        if (!IntersectRect(&to, area, &dirty[i])) continue;
-        edges[edge_count++] = to.top;
-        edges[edge_count++] = to.bottom;
-    }
-    qsort(edges, edge_count, sizeof(*edges), dxgi_compare_long);
-    for (i = 1; i < edge_count; ++i)
-    {
-        if (edges[i] == edges[i - 1]) continue;
-        interval_count = 0;
-        for (j = 0; j < count; ++j)
-        {
-            if (dirty[j].top >= edges[i] || dirty[j].bottom <= edges[i - 1]
-                    || dirty[j].left >= area->right || dirty[j].right <= area->left) continue;
-            intervals[interval_count++] = (struct dxgi_damage_interval)
-                    {max(area->left, dirty[j].left), min(area->right, dirty[j].right)};
-        }
-        qsort(intervals, interval_count, sizeof(*intervals), dxgi_compare_interval);
-        cursor = area->left;
-        for (j = 0; j <= interval_count; ++j)
-        {
-            LONG right = j == interval_count ? area->right : intervals[j].left;
-            if (cursor < right)
-            {
-                SetRect(&to, cursor, edges[i - 1], right, edges[i]);
-                SetRect(&from, (LONGLONG)to.left - offset.x, (LONGLONG)to.top - offset.y,
-                        (LONGLONG)to.right - offset.x, (LONGLONG)to.bottom - offset.y);
-                if (FAILED(hr = wined3d_device_context_blt(context, dst, 0, &to, src, 0,
-                        &from, WINED3D_BLT_RAW, NULL, WINED3D_TEXF_POINT))) return hr;
-            }
-            if (j < interval_count) cursor = max(cursor, intervals[j].right);
-        }
-    }
-    return S_OK;
-}
 
 /* Called with present_lock and the builtin binding read lock held. Allocate
  * both history images before replacing either; failed Present does not advance
@@ -629,12 +560,12 @@ static HRESULT d3d11_present_prepare(struct d3d11_swapchain *swapchain,
     struct wined3d_resource_desc desc, old_desc;
     struct wined3d_device_context *context;
     struct wined3d_swapchain_desc sc_desc;
-    RECT dirty[DXGI_MAX_DIRTY_RECTS], bounds, scroll, destination;
+    RECT bounds, scroll, destination, source;
+    const RECT *dirty;
     POINT offset = {0, 0};
     UINT count = parameters ? parameters->DirtyRectsCount : 0, i;
     HRESULT hr = S_FALSE;
 
-    if (count > DXGI_MAX_DIRTY_RECTS) return E_NOTIMPL;
     if (parameters && ((count && !parameters->pDirtyRects)
             || (!parameters->pScrollRect != !parameters->pScrollOffset))) return DXGI_ERROR_INVALID_CALL;
     wined3d_mutex_lock();
@@ -651,9 +582,9 @@ static HRESULT d3d11_present_prepare(struct d3d11_swapchain *swapchain,
     SetRect(&bounds, 0, 0, desc.width, desc.height);
     for (i = 0; i < count; ++i)
     {
-        dirty[i] = parameters->pDirtyRects[i];
-        if (IsRectEmpty(&dirty[i]) || dirty[i].left < 0 || dirty[i].top < 0
-                || dirty[i].right > bounds.right || dirty[i].bottom > bounds.bottom)
+        dirty = &parameters->pDirtyRects[i];
+        if (IsRectEmpty(dirty) || dirty->left < 0 || dirty->top < 0
+                || dirty->right > bounds.right || dirty->bottom > bounds.bottom)
         { hr = DXGI_ERROR_INVALID_CALL; goto done; }
     }
     if (parameters && parameters->pScrollRect)
@@ -691,13 +622,31 @@ static HRESULT d3d11_present_prepare(struct d3d11_swapchain *swapchain,
     context = wined3d_device_get_immediate_context(swapchain->present_device);
     if (count && swapchain->present_history_valid)
     {
-        if (FAILED(hr = d3d11_present_copy_undirtied(context, back_buffer, swapchain->present_history,
-                &bounds, dirty, count, (POINT){0, 0}))) goto done;
-        if (parameters->pScrollRect && FAILED(hr = d3d11_present_copy_undirtied(context,
-                back_buffer, swapchain->present_history, &destination, dirty, count, offset))) goto done;
+        /* Compose into a separate image: previous frame, scroll, then dirty
+         * pixels. Last-write priority naturally handles arbitrary overlapping
+         * dirty lists in O(n), without quadratic complement slicing or a cap.
+         * Blit packets copy rectangles; no caller pointer survives this call. */
+        if (FAILED(hr = wined3d_device_context_blt(context, swapchain->present_next, 0, &bounds,
+                swapchain->present_history, 0, &bounds, WINED3D_BLT_RAW, NULL, WINED3D_TEXF_POINT))) goto done;
+        if (parameters->pScrollRect && !IsRectEmpty(&destination))
+        {
+            SetRect(&source, (LONGLONG)destination.left - offset.x, (LONGLONG)destination.top - offset.y,
+                    (LONGLONG)destination.right - offset.x, (LONGLONG)destination.bottom - offset.y);
+            if (FAILED(hr = wined3d_device_context_blt(context, swapchain->present_next, 0, &destination,
+                    swapchain->present_history, 0, &source, WINED3D_BLT_RAW, NULL, WINED3D_TEXF_POINT))) goto done;
+        }
+        for (i = 0; i < count; ++i)
+        {
+            dirty = &parameters->pDirtyRects[i];
+            if (FAILED(hr = wined3d_device_context_blt(context, swapchain->present_next, 0, dirty,
+                    back_buffer, 0, dirty, WINED3D_BLT_RAW, NULL, WINED3D_TEXF_POINT))) goto done;
+        }
+        hr = wined3d_device_context_blt(context, back_buffer, 0, &bounds,
+                swapchain->present_next, 0, &bounds, WINED3D_BLT_RAW, NULL, WINED3D_TEXF_POINT);
     }
-    hr = wined3d_device_context_blt(context, swapchain->present_next, 0, &bounds,
-            back_buffer, 0, &bounds, WINED3D_BLT_RAW, NULL, WINED3D_TEXF_POINT);
+    else
+        hr = wined3d_device_context_blt(context, swapchain->present_next, 0, &bounds,
+                back_buffer, 0, &bounds, WINED3D_BLT_RAW, NULL, WINED3D_TEXF_POINT);
 done:
     if (history) wined3d_texture_decref(history);
     if (next) wined3d_texture_decref(next);
