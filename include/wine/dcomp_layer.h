@@ -58,12 +58,16 @@ struct wine_dcomp_layer_params
 };
 
 #define WINE_DCOMP_TARGET_SCENE_PROP  L"__wine_dcomp_target_scene"
-#define WINE_DCOMP_MAX_LAYERS         32
+#define WINE_DCOMP_MAX_LAYERS         128
+#define WINE_DCOMP_MAX_CONTENTS       32
 
 struct wine_dcomp_clip_rect { float left, top, right, bottom; };
 
 struct wine_dcomp_layer_desc
 {
+    /* Preorder visual entries, including contentless clip/opacity groups.
+     * Children are contiguous, back to front; subtree_end is exclusive. */
+    unsigned int subtree_end;
     IUnknown *content;
     float offset_x;
     float offset_y;

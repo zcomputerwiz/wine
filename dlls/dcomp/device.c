@@ -23,6 +23,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <math.h>
+#include <float.h>
 
 #define INITGUID
 #define COBJMACROS
@@ -374,6 +375,8 @@ static HRESULT dcomp_rectangle_clip_create(IDCompositionRectangleClip **out)
     if (!(clip = calloc(1, sizeof(*clip)))) return E_OUTOFMEMORY;
     clip->IDCompositionRectangleClip_iface.lpVtbl = &dcomp_rectangle_clip_vtbl;
     clip->refcount = 1;
+    clip->left = clip->top = -FLT_MAX;
+    clip->right = clip->bottom = FLT_MAX;
     *out = &clip->IDCompositionRectangleClip_iface;
     return S_OK;
 }
@@ -1159,17 +1162,11 @@ static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int 
     D2D_MATRIX_3X2_F loc_mat, cur_mat;
     HRESULT hr;
     enum DCOMPOSITION_OPACITY_MODE mode;
-    float opacity;
 
     if (!visual) return S_OK;
     if (depth > 128 || ++*visuals > 128) return E_INVALIDARG;
     mode = visual->pending.opacity_mode == DCOMPOSITION_OPACITY_MODE_INHERIT
             ? parent_mode : visual->pending.opacity_mode;
-    opacity = visual->pending.effect
-            ? impl_from_IDCompositionEffectGroup((IDCompositionEffectGroup *)visual->pending.effect)->opacity
-            : visual->pending.opacity;
-    if (mode == DCOMPOSITION_OPACITY_MODE_LAYER && opacity != 1.0f && visual->pending_children)
-        return E_NOTIMPL; /* Isolated opacity requires a separate group surface. */
 
     if (visual->pending.has_transform)
         loc_mat = visual->pending.transform;
@@ -1194,17 +1191,13 @@ static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int 
         fabsf(cur_mat._31) > 1048576.0f || fabsf(cur_mat._32) > 1048576.0f)
         return E_INVALIDARG;
 
-    /* The reference slice masks leaf content. Do not silently drop an ancestor
-     * clip or pretend MULTIPLY implements isolated LAYER group opacity. */
-    if ((visual->pending.has_clip || visual->pending.clip_obj) && visual->pending_children)
-        return E_NOTIMPL;
 
     if (visual->pending.content)
     {
         IDXGISwapChain1 *swapchain;
         IUnknown *device;
         DXGI_SWAP_CHAIN_DESC1 desc;
-        if (++*contents > WINE_DCOMP_MAX_LAYERS) return E_NOTIMPL;
+        if (++*contents > WINE_DCOMP_MAX_CONTENTS) return E_NOTIMPL;
         if (FAILED(hr = IUnknown_QueryInterface(visual->pending.content,
                 &IID_IWineDCompSwapChain, (void **)&binding))) return E_NOTIMPL;
         IWineDCompSwapChain_Release(binding);
@@ -1279,11 +1272,9 @@ static void dcomp_collect_pending(struct dcomp_visual *visual,
     matrix._22 = local._21 * parent->_12 + local._22 * parent->_22;
     matrix._31 = local._31 * parent->_11 + local._32 * parent->_21 + parent->_31;
     matrix._32 = local._31 * parent->_12 + local._32 * parent->_22 + parent->_32;
-    opacity *= state.opacity;
     if (state.opacity_mode != DCOMPOSITION_OPACITY_MODE_INHERIT) mode = state.opacity_mode;
 
     /* Children are listed front to back; content is behind all children. */
-    if (state.content)
     {
         layer = &ctx->scene.layers[ctx->scene.layer_count++];
         layer->content = state.content;
@@ -1291,7 +1282,7 @@ static void dcomp_collect_pending(struct dcomp_visual *visual,
         layer->m11 = matrix._11; layer->m12 = matrix._12;
         layer->m21 = matrix._21; layer->m22 = matrix._22;
         layer->m31 = matrix._31; layer->m32 = matrix._32;
-        if (SUCCEEDED(IUnknown_QueryInterface(state.content, &IID_IDXGISwapChain1, (void **)&sc)))
+        if (state.content && SUCCEEDED(IUnknown_QueryInterface(state.content, &IID_IDXGISwapChain1, (void **)&sc)))
         {
             if (SUCCEEDED(IDXGISwapChain1_GetDesc1(sc, &desc)))
             {
@@ -1308,10 +1299,11 @@ static void dcomp_collect_pending(struct dcomp_visual *visual,
         layer->radius_tr_x = state.radius_tr_x; layer->radius_tr_y = state.radius_tr_y;
         layer->radius_bl_x = state.radius_bl_x; layer->radius_bl_y = state.radius_bl_y;
         layer->radius_br_x = state.radius_br_x; layer->radius_br_y = state.radius_br_y;
-        layer->opacity = opacity;
+        layer->opacity = state.opacity;
         layer->opacity_mode = mode;
     }
     dcomp_collect_children(visual->pending_children, &matrix, opacity, mode, ctx);
+    layer->subtree_end = ctx->scene.layer_count;
 }
 
 static void dcomp_collect_children(struct dcomp_visual *child,
@@ -1355,6 +1347,7 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
         for (i = 0; i < ctx.scene.layer_count; ++i)
         {
             IWineDCompSwapChain *binding;
+            if (!ctx.scene.layers[i].content) continue;
             if (FAILED(hr = IUnknown_QueryInterface(ctx.scene.layers[i].content,
                     &IID_IWineDCompSwapChain, (void **)&binding))) goto done;
             for (j = 0; j < count && bindings[j] != binding; ++j) {}
