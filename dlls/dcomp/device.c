@@ -1389,7 +1389,7 @@ static void dcomp_visual_apply_commit(struct dcomp_visual *visual)
 }
 
 static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int *contents,
-        unsigned int *visuals, IUnknown **content_device, enum DCOMPOSITION_OPACITY_MODE parent_mode,
+        unsigned int *visuals, struct dcomp_visual **seen, IUnknown **content_device, enum DCOMPOSITION_OPACITY_MODE parent_mode,
         const D2D_MATRIX_3X2_F *parent_mat, unsigned int depth)
 {
     struct dcomp_visual *child;
@@ -1397,9 +1397,12 @@ static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int 
     D2D_MATRIX_3X2_F loc_mat, cur_mat;
     HRESULT hr;
     enum DCOMPOSITION_OPACITY_MODE mode;
+    unsigned int i;
 
     if (!visual) return S_OK;
-    if (depth > 128 || ++*visuals > 128) return E_INVALIDARG;
+    if (depth > WINE_DCOMP_MAX_LAYERS || *visuals == WINE_DCOMP_MAX_LAYERS) return E_INVALIDARG;
+    for (i = 0; i < *visuals; ++i) if (seen[i] == visual) return E_NOTIMPL;
+    seen[(*visuals)++] = visual;
     mode = visual->pending.opacity_mode == DCOMPOSITION_OPACITY_MODE_INHERIT
             ? parent_mode : visual->pending.opacity_mode;
 
@@ -1461,7 +1464,7 @@ static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int 
     }
 
     for (child = visual->pending_children; child; child = child->pending_next_sibling)
-        if (FAILED(hr = dcomp_validate_pending(child, contents, visuals, content_device, mode, &cur_mat, depth + 1)))
+        if (FAILED(hr = dcomp_validate_pending(child, contents, visuals, seen, content_device, mode, &cur_mat, depth + 1)))
             return hr;
 
     return S_OK;
@@ -1550,46 +1553,108 @@ static void dcomp_collect_children(struct dcomp_visual *child,
     dcomp_collect_pending(child, parent, opacity, mode, ctx);
 }
 
+static HRESULT dcomp_retain_active_tree(struct dcomp_visual *visual, struct dcomp_visual **nodes, unsigned int *count)
+{
+    struct dcomp_visual *child;
+    unsigned int i;
+    HRESULT hr;
+
+    if (!visual) return S_OK;
+    for (i = 0; i < *count; ++i) if (nodes[i] == visual) return S_OK;
+    if (*count == WINE_DCOMP_MAX_LAYERS) return E_UNEXPECTED;
+    IDCompositionVisual2_AddRef(&visual->IDCompositionVisual2_iface);
+    nodes[(*count)++] = visual;
+    for (child = visual->active_children; child; child = child->active_next_sibling)
+        if (FAILED(hr = dcomp_retain_active_tree(child, nodes, count))) return hr;
+    return S_OK;
+}
+
 static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
 {
-    struct dcomp_target *target, *prepared_target = NULL;
+    struct dcomp_target *target;
     D2D_MATRIX_3X2_F ident = {1,0,0,1,0,0};
-    struct dcomp_collect_context ctx = {0};
-    IWineDCompSwapChain *bindings[WINE_DCOMP_MAX_LAYERS];
-    unsigned int contents = 0, visuals = 0, targets = 0, count = 0, i, j;
+    struct dcomp_collect_context *contexts = NULL;
+    IWineDCompSwapChain *bindings[WINE_DCOMP_MAX_CONTENTS];
+    unsigned int binding_context[WINE_DCOMP_MAX_CONTENTS];
+    struct dcomp_visual *pending_nodes[WINE_DCOMP_MAX_LAYERS], *old_nodes[WINE_DCOMP_MAX_LAYERS];
+    unsigned int old_count = 0;
+    unsigned int contents = 0, visuals = 0, targets = 0, count = 0, i, j, c = 0;
     IUnknown *content_device = NULL;
     HRESULT hr = S_OK;
 
     EnterCriticalSection(&dev->cs);
     LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
     {
-        if (target->pending_root && ++targets > 1) { hr = E_NOTIMPL; goto done; }
-        if (FAILED(hr = dcomp_validate_pending(target->pending_root, &contents, &visuals,
-                &content_device, DCOMPOSITION_OPACITY_MODE_LAYER, &ident, 0))) goto done;
-        if (target->pending_root)
+        if (target->pending_root && ++targets > WINE_DCOMP_MAX_CONTENTS)
         {
-            if (!IsWindow(target->hwnd)) { hr = E_INVALIDARG; goto done; }
-            prepared_target = target;
+            hr = E_NOTIMPL;
+            goto done;
         }
     }
-    if (prepared_target)
+    if (targets && !(contexts = calloc(targets, sizeof(*contexts))))
     {
-        ctx.scene.target_hwnd = prepared_target->hwnd;
-        dcomp_collect_pending(prepared_target->pending_root, &ident, 1,
-                DCOMPOSITION_OPACITY_MODE_LAYER, &ctx);
-        /* Allocate every scene/surface before touching any active visual state.
-         * Deduplicate shared content so it is prepared and published once. */
-        for (i = 0; i < ctx.scene.layer_count; ++i)
+        hr = E_OUTOFMEMORY;
+        goto done;
+    }
+    LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
+    {
+        if (!target->pending_root) continue;
+        if (!IsWindow(target->hwnd)) { hr = E_INVALIDARG; goto done; }
+        for (j = 0; j < c; ++j)
+            if (contexts[j].scene.target_hwnd == target->hwnd) { hr = E_NOTIMPL; goto done; }
+        /* Distinct targets may use different D3D devices. A scene still cannot
+         * mix devices until the backend provides a cross-device image route. */
+        if (FAILED(hr = dcomp_validate_pending(target->pending_root, &contents, &visuals, pending_nodes,
+                &content_device, DCOMPOSITION_OPACITY_MODE_LAYER, &ident, 0))) goto done;
+        if (content_device) IUnknown_Release(content_device);
+        content_device = NULL;
+        contexts[c].scene.target_hwnd = target->hwnd;
+        dcomp_collect_pending(target->pending_root, &ident, 1, DCOMPOSITION_OPACITY_MODE_LAYER, &contexts[c]);
+        ++c;
+    }
+    /* Prepare ALL targets before changing active state. Keep one prepared scene
+     * per producer, and reject ambiguous cross-target producer routing before
+     * any active edits are applied (the current backend has one output HWND). */
+    for (c = 0; c < targets; ++c)
+    {
+        const struct wine_dcomp_target_scene *scene = &contexts[c].scene;
+        for (i = 0; i < scene->layer_count; ++i)
         {
             IWineDCompSwapChain *binding;
-            if (!ctx.scene.layers[i].content) continue;
-            if (FAILED(hr = IUnknown_QueryInterface(ctx.scene.layers[i].content,
+            if (!scene->layers[i].content) continue;
+            if (FAILED(hr = IUnknown_QueryInterface(scene->layers[i].content,
                     &IID_IWineDCompSwapChain, (void **)&binding))) goto done;
             for (j = 0; j < count && bindings[j] != binding; ++j) {}
-            if (j < count) { IWineDCompSwapChain_Release(binding); continue; }
+            if (j < count)
+            {
+                IWineDCompSwapChain_Release(binding);
+                if (binding_context[j] != c) { hr = E_NOTIMPL; goto done; }
+                continue;
+            }
+            binding_context[count] = c;
             bindings[count++] = binding;
-            if (FAILED(hr = IWineDCompSwapChain_prepare_target_scene(binding,
-                    ctx.scene.target_hwnd, &ctx.scene))) goto done;
+            if (FAILED(hr = IWineDCompSwapChain_prepare_target_scene(binding, scene->target_hwnd, scene)))
+                goto done;
+        }
+    }
+    /* Reparenting must not reuse active sibling links while a different old
+     * parent still traverses them. Retain every old node, remove ALL old edges,
+     * then build the new graph. Pending ownership alone cannot retain detached
+     * old-only nodes until their bindings have been revoked. */
+    LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
+        if (FAILED(hr = dcomp_retain_active_tree(target->active_root, old_nodes, &old_count))) goto done;
+    for (i = 0; i < old_count; ++i)
+    {
+        struct dcomp_visual *visual = old_nodes[i];
+        for (j = 0; j < visuals && pending_nodes[j] != visual; ++j) {}
+        if (j == visuals) dcomp_bind_content(visual->active.content, NULL, NULL, NULL);
+        while (visual->active_children)
+        {
+            struct dcomp_visual *child = visual->active_children;
+            visual->active_children = child->active_next_sibling;
+            child->active_parent = NULL;
+            child->active_next_sibling = NULL;
+            IDCompositionVisual2_Release(&child->IDCompositionVisual2_iface);
         }
     }
     LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
@@ -1607,15 +1672,20 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
         if (target->active_root) dcomp_visual_apply_commit(target->active_root);
     }
     for (i = 0; i < count; ++i)
-        if (FAILED(hr = IWineDCompSwapChain_set_target_scene(bindings[i], ctx.scene.target_hwnd, &ctx.scene)))
+    {
+        const struct wine_dcomp_target_scene *scene = &contexts[binding_context[i]].scene;
+        if (FAILED(hr = IWineDCompSwapChain_set_target_scene(bindings[i], scene->target_hwnd, scene)))
             break;
+    }
 done:
+    for (i = 0; i < old_count; ++i) IDCompositionVisual2_Release(&old_nodes[i]->IDCompositionVisual2_iface);
     for (i = 0; i < count; ++i)
     {
         IWineDCompSwapChain_prepare_target_scene(bindings[i], NULL, NULL);
         IWineDCompSwapChain_Release(bindings[i]);
     }
     if (content_device) IUnknown_Release(content_device);
+    free(contexts);
     LeaveCriticalSection(&dev->cs);
     return hr;
 }
