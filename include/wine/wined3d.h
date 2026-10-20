@@ -2945,15 +2945,20 @@ void __cdecl wined3d_swapchain_set_window(struct wined3d_swapchain *swapchain, H
 
 #define WINED3D_DCOMP_MAX_LAYERS 32
 
+struct wined3d_dcomp_frame;
+struct wined3d_dcomp_clip_rect { float left, top, right, bottom; };
+
 struct wined3d_dcomp_layer
 {
     struct wined3d_swapchain *swapchain;
+    struct wined3d_dcomp_frame *frame;
+    BOOL ignore_alpha;
     float m11, m12;
     float m21, m22;
     float m31, m32;
     int width, height;
     BOOL has_clip;
-    RECT clip_rect;
+    struct wined3d_dcomp_clip_rect clip_rect;
     float radius_tl_x, radius_tl_y;
     float radius_tr_x, radius_tr_y;
     float radius_bl_x, radius_bl_y;
@@ -2968,8 +2973,8 @@ struct wined3d_dcomp_target_scene
     struct wined3d_dcomp_layer layers[WINED3D_DCOMP_MAX_LAYERS];
 };
 
-void __cdecl wined3d_swapchain_set_target_scene(struct wined3d_swapchain *swapchain,
-        const struct wined3d_dcomp_target_scene *scene);
+HRESULT __cdecl wined3d_swapchain_set_target_scene(struct wined3d_swapchain *swapchain,
+        const struct wined3d_dcomp_target_scene *scene, BOOL prepare);
 
 HRESULT __cdecl wined3d_swapchain_state_create(const struct wined3d_swapchain_desc *desc,
         HWND window, struct wined3d *wined3d, struct wined3d_swapchain_state_parent *state_parent,

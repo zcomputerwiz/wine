@@ -390,24 +390,33 @@ static HRESULT STDMETHODCALLTYPE dcomp_binding_set_target(IWineDCompSwapChain *i
     return S_OK;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_binding_set_target_scene(IWineDCompSwapChain *iface,
-        HWND target, const void *scene)
+static HRESULT dcomp_binding_target_scene(IWineDCompSwapChain *iface,
+        HWND target, const void *scene, BOOL prepare)
 {
     struct d3d11_swapchain *swapchain = impl_from_IWineDCompSwapChain(iface);
     const struct wine_dcomp_target_scene *dcomp_scene = (const struct wine_dcomp_target_scene *)scene;
     struct wined3d_dcomp_target_scene wined3d_scene;
     unsigned int i;
+    HRESULT hr;
+
+    if (dcomp_scene && (dcomp_scene->layer_count > WINED3D_DCOMP_MAX_LAYERS
+            || dcomp_scene->target_hwnd != target)) return E_INVALIDARG;
 
     AcquireSRWLockExclusive(&dcomp_binding_lock);
     if (!target || !dcomp_scene)
     {
+        wined3d_swapchain_set_target_scene(swapchain->wined3d_swapchain, NULL, prepare);
+        if (prepare)
+        {
+            ReleaseSRWLockExclusive(&dcomp_binding_lock);
+            return S_OK;
+        }
         if (swapchain->target_hwnd)
         {
             RECT empty = {0};
             wined3d_swapchain_present(swapchain->wined3d_swapchain, &empty, &empty,
                     swapchain->target_hwnd, 0, WINED3D_PRESENT_CLEAR | WINED3D_PRESENT_CLEAR_ONLY);
         }
-        wined3d_swapchain_set_target_scene(swapchain->wined3d_swapchain, NULL);
         dcomp_swapchain_apply_target(swapchain, WINE_DCOMP_SET_TARGET_LEGACY, 0);
         ReleaseSRWLockExclusive(&dcomp_binding_lock);
         return S_OK;
@@ -427,8 +436,19 @@ static HRESULT STDMETHODCALLTYPE dcomp_binding_set_target_scene(IWineDCompSwapCh
                 &IID_IWineDCompSwapChain, (void **)&layer_binding)))
         {
             struct d3d11_swapchain *layer_sc = impl_from_IWineDCompSwapChain(layer_binding);
+            if (layer_sc->device != swapchain->device)
+            {
+                IWineDCompSwapChain_Release(layer_binding);
+                ReleaseSRWLockExclusive(&dcomp_binding_lock);
+                return E_NOTIMPL;
+            }
             dst_layer->swapchain = layer_sc->wined3d_swapchain;
             IWineDCompSwapChain_Release(layer_binding);
+        }
+        if (!dst_layer->swapchain)
+        {
+            ReleaseSRWLockExclusive(&dcomp_binding_lock);
+            return E_NOTIMPL;
         }
 
         dst_layer->m11 = src_layer->m11;
@@ -440,7 +460,8 @@ static HRESULT STDMETHODCALLTYPE dcomp_binding_set_target_scene(IWineDCompSwapCh
         dst_layer->width = src_layer->width;
         dst_layer->height = src_layer->height;
         dst_layer->has_clip = src_layer->has_clip;
-        dst_layer->clip_rect = src_layer->clip_rect;
+        dst_layer->clip_rect = (struct wined3d_dcomp_clip_rect){src_layer->clip_rect.left,
+                src_layer->clip_rect.top, src_layer->clip_rect.right, src_layer->clip_rect.bottom};
         dst_layer->radius_tl_x = src_layer->radius_tl_x;
         dst_layer->radius_tl_y = src_layer->radius_tl_y;
         dst_layer->radius_tr_x = src_layer->radius_tr_x;
@@ -450,14 +471,36 @@ static HRESULT STDMETHODCALLTYPE dcomp_binding_set_target_scene(IWineDCompSwapCh
         dst_layer->radius_br_x = src_layer->radius_br_x;
         dst_layer->radius_br_y = src_layer->radius_br_y;
         dst_layer->opacity = src_layer->opacity;
+        dst_layer->ignore_alpha = src_layer->ignore_alpha;
     }
 
-    swapchain->target_hwnd = target;
-    wined3d_swapchain_set_window(swapchain->wined3d_swapchain, target);
-    wined3d_swapchain_set_target_scene(swapchain->wined3d_swapchain, &wined3d_scene);
+    hr = wined3d_swapchain_set_target_scene(swapchain->wined3d_swapchain, &wined3d_scene, prepare);
+    if (SUCCEEDED(hr) && !prepare)
+    {
+        RECT empty = {0};
+        swapchain->target_hwnd = target;
+        swapchain->has_dst_rect = FALSE;
+        swapchain->fully_clipped = FALSE;
+        wined3d_swapchain_set_window(swapchain->wined3d_swapchain, target);
+        /* Commit redraws the retained frames, never the unpresented back buffer. */
+        hr = wined3d_swapchain_present(swapchain->wined3d_swapchain, &empty, &empty,
+                target, 0, WINED3D_PRESENT_CLEAR | WINED3D_PRESENT_CLEAR_ONLY);
+    }
 
     ReleaseSRWLockExclusive(&dcomp_binding_lock);
-    return S_OK;
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_binding_set_target_scene(IWineDCompSwapChain *iface,
+        HWND target, const void *scene)
+{
+    return dcomp_binding_target_scene(iface, target, scene, FALSE);
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_binding_prepare_target_scene(IWineDCompSwapChain *iface,
+        HWND target, const void *scene)
+{
+    return dcomp_binding_target_scene(iface, target, scene, TRUE);
 }
 
 static const struct IWineDCompSwapChainVtbl dcomp_binding_vtbl =
@@ -467,6 +510,7 @@ static const struct IWineDCompSwapChainVtbl dcomp_binding_vtbl =
     dcomp_binding_Release,
     dcomp_binding_set_target,
     dcomp_binding_set_target_scene,
+    dcomp_binding_prepare_target_scene,
 };
 
 static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
@@ -849,7 +893,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetDesc1(IDXGISwapChain4 *iface
     wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &wined3d_desc);
     wined3d_mutex_unlock();
 
-    FIXME("Ignoring Stereo, Scaling and AlphaMode.\n");
+    FIXME("Ignoring Stereo and Scaling.\n");
 
     desc->Width = wined3d_desc.backbuffer_width;
     desc->Height = wined3d_desc.backbuffer_height;
@@ -861,7 +905,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetDesc1(IDXGISwapChain4 *iface
     desc->BufferCount = wined3d_desc.backbuffer_count;
     desc->Scaling = DXGI_SCALING_STRETCH;
     desc->SwapEffect = dxgi_swap_effect_from_wined3d(wined3d_desc.swap_effect);
-    desc->AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    desc->AlphaMode = swapchain->comp_wnd ? swapchain->composition_alpha_mode : DXGI_ALPHA_MODE_IGNORE;
     desc->Flags = dxgi_swapchain_flags_from_wined3d(wined3d_desc.flags);
 
     return S_OK;
@@ -1165,6 +1209,12 @@ static const struct IDXGISwapChain4Vtbl d3d11_swapchain_vtbl =
     /* IDXGISwapChain4 methods */
     d3d11_swapchain_SetHDRMetaData,
 };
+
+struct d3d11_swapchain *d3d11_swapchain_from_composition_candidate(IDXGISwapChain1 *iface)
+{
+    if ((const void *)iface->lpVtbl != &d3d11_swapchain_vtbl) return NULL;
+    return d3d11_swapchain_from_IDXGISwapChain4((IDXGISwapChain4 *)iface);
+}
 
 static void STDMETHODCALLTYPE d3d11_swapchain_wined3d_object_released(void *parent)
 {

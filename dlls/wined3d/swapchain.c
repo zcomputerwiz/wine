@@ -27,6 +27,32 @@
 WINE_DEFAULT_DEBUG_CHANNEL(d3d);
 WINE_DECLARE_DEBUG_CHANNEL(d3d_perf);
 
+/* CPU reference-composition frames are independent of rotating back buffers and
+ * of the lifetime of their producing swapchains. Only the device CS accesses
+ * pixels; scene publication drains that CS before replacing frame references. */
+struct wined3d_dcomp_frame
+{
+    unsigned int refcount, width, height;
+    uint32_t *pixels;
+};
+
+static void dcomp_frame_release(struct wined3d_dcomp_frame *frame)
+{
+    if (frame && !--frame->refcount)
+    {
+        free(frame->pixels);
+        free(frame);
+    }
+}
+
+static void dcomp_scene_cleanup(struct wined3d_dcomp_target_scene *scene)
+{
+    unsigned int i;
+    for (i = 0; i < scene->layer_count; ++i)
+        dcomp_frame_release(scene->layers[i].frame);
+    memset(scene, 0, sizeof(*scene));
+}
+
 static BOOL set_window_present_rect(HWND hwnd, UINT x, UINT y, UINT width, UINT height)
 {
     RECT rect = {x, y, x + width, y + height};
@@ -46,6 +72,11 @@ void wined3d_swapchain_cleanup(struct wined3d_swapchain *swapchain)
     UINT i;
 
     TRACE("Destroying swapchain %p.\n", swapchain);
+
+    dcomp_scene_cleanup(&swapchain->target_scene);
+    dcomp_scene_cleanup(&swapchain->prepared_scene);
+    dcomp_frame_release(swapchain->dcomp_frame);
+    if (swapchain->prepared_surface) wined3d_texture_decref(swapchain->prepared_surface);
 
     wined3d_swapchain_state_cleanup(&swapchain->state);
     wined3d_swapchain_set_gamma_ramp(swapchain, 0, &swapchain->orig_gamma);
@@ -219,61 +250,116 @@ void CDECL wined3d_swapchain_set_window(struct wined3d_swapchain *swapchain, HWN
         WARN("Failed to retrieve device context, trying swapchain backup.\n");
 }
 
-void CDECL wined3d_swapchain_set_target_scene(struct wined3d_swapchain *swapchain,
-        const struct wined3d_dcomp_target_scene *scene)
+static HRESULT dcomp_surface_for_window(struct wined3d_swapchain *swapchain, HWND window,
+        struct wined3d_texture **out)
 {
+    struct wined3d_resource_desc desc = {0};
+    RECT client;
+    unsigned int width, height;
+
+    *out = NULL;
+    if (!GetClientRect(window, &client)) return E_INVALIDARG;
+    width = client.right;
+    height = client.bottom;
+    if (!width || !height) return S_OK;
+    /* Bound this deliberately CPU reference path to 64 MiB per target surface. */
+    if (width > 8192 || height > 8192 || (size_t)width * height > 16777216) return E_NOTIMPL;
+    if (swapchain->composite_texture && swapchain->composite_texture->resource.width == width
+            && swapchain->composite_texture->resource.height == height)
+    {
+        *out = swapchain->composite_texture;
+        wined3d_texture_incref(*out);
+        return S_OK;
+    }
+    desc.resource_type = WINED3D_RTYPE_TEXTURE_2D;
+    desc.format = WINED3DFMT_B8G8R8A8_UNORM;
+    desc.multisample_type = WINED3D_MULTISAMPLE_NONE;
+    desc.bind_flags = WINED3D_BIND_RENDER_TARGET;
+    desc.access = WINED3D_RESOURCE_ACCESS_GPU | WINED3D_RESOURCE_ACCESS_MAP_R | WINED3D_RESOURCE_ACCESS_MAP_W;
+    desc.width = width;
+    desc.height = height;
+    desc.depth = 1;
+    return wined3d_texture_create(swapchain->device, &desc, 1, 1, 0,
+            NULL, NULL, &wined3d_null_parent_ops, out);
+}
+
+HRESULT CDECL wined3d_swapchain_set_target_scene(struct wined3d_swapchain *swapchain,
+        const struct wined3d_dcomp_target_scene *scene, BOOL prepare)
+{
+    struct wined3d_dcomp_target_scene snapshot = {0};
+    struct wined3d_texture *surface = NULL;
+    unsigned int i;
+    HRESULT hr = S_OK;
+
     wined3d_mutex_lock();
+    wined3d_cs_finish(swapchain->device->cs, WINED3D_CS_QUEUE_DEFAULT);
+    if (!prepare && scene)
+    {
+        if (!swapchain->has_prepared_scene) { hr = E_UNEXPECTED; goto done; }
+        snapshot = swapchain->prepared_scene;
+        surface = swapchain->prepared_surface;
+        memset(&swapchain->prepared_scene, 0, sizeof(swapchain->prepared_scene));
+        swapchain->prepared_surface = NULL;
+        swapchain->has_prepared_scene = FALSE;
+        goto publish;
+    }
     if (scene)
     {
-        RECT client_rect;
-        int dst_w, dst_h;
-
-        swapchain->target_scene = *scene;
-        swapchain->has_target_scene = TRUE;
-
-        GetClientRect(scene->target_hwnd, &client_rect);
-        dst_w = client_rect.right - client_rect.left;
-        dst_h = client_rect.bottom - client_rect.top;
-        if (dst_w > 0 && dst_h > 0)
+        if (scene->layer_count > WINED3D_DCOMP_MAX_LAYERS)
         {
-            if (swapchain->composite_texture &&
-                (swapchain->composite_texture->resource.width != (unsigned int)dst_w ||
-                 swapchain->composite_texture->resource.height != (unsigned int)dst_h))
+            hr = E_INVALIDARG;
+            goto done;
+        }
+        if (FAILED(hr = dcomp_surface_for_window(swapchain, scene->target_hwnd, &surface))) goto done;
+        snapshot = *scene;
+        for (i = 0; i < snapshot.layer_count; ++i)
+        {
+            struct wined3d_swapchain *source = snapshot.layers[i].swapchain;
+            if (!source || source->device != swapchain->device)
             {
-                wined3d_texture_decref(swapchain->composite_texture);
-                swapchain->composite_texture = NULL;
+                hr = E_NOTIMPL;
+                snapshot.layer_count = i;
+                goto failed;
             }
-            if (!swapchain->composite_texture)
+            if (!source->dcomp_frame)
             {
-                struct wined3d_resource_desc desc;
-                memset(&desc, 0, sizeof(desc));
-                desc.resource_type = WINED3D_RTYPE_TEXTURE_2D;
-                desc.format = WINED3DFMT_B8G8R8A8_UNORM;
-                desc.multisample_type = WINED3D_MULTISAMPLE_NONE;
-                desc.multisample_quality = 0;
-                desc.usage = 0;
-                desc.bind_flags = WINED3D_BIND_RENDER_TARGET;
-                desc.access = WINED3D_RESOURCE_ACCESS_GPU | WINED3D_RESOURCE_ACCESS_MAP_R | WINED3D_RESOURCE_ACCESS_MAP_W;
-                desc.width = dst_w;
-                desc.height = dst_h;
-                desc.depth = 1;
-                desc.size = 0;
-                wined3d_texture_create(swapchain->device, &desc, 1, 1, 0,
-                        NULL, NULL, &wined3d_null_parent_ops, &swapchain->composite_texture);
+                if (!(source->dcomp_frame = calloc(1, sizeof(*source->dcomp_frame))))
+                {
+                    hr = E_OUTOFMEMORY;
+                    snapshot.layer_count = i;
+                    goto failed;
+                }
+                source->dcomp_frame->refcount = 1;
             }
+            snapshot.layers[i].frame = source->dcomp_frame;
+            ++snapshot.layers[i].frame->refcount;
+            snapshot.layers[i].swapchain = NULL;
         }
     }
-    else
+    if (prepare)
     {
-        swapchain->has_target_scene = FALSE;
-        memset(&swapchain->target_scene, 0, sizeof(swapchain->target_scene));
-        if (swapchain->composite_texture)
-        {
-            wined3d_texture_decref(swapchain->composite_texture);
-            swapchain->composite_texture = NULL;
-        }
+        dcomp_scene_cleanup(&swapchain->prepared_scene);
+        if (swapchain->prepared_surface) wined3d_texture_decref(swapchain->prepared_surface);
+        swapchain->prepared_scene = snapshot;
+        swapchain->prepared_surface = surface;
+        swapchain->has_prepared_scene = !!scene;
+        goto done;
     }
+publish:
+    /* All allocations succeeded before the visual tree transaction was applied. */
+    dcomp_scene_cleanup(&swapchain->target_scene);
+    if (swapchain->composite_texture) wined3d_texture_decref(swapchain->composite_texture);
+    swapchain->composite_texture = surface;
+    swapchain->target_scene = snapshot;
+    swapchain->has_target_scene = !!scene;
+    goto done;
+
+failed:
+    dcomp_scene_cleanup(&snapshot);
+    if (surface) wined3d_texture_decref(surface);
+done:
     wined3d_mutex_unlock();
+    return hr;
 }
 
 HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
@@ -282,10 +368,20 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
 {
     const struct wined3d_swapchain_desc *desc = &swapchain->state.desc;
     RECT s, d;
+    struct wined3d_texture *surface;
+    RECT client;
+    HRESULT hr;
 
     TRACE("swapchain %p, src_rect %s, dst_rect %s, dst_window_override %p, swap_interval %u, flags %#x.\n",
             swapchain, wine_dbgstr_rect(src_rect), wine_dbgstr_rect(dst_rect),
             dst_window_override, swap_interval, flags);
+
+    if (swapchain->has_target_scene &&
+            ((desc->backbuffer_format != WINED3DFMT_B8G8R8A8_UNORM
+                && desc->backbuffer_format != WINED3DFMT_R8G8B8A8_UNORM)
+             || desc->backbuffer_width > 8192 || desc->backbuffer_height > 8192
+             || (size_t)desc->backbuffer_width * desc->backbuffer_height > 16777216))
+        return E_NOTIMPL;
 
     if (flags & ~(WINED3D_PRESENT_CLEAR | WINED3D_PRESENT_CLEAR_ONLY))
         FIXME("Ignoring flags %#x.\n", flags);
@@ -307,6 +403,24 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
         return WINED3DERR_INVALIDCALL;
     }
 
+    if (swapchain->has_target_scene && GetClientRect(swapchain->win_handle, &client)
+            && client.right > 0 && client.bottom > 0
+            && (!swapchain->composite_texture
+                || swapchain->composite_texture->resource.width != (unsigned int)client.right
+                || swapchain->composite_texture->resource.height != (unsigned int)client.bottom))
+    {
+        wined3d_cs_finish(swapchain->device->cs, WINED3D_CS_QUEUE_DEFAULT);
+        if (FAILED(hr = dcomp_surface_for_window(swapchain, swapchain->win_handle, &surface)))
+        {
+            if (!(desc->flags & WINED3D_SWAPCHAIN_FRAME_LATENCY_WAITABLE_OBJECT))
+                ReleaseSemaphore(swapchain->frame_latency_semaphore, 1, NULL);
+            wined3d_mutex_unlock();
+            return hr;
+        }
+        if (swapchain->composite_texture) wined3d_texture_decref(swapchain->composite_texture);
+        swapchain->composite_texture = surface;
+    }
+
     if (!src_rect)
     {
         SetRect(&s, 0, 0, desc->backbuffer_width, desc->backbuffer_height);
@@ -324,6 +438,8 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
 
     wined3d_cs_emit_present(swapchain->device->cs, swapchain, src_rect,
             dst_rect, dst_window_override, swap_interval, flags);
+    if (swapchain->has_target_scene && (flags & WINED3D_PRESENT_CLEAR_ONLY))
+        wined3d_cs_finish(swapchain->device->cs, WINED3D_CS_QUEUE_DEFAULT);
 
     wined3d_mutex_unlock();
 
@@ -689,13 +805,46 @@ static bool swapchain_present_is_partial_copy(struct wined3d_swapchain *swapchai
     return false;
 }
 
+static BOOL swapchain_capture_frame(struct wined3d_swapchain *swapchain, struct wined3d_context *context)
+{
+    struct wined3d_texture *texture = swapchain->back_buffers[0];
+    struct wined3d_dcomp_frame *frame = swapchain->dcomp_frame;
+    unsigned int pitch, slice, x, y, width = texture->resource.width, height = texture->resource.height;
+    uint32_t *pixels;
+
+    if (!frame || !width || !height || width > SIZE_MAX / sizeof(*pixels) / height)
+        return FALSE;
+    wined3d_texture_load_location(texture, 0, context, texture->resource.draw_binding);
+    wined3d_texture_invalidate_location(texture, 0, WINED3D_LOCATION_SYSMEM);
+    if (!wined3d_texture_load_location(texture, 0, context, WINED3D_LOCATION_SYSMEM))
+        return FALSE;
+    if (!(pixels = malloc((size_t)width * height * sizeof(*pixels)))) return FALSE;
+    wined3d_texture_get_pitch(texture, 0, &pitch, &slice);
+    for (y = 0; y < height; ++y)
+    {
+        const uint32_t *row = (const uint32_t *)((const BYTE *)texture->resource.heap_memory + y * pitch);
+        for (x = 0; x < width; ++x)
+        {
+            uint32_t p = row[x];
+            if (texture->resource.format->id == WINED3DFMT_R8G8B8A8_UNORM)
+                p = (p & 0xff00ff00) | ((p & 0xff) << 16) | ((p >> 16) & 0xff);
+            pixels[y * width + x] = p;
+        }
+    }
+    free(frame->pixels);
+    frame->pixels = pixels;
+    frame->width = width;
+    frame->height = height;
+    return TRUE;
+}
+
 static void swapchain_composite_layers(struct wined3d_swapchain *swapchain, struct wined3d_context *context)
 {
     const struct wined3d_dcomp_target_scene *scene = &swapchain->target_scene;
     RECT client_rect;
     int dst_w, dst_h;
     uint32_t *dst_pixels;
-    unsigned int k;
+    unsigned int k, dst_pitch, slice_pitch, dst_stride;
 
     GetClientRect(swapchain->win_handle, &client_rect);
     dst_w = client_rect.right - client_rect.left;
@@ -709,6 +858,8 @@ static void swapchain_composite_layers(struct wined3d_swapchain *swapchain, stru
         return;
 
     wined3d_texture_prepare_location(swapchain->composite_texture, 0, context, WINED3D_LOCATION_SYSMEM);
+    wined3d_texture_get_pitch(swapchain->composite_texture, 0, &dst_pitch, &slice_pitch);
+    dst_stride = dst_pitch / sizeof(uint32_t);
     dst_pixels = (uint32_t *)swapchain->composite_texture->resource.heap_memory;
     if (!dst_pixels)
     {
@@ -716,14 +867,13 @@ static void swapchain_composite_layers(struct wined3d_swapchain *swapchain, stru
         return;
     }
 
-    memset(dst_pixels, 0, dst_w * dst_h * sizeof(uint32_t));
+    memset(dst_pixels, 0, (size_t)dst_pitch * dst_h);
 
     for (k = 0; k < scene->layer_count; ++k)
     {
         const struct wined3d_dcomp_layer *layer = &scene->layers[k];
-        struct wined3d_swapchain *layer_sc = layer->swapchain;
-        struct wined3d_texture *src_tex;
-        unsigned int row_pitch, slice_pitch;
+        struct wined3d_dcomp_frame *frame = layer->frame;
+        unsigned int row_pitch;
         const uint8_t *src_bytes;
         int src_w, src_h;
         float opacity;
@@ -733,21 +883,14 @@ static void swapchain_composite_layers(struct wined3d_swapchain *swapchain, stru
         int min_x, max_x, min_y, max_y;
         int dx, dy;
 
-        if (!layer_sc || !layer_sc->back_buffers)
-            continue;
-
-        src_tex = layer_sc->back_buffers[0];
-        if (!src_tex)
-            continue;
-
-        wined3d_texture_load_location(src_tex, 0, context, WINED3D_LOCATION_SYSMEM);
-        wined3d_texture_get_pitch(src_tex, 0, &row_pitch, &slice_pitch);
-        src_bytes = src_tex->resource.heap_memory;
+        if (!frame) continue;
+        row_pitch = frame->width * sizeof(uint32_t);
+        src_bytes = (const BYTE *)frame->pixels;
         if (!src_bytes)
             continue;
 
-        src_w = layer->width > 0 ? layer->width : (int)src_tex->resource.width;
-        src_h = layer->height > 0 ? layer->height : (int)src_tex->resource.height;
+        src_w = frame->width;
+        src_h = frame->height;
         opacity = layer->opacity;
         if (opacity <= 0.0f)
             continue;
@@ -777,10 +920,11 @@ static void swapchain_composite_layers(struct wined3d_swapchain *swapchain, stru
         min_yf = fminf(fminf(c0y, c1y), fminf(c2y, c3y));
         max_yf = fmaxf(fmaxf(c0y, c1y), fmaxf(c2y, c3y));
 
-        min_x = (int)floorf(min_xf);
-        max_x = (int)ceilf(max_xf);
-        min_y = (int)floorf(min_yf);
-        max_y = (int)ceilf(max_yf);
+        /* Clamp in floating point before conversion, even for composed transforms. */
+        min_x = (int)fmaxf(0, fminf(dst_w, floorf(min_xf)));
+        max_x = (int)fmaxf(0, fminf(dst_w, ceilf(max_xf)));
+        min_y = (int)fmaxf(0, fminf(dst_h, floorf(min_yf)));
+        max_y = (int)fmaxf(0, fminf(dst_h, ceilf(max_yf)));
 
         if (min_x < 0) min_x = 0;
         if (max_x > dst_w) max_x = dst_w;
@@ -873,10 +1017,11 @@ static void swapchain_composite_layers(struct wined3d_swapchain *swapchain, stru
                 sg = (float)((spix >> 8) & 0xFF);
                 sr = (float)((spix >> 16) & 0xFF);
                 sa = (float)((spix >> 24) & 0xFF);
+                if (layer->ignore_alpha) { sa = 255.0f; spix |= 0xff000000; }
 
                 if (opacity >= 0.999f && sa >= 254.5f)
                 {
-                    dst_pixels[dy * dst_w + dx] = spix;
+                    dst_pixels[dy * dst_stride + dx] = spix;
                     continue;
                 }
 
@@ -885,7 +1030,7 @@ static void swapchain_composite_layers(struct wined3d_swapchain *swapchain, stru
                 fg = sg * opacity;
                 fb = sb * opacity;
 
-                dpix = dst_pixels[dy * dst_w + dx];
+                dpix = dst_pixels[dy * dst_stride + dx];
                 db = (float)(dpix & 0xFF);
                 dg = (float)((dpix >> 8) & 0xFF);
                 dr = (float)((dpix >> 16) & 0xFF);
@@ -897,7 +1042,7 @@ static void swapchain_composite_layers(struct wined3d_swapchain *swapchain, stru
                 out_b = (uint32_t)fminf(255.0f, fb + db * inv_fa + 0.5f);
                 out_a = (uint32_t)fminf(255.0f, fa * 255.0f + da * inv_fa + 0.5f);
 
-                dst_pixels[dy * dst_w + dx] = out_b | (out_g << 8) | (out_r << 16) | (out_a << 24);
+                dst_pixels[dy * dst_stride + dx] = out_b | (out_g << 8) | (out_r << 16) | (out_a << 24);
             }
         }
     }
@@ -927,43 +1072,50 @@ static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
     TRACE("Presenting DC %p.\n", context_gl->dc);
 
     pixel_format = &wined3d_adapter_gl(swapchain->device->adapter)->pixel_formats[context_gl->pixel_format - 1];
+    if (swapchain->has_target_scene)
+    {
+        RECT client;
+        /* CPU reference composition, followed by Wine's normal drawable blit.
+         * The drawable belongs to the real swapchain, NOT the scratch texture. */
+        if (!(flags & WINED3D_PRESENT_CLEAR_ONLY)) swapchain_capture_frame(swapchain, context);
+        GetClientRect(swapchain->win_handle, &client);
+        swapchain_composite_layers(swapchain, context);
+        if (swapchain->composite_texture)
+        {
+            gl_info = context_gl->gl_info;
+            wined3d_texture_load_location(swapchain->composite_texture, 0, context, WINED3D_LOCATION_TEXTURE_RGB);
+            wined3d_context_gl_apply_fbo_state_explicit(context_gl, GL_FRAMEBUFFER,
+                    NULL, 0, NULL, 0, WINED3D_LOCATION_DRAWABLE);
+            gl_info->gl_ops.gl.p_glDisable(GL_SCISSOR_TEST);
+            gl_info->gl_ops.gl.p_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            context_invalidate_state(context, STATE_RASTERIZER);
+            context_invalidate_state(context, STATE_BLEND);
+            context_invalidate_state(context, STATE_FRAMEBUFFER);
+            wined3d_texture_validate_location(back_buffer, 0, WINED3D_LOCATION_DRAWABLE);
+            swapchain->device->blitter->ops->blitter_blit(swapchain->device->blitter,
+                    WINED3D_BLIT_OP_COLOR_BLIT, context,
+                    swapchain->composite_texture, 0, WINED3D_LOCATION_TEXTURE_RGB, &client,
+                    back_buffer, 0, WINED3D_LOCATION_DRAWABLE, &client,
+                    NULL, WINED3D_TEXF_NONE, NULL);
+            wined3d_texture_invalidate_location(back_buffer, 0, WINED3D_LOCATION_DRAWABLE);
+            swapchain_gl_set_swap_interval(swapchain, context_gl, swap_interval);
+            gl_info->gl_ops.wgl.p_wglSwapBuffers(context_gl->dc);
+        }
+        goto frame_done;
+    }
     if (context_gl->dc == wined3d_device_gl(swapchain->device)->backup_dc
             || (pixel_format->swap_method != WGL_SWAP_COPY_ARB
             && swapchain_present_is_partial_copy(swapchain, dst_rect)))
     {
-        if (swapchain->has_target_scene)
+        if (flags & WINED3D_PRESENT_CLEAR)
         {
-            RECT client_rect;
-            int dst_w, dst_h;
-            GetClientRect(swapchain->win_handle, &client_rect);
-            dst_w = client_rect.right - client_rect.left;
-            dst_h = client_rect.bottom - client_rect.top;
+            RECT rc;
+            GetClientRect(swapchain->win_handle, &rc);
+            PatBlt(swapchain->dc, 0, 0, rc.right, rc.bottom, BLACKNESS);
+        }
+        if (!(flags & WINED3D_PRESENT_CLEAR_ONLY))
+            swapchain_blit_gdi(swapchain, context, src_rect, dst_rect);
 
-            if (swapchain->target_scene.layer_count > 0 && dst_w > 0 && dst_h > 0 && swapchain->composite_texture)
-            {
-                RECT s = {0, 0, dst_w, dst_h};
-                RECT d = {0, 0, dst_w, dst_h};
-                swapchain_composite_layers(swapchain, context);
-                swapchain_blit_gdi_texture(swapchain, context, swapchain->composite_texture, &s, &d);
-            }
-            else
-            {
-                RECT rc;
-                GetClientRect(swapchain->win_handle, &rc);
-                PatBlt(swapchain->dc, 0, 0, rc.right, rc.bottom, BLACKNESS);
-            }
-        }
-        else
-        {
-            if (flags & WINED3D_PRESENT_CLEAR)
-            {
-                RECT rc;
-                GetClientRect(swapchain->win_handle, &rc);
-                PatBlt(swapchain->dc, 0, 0, rc.right, rc.bottom, BLACKNESS);
-            }
-            if (!(flags & WINED3D_PRESENT_CLEAR_ONLY))
-                swapchain_blit_gdi(swapchain, context, src_rect, dst_rect);
-        }
     }
     else
     {
@@ -971,95 +1123,39 @@ static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
 
         swapchain_gl_set_swap_interval(swapchain, context_gl, swap_interval);
 
-        if (swapchain->has_target_scene)
+        wined3d_texture_load_location(back_buffer, 0, context, back_buffer->resource.draw_binding);
+
+        if (flags & WINED3D_PRESENT_CLEAR)
         {
-            RECT client_rect;
-            int dst_w, dst_h;
-            GetClientRect(swapchain->win_handle, &client_rect);
-            dst_w = client_rect.right - client_rect.left;
-            dst_h = client_rect.bottom - client_rect.top;
-
-            if (swapchain->target_scene.layer_count > 0 && dst_w > 0 && dst_h > 0 && swapchain->composite_texture)
-            {
-                RECT s = {0, 0, dst_w, dst_h};
-                RECT d = {0, 0, dst_w, dst_h};
-
-                swapchain_composite_layers(swapchain, context);
-
-                wined3d_texture_load_location(swapchain->composite_texture, 0, context,
-                        swapchain->composite_texture->resource.draw_binding);
-
-                wined3d_context_gl_apply_fbo_state_explicit(context_gl, GL_FRAMEBUFFER,
-                        NULL, 0, NULL, 0, WINED3D_LOCATION_DRAWABLE);
-                gl_info->gl_ops.gl.p_glDisable(GL_SCISSOR_TEST);
-                gl_info->gl_ops.gl.p_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-                context_invalidate_state(context, STATE_RASTERIZER);
-                context_invalidate_state(context, STATE_BLEND);
-                context_invalidate_state(context, STATE_FRAMEBUFFER);
-
-                wined3d_texture_validate_location(swapchain->composite_texture, 0, WINED3D_LOCATION_DRAWABLE);
-                swapchain->device->blitter->ops->blitter_blit(swapchain->device->blitter,
-                        WINED3D_BLIT_OP_COLOR_BLIT, context,
-                        swapchain->composite_texture, 0, WINED3D_LOCATION_TEXTURE_RGB, &s,
-                        swapchain->composite_texture, 0, WINED3D_LOCATION_DRAWABLE, &d,
-                        NULL, WINED3D_TEXF_NONE, NULL);
-                wined3d_texture_invalidate_location(swapchain->composite_texture, 0, WINED3D_LOCATION_DRAWABLE);
-            }
-            else
-            {
-                wined3d_context_gl_apply_fbo_state_explicit(context_gl, GL_FRAMEBUFFER,
-                        NULL, 0, NULL, 0, WINED3D_LOCATION_DRAWABLE);
-                gl_info->gl_ops.gl.p_glDisable(GL_SCISSOR_TEST);
-                gl_info->gl_ops.gl.p_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-                context_invalidate_state(context, STATE_RASTERIZER);
-                context_invalidate_state(context, STATE_BLEND);
-                context_invalidate_state(context, STATE_FRAMEBUFFER);
-                gl_info->gl_ops.gl.p_glClearColor(0, 0, 0, 0);
-                gl_info->gl_ops.gl.p_glClear(GL_COLOR_BUFFER_BIT);
-            }
-
-            if (swapchain->device->context_count > 1)
-            {
-                WARN_(d3d_perf)("Multiple contexts, calling glFinish() to enforce ordering.\n");
-                gl_info->gl_ops.gl.p_glFinish();
-            }
-
-            gl_info->gl_ops.wgl.p_wglSwapBuffers(context_gl->dc);
+            wined3d_context_gl_apply_fbo_state_explicit(context_gl, GL_FRAMEBUFFER,
+                    NULL, 0, NULL, 0, WINED3D_LOCATION_DRAWABLE);
+            gl_info->gl_ops.gl.p_glDisable(GL_SCISSOR_TEST);
+            gl_info->gl_ops.gl.p_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            context_invalidate_state(context, STATE_RASTERIZER);
+            context_invalidate_state(context, STATE_BLEND);
+            context_invalidate_state(context, STATE_FRAMEBUFFER);
+            gl_info->gl_ops.gl.p_glClearColor(0, 0, 0, 0);
+            gl_info->gl_ops.gl.p_glClear(GL_COLOR_BUFFER_BIT);
         }
-        else
+        if (!(flags & WINED3D_PRESENT_CLEAR_ONLY))
+            swapchain_blit(swapchain, context, src_rect, dst_rect);
+
+        if (swapchain->device->context_count > 1)
         {
-            wined3d_texture_load_location(back_buffer, 0, context, back_buffer->resource.draw_binding);
-
-            if (flags & WINED3D_PRESENT_CLEAR)
-            {
-                wined3d_context_gl_apply_fbo_state_explicit(context_gl, GL_FRAMEBUFFER,
-                        NULL, 0, NULL, 0, WINED3D_LOCATION_DRAWABLE);
-                gl_info->gl_ops.gl.p_glDisable(GL_SCISSOR_TEST);
-                gl_info->gl_ops.gl.p_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-                context_invalidate_state(context, STATE_RASTERIZER);
-                context_invalidate_state(context, STATE_BLEND);
-                context_invalidate_state(context, STATE_FRAMEBUFFER);
-                gl_info->gl_ops.gl.p_glClearColor(0, 0, 0, 0);
-                gl_info->gl_ops.gl.p_glClear(GL_COLOR_BUFFER_BIT);
-            }
-            if (!(flags & WINED3D_PRESENT_CLEAR_ONLY))
-                swapchain_blit(swapchain, context, src_rect, dst_rect);
-
-            if (swapchain->device->context_count > 1)
-            {
-                WARN_(d3d_perf)("Multiple contexts, calling glFinish() to enforce ordering.\n");
-                gl_info->gl_ops.gl.p_glFinish();
-            }
-
-            /* call wglSwapBuffers through the gl table to avoid confusing the Steam overlay */
-            gl_info->gl_ops.wgl.p_wglSwapBuffers(context_gl->dc);
+            WARN_(d3d_perf)("Multiple contexts, calling glFinish() to enforce ordering.\n");
+            gl_info->gl_ops.gl.p_glFinish();
         }
+
+        /* call wglSwapBuffers through the gl table to avoid confusing the Steam overlay */
+        gl_info->gl_ops.wgl.p_wglSwapBuffers(context_gl->dc);
+
     }
 
+frame_done:
     if (context->d3d_info->fences)
         wined3d_context_gl_submit_command_fence(context_gl);
 
-    wined3d_swapchain_gl_rotate(swapchain, context);
+    if (!(flags & WINED3D_PRESENT_CLEAR_ONLY)) wined3d_swapchain_gl_rotate(swapchain, context);
 
     TRACE("SwapBuffers called, Starting new frame\n");
 
@@ -1470,7 +1566,8 @@ static VkResult wined3d_swapchain_vk_blit(struct wined3d_swapchain_vk *swapchain
         struct wined3d_context_vk *context_vk, const RECT *src_rect, const RECT *dst_rect,
         unsigned int swap_interval, uint32_t flags)
 {
-    struct wined3d_texture_vk *back_buffer_vk = wined3d_texture_vk(swapchain_vk->s.back_buffers[0]);
+    struct wined3d_texture_vk *back_buffer_vk = wined3d_texture_vk(swapchain_vk->s.has_target_scene
+            ? swapchain_vk->s.composite_texture : swapchain_vk->s.back_buffers[0]);
     struct wined3d_device_vk *device_vk = wined3d_device_vk(swapchain_vk->s.device);
     const struct wined3d_swapchain_desc *desc = &swapchain_vk->s.state.desc;
     const struct wined3d_vk_info *vk_info = context_vk->vk_info;
@@ -1537,104 +1634,39 @@ static VkResult wined3d_swapchain_vk_blit(struct wined3d_swapchain_vk *swapchain
             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             swapchain_vk->vk_images[image_idx], &vk_range);
 
-    if (swapchain_vk->s.has_target_scene)
+    if (flags & WINED3D_PRESENT_CLEAR)
     {
-        RECT client_rect;
-        int dst_w, dst_h;
-        GetClientRect(swapchain_vk->s.win_handle, &client_rect);
-        dst_w = client_rect.right - client_rect.left;
-        dst_h = client_rect.bottom - client_rect.top;
-
-        if (swapchain_vk->s.target_scene.layer_count > 0 && dst_w > 0 && dst_h > 0 && swapchain_vk->s.composite_texture)
-        {
-            struct wined3d_texture_vk *comp_vk;
-            VkImageSubresourceRange comp_range;
-
-            swapchain_composite_layers(&swapchain_vk->s, &context_vk->c);
-
-            wined3d_texture_load_location(swapchain_vk->s.composite_texture, 0, &context_vk->c,
-                    swapchain_vk->s.composite_texture->resource.draw_binding);
-
-            comp_vk = wined3d_texture_vk(swapchain_vk->s.composite_texture);
-            comp_range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            comp_range.baseMipLevel = 0;
-            comp_range.levelCount = 1;
-            comp_range.baseArrayLayer = 0;
-            comp_range.layerCount = 1;
-
-            wined3d_context_vk_image_barrier(context_vk, vk_command_buffer,
-                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    vk_access_mask_from_bind_flags(comp_vk->t.resource.bind_flags),
-                    VK_ACCESS_TRANSFER_READ_BIT,
-                    comp_vk->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                    comp_vk->image.vk_image, &comp_range);
-
-            blit.srcSubresource.aspectMask = comp_range.aspectMask;
-            blit.srcSubresource.mipLevel = comp_range.baseMipLevel;
-            blit.srcSubresource.baseArrayLayer = comp_range.baseArrayLayer;
-            blit.srcSubresource.layerCount = comp_range.layerCount;
-            blit.srcOffsets[0].x = 0;
-            blit.srcOffsets[0].y = 0;
-            blit.srcOffsets[0].z = 0;
-            blit.srcOffsets[1].x = dst_w;
-            blit.srcOffsets[1].y = dst_h;
-            blit.srcOffsets[1].z = 1;
-            blit.dstSubresource = blit.srcSubresource;
-            blit.dstOffsets[0].x = 0;
-            blit.dstOffsets[0].y = 0;
-            blit.dstOffsets[0].z = 0;
-            blit.dstOffsets[1].x = dst_w;
-            blit.dstOffsets[1].y = dst_h;
-            blit.dstOffsets[1].z = 1;
-
-            VK_CALL(vkCmdBlitImage(vk_command_buffer,
-                comp_vk->image.vk_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                swapchain_vk->vk_images[image_idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                1, &blit, filter));
-
-            wined3d_context_vk_reference_texture(context_vk, comp_vk);
-        }
-        else
-        {
-            VK_CALL(vkCmdClearColorImage(vk_command_buffer, swapchain_vk->vk_images[image_idx],
-                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &vk_range));
-        }
+        VK_CALL(vkCmdClearColorImage(vk_command_buffer, swapchain_vk->vk_images[image_idx],
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &vk_range));
+        wined3d_context_vk_image_barrier(context_vk, vk_command_buffer,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                swapchain_vk->vk_images[image_idx], &vk_range);
     }
-    else
-    {
-        if (flags & WINED3D_PRESENT_CLEAR)
-        {
-            VK_CALL(vkCmdClearColorImage(vk_command_buffer, swapchain_vk->vk_images[image_idx],
-                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &vk_range));
-            wined3d_context_vk_image_barrier(context_vk, vk_command_buffer,
-                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                    swapchain_vk->vk_images[image_idx], &vk_range);
-        }
-        blit.srcSubresource.aspectMask = vk_range.aspectMask;
-        blit.srcSubresource.mipLevel = vk_range.baseMipLevel;
-        blit.srcSubresource.baseArrayLayer = vk_range.baseArrayLayer;
-        blit.srcSubresource.layerCount = vk_range.layerCount;
-        blit.srcOffsets[0].x = src_rect->left;
-        blit.srcOffsets[0].y = src_rect->top;
-        blit.srcOffsets[0].z = 0;
-        blit.srcOffsets[1].x = src_rect->right;
-        blit.srcOffsets[1].y = src_rect->bottom;
-        blit.srcOffsets[1].z = 1;
-        blit.dstSubresource = blit.srcSubresource;
-        blit.dstOffsets[0].x = dst_rect->left;
-        blit.dstOffsets[0].y = dst_rect->top;
-        blit.dstOffsets[0].z = 0;
-        blit.dstOffsets[1].x = dst_rect->right;
-        blit.dstOffsets[1].y = dst_rect->bottom;
-        blit.dstOffsets[1].z = 1;
-        if (!(flags & WINED3D_PRESENT_CLEAR_ONLY))
-            VK_CALL(vkCmdBlitImage(vk_command_buffer,
-                back_buffer_vk->image.vk_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                swapchain_vk->vk_images[image_idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                1, &blit, filter));
-    }
+    blit.srcSubresource.aspectMask = vk_range.aspectMask;
+    blit.srcSubresource.mipLevel = vk_range.baseMipLevel;
+    blit.srcSubresource.baseArrayLayer = vk_range.baseArrayLayer;
+    blit.srcSubresource.layerCount = vk_range.layerCount;
+    blit.srcOffsets[0].x = src_rect->left;
+    blit.srcOffsets[0].y = src_rect->top;
+    blit.srcOffsets[0].z = 0;
+    blit.srcOffsets[1].x = src_rect->right;
+    blit.srcOffsets[1].y = src_rect->bottom;
+    blit.srcOffsets[1].z = 1;
+    blit.dstSubresource = blit.srcSubresource;
+    blit.dstOffsets[0].x = dst_rect->left;
+    blit.dstOffsets[0].y = dst_rect->top;
+    blit.dstOffsets[0].z = 0;
+    blit.dstOffsets[1].x = dst_rect->right;
+    blit.dstOffsets[1].y = dst_rect->bottom;
+    blit.dstOffsets[1].z = 1;
+    if (!(flags & WINED3D_PRESENT_CLEAR_ONLY))
+        VK_CALL(vkCmdBlitImage(vk_command_buffer,
+            back_buffer_vk->image.vk_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            swapchain_vk->vk_images[image_idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1, &blit, filter));
+
 
     wined3d_context_vk_reference_texture(context_vk, back_buffer_vk);
     wined3d_context_vk_image_barrier(context_vk, vk_command_buffer,
@@ -1736,8 +1768,31 @@ static void swapchain_vk_present(struct wined3d_swapchain *swapchain, const RECT
     struct wined3d_context_vk *context_vk;
     VkResult vr;
     HRESULT hr;
+    RECT client;
+    BOOL retained_only = flags & WINED3D_PRESENT_CLEAR_ONLY;
 
     context_vk = wined3d_context_vk(context_acquire(swapchain->device, back_buffer, 0));
+
+    if (swapchain->has_target_scene)
+    {
+        if (!(flags & WINED3D_PRESENT_CLEAR_ONLY)) swapchain_capture_frame(swapchain, &context_vk->c);
+        GetClientRect(swapchain->win_handle, &client);
+        swapchain_composite_layers(swapchain, &context_vk->c);
+        if (!swapchain->composite_texture) goto frame_done;
+        if (swapchain_vk->vk_swapchain &&
+                (swapchain_vk->width != (unsigned int)client.right || swapchain_vk->height != (unsigned int)client.bottom))
+        {
+            if (FAILED(hr = wined3d_swapchain_vk_recreate(swapchain_vk)))
+            {
+                ERR("Failed to resize retained target, hr %#lx.\n", hr);
+                goto frame_done;
+            }
+        }
+        wined3d_texture_load_location(swapchain->composite_texture, 0, &context_vk->c,
+                swapchain->composite_texture->resource.draw_binding);
+        src_rect = dst_rect = &client;
+        flags &= ~WINED3D_PRESENT_CLEAR_ONLY;
+    }
 
     if (!swapchain_vk->vk_swapchain || swapchain_present_is_partial_copy(swapchain, dst_rect))
     {
@@ -1748,7 +1803,8 @@ static void swapchain_vk_present(struct wined3d_swapchain *swapchain, const RECT
             PatBlt(swapchain->dc, 0, 0, rc.right, rc.bottom, BLACKNESS);
         }
         if (!(flags & WINED3D_PRESENT_CLEAR_ONLY))
-            swapchain_blit_gdi(swapchain, &context_vk->c, src_rect, dst_rect);
+            swapchain_blit_gdi_texture(swapchain, &context_vk->c,
+                    swapchain->has_target_scene ? swapchain->composite_texture : back_buffer, src_rect, dst_rect);
     }
     else
     {
@@ -1771,7 +1827,8 @@ static void swapchain_vk_present(struct wined3d_swapchain *swapchain, const RECT
         }
     }
 
-    wined3d_swapchain_vk_rotate(swapchain, context_vk);
+frame_done:
+    if (!retained_only) wined3d_swapchain_vk_rotate(swapchain, context_vk);
 
     wined3d_texture_validate_location(swapchain->front_buffer, 0, WINED3D_LOCATION_DRAWABLE);
     wined3d_texture_invalidate_location(swapchain->front_buffer, 0, ~WINED3D_LOCATION_DRAWABLE);
