@@ -2943,6 +2943,34 @@ HRESULT __cdecl wined3d_swapchain_set_max_frame_latency(struct wined3d_swapchain
 void __cdecl wined3d_swapchain_set_palette(struct wined3d_swapchain *swapchain, struct wined3d_palette *palette);
 void __cdecl wined3d_swapchain_set_window(struct wined3d_swapchain *swapchain, HWND window);
 
+#define WINED3D_DCOMP_MAX_LAYERS 32
+
+struct wined3d_dcomp_layer
+{
+    struct wined3d_swapchain *swapchain;
+    float m11, m12;
+    float m21, m22;
+    float m31, m32;
+    int width, height;
+    BOOL has_clip;
+    RECT clip_rect;
+    float radius_tl_x, radius_tl_y;
+    float radius_tr_x, radius_tr_y;
+    float radius_bl_x, radius_bl_y;
+    float radius_br_x, radius_br_y;
+    float opacity;
+};
+
+struct wined3d_dcomp_target_scene
+{
+    HWND target_hwnd;
+    unsigned int layer_count;
+    struct wined3d_dcomp_layer layers[WINED3D_DCOMP_MAX_LAYERS];
+};
+
+void __cdecl wined3d_swapchain_set_target_scene(struct wined3d_swapchain *swapchain,
+        const struct wined3d_dcomp_target_scene *scene);
+
 HRESULT __cdecl wined3d_swapchain_state_create(const struct wined3d_swapchain_desc *desc,
         HWND window, struct wined3d *wined3d, struct wined3d_swapchain_state_parent *state_parent,
         struct wined3d_swapchain_state **state);
