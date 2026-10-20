@@ -57,4 +57,35 @@ struct wine_dcomp_layer_params
     float opacity;
 };
 
+#define WINE_DCOMP_TARGET_SCENE_PROP  L"__wine_dcomp_target_scene"
+#define WINE_DCOMP_MAX_LAYERS         32
+
+struct wine_dcomp_layer_desc
+{
+    IUnknown *content;
+    float offset_x;
+    float offset_y;
+    int width;
+    int height;
+    BOOL has_transform;
+    float m11, m12;
+    float m21, m22;
+    float m31, m32;
+    BOOL has_clip;
+    RECT clip_rect;
+    float radius_tl_x, radius_tl_y;
+    float radius_tr_x, radius_tr_y;
+    float radius_bl_x, radius_bl_y;
+    float radius_br_x, radius_br_y;
+    float opacity;
+    int opacity_mode;
+};
+
+struct wine_dcomp_target_scene
+{
+    HWND target_hwnd;
+    unsigned int layer_count;
+    struct wine_dcomp_layer_desc layers[WINE_DCOMP_MAX_LAYERS];
+};
+
 #endif /* __WINE_DCOMP_LAYER_H */

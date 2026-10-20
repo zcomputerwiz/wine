@@ -84,6 +84,10 @@ struct dcomp_visual_state
     enum DCOMPOSITION_OPACITY_MODE opacity_mode;
     BOOL has_transform;
     D2D_MATRIX_3X2_F transform;
+    float radius_tl_x, radius_tl_y;
+    float radius_tr_x, radius_tr_y;
+    float radius_bl_x, radius_bl_y;
+    float radius_br_x, radius_br_y;
 };
 
 struct dcomp_visual
@@ -225,7 +229,6 @@ static HRESULT STDMETHODCALLTYPE dcomp_effect_group_SetOpacity(IDCompositionEffe
 {
     struct dcomp_effect_group *group = impl_from_IDCompositionEffectGroup(iface);
     if (!isfinite(opacity) || opacity < 0.0f || opacity > 1.0f) return E_INVALIDARG;
-    if (opacity != 1.0f) return E_NOTIMPL;
     group->opacity = opacity;
     return S_OK;
 }
@@ -311,24 +314,24 @@ static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomAnimation(IDCompo
 static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottom(IDCompositionRectangleClip *iface, float bottom) { if (!isfinite(bottom) || fabsf(bottom) > 1048576) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->bottom = bottom; return S_OK; }
 
 static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopLeftRadiusXAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopLeftRadiusX(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; if (r != 0.0f) return E_NOTIMPL; impl_from_IDCompositionRectangleClip(iface)->top_left_radius_x = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopLeftRadiusX(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->top_left_radius_x = r; return S_OK; }
 static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopLeftRadiusYAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopLeftRadiusY(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; if (r != 0.0f) return E_NOTIMPL; impl_from_IDCompositionRectangleClip(iface)->top_left_radius_y = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopLeftRadiusY(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->top_left_radius_y = r; return S_OK; }
 
 static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopRightRadiusXAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopRightRadiusX(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; if (r != 0.0f) return E_NOTIMPL; impl_from_IDCompositionRectangleClip(iface)->top_right_radius_x = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopRightRadiusX(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->top_right_radius_x = r; return S_OK; }
 static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopRightRadiusYAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopRightRadiusY(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; if (r != 0.0f) return E_NOTIMPL; impl_from_IDCompositionRectangleClip(iface)->top_right_radius_y = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetTopRightRadiusY(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->top_right_radius_y = r; return S_OK; }
 
 static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomLeftRadiusXAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomLeftRadiusX(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; if (r != 0.0f) return E_NOTIMPL; impl_from_IDCompositionRectangleClip(iface)->bottom_left_radius_x = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomLeftRadiusX(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->bottom_left_radius_x = r; return S_OK; }
 static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomLeftRadiusYAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomLeftRadiusY(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; if (r != 0.0f) return E_NOTIMPL; impl_from_IDCompositionRectangleClip(iface)->bottom_left_radius_y = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomLeftRadiusY(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->bottom_left_radius_y = r; return S_OK; }
 
 static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomRightRadiusXAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomRightRadiusX(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; if (r != 0.0f) return E_NOTIMPL; impl_from_IDCompositionRectangleClip(iface)->bottom_right_radius_x = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomRightRadiusX(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->bottom_right_radius_x = r; return S_OK; }
 static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomRightRadiusYAnimation(IDCompositionRectangleClip *iface, IDCompositionAnimation *animation) { return E_NOTIMPL; }
-static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomRightRadiusY(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; if (r != 0.0f) return E_NOTIMPL; impl_from_IDCompositionRectangleClip(iface)->bottom_right_radius_y = r; return S_OK; }
+static HRESULT STDMETHODCALLTYPE dcomp_rectangle_clip_SetBottomRightRadiusY(IDCompositionRectangleClip *iface, float r) { if (!isfinite(r) || r < 0.0f) return E_INVALIDARG; impl_from_IDCompositionRectangleClip(iface)->bottom_right_radius_y = r; return S_OK; }
 
 static const struct IDCompositionRectangleClipVtbl dcomp_rectangle_clip_vtbl =
 {
@@ -531,10 +534,10 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetTransform(IDCompositionVisual2 
         if (!isfinite(matrix->_11) || !isfinite(matrix->_12) || !isfinite(matrix->_21)
                 || !isfinite(matrix->_22) || !isfinite(matrix->_31) || !isfinite(matrix->_32))
             return E_INVALIDARG;
-        if (matrix->_12 || matrix->_21 || matrix->_11 < 0 || matrix->_22 < 0)
-            return E_NOTIMPL;
-        if (matrix->_11 > 64 || matrix->_22 > 64 || fabsf(matrix->_31) > 1048576
-                || fabsf(matrix->_32) > 1048576) return E_INVALIDARG;
+        if (fabsf(matrix->_11) > 64.0f || fabsf(matrix->_12) > 64.0f || fabsf(matrix->_21) > 64.0f
+                || fabsf(matrix->_22) > 64.0f || fabsf(matrix->_31) > 1048576.0f
+                || fabsf(matrix->_32) > 1048576.0f)
+            return E_INVALIDARG;
         visual->pending.has_transform = TRUE;
         visual->pending.transform = *matrix;
     }
@@ -629,12 +632,24 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetClipObject(IDCompositionVisual2
             visual->pending.clip.top = rc->top;
             visual->pending.clip.right = rc->right;
             visual->pending.clip.bottom = rc->bottom;
+            visual->pending.radius_tl_x = rc->top_left_radius_x;
+            visual->pending.radius_tl_y = rc->top_left_radius_y;
+            visual->pending.radius_tr_x = rc->top_right_radius_x;
+            visual->pending.radius_tr_y = rc->top_right_radius_y;
+            visual->pending.radius_bl_x = rc->bottom_left_radius_x;
+            visual->pending.radius_bl_y = rc->bottom_left_radius_y;
+            visual->pending.radius_br_x = rc->bottom_right_radius_x;
+            visual->pending.radius_br_y = rc->bottom_right_radius_y;
             IDCompositionRectangleClip_Release(rclip);
         }
     }
     else
     {
         visual->pending.has_clip = FALSE;
+        visual->pending.radius_tl_x = visual->pending.radius_tl_y = 0.0f;
+        visual->pending.radius_tr_x = visual->pending.radius_tr_y = 0.0f;
+        visual->pending.radius_bl_x = visual->pending.radius_bl_y = 0.0f;
+        visual->pending.radius_br_x = visual->pending.radius_br_y = 0.0f;
     }
 
     if (visual->pending.clip_obj)
@@ -659,6 +674,11 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetClip(IDCompositionVisual2 *ifac
         IDCompositionClip_Release(visual->pending.clip_obj);
         visual->pending.clip_obj = NULL;
     }
+
+    visual->pending.radius_tl_x = visual->pending.radius_tl_y = 0.0f;
+    visual->pending.radius_tr_x = visual->pending.radius_tr_y = 0.0f;
+    visual->pending.radius_bl_x = visual->pending.radius_bl_y = 0.0f;
+    visual->pending.radius_br_x = visual->pending.radius_br_y = 0.0f;
 
     if (rect)
     {
@@ -1025,6 +1045,8 @@ static HRESULT dcomp_bind_content(IUnknown *content, HWND hwnd, const RECT *dst,
     if (!content) return S_OK;
     if (FAILED(hr = IUnknown_QueryInterface(content, &IID_IWineDCompSwapChain, (void **)&binding)))
         return E_NOTIMPL;
+    if (!hwnd)
+        IWineDCompSwapChain_set_target_scene(binding, NULL, NULL);
     hr = IWineDCompSwapChain_set_target(binding, hwnd, dst, clip);
     IWineDCompSwapChain_Release(binding);
     return hr;
@@ -1065,6 +1087,14 @@ static void dcomp_visual_apply_commit(struct dcomp_visual *visual)
             visual->active.clip.top = rc->top;
             visual->active.clip.right = rc->right;
             visual->active.clip.bottom = rc->bottom;
+            visual->active.radius_tl_x = rc->top_left_radius_x;
+            visual->active.radius_tl_y = rc->top_left_radius_y;
+            visual->active.radius_tr_x = rc->top_right_radius_x;
+            visual->active.radius_tr_y = rc->top_right_radius_y;
+            visual->active.radius_bl_x = rc->bottom_left_radius_x;
+            visual->active.radius_bl_y = rc->bottom_left_radius_y;
+            visual->active.radius_br_x = rc->bottom_right_radius_x;
+            visual->active.radius_br_y = rc->bottom_right_radius_y;
             IDCompositionRectangleClip_Release(rclip);
         }
     }
@@ -1155,46 +1185,188 @@ static HRESULT dcomp_visual_commit_content_tree(struct dcomp_visual *visual, HWN
     return S_OK;
 }
 
-/* Until a retained multilayer renderer exists, do not pretend independent blits
- * to the same HWND implement stacking/alpha. Validate before changing any target.
- * This initial coherent slice supports one content leaf per device. */
 static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int *contents,
-        float scale_x, float scale_y, float x, float y, unsigned int depth)
+        const D2D_MATRIX_3X2_F *parent_mat, unsigned int depth)
 {
     struct dcomp_visual *child;
     IWineDCompSwapChain *binding;
+    D2D_MATRIX_3X2_F loc_mat, cur_mat;
     HRESULT hr;
 
     if (!visual) return S_OK;
     if (depth > 128) return E_INVALIDARG;
-    x += visual->pending.offset_x * scale_x;
-    y += visual->pending.offset_y * scale_y;
+
     if (visual->pending.has_transform)
-    {
-        x += visual->pending.transform._31 * scale_x;
-        y += visual->pending.transform._32 * scale_y;
-        scale_x *= visual->pending.transform._11;
-        scale_y *= visual->pending.transform._22;
-    }
-    if (!isfinite(x) || !isfinite(y) || !isfinite(scale_x) || !isfinite(scale_y)
-            || fabsf(x) > 1048576 || fabsf(y) > 1048576
-            || scale_x > 64 || scale_y > 64) return E_INVALIDARG;
+        loc_mat = visual->pending.transform;
+    else
+        loc_mat = (D2D_MATRIX_3X2_F){1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+
+    loc_mat._31 += visual->pending.offset_x;
+    loc_mat._32 += visual->pending.offset_y;
+
+    cur_mat._11 = loc_mat._11 * parent_mat->_11 + loc_mat._12 * parent_mat->_21;
+    cur_mat._12 = loc_mat._11 * parent_mat->_12 + loc_mat._12 * parent_mat->_22;
+    cur_mat._21 = loc_mat._21 * parent_mat->_11 + loc_mat._22 * parent_mat->_21;
+    cur_mat._22 = loc_mat._21 * parent_mat->_12 + loc_mat._22 * parent_mat->_22;
+    cur_mat._31 = loc_mat._31 * parent_mat->_11 + loc_mat._32 * parent_mat->_21 + parent_mat->_31;
+    cur_mat._32 = loc_mat._31 * parent_mat->_12 + loc_mat._32 * parent_mat->_22 + parent_mat->_32;
+
+    if (!isfinite(cur_mat._11) || !isfinite(cur_mat._12) ||
+        !isfinite(cur_mat._21) || !isfinite(cur_mat._22) ||
+        !isfinite(cur_mat._31) || !isfinite(cur_mat._32) ||
+        fabsf(cur_mat._31) > 1048576.0f || fabsf(cur_mat._32) > 1048576.0f)
+        return E_INVALIDARG;
+
     if (visual->pending.content)
     {
-        if (++*contents > 1) return E_NOTIMPL;
+        if (++*contents > WINE_DCOMP_MAX_LAYERS) return E_NOTIMPL;
         if (FAILED(hr = IUnknown_QueryInterface(visual->pending.content,
                 &IID_IWineDCompSwapChain, (void **)&binding))) return E_NOTIMPL;
         IWineDCompSwapChain_Release(binding);
     }
+
     for (child = visual->pending_children; child; child = child->pending_next_sibling)
-        if (FAILED(hr = dcomp_validate_pending(child, contents, scale_x, scale_y, x, y, depth + 1)))
+        if (FAILED(hr = dcomp_validate_pending(child, contents, &cur_mat, depth + 1)))
             return hr;
+
     return S_OK;
+}
+
+struct dcomp_collect_context
+{
+    HWND target_hwnd;
+    struct wine_dcomp_target_scene scene;
+};
+
+static void dcomp_collect_children_back_to_front(struct dcomp_visual *child,
+        const D2D_MATRIX_3X2_F *parent_mat,
+        const D2D_RECT_F *parent_clip,
+        BOOL parent_has_clip,
+        float parent_opacity,
+        enum DCOMPOSITION_OPACITY_MODE parent_opacity_mode,
+        struct dcomp_collect_context *ctx);
+
+static void dcomp_visual_collect_layers(struct dcomp_visual *visual,
+        const D2D_MATRIX_3X2_F *parent_mat,
+        const D2D_RECT_F *parent_clip,
+        BOOL parent_has_clip,
+        float parent_opacity,
+        enum DCOMPOSITION_OPACITY_MODE parent_opacity_mode,
+        struct dcomp_collect_context *ctx)
+{
+    D2D_MATRIX_3X2_F loc_mat, cur_mat;
+    D2D_RECT_F cur_clip;
+    BOOL cur_has_clip;
+    float cur_opacity;
+    enum DCOMPOSITION_OPACITY_MODE cur_opacity_mode;
+
+    if (!visual) return;
+
+    if (visual->active.has_transform)
+        loc_mat = visual->active.transform;
+    else
+        loc_mat = (D2D_MATRIX_3X2_F){1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+
+    loc_mat._31 += visual->active.offset_x;
+    loc_mat._32 += visual->active.offset_y;
+
+    cur_mat._11 = loc_mat._11 * parent_mat->_11 + loc_mat._12 * parent_mat->_21;
+    cur_mat._12 = loc_mat._11 * parent_mat->_12 + loc_mat._12 * parent_mat->_22;
+    cur_mat._21 = loc_mat._21 * parent_mat->_11 + loc_mat._22 * parent_mat->_21;
+    cur_mat._22 = loc_mat._21 * parent_mat->_12 + loc_mat._22 * parent_mat->_22;
+    cur_mat._31 = loc_mat._31 * parent_mat->_11 + loc_mat._32 * parent_mat->_21 + parent_mat->_31;
+    cur_mat._32 = loc_mat._31 * parent_mat->_12 + loc_mat._32 * parent_mat->_22 + parent_mat->_32;
+
+    cur_opacity_mode = visual->active.opacity_mode;
+    if (cur_opacity_mode == DCOMPOSITION_OPACITY_MODE_INHERIT)
+        cur_opacity_mode = parent_opacity_mode;
+
+    cur_opacity = parent_opacity * visual->active.opacity;
+    if (cur_opacity < 0.0f) cur_opacity = 0.0f;
+    if (cur_opacity > 1.0f) cur_opacity = 1.0f;
+
+    cur_has_clip = visual->active.has_clip;
+    if (cur_has_clip)
+        cur_clip = visual->active.clip;
+    else if (parent_has_clip)
+    {
+        cur_clip = *parent_clip;
+        cur_has_clip = TRUE;
+    }
+
+    /* Visual's own content renders behind its children */
+    if (visual->active.content && ctx->scene.layer_count < WINE_DCOMP_MAX_LAYERS)
+    {
+        struct wine_dcomp_layer_desc *l = &ctx->scene.layers[ctx->scene.layer_count++];
+        IDXGISwapChain1 *sc = NULL;
+        DXGI_SWAP_CHAIN_DESC1 desc;
+
+        l->content = visual->active.content;
+        l->offset_x = cur_mat._31;
+        l->offset_y = cur_mat._32;
+        l->has_transform = TRUE;
+        l->m11 = cur_mat._11;
+        l->m12 = cur_mat._12;
+        l->m21 = cur_mat._21;
+        l->m22 = cur_mat._22;
+        l->m31 = cur_mat._31;
+        l->m32 = cur_mat._32;
+
+        if (SUCCEEDED(IUnknown_QueryInterface(visual->active.content,
+                &IID_IDXGISwapChain1, (void **)&sc)))
+        {
+            if (SUCCEEDED(IDXGISwapChain1_GetDesc1(sc, &desc)))
+            {
+                l->width = desc.Width;
+                l->height = desc.Height;
+            }
+            IDXGISwapChain1_Release(sc);
+        }
+
+        l->has_clip = visual->active.has_clip;
+        if (l->has_clip)
+        {
+            l->clip_rect.left = (LONG)floorf(visual->active.clip.left);
+            l->clip_rect.top = (LONG)floorf(visual->active.clip.top);
+            l->clip_rect.right = (LONG)ceilf(visual->active.clip.right);
+            l->clip_rect.bottom = (LONG)ceilf(visual->active.clip.bottom);
+            l->radius_tl_x = visual->active.radius_tl_x;
+            l->radius_tl_y = visual->active.radius_tl_y;
+            l->radius_tr_x = visual->active.radius_tr_x;
+            l->radius_tr_y = visual->active.radius_tr_y;
+            l->radius_bl_x = visual->active.radius_bl_x;
+            l->radius_bl_y = visual->active.radius_bl_y;
+            l->radius_br_x = visual->active.radius_br_x;
+            l->radius_br_y = visual->active.radius_br_y;
+        }
+
+        l->opacity = cur_opacity;
+        l->opacity_mode = cur_opacity_mode;
+    }
+
+    dcomp_collect_children_back_to_front(visual->active_children,
+            &cur_mat, &cur_clip, cur_has_clip, cur_opacity, cur_opacity_mode, ctx);
+}
+
+static void dcomp_collect_children_back_to_front(struct dcomp_visual *child,
+        const D2D_MATRIX_3X2_F *parent_mat,
+        const D2D_RECT_F *parent_clip,
+        BOOL parent_has_clip,
+        float parent_opacity,
+        enum DCOMPOSITION_OPACITY_MODE parent_opacity_mode,
+        struct dcomp_collect_context *ctx)
+{
+    if (!child) return;
+    dcomp_collect_children_back_to_front(child->active_next_sibling,
+            parent_mat, parent_clip, parent_has_clip, parent_opacity, parent_opacity_mode, ctx);
+    dcomp_visual_collect_layers(child,
+            parent_mat, parent_clip, parent_has_clip, parent_opacity, parent_opacity_mode, ctx);
 }
 
 static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
 {
     struct dcomp_target *target;
+    D2D_MATRIX_3X2_F ident = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
     unsigned int contents = 0;
     HRESULT hr;
 
@@ -1203,7 +1375,7 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
     EnterCriticalSection(&dev->cs);
     LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
     {
-        if (FAILED(hr = dcomp_validate_pending(target->pending_root, &contents, 1, 1, 0, 0, 0)))
+        if (FAILED(hr = dcomp_validate_pending(target->pending_root, &contents, &ident, 0)))
         {
             LeaveCriticalSection(&dev->cs);
             return hr;
@@ -1229,7 +1401,31 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
             dcomp_visual_apply_commit(target->active_root);
 
             if (target->hwnd && IsWindow(target->hwnd))
+            {
+                struct dcomp_collect_context ctx;
+                unsigned int i;
+
+                memset(&ctx, 0, sizeof(ctx));
+                ctx.target_hwnd = target->hwnd;
+                ctx.scene.target_hwnd = target->hwnd;
+
+                dcomp_visual_collect_layers(target->active_root, &ident, NULL, FALSE, 1.0f,
+                        DCOMPOSITION_OPACITY_MODE_MULTIPLY, &ctx);
+
+                for (i = 0; i < ctx.scene.layer_count; ++i)
+                {
+                    IWineDCompSwapChain *sc_binding = NULL;
+                    if (ctx.scene.layers[i].content &&
+                        SUCCEEDED(IUnknown_QueryInterface(ctx.scene.layers[i].content,
+                                &IID_IWineDCompSwapChain, (void **)&sc_binding)))
+                    {
+                        IWineDCompSwapChain_set_target_scene(sc_binding, target->hwnd, &ctx.scene);
+                        IWineDCompSwapChain_Release(sc_binding);
+                    }
+                }
+
                 dcomp_visual_commit_content_tree(target->active_root, target->hwnd, 0, 0, 1.0f, 1.0f, NULL, FALSE, 1.0f);
+            }
         }
     }
     LeaveCriticalSection(&dev->cs);

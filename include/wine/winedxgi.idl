@@ -32,6 +32,7 @@ interface IWineDCompSwapChain : IUnknown
 {
     HRESULT set_target([in] HWND target, [in] const RECT *destination,
             [in] const RECT *clip);
+    HRESULT set_target_scene([in] HWND target, [in] const void *scene);
 }
 
 [
