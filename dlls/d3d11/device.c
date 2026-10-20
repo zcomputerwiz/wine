@@ -5532,8 +5532,23 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_CheckFormatSupport(ID3D11Device5 *
         }
     }
 
-    /* d3d11 requires 4 and 8 sample counts support for formats reported to
-     * support multisample. */
+    /* Report usable multisampled render targets independently of the 4x/8x
+     * feature-level guarantees. Some backends support 4x but not 8x; hiding
+     * that support also prevents consumers from constructing single-sample
+     * format tables. Exact sample counts still come from CheckMultisampleQualityLevels. */
+    if (*format_support & (D3D11_FORMAT_SUPPORT_RENDER_TARGET | D3D11_FORMAT_SUPPORT_DEPTH_STENCIL))
+    {
+        for (i = WINED3D_MULTISAMPLE_2_SAMPLES; i <= WINED3D_MULTISAMPLE_16_SAMPLES; ++i)
+        {
+            if (wined3d_check_device_multisample_type(wined3d_adapter, params.device_type,
+                    wined3d_format, TRUE, i, NULL) != WINED3D_OK) continue;
+            *format_support |= D3D11_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET;
+            break;
+        }
+    }
+
+    /* Preserve the existing conservative resolve / shader-load advertisement;
+     * neither is implied solely by the render-target capability above. */
     if (wined3d_check_device_multisample_type(wined3d_adapter, params.device_type, wined3d_format,
             TRUE, WINED3D_MULTISAMPLE_4_SAMPLES, NULL) == WINED3D_OK &&
             wined3d_check_device_multisample_type(wined3d_adapter, params.device_type, wined3d_format,
@@ -5544,6 +5559,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_CheckFormatSupport(ID3D11Device5 *
                 | D3D11_FORMAT_SUPPORT_MULTISAMPLE_LOAD;
     }
 
+    TRACE("Format %s support %#x.\n", debug_dxgi_format(format), *format_support);
     return *format_support ? S_OK : E_FAIL;
 }
 
