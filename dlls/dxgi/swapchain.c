@@ -27,6 +27,9 @@
 WINE_DEFAULT_DEBUG_CHANNEL(dxgi);
 WINE_DECLARE_DEBUG_CHANNEL(winediag);
 
+/* Binding/DC changes must not race Present's parameter snapshot/enqueue. */
+static SRWLOCK dcomp_binding_lock = SRWLOCK_INIT;
+
 static DXGI_SWAP_EFFECT dxgi_swap_effect_from_wined3d(enum wined3d_swap_effect swap_effect)
 {
     switch (swap_effect)
@@ -307,9 +310,28 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_SetPrivateDataInterface(IDXGISw
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetPrivateData(IDXGISwapChain4 *iface,
         REFGUID guid, UINT *data_size, void *data)
 {
+    static const GUID dcomp_stats_guid = {0xa1042da3,0x2ea1,0x4d9a,{0xa4,0x03,0x01,0x1e,0xd3,0x61,0x83,0xfb}};
     struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
 
     TRACE("iface %p, guid %s, data_size %p, data %p.\n", iface, debugstr_guid(guid), data_size, data);
+
+    if (swapchain->comp_wnd && IsEqualGUID(guid, &dcomp_stats_guid))
+    {
+        struct wined3d_dcomp_stats stats;
+        if (!data_size) return E_INVALIDARG;
+        if (*data_size < sizeof(struct wined3d_dcomp_stats))
+        {
+            *data_size = sizeof(struct wined3d_dcomp_stats);
+            return DXGI_ERROR_MORE_DATA;
+        }
+        if (!data) return E_INVALIDARG;
+        AcquireSRWLockShared(&dcomp_binding_lock);
+        wined3d_swapchain_get_dcomp_stats(swapchain->wined3d_swapchain, &stats);
+        ReleaseSRWLockShared(&dcomp_binding_lock);
+        memcpy(data, &stats, sizeof(stats));
+        *data_size = sizeof(struct wined3d_dcomp_stats);
+        return S_OK;
+    }
 
     return dxgi_get_private_data(&swapchain->private_store, guid, data_size, data);
 }
@@ -340,9 +362,6 @@ static inline struct d3d11_swapchain *impl_from_IWineDCompSwapChain(IWineDCompSw
 {
     return CONTAINING_RECORD(iface, struct d3d11_swapchain, IWineDCompSwapChain_iface);
 }
-
-/* Binding/DC changes must not race Present's parameter snapshot/enqueue. */
-static SRWLOCK dcomp_binding_lock = SRWLOCK_INIT;
 
 static HRESULT STDMETHODCALLTYPE dcomp_binding_QueryInterface(IWineDCompSwapChain *iface, REFIID iid, void **out)
 {
