@@ -435,21 +435,18 @@ static HRESULT dcomp_binding_target_scene(IWineDCompSwapChain *iface,
     AcquireSRWLockExclusive(&dcomp_binding_lock);
     if (!target || !dcomp_scene)
     {
-        wined3d_swapchain_set_target_scene(swapchain->wined3d_swapchain, NULL, prepare);
         if (prepare)
         {
+            hr = wined3d_swapchain_set_target_scene(swapchain->wined3d_swapchain, NULL, TRUE);
             ReleaseSRWLockExclusive(&dcomp_binding_lock);
-            return S_OK;
+            return hr;
         }
-        if (swapchain->target_hwnd)
-        {
-            RECT empty = {0};
-            wined3d_swapchain_present(swapchain->wined3d_swapchain, &empty, &empty,
-                    swapchain->target_hwnd, 0, WINED3D_PRESENT_CLEAR | WINED3D_PRESENT_CLEAR_ONLY);
-        }
+        /* WineD3D restores the current application underlay while revoking
+         * this scene, without consuming another transaction's prepared scene. */
+        hr = wined3d_swapchain_set_target_scene(swapchain->wined3d_swapchain, NULL, FALSE);
         dcomp_swapchain_apply_target(swapchain, WINE_DCOMP_SET_TARGET_LEGACY, 0);
         ReleaseSRWLockExclusive(&dcomp_binding_lock);
-        return S_OK;
+        return hr;
     }
 
     memset(&wined3d_scene, 0, sizeof(wined3d_scene));

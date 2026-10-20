@@ -49,6 +49,7 @@
 #include "x11drv.h"
 #include "winternl.h"
 #include "wine/debug.h"
+#include "wine/dcomp_underlay.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(bitblt);
 
@@ -1983,6 +1984,9 @@ static BOOL enable_direct_drawing( struct x11drv_win_data *data, BOOL layered )
     if (layered) return FALSE;
     if (data->embedded) return TRUE; /* draw directly to the window */
     if (data->whole_window == root_window) return TRUE; /* draw directly to the window */
+    /* Keep the application underlay independent of the DComp client drawable,
+     * including when a resize recreates the ordinary window surface. */
+    if (NtUserGetProp(data->hwnd, WINE_DCOMP_UNDERLAY_PROP)) return FALSE;
     if (data->client_window) return TRUE; /* draw directly to the window */
     if (!client_side_graphics) return TRUE; /* draw directly to the window */
     return FALSE;

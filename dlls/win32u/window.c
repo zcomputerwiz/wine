@@ -31,6 +31,7 @@
 #include "wine/opengl_driver.h"
 #include "wine/server.h"
 #include "wine/debug.h"
+#include "wine/dcomp_underlay.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(win);
 
@@ -1791,6 +1792,17 @@ HANDLE WINAPI NtUserGetProp( HWND hwnd, const WCHAR *str )
  * NOTE Native allows only ATOMs as the second argument. We allow strings
  *      to save extra server call in SetPropW.
  */
+static void invalidate_dcomp_underlay_dc( HWND hwnd, const WCHAR *str )
+{
+    WND *win;
+
+    if (IS_INTRESOURCE(str) || wcscmp(str, WINE_DCOMP_UNDERLAY_PROP)) return;
+    if (!(win = get_win_ptr(hwnd)) || win == WND_DESKTOP || win == WND_OTHER_PROCESS) return;
+    invalidate_dce(win, NULL);
+    release_win_ptr(win);
+    update_window_state(hwnd);
+}
+
 BOOL WINAPI NtUserSetProp( HWND hwnd, const WCHAR *str, HANDLE handle )
 {
     BOOL ret;
@@ -1804,6 +1816,7 @@ BOOL WINAPI NtUserSetProp( HWND hwnd, const WCHAR *str, HANDLE handle )
         ret = !wine_server_call_err( req );
     }
     SERVER_END_REQ;
+    if (ret) invalidate_dcomp_underlay_dc(hwnd, str);
     return ret;
 }
 
@@ -1827,6 +1840,7 @@ HANDLE WINAPI NtUserRemoveProp( HWND hwnd, const WCHAR *str )
     }
     SERVER_END_REQ;
 
+    if (ret) invalidate_dcomp_underlay_dc(hwnd, str);
     return (HANDLE)ret;
 }
 

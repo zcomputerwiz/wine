@@ -4131,6 +4131,8 @@ struct wined3d_swapchain
     struct wined3d_dcomp_target_scene target_scene;
     BOOL has_target_scene;
     struct wined3d_texture *composite_texture;
+    struct wined3d_dcomp_background *dcomp_background;
+    struct wined3d_dcomp_background *prepared_background;
     UINT64 dcomp_gpu_compositions, dcomp_cpu_compositions;
     struct wined3d_dcomp_frame *dcomp_frame;
     struct wined3d_dcomp_target_scene prepared_scene;
