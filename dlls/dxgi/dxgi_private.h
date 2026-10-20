@@ -200,6 +200,12 @@ struct d3d11_swapchain
     RECT src_rect;      /* matching back buffer source rectangle */
     BOOL has_dst_rect;
     BOOL fully_clipped;
+    /* Serializes Present/Present1 history with ResizeBuffers. The device is
+     * borrowed from the retained IWineDXGIDevice. History copies use its CS. */
+    SRWLOCK present_lock;
+    struct wined3d_device *present_device;
+    struct wined3d_texture *present_history, *present_next;
+    BOOL present_history_valid;
 };
 
 struct d3d11_swapchain *d3d11_swapchain_from_composition_candidate(IDXGISwapChain1 *iface);
