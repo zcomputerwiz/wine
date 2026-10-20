@@ -60,6 +60,8 @@ struct wine_dcomp_layer_params
 #define WINE_DCOMP_TARGET_SCENE_PROP  L"__wine_dcomp_target_scene"
 #define WINE_DCOMP_MAX_LAYERS         32
 
+struct wine_dcomp_clip_rect { float left, top, right, bottom; };
+
 struct wine_dcomp_layer_desc
 {
     IUnknown *content;
@@ -72,13 +74,14 @@ struct wine_dcomp_layer_desc
     float m21, m22;
     float m31, m32;
     BOOL has_clip;
-    RECT clip_rect;
+    struct wine_dcomp_clip_rect clip_rect;
     float radius_tl_x, radius_tl_y;
     float radius_tr_x, radius_tr_y;
     float radius_bl_x, radius_bl_y;
     float radius_br_x, radius_br_y;
     float opacity;
     int opacity_mode;
+    BOOL ignore_alpha;
 };
 
 struct wine_dcomp_target_scene

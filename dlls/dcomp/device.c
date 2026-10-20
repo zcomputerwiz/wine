@@ -48,6 +48,9 @@ struct dcomp_device;
 struct dcomp_target;
 struct dcomp_visual;
 
+static void dcomp_visual_unbind_tree(struct dcomp_visual *visual);
+static const struct IDCompositionVisual2Vtbl dcomp_visual_vtbl;
+
 struct dcomp_device;
 struct dcomp_target;
 struct dcomp_visual;
@@ -720,7 +723,10 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_AddVisual(IDCompositionVisual2 *if
     if (!visual || visual == (IDCompositionVisual *)iface)
         return E_INVALIDARG;
 
+    if ((const void *)visual->lpVtbl != &dcomp_visual_vtbl) return E_NOTIMPL;
+
     child = impl_from_IDCompositionVisual(visual);
+    if (child->device != parent->device) return E_INVALIDARG;
 
     /* Cycle detection: parent cannot be child or any descendant of child */
     for (cur = parent; cur; cur = cur->pending_parent)
@@ -731,6 +737,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_AddVisual(IDCompositionVisual2 *if
 
     if (reference_visual)
     {
+        if ((const void *)reference_visual->lpVtbl != &dcomp_visual_vtbl) return E_NOTIMPL;
         if (reference_visual == visual)
             return E_INVALIDARG;
         ref = impl_from_IDCompositionVisual(reference_visual);
@@ -741,6 +748,8 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_AddVisual(IDCompositionVisual2 *if
             return E_INVALIDARG;
     }
 
+    /* Keep the child alive while its old parent drops its owning reference. */
+    IDCompositionVisual2_AddRef(&child->IDCompositionVisual2_iface);
     /* If child is already in a parent's pending list, reparent it */
     if (child->pending_parent)
     {
@@ -757,7 +766,6 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_AddVisual(IDCompositionVisual2 *if
         }
     }
 
-    IDCompositionVisual2_AddRef(&child->IDCompositionVisual2_iface);
     child->pending_parent = parent;
 
     if (!ref)
@@ -847,6 +855,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetCompositeMode(IDCompositionVisu
         enum DCOMPOSITION_COMPOSITE_MODE composite_mode)
 {
     TRACE("iface %p, composite_mode %d.\n", iface, composite_mode);
+    if (composite_mode != DCOMPOSITION_COMPOSITE_MODE_SOURCE_OVER) return E_NOTIMPL;
     return S_OK;
 }
 
@@ -914,6 +923,8 @@ static HRESULT dcomp_visual_create(struct dcomp_device *device, struct dcomp_vis
     visual->device = device;
     visual->pending.opacity = 1.0f;
     visual->active.opacity = 1.0f;
+    visual->pending.opacity_mode = DCOMPOSITION_OPACITY_MODE_INHERIT;
+    visual->active.opacity_mode = DCOMPOSITION_OPACITY_MODE_INHERIT;
 
     *out = visual;
     return S_OK;
@@ -964,6 +975,7 @@ static ULONG STDMETHODCALLTYPE dcomp_target_Release(IDCompositionTarget *iface)
 
     if (!refcount)
     {
+        if (target->active_root) dcomp_visual_unbind_tree(target->active_root);
         if (target->pending_root)
             IDCompositionVisual2_Release(&target->pending_root->IDCompositionVisual2_iface);
         if (target->active_root)
@@ -989,7 +1001,9 @@ static HRESULT STDMETHODCALLTYPE dcomp_target_SetRoot(IDCompositionTarget *iface
 
     if (visual)
     {
+        if ((const void *)visual->lpVtbl != &dcomp_visual_vtbl) return E_NOTIMPL;
         new_root = impl_from_IDCompositionVisual(visual);
+        if (new_root->device != target->device) return E_INVALIDARG;
         IDCompositionVisual2_AddRef(&new_root->IDCompositionVisual2_iface);
     }
 
@@ -1136,65 +1150,26 @@ static void dcomp_visual_apply_commit(struct dcomp_visual *visual)
     }
 }
 
-static HRESULT dcomp_visual_commit_content_tree(struct dcomp_visual *visual, HWND target_hwnd,
-        float cur_x, float cur_y, float scale_x, float scale_y,
-        const RECT *cur_clip, BOOL has_clip, float cur_opacity)
-{
-    struct dcomp_visual *child;
-    float sx = scale_x, sy = scale_y, x, y;
-    RECT clip, dst;
-    IDXGISwapChain1 *swapchain;
-    DXGI_SWAP_CHAIN_DESC1 desc;
-    HRESULT hr;
-
-    if (!visual) return S_OK;
-    x = cur_x + visual->active.offset_x * scale_x;
-    y = cur_y + visual->active.offset_y * scale_y;
-    if (visual->active.has_transform)
-    {
-        sx *= visual->active.transform._11;
-        sy *= visual->active.transform._22;
-        x += visual->active.transform._31 * scale_x;
-        y += visual->active.transform._32 * scale_y;
-    }
-    if (has_clip) clip = *cur_clip;
-    if (visual->active.has_clip)
-    {
-        RECT local = {(LONG)(x + visual->active.clip.left * sx),
-                (LONG)(y + visual->active.clip.top * sy),
-                (LONG)(x + visual->active.clip.right * sx),
-                (LONG)(y + visual->active.clip.bottom * sy)};
-        if (has_clip) IntersectRect(&clip, &clip, &local);
-        else clip = local;
-        has_clip = TRUE;
-    }
-    if (visual->active.content && target_hwnd)
-    {
-        if (FAILED(hr = IUnknown_QueryInterface(visual->active.content,
-                &IID_IDXGISwapChain1, (void **)&swapchain))) return hr;
-        hr = IDXGISwapChain1_GetDesc1(swapchain, &desc);
-        IDXGISwapChain1_Release(swapchain);
-        if (FAILED(hr)) return hr;
-        SetRect(&dst, x, y, x + desc.Width * sx, y + desc.Height * sy);
-        if (FAILED(hr = dcomp_bind_content(visual->active.content, target_hwnd,
-                &dst, has_clip ? &clip : NULL))) return hr;
-    }
-    for (child = visual->active_children; child; child = child->active_next_sibling)
-        if (FAILED(hr = dcomp_visual_commit_content_tree(child, target_hwnd,
-                x, y, sx, sy, &clip, has_clip, cur_opacity))) return hr;
-    return S_OK;
-}
-
 static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int *contents,
+        unsigned int *visuals, IUnknown **content_device, enum DCOMPOSITION_OPACITY_MODE parent_mode,
         const D2D_MATRIX_3X2_F *parent_mat, unsigned int depth)
 {
     struct dcomp_visual *child;
     IWineDCompSwapChain *binding;
     D2D_MATRIX_3X2_F loc_mat, cur_mat;
     HRESULT hr;
+    enum DCOMPOSITION_OPACITY_MODE mode;
+    float opacity;
 
     if (!visual) return S_OK;
-    if (depth > 128) return E_INVALIDARG;
+    if (depth > 128 || ++*visuals > 128) return E_INVALIDARG;
+    mode = visual->pending.opacity_mode == DCOMPOSITION_OPACITY_MODE_INHERIT
+            ? parent_mode : visual->pending.opacity_mode;
+    opacity = visual->pending.effect
+            ? impl_from_IDCompositionEffectGroup((IDCompositionEffectGroup *)visual->pending.effect)->opacity
+            : visual->pending.opacity;
+    if (mode == DCOMPOSITION_OPACITY_MODE_LAYER && opacity != 1.0f && visual->pending_children)
+        return E_NOTIMPL; /* Isolated opacity requires a separate group surface. */
 
     if (visual->pending.has_transform)
         loc_mat = visual->pending.transform;
@@ -1214,19 +1189,51 @@ static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int 
     if (!isfinite(cur_mat._11) || !isfinite(cur_mat._12) ||
         !isfinite(cur_mat._21) || !isfinite(cur_mat._22) ||
         !isfinite(cur_mat._31) || !isfinite(cur_mat._32) ||
+        fabsf(cur_mat._11) > 64 || fabsf(cur_mat._12) > 64 ||
+        fabsf(cur_mat._21) > 64 || fabsf(cur_mat._22) > 64 ||
         fabsf(cur_mat._31) > 1048576.0f || fabsf(cur_mat._32) > 1048576.0f)
         return E_INVALIDARG;
 
+    /* The reference slice masks leaf content. Do not silently drop an ancestor
+     * clip or pretend MULTIPLY implements isolated LAYER group opacity. */
+    if ((visual->pending.has_clip || visual->pending.clip_obj) && visual->pending_children)
+        return E_NOTIMPL;
+
     if (visual->pending.content)
     {
+        IDXGISwapChain1 *swapchain;
+        IUnknown *device;
+        DXGI_SWAP_CHAIN_DESC1 desc;
         if (++*contents > WINE_DCOMP_MAX_LAYERS) return E_NOTIMPL;
         if (FAILED(hr = IUnknown_QueryInterface(visual->pending.content,
                 &IID_IWineDCompSwapChain, (void **)&binding))) return E_NOTIMPL;
         IWineDCompSwapChain_Release(binding);
+        if (FAILED(IUnknown_QueryInterface(visual->pending.content, &IID_IDXGISwapChain1,
+                (void **)&swapchain))) return E_NOTIMPL;
+        hr = IDXGISwapChain1_GetDesc1(swapchain, &desc);
+        if (SUCCEEDED(hr))
+        {
+            hr = IDXGISwapChain1_GetDevice(swapchain, &IID_IUnknown, (void **)&device);
+            if (SUCCEEDED(hr))
+            {
+                if (!*content_device) *content_device = device;
+                else
+                {
+                    if (*content_device != device) hr = E_NOTIMPL;
+                    IUnknown_Release(device);
+                }
+            }
+        }
+        IDXGISwapChain1_Release(swapchain);
+        if (FAILED(hr)) return hr;
+        if (desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM && desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM)
+            return E_NOTIMPL;
+        if (desc.AlphaMode != DXGI_ALPHA_MODE_PREMULTIPLIED && desc.AlphaMode != DXGI_ALPHA_MODE_IGNORE)
+            return E_NOTIMPL;
     }
 
     for (child = visual->pending_children; child; child = child->pending_next_sibling)
-        if (FAILED(hr = dcomp_validate_pending(child, contents, &cur_mat, depth + 1)))
+        if (FAILED(hr = dcomp_validate_pending(child, contents, visuals, content_device, mode, &cur_mat, depth + 1)))
             return hr;
 
     return S_OK;
@@ -1234,160 +1241,134 @@ static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int 
 
 struct dcomp_collect_context
 {
-    HWND target_hwnd;
     struct wine_dcomp_target_scene scene;
 };
 
-static void dcomp_collect_children_back_to_front(struct dcomp_visual *child,
-        const D2D_MATRIX_3X2_F *parent_mat,
-        const D2D_RECT_F *parent_clip,
-        BOOL parent_has_clip,
-        float parent_opacity,
-        enum DCOMPOSITION_OPACITY_MODE parent_opacity_mode,
+static void dcomp_collect_children(struct dcomp_visual *child,
+        const D2D_MATRIX_3X2_F *parent, float opacity, enum DCOMPOSITION_OPACITY_MODE mode,
         struct dcomp_collect_context *ctx);
 
-static void dcomp_visual_collect_layers(struct dcomp_visual *visual,
-        const D2D_MATRIX_3X2_F *parent_mat,
-        const D2D_RECT_F *parent_clip,
-        BOOL parent_has_clip,
-        float parent_opacity,
-        enum DCOMPOSITION_OPACITY_MODE parent_opacity_mode,
+static void dcomp_collect_pending(struct dcomp_visual *visual,
+        const D2D_MATRIX_3X2_F *parent, float opacity, enum DCOMPOSITION_OPACITY_MODE mode,
         struct dcomp_collect_context *ctx)
 {
-    D2D_MATRIX_3X2_F loc_mat, cur_mat;
-    D2D_RECT_F cur_clip;
-    BOOL cur_has_clip;
-    float cur_opacity;
-    enum DCOMPOSITION_OPACITY_MODE cur_opacity_mode;
+    struct dcomp_visual_state state = visual->pending;
+    D2D_MATRIX_3X2_F local = {1,0,0,1,0,0}, matrix;
+    struct wine_dcomp_layer_desc *layer;
+    IDXGISwapChain1 *sc;
+    DXGI_SWAP_CHAIN_DESC1 desc;
 
-    if (!visual) return;
-
-    if (visual->active.has_transform)
-        loc_mat = visual->active.transform;
-    else
-        loc_mat = (D2D_MATRIX_3X2_F){1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
-
-    loc_mat._31 += visual->active.offset_x;
-    loc_mat._32 += visual->active.offset_y;
-
-    cur_mat._11 = loc_mat._11 * parent_mat->_11 + loc_mat._12 * parent_mat->_21;
-    cur_mat._12 = loc_mat._11 * parent_mat->_12 + loc_mat._12 * parent_mat->_22;
-    cur_mat._21 = loc_mat._21 * parent_mat->_11 + loc_mat._22 * parent_mat->_21;
-    cur_mat._22 = loc_mat._21 * parent_mat->_12 + loc_mat._22 * parent_mat->_22;
-    cur_mat._31 = loc_mat._31 * parent_mat->_11 + loc_mat._32 * parent_mat->_21 + parent_mat->_31;
-    cur_mat._32 = loc_mat._31 * parent_mat->_12 + loc_mat._32 * parent_mat->_22 + parent_mat->_32;
-
-    cur_opacity_mode = visual->active.opacity_mode;
-    if (cur_opacity_mode == DCOMPOSITION_OPACITY_MODE_INHERIT)
-        cur_opacity_mode = parent_opacity_mode;
-
-    cur_opacity = parent_opacity * visual->active.opacity;
-    if (cur_opacity < 0.0f) cur_opacity = 0.0f;
-    if (cur_opacity > 1.0f) cur_opacity = 1.0f;
-
-    cur_has_clip = visual->active.has_clip;
-    if (cur_has_clip)
-        cur_clip = visual->active.clip;
-    else if (parent_has_clip)
+    if (state.clip_obj)
     {
-        cur_clip = *parent_clip;
-        cur_has_clip = TRUE;
+        struct dcomp_rectangle_clip *clip = impl_from_IDCompositionRectangleClip(
+                (IDCompositionRectangleClip *)state.clip_obj);
+        state.clip = (D2D_RECT_F){clip->left, clip->top, clip->right, clip->bottom};
+        state.radius_tl_x = clip->top_left_radius_x; state.radius_tl_y = clip->top_left_radius_y;
+        state.radius_tr_x = clip->top_right_radius_x; state.radius_tr_y = clip->top_right_radius_y;
+        state.radius_bl_x = clip->bottom_left_radius_x; state.radius_bl_y = clip->bottom_left_radius_y;
+        state.radius_br_x = clip->bottom_right_radius_x; state.radius_br_y = clip->bottom_right_radius_y;
     }
+    if (state.effect)
+        state.opacity = impl_from_IDCompositionEffectGroup((IDCompositionEffectGroup *)state.effect)->opacity;
+    if (state.has_transform) local = state.transform;
+    local._31 += state.offset_x;
+    local._32 += state.offset_y;
+    matrix._11 = local._11 * parent->_11 + local._12 * parent->_21;
+    matrix._12 = local._11 * parent->_12 + local._12 * parent->_22;
+    matrix._21 = local._21 * parent->_11 + local._22 * parent->_21;
+    matrix._22 = local._21 * parent->_12 + local._22 * parent->_22;
+    matrix._31 = local._31 * parent->_11 + local._32 * parent->_21 + parent->_31;
+    matrix._32 = local._31 * parent->_12 + local._32 * parent->_22 + parent->_32;
+    opacity *= state.opacity;
+    if (state.opacity_mode != DCOMPOSITION_OPACITY_MODE_INHERIT) mode = state.opacity_mode;
 
-    /* Visual's own content renders behind its children */
-    if (visual->active.content && ctx->scene.layer_count < WINE_DCOMP_MAX_LAYERS)
+    /* Children are listed front to back; content is behind all children. */
+    if (state.content)
     {
-        struct wine_dcomp_layer_desc *l = &ctx->scene.layers[ctx->scene.layer_count++];
-        IDXGISwapChain1 *sc = NULL;
-        DXGI_SWAP_CHAIN_DESC1 desc;
-
-        l->content = visual->active.content;
-        l->offset_x = cur_mat._31;
-        l->offset_y = cur_mat._32;
-        l->has_transform = TRUE;
-        l->m11 = cur_mat._11;
-        l->m12 = cur_mat._12;
-        l->m21 = cur_mat._21;
-        l->m22 = cur_mat._22;
-        l->m31 = cur_mat._31;
-        l->m32 = cur_mat._32;
-
-        if (SUCCEEDED(IUnknown_QueryInterface(visual->active.content,
-                &IID_IDXGISwapChain1, (void **)&sc)))
+        layer = &ctx->scene.layers[ctx->scene.layer_count++];
+        layer->content = state.content;
+        layer->has_transform = TRUE;
+        layer->m11 = matrix._11; layer->m12 = matrix._12;
+        layer->m21 = matrix._21; layer->m22 = matrix._22;
+        layer->m31 = matrix._31; layer->m32 = matrix._32;
+        if (SUCCEEDED(IUnknown_QueryInterface(state.content, &IID_IDXGISwapChain1, (void **)&sc)))
         {
             if (SUCCEEDED(IDXGISwapChain1_GetDesc1(sc, &desc)))
             {
-                l->width = desc.Width;
-                l->height = desc.Height;
+                layer->width = desc.Width;
+                layer->height = desc.Height;
+                layer->ignore_alpha = desc.AlphaMode == DXGI_ALPHA_MODE_IGNORE;
             }
             IDXGISwapChain1_Release(sc);
         }
-
-        l->has_clip = visual->active.has_clip;
-        if (l->has_clip)
-        {
-            l->clip_rect.left = (LONG)floorf(visual->active.clip.left);
-            l->clip_rect.top = (LONG)floorf(visual->active.clip.top);
-            l->clip_rect.right = (LONG)ceilf(visual->active.clip.right);
-            l->clip_rect.bottom = (LONG)ceilf(visual->active.clip.bottom);
-            l->radius_tl_x = visual->active.radius_tl_x;
-            l->radius_tl_y = visual->active.radius_tl_y;
-            l->radius_tr_x = visual->active.radius_tr_x;
-            l->radius_tr_y = visual->active.radius_tr_y;
-            l->radius_bl_x = visual->active.radius_bl_x;
-            l->radius_bl_y = visual->active.radius_bl_y;
-            l->radius_br_x = visual->active.radius_br_x;
-            l->radius_br_y = visual->active.radius_br_y;
-        }
-
-        l->opacity = cur_opacity;
-        l->opacity_mode = cur_opacity_mode;
+        layer->has_clip = state.has_clip;
+        layer->clip_rect = (struct wine_dcomp_clip_rect){state.clip.left, state.clip.top,
+                state.clip.right, state.clip.bottom};
+        layer->radius_tl_x = state.radius_tl_x; layer->radius_tl_y = state.radius_tl_y;
+        layer->radius_tr_x = state.radius_tr_x; layer->radius_tr_y = state.radius_tr_y;
+        layer->radius_bl_x = state.radius_bl_x; layer->radius_bl_y = state.radius_bl_y;
+        layer->radius_br_x = state.radius_br_x; layer->radius_br_y = state.radius_br_y;
+        layer->opacity = opacity;
+        layer->opacity_mode = mode;
     }
-
-    dcomp_collect_children_back_to_front(visual->active_children,
-            &cur_mat, &cur_clip, cur_has_clip, cur_opacity, cur_opacity_mode, ctx);
+    dcomp_collect_children(visual->pending_children, &matrix, opacity, mode, ctx);
 }
 
-static void dcomp_collect_children_back_to_front(struct dcomp_visual *child,
-        const D2D_MATRIX_3X2_F *parent_mat,
-        const D2D_RECT_F *parent_clip,
-        BOOL parent_has_clip,
-        float parent_opacity,
-        enum DCOMPOSITION_OPACITY_MODE parent_opacity_mode,
+static void dcomp_collect_children(struct dcomp_visual *child,
+        const D2D_MATRIX_3X2_F *parent, float opacity, enum DCOMPOSITION_OPACITY_MODE mode,
         struct dcomp_collect_context *ctx)
 {
     if (!child) return;
-    dcomp_collect_children_back_to_front(child->active_next_sibling,
-            parent_mat, parent_clip, parent_has_clip, parent_opacity, parent_opacity_mode, ctx);
-    dcomp_visual_collect_layers(child,
-            parent_mat, parent_clip, parent_has_clip, parent_opacity, parent_opacity_mode, ctx);
+    dcomp_collect_children(child->pending_next_sibling, parent, opacity, mode, ctx);
+    dcomp_collect_pending(child, parent, opacity, mode, ctx);
 }
 
 static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
 {
-    struct dcomp_target *target;
-    D2D_MATRIX_3X2_F ident = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
-    unsigned int contents = 0;
-    HRESULT hr;
-
-    TRACE("device %p.\n", dev);
+    struct dcomp_target *target, *prepared_target = NULL;
+    D2D_MATRIX_3X2_F ident = {1,0,0,1,0,0};
+    struct dcomp_collect_context ctx = {0};
+    IWineDCompSwapChain *bindings[WINE_DCOMP_MAX_LAYERS];
+    unsigned int contents = 0, visuals = 0, targets = 0, count = 0, i, j;
+    IUnknown *content_device = NULL;
+    HRESULT hr = S_OK;
 
     EnterCriticalSection(&dev->cs);
     LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
     {
-        if (FAILED(hr = dcomp_validate_pending(target->pending_root, &contents, &ident, 0)))
+        if (target->pending_root && ++targets > 1) { hr = E_NOTIMPL; goto done; }
+        if (FAILED(hr = dcomp_validate_pending(target->pending_root, &contents, &visuals,
+                &content_device, DCOMPOSITION_OPACITY_MODE_LAYER, &ident, 0))) goto done;
+        if (target->pending_root)
         {
-            LeaveCriticalSection(&dev->cs);
-            return hr;
+            if (!IsWindow(target->hwnd)) { hr = E_INVALIDARG; goto done; }
+            prepared_target = target;
+        }
+    }
+    if (prepared_target)
+    {
+        ctx.scene.target_hwnd = prepared_target->hwnd;
+        dcomp_collect_pending(prepared_target->pending_root, &ident, 1,
+                DCOMPOSITION_OPACITY_MODE_LAYER, &ctx);
+        /* Allocate every scene/surface before touching any active visual state.
+         * Deduplicate shared content so it is prepared and published once. */
+        for (i = 0; i < ctx.scene.layer_count; ++i)
+        {
+            IWineDCompSwapChain *binding;
+            if (FAILED(hr = IUnknown_QueryInterface(ctx.scene.layers[i].content,
+                    &IID_IWineDCompSwapChain, (void **)&binding))) goto done;
+            for (j = 0; j < count && bindings[j] != binding; ++j) {}
+            if (j < count) { IWineDCompSwapChain_Release(binding); continue; }
+            bindings[count++] = binding;
+            if (FAILED(hr = IWineDCompSwapChain_prepare_target_scene(binding,
+                    ctx.scene.target_hwnd, &ctx.scene))) goto done;
         }
     }
     LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
     {
-        /* Apply pending root to active root */
         if (target->active_root != target->pending_root)
         {
-            if (target->pending_root)
-                IDCompositionVisual2_AddRef(&target->pending_root->IDCompositionVisual2_iface);
+            if (target->pending_root) IDCompositionVisual2_AddRef(&target->pending_root->IDCompositionVisual2_iface);
             if (target->active_root)
             {
                 dcomp_visual_unbind_tree(target->active_root);
@@ -1395,42 +1376,20 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
             }
             target->active_root = target->pending_root;
         }
-
-        if (target->active_root)
-        {
-            dcomp_visual_apply_commit(target->active_root);
-
-            if (target->hwnd && IsWindow(target->hwnd))
-            {
-                struct dcomp_collect_context ctx;
-                unsigned int i;
-
-                memset(&ctx, 0, sizeof(ctx));
-                ctx.target_hwnd = target->hwnd;
-                ctx.scene.target_hwnd = target->hwnd;
-
-                dcomp_visual_collect_layers(target->active_root, &ident, NULL, FALSE, 1.0f,
-                        DCOMPOSITION_OPACITY_MODE_MULTIPLY, &ctx);
-
-                for (i = 0; i < ctx.scene.layer_count; ++i)
-                {
-                    IWineDCompSwapChain *sc_binding = NULL;
-                    if (ctx.scene.layers[i].content &&
-                        SUCCEEDED(IUnknown_QueryInterface(ctx.scene.layers[i].content,
-                                &IID_IWineDCompSwapChain, (void **)&sc_binding)))
-                    {
-                        IWineDCompSwapChain_set_target_scene(sc_binding, target->hwnd, &ctx.scene);
-                        IWineDCompSwapChain_Release(sc_binding);
-                    }
-                }
-
-                dcomp_visual_commit_content_tree(target->active_root, target->hwnd, 0, 0, 1.0f, 1.0f, NULL, FALSE, 1.0f);
-            }
-        }
+        if (target->active_root) dcomp_visual_apply_commit(target->active_root);
     }
+    for (i = 0; i < count; ++i)
+        if (FAILED(hr = IWineDCompSwapChain_set_target_scene(bindings[i], ctx.scene.target_hwnd, &ctx.scene)))
+            break;
+done:
+    for (i = 0; i < count; ++i)
+    {
+        IWineDCompSwapChain_prepare_target_scene(bindings[i], NULL, NULL);
+        IWineDCompSwapChain_Release(bindings[i]);
+    }
+    if (content_device) IUnknown_Release(content_device);
     LeaveCriticalSection(&dev->cs);
-
-    return S_OK;
+    return hr;
 }
 
 /* =====================================================================

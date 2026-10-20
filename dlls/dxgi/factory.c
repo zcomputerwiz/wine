@@ -557,8 +557,17 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
             desc, NULL, output, swapchain);
     if (SUCCEEDED(hr))
     {
-        struct d3d11_swapchain *d3d11_sc = d3d11_swapchain_from_IDXGISwapChain4((IDXGISwapChain4 *)*swapchain);
+        struct d3d11_swapchain *d3d11_sc = d3d11_swapchain_from_composition_candidate(*swapchain);
+        if (!d3d11_sc)
+        {
+            /* A D3D12/custom swapchain is not a d3d11_swapchain structure. */
+            IDXGISwapChain1_Release(*swapchain);
+            *swapchain = NULL;
+            DestroyWindow(window);
+            return E_NOTIMPL;
+        }
         d3d11_sc->comp_wnd = window;
+        d3d11_sc->composition_alpha_mode = desc->AlphaMode;
 
         swprintf(prop_name, ARRAY_SIZE(prop_name),
                 WINE_DCOMP_WND_PROP_FMT, GetCurrentProcessId(), (UINT_PTR)*swapchain);
