@@ -1028,6 +1028,41 @@ static void dcomp_blend(struct dcomp_color *dst, const struct dcomp_color *src, 
     dst->a = src->a * opacity + dst->a * inverse_alpha;
 }
 
+static struct dcomp_color dcomp_sample_bitmap(const struct wined3d_dcomp_layer *layer, float u, float v)
+{
+    const struct wined3d_dcomp_frame *frame = layer->frame;
+    struct dcomp_color color = {0};
+    float fx, fy, weight;
+    int x, y, ix, iy;
+    unsigned int i, j;
+    uint32_t pixel;
+
+    if (!layer->interpolation_mode)
+    {
+        pixel = frame->pixels[(unsigned int)v * frame->width + (unsigned int)u];
+        return (struct dcomp_color){((pixel >> 16) & 0xff) / 255.0f,
+                ((pixel >> 8) & 0xff) / 255.0f, (pixel & 0xff) / 255.0f,
+                layer->ignore_alpha ? 1.0f : (pixel >> 24) / 255.0f};
+    }
+    /* Coordinates address texel centers. Interpolate premultiplied components
+     * together, clamping taps to the bitmap, not into unrelated frame memory. */
+    x = floorf(u - 0.5f); y = floorf(v - 0.5f);
+    fx = u - 0.5f - x; fy = v - 0.5f - y;
+    for (j = 0; j < 2; ++j)
+        for (i = 0; i < 2; ++i)
+        {
+            ix = max(0, min((int)frame->width - 1, x + (int)i));
+            iy = max(0, min((int)frame->height - 1, y + (int)j));
+            pixel = frame->pixels[iy * frame->width + ix];
+            weight = (i ? fx : 1.0f - fx) * (j ? fy : 1.0f - fy);
+            color.r += ((pixel >> 16) & 0xff) / 255.0f * weight;
+            color.g += ((pixel >> 8) & 0xff) / 255.0f * weight;
+            color.b += (pixel & 0xff) / 255.0f * weight;
+            color.a += (layer->ignore_alpha ? 1.0f : (pixel >> 24) / 255.0f) * weight;
+        }
+    return color;
+}
+
 static void dcomp_render_pixel(const struct wined3d_dcomp_target_scene *scene,
         const struct dcomp_sample_transform *transforms, unsigned int index,
         float x, float y, float inherited_opacity, struct dcomp_color *destination)
@@ -1040,7 +1075,6 @@ static void dcomp_render_pixel(const struct wined3d_dcomp_target_scene *scene,
     float px = x - layer->m31, py = y - layer->m32;
     float u, v, opacity = inherited_opacity * layer->opacity, content_opacity = opacity;
     unsigned int child;
-    uint32_t pixel;
 
     if (!transform->valid || opacity <= 0.0f) return;
     u = px * transform->inv11 + py * transform->inv21;
@@ -1056,11 +1090,7 @@ static void dcomp_render_pixel(const struct wined3d_dcomp_target_scene *scene,
     }
     if (frame && frame->pixels && u >= 0.0f && v >= 0.0f && u < frame->width && v < frame->height)
     {
-        pixel = frame->pixels[(unsigned int)v * frame->width + (unsigned int)u];
-        color.r = ((pixel >> 16) & 0xff) / 255.0f;
-        color.g = ((pixel >> 8) & 0xff) / 255.0f;
-        color.b = (pixel & 0xff) / 255.0f;
-        color.a = layer->ignore_alpha ? 1.0f : (pixel >> 24) / 255.0f;
+        color = dcomp_sample_bitmap(layer, u, v);
         dcomp_blend(output, &color, content_opacity);
     }
     for (child = index + 1; child < layer->subtree_end; child = scene->layers[child].subtree_end)

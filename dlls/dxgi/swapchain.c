@@ -483,6 +483,7 @@ static HRESULT dcomp_binding_target_scene(IWineDCompSwapChain *iface,
 
         dst_layer->subtree_end = src_layer->subtree_end;
         dst_layer->opacity_mode = src_layer->opacity_mode;
+        dst_layer->interpolation_mode = src_layer->interpolation_mode;
         dst_layer->m11 = src_layer->m11;
         dst_layer->m12 = src_layer->m12;
         dst_layer->m21 = src_layer->m21;
