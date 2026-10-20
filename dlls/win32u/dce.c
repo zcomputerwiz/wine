@@ -31,6 +31,7 @@
 #include "wine/opengl_driver.h"
 #include "wine/server.h"
 #include "wine/debug.h"
+#include "wine/dcomp_underlay.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(win);
 
@@ -867,8 +868,10 @@ static void update_visible_region( struct dce *dce )
     if (dce->clip_rgn) NtGdiCombineRgn( vis_rgn, vis_rgn, dce->clip_rgn,
                                         (flags & DCX_INTERSECTRGN) ? RGN_AND : RGN_DIFF );
 
-    /* don't use a surface to paint the client area of OpenGL windows */
-    if (!(paint_flags & SET_WINPOS_PIXEL_FORMAT && user_driver->dc_funcs.pPutImage) || (flags & DCX_WINDOW))
+    /* Ordinary GL paints directly; DComp must keep application GDI content
+     * separate from the drawable containing its retained visual tree. */
+    if (!(paint_flags & SET_WINPOS_PIXEL_FORMAT && user_driver->dc_funcs.pPutImage) || (flags & DCX_WINDOW)
+            || NtUserGetProp(dce->hwnd, WINE_DCOMP_UNDERLAY_PROP))
     {
         win = get_win_ptr( top_win );
         if (win && win != WND_DESKTOP && win != WND_OTHER_PROCESS)

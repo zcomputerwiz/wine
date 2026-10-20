@@ -42,6 +42,7 @@ struct wined3d_device_parent;
 #include "wine/debug.h"
 #include "wine/list.h"
 #include "wine/dcomp_layer.h"
+#include "wine/dcomp_underlay.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
 
@@ -51,6 +52,7 @@ struct dcomp_visual;
 
 static void dcomp_visual_unbind_tree(struct dcomp_visual *visual);
 static const struct IDCompositionVisual2Vtbl dcomp_visual_vtbl;
+static SRWLOCK target_registration_lock = SRWLOCK_INIT;
 
 struct dcomp_device;
 struct dcomp_target;
@@ -1221,6 +1223,12 @@ static ULONG STDMETHODCALLTYPE dcomp_target_Release(IDCompositionTarget *iface)
         list_remove(&target->entry);
         LeaveCriticalSection(&device->cs);
 
+        AcquireSRWLockExclusive(&target_registration_lock);
+        if (GetPropW(target->hwnd, target->topmost ? WINE_DCOMP_UNDERLAY_TOP_PROP
+                : WINE_DCOMP_UNDERLAY_BOTTOM_PROP) == target)
+            RemovePropW(target->hwnd, target->topmost ? WINE_DCOMP_UNDERLAY_TOP_PROP
+                    : WINE_DCOMP_UNDERLAY_BOTTOM_PROP);
+        ReleaseSRWLockExclusive(&target_registration_lock);
         free(target);
         IDCompositionDevice_Release(&device->IDCompositionDevice_iface);
     }
@@ -1275,12 +1283,38 @@ static HRESULT dcomp_target_create(struct dcomp_device *device, HWND hwnd, BOOL 
         struct dcomp_target **out)
 {
     struct dcomp_target *target;
+    const WCHAR *property = topmost ? WINE_DCOMP_UNDERLAY_TOP_PROP : WINE_DCOMP_UNDERLAY_BOTTOM_PROP;
+    DWORD process;
 
-    if (!IsWindow(hwnd))
-        return E_INVALIDARG;
+    if (!GetWindowThreadProcessId(hwnd, &process)) return E_INVALIDARG;
+    if (process != GetCurrentProcessId()) return E_ACCESSDENIED;
 
     if (!(target = calloc(1, sizeof(*target))))
         return E_OUTOFMEMORY;
+
+    AcquireSRWLockExclusive(&target_registration_lock);
+    if (GetPropW(hwnd, property))
+    {
+        ReleaseSRWLockExclusive(&target_registration_lock);
+        free(target);
+        return DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED;
+    }
+    if (!SetPropW(hwnd, property, target))
+    {
+        HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
+        ReleaseSRWLockExclusive(&target_registration_lock);
+        free(target);
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+    if (!GetPropW(hwnd, WINE_DCOMP_UNDERLAY_PROP)
+            && !SetPropW(hwnd, WINE_DCOMP_UNDERLAY_PROP, (HANDLE)1))
+    {
+        RemovePropW(hwnd, property);
+        ReleaseSRWLockExclusive(&target_registration_lock);
+        free(target);
+        return E_OUTOFMEMORY;
+    }
+    ReleaseSRWLockExclusive(&target_registration_lock);
 
     target->IDCompositionTarget_iface.lpVtbl = &dcomp_target_vtbl;
     target->refcount = 1;

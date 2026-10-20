@@ -57,6 +57,56 @@ static void dcomp_scene_cleanup(struct wined3d_dcomp_target_scene *scene)
     memset(scene, 0, sizeof(*scene));
 }
 
+struct wined3d_dcomp_background
+{
+    unsigned int refcount, width, height;
+    HBITMAP bitmap;
+    uint32_t *pixels;
+};
+
+static void dcomp_background_release(struct wined3d_dcomp_background *background)
+{
+    if (background && !--background->refcount)
+    {
+        DeleteObject(background->bitmap);
+        free(background);
+    }
+}
+
+static HRESULT dcomp_background_for_window(struct wined3d_swapchain *swapchain, HWND hwnd,
+        unsigned int width, unsigned int height, struct wined3d_dcomp_background **out)
+{
+    struct wined3d_dcomp_background *background = swapchain->dcomp_background;
+    BITMAPINFO info = {{sizeof(BITMAPINFOHEADER)}};
+
+    *out = NULL;
+    /* These windows have no ordinary opaque GDI redirection underlay. */
+    if (GetWindowLongW(hwnd, GWL_EXSTYLE) & (WS_EX_LAYERED | WS_EX_NOREDIRECTIONBITMAP)) return S_OK;
+    if (background && background->width == width && background->height == height)
+    {
+        ++background->refcount;
+        *out = background;
+        return S_OK;
+    }
+    if (!(background = calloc(1, sizeof(*background)))) return E_OUTOFMEMORY;
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -(LONG)height;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    if (!(background->bitmap = CreateDIBSection(NULL, &info, DIB_RGB_COLORS,
+            (void **)&background->pixels, NULL, 0)))
+    {
+        free(background);
+        return E_OUTOFMEMORY;
+    }
+    background->refcount = 1;
+    background->width = width;
+    background->height = height;
+    *out = background;
+    return S_OK;
+}
+
 /* A deliberately narrow GL route, with no CPU readback: opaque content,
  * unit opacity, no masks, unit affine scale and integer placement.
  * More complex scenes continue to use the explicit reference compositor. */
@@ -119,6 +169,8 @@ void wined3d_swapchain_cleanup(struct wined3d_swapchain *swapchain)
     dcomp_scene_cleanup(&swapchain->prepared_scene);
     dcomp_frame_release(swapchain->dcomp_frame);
     if (swapchain->prepared_surface) wined3d_texture_decref(swapchain->prepared_surface);
+    dcomp_background_release(swapchain->dcomp_background);
+    dcomp_background_release(swapchain->prepared_background);
 
     wined3d_swapchain_state_cleanup(&swapchain->state);
     wined3d_swapchain_set_gamma_ramp(swapchain, 0, &swapchain->orig_gamma);
@@ -330,6 +382,7 @@ HRESULT CDECL wined3d_swapchain_set_target_scene(struct wined3d_swapchain *swapc
 {
     struct wined3d_dcomp_target_scene snapshot = {0};
     struct wined3d_texture *surface = NULL;
+    struct wined3d_dcomp_background *background = NULL;
     unsigned int i;
     HRESULT hr = S_OK;
 
@@ -340,8 +393,10 @@ HRESULT CDECL wined3d_swapchain_set_target_scene(struct wined3d_swapchain *swapc
         if (!swapchain->has_prepared_scene) { hr = E_UNEXPECTED; goto done; }
         snapshot = swapchain->prepared_scene;
         surface = swapchain->prepared_surface;
+        background = swapchain->prepared_background;
         memset(&swapchain->prepared_scene, 0, sizeof(swapchain->prepared_scene));
         swapchain->prepared_surface = NULL;
+        swapchain->prepared_background = NULL;
         swapchain->has_prepared_scene = FALSE;
         goto publish;
     }
@@ -368,6 +423,8 @@ HRESULT CDECL wined3d_swapchain_set_target_scene(struct wined3d_swapchain *swapc
             ends[depth++] = end;
         }
         if (FAILED(hr = dcomp_surface_for_window(swapchain, scene->target_hwnd, &surface))) goto done;
+        if (surface && FAILED(hr = dcomp_background_for_window(swapchain, scene->target_hwnd,
+                surface->resource.width, surface->resource.height, &background))) goto failed;
         snapshot = *scene;
         for (i = 0; i < snapshot.layer_count; ++i)
         {
@@ -398,16 +455,34 @@ HRESULT CDECL wined3d_swapchain_set_target_scene(struct wined3d_swapchain *swapc
     {
         dcomp_scene_cleanup(&swapchain->prepared_scene);
         if (swapchain->prepared_surface) wined3d_texture_decref(swapchain->prepared_surface);
+        dcomp_background_release(swapchain->prepared_background);
         swapchain->prepared_scene = snapshot;
         swapchain->prepared_surface = surface;
+        swapchain->prepared_background = background;
         swapchain->has_prepared_scene = !!scene;
         goto done;
+    }
+    if (!scene && swapchain->has_target_scene && swapchain->composite_texture
+            && IsWindow(swapchain->win_handle))
+    {
+        unsigned int layer_count = swapchain->target_scene.layer_count;
+        /* Revoke the active visual tree by presenting only its underlay before
+         * releasing the resources. Do NOT replace/consume prepared_scene: a
+         * Commit may have already prepared this producer's next placement.
+         * The CS was drained above; CLEAR_ONLY drains its own delivery without
+         * capturing or rotating an unpresented producer back buffer. */
+        swapchain->target_scene.layer_count = 0;
+        hr = wined3d_swapchain_present(swapchain, NULL, NULL, swapchain->win_handle,
+                0, WINED3D_PRESENT_CLEAR_ONLY);
+        swapchain->target_scene.layer_count = layer_count;
     }
 publish:
     /* All allocations succeeded before the visual tree transaction was applied. */
     dcomp_scene_cleanup(&swapchain->target_scene);
     if (swapchain->composite_texture) wined3d_texture_decref(swapchain->composite_texture);
+    dcomp_background_release(swapchain->dcomp_background);
     swapchain->composite_texture = surface;
+    swapchain->dcomp_background = background;
     swapchain->target_scene = snapshot;
     swapchain->has_target_scene = !!scene;
     goto done;
@@ -415,6 +490,7 @@ publish:
 failed:
     dcomp_scene_cleanup(&snapshot);
     if (surface) wined3d_texture_decref(surface);
+    dcomp_background_release(background);
 done:
     wined3d_mutex_unlock();
     return hr;
@@ -459,6 +535,7 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
     const struct wined3d_swapchain_desc *desc = &swapchain->state.desc;
     RECT s, d;
     struct wined3d_texture *surface;
+    struct wined3d_dcomp_background *background = NULL;
     RECT client;
     HRESULT hr;
 
@@ -517,8 +594,19 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
             wined3d_mutex_unlock();
             return hr;
         }
+        if (surface && FAILED(hr = dcomp_background_for_window(swapchain, swapchain->win_handle,
+                surface->resource.width, surface->resource.height, &background)))
+        {
+            wined3d_texture_decref(surface);
+            if (!(desc->flags & WINED3D_SWAPCHAIN_FRAME_LATENCY_WAITABLE_OBJECT))
+                ReleaseSemaphore(swapchain->frame_latency_semaphore, 1, NULL);
+            wined3d_mutex_unlock();
+            return hr;
+        }
         if (swapchain->composite_texture) wined3d_texture_decref(swapchain->composite_texture);
+        dcomp_background_release(swapchain->dcomp_background);
         swapchain->composite_texture = surface;
+        swapchain->dcomp_background = background;
     }
 
     if (!src_rect)
@@ -1098,7 +1186,50 @@ static void dcomp_render_pixel(const struct wined3d_dcomp_target_scene *scene,
     if (!layer->opacity_mode) dcomp_blend(destination, &isolated, opacity);
 }
 
-static void swapchain_composite_layers(struct wined3d_swapchain *swapchain, struct wined3d_context *context)
+/* Read the window's GDI backing bitmap, not the screen / GL drawable that
+ * contains our previously composed frame. Never bake our output into its own
+ * underlay. DIB storage is prepared transactionally, with no retained HDC tied
+ * to a caller thread; only the CS selects the bitmap into a temporary DC. */
+static BOOL dcomp_capture_background(struct wined3d_swapchain *swapchain, struct wined3d_context *context)
+{
+    struct wined3d_dcomp_background *background = swapchain->dcomp_background;
+    unsigned int width = swapchain->composite_texture->resource.width;
+    unsigned int height = swapchain->composite_texture->resource.height;
+    unsigned int pitch, slice_pitch, x, y;
+    HDC source = NULL, memory = NULL;
+    HGDIOBJ previous = NULL;
+    uint32_t *row;
+    BOOL success = FALSE;
+
+    if (background)
+    {
+        if (background->width != width || background->height != height) return FALSE;
+        if (!(source = GetDC(swapchain->win_handle)) || !(memory = CreateCompatibleDC(NULL))) goto done;
+        if (!(previous = SelectObject(memory, background->bitmap)) || previous == HGDI_ERROR) goto done;
+        if (!BitBlt(memory, 0, 0, width, height, source, 0, 0, SRCCOPY)) goto done;
+        GdiFlush();
+    }
+    if (!wined3d_texture_prepare_location(swapchain->composite_texture, 0, context, WINED3D_LOCATION_SYSMEM)) goto done;
+    wined3d_texture_get_pitch(swapchain->composite_texture, 0, &pitch, &slice_pitch);
+    if (!swapchain->composite_texture->resource.heap_memory) goto done;
+    for (y = 0; y < height; ++y)
+    {
+        row = (uint32_t *)((BYTE *)swapchain->composite_texture->resource.heap_memory + y * pitch);
+        for (x = 0; x < width; ++x)
+            row[x] = background ? background->pixels[y * width + x] | 0xff000000 : 0;
+    }
+    wined3d_texture_validate_location(swapchain->composite_texture, 0, WINED3D_LOCATION_SYSMEM);
+    wined3d_texture_invalidate_location(swapchain->composite_texture, 0, ~WINED3D_LOCATION_SYSMEM);
+    success = TRUE;
+done:
+    if (previous && previous != HGDI_ERROR) SelectObject(memory, previous);
+    if (memory) DeleteDC(memory);
+    if (source) ReleaseDC(swapchain->win_handle, source);
+    if (!success) ERR("Failed to capture application composition background.\n");
+    return success;
+}
+
+static BOOL swapchain_composite_layers(struct wined3d_swapchain *swapchain, struct wined3d_context *context)
 {
     const struct wined3d_dcomp_target_scene *scene = &swapchain->target_scene;
     struct dcomp_sample_transform transforms[WINED3D_DCOMP_MAX_LAYERS];
@@ -1108,19 +1239,19 @@ static void swapchain_composite_layers(struct wined3d_swapchain *swapchain, stru
     RECT client;
 
     if (!GetClientRect(swapchain->win_handle, &client) || client.right <= 0 || client.bottom <= 0)
-        return;
+        return FALSE;
     width = client.right;
     height = client.bottom;
     if (!swapchain->composite_texture || swapchain->composite_texture->resource.width != width
             || swapchain->composite_texture->resource.height != height)
-        return;
+        return FALSE;
 
     for (i = 0; i < scene->layer_count; ++i)
     {
         const struct wined3d_dcomp_layer *layer = &scene->layers[i];
         float det = layer->m11 * layer->m22 - layer->m12 * layer->m21;
         if (layer->frame && !layer->frame->pixels && layer->frame->gpu_valid)
-            dcomp_read_texture(layer->frame, layer->frame->gpu_texture, context);
+            if (!dcomp_read_texture(layer->frame, layer->frame->gpu_texture, context)) return FALSE;
         transforms[i].valid = fabsf(det) >= 1e-7f;
         if (!transforms[i].valid) continue;
         transforms[i].inv11 = layer->m22 / det;
@@ -1129,15 +1260,15 @@ static void swapchain_composite_layers(struct wined3d_swapchain *swapchain, stru
         transforms[i].inv22 = layer->m11 / det;
     }
 
-    wined3d_texture_prepare_location(swapchain->composite_texture, 0, context, WINED3D_LOCATION_SYSMEM);
+    if (!dcomp_capture_background(swapchain, context)) return FALSE;
     wined3d_texture_get_pitch(swapchain->composite_texture, 0, &pitch, &slice_pitch);
-    if (!swapchain->composite_texture->resource.heap_memory) return;
     for (y = 0; y < height; ++y)
     {
         row = (uint32_t *)((BYTE *)swapchain->composite_texture->resource.heap_memory + y * pitch);
         for (x = 0; x < width; ++x)
         {
-            color = (struct dcomp_color){0};
+            color = (struct dcomp_color){((row[x] >> 16) & 0xff) / 255.0f,
+                    ((row[x] >> 8) & 0xff) / 255.0f, (row[x] & 0xff) / 255.0f, (row[x] >> 24) / 255.0f};
             if (scene->layer_count) dcomp_render_pixel(scene, transforms, 0, x + 0.5f, y + 0.5f, 1.0f, &color);
             row[x] = (uint32_t)(fminf(1.0f, color.b) * 255.0f + 0.5f)
                     | ((uint32_t)(fminf(1.0f, color.g) * 255.0f + 0.5f) << 8)
@@ -1148,6 +1279,7 @@ static void swapchain_composite_layers(struct wined3d_swapchain *swapchain, stru
     wined3d_texture_validate_location(swapchain->composite_texture, 0, WINED3D_LOCATION_SYSMEM);
     wined3d_texture_invalidate_location(swapchain->composite_texture, 0, ~WINED3D_LOCATION_SYSMEM);
     ++swapchain->dcomp_cpu_compositions;
+    return TRUE;
 }
 
 static BOOL swapchain_gl_composite_opaque(struct wined3d_swapchain *swapchain,
@@ -1161,11 +1293,29 @@ static BOOL swapchain_gl_composite_opaque(struct wined3d_swapchain *swapchain,
     RECT client, src, dst;
     unsigned int i;
     int x, y;
+    BOOL background_required = !!swapchain->dcomp_background;
 
     if (!dcomp_gpu_scene(scene) || !gl_info->fbo_ops.glBlitFramebuffer) return FALSE;
     for (i = 0; i < scene->layer_count; ++i)
         if ((frame = scene->layers[i].frame) && !frame->gpu_valid && frame->pixels) return FALSE;
     if (!GetClientRect(swapchain->win_handle, &client)) return FALSE;
+    for (i = 0; i < scene->layer_count; ++i)
+    {
+        const struct wined3d_dcomp_layer *layer = &scene->layers[i];
+        if ((frame = layer->frame) && frame->gpu_valid
+                && layer->m31 <= 0.0f && layer->m32 <= 0.0f
+                && layer->m31 + frame->width >= client.right
+                && layer->m32 + frame->height >= client.bottom)
+            background_required = FALSE;
+    }
+    /* A full opaque covering leaf makes the underlay irrelevant. Otherwise
+     * upload current GDI backing pixels, without reading GPU producer images. */
+    if (background_required)
+    {
+        if (!dcomp_capture_background(swapchain, context)) return FALSE;
+        if (!wined3d_texture_load_location(swapchain->composite_texture, 0,
+                context, WINED3D_LOCATION_TEXTURE_RGB)) return FALSE;
+    }
     wined3d_context_gl_apply_fbo_state_explicit(context_gl, GL_FRAMEBUFFER,
             NULL, 0, NULL, 0, WINED3D_LOCATION_DRAWABLE);
     gl_info->gl_ops.gl.p_glDisable(GL_SCISSOR_TEST);
@@ -1175,6 +1325,15 @@ static BOOL swapchain_gl_composite_opaque(struct wined3d_swapchain *swapchain,
     context_invalidate_state(context, STATE_RASTERIZER);
     context_invalidate_state(context, STATE_BLEND);
     context_invalidate_state(context, STATE_FRAMEBUFFER);
+    if (background_required)
+    {
+        wined3d_texture_validate_location(back_buffer, 0, WINED3D_LOCATION_DRAWABLE);
+        swapchain->device->blitter->ops->blitter_blit(swapchain->device->blitter,
+                WINED3D_BLIT_OP_COLOR_BLIT, context, swapchain->composite_texture, 0,
+                WINED3D_LOCATION_TEXTURE_RGB, &client, back_buffer, 0,
+                WINED3D_LOCATION_DRAWABLE, &client, NULL, WINED3D_TEXF_POINT, NULL);
+        wined3d_texture_invalidate_location(back_buffer, 0, WINED3D_LOCATION_DRAWABLE);
+    }
     for (i = 0; i < scene->layer_count; ++i)
     {
         const struct wined3d_dcomp_layer *layer = &scene->layers[i];
@@ -1232,7 +1391,7 @@ static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
             goto frame_done;
         }
         GetClientRect(swapchain->win_handle, &client);
-        swapchain_composite_layers(swapchain, context);
+        if (!swapchain_composite_layers(swapchain, context)) goto frame_done;
         if (swapchain->composite_texture)
         {
             gl_info = context_gl->gl_info;
@@ -1930,7 +2089,7 @@ static void swapchain_vk_present(struct wined3d_swapchain *swapchain, const RECT
     {
         if (!(flags & WINED3D_PRESENT_CLEAR_ONLY)) swapchain_capture_frame(swapchain, &context_vk->c);
         GetClientRect(swapchain->win_handle, &client);
-        swapchain_composite_layers(swapchain, &context_vk->c);
+        if (!swapchain_composite_layers(swapchain, &context_vk->c)) goto frame_done;
         if (!swapchain->composite_texture) goto frame_done;
         if (swapchain_vk->vk_swapchain &&
                 (swapchain_vk->width != (unsigned int)client.right || swapchain_vk->height != (unsigned int)client.bottom))
