@@ -88,6 +88,7 @@ struct dcomp_visual_state
     IDCompositionEffect *effect;
     float opacity;
     enum DCOMPOSITION_OPACITY_MODE opacity_mode;
+    enum DCOMPOSITION_BITMAP_INTERPOLATION_MODE interpolation_mode;
     BOOL has_transform;
     D2D_MATRIX_3X2_F transform;
     float radius_tl_x, radius_tl_y;
@@ -732,7 +733,16 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetEffect(IDCompositionVisual2 *if
 static HRESULT STDMETHODCALLTYPE dcomp_visual_SetBitmapInterpolationMode(IDCompositionVisual2 *iface,
         enum DCOMPOSITION_BITMAP_INTERPOLATION_MODE interpolation_mode)
 {
+    struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
+
     TRACE("iface %p, interpolation_mode %d.\n", iface, interpolation_mode);
+    if (interpolation_mode != DCOMPOSITION_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR
+            && interpolation_mode != DCOMPOSITION_BITMAP_INTERPOLATION_MODE_LINEAR
+            && interpolation_mode != DCOMPOSITION_BITMAP_INTERPOLATION_MODE_INHERIT)
+        return E_INVALIDARG;
+    EnterCriticalSection(&visual->device->cs);
+    visual->pending.interpolation_mode = interpolation_mode;
+    LeaveCriticalSection(&visual->device->cs);
     return S_OK;
 }
 
@@ -1148,6 +1158,8 @@ static HRESULT dcomp_visual_create(struct dcomp_device *device, struct dcomp_vis
     visual->active.opacity = 1.0f;
     visual->pending.opacity_mode = DCOMPOSITION_OPACITY_MODE_INHERIT;
     visual->active.opacity_mode = DCOMPOSITION_OPACITY_MODE_INHERIT;
+    visual->pending.interpolation_mode = DCOMPOSITION_BITMAP_INTERPOLATION_MODE_INHERIT;
+    visual->active.interpolation_mode = DCOMPOSITION_BITMAP_INTERPOLATION_MODE_INHERIT;
 
     *out = visual;
     return S_OK;
@@ -1477,10 +1489,12 @@ struct dcomp_collect_context
 
 static void dcomp_collect_children(struct dcomp_visual *child,
         const D2D_MATRIX_3X2_F *parent, float opacity, enum DCOMPOSITION_OPACITY_MODE mode,
+        enum DCOMPOSITION_BITMAP_INTERPOLATION_MODE interpolation,
         struct dcomp_collect_context *ctx);
 
 static void dcomp_collect_pending(struct dcomp_visual *visual,
         const D2D_MATRIX_3X2_F *parent, float opacity, enum DCOMPOSITION_OPACITY_MODE mode,
+        enum DCOMPOSITION_BITMAP_INTERPOLATION_MODE interpolation,
         struct dcomp_collect_context *ctx)
 {
     struct dcomp_visual_state state = visual->pending;
@@ -1511,6 +1525,8 @@ static void dcomp_collect_pending(struct dcomp_visual *visual,
     matrix._31 = local._31 * parent->_11 + local._32 * parent->_21 + parent->_31;
     matrix._32 = local._31 * parent->_12 + local._32 * parent->_22 + parent->_32;
     if (state.opacity_mode != DCOMPOSITION_OPACITY_MODE_INHERIT) mode = state.opacity_mode;
+    if (state.interpolation_mode != DCOMPOSITION_BITMAP_INTERPOLATION_MODE_INHERIT)
+        interpolation = state.interpolation_mode;
 
     /* Children are listed front to back; content is behind all children. */
     {
@@ -1539,18 +1555,20 @@ static void dcomp_collect_pending(struct dcomp_visual *visual,
         layer->radius_br_x = state.radius_br_x; layer->radius_br_y = state.radius_br_y;
         layer->opacity = state.opacity;
         layer->opacity_mode = mode;
+        layer->interpolation_mode = interpolation;
     }
-    dcomp_collect_children(visual->pending_children, &matrix, opacity, mode, ctx);
+    dcomp_collect_children(visual->pending_children, &matrix, opacity, mode, interpolation, ctx);
     layer->subtree_end = ctx->scene.layer_count;
 }
 
 static void dcomp_collect_children(struct dcomp_visual *child,
         const D2D_MATRIX_3X2_F *parent, float opacity, enum DCOMPOSITION_OPACITY_MODE mode,
+        enum DCOMPOSITION_BITMAP_INTERPOLATION_MODE interpolation,
         struct dcomp_collect_context *ctx)
 {
     if (!child) return;
-    dcomp_collect_children(child->pending_next_sibling, parent, opacity, mode, ctx);
-    dcomp_collect_pending(child, parent, opacity, mode, ctx);
+    dcomp_collect_children(child->pending_next_sibling, parent, opacity, mode, interpolation, ctx);
+    dcomp_collect_pending(child, parent, opacity, mode, interpolation, ctx);
 }
 
 static HRESULT dcomp_retain_active_tree(struct dcomp_visual *visual, struct dcomp_visual **nodes, unsigned int *count)
@@ -1609,7 +1627,8 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
         if (content_device) IUnknown_Release(content_device);
         content_device = NULL;
         contexts[c].scene.target_hwnd = target->hwnd;
-        dcomp_collect_pending(target->pending_root, &ident, 1, DCOMPOSITION_OPACITY_MODE_LAYER, &contexts[c]);
+        dcomp_collect_pending(target->pending_root, &ident, 1, DCOMPOSITION_OPACITY_MODE_LAYER,
+                DCOMPOSITION_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, &contexts[c]);
         ++c;
     }
     /* Prepare ALL targets before changing active state. Keep one prepared scene

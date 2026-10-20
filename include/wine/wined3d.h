@@ -2966,6 +2966,7 @@ struct wined3d_dcomp_layer
     float radius_br_x, radius_br_y;
     float opacity;
     int opacity_mode;
+    int interpolation_mode;
 };
 
 struct wined3d_dcomp_target_scene

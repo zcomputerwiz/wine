@@ -26,7 +26,7 @@ import "dxgi1_6.idl";
 [
     object,
     local,
-    uuid(37fbf4a2-2c4d-47c0-a2ec-c7716aa35ca1)
+    uuid(bc193c8b-df4f-4c75-8a59-0ab8ffccdc0b)
 ]
 interface IWineDCompSwapChain : IUnknown
 {
