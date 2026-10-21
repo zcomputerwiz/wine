@@ -18,6 +18,7 @@
  */
 
 #include "dxgi_private.h"
+#include "wine/dcomp_underlay.h"
 
 #define VKD3D_NO_VULKAN_H
 #define VKD3D_NO_WIN32_TYPES
@@ -29,6 +30,9 @@ WINE_DECLARE_DEBUG_CHANNEL(winediag);
 
 /* Binding/DC changes must not race Present's parameter snapshot/enqueue. */
 static SRWLOCK dcomp_binding_lock = SRWLOCK_INIT;
+/* Protect lookup/AddRef of notification-window registrations against final
+ * Release. No renderer / window destruction runs while this lock is held. */
+static SRWLOCK dcomp_notification_lock = SRWLOCK_INIT;
 
 static void d3d11_present_history_cleanup(struct d3d11_swapchain *swapchain)
 {
@@ -264,7 +268,13 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_AddRef(IDXGISwapChain4 *iface)
 static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
 {
     struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
-    ULONG refcount = InterlockedDecrement(&swapchain->refcount);
+    ULONG refcount;
+
+    if (swapchain->comp_wnd) AcquireSRWLockExclusive(&dcomp_notification_lock);
+    refcount = InterlockedDecrement(&swapchain->refcount);
+    if (!refcount && swapchain->comp_wnd)
+        RemovePropW(swapchain->comp_wnd, L"__wine_dcomp_swapchain");
+    if (swapchain->comp_wnd) ReleaseSRWLockExclusive(&dcomp_notification_lock);
 
     TRACE("%p decreasing refcount to %lu.\n", swapchain, refcount);
 
@@ -277,7 +287,11 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
             swprintf(prop_name, ARRAY_SIZE(prop_name),
                     WINE_DCOMP_WND_PROP_FMT, GetCurrentProcessId(), (UINT_PTR)&swapchain->IDXGISwapChain4_iface);
             RemovePropW(GetDesktopWindow(), prop_name);
-            RemovePropW(swapchain->comp_wnd, L"__wine_dcomp_swapchain");
+            AcquireSRWLockExclusive(&dcomp_binding_lock);
+            if (swapchain->target_hwnd && GetPropW(swapchain->target_hwnd,
+                    WINE_DCOMP_REPAINT_SINK_PROP) == swapchain->comp_wnd)
+                RemovePropW(swapchain->target_hwnd, WINE_DCOMP_REPAINT_SINK_PROP);
+            ReleaseSRWLockExclusive(&dcomp_binding_lock);
             DestroyWindow(swapchain->comp_wnd);
         }
         if (swapchain->target)
@@ -294,6 +308,26 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
     }
 
     return refcount;
+}
+
+void dcomp_swapchain_repaint(HWND window)
+{
+    struct d3d11_swapchain *swapchain;
+    IDXGISwapChain4 *iface;
+    RECT empty = {0};
+
+    AcquireSRWLockShared(&dcomp_notification_lock);
+    iface = GetPropW(window, L"__wine_dcomp_swapchain");
+    if (iface) IDXGISwapChain4_AddRef(iface);
+    ReleaseSRWLockShared(&dcomp_notification_lock);
+    if (!iface) return;
+    swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
+    AcquireSRWLockShared(&dcomp_binding_lock);
+    if (swapchain->target_hwnd && GetPropW(swapchain->target_hwnd, WINE_DCOMP_REPAINT_SINK_PROP) == window)
+        wined3d_swapchain_present(swapchain->wined3d_swapchain, &empty, &empty,
+                swapchain->target_hwnd, 0, WINED3D_PRESENT_CLEAR_ONLY);
+    ReleaseSRWLockShared(&dcomp_binding_lock);
+    IDXGISwapChain4_Release(iface);
 }
 
 /* IDXGIObject methods */
@@ -443,6 +477,9 @@ static HRESULT dcomp_binding_target_scene(IWineDCompSwapChain *iface,
         }
         /* WineD3D restores the current application underlay while revoking
          * this scene, without consuming another transaction's prepared scene. */
+        if (swapchain->target_hwnd && GetPropW(swapchain->target_hwnd,
+                WINE_DCOMP_REPAINT_SINK_PROP) == swapchain->comp_wnd)
+            RemovePropW(swapchain->target_hwnd, WINE_DCOMP_REPAINT_SINK_PROP);
         hr = wined3d_swapchain_set_target_scene(swapchain->wined3d_swapchain, NULL, FALSE);
         dcomp_swapchain_apply_target(swapchain, WINE_DCOMP_SET_TARGET_LEGACY, 0);
         ReleaseSRWLockExclusive(&dcomp_binding_lock);
@@ -508,7 +545,11 @@ static HRESULT dcomp_binding_target_scene(IWineDCompSwapChain *iface,
     if (SUCCEEDED(hr) && !prepare)
     {
         RECT empty = {0};
+        if (swapchain->target_hwnd && swapchain->target_hwnd != target
+                && GetPropW(swapchain->target_hwnd, WINE_DCOMP_REPAINT_SINK_PROP) == swapchain->comp_wnd)
+            RemovePropW(swapchain->target_hwnd, WINE_DCOMP_REPAINT_SINK_PROP);
         swapchain->target_hwnd = target;
+        SetPropW(target, WINE_DCOMP_REPAINT_SINK_PROP, swapchain->comp_wnd);
         swapchain->has_dst_rect = FALSE;
         swapchain->fully_clipped = FALSE;
         wined3d_swapchain_set_window(swapchain->wined3d_swapchain, target);

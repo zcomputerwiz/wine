@@ -622,6 +622,7 @@ void window_surface_flush( struct window_surface *surface )
     BITMAPINFO *shape_info = (BITMAPINFO *)shape_buf;
     RECT dirty = surface->rect, bounds;
     void *color_bits;
+    HWND repaint_sink = 0;
 
     window_surface_lock( surface );
 
@@ -643,10 +644,16 @@ void window_surface_flush( struct window_surface *surface )
 
         if (surface->funcs->flush( surface, &surface->rect, &dirty, color_info, color_bits,
                                    shape_changed, shape_info, shape_bits ))
+        {
             reset_bounds( &surface->bounds );
+            repaint_sink = NtUserGetProp(surface->hwnd, WINE_DCOMP_REPAINT_SINK_PROP);
+        }
     }
 
     window_surface_unlock( surface );
+    /* Asynchronous: never enter a renderer while holding the backing lock.
+     * Only actual dirty flushes notify; idle windows schedule no work. */
+    if (repaint_sink) NtUserPostMessage(repaint_sink, WM_WINE_DCOMP_REPAINT, 0, 0);
 }
 
 void window_surface_set_layered( struct window_surface *surface, COLORREF color_key, UINT alpha_bits, UINT alpha_mask )

@@ -225,6 +225,7 @@ HRESULT d3d12_swapchain_create(IWineDXGIFactory *factory, ID3D12CommandQueue *qu
 BOOL dxgi_validate_swapchain_desc(const DXGI_SWAP_CHAIN_DESC1 *desc);
 BOOL dxgi_validate_swapchain_fullscreen_desc(const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *desc);
 void dcomp_swapchain_apply_target(struct d3d11_swapchain *swapchain, WPARAM mode, LPARAM lparam);
+void dcomp_swapchain_repaint(HWND window);
 
 /* IDXGISurface/IDXGIResource */
 struct dxgi_resource

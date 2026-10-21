@@ -14,5 +14,9 @@ static const WCHAR wine_dcomp_underlayW[] =
 #define WINE_DCOMP_UNDERLAY_TOP_PROP wine_dcomp_underlay_topW
 #define WINE_DCOMP_UNDERLAY_BOTTOM_PROP wine_dcomp_underlay_bottomW
 #define WINE_DCOMP_UNDERLAY_PROP wine_dcomp_underlayW
+static const WCHAR wine_dcomp_repaint_sinkW[] =
+        {'_','_','w','i','n','e','_','d','c','o','m','p','_','r','e','p','a','i','n','t','_','s','i','n','k',0};
+#define WINE_DCOMP_REPAINT_SINK_PROP wine_dcomp_repaint_sinkW
+#define WM_WINE_DCOMP_REPAINT (WM_USER + 0x103)
 
 #endif
