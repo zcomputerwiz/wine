@@ -3370,7 +3370,10 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
 #ifdef HAVE_LIBXSHAPE
         if (IsRectEmpty( &old_rects.window ) != IsRectEmpty( &new_rects->window ))
             sync_empty_window_shape( data, surface );
-        if (data->shaped)
+        /* Client-side surfaces install their own shape in drawable coordinates.
+         * Only legacy window regions need the window-to-visible origin offset;
+         * shifting a surface shape again can clip the caption after startup. */
+        if (data->shaped && !client_side_graphics)
         {
             int old_x_offset = old_rects.window.left - old_rects.visible.left;
             int old_y_offset = old_rects.window.top - old_rects.visible.top;
