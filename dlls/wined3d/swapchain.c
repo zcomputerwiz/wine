@@ -1232,7 +1232,32 @@ static BOOL dcomp_pixel_needs_aa(const struct wined3d_dcomp_target_scene *scene,
  * contains our previously composed frame. Never bake our output into its own
  * underlay. DIB storage is prepared transactionally, with no retained HDC tied
  * to a caller thread; only the CS selects the bitmap into a temporary DC. */
-static BOOL dcomp_capture_background(struct wined3d_swapchain *swapchain, struct wined3d_context *context)
+static BOOL dcomp_has_opaque_cover(const struct wined3d_dcomp_target_scene *scene, const RECT *client)
+{
+    unsigned int i, x, y, left, top;
+    for (i = 0; i < scene->layer_count; ++i)
+        if (scene->layers[i].opacity != 1.0f || scene->layers[i].has_clip) return FALSE;
+    for (i = 0; i < scene->layer_count; ++i)
+    {
+        const struct wined3d_dcomp_layer *layer = &scene->layers[i];
+        const struct wined3d_dcomp_frame *frame = layer->frame;
+        BOOL opaque = TRUE;
+        if (!frame || (!frame->pixels && !frame->gpu_valid)
+                || layer->m11 != 1.0f || layer->m22 != 1.0f || layer->m12 != 0.0f || layer->m21 != 0.0f
+                || layer->m31 > 0 || layer->m32 > 0 || floorf(layer->m31) != layer->m31 || floorf(layer->m32) != layer->m32
+                || layer->m31 + frame->width < client->right || layer->m32 + frame->height < client->bottom) continue;
+        if (layer->ignore_alpha) return TRUE;
+        if (!frame->pixels) continue;
+        left = -layer->m31; top = -layer->m32;
+        for (y = 0; opaque && y < client->bottom; ++y)
+            for (x = 0; x < client->right; ++x)
+                if ((frame->pixels[(top + y) * frame->width + left + x] >> 24) != 255) { opaque = FALSE; break; }
+        if (opaque) return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL dcomp_capture_background(struct wined3d_swapchain *swapchain, struct wined3d_context *context, BOOL required)
 {
     struct wined3d_dcomp_background *background = swapchain->dcomp_background;
     unsigned int width = swapchain->composite_texture->resource.width;
@@ -1243,7 +1268,7 @@ static BOOL dcomp_capture_background(struct wined3d_swapchain *swapchain, struct
     uint32_t *row;
     BOOL success = FALSE;
 
-    if (background)
+    if (background && required)
     {
         if (background->width != width || background->height != height) return FALSE;
         if (!(source = GetDC(swapchain->win_handle)) || !(memory = CreateCompatibleDC(NULL))) goto done;
@@ -1258,7 +1283,7 @@ static BOOL dcomp_capture_background(struct wined3d_swapchain *swapchain, struct
     {
         row = (uint32_t *)((BYTE *)swapchain->composite_texture->resource.heap_memory + y * pitch);
         for (x = 0; x < width; ++x)
-            row[x] = background ? background->pixels[y * width + x] | 0xff000000 : 0;
+            row[x] = background && required ? background->pixels[y * width + x] | 0xff000000 : 0;
     }
     wined3d_texture_validate_location(swapchain->composite_texture, 0, WINED3D_LOCATION_SYSMEM);
     wined3d_texture_invalidate_location(swapchain->composite_texture, 0, ~WINED3D_LOCATION_SYSMEM);
@@ -1304,7 +1329,9 @@ static BOOL swapchain_composite_layers(struct wined3d_swapchain *swapchain, stru
         soft_border |= layer->soft_border;
     }
 
-    if (!dcomp_capture_background(swapchain, context)) return FALSE;
+    /* A fully covering opaque retained image makes an inaccessible foreign
+     * GDI backing irrelevant. Never skip it for partial/translucent scenes. */
+    if (!dcomp_capture_background(swapchain, context, !dcomp_has_opaque_cover(scene, &client))) return FALSE;
     wined3d_texture_get_pitch(swapchain->composite_texture, 0, &pitch, &slice_pitch);
     for (y = 0; y < height; ++y)
     {
@@ -1372,7 +1399,7 @@ static BOOL swapchain_gl_composite_opaque(struct wined3d_swapchain *swapchain,
      * upload current GDI backing pixels, without reading GPU producer images. */
     if (background_required)
     {
-        if (!dcomp_capture_background(swapchain, context)) return FALSE;
+        if (!dcomp_capture_background(swapchain, context, TRUE)) return FALSE;
         if (!wined3d_texture_load_location(swapchain->composite_texture, 0,
                 context, WINED3D_LOCATION_TEXTURE_RGB)) return FALSE;
     }
