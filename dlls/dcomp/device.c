@@ -91,6 +91,7 @@ struct dcomp_visual_state
     float opacity;
     enum DCOMPOSITION_OPACITY_MODE opacity_mode;
     enum DCOMPOSITION_BITMAP_INTERPOLATION_MODE interpolation_mode;
+    enum DCOMPOSITION_BORDER_MODE border_mode;
     BOOL has_transform;
     D2D_MATRIX_3X2_F transform;
     float radius_tl_x, radius_tl_y;
@@ -751,7 +752,13 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetBitmapInterpolationMode(IDCompo
 static HRESULT STDMETHODCALLTYPE dcomp_visual_SetBorderMode(IDCompositionVisual2 *iface,
         enum DCOMPOSITION_BORDER_MODE border_mode)
 {
+    struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
     TRACE("iface %p, border_mode %d.\n", iface, border_mode);
+    if (border_mode != DCOMPOSITION_BORDER_MODE_SOFT && border_mode != DCOMPOSITION_BORDER_MODE_HARD
+            && border_mode != DCOMPOSITION_BORDER_MODE_INHERIT) return E_INVALIDARG;
+    EnterCriticalSection(&visual->device->cs);
+    visual->pending.border_mode = border_mode;
+    LeaveCriticalSection(&visual->device->cs);
     return S_OK;
 }
 
@@ -1162,6 +1169,7 @@ static HRESULT dcomp_visual_create(struct dcomp_device *device, struct dcomp_vis
     visual->active.opacity_mode = DCOMPOSITION_OPACITY_MODE_INHERIT;
     visual->pending.interpolation_mode = DCOMPOSITION_BITMAP_INTERPOLATION_MODE_INHERIT;
     visual->active.interpolation_mode = DCOMPOSITION_BITMAP_INTERPOLATION_MODE_INHERIT;
+    visual->pending.border_mode = visual->active.border_mode = DCOMPOSITION_BORDER_MODE_INHERIT;
 
     *out = visual;
     return S_OK;
@@ -1524,11 +1532,13 @@ struct dcomp_collect_context
 static void dcomp_collect_children(struct dcomp_visual *child,
         const D2D_MATRIX_3X2_F *parent, float opacity, enum DCOMPOSITION_OPACITY_MODE mode,
         enum DCOMPOSITION_BITMAP_INTERPOLATION_MODE interpolation,
+        enum DCOMPOSITION_BORDER_MODE border,
         struct dcomp_collect_context *ctx);
 
 static void dcomp_collect_pending(struct dcomp_visual *visual,
         const D2D_MATRIX_3X2_F *parent, float opacity, enum DCOMPOSITION_OPACITY_MODE mode,
         enum DCOMPOSITION_BITMAP_INTERPOLATION_MODE interpolation,
+        enum DCOMPOSITION_BORDER_MODE border,
         struct dcomp_collect_context *ctx)
 {
     struct dcomp_visual_state state = visual->pending;
@@ -1561,6 +1571,7 @@ static void dcomp_collect_pending(struct dcomp_visual *visual,
     if (state.opacity_mode != DCOMPOSITION_OPACITY_MODE_INHERIT) mode = state.opacity_mode;
     if (state.interpolation_mode != DCOMPOSITION_BITMAP_INTERPOLATION_MODE_INHERIT)
         interpolation = state.interpolation_mode;
+    if (state.border_mode != DCOMPOSITION_BORDER_MODE_INHERIT) border = state.border_mode;
 
     /* Children are listed front to back; content is behind all children. */
     {
@@ -1590,19 +1601,21 @@ static void dcomp_collect_pending(struct dcomp_visual *visual,
         layer->opacity = state.opacity;
         layer->opacity_mode = mode;
         layer->interpolation_mode = interpolation;
+        layer->soft_border = border == DCOMPOSITION_BORDER_MODE_SOFT;
     }
-    dcomp_collect_children(visual->pending_children, &matrix, opacity, mode, interpolation, ctx);
+    dcomp_collect_children(visual->pending_children, &matrix, opacity, mode, interpolation, border, ctx);
     layer->subtree_end = ctx->scene.layer_count;
 }
 
 static void dcomp_collect_children(struct dcomp_visual *child,
         const D2D_MATRIX_3X2_F *parent, float opacity, enum DCOMPOSITION_OPACITY_MODE mode,
         enum DCOMPOSITION_BITMAP_INTERPOLATION_MODE interpolation,
+        enum DCOMPOSITION_BORDER_MODE border,
         struct dcomp_collect_context *ctx)
 {
     if (!child) return;
-    dcomp_collect_children(child->pending_next_sibling, parent, opacity, mode, interpolation, ctx);
-    dcomp_collect_pending(child, parent, opacity, mode, interpolation, ctx);
+    dcomp_collect_children(child->pending_next_sibling, parent, opacity, mode, interpolation, border, ctx);
+    dcomp_collect_pending(child, parent, opacity, mode, interpolation, border, ctx);
 }
 
 static HRESULT dcomp_retain_active_tree(struct dcomp_visual *visual, struct dcomp_visual **nodes, unsigned int *count)
@@ -1662,7 +1675,7 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
         content_device = NULL;
         contexts[c].scene.target_hwnd = target->hwnd;
         dcomp_collect_pending(target->pending_root, &ident, 1, DCOMPOSITION_OPACITY_MODE_LAYER,
-                DCOMPOSITION_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, &contexts[c]);
+                DCOMPOSITION_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, DCOMPOSITION_BORDER_MODE_HARD, &contexts[c]);
         ++c;
     }
     /* Prepare ALL targets before changing active state. Keep one prepared scene
