@@ -703,6 +703,7 @@ static HRESULT d3d11_swapchain_present_locked(struct d3d11_swapchain *swapchain,
     HWND hwnd;
     HRESULT hr;
     BOOL history_ready = FALSE;
+    BOOL capture_only;
 
     if (sync_interval > 4)
     {
@@ -735,12 +736,9 @@ static HRESULT d3d11_swapchain_present_locked(struct d3d11_swapchain *swapchain,
         return S_OK;
     }
 
-    /* Empty clipping must not be sent to the backend as a zero-area blit. */
-    if (swapchain->comp_wnd && !target_hwnd)
-    {
-        ReleaseSRWLockShared(&dcomp_binding_lock);
-        return S_OK;
-    }
+    /* A producer may Present before it is attached to a visual tree. Retain
+     * that frame without drawing it; Commit must not require a second Present. */
+    capture_only = swapchain->comp_wnd && !target_hwnd;
 
     if (!fully_clipped)
     {
@@ -755,7 +753,8 @@ static HRESULT d3d11_swapchain_present_locked(struct d3d11_swapchain *swapchain,
     if (SUCCEEDED(hr = wined3d_swapchain_present(swapchain->wined3d_swapchain,
             has_dst_rect ? &src_rect : NULL,
             has_dst_rect ? &dst_rect : NULL,
-            target_hwnd, sync_interval, swapchain->comp_wnd ? WINED3D_PRESENT_CLEAR
+            target_hwnd, sync_interval, capture_only ? WINED3D_PRESENT_CAPTURE_ONLY
+                    : swapchain->comp_wnd ? WINED3D_PRESENT_CLEAR
                     | (fully_clipped ? WINED3D_PRESENT_CLEAR_ONLY : 0) : 0)))
     {
         InterlockedIncrement(&swapchain->present_count);

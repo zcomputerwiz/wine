@@ -543,14 +543,16 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
             swapchain, wine_dbgstr_rect(src_rect), wine_dbgstr_rect(dst_rect),
             dst_window_override, swap_interval, flags);
 
-    if (swapchain->has_target_scene &&
+    if ((swapchain->has_target_scene || (flags & WINED3D_PRESENT_CAPTURE_ONLY)) &&
             ((desc->backbuffer_format != WINED3DFMT_B8G8R8A8_UNORM
                 && desc->backbuffer_format != WINED3DFMT_R8G8B8A8_UNORM)
              || desc->backbuffer_width > 8192 || desc->backbuffer_height > 8192
              || (size_t)desc->backbuffer_width * desc->backbuffer_height > 16777216))
         return E_NOTIMPL;
 
-    if (flags & ~(WINED3D_PRESENT_CLEAR | WINED3D_PRESENT_CLEAR_ONLY))
+    if ((flags & WINED3D_PRESENT_CAPTURE_ONLY) && wined3d_get_renderer() != WINED3D_RENDERER_OPENGL
+            && wined3d_get_renderer() != WINED3D_RENDERER_VULKAN) return E_NOTIMPL;
+    if (flags & ~(WINED3D_PRESENT_CLEAR | WINED3D_PRESENT_CLEAR_ONLY | WINED3D_PRESENT_CAPTURE_ONLY))
         FIXME("Ignoring flags %#x.\n", flags);
 
     if (!(swapchain->state.desc.flags & WINED3D_SWAPCHAIN_FRAME_LATENCY_WAITABLE_OBJECT))
@@ -563,6 +565,18 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
 
     wined3d_mutex_lock();
 
+    if ((flags & WINED3D_PRESENT_CAPTURE_ONLY) && !swapchain->dcomp_frame)
+    {
+        if (!(swapchain->dcomp_frame = calloc(1, sizeof(*swapchain->dcomp_frame))))
+        {
+            if (!(desc->flags & WINED3D_SWAPCHAIN_FRAME_LATENCY_WAITABLE_OBJECT))
+                ReleaseSemaphore(swapchain->frame_latency_semaphore, 1, NULL);
+            wined3d_mutex_unlock();
+            return E_OUTOFMEMORY;
+        }
+        swapchain->dcomp_frame->refcount = 1;
+    }
+
     if (!swapchain->back_buffers)
     {
         WARN("Swapchain doesn't have a backbuffer, returning WINED3DERR_INVALIDCALL.\n");
@@ -570,8 +584,9 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
         return WINED3DERR_INVALIDCALL;
     }
 
-    if (swapchain->has_target_scene && !(flags & WINED3D_PRESENT_CLEAR_ONLY)
-            && wined3d_get_renderer() == WINED3D_RENDERER_OPENGL && dcomp_gpu_scene(&swapchain->target_scene)
+    if ((swapchain->has_target_scene || (flags & WINED3D_PRESENT_CAPTURE_ONLY)) && !(flags & WINED3D_PRESENT_CLEAR_ONLY)
+            && wined3d_get_renderer() == WINED3D_RENDERER_OPENGL
+            && ((flags & WINED3D_PRESENT_CAPTURE_ONLY) || dcomp_gpu_scene(&swapchain->target_scene))
             && FAILED(hr = dcomp_prepare_gpu_frame(swapchain)))
     {
         if (!(desc->flags & WINED3D_SWAPCHAIN_FRAME_LATENCY_WAITABLE_OBJECT))
@@ -1022,13 +1037,13 @@ static BOOL dcomp_read_texture(struct wined3d_dcomp_frame *frame,
     return TRUE;
 }
 
-static BOOL swapchain_capture_frame(struct wined3d_swapchain *swapchain, struct wined3d_context *context)
+static BOOL swapchain_capture_frame(struct wined3d_swapchain *swapchain, struct wined3d_context *context, BOOL unbound)
 {
     struct wined3d_texture *texture = swapchain->back_buffers[0];
     struct wined3d_dcomp_frame *frame = swapchain->dcomp_frame;
 
     if (!frame) return FALSE;
-    if (wined3d_get_renderer() == WINED3D_RENDERER_OPENGL && dcomp_gpu_scene(&swapchain->target_scene)
+    if (wined3d_get_renderer() == WINED3D_RENDERER_OPENGL && (unbound || dcomp_gpu_scene(&swapchain->target_scene))
             && frame->gpu_texture && frame->gpu_texture->resource.width == texture->resource.width
             && frame->gpu_texture->resource.height == texture->resource.height
             && frame->gpu_texture->resource.format->id == texture->resource.format->id
@@ -1464,13 +1479,19 @@ static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
 
     TRACE("Presenting DC %p.\n", context_gl->dc);
 
+    if (flags & WINED3D_PRESENT_CAPTURE_ONLY)
+    {
+        if (!swapchain_capture_frame(swapchain, context, TRUE)) ERR("Failed to retain unbound composition frame.\n");
+        goto frame_done;
+    }
+
     pixel_format = &wined3d_adapter_gl(swapchain->device->adapter)->pixel_formats[context_gl->pixel_format - 1];
     if (swapchain->has_target_scene)
     {
         RECT client;
         /* CPU reference composition, followed by Wine's normal drawable blit.
          * The drawable belongs to the real swapchain, NOT the scratch texture. */
-        if (!(flags & WINED3D_PRESENT_CLEAR_ONLY)) swapchain_capture_frame(swapchain, context);
+        if (!(flags & WINED3D_PRESENT_CLEAR_ONLY)) swapchain_capture_frame(swapchain, context, FALSE);
         if (swapchain_gl_composite_opaque(swapchain, context_gl))
         {
             swapchain_gl_set_swap_interval(swapchain, context_gl, swap_interval);
@@ -1558,8 +1579,11 @@ frame_done:
 
     TRACE("SwapBuffers called, Starting new frame\n");
 
-    wined3d_texture_validate_location(swapchain->front_buffer, 0, WINED3D_LOCATION_DRAWABLE);
-    wined3d_texture_invalidate_location(swapchain->front_buffer, 0, ~WINED3D_LOCATION_DRAWABLE);
+    if (!(flags & WINED3D_PRESENT_CAPTURE_ONLY))
+    {
+        wined3d_texture_validate_location(swapchain->front_buffer, 0, WINED3D_LOCATION_DRAWABLE);
+        wined3d_texture_invalidate_location(swapchain->front_buffer, 0, ~WINED3D_LOCATION_DRAWABLE);
+    }
 
     context_release(context);
 }
@@ -2172,9 +2196,15 @@ static void swapchain_vk_present(struct wined3d_swapchain *swapchain, const RECT
 
     context_vk = wined3d_context_vk(context_acquire(swapchain->device, back_buffer, 0));
 
+    if (flags & WINED3D_PRESENT_CAPTURE_ONLY)
+    {
+        if (!swapchain_capture_frame(swapchain, &context_vk->c, TRUE)) ERR("Failed to retain unbound composition frame.\n");
+        goto frame_done;
+    }
+
     if (swapchain->has_target_scene)
     {
-        if (!(flags & WINED3D_PRESENT_CLEAR_ONLY)) swapchain_capture_frame(swapchain, &context_vk->c);
+        if (!(flags & WINED3D_PRESENT_CLEAR_ONLY)) swapchain_capture_frame(swapchain, &context_vk->c, FALSE);
         GetClientRect(swapchain->win_handle, &client);
         if (!swapchain_composite_layers(swapchain, &context_vk->c)) goto frame_done;
         if (!swapchain->composite_texture) goto frame_done;
@@ -2229,8 +2259,11 @@ static void swapchain_vk_present(struct wined3d_swapchain *swapchain, const RECT
 frame_done:
     if (!retained_only) wined3d_swapchain_vk_rotate(swapchain, context_vk);
 
-    wined3d_texture_validate_location(swapchain->front_buffer, 0, WINED3D_LOCATION_DRAWABLE);
-    wined3d_texture_invalidate_location(swapchain->front_buffer, 0, ~WINED3D_LOCATION_DRAWABLE);
+    if (!(flags & WINED3D_PRESENT_CAPTURE_ONLY))
+    {
+        wined3d_texture_validate_location(swapchain->front_buffer, 0, WINED3D_LOCATION_DRAWABLE);
+        wined3d_texture_invalidate_location(swapchain->front_buffer, 0, ~WINED3D_LOCATION_DRAWABLE);
+    }
 
     TRACE("Starting new frame.\n");
 
