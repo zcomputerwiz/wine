@@ -86,6 +86,7 @@ struct wine_dcomp_layer_desc
     float opacity;
     int opacity_mode;
     int interpolation_mode;
+    BOOL soft_border;
     BOOL ignore_alpha;
 };
 

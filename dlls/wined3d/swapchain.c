@@ -1153,7 +1153,8 @@ static struct dcomp_color dcomp_sample_bitmap(const struct wined3d_dcomp_layer *
 
 static void dcomp_render_pixel(const struct wined3d_dcomp_target_scene *scene,
         const struct dcomp_sample_transform *transforms, unsigned int index,
-        float x, float y, float inherited_opacity, struct dcomp_color *destination)
+        float x, float y, float sample_x, float sample_y,
+        float inherited_opacity, struct dcomp_color *destination)
 {
     const struct wined3d_dcomp_layer *layer = &scene->layers[index];
     const struct dcomp_sample_transform *transform = &transforms[index];
@@ -1161,12 +1162,18 @@ static void dcomp_render_pixel(const struct wined3d_dcomp_target_scene *scene,
     struct dcomp_color isolated = {0}, color;
     struct dcomp_color *output = destination;
     float px = x - layer->m31, py = y - layer->m32;
-    float u, v, opacity = inherited_opacity * layer->opacity, content_opacity = opacity;
+    float u, v, center_u, center_v, opacity = inherited_opacity * layer->opacity, content_opacity = opacity;
     unsigned int child;
 
     if (!transform->valid || opacity <= 0.0f) return;
-    u = px * transform->inv11 + py * transform->inv21;
-    v = px * transform->inv12 + py * transform->inv22;
+    center_u = u = px * transform->inv11 + py * transform->inv21;
+    center_v = v = px * transform->inv12 + py * transform->inv22;
+    if (layer->soft_border)
+    {
+        px = sample_x - layer->m31; py = sample_y - layer->m32;
+        u = px * transform->inv11 + py * transform->inv21;
+        v = px * transform->inv12 + py * transform->inv22;
+    }
     if (!dcomp_inside_clip(layer, u, v)) return;
 
     /* LAYER starts its subtree at unit opacity, then blends the result once.
@@ -1178,12 +1185,47 @@ static void dcomp_render_pixel(const struct wined3d_dcomp_target_scene *scene,
     }
     if (frame && frame->pixels && u >= 0.0f && v >= 0.0f && u < frame->width && v < frame->height)
     {
-        color = dcomp_sample_bitmap(layer, u, v);
+        /* Edge coverage must not change the selected bitmap interpolation.
+         * Partial pixels extend the nearest texel at the bitmap boundary. */
+        color = dcomp_sample_bitmap(layer, fmaxf(0.0f, fminf(frame->width - 0.5f, center_u)),
+                fmaxf(0.0f, fminf(frame->height - 0.5f, center_v)));
         dcomp_blend(output, &color, content_opacity);
     }
     for (child = index + 1; child < layer->subtree_end; child = scene->layers[child].subtree_end)
-        dcomp_render_pixel(scene, transforms, child, x, y, content_opacity, output);
+        dcomp_render_pixel(scene, transforms, child, x, y, sample_x, sample_y, content_opacity, output);
     if (!layer->opacity_mode) dcomp_blend(destination, &isolated, opacity);
+}
+
+/* Conservative boundary detection: a transformed pixel wholly inside a convex
+ * clip needs no coverage samples; a bounding box wholly outside cannot touch it.
+ * Inconclusive pixels use an independent 8x8 coverage reference. HARD nodes
+ * always test the pixel center, even beneath a SOFT ancestor. */
+static BOOL dcomp_pixel_needs_aa(const struct wined3d_dcomp_target_scene *scene,
+        const struct dcomp_sample_transform *transforms, float x, float y)
+{
+    unsigned int i, j;
+    for (i = 0; i < scene->layer_count; ++i)
+    {
+        const struct wined3d_dcomp_layer *layer = &scene->layers[i];
+        const struct dcomp_sample_transform *t = &transforms[i];
+        float u[4], v[4], left = INFINITY, top = INFINITY, right = -INFINITY, bottom = -INFINITY;
+        if (!layer->soft_border || !t->valid) continue;
+        for (j = 0; j < 4; ++j)
+        {
+            float px = x + (j & 1) - layer->m31, py = y + (j >> 1) - layer->m32;
+            u[j] = px * t->inv11 + py * t->inv21;
+            v[j] = px * t->inv12 + py * t->inv22;
+            left = fminf(left,u[j]); right = fmaxf(right,u[j]);
+            top = fminf(top,v[j]); bottom = fmaxf(bottom,v[j]);
+        }
+        if (layer->frame && right > 0 && bottom > 0 && left < layer->frame->width && top < layer->frame->height
+                && (left < 0 || top < 0 || right > layer->frame->width || bottom > layer->frame->height))
+            return TRUE;
+        if (layer->has_clip && right > layer->clip_rect.left && bottom > layer->clip_rect.top
+                && left < layer->clip_rect.right && top < layer->clip_rect.bottom)
+            for (j = 0; j < 4; ++j) if (!dcomp_inside_clip(layer,u[j],v[j])) return TRUE;
+    }
+    return FALSE;
 }
 
 /* Read the window's GDI backing bitmap, not the screen / GL drawable that
@@ -1233,8 +1275,9 @@ static BOOL swapchain_composite_layers(struct wined3d_swapchain *swapchain, stru
 {
     const struct wined3d_dcomp_target_scene *scene = &swapchain->target_scene;
     struct dcomp_sample_transform transforms[WINED3D_DCOMP_MAX_LAYERS];
-    unsigned int width, height, pitch, slice_pitch, i, x, y;
-    struct dcomp_color color;
+    unsigned int width, height, pitch, slice_pitch, i, x, y, sx, sy;
+    struct dcomp_color color, background, sample;
+    BOOL soft_border = FALSE;
     uint32_t *row;
     RECT client;
 
@@ -1258,6 +1301,7 @@ static BOOL swapchain_composite_layers(struct wined3d_swapchain *swapchain, stru
         transforms[i].inv12 = -layer->m12 / det;
         transforms[i].inv21 = -layer->m21 / det;
         transforms[i].inv22 = layer->m11 / det;
+        soft_border |= layer->soft_border;
     }
 
     if (!dcomp_capture_background(swapchain, context)) return FALSE;
@@ -1269,7 +1313,23 @@ static BOOL swapchain_composite_layers(struct wined3d_swapchain *swapchain, stru
         {
             color = (struct dcomp_color){((row[x] >> 16) & 0xff) / 255.0f,
                     ((row[x] >> 8) & 0xff) / 255.0f, (row[x] & 0xff) / 255.0f, (row[x] >> 24) / 255.0f};
-            if (scene->layer_count) dcomp_render_pixel(scene, transforms, 0, x + 0.5f, y + 0.5f, 1.0f, &color);
+            if (soft_border && dcomp_pixel_needs_aa(scene, transforms, x, y))
+            {
+                background = color;
+                color = (struct dcomp_color){0};
+                for (sy = 0; sy < 8; ++sy)
+                    for (sx = 0; sx < 8; ++sx)
+                    {
+                        sample = background;
+                        dcomp_render_pixel(scene, transforms, 0, x + 0.5f, y + 0.5f,
+                                x + (sx + 0.5f) / 8, y + (sy + 0.5f) / 8, 1.0f, &sample);
+                        color.r += sample.r / 64; color.g += sample.g / 64;
+                        color.b += sample.b / 64; color.a += sample.a / 64;
+                    }
+            }
+            else if (scene->layer_count)
+                dcomp_render_pixel(scene, transforms, 0, x + 0.5f, y + 0.5f,
+                        x + 0.5f, y + 0.5f, 1.0f, &color);
             row[x] = (uint32_t)(fminf(1.0f, color.b) * 255.0f + 0.5f)
                     | ((uint32_t)(fminf(1.0f, color.g) * 255.0f + 0.5f) << 8)
                     | ((uint32_t)(fminf(1.0f, color.r) * 255.0f + 0.5f) << 16)

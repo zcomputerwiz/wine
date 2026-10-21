@@ -2967,6 +2967,7 @@ struct wined3d_dcomp_layer
     float opacity;
     int opacity_mode;
     int interpolation_mode;
+    BOOL soft_border;
 };
 
 struct wined3d_dcomp_target_scene
