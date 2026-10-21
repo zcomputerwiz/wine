@@ -696,6 +696,7 @@ struct d3d11_fence_waiter
     struct list entry;
     UINT64 value;
     HANDLE event;
+    const void *owner; /* Internal CS command identity; NULL for public registrations. */
 };
 
 struct d3d11_fence_shared_data

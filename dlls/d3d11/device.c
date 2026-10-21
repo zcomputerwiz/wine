@@ -3293,6 +3293,7 @@ static VOID CALLBACK fence_signal_callback(PVOID context, BOOLEAN timer_or_wait_
         {
             SetEvent(waiter->event);
             list_remove(&waiter->entry);
+            CloseHandle(waiter->event);
             free(waiter);
         }
     }
@@ -3352,6 +3353,7 @@ static ULONG d3d11_fence_private_release(struct d3d11_fence *fence)
         LIST_FOR_EACH_ENTRY_SAFE(waiter, next, &fence->waiters, struct d3d11_fence_waiter, entry)
         {
             list_remove(&waiter->entry);
+            CloseHandle(waiter->event);
             free(waiter);
         }
         LeaveCriticalSection(&fence->cs);
@@ -3494,8 +3496,8 @@ static UINT64 STDMETHODCALLTYPE d3d11_fence_GetCompletedValue(ID3D11Fence *iface
     return (UINT64)InterlockedCompareExchange64(&fence->completed_value, 0, 0);
 }
 
-static HRESULT STDMETHODCALLTYPE d3d11_fence_SetEventOnCompletion(ID3D11Fence *iface,
-        UINT64 value, HANDLE event)
+static HRESULT d3d11_fence_set_event_on_completion(ID3D11Fence *iface,
+        UINT64 value, HANDLE event, const void *owner)
 {
     struct d3d11_fence *fence = impl_from_ID3D11Fence(iface);
     struct d3d11_fence_waiter *waiter;
@@ -3530,7 +3532,17 @@ static HRESULT STDMETHODCALLTYPE d3d11_fence_SetEventOnCompletion(ID3D11Fence *i
     }
 
     waiter->value = value;
-    waiter->event = event;
+    waiter->owner = owner;
+    /* Retain the event object, not the caller's recyclable handle value.
+     * Applications may close their handle after registering completion. */
+    if (!DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(), &waiter->event,
+            0, FALSE, DUPLICATE_SAME_ACCESS))
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        free(waiter);
+        LeaveCriticalSection(&fence->cs);
+        return hr;
+    }
     list_add_tail(&fence->waiters, &waiter->entry);
 
     if (fence->shared_data && !fence->wait_register)
@@ -3541,6 +3553,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_fence_SetEventOnCompletion(ID3D11Fence *i
         {
             if (SUCCEEDED(hr)) hr = HRESULT_FROM_WIN32(GetLastError());
             list_remove(&waiter->entry);
+            CloseHandle(waiter->event);
             free(waiter);
             LeaveCriticalSection(&fence->cs);
             return hr;
@@ -3552,6 +3565,12 @@ static HRESULT STDMETHODCALLTYPE d3d11_fence_SetEventOnCompletion(ID3D11Fence *i
 
     LeaveCriticalSection(&fence->cs);
     return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d3d11_fence_SetEventOnCompletion(ID3D11Fence *iface,
+        UINT64 value, HANDLE event)
+{
+    return d3d11_fence_set_event_on_completion(iface, value, event, NULL);
 }
 
 static const struct ID3D11FenceVtbl d3d11_fence_vtbl =
@@ -3735,6 +3754,7 @@ static void d3d11_fence_signal_complete(void *object, BOOL success)
         {
             SetEvent(waiter->event);
             list_remove(&waiter->entry);
+            CloseHandle(waiter->event);
             free(waiter);
         }
     }
@@ -3776,9 +3796,10 @@ static void d3d11_fence_command_destroy(struct d3d11_fence_command *command)
         EnterCriticalSection(&fence->cs);
         LIST_FOR_EACH_ENTRY_SAFE(waiter, next, &fence->waiters, struct d3d11_fence_waiter, entry)
         {
-            if (waiter->event != command->event)
+            if (waiter->owner != command)
                 continue;
             list_remove(&waiter->entry);
+            CloseHandle(waiter->event);
             free(waiter);
         }
         LeaveCriticalSection(&fence->cs);
@@ -3840,7 +3861,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_context_Wait(ID3D11DeviceContext4 
         d3d11_fence_command_destroy(command);
         return E_OUTOFMEMORY;
     }
-    hr = ID3D11Fence_SetEventOnCompletion(fence_iface, value, command->event);
+    hr = d3d11_fence_set_event_on_completion(fence_iface, value, command->event, command);
     if (SUCCEEDED(hr))
         hr = wined3d_device_context_enqueue_fence(context->wined3d_context,
                 d3d11_fence_wait_complete, command, FALSE);
