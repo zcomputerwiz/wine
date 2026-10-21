@@ -1280,6 +1280,8 @@ static void wayland_client_surface_destroy(struct client_surface *client)
         wp_viewport_destroy(surface->wp_viewport);
     if (surface->wl_subsurface)
         wl_subsurface_destroy(surface->wl_subsurface);
+    if (surface->wex_render_surface)
+        wex_render_surface_v1_destroy(surface->wex_render_surface);
     if (surface->wl_surface)
         wl_surface_destroy(surface->wl_surface);
 }
@@ -1292,9 +1294,9 @@ static void wayland_client_surface_detach(struct client_surface *client)
     if ((data = wayland_win_data_get(client->hwnd)))
     {
         if (data->client_surface == surface) data->client_surface = NULL;
-        wayland_client_surface_attach(surface, NULL, NULL);
         wayland_win_data_release(data);
     }
+    wayland_client_surface_attach(surface, NULL, NULL);
 }
 
 static void wayland_client_surface_update(struct client_surface *client)
@@ -1306,14 +1308,14 @@ static void wayland_client_surface_update(struct client_surface *client)
 
     TRACE("%s\n", debugstr_client_surface(client));
     if(toplevel) visible = NtUserIsWindowVisible(hwnd);
-    if (!(data = wayland_win_data_get(hwnd))) return;
-
+    data = wayland_win_data_get(hwnd);
+    TRACE("render update hwnd %p parent %p visible %u local_data %p\n", hwnd, toplevel, visible, data);
     if (toplevel && visible)
         wayland_client_surface_attach(surface, toplevel, &client->monitor_rect);
     else
         wayland_client_surface_attach(surface, NULL, NULL);
 
-    wayland_win_data_release(data);
+    if (data) wayland_win_data_release(data);
 }
 
 static void wayland_client_surface_present(struct client_surface *client, HDC hdc)
@@ -1323,7 +1325,12 @@ static void wayland_client_surface_present(struct client_surface *client, HDC hd
     struct wayland_surface *wayland_surface;
     struct wayland_win_data *data;
 
-    if (!(data = wayland_win_data_get(toplevel))) return;
+    if (!(data = wayland_win_data_get(toplevel)))
+    {
+        wayland_client_surface_attach(surface, toplevel, &client->monitor_rect);
+        wl_display_flush(process_wayland.wl_display);
+        return;
+    }
 
     if ((wayland_surface = data->wayland_surface))
     {
@@ -1448,6 +1455,12 @@ void wayland_client_surface_attach(struct wayland_client_surface *client, HWND t
 
     if (!toplevel)
     {
+        if (client->wex_render_surface && client->wex_render_parent[0])
+        {
+            wex_render_surface_v1_set_parent(client->wex_render_surface, "", 0, 0, 0, 0);
+            client->wex_render_parent[0] = 0;
+            wl_display_flush(process_wayland.wl_display);
+        }
         if (client->wl_subsurface)
         {
             wl_subsurface_destroy(client->wl_subsurface);
@@ -1458,7 +1471,38 @@ void wayland_client_surface_attach(struct wayland_client_surface *client, HWND t
         return;
     }
 
-    if (!(toplevel_data = wayland_win_data_get(toplevel)) || !(surface = toplevel_data->wayland_surface))
+    toplevel_data = wayland_win_data_get(toplevel);
+    if (client->wex_render_surface || !toplevel_data || !toplevel_data->wayland_surface)
+    {
+        char handle[33];
+        double scale;
+        RECT logical;
+        TRACE("cross-process render hwnd %p parent %p rect %s\n", client->client.hwnd, toplevel,
+                rect ? wine_dbgstr_rect(rect) : "none");
+        if (toplevel_data) wayland_win_data_release(toplevel_data);
+        if (!process_wayland.wex_manager || wex_window_manager_v1_get_version(process_wayland.wex_manager) < 11)
+            return wayland_client_surface_attach(client, NULL, NULL);
+        if (!wayland_wex_get_render_parent(toplevel, handle, &scale) || !rect)
+            return wayland_client_surface_attach(client, NULL, NULL);
+        if (!client->wex_render_surface)
+            client->wex_render_surface = wex_window_manager_v1_get_render_surface(process_wayland.wex_manager, client->wl_surface);
+        logical.left = round(rect->left / scale); logical.top = round(rect->top / scale);
+        logical.right = round(rect->right / scale); logical.bottom = round(rect->bottom / scale);
+        if (IsRectEmpty(&logical)) return wayland_client_surface_attach(client, NULL, NULL);
+        if (strcmp(client->wex_render_parent, handle) || !EqualRect(&logical, &client->wex_render_rect))
+        {
+            wp_viewport_set_destination(client->wp_viewport, logical.right - logical.left, logical.bottom - logical.top);
+            wex_render_surface_v1_set_parent(client->wex_render_surface, handle, logical.left, logical.top,
+                    logical.right - logical.left, logical.bottom - logical.top);
+            strcpy(client->wex_render_parent, handle);
+            client->wex_render_rect = logical;
+        }
+        client->rect = *rect;
+        client->toplevel = toplevel;
+        wl_display_flush(process_wayland.wl_display);
+        return;
+    }
+    if (!(surface = toplevel_data->wayland_surface))
     {
         if (toplevel_data) wayland_win_data_release(toplevel_data);
         return wayland_client_surface_attach(client, NULL, NULL);

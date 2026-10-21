@@ -268,6 +268,9 @@ struct wayland_client_surface
     RECT rect;
     struct wl_surface *wl_surface;
     struct wl_subsurface *wl_subsurface;
+    struct wex_render_surface_v1 *wex_render_surface;
+    char wex_render_parent[33];
+    RECT wex_render_rect;
     struct wp_viewport *wp_viewport;
     struct wp_color_management_surface_v1 *color_management;
 };
@@ -353,6 +356,7 @@ void wayland_zones_reposition(void);
 void wayland_zone_create_item(struct wayland_surface *surface);
 void wayland_zone_place(struct wayland_surface *surface);
 void wayland_wex_create(struct wayland_surface *surface);
+BOOL wayland_wex_get_render_parent(HWND hwnd, char handle[33], double *scale);
 void wayland_wex_destroy(struct wayland_surface *surface);
 void wayland_wex_update(struct wayland_surface *surface, HWND insert_after, UINT flags);
 void WAYLAND_ActivateWindow(HWND hwnd, HWND previous);
