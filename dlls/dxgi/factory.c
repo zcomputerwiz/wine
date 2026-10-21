@@ -18,6 +18,7 @@
  */
 
 #include "dxgi_private.h"
+#include "wine/dcomp_underlay.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dxgi);
 
@@ -471,6 +472,17 @@ static LRESULT CALLBACK dcomp_swapchain_wndproc(HWND hwnd, UINT msg, WPARAM wpar
 {
     switch (msg)
     {
+        case WM_WINE_DCOMP_REPAINT:
+        {
+            MSG pending;
+            unsigned int count;
+            /* Coalesce a bounded burst, then render current retained state,
+             * never a stale target or a caller-owned packet. */
+            for (count = 0; count < 64; ++count)
+                if (!PeekMessageW(&pending, hwnd, WM_WINE_DCOMP_REPAINT, WM_WINE_DCOMP_REPAINT, PM_REMOVE)) break;
+            dcomp_swapchain_repaint(hwnd);
+            return 0;
+        }
         case WM_ERASEBKGND:
             return 1;
         case WM_NCHITTEST:
