@@ -217,6 +217,8 @@ static VkResult allocate_external_host_memory( struct vulkan_device *device, VkM
                                                               mapping, &props )))
     {
         ERR( "vkGetMemoryHostPointerPropertiesEXT failed: %d\n", res );
+        alloc_size = 0;
+        NtFreeVirtualMemory( GetCurrentProcess(), &mapping, &alloc_size, MEM_RELEASE );
         return res;
     }
 
@@ -890,7 +892,7 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
     struct vulkan_device *device = vulkan_device_from_handle( client_device );
     struct vulkan_physical_device *physical_device = device->physical_device;
     struct vulkan_instance *instance = device->physical_device->instance;
-    VkImportMemoryHostPointerInfoEXT host_pointer_info, *pointer_info = NULL;
+    VkImportMemoryHostPointerInfoEXT host_pointer_info = {0}, *pointer_info = NULL;
     VkExportMemoryWin32HandleInfoKHR export_win32 = {.dwAccess = GENERIC_ALL};
     VkImportMemoryWin32HandleInfoKHR *import_win32 = NULL;
     VkDeviceMemory host_device_memory = VK_NULL_HANDLE;
@@ -939,11 +941,23 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
 
     /* For host visible memory, we try to use VK_EXT_external_memory_host on wow64 to ensure that mapped pointer is 32-bit. */
     mem_flags = physical_device->memory_properties.memoryTypes[alloc_info->memoryTypeIndex].propertyFlags;
-    if (physical_device->external_memory_align && (mem_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && !pointer_info &&
-        (res = allocate_external_host_memory( device, alloc_info, mem_flags, &host_pointer_info )))
-        return res;
+    if (physical_device->external_memory_align && (mem_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && !pointer_info)
+    {
+        if ((res = allocate_external_host_memory( device, alloc_info, mem_flags, &host_pointer_info ))) return res;
+        /* Only this synthesized import owns its host allocation. An explicit
+         * application host-pointer import must never be released by Wine. */
+        mapping = (void *)host_pointer_info.pHostPointer;
+    }
 
-    if (!(memory = calloc( 1, sizeof(*memory) ))) return VK_ERROR_OUT_OF_HOST_MEMORY;
+    if (!(memory = calloc( 1, sizeof(*memory) )))
+    {
+        if (mapping)
+        {
+            SIZE_T size = 0;
+            NtFreeVirtualMemory( GetCurrentProcess(), &mapping, &size, MEM_RELEASE );
+        }
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
 
     if (import_win32)
     {
@@ -1041,6 +1055,11 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
 failed:
     WARN( "Failed to allocate memory, res %d\n", res );
     if (host_device_memory) device->p_vkFreeMemory( device->host.device, host_device_memory, NULL );
+    if (mapping)
+    {
+        SIZE_T size = 0;
+        NtFreeVirtualMemory( GetCurrentProcess(), &mapping, &size, MEM_RELEASE );
+    }
     if (memory->semaphore) device->p_vkDestroySemaphore( device->host.device, memory->semaphore, NULL );
     d3dkmt_destroy_resource( memory->local );
     d3dkmt_destroy_mutex( memory->mutex );
