@@ -626,9 +626,13 @@ static void update_window( struct console *console )
         SetWindowPos( console->win, 0, 0, 0, dx, dy, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE );
 
         SystemParametersInfoW( SPI_GETWORKAREA, 0, &r, 0 );
-        console->active->max_width  = (r.right - r.left) / console->active->font.width;
-        console->active->max_height = (r.bottom - r.top - GetSystemMetrics( SM_CYCAPTION )) /
-            console->active->font.height;
+        /* the cell size is zero when no usable console font could be loaded */
+        if (console->active->font.width && console->active->font.height)
+        {
+            console->active->max_width  = (r.right - r.left) / console->active->font.width;
+            console->active->max_height = (r.bottom - r.top - GetSystemMetrics( SM_CYCAPTION )) /
+                console->active->font.height;
+        }
 
         InvalidateRect( console->win, NULL, FALSE );
         UpdateWindow( console->win );
