@@ -29,6 +29,7 @@
 #include <ntsecapi.h>
 #include <sddl.h>
 #include <rpc.h>
+#include <rpcdcep.h>
 
 #include "wine/list.h"
 #include "wine/debug.h"
@@ -115,6 +116,26 @@ static DWORD check_client_access(BOOL service, const GENERIC_MAPPING *mapping, D
         ok = FALSE;
     CloseHandle(token);
     return ok ? ERROR_SUCCESS : ERROR_ACCESS_DENIED;
+}
+
+/* A service process may open its own service to report status and read it back, whatever the descriptor says.
+ * The client is identified by the process id the SCM recorded when it started the process.
+ * shortcut: RpcSs is openable for start and status by anyone, upgrade when the system role starts it at boot. */
+static BOOL own_process_access(const struct service_entry *entry, DWORD *access)
+{
+    static const DWORD allowed = SERVICE_SET_STATUS | SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG |
+                                 SERVICE_INTERROGATE | READ_CONTROL;
+    ULONG pid;
+    BOOL ok;
+
+    RtlMapGenericMask(access, &g_svc_generic);
+    /* Wine starts RpcSs when the first COM client needs it, where Windows has it running from boot. */
+    if (!wcscmp(entry->name, L"RpcSs") && !(*access & ~(SERVICE_START | SERVICE_QUERY_STATUS | READ_CONTROL)))
+        return TRUE;
+    if (*access & ~allowed) return FALSE;
+    if (I_RpcBindingInqLocalClientPID(NULL, &pid) != RPC_S_OK) return FALSE;
+    ok = entry->process && entry->process->process_id == pid;
+    return ok;
 }
 
 typedef enum
@@ -560,8 +581,14 @@ DWORD __cdecl svcctl_OpenServiceW(
 
     if (dwDesiredAccess && (err = check_client_access(TRUE, &g_svc_generic, &dwDesiredAccess)))
     {
-        release_service(entry);
-        return err;
+        service_lock(entry);
+        if (own_process_access(entry, &dwDesiredAccess)) err = ERROR_SUCCESS;
+        service_unlock(entry);
+        if (err)
+        {
+            release_service(entry);
+            return err;
+        }
     }
 
     return create_handle_for_service(entry, dwDesiredAccess, phService);

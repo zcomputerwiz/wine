@@ -3137,7 +3137,7 @@ static const struct connection_ops conn_protseq_list[] = {
     rpcrt4_conn_np_impersonate_client,
     rpcrt4_conn_np_revert_to_self,
     RPCRT4_default_inquire_auth_client,
-    NULL
+    rpcrt4_ncalrpc_inquire_client_pid
   },
   { "ncalrpc",
     { EPM_PROTOCOL_NCALRPC, EPM_PROTOCOL_PIPE },
