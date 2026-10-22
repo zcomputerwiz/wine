@@ -61,6 +61,7 @@ struct pipe_end
     struct pipe_end     *connection; /* the other end of the pipe */
     process_id_t         client_pid; /* process that created the client */
     process_id_t         server_pid; /* process that created the server */
+    struct token        *client_token; /* token of the thread that opened the client end (elevation enforced) */
     data_size_t          buffer_size;/* size of buffered data that doesn't block caller */
     struct list          message_queue;
     struct async_queue   read_q;     /* read queue */
@@ -443,6 +444,7 @@ static void pipe_end_destroy( struct object *obj )
     free_async_queue( &pipe_end->write_q );
     if (pipe_end->fd) release_object( pipe_end->fd );
     if (pipe_end->pipe) release_object( pipe_end->pipe );
+    if (pipe_end->client_token) release_object( pipe_end->client_token );
 }
 
 static struct object *pipe_server_lookup_name( struct object *obj, struct unicode_str *name,
@@ -1310,6 +1312,22 @@ static void pipe_server_ioctl( struct fd *fd, ioctl_code_t code, struct async *a
         return;
 
     case FSCTL_PIPE_IMPERSONATE:
+        /* while elevation is enforced, impersonate the client; otherwise the caller's own token */
+        if (elevation_enforced())
+        {
+            struct token *token, *client_token = server->pipe_end.connection ? server->pipe_end.connection->client_token : NULL;
+
+            if (!client_token)
+            {
+                set_error( STATUS_CANNOT_IMPERSONATE );
+                return;
+            }
+            if (!(token = token_duplicate( client_token, 0, SecurityImpersonation, NULL, NULL, 0, NULL, 0 )))
+                return;
+            if (current->token) release_object( current->token );
+            current->token = token;
+            return;
+        }
         if (current->process->token) /* FIXME: use the client token */
         {
             struct token *token;
@@ -1347,6 +1365,7 @@ static void init_pipe_end( struct pipe_end *pipe_end, struct named_pipe *pipe,
     pipe_end->fd = NULL;
     pipe_end->flags = pipe_flags;
     pipe_end->connection = NULL;
+    pipe_end->client_token = NULL;
     pipe_end->buffer_size = buffer_size;
     init_async_queue( &pipe_end->read_q );
     init_async_queue( &pipe_end->write_q );
@@ -1391,6 +1410,11 @@ static struct pipe_end *create_pipe_client( struct named_pipe *pipe, data_size_t
     init_pipe_end( client, pipe, 0, buffer_size );
     client->state = FILE_PIPE_CONNECTED_STATE;
     client->client_pid = get_process_id( current->process );
+    if (elevation_enforced())
+    {
+        struct token *token = current->token ? current->token : current->process->token;
+        if (token) client->client_token = (struct token *)grab_object( token );
+    }
 
     client->fd = alloc_pseudo_fd( &pipe_client_fd_ops, &client->obj, options );
     if (!client->fd)
