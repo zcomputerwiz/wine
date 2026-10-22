@@ -64,6 +64,8 @@ struct service_entry
     BOOL marked_for_delete;
     BOOL is_wow64;
     BOOL delayed_autostart;
+    BYTE *security;                    /* self-relative security descriptor of the "Security" value, NULL for the native default */
+    DWORD security_size;
     struct list handles;
 };
 

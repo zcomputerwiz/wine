@@ -26,6 +26,7 @@
 #include <windows.h>
 #include <winsvc.h>
 #include <winternl.h>
+#include <sddl.h>
 #include <rpc.h>
 #include <userenv.h>
 #include <setupapi.h>
@@ -51,8 +52,84 @@ static HANDLE job_object, job_completion_port;
 
 static const BOOL is_win64 = (sizeof(void *) > sizeof(int));
 
-static DWORD process_create(const WCHAR *name, struct process_entry **entry)
+/* Set when the server gave this services.exe the system role (SYSTEM token, ELEVATION_SYSTEM_ROLE_WORKORDER.md C3).
+ * Only then are services started with the token of their account; otherwise they run with the caller's token. */
+static BOOL system_role;
+
+static BOOL has_system_role(void)
 {
+    char buf[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    HANDLE token;
+    DWORD len;
+    BOOL ret = FALSE;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return FALSE;
+    if (GetTokenInformation(token, TokenUser, buf, sizeof(buf), &len))
+        ret = IsWellKnownSid(((TOKEN_USER *)buf)->User.Sid, WinLocalSystemSid);
+    CloseHandle(token);
+    return ret;
+}
+
+/* Objects that services.exe creates without a descriptor would get the SYSTEM default DACL (SYSTEM and
+ * Administrators only). The RPC endpoint \pipe\svcctl has to be reachable by every user, so give the process
+ * the default DACL that grants authenticated users read and write. */
+static void set_default_dacl(void)
+{
+    TOKEN_DEFAULT_DACL info;
+    PSECURITY_DESCRIPTOR sd;
+    BOOL present, defaulted;
+    HANDLE token;
+
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGWGX;;;AU)",
+                                                              SDDL_REVISION_1, &sd, NULL)) return;
+    if (GetSecurityDescriptorDacl(sd, &present, &info.DefaultDacl, &defaulted) && present &&
+        OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_DEFAULT, &token))
+    {
+        SetTokenInformation(token, TokenDefaultDacl, &info, sizeof(info));
+        CloseHandle(token);
+    }
+    LocalFree(sd);
+}
+
+/* The token of the account that ObjectName names. An empty name or LocalSystem is the SYSTEM token. Other accounts
+ * (a user name needs a logon) are refused for now. *sddl is the security descriptor of the control pipe. */
+static DWORD get_service_token(const WCHAR *account, HANDLE *token, const WCHAR **sddl)
+{
+    HANDLE handle;
+    NTSTATUS status;
+    int type;
+
+    *token = NULL;
+    *sddl = NULL;
+    if (!system_role) return ERROR_SUCCESS;
+
+    if (!account || !*account || !lstrcmpiW(account, L"LocalSystem"))
+    {
+        type = 0;
+        *sddl = L"D:(A;;GA;;;SY)";
+    }
+    else if (!lstrcmpiW(account, L"NT AUTHORITY\\LocalService"))
+    {
+        type = 1;
+        *sddl = L"D:(A;;GA;;;SY)(A;;GA;;;LS)";
+    }
+    else if (!lstrcmpiW(account, L"NT AUTHORITY\\NetworkService"))
+    {
+        type = 2;
+        *sddl = L"D:(A;;GA;;;SY)(A;;GA;;;NS)";
+    }
+    else return ERROR_SERVICE_LOGON_FAILED;
+
+    handle = (HANDLE)(ULONG_PTR)type;
+    if ((status = NtSetInformationProcess(GetCurrentProcess(), ProcessWineCreateServiceToken, &handle, sizeof(handle))))
+        return RtlNtStatusToDosError(status);
+    *token = handle;
+    return ERROR_SUCCESS;
+}
+
+static DWORD process_create(const WCHAR *name, const WCHAR *sddl, struct process_entry **entry)
+{
+    SECURITY_ATTRIBUTES sa = { sizeof(sa) };
     DWORD err;
 
     *entry = calloc(1, sizeof(**entry));
@@ -65,8 +142,11 @@ static DWORD process_create(const WCHAR *name, struct process_entry **entry)
     (*entry)->overlapped_event = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (!(*entry)->overlapped_event)
         goto error;
+    if (sddl && !ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sa.lpSecurityDescriptor, NULL))
+        goto error;
     (*entry)->control_pipe = CreateNamedPipeW(name, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-                                              PIPE_TYPE_BYTE|PIPE_WAIT, 1, 256, 256, 10000, NULL);
+                                              PIPE_TYPE_BYTE|PIPE_WAIT, 1, 256, 256, 10000, sddl ? &sa : NULL);
+    if (sddl) LocalFree(sa.lpSecurityDescriptor);
     if ((*entry)->control_pipe == INVALID_HANDLE_VALUE)
         goto error;
     /* all other fields are zero */
@@ -131,8 +211,26 @@ void free_service_entry(struct service_entry *entry)
     free(entry->description);
     free(entry->dependOnServices);
     free(entry->dependOnGroups);
+    free(entry->security);
     if (entry->process) release_process(entry->process);
     free(entry);
+}
+
+/* the per-service security descriptor of the "Security" value; an invalid one is ignored (the native default applies) */
+static void load_service_security(HKEY hKey, struct service_entry *entry)
+{
+    DWORD type, size = 0;
+    BYTE *sd;
+
+    if (RegQueryValueExW(hKey, L"Security", NULL, &type, NULL, &size) || type != REG_BINARY || !size) return;
+    if (!(sd = malloc(size))) return;
+    if (RegQueryValueExW(hKey, L"Security", NULL, &type, sd, &size) || !IsValidSecurityDescriptor(sd))
+    {
+        free(sd);
+        return;
+    }
+    entry->security = sd;
+    entry->security_size = size;
 }
 
 static DWORD load_service_config(HKEY hKey, struct service_entry *entry)
@@ -153,6 +251,7 @@ static DWORD load_service_config(HKEY hKey, struct service_entry *entry)
     if ((err = load_reg_dword(hKey, L"Tag", &entry->config.dwTagId))) return err;
     if ((err = load_reg_dword(hKey, L"PreshutdownTimeout", &entry->preshutdown_timeout))) return err;
 
+    load_service_security(hKey, entry);
     if (load_reg_dword(hKey, L"WOW64", &value) == 0 && value == 1)
         entry->is_wow64 = TRUE;
     if (load_reg_dword(hKey, L"DelayedAutoStart", &value) == 0 && value == 1)
@@ -919,7 +1018,8 @@ static DWORD service_start_process(struct service_entry *service_entry, struct p
     PROCESS_INFORMATION pi;
     STARTUPINFOW si;
     BOOL is_wow64 = FALSE;
-    HANDLE token;
+    HANDLE token, service_token = NULL;
+    const WCHAR *sddl;
     WCHAR *path;
     DWORD err;
     BOOL r;
@@ -1015,12 +1115,22 @@ found:
         return ERROR_SUCCESS;
     }
 
-    if ((err = process_create(service_get_pipe_name(), &process)))
+    if ((err = get_service_token(service_entry->config.lpServiceStartName, &service_token, &sddl)))
+    {
+        WINE_ERR("cannot start %s as %s, error = %lu\n", wine_dbgstr_w(service_entry->name),
+                 wine_dbgstr_w(service_entry->config.lpServiceStartName), err);
+        service_unlock(service_entry);
+        free(path);
+        return err;
+    }
+
+    if ((err = process_create(service_get_pipe_name(), sddl, &process)))
     {
         WINE_ERR("failed to create process object for %s, error = %lu\n",
                  wine_dbgstr_w(service_entry->name), err);
         service_unlock(service_entry);
         free(path);
+        if (service_token) CloseHandle(service_token);
         return err;
     }
 
@@ -1056,7 +1166,14 @@ found:
     process->use_count++;
     service_unlock(service_entry);
 
-    r = CreateProcessW(NULL, path, NULL, NULL, FALSE, CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS, environment, NULL, &si, &pi);
+    if (service_token)
+    {
+        r = CreateProcessAsUserW(service_token, NULL, path, NULL, NULL, FALSE,
+                                 CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS, environment, NULL, &si, &pi);
+        CloseHandle(service_token);
+    }
+    else
+        r = CreateProcessW(NULL, path, NULL, NULL, FALSE, CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS, environment, NULL, &si, &pi);
     free(path);
     if (!r)
     {
@@ -1300,6 +1417,8 @@ int __cdecl main(int argc, char *argv[])
         WINE_ERR("Failed to set completion port for job, err %lu.\n", GetLastError());
         return GetLastError();
     }
+
+    if ((system_role = has_system_role())) set_default_dacl();
 
     started_event = CreateEventW(NULL, TRUE, FALSE, svcctl_started_event);
 

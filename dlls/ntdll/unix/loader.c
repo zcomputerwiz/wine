@@ -2112,6 +2112,7 @@ DECLSPEC_EXPORT void __wine_main( int argc, char *argv[] )
     main_argc = argc;
     main_argv = argv;
 
+    sysrun_early_init();
     init_paths();
     if (!getenv( "WINELOADERNOEXEC" ) || argc <= 1) check_command_line( argc, argv );
     unsetenv( "WINELOADERNOEXEC" );

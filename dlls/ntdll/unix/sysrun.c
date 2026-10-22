@@ -44,6 +44,9 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#ifdef HAVE_SYS_PRCTL_H
+# include <sys/prctl.h>
+#endif
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -187,4 +190,54 @@ BOOL sysrun_server_ok( int fd )
     if (!got_uid || !got_gid) return FALSE;
     return ruid == getuid() && euid == ruid && suid == ruid && fuid == ruid &&
            rgid == getgid() && sgid == gid && (egid == rgid || egid == gid);
+}
+
+/* A process of the system role is not dumpable (it has the system group), so the user cannot ptrace it. A service
+ * of another account has no system group, so it would be an ordinary dumpable process of the user: it marks itself
+ * not dumpable first thing instead, and so do the processes it starts.
+ * shortcut: the flag is set after the exec, so a process that attaches in that short window wins; upgrade by
+ * starting the launcher's service-child mode instead of the plain loader. */
+void sysrun_early_init(void)
+{
+#if defined(__linux__) && defined(HAVE_SYS_PRCTL_H)
+    if (!getenv( "WINESERVICENODUMP" )) return;
+    prctl( PR_SET_DUMPABLE, 0, 0, 0, 0 );
+    unsetenv( "WINESERVICENODUMP" );
+#endif
+}
+
+/* Does the child get no system group? Only a client that has it can pass it on, and it keeps it for a child with
+ * the SYSTEM token or with its own (inherited) token; a service account or any other token gets none. */
+BOOL sysrun_must_drop_group( HANDLE token )
+{
+    static const SID_IDENTIFIER_AUTHORITY nt_authority = { SECURITY_NT_AUTHORITY };
+    char buf[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    const SID *sid;
+    ULONG len;
+
+    if (!token || !sysrun_client_is_system()) return FALSE;
+    if (NtQueryInformationToken( token, TokenUser, buf, sizeof(buf), &len )) return TRUE;
+    sid = ((TOKEN_USER *)buf)->User.Sid;
+    return !(sid->SubAuthorityCount == 1 && sid->SubAuthority[0] == SECURITY_LOCAL_SYSTEM_RID &&
+             !memcmp( &sid->IdentifierAuthority, &nt_authority, sizeof(nt_authority) ));
+}
+
+/* In the forked child, before the exec of the loader. Returns FALSE if the child must not run. */
+BOOL sysrun_prepare_child( BOOL drop_group )
+{
+#if defined(__linux__) && defined(HAVE_SYS_PRCTL_H)
+    if (drop_group)
+    {
+        gid_t gid = getgid();
+
+        /* effective and saved group both become the real group: the child cannot get the system group back */
+        if (setresgid( gid, gid, gid )) return FALSE;
+        putenv( (char *)"WINESERVICENODUMP=1" );
+    }
+    else if (prctl( PR_GET_DUMPABLE, 0, 0, 0, 0 ) == 0 && getuid() == geteuid() && getegid() == getgid())
+        putenv( (char *)"WINESERVICENODUMP=1" );
+#else
+    if (drop_group) return FALSE;
+#endif
+    return TRUE;
 }
