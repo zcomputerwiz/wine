@@ -34,6 +34,7 @@
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #ifdef HAVE_SYS_PRCTL_H
 # include <sys/prctl.h>
@@ -1557,6 +1558,10 @@ static void run_wineboot( WCHAR *env, SIZE_T size )
     LARGE_INTEGER timeout;
     unsigned int status;
     int count = 1;
+    pid_t sysrun_pid = 0;
+
+    /* a process with the system group started by the launcher is the wineboot --init already */
+    if (sysrun_client_is_system()) return;
 
     init_unicode_string( &nameW, eventW );
     InitializeObjectAttributes( &attr, &nameW, OBJ_OPENIF, 0, NULL );
@@ -1587,6 +1592,22 @@ static void run_wineboot( WCHAR *env, SIZE_T size )
     ps_attr->Attributes[1].Attribute    = PS_ATTRIBUTE_MACHINE_TYPE;
     ps_attr->Attributes[1].Value        = native_machine;
 
+    /* with the launcher wineboot --init runs with the system group, in the machine root */
+    if (sysrun_launcher_usable() && !sysrun_spawn( "wineboot-init", &sysrun_pid ))
+    {
+        timeout.QuadPart = -2000000;  /* 200 ms */
+        for (;;)
+        {
+            int wstatus;
+
+            if (!NtWaitForSingleObject( handles[0], FALSE, &timeout )) goto done;
+            if (waitpid( sysrun_pid, &wstatus, WNOHANG ) != sysrun_pid) continue;
+            if (!WIFEXITED(wstatus) || WEXITSTATUS(wstatus) != SYSRUN_REFUSED) goto done;
+            sysrun_warn_refused( "wineboot-init" );
+            break;
+        }
+    }
+
     wine_server_fd_to_handle( 2, GENERIC_WRITE | SYNCHRONIZE, OBJ_INHERIT, &params.hStdError );
 
     status = NtCreateUserProcess( &process, &thread, PROCESS_ALL_ACCESS, THREAD_ALL_ACCESS,
@@ -1608,6 +1629,7 @@ wait:
     timeout.QuadPart = (ULONGLONG)5 * 60 * 1000 * -10000;
     if (NtWaitForMultipleObjects( count, handles, WaitAny, FALSE, &timeout ) == WAIT_TIMEOUT)
         ERR( "boot event wait timed out\n" );
+done:
     while (count) NtClose( handles[--count] );
 }
 

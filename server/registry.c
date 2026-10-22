@@ -53,6 +53,7 @@
 #include "process.h"
 #include "unicode.h"
 #include "security.h"
+#include "sysrun.h"
 
 #include "winternl.h"
 
@@ -170,6 +171,7 @@ struct save_branch_info
     bool            has_stat;
     bool            has_ephemeral_mods;
     bool            is_shared_machine;
+    bool            sysrun;  /* machine hive of a system role server: fixed path, saved with the system group */
     struct list     tombstones;
 };
 
@@ -960,17 +962,37 @@ static struct security_descriptor *key_alloc_default_sd( const struct default_ac
     return sd;
 }
 
+static WCHAR *format_user_registry_path( const struct sid *sid, struct unicode_str *path );
+
 /* is the key in the \Registry\User tree (HKCU, HKU\.Default)? */
 static int key_in_user_tree( struct key *key )
 {
     static const WCHAR user[] = {'U','s','e','r'};
+    static const WCHAR classes[] = {'_','C','l','a','s','s','e','s'};
+    static WCHAR *own_name;  /* "S-1-5-21-...", the name of the token user's key below User */
+    static data_size_t own_len;
     const WCHAR *name;
     data_size_t len;
-    struct key *parent;
+    struct key *parent, *sub = NULL;
 
-    while ((parent = get_parent( key )) && parent != root_key) key = parent;
+    while ((parent = get_parent( key )) && parent != root_key) { sub = key; key = parent; }
     if (!parent || !(name = get_object_name( &key->obj, &len ))) return FALSE;
-    return len == sizeof(user) && !memicmp_strW( name, user, sizeof(user) );
+    if (len != sizeof(user) || memicmp_strW( name, user, sizeof(user) )) return FALSE;
+    /* With a system role server only the token user's own subtree and its _Classes belong to the user: HKU\S-1-5-18,
+     * S-1-5-19, S-1-5-20 and .DEFAULT get the machine default descriptor. */
+    if (!sysrun_active || !elevation_enforced() || !sub) return TRUE;
+    if (!own_name)
+    {
+        struct unicode_str path;
+        WCHAR *full = format_user_registry_path( &local_user_sid, &path );
+        own_len = path.len - 5 * sizeof(WCHAR);  /* skip "User\\" */
+        own_name = memdup( full + 5, own_len );
+        free( full );
+    }
+    if (!(name = get_object_name( &sub->obj, &len ))) return FALSE;
+    if (len == own_len && !memicmp_strW( name, own_name, own_len )) return TRUE;
+    return len == own_len + sizeof(classes) && !memicmp_strW( name, own_name, own_len ) &&
+           !memicmp_strW( name + own_len / sizeof(WCHAR), classes, sizeof(classes) );
 }
 
 /* Keys under HKLM that win32u's prepare_devices rewrites on every GUI process start (the display device
@@ -2441,8 +2463,40 @@ static bool is_shared_machine_file( const char *filename )
     return false;
 }
 
-/* load one of the initial registry files */
-static int load_init_registry_from_file( const char *filename, struct key *key )
+/* The path of a machine hive of a system role server: the machine root of the root-owned configuration, never
+ * the prefix, whose symlinks the user controls. */
+static const char *machine_hive_path( const char *name )
+{
+    char *path;
+
+    if (asprintf( &path, "%s/%s", sysrun_machine_root(), name ) == -1) fatal_error( "out of memory\n" );
+    return path;
+}
+
+/* Open a machine hive for reading with the system group. The last component must not be a symlink, and the file
+ * must be a regular file of the system group that others cannot write, else the server refuses to start. */
+static FILE *fopen_machine_hive( const char *filename )
+{
+    struct stat st;
+    FILE *f;
+    int fd, raised = sysrun_raise();
+
+    fd = open( filename, O_RDONLY | O_NOFOLLOW | O_CLOEXEC );
+    sysrun_drop( raised );
+    if (fd == -1)
+    {
+        if (errno != ENOENT) fatal_error( "cannot open the machine hive %s: %s\n", filename, strerror( errno ));
+        return NULL;
+    }
+    if (fstat( fd, &st ) || !S_ISREG( st.st_mode ) || st.st_gid != sysrun_group() || (st.st_mode & S_IWOTH))
+        fatal_error( "the machine hive %s is not a regular file of the system group\n", filename );
+    if (!(f = fdopen( fd, "r" ))) fatal_error( "out of memory\n" );
+    return f;
+}
+
+/* load one of the initial registry files; machine is set for the hives that a system role server takes from the
+ * machine root */
+static int load_init_registry_from_file( const char *filename, struct key *key, bool machine )
 {
     struct stat st;
     FILE *f;
@@ -2453,7 +2507,7 @@ static int load_init_registry_from_file( const char *filename, struct key *key )
     memset( info, 0, sizeof(*info) );
     list_init( &info->tombstones );
 
-    if ((f = fopen( filename, "r" )))
+    if ((f = machine ? fopen_machine_hive( filename ) : fopen( filename, "r" )))
     {
         if (!fstat( fileno( f ), &st ))
         {
@@ -2473,7 +2527,8 @@ static int load_init_registry_from_file( const char *filename, struct key *key )
 
     info->filename = filename;
     info->key = (struct key *)grab_object( key );
-    info->is_shared_machine = is_shared_machine_file( filename );
+    info->sysrun = machine;
+    info->is_shared_machine = machine || is_shared_machine_file( filename );
     save_branch_count++;
     make_object_permanent( &key->obj );
     return (f != NULL);
@@ -2586,7 +2641,8 @@ void init_registry(void)
     if (!(hklm = create_key_recursive( root_key, HKLM_name, current_time )))
         fatal_error( "could not create Machine registry key\n" );
 
-    if (!load_init_registry_from_file( "system.reg", hklm ))
+    if (!load_init_registry_from_file( sysrun_active ? machine_hive_path( "system.reg" ) : "system.reg",
+                                       hklm, sysrun_active ))
     {
         if ((p = getenv( "WINEARCH" )) && !strcmp( p, "win32" ))
             prefix_type = PREFIX_32BIT;
@@ -2610,7 +2666,8 @@ void init_registry(void)
     if (!(key = create_key_recursive( root_key, HKU_name, current_time )))
         fatal_error( "could not create User\\.Default registry key\n" );
 
-    load_init_registry_from_file( "userdef.reg", key );
+    load_init_registry_from_file( sysrun_active ? machine_hive_path( "userdef.reg" ) : "userdef.reg",
+                                  key, sysrun_active );
     release_object( key );
 
     /* load user.reg into HKEY_CURRENT_USER */
@@ -2621,7 +2678,7 @@ void init_registry(void)
         !(hkcu = create_key_recursive( root_key, current_user_str, current_time )))
         fatal_error( "could not create HKEY_CURRENT_USER registry key\n" );
     free( current_user_path );
-    load_init_registry_from_file( "user.reg", hkcu );
+    load_init_registry_from_file( "user.reg", hkcu, false );
 
     /* set the shared flag on Software\Classes\Wow6432Node for all platforms */
     for (i = 1; i < supported_machines_count; i++)
@@ -2657,6 +2714,22 @@ void init_registry(void)
             make_clean( save_branch_info[i].key );
     }
     registry_loaded = true;
+
+    /* With a system role server the service profiles exist from the start, so that a limited user cannot create
+     * them (and their subkeys) through its create access to the User key; they get the machine default descriptor. */
+    if (sysrun_active && elevation_enforced())
+    {
+        static const char * const service_profiles[] = { "User\\S-1-5-18", "User\\S-1-5-19", "User\\S-1-5-20" };
+
+        for (i = 0; i < ARRAY_SIZE(service_profiles); i++)
+        {
+            struct unicode_str name;
+            WCHAR *path = ascii_to_unicode_str( service_profiles[i], &name );
+
+            if (path && (key = create_key_recursive( root_key, name, current_time ))) release_object( key );
+            free( path );
+        }
+    }
 
     /* start the periodic save timer */
     set_periodic_save_timer();
@@ -2808,8 +2881,14 @@ static void save_registry( struct key *key, obj_handle_t handle )
     }
 }
 
+/* access() tests the real ids; a machine hive is saved with the effective, raised group */
+static int hive_access( const struct save_branch_info *info, const char *path, int mode )
+{
+    return info->sysrun ? faccessat( AT_FDCWD, path, mode, AT_EACCESS ) : access( path, mode );
+}
+
 /* save a registry branch to a file */
-static int save_branch( struct save_branch_info *info )
+static int do_save_branch( struct save_branch_info *info )
 {
     struct key *key = info->key;
     const char *filename = info->filename;
@@ -2837,6 +2916,7 @@ static int save_branch( struct save_branch_info *info )
     /* Check if accessed via symbolic link */
     if (!lstat( filename, &lst ) && S_ISLNK( lst.st_mode ))
     {
+        if (info->sysrun) return 0;  /* a machine hive is never reached through a symlink */
         is_symlink = true;
         if (!realpath( filename, target_path ))
         {
@@ -2869,7 +2949,7 @@ static int save_branch( struct save_branch_info *info )
      * clear dirty state and return 1 without modifying file or replacing link (Requirements 2 & 3). */
     if (access( target_path, F_OK ) == 0)
     {
-        if (access( target_path, W_OK ) == -1)
+        if (hive_access( info, target_path, W_OK ) == -1)
         {
             if (errno == EACCES || errno == EROFS)
             {
@@ -2881,7 +2961,7 @@ static int save_branch( struct save_branch_info *info )
             }
         }
     }
-    if (access( target_dir, W_OK ) == -1)
+    if (hive_access( info, target_dir, W_OK ) == -1)
     {
         if (errno == EACCES || errno == EROFS)
         {
@@ -2938,7 +3018,7 @@ static int save_branch( struct save_branch_info *info )
      * load current on-disk hive into tmp_root, replay session tombstones, and replay session dirty tree. */
     if (file_exists && info->is_shared_machine && (disk_changed || info->has_ephemeral_mods || is_symlink))
     {
-        FILE *f_in = fopen( target_path, "r" );
+        FILE *f_in = info->sysrun ? fopen_machine_hive( target_path ) : fopen( target_path, "r" );
         if (f_in)
         {
             static const WCHAR merge_tmp_name[] = {'_','_','m','e','r','g','e','_','t','m','p','_','_'};
@@ -3047,6 +3127,15 @@ done:
         free_tombstones( info );
         info->has_ephemeral_mods = false;
     }
+    return ret;
+}
+
+static int save_branch( struct save_branch_info *info )
+{
+    int raised = info->sysrun ? sysrun_raise() : 0;
+    int ret = do_save_branch( info );
+
+    sysrun_drop( raised );
     return ret;
 }
 

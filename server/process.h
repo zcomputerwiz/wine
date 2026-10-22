@@ -90,6 +90,9 @@ struct process
     struct list          rawinput_entry;  /* entry in the rawinput process list */
     struct list          kernel_object;   /* list of kernel object pointers */
     struct pe_image_info image_info;      /* main exe image info */
+    int                  peer_pid;        /* SO_PEERCRED pid of the connection (not the client-sent unix_pid) */
+    unsigned int         peer_uid;        /* SO_PEERCRED effective uid, -1 if unknown */
+    unsigned int         peer_gid;        /* SO_PEERCRED effective gid, -1 if unknown */
 };
 
 /* process functions */

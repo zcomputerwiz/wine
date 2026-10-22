@@ -250,6 +250,12 @@ extern NTSTATUS load_main_exe( UNICODE_STRING *nt_name, USHORT load_machine );
 extern NTSTATUS load_start_exe( UNICODE_STRING *nt_name );
 extern ULONG_PTR redirect_arm64ec_rva( void *module, ULONG_PTR rva, const IMAGE_ARM64EC_METADATA *metadata );
 extern void start_server( BOOL debug );
+extern BOOL sysrun_client_is_system(void);
+extern BOOL sysrun_launcher_usable(void);
+extern int sysrun_spawn( const char *mode, pid_t *pid );
+extern void sysrun_warn_refused( const char *mode );
+extern BOOL sysrun_server_ok( int fd );
+#define SYSRUN_REFUSED 77  /* exit status of wex-sysrun when it refuses */
 
 extern unsigned int server_call_unlocked( void *req_ptr );
 extern void server_enter_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigset );

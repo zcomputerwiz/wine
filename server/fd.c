@@ -100,6 +100,7 @@
 #include "handle.h"
 #include "process.h"
 #include "request.h"
+#include "sysrun.h"
 
 #include "winternl.h"
 #include "winioctl.h"
@@ -130,6 +131,7 @@ struct closed_fd
     int             unix_fd;    /* the unix file descriptor */
     unsigned int    disp_flags; /* the disposition flags */
     char           *unix_name;  /* name to unlink on close, points to parent fd unix_name */
+    int             sysrun;     /* opened for a client that runs with the system group */
 };
 
 struct fd
@@ -1050,8 +1052,10 @@ static void unlink_closed_fd( struct inode *inode, struct closed_fd *fd )
     struct stat st;
     if (!stat( fd->unix_name, &st ) && st.st_dev == inode->device->dev && st.st_ino == inode->ino)
     {
+        int raised = fd->sysrun ? sysrun_raise() : 0;  /* only a file that a system group client opened */
         if (S_ISDIR(st.st_mode)) rmdir( fd->unix_name );
         else unlink( fd->unix_name );
+        sysrun_drop( raised );
     }
 }
 
@@ -1774,6 +1778,7 @@ struct fd *dup_fd_object( struct fd *orig, unsigned int access, unsigned int sha
         }
         closed->unix_fd = fd->unix_fd;
         closed->disp_flags = 0;
+        closed->sysrun = orig->closed && orig->closed->sysrun;
         closed->unix_name = fd->unix_name;
         fd->closed = closed;
         fd->inode = (struct inode *)grab_object( orig->inode );
@@ -1913,7 +1918,7 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
     /* create the directory if needed */
     if ((options & FILE_DIRECTORY_FILE) && (flags & O_CREAT))
     {
-        if (mkdir( name, *mode ) == -1)
+        if (sysrun_mkdir( name, *mode ) == -1)
         {
             if (errno != EEXIST || (flags & O_EXCL))
             {
@@ -1931,13 +1936,13 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
     }
     else rw_mode = O_RDONLY;
 
-    if ((fd->unix_fd = open( name, rw_mode | (flags & ~O_TRUNC), *mode )) == -1)
+    if ((fd->unix_fd = sysrun_open( name, rw_mode | (flags & ~O_TRUNC), *mode )) == -1)
     {
         /* if we tried to open a directory for write access, retry read-only */
         if (errno == EISDIR)
         {
             if ((access & FILE_UNIX_WRITE_ACCESS) || (flags & O_CREAT))
-                fd->unix_fd = open( name, O_RDONLY | (flags & ~(O_TRUNC | O_CREAT | O_EXCL)), *mode );
+                fd->unix_fd = sysrun_open( name, O_RDONLY | (flags & ~(O_TRUNC | O_CREAT | O_EXCL)), *mode );
         }
 
         if (fd->unix_fd == -1)
@@ -1997,6 +2002,7 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
         closed_fd->unix_fd = fd->unix_fd;
         closed_fd->unix_name = fd->unix_name;
         closed_fd->disp_flags = 0;
+        closed_fd->sysrun = sysrun_process_privileged( current ? current->process : NULL );
         fd->inode = inode;
         fd->closed = closed_fd;
         fd->cacheable = !inode->device->removable;
@@ -2472,7 +2478,7 @@ static void set_reparse_point( struct fd *fd, struct async *async )
         memcpy( reparse_name, fd->unix_name, len );
         strcpy( reparse_name + len, "?" );
 
-        if (rename( fd->unix_name, reparse_name ))
+        if (sysrun_rename( fd->unix_name, reparse_name ))
         {
             free( reparse_name );
             return;
@@ -2568,7 +2574,7 @@ static void delete_reparse_point( struct fd *fd, struct async *async )
     memcpy( base_name, fd->unix_name, len - 1 );
     base_name[len - 1] = 0;
 
-    if (rename( fd->unix_name, base_name ) < 0)
+    if (sysrun_rename( fd->unix_name, base_name ) < 0)
     {
         file_set_error();
         free( base_name );
@@ -2862,7 +2868,7 @@ static void set_fd_name( struct fd *fd, struct fd *root, const char *nameptr, da
         /* rename() cannot replace files with directories */
         if (create_link || S_ISDIR( st2.st_mode ))
         {
-            if (unlink( name ))
+            if (sysrun_unlink( name ))
             {
                 file_set_error();
                 goto failed;
@@ -2872,13 +2878,13 @@ static void set_fd_name( struct fd *fd, struct fd *root, const char *nameptr, da
 
     if (create_link)
     {
-        if (link( fd->unix_name, name ))
+        if (sysrun_link( fd->unix_name, name ))
             file_set_error();
         free( name );
         return;
     }
 
-    if (rename( fd->unix_name, name ))
+    if (sysrun_rename( fd->unix_name, name ))
     {
         file_set_error();
         goto failed;
