@@ -520,6 +520,26 @@ static BOOL is_elevation_required( HANDLE token, const WCHAR *filename )
 
     if (!filename || !filename[0]) return FALSE;
 
+    /* Audit HKLM\Software\Wine\Elevation\Helper before touching the manifest. An absent or explicitly
+     * empty value selects stock Wine behavior (silent elevation in the loader), which must stay free of
+     * extra work. Denied reads, wrong registry types, odd or oversized data must NOT select it: they
+     * fall through and require elevation. */
+    status = RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"Software\\Wine\\Elevation", 0, KEY_READ, &hkey );
+    if (status == ERROR_FILE_NOT_FOUND)
+        helper_unset = TRUE;
+    else if (status == ERROR_SUCCESS)
+    {
+        bytes = sizeof(helper) - sizeof(WCHAR);
+        status = RegQueryValueExW( hkey, L"Helper", NULL, &type, (BYTE *)helper, &bytes );
+        RegCloseKey( hkey );
+        if (status == ERROR_FILE_NOT_FOUND)
+            helper_unset = TRUE;
+        else if (status == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) &&
+                 !(bytes % sizeof(WCHAR)) && (!bytes || !helper[0]))
+            helper_unset = TRUE;
+    }
+    if (helper_unset) return FALSE;
+
     /* Determine token elevation type */
     token_to_check = token ? token : GetCurrentThreadEffectiveToken();
     if (!GetTokenInformation( token_to_check, TokenElevationType, &elev_type, sizeof(elev_type), &size ))
@@ -549,40 +569,7 @@ static BOOL is_elevation_required( HANDLE token, const WCHAR *filename )
     }
     ReleaseActCtx( actctx );
 
-    if (!ret) return FALSE;
-
-    /* Manifest requires elevation. Audit Helper configuration in HKLM\Software\Wine\Elevation\Helper.
-     * Absent or explicitly empty configuration selects stock Wine behavior (silent elevation).
-     * Denied reads, wrong registry types, odd/truncated/oversized data or invalid paths must NOT
-     * silently select helper-unset elevation; they must fail closed by requiring elevation. */
-    status = RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"Software\\Wine\\Elevation", 0, KEY_READ, &hkey );
-    if (status == ERROR_FILE_NOT_FOUND)
-        helper_unset = TRUE;
-    else if (status == ERROR_SUCCESS)
-    {
-        bytes = sizeof(helper) - sizeof(WCHAR);
-        status = RegQueryValueExW( hkey, L"Helper", NULL, &type, (BYTE *)helper, &bytes );
-        RegCloseKey( hkey );
-        if (status == ERROR_FILE_NOT_FOUND)
-            helper_unset = TRUE;
-        else if (status == ERROR_SUCCESS)
-        {
-            if (type == REG_SZ || type == REG_EXPAND_SZ)
-            {
-                if (bytes == 0) helper_unset = TRUE;
-                else if (bytes % sizeof(WCHAR) == 0)
-                {
-                    helper[bytes / sizeof(WCHAR)] = 0;
-                    if (!helper[0]) helper_unset = TRUE;
-                }
-            }
-        }
-    }
-
-    if (helper_unset)
-        return FALSE; /* Stock compatibility: silent elevation in loader */
-
-    return TRUE; /* Helper configured or invalid/denied: enforce elevation requirement */
+    return ret;
 }
 
 /**********************************************************************
