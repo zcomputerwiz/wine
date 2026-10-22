@@ -3104,8 +3104,9 @@ static void test_elevation(void)
     }
 
     /* 2. Configure Elevation Helper -> helper_yes */
+    /* the helper is read from the 64-bit registry view by every process */
     res = RegCreateKeyExA(HKEY_LOCAL_MACHINE, "Software\\Wine\\Elevation", 0, NULL, 0,
-                          KEY_WRITE, NULL, &hkey, NULL);
+                          KEY_WRITE | KEY_WOW64_64KEY, NULL, &hkey, NULL);
     if (res != ERROR_SUCCESS)
     {
         win_skip("Cannot create Software\\Wine\\Elevation key: %lu\n", res);
@@ -3132,9 +3133,15 @@ static void test_elevation(void)
     sei.lpParameters = params;
     sei.nShow = SW_SHOWNORMAL;
 
+    /* While a helper is configured the linked token cannot start a process (Windows returns
+     * ERROR_BAD_IMPERSONATION_LEVEL), so an approving helper cannot launch the target until the elevation
+     * broker does (docs/ELEVATION_BOUNDARY_PLAN.md, step 4). */
+    SetLastError(0xdeadbeef);
     ret = ShellExecuteExA(&sei);
-    ok(ret, "ShellExecuteEx with approved helper failed: %lu\n", GetLastError());
-    ok(sei.hProcess != NULL, "expected valid hProcess handle\n");
+    err = GetLastError();
+    ok(!ret, "ShellExecuteEx with approved helper succeeded\n");
+    ok(err == ERROR_BAD_IMPERSONATION_LEVEL, "expected ERROR_BAD_IMPERSONATION_LEVEL, got %lu\n", err);
+    ok(sei.hProcess == NULL, "expected no process handle\n");
     if (sei.hProcess)
     {
         WaitForSingleObject(sei.hProcess, 5000);
@@ -3150,9 +3157,12 @@ static void test_elevation(void)
     sei.lpParameters = params;
     sei.nShow = SW_SHOWNORMAL;
 
+    SetLastError(0xdeadbeef);
     ret = ShellExecuteExA(&sei);
-    ok(ret, "ShellExecuteEx runas with approved helper failed: %lu\n", GetLastError());
-    ok(sei.hProcess != NULL, "expected valid hProcess handle\n");
+    err = GetLastError();
+    ok(!ret, "ShellExecuteEx runas with approved helper succeeded\n");
+    ok(err == ERROR_BAD_IMPERSONATION_LEVEL, "expected ERROR_BAD_IMPERSONATION_LEVEL, got %lu\n", err);
+    ok(sei.hProcess == NULL, "expected no process handle\n");
     if (sei.hProcess)
     {
         WaitForSingleObject(sei.hProcess, 5000);
