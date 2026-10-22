@@ -456,6 +456,26 @@ static struct key *find_subkey_by_path( struct key *root, const WCHAR *path, dat
     return cur;
 }
 
+/* The elevation helper (HKLM/Software/Wine/Elevation/Helper) is unset when the key or the value is absent,
+ * or the value is an empty string. Any other state, including a wrong type or an odd length, counts as
+ * configured: elevation enforcement fails closed. Same rule as is_elevation_helper_unset() in ntdll. */
+int elevation_helper_unset(void)
+{
+    static const WCHAR key_path[] = {'M','a','c','h','i','n','e','\\','S','o','f','t','w','a','r','e','\\',
+                                     'W','i','n','e','\\','E','l','e','v','a','t','i','o','n'};
+    static const WCHAR value_name[] = {'H','e','l','p','e','r'};
+    struct unicode_str name = { value_name, sizeof(value_name) };
+    struct key_value *value;
+    struct key *key;
+    int index;
+
+    if (!root_key || !(key = find_subkey_by_path( root_key, key_path, sizeof(key_path) ))) return TRUE;
+    if (!(value = find_value( key, name, &index ))) return TRUE;
+    if (value->type != REG_SZ && value->type != REG_EXPAND_SZ) return FALSE;
+    if (value->len % sizeof(WCHAR)) return FALSE;
+    return !value->len || !*(const WCHAR *)value->data;
+}
+
 static void replay_tombstones( struct save_branch_info *info, struct key *tmp_root )
 {
     struct reg_tombstone *ts;
@@ -3188,4 +3208,9 @@ DECL_HANDLER(rename_key)
         rename_key( key, name );
         release_object( key );
     }
+}
+
+int object_is_registry_key( struct object *obj )
+{
+    return obj->ops == &key_ops;
 }

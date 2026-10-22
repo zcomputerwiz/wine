@@ -1105,7 +1105,7 @@ DECL_HANDLER(new_process)
     int socket_fd = thread_get_inflight_fd( current, req->socket_fd );
     const obj_handle_t *handles = NULL;
     const obj_handle_t *job_handles = NULL;
-    unsigned int i, job_handle_count;
+    unsigned int i, job_handle_count, status;
     struct job *job;
 
     if (socket_fd == -1)
@@ -1257,6 +1257,12 @@ DECL_HANDLER(new_process)
     if (req->token && !(token = get_token_obj( current->process, req->token, TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY )))
     {
         close( socket_fd );
+        goto done;
+    }
+    if (token && (status = token_check_assign_primary( token )))
+    {
+        close( socket_fd );
+        set_error( status );
         goto done;
     }
     if (req->debug && !(debug_obj = get_debug_obj( current->process, req->debug, DEBUG_PROCESS_ASSIGN )))
@@ -1704,8 +1710,18 @@ DECL_HANDLER(set_process_info)
 
             if ((token = get_token_obj( current->process, req->token, TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY )))
             {
-                release_object( process->token );
-                process->token = token;
+                unsigned int status = token_check_assign_primary( token );
+
+                if (status)
+                {
+                    set_error( status );
+                    release_object( token );
+                }
+                else
+                {
+                    release_object( process->token );
+                    process->token = token;
+                }
             }
         }
         release_object( process );
@@ -1799,6 +1815,13 @@ DECL_HANDLER(grant_process_admin_token)
 {
     struct process *process;
     struct token *token;
+
+    /* any process could elevate itself with this request; only a TCB caller may while elevation is enforced */
+    if (elevation_enforced() && !token_has_privilege( current->process->token, SeTcbPrivilege ))
+    {
+        set_error( STATUS_PRIVILEGE_NOT_HELD );
+        return;
+    }
 
     if (!(process = get_process_from_handle( req->handle, PROCESS_SET_INFORMATION )))
         return;

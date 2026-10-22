@@ -42,6 +42,7 @@
 #define MAX_SUBAUTH_COUNT 1
 
 const struct luid SeIncreaseQuotaPrivilege        = {  5, 0 };
+const struct luid SeAssignPrimaryTokenPrivilege  = {  3, 0 };
 const struct luid SeTcbPrivilege                  = {  7, 0 };
 const struct luid SeSecurityPrivilege             = {  8, 0 };
 const struct luid SeTakeOwnershipPrivilege        = {  9, 0 };
@@ -104,6 +105,7 @@ struct token
     struct object  obj;             /* object header */
     struct luid    token_id;        /* system-unique id of token */
     struct luid    modified_id;     /* new id allocated every time token is modified */
+    struct luid    lineage_id;      /* token_id of the first token of the chain of duplicates and filtered copies */
     struct list    privileges;      /* privileges available to the token */
     struct list    groups;          /* groups that the user of this token belongs to (sid_and_attributes) */
     struct sid    *user;            /* SID of user this token represents */
@@ -490,6 +492,7 @@ static struct token *create_token( unsigned int primary, unsigned int session_id
         unsigned int i;
 
         allocate_luid( &token->token_id );
+        token->lineage_id = token->token_id;
         if (modified_id)
             token->modified_id = *modified_id;
         else
@@ -603,6 +606,16 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
     struct privilege *privilege;
     struct group *group;
 
+    /* Windows will not turn an identification-level token into a primary token. Stock Wine relies on it
+     * (shell32 runas, msi custom actions and the ntdll loader start processes from the linked token), so this
+     * only applies while an elevation helper is configured. */
+    if (primary && !src_token->primary && src_token->impersonation_level < SecurityImpersonation &&
+        elevation_enforced())
+    {
+        set_error( STATUS_BAD_IMPERSONATION_LEVEL );
+        return NULL;
+    }
+
     if (!primary &&
         (impersonation_level < SecurityAnonymous ||
          impersonation_level > SecurityDelegation ||
@@ -616,6 +629,7 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
                           NULL, 0, src_token->default_dacl, modified_id,
                           0, impersonation_level, src_token->elevation );
     if (!token) return token;
+    token->lineage_id = src_token->lineage_id;
 
     /* copy groups */
     token->primary_group = NULL;
@@ -924,6 +938,31 @@ static void token_disable_privileges( struct token *token )
 
     LIST_FOR_EACH_ENTRY( privilege, &token->privileges, struct privilege, entry )
         privilege->enabled = FALSE;
+}
+
+/* Windows only honours a privilege that is enabled in the primary token. */
+int token_has_privilege( struct token *token, struct luid priv )
+{
+    return token_find_privilege( token, priv, TRUE ) != NULL;
+}
+
+/* Can the caller give a process this token? Only enforced while an elevation helper is configured.
+ * A token that is not at least an impersonation-level token is refused. A copy of the caller's own
+ * token (same lineage: a duplicate or a filtered version) is always allowed. Anything else needs
+ * SeAssignPrimaryTokenPrivilege, which Wine's service tokens do not have yet, so SeTcbPrivilege (held
+ * by a full administrator token and by the planned elevation broker) stands in for it.
+ * shortcut: SeTcbPrivilege stands in for SeAssignPrimaryTokenPrivilege, drop it once the broker has its own token. */
+unsigned int token_check_assign_primary( struct token *token )
+{
+    struct token *caller = current->process->token;
+
+    if (!elevation_enforced()) return STATUS_SUCCESS;
+    if (!token->primary && token->impersonation_level < SecurityImpersonation)
+        return STATUS_BAD_IMPERSONATION_LEVEL;
+    if (is_equal_luid( token->lineage_id, caller->lineage_id )) return STATUS_SUCCESS;
+    if (token_has_privilege( caller, SeAssignPrimaryTokenPrivilege ) || token_has_privilege( caller, SeTcbPrivilege ))
+        return STATUS_SUCCESS;
+    return STATUS_PRIVILEGE_NOT_HELD;
 }
 
 int token_check_privileges( struct token *token, int all_required, const struct luid_attr *reqprivs,
@@ -1273,6 +1312,14 @@ int check_object_access(struct token *token, struct object *obj, unsigned int *a
 
     if (!token)
         token = current->token ? current->token : current->process->token;
+
+    /* Identification-level impersonation is for reading the client's identity only. Windows fails every
+     * object open with it, a registry key with access denied. */
+    if (!token->primary && token->impersonation_level < SecurityImpersonation && elevation_enforced())
+    {
+        set_error( object_is_registry_key( obj ) ? STATUS_ACCESS_DENIED : STATUS_BAD_IMPERSONATION_LEVEL );
+        return FALSE;
+    }
 
     mapping.all = map_obj_access( obj, GENERIC_ALL );
 
@@ -2005,6 +2052,8 @@ DECL_HANDLER(create_linked_token)
             release_object( token );
             return;
         }
+        /* shortcut: everyone gets an identification-level token; Windows hands a SeTcbPrivilege caller a usable
+         * primary token (docs/ELEVATION_BOUNDARY_PLAN.md, N6), add that when the elevation broker exists. */
         if ((linked = token_create_admin( FALSE, SecurityIdentification, elevation, token->session_id )))
         {
             reply->linked = alloc_handle( current->process, linked, TOKEN_ALL_ACCESS, 0 );

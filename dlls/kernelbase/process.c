@@ -524,7 +524,7 @@ static BOOL is_elevation_required( HANDLE token, const WCHAR *filename )
      * empty value selects stock Wine behavior (silent elevation in the loader), which must stay free of
      * extra work. Denied reads, wrong registry types, odd or oversized data must NOT select it: they
      * fall through and require elevation. */
-    status = RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"Software\\Wine\\Elevation", 0, KEY_READ, &hkey );
+    status = RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"Software\\Wine\\Elevation", 0, KEY_READ | KEY_WOW64_64KEY, &hkey );
     if (status == ERROR_FILE_NOT_FOUND)
         helper_unset = TRUE;
     else if (status == ERROR_SUCCESS)

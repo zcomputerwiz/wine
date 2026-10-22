@@ -123,6 +123,15 @@ extern void security_set_thread_token( struct thread *thread, obj_handle_t handl
 extern const struct sid *security_unix_uid_to_sid( uid_t uid );
 extern int check_object_access( struct token *token, struct object *obj, unsigned int *access );
 
+/* elevation enforcement is on while an elevation helper is configured (registry.c) */
+extern int elevation_helper_unset(void);
+static inline int elevation_enforced(void) { return !elevation_helper_unset(); }
+extern int object_is_registry_key( struct object *obj );
+extern const struct luid SeAssignPrimaryTokenPrivilege;
+extern const struct luid SeTcbPrivilege;
+extern int token_has_privilege( struct token *token, struct luid priv );
+extern unsigned int token_check_assign_primary( struct token *token );
+
 static inline int thread_single_check_privilege( struct thread *thread, struct luid priv )
 {
     struct token *token = thread_get_impersonation_token( thread );

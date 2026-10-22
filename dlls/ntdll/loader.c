@@ -4285,7 +4285,7 @@ static BOOL is_elevation_helper_unset(void)
     NTSTATUS status;
 
     InitializeObjectAttributes( &attr, &name, OBJ_CASE_INSENSITIVE, 0, NULL );
-    status = NtOpenKey( &hkey, KEY_READ, &attr );
+    status = NtOpenKey( &hkey, KEY_READ | KEY_WOW64_64KEY, &attr );
     if (status == STATUS_OBJECT_NAME_NOT_FOUND) return TRUE;
     if (status) return FALSE;
 
