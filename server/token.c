@@ -1685,6 +1685,27 @@ void token_make_filtered( struct token *token )
     }
 }
 
+/* set when this server gave its user a standard token: tokens derived from it (a filtered copy is Limited
+ * again) must not get a linked full token or an administrator grant */
+int standard_user_session;
+
+/* a standard user (not in the administrator group): the filtered token without Administrators and without a
+ * split, so TokenElevationType is Default as for a non-split token on Windows */
+void token_make_standard( struct token *token )
+{
+    struct group *group, *next;
+
+    standard_user_session = 1;
+
+    LIST_FOR_EACH_ENTRY_SAFE( group, next, &token->groups, struct group, entry )
+    {
+        if (!equal_sid( &group->sid, &builtin_admins_sid )) continue;
+        list_remove( &group->entry );
+        free( group );
+    }
+    token->elevation = TokenElevationTypeDefault;
+}
+
 /* creates a restricted version of a token */
 DECL_HANDLER(filter_token)
 {
@@ -2087,6 +2108,13 @@ DECL_HANDLER(create_linked_token)
 {
     struct token *token, *linked;
     int elevation;
+
+    /* a standard user has no linked token (native: ERROR_NO_SUCH_LOGON_SESSION) */
+    if (elevation_enforced() && standard_user_session)
+    {
+        set_error( STATUS_NO_SUCH_LOGON_SESSION );
+        return;
+    }
 
     if ((token = (struct token *)get_handle_obj( current->process, req->handle,
                                                  TOKEN_QUERY, &token_ops )))

@@ -28,6 +28,8 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
+#include <pwd.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -474,6 +476,63 @@ int elevation_helper_unset(void)
     if (value->type != REG_SZ && value->type != REG_EXPAND_SZ) return FALSE;
     if (value->len % sizeof(WCHAR)) return FALSE;
     return !value->len || !*(const WCHAR *)value->data;
+}
+
+/* The administrator group: "admin_group" of the root-owned sysrun.conf (a user controls its own environment, so
+ * the name cannot come from there), else "sudo". */
+static const char *admin_group_name(void)
+{
+    static char name[64];
+    char buf[4096], *line, *next;
+    struct stat st;
+    ssize_t n;
+    int fd;
+
+    strcpy( name, "sudo" );
+    if ((fd = open( "/etc/wineexplorer/sysrun.conf", O_RDONLY | O_NOFOLLOW | O_CLOEXEC )) == -1) return name;
+    if (fstat( fd, &st ) || !S_ISREG( st.st_mode ) || st.st_uid != 0 || (st.st_mode & (S_IWGRP | S_IWOTH)))
+        n = 0;
+    else
+        n = read( fd, buf, sizeof(buf) - 1 );
+    close( fd );
+    if (n <= 0) return name;
+    buf[n] = 0;
+    for (line = buf; line; line = next)
+    {
+        if ((next = strchr( line, '\n' ))) *next++ = 0;
+        if (strncmp( line, "admin_group=", 12 )) continue;
+        if (line[12] && strlen( line + 12 ) < sizeof(name)) strcpy( name, line + 12 );
+        break;
+    }
+    return name;
+}
+
+/* Whether the user of this server is in the administrator group of the group database. Decided once, when the
+ * first process (the logon) gets its token, so a membership change applies at the next logon. A missing user or
+ * group counts as no. */
+int user_is_administrator(void)
+{
+    static int is_admin = -1;
+    struct passwd *pw;
+    struct group *gr;
+    gid_t *gids;
+    int i, count = 32;
+
+    if (is_admin != -1) return is_admin;
+    is_admin = 0;
+    if (!(pw = getpwuid( getuid() )) || !(gr = getgrnam( admin_group_name() ))) return 0;
+    for (;;)
+    {
+        int n = count;
+        if (!(gids = malloc( count * sizeof(*gids) ))) return 0;
+        if (getgrouplist( pw->pw_name, pw->pw_gid, gids, &n ) != -1) { count = n; break; }
+        free( gids );
+        if (n <= count) return 0;
+        count = n;
+    }
+    for (i = 0; i < count; i++) if (gids[i] == gr->gr_gid) is_admin = 1;
+    free( gids );
+    return is_admin;
 }
 
 static void replay_tombstones( struct save_branch_info *info, struct key *tmp_root )

@@ -671,7 +671,11 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
         process->handles = alloc_handle_table( process, 0 );
         process->token = token_create_admin( TRUE, -1, TokenElevationTypeLimited, default_session_id );
         /* the registry is loaded before the first client connects, so the helper setting is known here */
-        if (process->token && elevation_enforced()) token_make_filtered( process->token );
+        if (process->token && elevation_enforced())
+        {
+            token_make_filtered( process->token );
+            if (!user_is_administrator()) token_make_standard( process->token );
+        }
         process->affinity = ~0;
     }
     else
@@ -1822,6 +1826,12 @@ DECL_HANDLER(grant_process_admin_token)
     if (elevation_enforced() && !token_has_privilege( current->process->token, SeTcbPrivilege ))
     {
         set_error( STATUS_PRIVILEGE_NOT_HELD );
+        return;
+    }
+
+    if (elevation_enforced() && standard_user_session)
+    {
+        set_error( STATUS_ACCESS_DENIED );
         return;
     }
 
