@@ -928,6 +928,10 @@ static const char * const display_cache_paths[] =
     "System\\ControlSet001\\Hardware Profiles\\Current",
     "HARDWARE\\DEVICEMAP",
     "Software\\Microsoft\\DirectX",
+    /* written by services.exe and wineboot --init, which run limited until the system role exists;
+     * shortcut: remove these two when they get the system role (step 2b work order, item 5) */
+    "System\\ControlSet001\\Control\\ServiceCurrent",
+    "System\\ControlSet001\\Control\\ComputerName\\ActiveComputerName",
 };
 
 /* is path a key above an entry of display_cache_paths? */
