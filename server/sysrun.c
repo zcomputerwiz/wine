@@ -234,6 +234,14 @@ static const char *const system_images[] =
     "/drive_c/windows/syswow64/winedevice.exe",
 };
 
+static void kill_unverified( void *private )
+{
+    struct process *process = private;
+
+    kill_process( process, 1 );
+    release_object( process );
+}
+
 void sysrun_main_image( struct process *process, struct fd *fd )
 {
     char path[PATH_MAX];
@@ -259,9 +267,10 @@ void sysrun_main_image( struct process *process, struct fd *fd )
     }
     fprintf( stderr, "wineserver: process %04x has the system group but its image is not a system program of the machine root\n",
              process->id );
-    process->peer_gid = -1;
-    set_error( STATUS_ACCESS_DENIED );
-    kill_process( process, 1 );
+    process->peer_gid = -1;  /* no more raised file access from now on */
+    /* killed from the main loop: this runs in a request of the process itself */
+    grab_object( process );
+    add_timeout_user( -TICKS_PER_SEC / 100, kill_unverified, process );
 }
 
 int sysrun_check_process_access( struct process *target, unsigned int access )
