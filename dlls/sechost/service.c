@@ -1741,7 +1741,7 @@ static DWORD WINAPI service_control_dispatcher( void *arg )
         {
             if (!(service->handle = OpenServiceW( disp->manager, name, SERVICE_SET_STATUS )) ||
                 !(service->full_access_handle = OpenServiceW( disp->manager, name,
-                        GENERIC_READ|GENERIC_WRITE )))
+                        SERVICE_QUERY_STATUS|SERVICE_QUERY_CONFIG )))
                 FIXME( "failed to open service %s\n", debugstr_w(name) );
         }
 

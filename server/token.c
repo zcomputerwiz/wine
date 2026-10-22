@@ -965,6 +965,23 @@ unsigned int token_check_assign_primary( struct token *token )
     return STATUS_PRIVILEGE_NOT_HELD;
 }
 
+/* Impersonation level a pipe server gets for a client token (Windows SeTokenCanImpersonate).
+ * Without SeImpersonatePrivilege in the server's primary token the level drops to identification, unless the
+ * client has the server's user and is neither more trusted (integrity) nor elevated while the server is not.
+ * shortcut: the client's requested SQOS level is not sent to the server, so it is the client token's own level
+ * (impersonation by default), upgrade when create_file carries SecurityQualityOfService. */
+int token_impersonation_level( struct token *client, struct token *server )
+{
+    int level = client->primary ? SecurityImpersonation : client->impersonation_level;
+
+    if (level > SecurityImpersonation) level = SecurityImpersonation;
+    if (token_has_privilege( server, SeImpersonatePrivilege )) return level;
+    if (equal_sid( client->user, server->user ) && client->integrity_rid <= server->integrity_rid &&
+        !(client->elevation == TokenElevationTypeFull && server->elevation != TokenElevationTypeFull))
+        return level;
+    return level < SecurityIdentification ? level : SecurityIdentification;
+}
+
 int token_check_privileges( struct token *token, int all_required, const struct luid_attr *reqprivs,
                             unsigned int count, struct luid_attr *usedprivs)
 {
@@ -1307,6 +1324,7 @@ unsigned int token_get_session_id( struct token *token )
 int check_object_access(struct token *token, struct object *obj, unsigned int *access)
 {
     struct generic_map mapping;
+    struct security_descriptor *sd;
     unsigned int status;
     int res;
 
@@ -1323,7 +1341,10 @@ int check_object_access(struct token *token, struct object *obj, unsigned int *a
 
     mapping.all = map_obj_access( obj, GENERIC_ALL );
 
-    if (!obj->sd)
+    /* a key without a descriptor is checked against its default one while elevation is enforced */
+    sd = obj->sd;
+    if (!sd && elevation_enforced() && object_is_registry_key( obj )) sd = obj->ops->get_sd( obj );
+    if (!sd)
     {
         if (*access & MAXIMUM_ALLOWED) *access = mapping.all;
         return TRUE;
@@ -1337,7 +1358,7 @@ int check_object_access(struct token *token, struct object *obj, unsigned int *a
     {
         const struct acl *sacl;
         int sacl_present;
-        sacl = sd_get_sacl( obj->sd, &sacl_present );
+        sacl = sd_get_sacl( sd, &sacl_present );
         if (sacl_present && sacl)
         {
             const struct ace *ace;
@@ -1364,7 +1385,7 @@ int check_object_access(struct token *token, struct object *obj, unsigned int *a
         }
     }
 
-    res = token_access_check( token, obj->sd, *access, NULL, NULL,
+    res = token_access_check( token, sd, *access, NULL, NULL,
                               &mapping, access, &status ) == STATUS_SUCCESS &&
           status == STATUS_SUCCESS;
 
@@ -1486,8 +1507,14 @@ DECL_HANDLER(open_token)
                 if (!thread->token->primary && thread->token->impersonation_level <= SecurityAnonymous)
                     set_error( STATUS_CANT_OPEN_ANONYMOUS );
                 else
-                    reply->token = alloc_handle( current->process, thread->token,
-                                                 req->access, req->attributes );
+                {
+                    /* OpenAsSelf: the access check uses the process token, which matters when the caller is
+                     * impersonating at identification level (a pipe server reading its client's identity) */
+                    struct token *target = thread->token, *impersonated = current->token;
+                    if (req->flags & OPEN_TOKEN_AS_SELF) current->token = NULL;
+                    reply->token = alloc_handle( current->process, target, req->access, req->attributes );
+                    current->token = impersonated;
+                }
             }
             else
                 set_error( STATUS_NO_TOKEN );

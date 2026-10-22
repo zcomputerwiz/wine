@@ -27,7 +27,9 @@
 #include <winsvc.h>
 #include <ddk/ntddk.h>
 #include <ntsecapi.h>
+#include <sddl.h>
 #include <rpc.h>
+#include <rpcdcep.h>
 
 #include "wine/list.h"
 #include "wine/debug.h"
@@ -52,6 +54,89 @@ static const GENERIC_MAPPING g_svc_generic =
     (STANDARD_RIGHTS_EXECUTE | SERVICE_START | SERVICE_STOP | SERVICE_PAUSE_CONTINUE | SERVICE_USER_DEFINED_CONTROL),
     SERVICE_ALL_ACCESS
 };
+
+/* Native default descriptors (Microsoft, "Service Security and Access Rights"). The SCM lets Authenticated Users
+ * connect, enumerate and read, LocalSystem also modify the boot configuration, and Administrators do anything.
+ * A service lets Authenticated Users query, enumerate dependents, interrogate and send user-defined controls,
+ * LocalSystem also start, stop and pause, and Administrators do anything. */
+static const WCHAR scm_sddl[] = L"O:SYG:SYD:(A;;0x20015;;;AU)(A;;0x20035;;;SY)(A;;0xf003f;;;BA)";
+static const WCHAR svc_sddl[] = L"O:SYG:SYD:(A;;0x2018d;;;AU)(A;;0x201fd;;;SY)(A;;0xf01ff;;;BA)";
+
+static INIT_ONCE sd_once = INIT_ONCE_STATIC_INIT;
+static PSECURITY_DESCRIPTOR scm_sd, svc_sd;
+
+static BOOL CALLBACK init_default_sds(INIT_ONCE *once, void *param, void **ctx)
+{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW(scm_sddl, SDDL_REVISION_1, &scm_sd, NULL);
+    ConvertStringSecurityDescriptorToSecurityDescriptorW(svc_sddl, SDDL_REVISION_1, &svc_sd, NULL);
+    return TRUE;
+}
+
+/* Same rule as is_elevation_helper_unset() in ntdll: access checks are on while an elevation helper is configured. */
+static BOOL access_checks_enforced(void)
+{
+    WCHAR buffer[2];
+    DWORD type, size = sizeof(buffer);
+    HKEY key;
+    LONG ret;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Wine\\Elevation", 0, KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key))
+        return FALSE;
+    ret = RegQueryValueExW(key, L"Helper", NULL, &type, (BYTE *)buffer, &size);
+    RegCloseKey(key);
+    if (ret == ERROR_FILE_NOT_FOUND) return FALSE;
+    if (ret == ERROR_MORE_DATA) return TRUE;
+    if (ret || (type != REG_SZ && type != REG_EXPAND_SZ) || (size % sizeof(WCHAR))) return TRUE;
+    return size && buffer[0];
+}
+
+/* While enforced, check the access the client asks for against a default descriptor, using the client's token.
+ * On success *access holds the granted rights. Anything that cannot be checked is denied. */
+static DWORD check_client_access(BOOL service, const GENERIC_MAPPING *mapping, DWORD *access)
+{
+    PRIVILEGE_SET privs;
+    DWORD privs_size = sizeof(privs), granted;
+    BOOL ok = FALSE, have_token;
+    HANDLE token;
+
+    if (!access_checks_enforced()) return ERROR_SUCCESS;
+
+    InitOnceExecuteOnce(&sd_once, init_default_sds, NULL, NULL);
+    if (!scm_sd || !svc_sd) return ERROR_ACCESS_DENIED;
+
+    if (RpcImpersonateClient(NULL) != RPC_S_OK) return ERROR_ACCESS_DENIED;
+    have_token = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token);
+    RpcRevertToSelf();
+    if (!have_token) return ERROR_ACCESS_DENIED;
+
+    if (AccessCheck(service ? svc_sd : scm_sd, token, *access, (GENERIC_MAPPING *)mapping, &privs, &privs_size,
+                    &granted, &ok) && ok)
+        *access = granted;
+    else
+        ok = FALSE;
+    CloseHandle(token);
+    return ok ? ERROR_SUCCESS : ERROR_ACCESS_DENIED;
+}
+
+/* A service process may open its own service to report status and read it back, whatever the descriptor says.
+ * The client is identified by the process id the SCM recorded when it started the process.
+ * shortcut: RpcSs is openable for start and status by anyone, upgrade when the system role starts it at boot. */
+static BOOL own_process_access(const struct service_entry *entry, DWORD *access)
+{
+    static const DWORD allowed = SERVICE_SET_STATUS | SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG |
+                                 SERVICE_INTERROGATE | READ_CONTROL;
+    ULONG pid;
+    BOOL ok;
+
+    RtlMapGenericMask(access, &g_svc_generic);
+    /* Wine starts RpcSs when the first COM client needs it, where Windows has it running from boot. */
+    if (!wcscmp(entry->name, L"RpcSs") && !(*access & ~(SERVICE_START | SERVICE_QUERY_STATUS | READ_CONTROL)))
+        return TRUE;
+    if (*access & ~allowed) return FALSE;
+    if (I_RpcBindingInqLocalClientPID(NULL, &pid) != RPC_S_OK) return FALSE;
+    ok = entry->process && entry->process->process_id == pid;
+    return ok;
+}
 
 typedef enum
 {
@@ -288,6 +373,7 @@ DWORD __cdecl svcctl_OpenSCManagerW(
     SC_RPC_HANDLE *handle)
 {
     struct sc_manager_handle *manager;
+    DWORD err;
 
     WINE_TRACE("(%s, %s, %lx)\n", wine_dbgstr_w(MachineName), wine_dbgstr_w(DatabaseName), dwAccessMask);
 
@@ -298,6 +384,9 @@ DWORD __cdecl svcctl_OpenSCManagerW(
         if (lstrcmpW(DatabaseName, SERVICES_ACTIVE_DATABASEW) != 0)
             return ERROR_INVALID_NAME;
     }
+
+    if (dwAccessMask && (err = check_client_access(FALSE, &g_scm_generic, &dwAccessMask)))
+        return err;
 
     if (!(manager = malloc(sizeof(*manager))))
         return ERROR_NOT_ENOUGH_SERVER_MEMORY;
@@ -490,6 +579,18 @@ DWORD __cdecl svcctl_OpenServiceW(
     if (entry == NULL)
         return ERROR_SERVICE_DOES_NOT_EXIST;
 
+    if (dwDesiredAccess && (err = check_client_access(TRUE, &g_svc_generic, &dwDesiredAccess)))
+    {
+        service_lock(entry);
+        if (own_process_access(entry, &dwDesiredAccess)) err = ERROR_SUCCESS;
+        service_unlock(entry);
+        if (err)
+        {
+            release_service(entry);
+            return err;
+        }
+    }
+
     return create_handle_for_service(entry, dwDesiredAccess, phService);
 }
 
@@ -591,6 +692,9 @@ static DWORD create_serviceW(
     WINE_TRACE("(%s, %s, 0x%lx, %s)\n", wine_dbgstr_w(lpServiceName), wine_dbgstr_w(lpDisplayName), dwDesiredAccess, wine_dbgstr_w(lpBinaryPathName));
 
     if ((err = validate_scm_handle(hSCManager, SC_MANAGER_CREATE_SERVICE, &manager)) != ERROR_SUCCESS)
+        return err;
+
+    if (dwDesiredAccess && (err = check_client_access(TRUE, &g_svc_generic, &dwDesiredAccess)))
         return err;
 
     if (!validate_service_name(lpServiceName))

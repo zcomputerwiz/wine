@@ -2501,6 +2501,10 @@ static HRESULT _SHOpenProfilesKey(PHKEY pKey)
 
     lRet = RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList", 0, NULL, 0,
      KEY_ALL_ACCESS, NULL, pKey, &disp);
+    /* a process without write access to HKLM can still read the profile locations */
+    if (lRet == ERROR_ACCESS_DENIED)
+        lRet = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList", 0,
+         KEY_READ, pKey);
     return HRESULT_FROM_WIN32(lRet);
 }
 
