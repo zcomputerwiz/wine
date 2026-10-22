@@ -63,6 +63,7 @@
 #include "request.h"
 #include "user.h"
 #include "security.h"
+#include "sysrun.h"
 
 /* process object */
 
@@ -636,6 +637,20 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->desktop         = 0;
     process->token           = NULL;
     process->trace_data      = 0;
+    process->peer_pid        = -1;
+    process->peer_uid        = -1;
+    process->peer_gid        = -1;
+    if (sysrun_active)  /* the connection's credentials, never the unix_pid the client sends */
+    {
+        struct ucred cred;
+        socklen_t len = sizeof(cred);
+        if (!getsockopt( fd, SOL_SOCKET, SO_PEERCRED, &cred, &len ))
+        {
+            process->peer_pid = cred.pid;
+            process->peer_uid = cred.uid;
+            process->peer_gid = cred.gid;
+        }
+    }
     process->rawinput_devices = NULL;
     process->rawinput_device_count = 0;
     process->rawinput_mouse  = NULL;

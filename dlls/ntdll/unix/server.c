@@ -1459,6 +1459,9 @@ static int server_connect(void)
 #endif
         if (connect( s, (struct sockaddr *)&addr, slen ) != -1)
         {
+            /* a client with the system group never trusts a server that the launcher did not start */
+            if (sysrun_client_is_system() && !sysrun_server_ok( s ))
+                fatal_error( "refusing a wine server that was not started by the system role launcher\n" );
             fchdir( initial_cwd );  /* switch back to the starting directory */
             fcntl( s, F_SETFD, FD_CLOEXEC );
             return s;

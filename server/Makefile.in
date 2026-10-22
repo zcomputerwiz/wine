@@ -39,6 +39,8 @@ SOURCES = \
 	signal.c \
 	sock.c \
 	symlink.c \
+	sysrun.c \
+	sysrun.h \
 	thread.c \
 	timer.c \
 	token.c \

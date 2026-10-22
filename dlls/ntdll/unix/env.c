@@ -34,6 +34,7 @@
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #ifdef HAVE_SYS_PRCTL_H
 # include <sys/prctl.h>
@@ -1557,6 +1558,11 @@ static void run_wineboot( WCHAR *env, SIZE_T size )
     LARGE_INTEGER timeout;
     unsigned int status;
     int count = 1;
+    pid_t sysrun_pid = 0;
+    int tries;
+
+    /* a process with the system group started by the launcher is the wineboot --init already */
+    if (sysrun_client_is_system()) return;
 
     init_unicode_string( &nameW, eventW );
     InitializeObjectAttributes( &attr, &nameW, OBJ_OPENIF, 0, NULL );
@@ -1586,6 +1592,27 @@ static void run_wineboot( WCHAR *env, SIZE_T size )
     ps_attr->Attributes[0].ReturnLength = NULL;
     ps_attr->Attributes[1].Attribute    = PS_ATTRIBUTE_MACHINE_TYPE;
     ps_attr->Attributes[1].Value        = native_machine;
+
+    /* With the launcher a wineboot --init runs first with the system group, in the machine root (services.exe,
+     * the boot-time machine state). The normal one below then does the user's part in the user's prefix. */
+    if (sysrun_launcher_usable() && !sysrun_spawn( "wineboot-init", &sysrun_pid ))
+    {
+        timeout.QuadPart = -2000000;  /* 200 ms */
+        for (tries = 0; tries < 1500; tries++)  /* 5 minutes, as for the normal wineboot */
+        {
+            int wstatus;
+
+            if (!NtWaitForSingleObject( handles[0], FALSE, &timeout ))
+            {
+                NtResetEvent( handles[0], NULL );  /* the normal wineboot signals it again when it is done */
+                waitpid( sysrun_pid, &wstatus, WNOHANG );
+                break;
+            }
+            if (waitpid( sysrun_pid, &wstatus, WNOHANG ) != sysrun_pid) continue;
+            if (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == SYSRUN_REFUSED) sysrun_warn_refused( "wineboot-init" );
+            break;
+        }
+    }
 
     wine_server_fd_to_handle( 2, GENERIC_WRITE | SYNCHRONIZE, OBJ_INHERIT, &params.hStdError );
 
