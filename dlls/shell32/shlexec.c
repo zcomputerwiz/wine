@@ -325,7 +325,7 @@ static enum elevation_helper_status get_elevation_helper(WCHAR *helper, DWORD si
     if (error_code) *error_code = ERROR_SUCCESS;
     if (size > 0) helper[0] = 0;
 
-    status = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Wine\\Elevation", 0, KEY_READ, &hkey);
+    status = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Wine\\Elevation", 0, KEY_READ | KEY_WOW64_64KEY, &hkey);
     if (status == ERROR_FILE_NOT_FOUND)
         return HELPER_UNSET;
     if (status != ERROR_SUCCESS)
