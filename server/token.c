@@ -1606,8 +1606,7 @@ DECL_HANDLER(duplicate_token)
     if (params.root) release_object( params.root );
 }
 
-/* DISABLE_MAX_PRIVILEGE and LUA_TOKEN of filter_token: keep only SeChangeNotifyPrivilege, make
- * Administrators deny-only, set the elevation type to Limited and lower the label to Medium. */
+/* native filter_token: DISABLE_MAX_PRIVILEGE keeps only SeChangeNotify; LUA_TOKEN: Administrators deny-only, Limited, Medium label */
 static void token_apply_filter( struct token *token, unsigned int flags )
 {
     if (flags & DISABLE_MAX_PRIVILEGE)
@@ -1641,10 +1640,22 @@ static void token_apply_filter( struct token *token, unsigned int flags )
     }
 }
 
-/* the token of a process created while an elevation helper is configured */
+/* native LSA filtered (UAC) token: only SeChangeNotify (enabled), SeShutdown and SeUndock (disabled); Wine lacks the native SeIncreaseWorkingSet and SeTimeZone */
 void token_make_filtered( struct token *token )
 {
-    token_apply_filter( token, LUA_TOKEN | DISABLE_MAX_PRIVILEGE );
+    struct list *cursor, *cursor_next;
+
+    token_apply_filter( token, LUA_TOKEN );
+    LIST_FOR_EACH_SAFE( cursor, cursor_next, &token->privileges )
+    {
+        struct privilege *privilege = LIST_ENTRY( cursor, struct privilege, entry );
+        if (is_equal_luid( privilege->luid, SeChangeNotifyPrivilege )) continue;
+        if (is_equal_luid( privilege->luid, SeShutdownPrivilege ) ||
+            is_equal_luid( privilege->luid, SeUndockPrivilege ))
+            privilege->def = privilege->enabled = FALSE;
+        else
+            privilege_remove( privilege );
+    }
 }
 
 /* creates a restricted version of a token */
