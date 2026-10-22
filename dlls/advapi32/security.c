@@ -2712,6 +2712,51 @@ BOOL WINAPI CreateProcessWithLogonW( LPCWSTR user_name, LPCWSTR domain, LPCWSTR 
     return FALSE;
 }
 
+/* The elevation helper is unset when HKLM/Software/Wine/Elevation/Helper is absent or an empty string.
+ * Same rule as is_elevation_helper_unset() in ntdll. */
+static BOOL elevation_helper_unset(void)
+{
+    WCHAR value[MAX_PATH];
+    DWORD type, size = sizeof(value) - sizeof(WCHAR);
+    HKEY key;
+    LSTATUS status;
+
+    status = RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"Software\\Wine\\Elevation", 0, KEY_READ | KEY_WOW64_64KEY, &key );
+    if (status == ERROR_FILE_NOT_FOUND) return TRUE;
+    if (status) return FALSE;
+    status = RegQueryValueExW( key, L"Helper", NULL, &type, (BYTE *)value, &size );
+    RegCloseKey( key );
+    if (status == ERROR_FILE_NOT_FOUND) return TRUE;
+    return status == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) && !(size % sizeof(WCHAR)) &&
+           (!size || !value[0]);
+}
+
+/* Windows requires SeImpersonatePrivilege for CreateProcessWithTokenW. Wine checks it only while an
+ * elevation helper is configured, so that stock behaviour is unchanged. */
+static BOOL caller_may_use_token_for_process(void)
+{
+    TOKEN_PRIVILEGES *privileges;
+    DWORD i, size = 0;
+    HANDLE token;
+    LUID luid;
+    BOOL ret = FALSE;
+
+    if (elevation_helper_unset()) return TRUE;
+    if (!LookupPrivilegeValueW( NULL, L"SeImpersonatePrivilege", &luid ) ||
+        !OpenProcessToken( GetCurrentProcess(), TOKEN_QUERY, &token )) return FALSE;
+    GetTokenInformation( token, TokenPrivileges, NULL, 0, &size );
+    if ((privileges = malloc( size )))
+    {
+        if (GetTokenInformation( token, TokenPrivileges, privileges, size, &size ))
+            for (i = 0; i < privileges->PrivilegeCount; i++)
+                if (privileges->Privileges[i].Luid.LowPart == luid.LowPart &&
+                    privileges->Privileges[i].Luid.HighPart == luid.HighPart) ret = TRUE;
+        free( privileges );
+    }
+    CloseHandle( token );
+    return ret;
+}
+
 /******************************************************************************
  * CreateProcessWithTokenW [ADVAPI32.@]
  */
@@ -2723,6 +2768,12 @@ BOOL WINAPI CreateProcessWithTokenW(HANDLE token, DWORD logon_flags, LPCWSTR app
           logon_flags, debugstr_w(application_name), debugstr_w(command_line),
           creation_flags, environment, debugstr_w(current_directory),
           startup_info, process_information);
+
+    if (!caller_may_use_token_for_process())
+    {
+        SetLastError( ERROR_PRIVILEGE_NOT_HELD );
+        return FALSE;
+    }
 
     /* FIXME: check if handles should be inherited */
     return CreateProcessAsUserW( token, application_name, command_line, NULL, NULL, FALSE, creation_flags,
