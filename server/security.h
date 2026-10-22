@@ -69,6 +69,7 @@ extern struct token *token_duplicate( struct token *src_token, unsigned primary,
                                       int impersonation_level, const struct security_descriptor *sd,
                                       const struct luid_attr *remove_privs, unsigned int remove_priv_count,
                                       const struct sid *remove_groups, unsigned int remove_group_count );
+extern int token_impersonation_level( struct token *client, struct token *server );
 extern int token_check_privileges( struct token *token, int all_required,
                                    const struct luid_attr *reqprivs,
                                    unsigned int count, struct luid_attr *usedprivs );

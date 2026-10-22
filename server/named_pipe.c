@@ -1322,7 +1322,9 @@ static void pipe_server_ioctl( struct fd *fd, ioctl_code_t code, struct async *a
                 set_error( STATUS_CANNOT_IMPERSONATE );
                 return;
             }
-            if (!(token = token_duplicate( client_token, 0, SecurityImpersonation, NULL, NULL, 0, NULL, 0 )))
+            if (!(token = token_duplicate( client_token, 0,
+                                            token_impersonation_level( client_token, current->process->token ),
+                                            NULL, NULL, 0, NULL, 0 )))
                 return;
             if (current->token) release_object( current->token );
             current->token = token;
