@@ -914,13 +914,74 @@ static int key_in_user_tree( struct key *key )
     return len == sizeof(user) && !memicmp_strW( name, user, sizeof(user) );
 }
 
+/* Keys under HKLM that win32u's prepare_devices rewrites on every GUI process start (the display device
+ * cache). Windows has SYSTEM components do this; here every process does, so while elevation is enforced these
+ * keys and their subkeys default to Users full control. Deviation from Windows, see STOCK_CHANGES.md. */
+static const char * const display_cache_paths[] =
+{
+    "System\\ControlSet001\\Enum\\DISPLAY",
+    "System\\ControlSet001\\Enum\\PCI",
+    "System\\ControlSet001\\Control\\Class\\{4D36E968-E325-11CE-BFC1-08002BE10318}",
+    "System\\ControlSet001\\Control\\Class\\{4D36E96E-E325-11CE-BFC1-08002BE10318}",
+    "System\\ControlSet001\\Control\\Video",
+    "System\\ControlSet001\\Control\\DeviceClasses",
+    "System\\ControlSet001\\Hardware Profiles\\Current",
+    "HARDWARE\\DEVICEMAP",
+    "Software\\Microsoft\\DirectX",
+};
+
+/* is path a key above an entry of display_cache_paths? */
+static bool is_display_cache_ancestor( const WCHAR *path, data_size_t len, const char *entry )
+{
+    size_t i, wlen = len / sizeof(WCHAR);
+
+    if (strlen( entry ) <= wlen || entry[wlen] != '\\') return false;
+    for (i = 0; i < wlen; i++)
+        if ((path[i] < 128 ? tolower( path[i] ) : path[i]) != tolower( (unsigned char)entry[i] )) return false;
+    return true;
+}
+
+/* Is the key, or with new_name the subkey of it that is about to be created, part of the display cache?
+ * A new subkey also counts when it is above a cache key, because the cache path has to be created. */
+static int key_in_display_cache( struct key *key, const struct unicode_str *new_name )
+{
+    static const WCHAR machine[] = {'M','a','c','h','i','n','e'};
+    struct key *top = key, *parent;
+    const WCHAR *name;
+    data_size_t len, total;
+    WCHAR *path, *full;
+    unsigned int i;
+    int ret = FALSE;
+
+    while ((parent = get_parent( top )) && parent != root_key) top = parent;
+    if (!parent || (top == key && !new_name) || !(name = get_object_name( &top->obj, &len ))) return FALSE;
+    if (len != sizeof(machine) || memicmp_strW( name, machine, sizeof(machine) )) return FALSE;
+
+    path = build_relative_key_path( key, top, &len );  /* NULL for the Machine key itself */
+    total = len + (new_name ? new_name->len + (len ? sizeof(WCHAR) : 0) : 0);
+    if (!(full = mem_alloc( total + sizeof(WCHAR) ))) goto done;
+    if (len) memcpy( full, path, len );
+    if (new_name)
+    {
+        if (len) full[len / sizeof(WCHAR)] = '\\';
+        memcpy( (char *)full + total - new_name->len, new_name->str, new_name->len );
+    }
+    for (i = 0; i < ARRAY_SIZE(display_cache_paths) && !ret; i++)
+        ret = match_ascii_prefix_ci( full, total, display_cache_paths[i] ) ||
+              (new_name && is_display_cache_ancestor( full, total, display_cache_paths[i] ));
+    free( full );
+done:
+    free( path );
+    return ret;
+}
+
 /* Default descriptors for keys that have none. A limited token has Administrators deny-only, so the
  * descriptors have to name the user (HKCU) and Users (everywhere else) instead of relying on Administrators:
  * the user and SYSTEM get full control of the user tree; elsewhere Users can read the key itself and
  * Administrators and SYSTEM have full control. */
 static struct security_descriptor *key_get_sd( struct object *obj )
 {
-    static struct security_descriptor *key_default_sd, *key_user_sd;
+    static struct security_descriptor *key_default_sd, *key_user_sd, *key_display_sd;
 
     if (obj->sd) return obj->sd;
 
@@ -937,6 +998,21 @@ static struct security_descriptor *key_get_sd( struct object *obj )
             key_user_sd = key_alloc_default_sd( aces, ARRAY_SIZE(aces) );
         }
         return key_user_sd;
+    }
+
+    if (elevation_enforced() && key_in_display_cache( (struct key *)obj, NULL ))
+    {
+        if (!key_display_sd)
+        {
+            const struct default_ace aces[] =
+            {
+                { &builtin_users_sid,  CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+                { &local_system_sid,   CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+                { &builtin_admins_sid, CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+            };
+            key_display_sd = key_alloc_default_sd( aces, ARRAY_SIZE(aces) );
+        }
+        return key_display_sd;
     }
 
     if (!key_default_sd)
@@ -2950,6 +3026,26 @@ void flush_registry(void)
 }
 
 
+/* a key that does not exist yet needs KEY_CREATE_SUB_KEY on the parent it would be created in */
+static int check_create_subkey( const struct object_params *params )
+{
+    struct unicode_str left;
+    struct object *parent;
+    unsigned int access = KEY_CREATE_SUB_KEY;
+    int ret = TRUE;
+
+    if (!params->name.len) return TRUE;
+    /* a lookup failure is reported by the create itself */
+    if (!(parent = lookup_named_object( params->root, params->name, params->attr, &left ))) return TRUE;
+    if (left.len && parent->ops == &key_ops && !check_object_access( NULL, parent, &access ))
+    {
+        ret = key_in_display_cache( (struct key *)parent, &left );
+        if (ret) clear_error();
+    }
+    release_object( parent );
+    return ret;
+}
+
 /* create a registry key */
 DECL_HANDLER(create_key)
 {
@@ -2972,6 +3068,8 @@ DECL_HANDLER(create_key)
         params.root = get_wow6432_parent( parent, access, params.name );
     }
 
+    if (elevation_enforced() && !check_create_subkey( &params )) goto done;
+
     if ((key = params.name.len ? create_named_object( &params ) : open_named_object( &params )))
     {
         if (!params.name.len || get_error() == STATUS_OBJECT_NAME_EXISTS)
@@ -2992,6 +3090,7 @@ DECL_HANDLER(create_key)
         release_object( key );
     }
 
+done:
     if (parent) release_object( parent );
 }
 

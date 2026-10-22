@@ -1307,6 +1307,7 @@ unsigned int token_get_session_id( struct token *token )
 int check_object_access(struct token *token, struct object *obj, unsigned int *access)
 {
     struct generic_map mapping;
+    struct security_descriptor *sd;
     unsigned int status;
     int res;
 
@@ -1323,7 +1324,10 @@ int check_object_access(struct token *token, struct object *obj, unsigned int *a
 
     mapping.all = map_obj_access( obj, GENERIC_ALL );
 
-    if (!obj->sd)
+    /* a key without a descriptor is checked against its default one while elevation is enforced */
+    sd = obj->sd;
+    if (!sd && elevation_enforced() && object_is_registry_key( obj )) sd = obj->ops->get_sd( obj );
+    if (!sd)
     {
         if (*access & MAXIMUM_ALLOWED) *access = mapping.all;
         return TRUE;
@@ -1337,7 +1341,7 @@ int check_object_access(struct token *token, struct object *obj, unsigned int *a
     {
         const struct acl *sacl;
         int sacl_present;
-        sacl = sd_get_sacl( obj->sd, &sacl_present );
+        sacl = sd_get_sacl( sd, &sacl_present );
         if (sacl_present && sacl)
         {
             const struct ace *ace;
@@ -1364,7 +1368,7 @@ int check_object_access(struct token *token, struct object *obj, unsigned int *a
         }
     }
 
-    res = token_access_check( token, obj->sd, *access, NULL, NULL,
+    res = token_access_check( token, sd, *access, NULL, NULL,
                               &mapping, access, &status ) == STATUS_SUCCESS &&
           status == STATUS_SUCCESS;
 
