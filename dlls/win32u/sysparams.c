@@ -823,14 +823,14 @@ static void reg_empty_key( HKEY root, const char *key_name, BOOL subkeys_only )
     HKEY hkey = key_name ? reg_open_ascii_key( root, key_name ) : root;
 
     while (!NtEnumerateKey( hkey, 0, KeyNodeInformation, key, sizeof(buffer), &size ))
-        reg_delete_tree( hkey, key->Name, key->NameLength );
+        if (!reg_delete_tree( hkey, key->Name, key->NameLength )) break;
 
     if (!subkeys_only)
     {
         while (!NtEnumerateValueKey( hkey, 0, KeyValueFullInformation, value, sizeof(buffer), &size ))
         {
             UNICODE_STRING name = { value->NameLength, value->NameLength, value->Name };
-            NtDeleteValueKey( hkey, &name );
+            if (NtDeleteValueKey( hkey, &name )) break;
         }
     }
 
