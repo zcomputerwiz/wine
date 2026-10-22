@@ -1468,6 +1468,14 @@ static BOOL start_services_process(void)
     PROCESS_INFORMATION pi;
     HANDLE wait_handles[2];
 
+    /* services.exe is already running, e.g. started by a wineboot --init with the system group */
+    if ((wait_handles[0] = OpenEventW( SYNCHRONIZE, FALSE, svcctl_started_event )))
+    {
+        BOOL started = !WaitForSingleObject( wait_handles[0], 0 );
+        CloseHandle( wait_handles[0] );
+        if (started) return TRUE;
+    }
+
     if (!create_native_process( L"C:\\windows\\system32\\services.exe", NULL,
                                 TRUE, DETACHED_PROCESS, L"C:\\windows\\system32", &pi))
     {

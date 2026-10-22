@@ -1559,6 +1559,7 @@ static void run_wineboot( WCHAR *env, SIZE_T size )
     unsigned int status;
     int count = 1;
     pid_t sysrun_pid = 0;
+    int tries;
 
     /* a process with the system group started by the launcher is the wineboot --init already */
     if (sysrun_client_is_system()) return;
@@ -1592,18 +1593,23 @@ static void run_wineboot( WCHAR *env, SIZE_T size )
     ps_attr->Attributes[1].Attribute    = PS_ATTRIBUTE_MACHINE_TYPE;
     ps_attr->Attributes[1].Value        = native_machine;
 
-    /* with the launcher wineboot --init runs with the system group, in the machine root */
+    /* With the launcher a wineboot --init runs first with the system group, in the machine root (services.exe,
+     * the boot-time machine state). The normal one below then does the user's part in the user's prefix. */
     if (sysrun_launcher_usable() && !sysrun_spawn( "wineboot-init", &sysrun_pid ))
     {
         timeout.QuadPart = -2000000;  /* 200 ms */
-        for (;;)
+        for (tries = 0; tries < 1500; tries++)  /* 5 minutes, as for the normal wineboot */
         {
             int wstatus;
 
-            if (!NtWaitForSingleObject( handles[0], FALSE, &timeout )) goto done;
+            if (!NtWaitForSingleObject( handles[0], FALSE, &timeout ))
+            {
+                NtResetEvent( handles[0], NULL );  /* the normal wineboot signals it again when it is done */
+                waitpid( sysrun_pid, &wstatus, WNOHANG );
+                break;
+            }
             if (waitpid( sysrun_pid, &wstatus, WNOHANG ) != sysrun_pid) continue;
-            if (!WIFEXITED(wstatus) || WEXITSTATUS(wstatus) != SYSRUN_REFUSED) goto done;
-            sysrun_warn_refused( "wineboot-init" );
+            if (WIFEXITED(wstatus) && WEXITSTATUS(wstatus) == SYSRUN_REFUSED) sysrun_warn_refused( "wineboot-init" );
             break;
         }
     }
@@ -1629,7 +1635,6 @@ wait:
     timeout.QuadPart = (ULONGLONG)5 * 60 * 1000 * -10000;
     if (NtWaitForMultipleObjects( count, handles, WaitAny, FALSE, &timeout ) == WAIT_TIMEOUT)
         ERR( "boot event wait timed out\n" );
-done:
     while (count) NtClose( handles[--count] );
 }
 

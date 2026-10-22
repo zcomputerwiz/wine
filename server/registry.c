@@ -2474,7 +2474,8 @@ static const char *machine_hive_path( const char *name )
 }
 
 /* Open a machine hive for reading with the system group. The last component must not be a symlink, and the file
- * must be a regular file of the system group that others cannot write, else the server refuses to start. */
+ * must be a regular file of the system group that others cannot write and that root owns (a file of the user's
+ * uid would stay writable for the user), else the server refuses to start. */
 static FILE *fopen_machine_hive( const char *filename )
 {
     struct stat st;
@@ -2488,8 +2489,9 @@ static FILE *fopen_machine_hive( const char *filename )
         if (errno != ENOENT) fatal_error( "cannot open the machine hive %s: %s\n", filename, strerror( errno ));
         return NULL;
     }
-    if (fstat( fd, &st ) || !S_ISREG( st.st_mode ) || st.st_gid != sysrun_group() || (st.st_mode & S_IWOTH))
-        fatal_error( "the machine hive %s is not a regular file of the system group\n", filename );
+    if (fstat( fd, &st ) || !S_ISREG( st.st_mode ) || st.st_uid != 0 || st.st_gid != sysrun_group() ||
+        (st.st_mode & S_IWOTH))
+        fatal_error( "the machine hive %s is not a regular file of root and the system group\n", filename );
     if (!(f = fdopen( fd, "r" ))) fatal_error( "out of memory\n" );
     return f;
 }
@@ -2881,6 +2883,39 @@ static void save_registry( struct key *key, obj_handle_t handle )
     }
 }
 
+/* Save a machine hive of a system role server into the existing file. A new file would belong to the user's uid,
+ * and its owner could change it afterwards; the existing one belongs to root and is writable through the group.
+ * shortcut: not atomic (one write, then a truncate); upgrade when the system role has its own uid. */
+static int save_hive_in_place( struct save_branch_info *info, const char *path, struct key *save_root )
+{
+    char *buf = NULL;
+    size_t size = 0;
+    struct stat st;
+    FILE *f;
+    int fd, ret = 0;
+
+    if (!(f = open_memstream( &buf, &size ))) return 0;
+    save_all_subkeys_from( info->key, save_root, f );
+    ret = !fflush( f ) && !ferror( f );
+    fclose( f );
+    if (ret && (fd = open( path, O_WRONLY | O_NOFOLLOW | O_CLOEXEC )) != -1)
+    {
+        ret = !fstat( fd, &st ) && S_ISREG( st.st_mode ) && st.st_uid == 0 && st.st_gid == sysrun_group() &&
+              pwrite( fd, buf, size, 0 ) == (ssize_t)size && !ftruncate( fd, size ) && !fsync( fd );
+        if (ret && !fstat( fd, &st ))
+        {
+            info->dev      = st.st_dev;
+            info->ino      = st.st_ino;
+            info->mtime    = st.st_mtim;
+            info->has_stat = true;
+        }
+        close( fd );
+    }
+    else ret = 0;
+    free( buf );
+    return ret;
+}
+
 /* access() tests the real ids; a machine hive is saved with the effective, raised group */
 static int hive_access( const struct save_branch_info *info, const char *path, int mode )
 {
@@ -2961,6 +2996,14 @@ static int do_save_branch( struct save_branch_info *info )
             }
         }
     }
+    if (info->sysrun && access( target_path, F_OK ))  /* no file to write in place */
+    {
+        make_clean( key );
+        clear_branch_mod_seq( key );
+        free_tombstones( info );
+        info->has_ephemeral_mods = false;
+        return 1;
+    }
     if (hive_access( info, target_dir, W_OK ) == -1)
     {
         if (errno == EACCES || errno == EROFS)
@@ -3039,6 +3082,12 @@ static int do_save_branch( struct save_branch_info *info )
             in_merge = false;
             fclose( f_in );
         }
+    }
+
+    if (info->sysrun)
+    {
+        ret = save_hive_in_place( info, target_path, save_root );
+        goto done;
     }
 
     /* Create temporary file in target directory */
