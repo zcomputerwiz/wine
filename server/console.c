@@ -34,6 +34,7 @@
 #include "ntstatus.h"
 #include "handle.h"
 #include "process.h"
+#include "sysrun.h"
 #include "request.h"
 #include "file.h"
 #include "unicode.h"
@@ -1015,6 +1016,11 @@ static void console_connection_ioctl( struct fd *fd, ioctl_code_t code, struct a
             pid = *(unsigned int *)get_req_data();
             if (pid == ATTACH_PARENT_PROCESS) pid = current->process->parent_id;
             if (!(process = get_process_from_id( pid ))) return;
+            if (!sysrun_check_process_access( process, PROCESS_QUERY_INFORMATION ))
+            {
+                release_object( process );
+                return;
+            }
 
             if (process->console)
                 current->process->console = (struct console *)grab_object( process->console );

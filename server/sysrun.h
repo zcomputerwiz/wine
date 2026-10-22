@@ -42,6 +42,20 @@ extern void sysrun_drop( int raised );
 extern int sysrun_process_privileged( const struct process *process );
 extern int sysrun_raise_for_current(void);
 
+/* The system role (C3). Only while sysrun is active and elevation is enforced; otherwise these do nothing. */
+struct fd;
+struct thread;
+
+/* a new process: protect it with the descriptor of its token (system and service accounts), and decide
+ * whether the connection with the system group is a root process that waits for its image check */
+extern int sysrun_process_created( struct process *process, int is_root );
+/* a new thread of a protected process gets the descriptor of its process */
+extern int sysrun_thread_created( struct thread *thread );
+/* the main image of a process was mapped: verify it, and give a verified system group root process the SYSTEM token */
+extern void sysrun_main_image( struct process *process, struct fd *fd );
+/* access check of a request that names another process or thread by id instead of by handle */
+extern int sysrun_check_process_access( struct process *target, unsigned int access );
+
 /* file operations on a Unix path, run with the system group if the requesting client has it */
 extern int sysrun_mkdir( const char *path, mode_t mode );
 extern int sysrun_open( const char *path, int flags, mode_t mode );

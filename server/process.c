@@ -713,6 +713,7 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     }
     if (!process->handles || !process->token) goto error;
     process->session_id = token_get_session_id( process->token );
+    if (!sysrun_process_created( process, !parent )) goto error;
 
     set_fd_events( process->msg_fd, POLLIN );  /* start listening to events */
     return process;

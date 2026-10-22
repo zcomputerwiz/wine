@@ -3930,6 +3930,14 @@ struct handle_info
 @END
 
 
+/* Create the primary token of a service account (0 LocalSystem, 1 LocalService, 2 NetworkService); needs the system role */
+@REQ(create_service_token)
+    unsigned int   account;       /* service account */
+@REPLY
+    obj_handle_t   token;         /* handle to the new token */
+@END
+
+
 /* Get detailed fixed-size information about a token */
 @REQ(get_token_info)
     obj_handle_t   handle;        /* handle to the object */

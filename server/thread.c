@@ -59,6 +59,7 @@
 #include "request.h"
 #include "user.h"
 #include "security.h"
+#include "sysrun.h"
 
 
 /* thread queues */
@@ -503,6 +504,12 @@ struct thread *create_thread( int fd, struct process *process, const struct secu
                                            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
                                            DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION,
                                            process->token ))
+    {
+        close( fd );
+        release_object( thread );
+        return NULL;
+    }
+    if (!sysrun_thread_created( thread ))
     {
         close( fd );
         release_object( thread );

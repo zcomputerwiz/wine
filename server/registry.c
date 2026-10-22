@@ -1009,8 +1009,12 @@ static const char * const display_cache_paths[] =
     "System\\ControlSet001\\Hardware Profiles\\Current",
     "HARDWARE\\DEVICEMAP",
     "Software\\Microsoft\\DirectX",
-    /* written by services.exe and wineboot --init, which run limited until the system role exists;
-     * shortcut: remove these two when they get the system role (step 2b work order, item 5) */
+};
+
+/* Written by services.exe and wineboot --init. With the system role active they run as SYSTEM and need no grant;
+ * without it (a user-writable prefix, no launcher) they run limited, so these two stay Users-writable. */
+static const char * const boot_state_paths[] =
+{
     "System\\ControlSet001\\Control\\ServiceCurrent",
     "System\\ControlSet001\\Control\\ComputerName\\ActiveComputerName",
 };
@@ -1054,6 +1058,9 @@ static int key_in_display_cache( struct key *key, const struct unicode_str *new_
     for (i = 0; i < ARRAY_SIZE(display_cache_paths) && !ret; i++)
         ret = match_ascii_prefix_ci( full, total, display_cache_paths[i] ) ||
               (new_name && is_display_cache_ancestor( full, total, display_cache_paths[i] ));
+    for (i = 0; i < ARRAY_SIZE(boot_state_paths) && !ret && !sysrun_active; i++)
+        ret = match_ascii_prefix_ci( full, total, boot_state_paths[i] ) ||
+              (new_name && is_display_cache_ancestor( full, total, boot_state_paths[i] ));
     free( full );
 done:
     free( path );
