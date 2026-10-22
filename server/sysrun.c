@@ -177,14 +177,46 @@ static int system_role_enabled(void)
     return sysrun_active && elevation_enforced();
 }
 
-/* give an object the owner, group and DACL that the token would give a new object */
-static int protect_object( struct object *obj, struct token *token )
-{
-    static const struct security_descriptor empty_sd;
+static const struct sid authenticated_users_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_AUTHENTICATED_USER_RID } };
+static const struct sid local_service_account_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_LOCAL_SERVICE_RID } };
+static const struct sid network_service_account_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_NETWORK_SERVICE_RID } };
 
-    return set_sd_defaults_from_token( obj, &empty_sd,
-                                       OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-                                       token );
+/* Give a process or thread of the system role the descriptor of a Windows service process: SYSTEM (and the service
+ * account) full control; Administrators query and read the descriptor, so full access needs SeDebugPrivilege;
+ * Users and Authenticated Users only the limited query and SYNCHRONIZE, so that task managers can list it.
+ * The owner and group come from the token. */
+static int protect_object( struct object *obj, struct token *token, int account, int is_thread )
+{
+    const unsigned int admin_mask = is_thread ? THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | READ_CONTROL
+                                              : PROCESS_QUERY_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | READ_CONTROL;
+    const unsigned int user_mask = (is_thread ? THREAD_QUERY_LIMITED_INFORMATION : PROCESS_QUERY_LIMITED_INFORMATION) | SYNCHRONIZE;
+    const struct sid *acct = account == SERVICE_ACCOUNT_LOCAL_SERVICE ? &local_service_account_sid :
+                             account == SERVICE_ACCOUNT_NETWORK_SERVICE ? &network_service_account_sid : NULL;
+    size_t acl_size = sizeof(struct acl) + 4 * sizeof(struct ace) + sid_len( &local_system_sid ) + sid_len( &builtin_admins_sid ) +
+                      sid_len( &builtin_users_sid ) + sid_len( &authenticated_users_sid ) + (acct ? sid_len( acct ) + sizeof(struct ace) : 0);
+    size_t size = sizeof(struct security_descriptor) + acl_size;
+    struct security_descriptor *sd;
+    struct acl *acl;
+    struct ace *ace;
+    int ret;
+
+    if (!(sd = mem_alloc( size ))) return 0;
+    memset( sd, 0, size );
+    sd->control = SE_DACL_PRESENT;
+    sd->dacl_len = acl_size;
+    acl = (struct acl *)(sd + 1);
+    acl->revision = ACL_REVISION;
+    acl->size = acl_size;
+    acl->count = acct ? 5 : 4;
+    ace = set_ace( ace_first( acl ), &local_system_sid, ACCESS_ALLOWED_ACE_TYPE, 0, GENERIC_ALL );
+    if (acct) ace = set_ace( ace_next( ace ), acct, ACCESS_ALLOWED_ACE_TYPE, 0, GENERIC_ALL );
+    ace = set_ace( ace_next( ace ), &builtin_admins_sid, ACCESS_ALLOWED_ACE_TYPE, 0, admin_mask );
+    ace = set_ace( ace_next( ace ), &builtin_users_sid, ACCESS_ALLOWED_ACE_TYPE, 0, user_mask );
+    set_ace( ace_next( ace ), &authenticated_users_sid, ACCESS_ALLOWED_ACE_TYPE, 0, user_mask );
+    ret = set_sd_defaults_from_token( obj, sd, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                                      token );
+    free( sd );
+    return ret;
 }
 
 int sysrun_process_created( struct process *process, int is_root )
@@ -199,7 +231,8 @@ int sysrun_process_created( struct process *process, int is_root )
          * image is a system program of the machine root, but its descriptor protects it from the start */
         if (!sysrun_process_privileged( process )) return 1;
         if (!(token = token_create_service( SERVICE_ACCOUNT_SYSTEM, token_get_session_id( process->token ) ))) return 0;
-        ret = protect_object( &process->obj, token );
+        ret = protect_object( &process->obj, token, SERVICE_ACCOUNT_SYSTEM, 0 );
+        process->sysrun_account = SERVICE_ACCOUNT_SYSTEM;
         process->sysrun_pending = 1;
         process->sysrun_protected = 1;
         release_object( token );
@@ -207,21 +240,20 @@ int sysrun_process_created( struct process *process, int is_root )
     }
     if ((account = token_service_account( process->token )) < 0) return 1;
     process->sysrun_protected = 1;
+    process->sysrun_account = account;
     /* The connection credentials of a new process are those of the process that made the socket pair, so
      * a service started by services.exe would look like it has the system group. Its Unix process drops the group
      * (ntdll, sysrun.c) and so does the server's view of it. */
     if (account != SERVICE_ACCOUNT_SYSTEM) process->peer_gid = -1;
-    return protect_object( &process->obj, process->token );
+    return protect_object( &process->obj, process->token, account, 0 );
 }
 
 int sysrun_thread_created( struct thread *thread )
 {
-    struct security_descriptor *sd = thread->process->obj.sd;
-    size_t size;
+    struct process *process = thread->process;
 
-    if (!thread->process->sysrun_protected || thread->obj.sd || !sd) return 1;
-    size = sizeof(*sd) + sd->owner_len + sd->group_len + sd->sacl_len + sd->dacl_len;
-    return (thread->obj.sd = memdup( sd, size )) != NULL;
+    if (!process->sysrun_protected || thread->obj.sd) return 1;
+    return protect_object( &thread->obj, process->token, process->sysrun_account, 1 );
 }
 
 /* the system programs of the machine root that may be the main image of a system group root process */

@@ -2211,6 +2211,15 @@ DECL_HANDLER(set_token_integrity_level)
     if ((token = (struct token *)get_handle_obj( current->process, req->handle, TOKEN_ADJUST_DEFAULT, &token_ops )))
     {
         struct sid label_sid = { SID_REVISION, 1, SECURITY_MANDATORY_LABEL_AUTHORITY, { req->integrity_rid } };
+
+        /* raising the integrity level needs SeTcbPrivilege, lowering does not */
+        if (elevation_enforced() && req->integrity_rid > token->integrity_rid &&
+            !token_has_privilege( current->process->token, SeTcbPrivilege ))
+        {
+            set_error( STATUS_PRIVILEGE_NOT_HELD );
+            release_object( token );
+            return;
+        }
         token_assign_label( token, &label_sid );
         release_object( token );
     }

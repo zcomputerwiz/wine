@@ -94,6 +94,7 @@ struct process
     unsigned int         peer_uid;        /* SO_PEERCRED effective uid, -1 if unknown */
     unsigned int         peer_gid;        /* SO_PEERCRED effective gid, -1 if unknown */
     unsigned int         sysrun_protected:1; /* system role descriptor on the process and its threads (sysrun.c) */
+    unsigned int         sysrun_account:2;   /* SERVICE_ACCOUNT_* of the descriptor */
     unsigned int         sysrun_pending:1;   /* system group root process: SYSTEM token once its main image is verified */
 };
 
