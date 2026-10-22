@@ -42,6 +42,7 @@
 #include "file.h"
 #include "thread.h"
 #include "process.h"
+#include "sysrun.h"
 #include "request.h"
 #include "user.h"
 
@@ -3685,6 +3686,8 @@ DECL_HANDLER(attach_thread_input)
         if (thread_to) release_object( thread_to );
         return;
     }
+    if (!sysrun_check_process_access( thread_from->process, PROCESS_SET_INFORMATION ) ||
+        !sysrun_check_process_access( thread_to->process, PROCESS_SET_INFORMATION )) goto failed;
     if (!(desktop_from = get_thread_desktop( thread_from, 0 ))) goto failed;
     if (!(desktop_to = get_thread_desktop( thread_to, 0 ))) goto failed;
 

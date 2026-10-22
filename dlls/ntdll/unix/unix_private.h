@@ -255,6 +255,9 @@ extern BOOL sysrun_launcher_usable(void);
 extern int sysrun_spawn( const char *mode, pid_t *pid );
 extern void sysrun_warn_refused( const char *mode );
 extern BOOL sysrun_server_ok( int fd );
+extern BOOL sysrun_must_drop_group( HANDLE token );
+extern BOOL sysrun_prepare_child( BOOL drop_group );
+extern void sysrun_early_init(void);
 #define SYSRUN_REFUSED 77  /* exit status of wex-sysrun when it refuses */
 
 extern unsigned int server_call_unlocked( void *req_ptr );

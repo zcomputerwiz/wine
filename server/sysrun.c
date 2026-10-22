@@ -44,11 +44,17 @@
 # include <sys/prctl.h>
 #endif
 
+#include "ntstatus.h"
+#include "windef.h"
+#include "winternl.h"
+
 #include "object.h"
 #include "process.h"
 #include "request.h"
 #include "thread.h"
 #include "sysrun.h"
+#include "security.h"
+#include "file.h"
 
 #define SYSRUN_CONF "/etc/wineexplorer/sysrun.conf"
 
@@ -162,6 +168,147 @@ int sysrun_process_privileged( const struct process *process )
 int sysrun_raise_for_current(void)
 {
     return sysrun_active && current && sysrun_process_privileged( current->process ) ? sysrun_raise() : 0;
+}
+
+/* ---- the system role (C3) ---------------------------------------------------------------------------------- */
+
+static int system_role_enabled(void)
+{
+    return sysrun_active && elevation_enforced();
+}
+
+static const struct sid authenticated_users_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_AUTHENTICATED_USER_RID } };
+static const struct sid local_service_account_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_LOCAL_SERVICE_RID } };
+static const struct sid network_service_account_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_NETWORK_SERVICE_RID } };
+
+/* Give a process or thread of the system role the descriptor of a Windows service process: SYSTEM (and the service
+ * account) full control; Administrators query and read the descriptor, so full access needs SeDebugPrivilege;
+ * Users and Authenticated Users only the limited query and SYNCHRONIZE, so that task managers can list it.
+ * The owner and group come from the token. */
+static int protect_object( struct object *obj, struct token *token, int account, int is_thread )
+{
+    const unsigned int admin_mask = is_thread ? THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | READ_CONTROL
+                                              : PROCESS_QUERY_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | READ_CONTROL;
+    const unsigned int user_mask = (is_thread ? THREAD_QUERY_LIMITED_INFORMATION : PROCESS_QUERY_LIMITED_INFORMATION) | SYNCHRONIZE;
+    const struct sid *acct = account == SERVICE_ACCOUNT_LOCAL_SERVICE ? &local_service_account_sid :
+                             account == SERVICE_ACCOUNT_NETWORK_SERVICE ? &network_service_account_sid : NULL;
+    size_t acl_size = sizeof(struct acl) + 4 * sizeof(struct ace) + sid_len( &local_system_sid ) + sid_len( &builtin_admins_sid ) +
+                      sid_len( &builtin_users_sid ) + sid_len( &authenticated_users_sid ) + (acct ? sid_len( acct ) + sizeof(struct ace) : 0);
+    size_t size = sizeof(struct security_descriptor) + acl_size;
+    struct security_descriptor *sd;
+    struct acl *acl;
+    struct ace *ace;
+    int ret;
+
+    if (!(sd = mem_alloc( size ))) return 0;
+    memset( sd, 0, size );
+    sd->control = SE_DACL_PRESENT;
+    sd->dacl_len = acl_size;
+    acl = (struct acl *)(sd + 1);
+    acl->revision = ACL_REVISION;
+    acl->size = acl_size;
+    acl->count = acct ? 5 : 4;
+    ace = set_ace( ace_first( acl ), &local_system_sid, ACCESS_ALLOWED_ACE_TYPE, 0, GENERIC_ALL );
+    if (acct) ace = set_ace( ace_next( ace ), acct, ACCESS_ALLOWED_ACE_TYPE, 0, GENERIC_ALL );
+    ace = set_ace( ace_next( ace ), &builtin_admins_sid, ACCESS_ALLOWED_ACE_TYPE, 0, admin_mask );
+    ace = set_ace( ace_next( ace ), &builtin_users_sid, ACCESS_ALLOWED_ACE_TYPE, 0, user_mask );
+    set_ace( ace_next( ace ), &authenticated_users_sid, ACCESS_ALLOWED_ACE_TYPE, 0, user_mask );
+    ret = set_sd_defaults_from_token( obj, sd, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                                      token );
+    free( sd );
+    return ret;
+}
+
+int sysrun_process_created( struct process *process, int is_root )
+{
+    struct token *token;
+    int account, ret = 1;
+
+    if (!system_role_enabled()) return 1;
+    if (is_root)
+    {
+        /* the connection has the system group: the launcher started it. It gets the SYSTEM token only when its main
+         * image is a system program of the machine root, but its descriptor protects it from the start */
+        if (!sysrun_process_privileged( process )) return 1;
+        if (!(token = token_create_service( SERVICE_ACCOUNT_SYSTEM, token_get_session_id( process->token ) ))) return 0;
+        ret = protect_object( &process->obj, token, SERVICE_ACCOUNT_SYSTEM, 0 );
+        process->sysrun_account = SERVICE_ACCOUNT_SYSTEM;
+        process->sysrun_pending = 1;
+        process->sysrun_protected = 1;
+        release_object( token );
+        return ret;
+    }
+    if ((account = token_service_account( process->token )) < 0) return 1;
+    process->sysrun_protected = 1;
+    process->sysrun_account = account;
+    /* The connection credentials of a new process are those of the process that made the socket pair, so
+     * a service started by services.exe would look like it has the system group. Its Unix process drops the group
+     * (ntdll, sysrun.c) and so does the server's view of it. */
+    if (account != SERVICE_ACCOUNT_SYSTEM) process->peer_gid = -1;
+    return protect_object( &process->obj, process->token, account, 0 );
+}
+
+int sysrun_thread_created( struct thread *thread )
+{
+    struct process *process = thread->process;
+
+    if (!process->sysrun_protected || thread->obj.sd) return 1;
+    return protect_object( &thread->obj, process->token, process->sysrun_account, 1 );
+}
+
+/* the system programs of the machine root that may be the main image of a system group root process */
+static const char *const system_images[] =
+{
+    "/drive_c/windows/system32/services.exe",
+    "/drive_c/windows/system32/wineboot.exe",
+    "/drive_c/windows/system32/winedevice.exe",
+    "/drive_c/windows/syswow64/wineboot.exe",
+    "/drive_c/windows/syswow64/winedevice.exe",
+};
+
+static void kill_unverified( void *private )
+{
+    struct process *process = private;
+
+    kill_process( process, 1 );
+    release_object( process );
+}
+
+void sysrun_main_image( struct process *process, struct fd *fd )
+{
+    char path[PATH_MAX];
+    struct stat st, ref;
+    struct token *token;
+    unsigned int i;
+    int unix_fd;
+
+    if (!process->sysrun_pending) return;
+    process->sysrun_pending = 0;
+    /* device and inode of the mapped file, never the NT path: that goes through the user's prefix links */
+    if (fd && (unix_fd = get_unix_fd( fd )) != -1 && !fstat( unix_fd, &st ) && S_ISREG( st.st_mode ))
+    {
+        for (i = 0; i < ARRAY_SIZE(system_images); i++)
+        {
+            if (snprintf( path, sizeof(path), "%s%s", machine_root, system_images[i] ) >= sizeof(path)) continue;
+            if (stat( path, &ref ) || ref.st_dev != st.st_dev || ref.st_ino != st.st_ino) continue;
+            if (!(token = token_create_service( SERVICE_ACCOUNT_SYSTEM, process->session_id ))) break;
+            release_object( process->token );
+            process->token = token;
+            return;
+        }
+    }
+    fprintf( stderr, "wineserver: process %04x has the system group but its image is not a system program of the machine root\n",
+             process->id );
+    process->peer_gid = -1;  /* no more raised file access from now on */
+    /* killed from the main loop: this runs in a request of the process itself */
+    grab_object( process );
+    add_timeout_user( -TICKS_PER_SEC / 100, kill_unverified, process );
+}
+
+int sysrun_check_process_access( struct process *target, unsigned int access )
+{
+    if (!target->sysrun_protected || target == current->process) return 1;
+    return check_object_access( NULL, &target->obj, &access );
 }
 
 int sysrun_mkdir( const char *path, mode_t mode )
