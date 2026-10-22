@@ -1606,6 +1606,47 @@ DECL_HANDLER(duplicate_token)
     if (params.root) release_object( params.root );
 }
 
+/* DISABLE_MAX_PRIVILEGE and LUA_TOKEN of filter_token: keep only SeChangeNotifyPrivilege, make
+ * Administrators deny-only, set the elevation type to Limited and lower the label to Medium. */
+static void token_apply_filter( struct token *token, unsigned int flags )
+{
+    if (flags & DISABLE_MAX_PRIVILEGE)
+    {
+        struct list *cursor, *cursor_next;
+        LIST_FOR_EACH_SAFE( cursor, cursor_next, &token->privileges )
+        {
+            struct privilege *privilege = LIST_ENTRY( cursor, struct privilege, entry );
+            if (!is_equal_luid( privilege->luid, SeChangeNotifyPrivilege ))
+                privilege_remove( privilege );
+        }
+    }
+
+    if (flags & LUA_TOKEN)
+    {
+        struct group *group;
+        token->elevation = TokenElevationTypeLimited;
+        LIST_FOR_EACH_ENTRY( group, &token->groups, struct group, entry )
+        {
+            if (equal_sid( &group->sid, &builtin_admins_sid ))
+            {
+                group->attrs &= ~(SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT);
+                group->attrs |= SE_GROUP_USE_FOR_DENY_ONLY;
+            }
+        }
+        if (token->integrity_rid > SECURITY_MANDATORY_MEDIUM_RID)
+        {
+            struct sid med_label = { SID_REVISION, 1, SECURITY_MANDATORY_LABEL_AUTHORITY, { SECURITY_MANDATORY_MEDIUM_RID } };
+            token_assign_label( token, &med_label );
+        }
+    }
+}
+
+/* the token of a process created while an elevation helper is configured */
+void token_make_filtered( struct token *token )
+{
+    token_apply_filter( token, LUA_TOKEN | DISABLE_MAX_PRIVILEGE );
+}
+
 /* creates a restricted version of a token */
 DECL_HANDLER(filter_token)
 {
@@ -1633,35 +1674,7 @@ DECL_HANDLER(filter_token)
                                  filter_privileges, priv_count, filter_groups, group_count );
         if (token)
         {
-            if (req->flags & DISABLE_MAX_PRIVILEGE)
-            {
-                struct list *cursor, *cursor_next;
-                LIST_FOR_EACH_SAFE( cursor, cursor_next, &token->privileges )
-                {
-                    struct privilege *privilege = LIST_ENTRY( cursor, struct privilege, entry );
-                    if (!is_equal_luid( privilege->luid, SeChangeNotifyPrivilege ))
-                        privilege_remove( privilege );
-                }
-            }
-
-            if (req->flags & LUA_TOKEN)
-            {
-                struct group *group;
-                token->elevation = TokenElevationTypeLimited;
-                LIST_FOR_EACH_ENTRY( group, &token->groups, struct group, entry )
-                {
-                    if (equal_sid( &group->sid, &builtin_admins_sid ))
-                    {
-                        group->attrs &= ~(SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT);
-                        group->attrs |= SE_GROUP_USE_FOR_DENY_ONLY;
-                    }
-                }
-                if (token->integrity_rid > SECURITY_MANDATORY_MEDIUM_RID)
-                {
-                    struct sid med_label = { SID_REVISION, 1, SECURITY_MANDATORY_LABEL_AUTHORITY, { SECURITY_MANDATORY_MEDIUM_RID } };
-                    token_assign_label( token, &med_label );
-                }
-            }
+            token_apply_filter( token, req->flags );
 
             token->is_restricted = (src_token->is_restricted || restrict_count > 0);
 
@@ -2056,7 +2069,10 @@ DECL_HANDLER(create_linked_token)
          * primary token (docs/ELEVATION_BOUNDARY_PLAN.md, N6), add that when the elevation broker exists. */
         if ((linked = token_create_admin( FALSE, SecurityIdentification, elevation, token->session_id )))
         {
-            reply->linked = alloc_handle( current->process, linked, TOKEN_ALL_ACCESS, 0 );
+            /* a Medium caller cannot get the write rights of a High token (mandatory label) */
+            unsigned int access = MAXIMUM_ALLOWED;
+            if (check_object_access( NULL, &linked->obj, &access ))
+                reply->linked = alloc_handle_no_access_check( current->process, linked, access & TOKEN_ALL_ACCESS, 0 );
             release_object( linked );
         }
         release_object( token );

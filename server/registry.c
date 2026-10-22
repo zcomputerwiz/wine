@@ -866,40 +866,90 @@ static unsigned int key_map_access( struct object *obj, unsigned int access )
     return access & ~(KEY_WOW64_64KEY | KEY_WOW64_32KEY);
 }
 
+struct default_ace { const struct sid *sid; unsigned char flags; unsigned int mask; };
+
+static struct security_descriptor *key_alloc_default_sd( const struct default_ace *aces, unsigned int count )
+{
+    struct security_descriptor *sd;
+    struct acl *dacl;
+    struct ace *ace;
+    struct sid *sid;
+    size_t admins_sid_len = sid_len( &builtin_admins_sid );
+    size_t dacl_len = sizeof(*dacl);
+    unsigned int i;
+
+    for (i = 0; i < count; i++) dacl_len += sizeof(*ace) + sid_len( aces[i].sid );
+
+    sd = mem_alloc( sizeof(*sd) + 2 * admins_sid_len + dacl_len );
+    sd->control   = SE_DACL_PRESENT;
+    sd->owner_len = admins_sid_len;
+    sd->group_len = admins_sid_len;
+    sd->sacl_len  = 0;
+    sd->dacl_len  = dacl_len;
+    sid = (struct sid *)(sd + 1);
+    sid = copy_sid( sid, &builtin_admins_sid );
+    copy_sid( sid, &builtin_admins_sid );
+
+    dacl = (struct acl *)((char *)(sd + 1) + 2 * admins_sid_len);
+    dacl->revision = ACL_REVISION;
+    dacl->pad1     = 0;
+    dacl->size     = dacl_len;
+    dacl->count    = count;
+    dacl->pad2     = 0;
+    for (i = 0, ace = ace_first( dacl ); i < count; i++, ace = ace_next( ace ))
+        set_ace( ace, aces[i].sid, ACCESS_ALLOWED_ACE_TYPE, aces[i].flags, aces[i].mask );
+    return sd;
+}
+
+/* is the key in the \Registry\User tree (HKCU, HKU\.Default)? */
+static int key_in_user_tree( struct key *key )
+{
+    static const WCHAR user[] = {'U','s','e','r'};
+    const WCHAR *name;
+    data_size_t len;
+    struct key *parent;
+
+    while ((parent = get_parent( key )) && parent != root_key) key = parent;
+    if (!parent || !(name = get_object_name( &key->obj, &len ))) return FALSE;
+    return len == sizeof(user) && !memicmp_strW( name, user, sizeof(user) );
+}
+
+/* Default descriptors for keys that have none. A limited token has Administrators deny-only, so the
+ * descriptors have to name the user (HKCU) and Users (everywhere else) instead of relying on Administrators:
+ * the user and SYSTEM get full control of the user tree; elsewhere Users can read the key itself and
+ * Administrators and SYSTEM have full control. */
 static struct security_descriptor *key_get_sd( struct object *obj )
 {
-    static struct security_descriptor *key_default_sd;
+    static struct security_descriptor *key_default_sd, *key_user_sd;
 
     if (obj->sd) return obj->sd;
 
+    if (key_in_user_tree( (struct key *)obj ))
+    {
+        if (!key_user_sd)
+        {
+            const struct default_ace aces[] =
+            {
+                { &local_user_sid,    CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+                { &local_system_sid,  CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+                { &builtin_admins_sid, CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+            };
+            key_user_sd = key_alloc_default_sd( aces, ARRAY_SIZE(aces) );
+        }
+        return key_user_sd;
+    }
+
     if (!key_default_sd)
     {
-        struct acl *dacl;
-        struct ace *ace;
-        struct sid *sid;
-        size_t users_sid_len = sid_len( &builtin_users_sid );
-        size_t admins_sid_len = sid_len( &builtin_admins_sid );
-        size_t dacl_len = sizeof(*dacl) + 2 * sizeof(*ace) + users_sid_len + admins_sid_len;
-
-        key_default_sd = mem_alloc( sizeof(*key_default_sd) + 2 * admins_sid_len + dacl_len );
-        key_default_sd->control   = SE_DACL_PRESENT;
-        key_default_sd->owner_len = admins_sid_len;
-        key_default_sd->group_len = admins_sid_len;
-        key_default_sd->sacl_len  = 0;
-        key_default_sd->dacl_len  = dacl_len;
-        sid = (struct sid *)(key_default_sd + 1);
-        sid = copy_sid( sid, &builtin_admins_sid );
-        copy_sid( sid, &builtin_admins_sid );
-
-        dacl = (struct acl *)((char *)(key_default_sd + 1) + 2 * admins_sid_len);
-        dacl->revision = ACL_REVISION;
-        dacl->pad1     = 0;
-        dacl->size     = dacl_len;
-        dacl->count    = 2;
-        dacl->pad2     = 0;
-        ace = set_ace( ace_first( dacl ), &builtin_users_sid, ACCESS_ALLOWED_ACE_TYPE,
-                       INHERIT_ONLY_ACE | CONTAINER_INHERIT_ACE, GENERIC_READ );
-        set_ace( ace_next( ace ), &builtin_admins_sid, ACCESS_ALLOWED_ACE_TYPE, 0, KEY_ALL_ACCESS );
+        const struct default_ace aces[] =
+        {
+            { &builtin_users_sid,  0, KEY_READ },
+            { &local_system_sid,   0, KEY_ALL_ACCESS },
+            { &builtin_admins_sid, 0, KEY_ALL_ACCESS },
+            /* the old inherit-only ACE stays last: advapi32 security.c looks for the last Users ACE */
+            { &builtin_users_sid,  INHERIT_ONLY_ACE | CONTAINER_INHERIT_ACE, GENERIC_READ },
+        };
+        key_default_sd = key_alloc_default_sd( aces, ARRAY_SIZE(aces) );
     }
     return key_default_sd;
 }

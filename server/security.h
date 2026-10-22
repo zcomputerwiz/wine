@@ -63,6 +63,7 @@ struct ace
 
 extern struct token *get_token_obj( struct process *process, obj_handle_t handle, unsigned int access );
 extern struct token *token_create_admin( unsigned primary, int impersonation_level, int elevation, unsigned int session_id );
+extern void token_make_filtered( struct token *token );
 extern int token_assign_label( struct token *token, const struct sid *label );
 extern struct token *token_duplicate( struct token *src_token, unsigned primary,
                                       int impersonation_level, const struct security_descriptor *sd,
