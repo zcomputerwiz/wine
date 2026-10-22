@@ -582,6 +582,8 @@ static UINT_PTR SHELL_ExecuteW(const WCHAR *lpCmd, WCHAR *env, BOOL shWait,
             SetLastError(helper_error ? helper_error : ERROR_INVALID_DATA);
             return SE_ERR_ACCESSDENIED;
         }
+        else /* HELPER_UNSET: same result as before the helper audit */
+            retval = ERROR_BAD_FORMAT;
     }
     else if ((retval = GetLastError()) >= 32)
     {

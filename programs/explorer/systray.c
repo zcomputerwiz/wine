@@ -236,8 +236,6 @@ static void balloon_create_timer( struct icon *icon )
 {
     TTTOOLINFOW ti;
 
-    if (!icon || !icon->window) return;
-
     init_common_controls();
     balloon_window = CreateWindowExW( WS_EX_TOPMOST, TOOLTIPS_CLASSW, NULL,
                                       WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX | TTS_BALLOON | TTS_CLOSE,
@@ -283,21 +281,14 @@ static BOOL show_balloon( struct icon *icon )
 
 static void hide_balloon( struct icon *icon )
 {
-    if (icon && icon->window)
-    {
-        KillTimer( icon->window, BALLOON_CREATE_TIMER );
-        KillTimer( icon->window, BALLOON_SHOW_TIMER );
-    }
     if (!balloon_icon) return;
     if (balloon_window)
     {
-        if (balloon_icon->window)
-            KillTimer( balloon_icon->window, BALLOON_SHOW_TIMER );
+        KillTimer( balloon_icon->window, BALLOON_SHOW_TIMER );
         DestroyWindow( balloon_window );
         balloon_window = 0;
     }
-    else if (balloon_icon->window)
-        KillTimer( balloon_icon->window, BALLOON_CREATE_TIMER );
+    else KillTimer( balloon_icon->window, BALLOON_CREATE_TIMER );
     balloon_icon = NULL;
 }
 
@@ -324,7 +315,6 @@ static void update_balloon( struct icon *icon )
 
 static void balloon_timer( struct icon *icon )
 {
-    if (!icon) return;
     icon->info_text[0] = 0;  /* clear text now that balloon has been shown */
     hide_balloon( icon );
     show_next_balloon();
@@ -499,9 +489,6 @@ static LRESULT WINAPI tray_icon_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPA
     struct icon *icon = (struct icon *)GetWindowLongPtrW( hwnd, GWLP_USERDATA );
 
     TRACE( "hwnd %p, msg %#x, wparam %#Ix, lparam %#Ix\n", hwnd, msg, wparam, lparam );
-
-    if (!icon && msg != WM_NCCREATE)
-        return DefWindowProcW( hwnd, msg, wparam, lparam );
 
     switch (msg)
     {
@@ -791,16 +778,10 @@ static BOOL add_icon(NOTIFYICONDATAW *nid)
 /* Deletes tray icon window and icon record */
 static BOOL delete_icon( struct icon *icon )
 {
-    hide_balloon( icon );
-    if (icon->window)
-    {
-        KillTimer( icon->window, BALLOON_CREATE_TIMER );
-        KillTimer( icon->window, BALLOON_SHOW_TIMER );
-        SetWindowLongPtrW( icon->window, GWLP_USERDATA, 0 );
-        DestroyWindow( icon->window );
-    }
+    hide_icon( icon );
     list_remove( &icon->entry );
     DestroyWindow( icon->tooltip );
+    DestroyWindow( icon->window );
     DestroyIcon( icon->image );
     free( icon );
     return TRUE;

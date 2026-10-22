@@ -4270,14 +4270,10 @@ static void elevate_token(void)
     NtClose( linked.LinkedToken );
 }
 
-enum elevation_helper_status
-{
-    HELPER_UNSET = 0,
-    HELPER_CONFIGURED = 1,
-    HELPER_INVALID = 2
-};
-
-static enum elevation_helper_status get_elevation_helper_status(void)
+/* The helper is unset only if the key or value is absent, or the value is an empty string.
+ * Any other state (denied read, wrong type, odd or oversized data, a path) is not unset, so the
+ * loader never elevates silently when the helper configuration cannot be trusted. */
+static BOOL is_elevation_helper_unset(void)
 {
     OBJECT_ATTRIBUTES attr;
     UNICODE_STRING name = RTL_CONSTANT_STRING( L"\\Registry\\Machine\\Software\\Wine\\Elevation" );
@@ -4290,51 +4286,18 @@ static enum elevation_helper_status get_elevation_helper_status(void)
 
     InitializeObjectAttributes( &attr, &name, OBJ_CASE_INSENSITIVE, 0, NULL );
     status = NtOpenKey( &hkey, KEY_READ, &attr );
-    if (status == STATUS_OBJECT_NAME_NOT_FOUND)
-        return HELPER_UNSET;
-    if (status)
-        return HELPER_INVALID;
+    if (status == STATUS_OBJECT_NAME_NOT_FOUND) return TRUE;
+    if (status) return FALSE;
 
     status = NtQueryValueKey( hkey, &val_name, KeyValuePartialInformation, info, sizeof(buffer), &len );
     NtClose( hkey );
+    if (status == STATUS_OBJECT_NAME_NOT_FOUND) return TRUE;
+    if (status) return FALSE;
 
-    if (status == STATUS_OBJECT_NAME_NOT_FOUND)
-        return HELPER_UNSET;
-    if (status)
-        return HELPER_INVALID;
-
-    if (info->Type != REG_SZ && info->Type != REG_EXPAND_SZ)
-        return HELPER_INVALID;
-
-    if (info->DataLength == 0)
-        return HELPER_UNSET;
-
-    if (info->DataLength % sizeof(WCHAR) != 0)
-        return HELPER_INVALID;
-
-    {
-        const WCHAR *str = (const WCHAR *)info->Data;
-        ULONG chars = info->DataLength / sizeof(WCHAR);
-        ULONG i;
-
-        if (chars == 0 || str[0] == 0)
-            return HELPER_UNSET;
-
-        i = 0;
-        while (i < chars && (str[i] == ' ' || str[i] == '\t')) i++;
-        if (i == chars || str[i] == 0)
-            return HELPER_INVALID;
-
-        for (i = 0; i < chars && str[i]; i++)
-        {
-            if (str[i] < 32 && str[i] != '\t')
-                return HELPER_INVALID;
-        }
-    }
-
-    return HELPER_CONFIGURED;
+    if (info->Type != REG_SZ && info->Type != REG_EXPAND_SZ) return FALSE;
+    if (info->DataLength % sizeof(WCHAR)) return FALSE;
+    return !info->DataLength || !*(const WCHAR *)info->Data;
 }
-
 
 static void open_known_dll_ntdir(void)
 {
@@ -4591,7 +4554,7 @@ void loader_init( CONTEXT *context, void **entry )
         LdrGetProcedureAddress( kernel32->ldr.DllBase, &ctrl_routine, 0, (void **)&pCtrlRoutine );
 
         locale_init();
-        if (needs_elevation() && get_elevation_helper_status() == HELPER_UNSET)
+        if (needs_elevation() && is_elevation_helper_unset())
             elevate_token();
         get_env_var( L"WINESYSTEMDLLPATH", 0, &system_dll_path );
         if (wm->ldr.Flags & LDR_COR_ILONLY)
