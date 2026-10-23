@@ -67,6 +67,8 @@ extern struct token *token_create_admin( unsigned primary, int impersonation_lev
 enum { SERVICE_ACCOUNT_SYSTEM, SERVICE_ACCOUNT_LOCAL_SERVICE, SERVICE_ACCOUNT_NETWORK_SERVICE };
 extern struct token *token_create_service( unsigned int account, unsigned int session_id );
 extern int token_service_account( const struct token *token );
+extern int token_is_elevated( const struct token *token );
+extern int token_protect_elevated( struct token *token );
 extern void token_make_filtered( struct token *token );
 extern void token_make_standard( struct token *token );
 extern int user_is_administrator(void);

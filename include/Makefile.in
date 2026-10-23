@@ -1009,6 +1009,7 @@ SOURCES = \
 	wexsearch.h \
 	wexbrowse.h \
 	wexhost.h \
+	wexelevate.h \
 	wfext.h \
 	wia.h \
 	wia_lh.idl \

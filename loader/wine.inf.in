@@ -180,6 +180,7 @@ AddService=Winmgmt,0,WinmgmtService
 AddService=wuauserv,0,wuauService
 AddService=NDIS,0x800,NDISService
 AddService=nsiproxy,0x800,NsiProxyService
+AddService=wexelevate,0,WexElevateService
 
 [DefaultInstall.ntx86.Services]
 AddService=BITS,0,BITSService
@@ -201,6 +202,7 @@ AddService=Winmgmt,0,WinmgmtService
 AddService=wuauserv,0,wuauService
 AddService=NDIS,0x800,NDISService
 AddService=nsiproxy,0x800,NsiProxyService
+AddService=wexelevate,0,WexElevateService
 
 [DefaultInstall.ntamd64.Services]
 AddService=BITS,0,BITSService
@@ -222,6 +224,7 @@ AddService=Winmgmt,0,WinmgmtService
 AddService=wuauserv,0,wuauService
 AddService=NDIS,0x800,NDISService
 AddService=nsiproxy,0x800,NsiProxyService
+AddService=wexelevate,0,WexElevateService
 
 [DefaultInstall.ntarm64.Services]
 AddService=BITS,0,BITSService
@@ -243,6 +246,7 @@ AddService=Winmgmt,0,WinmgmtService
 AddService=wuauserv,0,wuauService
 AddService=NDIS,0x800,NDISService
 AddService=nsiproxy,0x800,NsiProxyService
+AddService=wexelevate,0,WexElevateService
 
 [Strings]
 MciExtStr="Software\Microsoft\Windows NT\CurrentVersion\MCI Extensions"
@@ -1186,6 +1190,18 @@ ErrorControl=1
 [TaskSchedulerServiceKeys]
 HKR,Parameters,"ServiceDll",,"%11%\schedsvc.dll"
 HKLM,%CurrentVersionNT%\SvcHost,"netsvcs",0x00010008,"Schedule"
+
+[WexElevateService]
+AddReg=WexElevateServiceKeys
+Description="Starts programs with the full token of an administrator, on behalf of a caller"
+DisplayName="Application Information"
+ServiceBinary="%11%\wexelevate.exe"
+ServiceType=16
+StartType=3
+ErrorControl=1
+
+[WexElevateServiceKeys]
+HKLM,"System\CurrentControlSet\Services\wexelevate","Security",1,01,00,04,80,5c,00,00,00,68,00,00,00,00,00,00,00,14,00,00,00,02,00,48,00,03,00,00,00,00,00,14,00,9d,01,02,00,01,01,00,00,00,00,00,05,0b,00,00,00,00,00,14,00,fd,a1,02,00,01,01,00,00,00,00,00,05,12,00,00,00,00,00,18,00,ff,01,0f,00,01,02,00,00,00,00,00,05,20,00,00,00,20,02,00,00,01,01,00,00,00,00,00,05,12,00,00,00,01,01,00,00,00,00,00,05,12,00,00,00
 
 [wuauService]
 Description="wuauserv"

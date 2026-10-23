@@ -181,20 +181,28 @@ static const struct sid authenticated_users_sid = { SID_REVISION, 1, SECURITY_NT
 static const struct sid local_service_account_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_LOCAL_SERVICE_RID } };
 static const struct sid network_service_account_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_NETWORK_SERVICE_RID } };
 
+/* sysrun_account of an elevated process (the broker's); the service accounts are SERVICE_ACCOUNT_* */
+#define SYSRUN_ACCOUNT_ELEVATED 3
+
 /* Give a process or thread of the system role the descriptor of a Windows service process: SYSTEM (and the service
  * account) full control; Administrators query and read the descriptor, so full access needs SeDebugPrivilege;
  * Users and Authenticated Users only the limited query and SYNCHRONIZE, so that task managers can list it.
  * The owner and group come from the token. */
 static int protect_object( struct object *obj, struct token *token, int account, int is_thread )
 {
-    const unsigned int admin_mask = is_thread ? THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | READ_CONTROL
+    /* an elevated process (B8): the full token's Administrators have full control of it, as they have of any
+     * elevated process, but the user's limited token (Administrators is deny-only in it) has the limited query only. The
+     * owner is the token's owner, Administrators, never the user: an owner always gets WRITE_DAC. */
+    const unsigned int admin_mask = account == SYSRUN_ACCOUNT_ELEVATED ? GENERIC_ALL :
+                                    is_thread ? THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | READ_CONTROL
                                               : PROCESS_QUERY_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | READ_CONTROL;
     const unsigned int user_mask = (is_thread ? THREAD_QUERY_LIMITED_INFORMATION : PROCESS_QUERY_LIMITED_INFORMATION) | SYNCHRONIZE;
     const struct sid *acct = account == SERVICE_ACCOUNT_LOCAL_SERVICE ? &local_service_account_sid :
                              account == SERVICE_ACCOUNT_NETWORK_SERVICE ? &network_service_account_sid : NULL;
     size_t acl_size = sizeof(struct acl) + 4 * sizeof(struct ace) + sid_len( &local_system_sid ) + sid_len( &builtin_admins_sid ) +
                       sid_len( &builtin_users_sid ) + sid_len( &authenticated_users_sid ) + (acct ? sid_len( acct ) + sizeof(struct ace) : 0);
-    size_t size = sizeof(struct security_descriptor) + acl_size;
+    size_t owner_len = account == SYSRUN_ACCOUNT_ELEVATED ? sid_len( &builtin_admins_sid ) : 0;
+    size_t size = sizeof(struct security_descriptor) + owner_len + acl_size;
     struct security_descriptor *sd;
     struct acl *acl;
     struct ace *ace;
@@ -204,7 +212,12 @@ static int protect_object( struct object *obj, struct token *token, int account,
     memset( sd, 0, size );
     sd->control = SE_DACL_PRESENT;
     sd->dacl_len = acl_size;
-    acl = (struct acl *)(sd + 1);
+    if (owner_len)  /* the token's owner would be the user */
+    {
+        sd->owner_len = owner_len;
+        memcpy( sd + 1, &builtin_admins_sid, owner_len );
+    }
+    acl = (struct acl *)((char *)(sd + 1) + owner_len);
     acl->revision = ACL_REVISION;
     acl->size = acl_size;
     acl->count = acct ? 5 : 4;
@@ -238,7 +251,21 @@ int sysrun_process_created( struct process *process, int is_root )
         release_object( token );
         return ret;
     }
-    if ((account = token_service_account( process->token )) < 0) return 1;
+    if ((account = token_service_account( process->token )) < 0)
+    {
+        /* The connection credentials are those of the process that made the socket pair, so a process that was
+         * started by one with the system group looks as if it had it too. Only an elevated process (its Unix process keeps
+         * the group, ntdll sysrun_must_drop_group) keeps the raised file access; any other loses it. */
+        if (!token_is_elevated( process->token ))
+        {
+            process->peer_gid = -1;
+            return 1;
+        }
+        process->sysrun_protected = 1;
+        process->sysrun_account = SYSRUN_ACCOUNT_ELEVATED;
+        return token_protect_elevated( process->token ) &&
+               protect_object( &process->obj, process->token, SYSRUN_ACCOUNT_ELEVATED, 0 );
+    }
     process->sysrun_protected = 1;
     process->sysrun_account = account;
     /* The connection credentials of a new process are those of the process that made the socket pair, so
@@ -260,6 +287,7 @@ int sysrun_thread_created( struct thread *thread )
 static const char *const system_images[] =
 {
     "/drive_c/windows/system32/services.exe",
+    "/drive_c/windows/system32/wexelevate.exe",
     "/drive_c/windows/system32/wineboot.exe",
     "/drive_c/windows/system32/winedevice.exe",
     "/drive_c/windows/syswow64/wineboot.exe",
