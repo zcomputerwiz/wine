@@ -210,6 +210,7 @@ extern BOOL run_winemenubuilder( const WCHAR *args );
 
 /* Default shell folder value registration */
 HRESULT SHELL_RegisterShellFolders(void);
+HRESULT SHELL_RegisterUserShellFolders(void);
 
 /* Detect Shell Links */
 BOOL SHELL_IsShortcut(LPCITEMIDLIST);

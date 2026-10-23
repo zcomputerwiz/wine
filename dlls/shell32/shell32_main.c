@@ -1112,6 +1112,9 @@ WCHAR *shell_get_resource_string(UINT id)
 
 HRESULT WINAPI DllInstall(BOOL bInstall, LPCWSTR cmdline)
 {
+    if (bInstall && cmdline && (!wcscmp(cmdline, L"U") || !wcscmp(cmdline, L"u")))
+        return SHELL_RegisterUserShellFolders();  /* per-user setup at first logon, as Windows' Active Setup */
+
     FIXME("%s %s: stub\n", bInstall ? "TRUE":"FALSE", debugstr_w(cmdline));
     return S_OK;        /* indicate success */
 }
