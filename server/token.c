@@ -64,6 +64,10 @@ const struct luid SeUndockPrivilege               = { 25, 0 };
 const struct luid SeManageVolumePrivilege         = { 28, 0 };
 const struct luid SeImpersonatePrivilege          = { 29, 0 };
 const struct luid SeCreateGlobalPrivilege         = { 30, 0 };
+static const struct luid SeIncreaseWorkingSetPrivilege = { 33, 0 };
+static const struct luid SeTimeZonePrivilege       = { 34, 0 };
+static const struct luid SeCreateSymbolicLinkPrivilege = { 35, 0 };
+static const struct luid SeDelegateSessionUserImpersonatePrivilege = { 36, 0 };
 static const struct luid SeCreateTokenPrivilege   = {  2, 0 };
 static const struct luid SeLockMemoryPrivilege    = {  4, 0 };
 static const struct luid SeCreatePermanentPrivilege = { 16, 0 };
@@ -83,6 +87,8 @@ const struct sid builtin_users_sid = { SID_REVISION, 2, SECURITY_NT_AUTHORITY, {
 const struct sid domain_users_sid = { SID_REVISION, 5, SECURITY_NT_AUTHORITY, { SECURITY_NT_NON_UNIQUE, 0, 0, 0, DOMAIN_GROUP_RID_USERS } };
 
 static const struct sid local_sid = { SID_REVISION, 1, SECURITY_LOCAL_SID_AUTHORITY, { SECURITY_LOCAL_RID } };
+static const struct sid console_logon_sid = { SID_REVISION, 1, SECURITY_LOCAL_SID_AUTHORITY, { 1 } };
+static const struct sid this_organization_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_THIS_ORGANIZATION_RID } };
 static const struct sid interactive_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_INTERACTIVE_RID } };
 static const struct sid anonymous_logon_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_ANONYMOUS_LOGON_RID } };
 static const struct sid authenticated_user_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_AUTHENTICATED_USER_RID } };
@@ -892,52 +898,53 @@ struct token *token_create_admin( unsigned primary, int impersonation_level, int
 
 /* Tokens of the system role (docs/ELEVATION_SYSTEM_ROLE_WORKORDER.md, C3): LocalSystem, LocalService and
  * NetworkService, all primary, Default elevation, no linked token, System integrity.
- * Provisional: the groups and the privilege states follow the native accounts as remembered from `whoami /priv` in
- * a service and the documented defaults; they were not measured on a native system. Wine defines no
- * SeIncreaseWorkingSet or SeTimeZone, so those are missing. */
+ * Privileges and groups follow the native tokens measured in docs/ELEVATION_LOCAL_VALIDATION_WORKORDER.md
+ * (Task Scheduler tokens). Left out on purpose: the per-task/per-service SIDs and the unknown S-1-5-32-* SIDs. */
 struct token *token_create_service( unsigned int account, unsigned int session_id )
 {
     const unsigned int on = SE_PRIVILEGE_ENABLED;
     const unsigned int grp = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY;
     const struct luid_attr system_privs[] =
     {
-        { SeTcbPrivilege, SE_PRIVILEGE_ENABLED }, { SeDebugPrivilege, SE_PRIVILEGE_ENABLED },
-        { SeBackupPrivilege, SE_PRIVILEGE_ENABLED }, { SeRestorePrivilege, SE_PRIVILEGE_ENABLED },
-        { SeShutdownPrivilege, SE_PRIVILEGE_ENABLED }, { SeSystemEnvironmentPrivilege, SE_PRIVILEGE_ENABLED },
-        { SeAuditPrivilege, SE_PRIVILEGE_ENABLED }, { SeImpersonatePrivilege, SE_PRIVILEGE_ENABLED },
-        { SeCreateGlobalPrivilege, SE_PRIVILEGE_ENABLED }, { SeChangeNotifyPrivilege, SE_PRIVILEGE_ENABLED },
-        { SeSystemProfilePrivilege, SE_PRIVILEGE_ENABLED }, { SeProfileSingleProcessPrivilege, SE_PRIVILEGE_ENABLED },
-        { SeIncreaseBasePriorityPrivilege, SE_PRIVILEGE_ENABLED }, { SeCreatePagefilePrivilege, SE_PRIVILEGE_ENABLED },
-        { SeManageVolumePrivilege, SE_PRIVILEGE_ENABLED }, { SeLockMemoryPrivilege, SE_PRIVILEGE_ENABLED },
-        { SeCreatePermanentPrivilege, SE_PRIVILEGE_ENABLED },
+        { SeLockMemoryPrivilege, on }, { SeTcbPrivilege, on }, { SeSystemProfilePrivilege, on },
+        { SeProfileSingleProcessPrivilege, on }, { SeIncreaseBasePriorityPrivilege, on },
+        { SeCreatePagefilePrivilege, on }, { SeCreatePermanentPrivilege, on }, { SeDebugPrivilege, on },
+        { SeAuditPrivilege, on }, { SeChangeNotifyPrivilege, on }, { SeImpersonatePrivilege, on },
+        { SeCreateGlobalPrivilege, on }, { SeIncreaseWorkingSetPrivilege, on }, { SeTimeZonePrivilege, on },
+        { SeCreateSymbolicLinkPrivilege, on }, { SeDelegateSessionUserImpersonatePrivilege, on },
         { SeAssignPrimaryTokenPrivilege, 0 }, { SeIncreaseQuotaPrivilege, 0 }, { SeSecurityPrivilege, 0 },
         { SeTakeOwnershipPrivilege, 0 }, { SeLoadDriverPrivilege, 0 }, { SeSystemtimePrivilege, 0 },
-        { SeRemoteShutdownPrivilege, 0 }, { SeUndockPrivilege, 0 },
+        { SeBackupPrivilege, 0 }, { SeRestorePrivilege, 0 }, { SeShutdownPrivilege, 0 },
+        { SeSystemEnvironmentPrivilege, 0 }, { SeUndockPrivilege, 0 }, { SeManageVolumePrivilege, 0 },
     };
+    /* SeImpersonate stays enabled although the measured Task Scheduler tokens lack it: Microsoft documents it as a
+     * default privilege of Local Service, Network Service and Local System services */
     const struct luid_attr local_service_privs[] =
     {
         { SeChangeNotifyPrivilege, on }, { SeCreateGlobalPrivilege, on }, { SeImpersonatePrivilege, on },
-        { SeAssignPrimaryTokenPrivilege, 0 }, { SeAuditPrivilege, 0 }, { SeShutdownPrivilege, 0 },
-        { SeUndockPrivilege, 0 },
+        { SeAssignPrimaryTokenPrivilege, 0 }, { SeSystemtimePrivilege, 0 }, { SeShutdownPrivilege, 0 },
+        { SeAuditPrivilege, 0 }, { SeUndockPrivilege, 0 }, { SeIncreaseWorkingSetPrivilege, 0 },
+        { SeTimeZonePrivilege, 0 },
     };
     const struct luid_attr network_service_privs[] =
     {
         { SeChangeNotifyPrivilege, on }, { SeCreateGlobalPrivilege, on }, { SeImpersonatePrivilege, on },
-        { SeAssignPrimaryTokenPrivilege, 0 }, { SeAuditPrivilege, 0 }, { SeIncreaseQuotaPrivilege, 0 },
+        { SeAssignPrimaryTokenPrivilege, 0 }, { SeIncreaseQuotaPrivilege, 0 }, { SeShutdownPrivilege, 0 },
+        { SeAuditPrivilege, 0 }, { SeUndockPrivilege, 0 }, { SeIncreaseWorkingSetPrivilege, 0 },
+        { SeTimeZonePrivilege, 0 },
     };
-    const struct sid_attrs system_groups[] =
-    {
-        { &world_sid, grp }, { &authenticated_user_sid, grp }, { &builtin_admins_sid, grp | SE_GROUP_OWNER },
-    };
+    /* CONSOLE LOGON may be an artifact of the Task Scheduler measurement: provisional */
     const struct sid_attrs service_groups[] =
     {
-        { &world_sid, grp }, { &builtin_users_sid, grp }, { &authenticated_user_sid, grp }, { &service_sid, grp },
-        { &local_sid, grp },
+        { &world_sid, grp }, { &builtin_users_sid, grp }, { &service_sid, grp }, { &console_logon_sid, grp },
+        { &authenticated_user_sid, grp }, { &this_organization_sid, grp }, { &local_sid, grp },
+        { &builtin_admins_sid, SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_OWNER },
     };
     const struct sid *user;
     const struct sid_attrs *groups = service_groups;
     const struct luid_attr *privs = local_service_privs;
-    unsigned int group_count = ARRAY_SIZE( service_groups ), priv_count = ARRAY_SIZE( local_service_privs );
+    unsigned int group_count = ARRAY_SIZE( service_groups ) - 1;  /* no Administrators */
+    unsigned int priv_count = ARRAY_SIZE( local_service_privs );
     unsigned int primary_group = 1;  /* BUILTIN\Users */
     struct token *token;
     struct acl *default_dacl;
@@ -946,9 +953,8 @@ struct token *token_create_service( unsigned int account, unsigned int session_i
     {
     case SERVICE_ACCOUNT_SYSTEM:
         user = &local_system_sid;
-        groups = system_groups;
-        group_count = ARRAY_SIZE( system_groups );
-        primary_group = 2;  /* BUILTIN\Administrators, also the owner */
+        group_count = ARRAY_SIZE( service_groups );
+        primary_group = 7;  /* BUILTIN\Administrators, also the owner */
         privs = system_privs;
         priv_count = ARRAY_SIZE( system_privs );
         break;
@@ -1826,7 +1832,8 @@ static void token_apply_filter( struct token *token, unsigned int flags )
     }
 }
 
-/* native LSA filtered (UAC) token: only SeChangeNotify (enabled), SeShutdown and SeUndock (disabled); Wine lacks the native SeIncreaseWorkingSet and SeTimeZone */
+/* native LSA filtered (UAC) token: only SeChangeNotify (enabled), SeShutdown, SeUndock,
+ * SeIncreaseWorkingSet and SeTimeZone (disabled) */
 void token_make_filtered( struct token *token )
 {
     struct list *cursor, *cursor_next;
@@ -1842,6 +1849,8 @@ void token_make_filtered( struct token *token )
         else
             privilege_remove( privilege );
     }
+    privilege_add( token, SeIncreaseWorkingSetPrivilege, FALSE );
+    privilege_add( token, SeTimeZonePrivilege, FALSE );
 }
 
 /* set when this server gave its user a standard token: tokens derived from it (a filtered copy is Limited
