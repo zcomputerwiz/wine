@@ -485,6 +485,12 @@ static const WCHAR * const WellKnownPrivNames[SE_MAX_WELL_KNOWN_PRIVILEGE + 1] =
     L"SeManageVolumePrivilege",
     L"SeImpersonatePrivilege",
     L"SeCreateGlobalPrivilege",
+    L"SeTrustedCredManAccessPrivilege",
+    L"SeRelabelPrivilege",
+    L"SeIncreaseWorkingSetPrivilege",
+    L"SeTimeZonePrivilege",
+    L"SeCreateSymbolicLinkPrivilege",
+    L"SeDelegateSessionUserImpersonatePrivilege",
 };
 
 const WCHAR *get_wellknown_privilege_name(const LUID *luid)
@@ -674,7 +680,7 @@ LookupPrivilegeNameW( LPCWSTR lpSystemName, PLUID lpLuid, LPWSTR lpName,
         return FALSE;
     }
     if (lpLuid->HighPart || (lpLuid->LowPart < SE_MIN_WELL_KNOWN_PRIVILEGE ||
-     lpLuid->LowPart > SE_MAX_WELL_KNOWN_PRIVILEGE))
+     lpLuid->LowPart > SE_MAX_WELL_KNOWN_PRIVILEGE) || !WellKnownPrivNames[lpLuid->LowPart])
     {
         SetLastError(ERROR_NO_SUCH_PRIVILEGE);
         return FALSE;
