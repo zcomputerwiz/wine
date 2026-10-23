@@ -680,7 +680,7 @@ LookupPrivilegeNameW( LPCWSTR lpSystemName, PLUID lpLuid, LPWSTR lpName,
         return FALSE;
     }
     if (lpLuid->HighPart || (lpLuid->LowPart < SE_MIN_WELL_KNOWN_PRIVILEGE ||
-     lpLuid->LowPart > SE_MAX_WELL_KNOWN_PRIVILEGE))
+     lpLuid->LowPart > SE_MAX_WELL_KNOWN_PRIVILEGE) || !WellKnownPrivNames[lpLuid->LowPart])
     {
         SetLastError(ERROR_NO_SUCH_PRIVILEGE);
         return FALSE;
