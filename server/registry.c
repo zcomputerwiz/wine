@@ -177,6 +177,7 @@ struct save_branch_info
 
 #define MAX_SAVE_BRANCH_INFO 3
 static int save_branch_count;
+static bool machine_hive_saved;  /* elevation enforced by the machine hive loaded at startup */
 static struct save_branch_info save_branch_info[MAX_SAVE_BRANCH_INFO];
 
 static bool registry_loaded = false;
@@ -2668,6 +2669,8 @@ void init_registry(void)
     else if (prefix_type == PREFIX_UNKNOWN)
         prefix_type = PREFIX_32BIT;
 
+    machine_hive_saved = sysrun_active && elevation_enforced();
+
     init_supported_machines();
 
     /* load userdef.reg into Registry\User\.Default */
@@ -3188,7 +3191,10 @@ done:
 
 static int save_branch( struct save_branch_info *info )
 {
-    int raised = info->sysrun ? sysrun_raise() : 0;
+    /* The system group is raised for the save only if elevation was enforced by the on-disk hive at startup (the
+     * access checks then decide which writes exist); otherwise a machine hive keeps the stock rule: it is saved if
+     * the real user can write it. The live value is not used: a user could set the helper in memory. */
+    int raised = info->sysrun && machine_hive_saved ? sysrun_raise() : 0;
     int ret = do_save_branch( info );
 
     sysrun_drop( raised );
