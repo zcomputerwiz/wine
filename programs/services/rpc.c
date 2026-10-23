@@ -58,9 +58,11 @@ static const GENERIC_MAPPING g_svc_generic =
 /* Native default descriptors (Microsoft, "Service Security and Access Rights"). The SCM lets Authenticated Users
  * connect, enumerate and read, LocalSystem also modify the boot configuration, and Administrators do anything.
  * A service lets Authenticated Users query, enumerate dependents, interrogate and send user-defined controls,
- * LocalSystem also start, stop and pause, and Administrators do anything. */
+ * LocalSystem also start, stop and pause, and Administrators do anything. Wine's SERVICE_SET_STATUS (0x8000) is
+ * added for LocalSystem: winedevice.exe loads a driver service (ZwLoadDriver) and reports its status, and no
+ * services.exe process record names that process for the driver. */
 static const WCHAR scm_sddl[] = L"O:SYG:SYD:(A;;0x20015;;;AU)(A;;0x20035;;;SY)(A;;0xf003f;;;BA)";
-static const WCHAR svc_sddl[] = L"O:SYG:SYD:(A;;0x2018d;;;AU)(A;;0x201fd;;;SY)(A;;0xf01ff;;;BA)";
+static const WCHAR svc_sddl[] = L"O:SYG:SYD:(A;;0x2018d;;;AU)(A;;0x2a1fd;;;SY)(A;;0xf01ff;;;BA)";
 
 static INIT_ONCE sd_once = INIT_ONCE_STATIC_INIT;
 static PSECURITY_DESCRIPTOR scm_sd, svc_sd;
