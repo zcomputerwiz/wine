@@ -995,6 +995,38 @@ int token_service_account( const struct token *token )
     return -1;
 }
 
+/* The token of an elevated process is only for SYSTEM and Administrators (enabled in the full token only, deny-only
+ * in the user's limited token): the user's limited processes must not duplicate, impersonate or assign it. */
+int token_protect_elevated( struct token *token )
+{
+    size_t acl_size = sizeof(struct acl) + 2 * sizeof(struct ace) + sid_len( &local_system_sid ) + sid_len( &builtin_admins_sid );
+    size_t size = sizeof(struct security_descriptor) + acl_size;
+    struct security_descriptor *sd;
+    struct acl *acl;
+    struct ace *ace;
+    int ret;
+
+    if (!(sd = mem_alloc( size ))) return 0;
+    memset( sd, 0, size );
+    sd->control = SE_DACL_PRESENT;
+    sd->dacl_len = acl_size;
+    acl = (struct acl *)(sd + 1);
+    acl->revision = ACL_REVISION;
+    acl->size = acl_size;
+    acl->count = 2;
+    ace = set_ace( ace_first( acl ), &local_system_sid, ACCESS_ALLOWED_ACE_TYPE, 0, GENERIC_ALL );
+    set_ace( ace_next( ace ), &builtin_admins_sid, ACCESS_ALLOWED_ACE_TYPE, 0, GENERIC_ALL );
+    ret = set_sd_defaults_from_token( &token->obj, sd, DACL_SECURITY_INFORMATION, token );
+    free( sd );
+    return ret;
+}
+
+/* a token of a process that was elevated: the full half of a split administrator token */
+int token_is_elevated( const struct token *token )
+{
+    return token->primary && token->elevation == TokenElevationTypeFull;
+}
+
 /* create the primary token of a service account; only the system role may (SeTcbPrivilege, enabled) */
 DECL_HANDLER(create_service_token)
 {
@@ -1662,9 +1694,13 @@ DECL_HANDLER(create_token)
 /* open a security token */
 DECL_HANDLER(open_token)
 {
+    /* Windows needs the query right on the process or thread; with only the limited query a limited process could
+     * open the full token of an elevated process of its user (the descriptor of the token is the second line of defense) */
+    unsigned int query = sysrun_active && elevation_enforced();
+
     if (req->flags & OPEN_TOKEN_THREAD)
     {
-        struct thread *thread = get_thread_from_handle( req->handle, 0 );
+        struct thread *thread = get_thread_from_handle( req->handle, query ? THREAD_QUERY_INFORMATION : 0 );
         if (thread)
         {
             if (thread->token)
@@ -1688,7 +1724,7 @@ DECL_HANDLER(open_token)
     }
     else
     {
-        struct process *process = get_process_from_handle( req->handle, 0 );
+        struct process *process = get_process_from_handle( req->handle, query ? PROCESS_QUERY_INFORMATION : 0 );
         if (process)
         {
             if (process->token)
@@ -2284,7 +2320,7 @@ DECL_HANDLER(set_token_default_dacl)
 DECL_HANDLER(create_linked_token)
 {
     struct token *token, *linked;
-    int elevation;
+    int elevation, primary;
 
     /* a standard user has no linked token (native: ERROR_NO_SUCH_LOGON_SESSION) */
     if (elevation_enforced() && standard_user_session)
@@ -2308,9 +2344,12 @@ DECL_HANDLER(create_linked_token)
             release_object( token );
             return;
         }
-        /* shortcut: everyone gets an identification-level token; Windows hands a SeTcbPrivilege caller a usable
-         * primary token (docs/ELEVATION_BOUNDARY_PLAN.md, N6), add that when the elevation broker exists. */
-        if ((linked = token_create_admin( FALSE, SecurityIdentification, elevation, token->session_id )))
+        /* Everyone gets an identification-level token. Windows hands a SeTcbPrivilege caller a usable primary
+         * token (docs/ELEVATION_BOUNDARY_PLAN.md, N6): here only the system role does (the elevation broker),
+         * because Wine's administrator token holds SeTcbPrivilege too. */
+        primary = elevation_enforced() && token_service_account( current->process->token ) == SERVICE_ACCOUNT_SYSTEM &&
+                  sysrun_process_privileged( current->process ) && token_has_privilege( current->process->token, SeTcbPrivilege );
+        if ((linked = token_create_admin( primary, primary ? -1 : SecurityIdentification, elevation, token->session_id )))
         {
             /* a Medium caller cannot get the write rights of a High token (mandatory label) */
             unsigned int access = MAXIMUM_ALLOWED;

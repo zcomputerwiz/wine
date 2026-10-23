@@ -207,15 +207,21 @@ void sysrun_early_init(void)
 }
 
 /* Does the child get no system group? Only a client that has it can pass it on, and it keeps it for a child with
- * the SYSTEM token or with its own (inherited) token; a service account or any other token gets none. */
+ * the SYSTEM token, a full (elevated) token or its own (inherited) token; a service account or any other token
+ * gets none. */
 BOOL sysrun_must_drop_group( HANDLE token )
 {
     static const SID_IDENTIFIER_AUTHORITY nt_authority = { SECURITY_NT_AUTHORITY };
     char buf[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
     const SID *sid;
-    ULONG len;
+    ULONG len, elevation;
 
     if (!token || !sysrun_client_is_system()) return FALSE;
+    /* A process the elevation broker started with the full half of an administrator's token keeps the group too:
+     * it is an elevated process and may write the machine root, as an elevated installer must (B7). Only a client
+     * that has the group can pass it on, so a limited process never gets here. */
+    if (!NtQueryInformationToken( token, TokenElevationType, &elevation, sizeof(elevation), &len ) &&
+        elevation == TokenElevationTypeFull) return FALSE;
     if (NtQueryInformationToken( token, TokenUser, buf, sizeof(buf), &len )) return TRUE;
     sid = ((TOKEN_USER *)buf)->User.Sid;
     return !(sid->SubAuthorityCount == 1 && sid->SubAuthority[0] == SECURITY_LOCAL_SYSTEM_RID &&
