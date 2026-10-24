@@ -946,6 +946,7 @@ static void process_killed( struct process *process )
 {
     assert( list_empty( &process->thread_list ));
     process->end_time = current_time;
+    winstation_process_killed( process );
     close_process_desktop( process );
     process->winstation = 0;
     process->desktop = 0;

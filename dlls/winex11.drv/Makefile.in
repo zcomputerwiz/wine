@@ -20,6 +20,7 @@ SOURCES = \
 	opengl.c \
 	palette.c \
 	pen.c \
+	secure.c \
 	vulkan.c \
 	window.c \
 	wintab.c \

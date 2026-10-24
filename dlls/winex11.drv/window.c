@@ -439,7 +439,7 @@ static BOOL is_window_managed( HWND hwnd, UINT swp_flags, BOOL fullscreen )
 {
     DWORD style, ex_style;
 
-    if (!managed_mode) return FALSE;
+    if (!managed_mode || x11drv_secure_desktop()) return FALSE;
 
     /* child windows are not managed */
     style = NtUserGetWindowLongW( hwnd, GWL_STYLE );
@@ -2491,6 +2491,7 @@ static void create_whole_window( struct x11drv_win_data *data )
     if (data->vis.visualid != default_visual.visualid)
         data->whole_colormap = XCreateColormap( data->display, root_window, data->vis.visual, AllocNone );
 
+    x11drv_secure_exclusive( data->display );  /* only on the secure desktop */
     data->managed = is_window_managed( data->hwnd, SWP_NOACTIVATE, FALSE );
     mask = get_window_attributes( data, &attr ) | CWOverrideRedirect;
     attr.override_redirect = !data->managed;

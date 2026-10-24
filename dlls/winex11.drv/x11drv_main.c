@@ -679,6 +679,7 @@ NTSTATUS __wine_unix_lib_init(void)
     if (use_xim) use_xim = xim_init( input_style );
 
     init_icm_profile();
+    x11drv_secure_init( gdi_display );  /* the screen, before any window of this process */
     init_user_driver();
     return STATUS_SUCCESS;
 }
