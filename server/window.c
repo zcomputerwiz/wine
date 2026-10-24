@@ -168,6 +168,12 @@ static inline struct window *get_window( user_handle_t handle )
     return ret;
 }
 
+/* a window of another desktop may be changed only by the system role (docs/ELEVATION_SECURE_DESKTOP_WORKORDER.md) */
+static int window_desktop_denied( struct window *win )
+{
+    return cross_desktop_denied( current, win->desktop );
+}
+
 /* check if window is the desktop */
 static inline int is_desktop_window( const struct window *win )
 {
@@ -2312,6 +2318,7 @@ DECL_HANDLER(set_parent)
     struct window *win, *parent = NULL;
 
     if (!(win = get_window( req->handle ))) return;
+    if (window_desktop_denied( win )) return;
     if (req->parent && !(parent = get_window( req->parent ))) return;
 
     /* reparenting to a window with a different DPI awareness isn't allowed */
@@ -2396,6 +2403,7 @@ DECL_HANDLER(set_window_owner)
     struct window *owner = NULL, *ptr;
 
     if (!win) return;
+    if (window_desktop_denied( win )) return;
     if (req->owner && !(owner = get_window( req->owner ))) return;
     if (is_desktop_window(win))
     {
@@ -2460,6 +2468,7 @@ DECL_HANDLER(set_window_info)
     bool ansi;
 
     if (!(win = get_window( req->handle ))) return;
+    if (window_desktop_denied( win )) return;
     if (is_desktop_window( win ) && win->thread != current)
     {
         set_error( STATUS_ACCESS_DENIED );
@@ -2701,6 +2710,7 @@ DECL_HANDLER(set_window_pos)
     unsigned int flags = req->swp_flags, old_style;
 
     if (!win) return;
+    if (window_desktop_denied( win )) return;
     if (!win->parent) flags |= SWP_NOZORDER;  /* no Z order for the desktop */
 
     if (!(flags & SWP_NOZORDER))
@@ -2841,6 +2851,7 @@ DECL_HANDLER(get_window_text)
 {
     struct window *win = get_window( req->handle );
 
+    if (win && window_desktop_denied( win )) return;
     if (win && win->text_len)
     {
         reply->length = win->text_len / sizeof(WCHAR);
@@ -2857,6 +2868,7 @@ DECL_HANDLER(set_window_text)
     struct window *win = get_window( req->handle );
 
     if (!win) return;
+    if (window_desktop_denied( win )) return;
     len = (get_req_data_size() / sizeof(WCHAR)) * sizeof(WCHAR);
     if (len && !(text = memdup( get_req_data(), len ))) return;
     free( win->text );

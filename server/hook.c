@@ -400,6 +400,16 @@ DECL_HANDLER(set_hook)
         }
     }
 
+    /* a thread hook cannot reach into another desktop (only the system role may) */
+    if (thread)
+    {
+        struct desktop *target = get_thread_desktop_quiet( thread );
+        int denied = target && cross_desktop_denied( current, target );
+
+        if (target) release_object( target );
+        if (denied) goto done;
+    }
+
     /* a hook loads a module into the target: the system role's processes are not open to that without a handle */
     if ((process && !sysrun_check_process_access( process, PROCESS_VM_WRITE | PROCESS_CREATE_THREAD )) ||
         (thread && !sysrun_check_process_access( thread->process, PROCESS_VM_WRITE | PROCESS_CREATE_THREAD )))

@@ -49,6 +49,8 @@ struct winstation
     unsigned int       monitor_count;      /* number of monitors */
     struct monitor_info *monitors;         /* window station monitors */
     unsigned __int64   monitor_serial;     /* winstation monitor update counter */
+    struct process    *input_owner;        /* system role process that switched to the secure desktop */
+    struct desktop    *return_desktop;     /* input desktop to return to when it dies (not referenced) */
 };
 
 struct key_repeat
@@ -86,6 +88,7 @@ struct desktop
     unsigned int         clip_flags;       /* last cursor clip flags */
     user_handle_t        cursor_win;       /* window that contains the cursor */
     desktop_shm_t       *shared;           /* desktop session shared memory */
+    unsigned char        secure;           /* the secure desktop (Winlogon created by the system role) */
 };
 
 /* user handles functions */
@@ -212,6 +215,9 @@ extern void connect_process_winstation( struct process *process, struct unicode_
 extern void set_process_default_desktop( struct process *process, struct desktop *desktop,
                                          obj_handle_t handle );
 extern void close_process_desktop( struct process *process );
+extern void winstation_process_killed( struct process *process );
+extern struct desktop *get_thread_desktop_quiet( struct thread *thread );
+extern int cross_desktop_denied( struct thread *thread, struct desktop *target );
 extern void set_thread_default_desktop( struct thread *thread, struct desktop *desktop, obj_handle_t handle );
 extern void release_thread_desktop( struct thread *thread, int close );
 

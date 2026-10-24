@@ -53,6 +53,10 @@ extern int sysrun_process_created( struct process *process, int is_root );
 extern int sysrun_thread_created( struct thread *thread );
 /* the main image of a process was mapped: verify it, and give a verified system group root process the SYSTEM token */
 extern void sysrun_main_image( struct process *process, struct fd *fd );
+/* does the process have the system role (a SYSTEM token and the descriptor of a system process)? */
+extern int sysrun_process_is_system( struct process *process );
+/* are the desktop rules of the secure desktop (reserved names, cross-desktop access) in force? */
+extern int sysrun_desktops_enforced(void);
 /* access check of a request that names another process or thread by id instead of by handle */
 extern int sysrun_check_process_access( struct process *target, unsigned int access );
 

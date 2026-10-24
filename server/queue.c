@@ -3151,6 +3151,11 @@ DECL_HANDLER(send_message)
         release_object( thread );
         return;
     }
+    if (cross_desktop_denied( current, recv_queue->input->desktop ))  /* only the system role may cross desktops */
+    {
+        release_object( thread );
+        return;
+    }
     if ((req->flags & SEND_MSG_ABORT_IF_HUNG) && is_queue_hung(recv_queue))
     {
         set_error( STATUS_TIMEOUT );
@@ -3215,6 +3220,16 @@ DECL_HANDLER(send_message)
     release_object( thread );
 }
 
+/* is the desktop the sender's desktop and the input desktop of its window station? */
+static int is_sender_input_desktop( struct desktop *desktop )
+{
+    struct desktop *own = get_thread_desktop_quiet( current );
+    int ret = own == desktop && desktop->winstation->input_desktop == desktop;
+
+    if (own) release_object( own );
+    return ret;
+}
+
 /* send a hardware message to a thread queue */
 DECL_HANDLER(send_hardware_message)
 {
@@ -3226,8 +3241,10 @@ DECL_HANDLER(send_hardware_message)
     int wait = 0;
 
     if (!(desktop = get_hardware_input_desktop( req->win ))) return;
-    if ((origin == IMO_INJECTED && desktop != current->queue->input->desktop) ||
-        !set_input_desktop( desktop->winstation, desktop ))
+    /* As on Windows, input is accepted only when the sender's desktop, the target window's desktop and the input
+     * desktop are one (for no window: the sender's desktop is the input desktop), whatever the origin; a host event
+     * never changes the input desktop, only SwitchDesktop does. */
+    if (!is_sender_input_desktop( desktop ) || !set_input_desktop( desktop->winstation, desktop ))
     {
         release_object( desktop );
         set_error( STATUS_ACCESS_DENIED );

@@ -333,6 +333,17 @@ void sysrun_main_image( struct process *process, struct fd *fd )
     add_timeout_user( -TICKS_PER_SEC / 100, kill_unverified, process );
 }
 
+int sysrun_desktops_enforced(void)
+{
+    return system_role_enabled();
+}
+
+int sysrun_process_is_system( struct process *process )
+{
+    return system_role_enabled() && process->sysrun_protected && !process->sysrun_pending &&
+           process->sysrun_account == SERVICE_ACCOUNT_SYSTEM;
+}
+
 int sysrun_check_process_access( struct process *target, unsigned int access )
 {
     if (!target->sysrun_protected || target == current->process) return 1;
