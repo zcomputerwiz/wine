@@ -29,10 +29,50 @@
 #include "sddl.h"
 #include "objbase.h"
 #include "userenv.h"
+#include "bcrypt.h"
 
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL( userenv );
+
+/***********************************************************************
+ * DeriveAppContainerSidFromAppContainerName (USERENV.@)
+ */
+HRESULT WINAPI DeriveAppContainerSidFromAppContainerName( const WCHAR *name, PSID *sid )
+{
+    SID_IDENTIFIER_AUTHORITY authority = { SECURITY_APP_PACKAGE_AUTHORITY };
+    BCRYPT_ALG_HANDLE algorithm = NULL;
+    BCRYPT_HASH_HANDLE hash = NULL;
+    WCHAR lower[64];
+    BYTE digest[32];
+    DWORD values[7];
+    unsigned int length, i;
+    NTSTATUS status;
+    PSID result;
+
+    if (!name || !sid) return E_INVALIDARG;
+    for (length = 0; length < ARRAY_SIZE(lower) && name[length]; ++length)
+        lower[length] = RtlDowncaseUnicodeChar( name[length] );
+    if (!length || name[length]) return E_INVALIDARG;
+
+    status = BCryptOpenAlgorithmProvider( &algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0 );
+    if (!status) status = BCryptCreateHash( algorithm, &hash, NULL, 0, NULL, 0, 0 );
+    if (!status) status = BCryptHashData( hash, (BYTE *)lower, length * sizeof(WCHAR), 0 );
+    if (!status) status = BCryptFinishHash( hash, digest, sizeof(digest), 0 );
+    if (hash) BCryptDestroyHash( hash );
+    if (algorithm) BCryptCloseAlgorithmProvider( algorithm, 0 );
+    if (status) return HRESULT_FROM_NT( status );
+
+    for (i = 0; i < ARRAY_SIZE(values); ++i)
+        values[i] = digest[4 * i] | (DWORD)digest[4 * i + 1] << 8 |
+                    (DWORD)digest[4 * i + 2] << 16 | (DWORD)digest[4 * i + 3] << 24;
+    if (!AllocateAndInitializeSid( &authority, SECURITY_APP_PACKAGE_RID_COUNT,
+                                  SECURITY_APP_PACKAGE_BASE_RID, values[0], values[1], values[2],
+                                  values[3], values[4], values[5], values[6], &result ))
+        return HRESULT_FROM_WIN32( GetLastError() );
+    *sid = result;
+    return S_OK;
+}
 
 static BOOL get_reg_value(WCHAR *env, HKEY hkey, const WCHAR *name, WCHAR *val, DWORD size)
 {
