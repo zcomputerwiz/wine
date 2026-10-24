@@ -7959,6 +7959,13 @@ UINT MSI_InstallPackage( MSIPACKAGE *package, LPCWSTR szPackagePath,
     msi_adjust_privilege_properties( package );
     msi_set_context( package );
 
+    if (package->Context == MSIINSTALLCONTEXT_MACHINE && package->PackagePath &&
+        msi_install_through_broker( package->PackagePath, szCommandLine, package->ui_level, &rc ))
+    {
+        free( action );
+        return rc;
+    }
+
     productcode = msi_dup_property( package->db, L"ProductCode" );
     if (wcsicmp( productcode, package->ProductCode ))
     {

@@ -570,11 +570,35 @@ UINT CDECL __wine_msi_call_dll_function(DWORD client_pid, const GUID *guid)
     return r;
 }
 
+/* The elevation helper is unset when HKLM\Software\Wine\Elevation\Helper is absent or an empty string.
+ * Same rule as is_elevation_helper_unset() in ntdll. While it is not unset, elevation is enforced: a linked
+ * token is never used, the elevation broker starts elevated programs (docs/ELEVATION_CALLERS_WORKORDER.md, E4). */
+BOOL msi_elevation_helper_unset(void)
+{
+    WCHAR value[MAX_PATH];
+    DWORD type, size = sizeof(value) - sizeof(WCHAR);
+    HKEY key;
+    LSTATUS status;
+
+    status = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Wine\\Elevation", 0, KEY_READ | KEY_WOW64_64KEY, &key);
+    if (status == ERROR_FILE_NOT_FOUND) return TRUE;
+    if (status) return FALSE;
+    status = RegQueryValueExW(key, L"Helper", NULL, &type, (BYTE *)value, &size);
+    RegCloseKey(key);
+    if (status == ERROR_FILE_NOT_FOUND) return TRUE;
+    return status == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) && !(size % sizeof(WCHAR)) &&
+           (!size || !value[0]);
+}
+
 static HANDLE get_admin_token(void)
 {
     TOKEN_ELEVATION_TYPE type;
     TOKEN_LINKED_TOKEN linked;
     DWORD size;
+
+    /* Under enforcement the custom action server runs with the caller's own token; a per-machine install has
+     * been handed to the broker already (msi_install_through_broker). */
+    if (!msi_elevation_helper_unset()) return NULL;
 
     if (!GetTokenInformation(GetCurrentThreadEffectiveToken(), TokenElevationType, &type, sizeof(type), &size)
             || type == TokenElevationTypeFull)
@@ -583,6 +607,82 @@ static HANDLE get_admin_token(void)
     if (!GetTokenInformation(GetCurrentThreadEffectiveToken(), TokenLinkedToken, &linked, sizeof(linked), &size))
         return NULL;
     return linked.LinkedToken;
+}
+
+typedef DWORD (WINAPI *WEXELEVATERUN)(const WCHAR *, const WCHAR *, const WCHAR *, const WCHAR *, DWORD, DWORD,
+                                      DWORD, HANDLE *, DWORD *);
+
+/* A per-machine install by a limited administrator, while elevation is enforced (the caller decides that it is
+ * per-machine): start the same msiexec command line once through the elevation broker (one consent). The elevated msiexec runs the whole install, deferred
+ * custom actions included, with the full token. Returns FALSE when this is not such an install (the caller goes
+ * on as before); otherwise TRUE and *result is the exit code of the elevated msiexec, or the error of the broker
+ * (cancel is ERROR_INSTALL_USEREXIT). */
+BOOL msi_install_through_broker(const WCHAR *package, const WCHAR *props, DWORD level, UINT *result)
+{
+    static const WCHAR *ui_names[] = { L"", L"", L" /qn", L" /qb", L" /qr", L"" };
+    TOKEN_ELEVATION_TYPE type;
+    WEXELEVATERUN run;
+    HMODULE wexhost;
+    HANDLE process = NULL;
+    WCHAR *cmd, *env, *p, image[MAX_PATH], cwd[MAX_PATH], ui[16];
+    DWORD size, err, code = 0, env_len = 0, pid;
+
+    if (!package || !package[0]) return FALSE;
+    if (msi_elevation_helper_unset()) return FALSE;
+    if (!GetTokenInformation(GetCurrentThreadEffectiveToken(), TokenElevationType, &type, sizeof(type), &size)
+            || type != TokenElevationTypeLimited)
+        return FALSE;
+    if (GetFileAttributesW(package) == INVALID_FILE_ATTRIBUTES) return FALSE;
+
+    wcscpy(ui, ui_names[(level & INSTALLUILEVEL_MASK) <= 5 ? (level & INSTALLUILEVEL_MASK) : 5]);
+    if ((level & INSTALLUILEVEL_MASK) == INSTALLUILEVEL_BASIC || (level & INSTALLUILEVEL_MASK) == INSTALLUILEVEL_NONE)
+    {
+        if (level & INSTALLUILEVEL_ENDDIALOG) wcscat(ui, L"+");
+        if ((level & INSTALLUILEVEL_MASK) == INSTALLUILEVEL_BASIC)
+        {
+            if (level & INSTALLUILEVEL_PROGRESSONLY) wcscat(ui, L"-");
+            if (level & INSTALLUILEVEL_HIDECANCEL) wcscat(ui, L"!");
+        }
+    }
+
+    swprintf(image, ARRAY_SIZE(image), L"%s\\msiexec.exe", sysdir);
+    size = lstrlenW(image) + lstrlenW(package) + lstrlenW(ui) + (props ? lstrlenW(props) : 0) + 32;
+    if (!(cmd = malloc(size * sizeof(WCHAR)))) { *result = ERROR_OUTOFMEMORY; return TRUE; }
+    swprintf(cmd, size, L"\"%s\" /i \"%s\"%s %s", image, package, ui, props ? props : L"");
+
+    if (!GetCurrentDirectoryW(ARRAY_SIZE(cwd), cwd)) cwd[0] = 0;
+    env = GetEnvironmentStringsW();
+    if (env)
+    {
+        for (p = env; *p; p += lstrlenW(p) + 1) ;
+        env_len = p + 1 - env;
+    }
+
+    TRACE("per-machine install by a limited token, asking the broker: %s\n", debugstr_w(cmd));
+    if (!(wexhost = LoadLibraryExW(L"wexhost.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32))
+            || !(run = (WEXELEVATERUN)GetProcAddress(wexhost, "WexElevateRun")))
+    {
+        err = ERROR_NOT_SUPPORTED;
+        if (wexhost) FreeLibrary(wexhost);
+    }
+    else
+    {
+        err = run(image, cmd, cwd, env, env_len, SW_SHOWNORMAL, 1 /* WEXELEVATE_WANT_HANDLE */, &process, &pid);
+        FreeLibrary(wexhost);
+    }
+    if (!err)
+    {
+        WaitForSingleObject(process, INFINITE);
+        if (!GetExitCodeProcess(process, &code)) code = GetLastError();
+        CloseHandle(process);
+    }
+    else if (err == ERROR_CANCELLED) code = ERROR_INSTALL_USEREXIT;
+    else code = err;
+
+    if (env) FreeEnvironmentStringsW(env);
+    free(cmd);
+    *result = code;
+    return TRUE;
 }
 
 static DWORD custom_start_server(MSIPACKAGE *package, DWORD arch)
