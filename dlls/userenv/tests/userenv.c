@@ -28,6 +28,7 @@
 #include "winreg.h"
 
 #include "userenv.h"
+#include "sddl.h"
 
 #include "wine/test.h"
 
@@ -457,6 +458,94 @@ static void test_get_user_profile_dir(void)
     CloseHandle( token );
 }
 
+static void test_appcontainer_sid(void)
+{
+    static const struct
+    {
+        const WCHAR *name;
+        const char *sid;
+    } cases[] =
+    {
+        { L"test", "S-1-15-2-1980125950-1037672881-421768107-1949737198-2922275827-507320043-1582245000" },
+        { L"TEST", "S-1-15-2-1980125950-1037672881-421768107-1949737198-2922275827-507320043-1582245000" },
+        { L"WineExplorer.MixedCase_01", "S-1-15-2-3520518378-1338609999-3243366982-3993260403-3393427587-956535139-1620658767" },
+        { L"wineexplorer.mixedcase_01", "S-1-15-2-3520518378-1338609999-3243366982-3993260403-3393427587-956535139-1620658767" },
+        { L"W\x00e4ne\x03a3", "S-1-15-2-1925959860-2464893839-2425465101-3504107519-2374159773-1197180585-2285453026" },
+        { L"a/b:*? ", "S-1-15-2-4173701422-852867342-4044399721-1874327424-3122796747-664920408-875619919" }
+    };
+    SID_IDENTIFIER_AUTHORITY authority = { SECURITY_APP_PACKAGE_AUTHORITY };
+    HRESULT (WINAPI *derive)(PCWSTR, PSID *);
+    WCHAR name[66], path[MAX_PATH];
+    PSID sid, again, other;
+    unsigned int i, length;
+    HRESULT hr;
+    char *text;
+    BOOL ret;
+
+    derive = (void *)GetProcAddress( GetModuleHandleW(L"userenv.dll"), "DeriveAppContainerSidFromAppContainerName" );
+    if (!derive)
+    {
+        win_skip("DeriveAppContainerSidFromAppContainerName is not available\n");
+        return;
+    }
+    GetModuleFileNameW( GetModuleHandleW(L"userenv.dll"), path, ARRAY_SIZE(path) );
+    trace("Testing userenv from %s\n", wine_dbgstr_w(path));
+    sid = (PSID)0xdeadbeef;
+    hr = derive( NULL, &sid );
+    ok(hr == E_INVALIDARG && sid == (PSID)0xdeadbeef, "NULL name: %#lx, %p\n", hr, sid);
+    hr = derive( L"", &sid );
+    ok(hr == E_INVALIDARG && sid == (PSID)0xdeadbeef, "Empty name: %#lx, %p\n", hr, sid);
+    hr = derive( L"test", NULL );
+    ok(hr == E_INVALIDARG, "NULL output: %#lx\n", hr);
+    for (i = 0; i < ARRAY_SIZE(cases); ++i)
+    {
+        winetest_push_context("case %u", i);
+        sid = NULL;
+        hr = derive( cases[i].name, &sid );
+        ok(hr == S_OK && sid != NULL, "derive returned %#lx, %p\n", hr, sid);
+        if (hr == S_OK && sid)
+        {
+            ok(IsValidSid(sid), "Invalid SID\n");
+            ok(*GetSidSubAuthorityCount(sid) == 8, "Wrong subauthority count\n");
+            ok(!memcmp(GetSidIdentifierAuthority(sid), &authority, sizeof(authority)), "Wrong authority\n");
+            ok(*GetSidSubAuthority(sid, 0) == SECURITY_APP_PACKAGE_BASE_RID, "Wrong base RID\n");
+            text = NULL;
+            ret = ConvertSidToStringSidA( sid, &text );
+            ok(ret, "ConvertSidToStringSidA failed: %lu\n", GetLastError());
+            if (ret) ok(!strcmp(text, cases[i].sid), "SID %s != %s\n", text, cases[i].sid);
+            LocalFree( text );
+            again = NULL;
+            hr = derive( cases[i].name, &again );
+            ok(hr == S_OK && again != NULL, "Repeat failed: %#lx\n", hr);
+            if (again) { ok(EqualSid(sid, again), "Repeat differs\n"); FreeSid(again); }
+            ok(!FreeSid(sid), "FreeSid failed\n");
+        }
+        winetest_pop_context();
+    }
+    sid = other = NULL;
+    hr = derive( L"test", &sid );
+    ok(hr == S_OK, "test failed %#lx\n", hr);
+    hr = derive( L"other", &other );
+    ok(hr == S_OK, "other failed %#lx\n", hr);
+    if (sid && other) ok(!EqualSid(sid, other), "Different names returned same SID\n");
+    FreeSid(sid); FreeSid(other);
+    for (length = 1; length <= 65; ++length)
+    {
+        if (length != 1 && length != 63 && length != 64 && length != 65) continue;
+        for (i = 0; i < length; ++i) name[i] = 'A';
+        name[length] = 0;
+        sid = (PSID)0xdeadbeef;
+        hr = derive( name, &sid );
+        if (length == 65)
+            ok(hr == E_INVALIDARG && sid == (PSID)0xdeadbeef, "Length65: %#lx, %p\n", hr, sid);
+        else
+        {
+            ok(hr == S_OK && sid != (PSID)0xdeadbeef && sid, "Length%u: %#lx, %p\n", length, hr, sid);
+            if (hr == S_OK && sid) FreeSid(sid);
+        }
+    }
+}
+
 START_TEST(userenv)
 {
     pIsWow64Process = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "IsWow64Process");
@@ -464,4 +553,5 @@ START_TEST(userenv)
     test_create_env();
     test_get_profiles_dir();
     test_get_user_profile_dir();
+    test_appcontainer_sid();
 }
