@@ -25,6 +25,7 @@
 #include "ntstatus.h"
 #include "windef.h"
 #include "winbase.h"
+#include "winreg.h"
 #include "winerror.h"
 #include "winternl.h"
 #include "winioctl.h"
@@ -1561,4 +1562,366 @@ done:
         RtlFreeHeap( GetProcessHeap(), 0, *cap_sids );
     }
     return set_ntstatus( status );
+}
+
+
+/******************************************************************************
+ * AppContainer registration functions
+ *
+ * A genuine per-user (HKCU) persistent mapping from an app container SID to its
+ * moniker and display name, stored as REG_SZ values under
+ * HKCU\Software\Wine\AppContainer\Mappings\<SID string>.
+ *
+ * These APIs register metadata only. They do not create a lowbox token, a
+ * directory profile or any security boundary, and they perform no capability,
+ * token or ACL enforcement. The registry store is the source of truth; a named
+ * mutant serializes writers (and readers) so a mapping is never observed
+ * half-published and a failed duplicate can never clobber an existing one.
+ ******************************************************************************/
+
+#define AC_MAPPING_ROOT   L"Software\\Wine\\AppContainer\\Mappings"
+#define AC_MONIKER_VALUE  L"Moniker"
+#define AC_DISPLAY_VALUE  L"DisplayName"
+#define AC_LOCK_NAME      L"WineAppContainerRegistrationLock"
+
+/* Open (creating if needed) the user-session lock that serializes access to
+ * the mapping store. Failing to obtain it degrades to unlocked operation: the
+ * atomic NtCreateKey disposition still guarantees a fresh SID is created
+ * exactly once, so no existing mapping can be overwritten either way. */
+static HANDLE ac_lock_open( void )
+{
+    static const WCHAR lock_name[] = AC_LOCK_NAME;
+    OBJECT_ATTRIBUTES attr;
+    UNICODE_STRING name;
+    HANDLE handle = NULL;
+
+    RtlInitUnicodeString( &name, lock_name );
+    InitializeObjectAttributes( &attr, &name, OBJ_CASE_INSENSITIVE, NULL, NULL );
+    if (NtCreateMutant( &handle, SYNCHRONIZE, &attr, FALSE )) return NULL;
+    return handle;
+}
+
+static void ac_lock_take( HANDLE lock )
+{
+    /* Wait indefinitely: every path in this file releases the lock and the OS
+     * drops it automatically if the owning process dies, so this cannot wedge. */
+    if (lock) NtWaitForSingleObject( lock, FALSE, NULL );
+}
+
+static void ac_lock_release( HANDLE lock )
+{
+    if (lock)
+    {
+        NtReleaseMutant( lock, NULL );
+        NtClose( lock );
+    }
+}
+
+/* Open a real handle to HKEY_CURRENT_USER for use as an Nt RootObject. This
+ * build's ntdll key APIs reject the pseudo-handle (HANDLE)HKEY_CURRENT_USER
+ * (they return STATUS_INVALID_HANDLE), so we resolve it first, mirroring
+ * kernelbase/registry.c. The mask covers everything the mapping store needs:
+ * create subkeys on the way down, set values at the leaves, read them back. */
+static HANDLE ac_open_hkcu( void )
+{
+    static const ACCESS_MASK hkcu_access = KEY_READ | KEY_WRITE | KEY_CREATE_SUB_KEY;
+    HANDLE handle = NULL;
+
+    if (RtlOpenCurrentUser( hkcu_access, &handle )) return NULL;
+    return handle;
+}
+
+/* Return the "S-1-5-..." string form of `sid` on the process heap, or NULL. */
+static WCHAR *ac_sid_to_string( PSID sid )
+{
+    UNICODE_STRING us;
+
+    if (RtlConvertSidToUnicodeString( &us, sid, TRUE )) return NULL;
+    return us.Buffer;
+}
+
+/* Build "<AC_MAPPING_ROOT>\<sid_str>" on the process heap, or NULL. */
+static WCHAR *ac_full_path( const WCHAR *sid_str )
+{
+    static const WCHAR prefix[] = AC_MAPPING_ROOT;
+    DWORD prefix_len = (DWORD)(sizeof(prefix) / sizeof(WCHAR)) - 1;
+    DWORD sid_len = (DWORD)wcslen( sid_str );
+    DWORD total = prefix_len + 1 + sid_len + 1; /* separating slash + terminator */
+    WCHAR *path = RtlAllocateHeap( GetProcessHeap(), 0, total * sizeof(WCHAR) );
+
+    if (!path) return NULL;
+    memcpy( path, prefix, prefix_len * sizeof(WCHAR) );
+    path[prefix_len] = L'\\';
+    memcpy( path + prefix_len + 1, sid_str, (sid_len + 1) * sizeof(WCHAR) );
+    return path;
+}
+
+/* Ensure Software\Wine\AppContainer\Mappings exists under the HKCU key `hkcu`,
+ * creating each level as needed. Returns STATUS_SUCCESS or the first failure. */
+static NTSTATUS ac_ensure_mapping_root( HANDLE hkcu )
+{
+    static const WCHAR root_path[] = AC_MAPPING_ROOT;
+    DWORD len = (DWORD)wcslen( root_path );
+    HANDLE handle = NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+    DWORD i;
+
+    for (i = 0; i <= len && !status; i++)
+    {
+        if (i < len && root_path[i] != L'\\') continue;
+        if (handle) NtClose( handle );
+        {
+            OBJECT_ATTRIBUTES attr;
+            UNICODE_STRING us;
+            ULONG disposition;
+
+            RtlInitUnicodeString( &us, root_path );
+            us.Length = i * sizeof(WCHAR);
+            InitializeObjectAttributes( &attr, &us, OBJ_CASE_INSENSITIVE, hkcu, NULL );
+            status = NtCreateKey( &handle, KEY_READ | KEY_WRITE, &attr, 0, NULL, REG_OPTION_NON_VOLATILE, &disposition );
+        }
+    }
+    if (handle) NtClose( handle );
+    return status;
+}
+
+/* Read the REG_SZ "Moniker" value of an open mapping key into an independent
+ * process-heap buffer (returned via *moniker). Mirrors the two-pass query used
+ * by kernelbase/registry.c RegQueryValueExW: probe with a real buffer, then grow
+ * on overflow. This build's ntdll NtQueryValueKey misbehaves when probed with a
+ * NULL/0 buffer (the follow-up buffered read is denied), so we always pass a live
+ * buffer. Returns an HRESULT; *moniker stays NULL unless S_OK. */
+static HRESULT ac_read_moniker_value( HANDLE key, LPWSTR *moniker )
+{
+    char stack_buf[256];
+    UNICODE_STRING value_us;
+    char *buf_ptr = stack_buf;
+    KEY_VALUE_PARTIAL_INFORMATION *info = (KEY_VALUE_PARTIAL_INFORMATION *)stack_buf;
+    DWORD total = sizeof(stack_buf);
+    NTSTATUS status;
+
+    RtlInitUnicodeString( &value_us, AC_MONIKER_VALUE );
+    status = NtQueryValueKey( key, &value_us, KeyValuePartialInformation, stack_buf, total, &total );
+    if (status == STATUS_OBJECT_NAME_NOT_FOUND)
+        return HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND );
+
+    while (status == STATUS_BUFFER_OVERFLOW || status == STATUS_INFO_LENGTH_MISMATCH)
+    {
+        if (buf_ptr != stack_buf) RtlFreeHeap( GetProcessHeap(), 0, buf_ptr );
+        if (!(buf_ptr = RtlAllocateHeap( GetProcessHeap(), 0, total )))
+            return E_OUTOFMEMORY;
+        info = (KEY_VALUE_PARTIAL_INFORMATION *)buf_ptr;
+        status = NtQueryValueKey( key, &value_us, KeyValuePartialInformation, buf_ptr, total, &total );
+    }
+
+    if (status)
+    {
+        HRESULT hr = HRESULT_FROM_WIN32( RtlNtStatusToDosError( status ) );
+        if (buf_ptr != stack_buf) RtlFreeHeap( GetProcessHeap(), 0, buf_ptr );
+        return hr;
+    }
+
+    if (info->Type != REG_SZ)
+    {
+        HRESULT hr = HRESULT_FROM_WIN32( ERROR_INVALID_DATA );
+        if (buf_ptr != stack_buf) RtlFreeHeap( GetProcessHeap(), 0, buf_ptr );
+        return hr;
+    }
+
+    {
+        DWORD cch = info->DataLength / sizeof(WCHAR);
+        WCHAR *out = RtlAllocateHeap( GetProcessHeap(), 0, info->DataLength + sizeof(WCHAR) );
+        if (!out)
+        {
+            if (buf_ptr != stack_buf) RtlFreeHeap( GetProcessHeap(), 0, buf_ptr );
+            return E_OUTOFMEMORY;
+        }
+        memcpy( out, info->Data, info->DataLength );
+        out[cch] = L'\0';
+        *moniker = out;
+    }
+    if (buf_ptr != stack_buf) RtlFreeHeap( GetProcessHeap(), 0, buf_ptr );
+    return S_OK;
+}
+
+/******************************************************************************
+ * AppContainerRegisterSid   (kernelbase.@)
+ */
+HRESULT WINAPI AppContainerRegisterSid( PSID sid, LPCWSTR moniker, LPCWSTR display_name )
+{
+    const WCHAR *m = moniker ? moniker : L"";
+    const WCHAR *d = display_name ? display_name : L"";
+    WCHAR *sid_str = NULL, *path = NULL;
+    HANDLE lock, hkcu = NULL, key = NULL;
+    OBJECT_ATTRIBUTES attr;
+    UNICODE_STRING us, value_us;
+    NTSTATUS status;
+    ULONG disposition = 0;
+    HRESULT hr = S_OK;
+
+    TRACE( "(%p, %s, %s)\n", (void *)sid, debugstr_w(moniker), debugstr_w(display_name) );
+
+    if (!RtlValidSid( sid )) return E_INVALIDARG;
+
+    lock = ac_lock_open();
+    ac_lock_take( lock );
+
+    hkcu = ac_open_hkcu();
+    if (!hkcu) { hr = HRESULT_FROM_WIN32( ERROR_ACCESS_DENIED ); goto done; }
+
+    sid_str = ac_sid_to_string( sid );
+    if (!sid_str) { hr = E_OUTOFMEMORY; goto done; }
+    path = ac_full_path( sid_str );
+    if (!path) { hr = E_OUTOFMEMORY; goto done; }
+
+    status = ac_ensure_mapping_root( hkcu );
+    if (status) { hr = HRESULT_FROM_WIN32( RtlNtStatusToDosError( status ) ); goto done; }
+
+    RtlInitUnicodeString( &us, path );
+    InitializeObjectAttributes( &attr, &us, OBJ_CASE_INSENSITIVE, hkcu, NULL );
+    status = NtCreateKey( &key, KEY_READ | KEY_WRITE, &attr, 0, NULL, REG_OPTION_NON_VOLATILE, &disposition );
+    if (status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_OBJECT_PATH_INVALID)
+        hr = HRESULT_FROM_WIN32( ERROR_ALREADY_EXISTS );
+    else if (status)
+        hr = HRESULT_FROM_WIN32( RtlNtStatusToDosError( status ) );
+    else if (disposition == REG_OPENED_EXISTING_KEY)
+        hr = HRESULT_FROM_WIN32( ERROR_ALREADY_EXISTS );  /* leave the original mapping intact */
+    else
+    {
+        /* We own a freshly created key: publish both values, rolling back only
+         * this incomplete write if either fails. */
+        BOOL ok = TRUE;
+
+        RtlInitUnicodeString( &value_us, AC_MONIKER_VALUE );
+        status = NtSetValueKey( key, &value_us, 0, REG_SZ, m, (DWORD)((wcslen(m) + 1) * sizeof(WCHAR)) );
+        if (status) ok = FALSE;
+
+        RtlInitUnicodeString( &value_us, AC_DISPLAY_VALUE );
+        if (ok)
+        {
+            status = NtSetValueKey( key, &value_us, 0, REG_SZ, d, (DWORD)((wcslen(d) + 1) * sizeof(WCHAR)) );
+            if (status) ok = FALSE;
+        }
+
+        if (!ok)
+        {
+            NtDeleteKey( key );
+            hr = HRESULT_FROM_WIN32( RtlNtStatusToDosError( status ) );
+        }
+    }
+
+done:
+    if (key) NtClose( key );
+    if (hkcu) NtClose( hkcu );
+    if (path) RtlFreeHeap( GetProcessHeap(), 0, path );
+    if (sid_str) RtlFreeHeap( GetProcessHeap(), 0, sid_str );
+    ac_lock_release( lock );
+    return hr;
+}
+
+/******************************************************************************
+ * AppContainerUnregisterSid   (kernelbase.@)
+ */
+HRESULT WINAPI AppContainerUnregisterSid( PSID sid )
+{
+    WCHAR *sid_str = NULL, *path = NULL;
+    HANDLE lock, hkcu = NULL, key = NULL;
+    OBJECT_ATTRIBUTES attr;
+    UNICODE_STRING us;
+    NTSTATUS status;
+    HRESULT hr;
+
+    TRACE( "(%p)\n", (void *)sid );
+
+    if (!RtlValidSid( sid )) return E_INVALIDARG;
+
+    lock = ac_lock_open();
+    ac_lock_take( lock );
+
+    hkcu = ac_open_hkcu();
+    if (!hkcu) { hr = HRESULT_FROM_WIN32( ERROR_ACCESS_DENIED ); goto done; }
+
+    sid_str = ac_sid_to_string( sid );
+    if (!sid_str) { hr = E_OUTOFMEMORY; goto done; }
+    path = ac_full_path( sid_str );
+    if (!path) { hr = E_OUTOFMEMORY; goto done; }
+
+    RtlInitUnicodeString( &us, path );
+    InitializeObjectAttributes( &attr, &us, OBJ_CASE_INSENSITIVE, hkcu, NULL );
+    status = NtOpenKeyEx( &key, DELETE, &attr, 0 );
+    if (status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_OBJECT_PATH_INVALID)
+        hr = HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND );
+    else if (status)
+        hr = HRESULT_FROM_WIN32( RtlNtStatusToDosError( status ) );
+    else
+    {
+        /* Remove only this leaf; it has no subkeys. */
+        status = NtDeleteKey( key );
+        hr = HRESULT_FROM_WIN32( RtlNtStatusToDosError( status ) );
+    }
+
+done:
+    if (key) NtClose( key );
+    if (hkcu) NtClose( hkcu );
+    if (path) RtlFreeHeap( GetProcessHeap(), 0, path );
+    if (sid_str) RtlFreeHeap( GetProcessHeap(), 0, sid_str );
+    ac_lock_release( lock );
+    return hr;
+}
+
+/******************************************************************************
+ * AppContainerLookupMoniker   (kernelbase.@)
+ */
+HRESULT WINAPI AppContainerLookupMoniker( PSID sid, LPWSTR *moniker )
+{
+    WCHAR *sid_str = NULL, *path = NULL;
+    HANDLE lock, hkcu = NULL, key = NULL;
+    OBJECT_ATTRIBUTES attr;
+    UNICODE_STRING us;
+    NTSTATUS status;
+    HRESULT hr;
+
+    TRACE( "(%p, %p)\n", (void *)sid, (void *)moniker );
+
+    if (!moniker) return E_POINTER;
+    *moniker = NULL;
+    if (!RtlValidSid( sid )) return E_INVALIDARG;
+
+    lock = ac_lock_open();
+    ac_lock_take( lock );
+
+    hkcu = ac_open_hkcu();
+    if (!hkcu) { hr = HRESULT_FROM_WIN32( ERROR_ACCESS_DENIED ); goto done; }
+
+    sid_str = ac_sid_to_string( sid );
+    if (!sid_str) { hr = E_OUTOFMEMORY; goto done; }
+    path = ac_full_path( sid_str );
+    if (!path) { hr = E_OUTOFMEMORY; goto done; }
+
+    RtlInitUnicodeString( &us, path );
+    InitializeObjectAttributes( &attr, &us, OBJ_CASE_INSENSITIVE, hkcu, NULL );
+    status = NtOpenKeyEx( &key, KEY_READ, &attr, 0 );
+    if (status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_OBJECT_PATH_INVALID)
+        hr = HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND );
+    else if (status)
+        hr = HRESULT_FROM_WIN32( RtlNtStatusToDosError( status ) );
+    else
+        hr = ac_read_moniker_value( key, moniker );
+
+done:
+    if (key) NtClose( key );
+    if (hkcu) NtClose( hkcu );
+    if (path) RtlFreeHeap( GetProcessHeap(), 0, path );
+    if (sid_str) RtlFreeHeap( GetProcessHeap(), 0, sid_str );
+    ac_lock_release( lock );
+    return hr;
+}
+
+/******************************************************************************
+ * AppContainerFreeMemory   (kernelbase.@)
+ */
+void WINAPI AppContainerFreeMemory( void *ptr )
+{
+    TRACE( "(%p)\n", ptr );
+    if (ptr) RtlFreeHeap( GetProcessHeap(), 0, ptr );
 }
