@@ -1641,9 +1641,12 @@ static HRESULT ac_publish_values( HANDLE key, const WCHAR *moniker, const WCHAR 
     return S_OK;
 }
 
-/* Does the open key have a value named `value_name`? Used to tell a complete
- * mapping apart from an incomplete leaf left by a writer that died mid-publish. */
-static BOOL ac_leaf_has_value( HANDLE key, const WCHAR *value_name )
+/* Query whether the value `value_name` exists under the open key, distinguishing
+ * "present" from "absent" from a genuine query error so callers never conflate an
+ * I/O or access failure with the value being missing. Returns STATUS_SUCCESS if the
+ * value is present, STATUS_OBJECT_NAME_NOT_FOUND if it is absent, or another NTSTATUS
+ * on a real failure. */
+static NTSTATUS ac_value_status( HANDLE key, const WCHAR *value_name )
 {
     UNICODE_STRING us;
     char buf[64];
@@ -1652,8 +1655,9 @@ static BOOL ac_leaf_has_value( HANDLE key, const WCHAR *value_name )
 
     RtlInitUnicodeString( &us, value_name );
     status = NtQueryValueKey( key, &us, KeyValuePartialInformation, buf, total, &total );
-    if (status == STATUS_OBJECT_NAME_NOT_FOUND) return FALSE;
-    return (!status || status == STATUS_BUFFER_OVERFLOW || status == STATUS_INFO_LENGTH_MISMATCH);
+    if (!status || status == STATUS_BUFFER_OVERFLOW || status == STATUS_INFO_LENGTH_MISMATCH)
+        return STATUS_SUCCESS;   /* present (we only needed to establish existence) */
+    return status;               /* NOT_FOUND (absent) or a real error -- kept distinct */
 }
 
 /* Open a real handle to HKEY_CURRENT_USER for use as an Nt RootObject. This
@@ -1837,34 +1841,67 @@ HRESULT WINAPI AppContainerRegisterSid( PSID sid, LPCWSTR moniker, LPCWSTR displ
 
     RtlInitUnicodeString( &us, path );
     InitializeObjectAttributes( &attr, &us, OBJ_CASE_INSENSITIVE, hkcu, NULL );
-    status = NtCreateKey( &key, KEY_READ | KEY_WRITE, &attr, 0, NULL, REG_OPTION_NON_VOLATILE, &disposition );
+    /* DELETE is requested so the rollback below can remove a leaf we own but failed
+     * to publish; it is granted for our own HKCU keys and is unused on the existing-key
+     * path (where we never delete). */
+    status = NtCreateKey( &key, KEY_READ | KEY_WRITE | DELETE, &attr, 0, NULL, REG_OPTION_NON_VOLATILE, &disposition );
     if (status)
         hr = HRESULT_FROM_WIN32( RtlNtStatusToDosError( status ) );   /* propagate the real failure */
     else if (disposition == REG_OPENED_EXISTING_KEY)
     {
-        /* A key is already here. Only a *complete, valid* mapping counts as a
-         * genuine duplicate; an incomplete leaf (a writer that died after creating
-         * the key but before publishing both values) is completed now, while we
-         * hold the lock so no other writer can be mid-publish. */
+        /* A key is already here. We must distinguish three cases and never clobber a
+         * valid existing mapping because of a transient read failure:
+         *   1. complete, valid mapping     -> ERROR_ALREADY_EXISTS, leave it intact;
+         *   2. positively incomplete leaf  -> repair by publishing both values (we hold
+         *                                     the lock, so no writer is mid-publish);
+         *   3. a read/allocation/access error while inspecting it -> propagate the real
+         *      failure and touch nothing. */
         LPWSTR existing = NULL;
+        HRESULT read_hr = ac_read_moniker_value( key, &existing );
 
-        if (ac_read_moniker_value( key, &existing ) == S_OK && ac_leaf_has_value( key, AC_DISPLAY_VALUE ))
+        if (read_hr == S_OK)
         {
+            /* Moniker is present and valid. Complete iff a DisplayName value also
+             * exists; query that without conflating a real error with absence. */
+            NTSTATUS disp_status;
+
             RtlFreeHeap( GetProcessHeap(), 0, existing );
-            hr = HRESULT_FROM_WIN32( ERROR_ALREADY_EXISTS );   /* leave the original mapping intact */
+            disp_status = ac_value_status( key, AC_DISPLAY_VALUE );
+            if (disp_status == STATUS_SUCCESS)
+                hr = HRESULT_FROM_WIN32( ERROR_ALREADY_EXISTS );   /* complete: leave the original intact */
+            else if (disp_status == STATUS_OBJECT_NAME_NOT_FOUND)
+                hr = ac_publish_values( key, m, d );               /* Moniker w/o DisplayName: incomplete leaf, repair */
+            else
+                hr = HRESULT_FROM_WIN32( RtlNtStatusToDosError( disp_status ) );   /* real error: don't clobber */
+        }
+        else if (read_hr == HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND ))
+        {
+            /* The Moniker value is POSITIVELY absent: a writer died after creating the
+             * key but before publishing. Repair the incomplete leaf now, under the lock. */
+            hr = ac_publish_values( key, m, d );
         }
         else
         {
+            /* A transient/allocation/access failure while reading an EXISTING key. We
+             * cannot positively establish incompleteness, so do NOT overwrite whatever
+             * is already stored; propagate the real failure and leave the key intact. */
             if (existing) RtlFreeHeap( GetProcessHeap(), 0, existing );
-            hr = ac_publish_values( key, m, d );
+            hr = read_hr;
         }
     }
     else
     {
-        /* We own a freshly created key: publish both values, rolling back only
-         * this incomplete write if either fails. */
+        /* We own a freshly created key: publish both values, rolling back only this
+         * incomplete write if either fails. The DELETE right from NtCreateKey above lets
+         * the rollback actually remove the leaf; a rollback failure is surfaced (but does
+         * not mask the real publish error the caller needs to see). */
         hr = ac_publish_values( key, m, d );
-        if (hr != S_OK) NtDeleteKey( key );
+        if (hr != S_OK)
+        {
+            NTSTATUS del_status = NtDeleteKey( key );
+            if (del_status && del_status != STATUS_PENDING)
+                WARN( "rollback NtDeleteKey failed: %08x\n", del_status );
+        }
     }
 
 done:

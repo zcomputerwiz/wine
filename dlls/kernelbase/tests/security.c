@@ -250,7 +250,7 @@ static void test_AppContainerRegistration( void )
     sid_b = ac_derive_sid( name_b );
     if (!sid_a || !sid_b)
     {
-        win_skip( "could not derive test package SIDs.\n" );
+        ok( FALSE, "could not derive test package SIDs.\n" );
         goto done;
     }
 
@@ -380,7 +380,7 @@ static void test_AppContainerCorruptValue( void )
     sid = ac_derive_sid( name );
     if (!sid)
     {
-        win_skip( "could not derive corrupt-value SID.\n" );
+        ok( FALSE, "could not derive corrupt-value SID.\n" );
         return;
     }
 
@@ -399,7 +399,7 @@ static void test_AppContainerCorruptValue( void )
                 (unsigned long)hr, (void *)moniker );
             if (moniker) pAppContainerFreeMemory( moniker );
         }
-        else win_skip( "could not store REG_DWORD corrupt value.\n" );
+        else ok( FALSE, "could not store REG_DWORD corrupt value.\n" );
     }
 
     /* (b) unterminated REG_SZ: exactly two WCHARs ('A','B'), no trailing NUL. Use an
@@ -415,7 +415,7 @@ static void test_AppContainerCorruptValue( void )
                 (unsigned long)hr, (void *)moniker );
             if (moniker) pAppContainerFreeMemory( moniker );
         }
-        else win_skip( "could not store unterminated corrupt value.\n" );
+        else ok( FALSE, "could not store unterminated corrupt value.\n" );
     }
 
     /* (c) odd-length REG_SZ: 3 bytes is not a whole number of WCHARs */
@@ -430,7 +430,7 @@ static void test_AppContainerCorruptValue( void )
                 (unsigned long)hr, (void *)moniker );
             if (moniker) pAppContainerFreeMemory( moniker );
         }
-        else win_skip( "could not store odd-length corrupt value.\n" );
+        else ok( FALSE, "could not store odd-length corrupt value.\n" );
     }
 
     /* Unregister removes the whole leaf regardless of the value type we left. */
@@ -459,14 +459,14 @@ static void test_AppContainerAbandonedWriter( void )
     sid = ac_derive_sid( name );
     if (!sid)
     {
-        win_skip( "could not derive repair SID.\n" );
+        ok( FALSE, "could not derive repair SID.\n" );
         return;
     }
 
     pAppContainerUnregisterSid( sid );
     if (!ac_precreate_empty_leaf( name ))
     {
-        win_skip( "could not pre-create abandoned leaf.\n" );
+        ok( FALSE, "could not pre-create abandoned leaf.\n" );
         goto done;
     }
 
@@ -560,6 +560,34 @@ static int child_conc( int idx, const WCHAR *name, DWORD ppid )
     return code;
 }
 
+/* Child for the blocked-reader test: signals a named "entered" event the instant it is
+ * about to call the lookup, so the parent can deterministically observe us actually
+ * reaching the blocking read (no arbitrary startup-time sleep), then performs the
+ * lookup -- which must block on the lock the parent holds until it releases it. */
+static int child_blockread( const WCHAR *name, const WCHAR *expected, DWORD ppid )
+{
+    WCHAR ename[96];
+    HANDLE entered;
+    PSID sid = ac_derive_sid( name );
+    LPWSTR moniker = NULL;
+    BOOL good = FALSE;
+    HRESULT hr;
+
+    if (!sid) return 2;
+
+    swprintf( ename, ARRAY_SIZE(ename), L"WineACBlockReadEntered_%u", ppid );
+    entered = OpenEventW( EVENT_MODIFY_STATE, FALSE, ename );
+    if (entered) { SetEvent( entered ); CloseHandle( entered ); }
+
+    hr = pAppContainerLookupMoniker( sid, &moniker );   /* blocks on the parent-held lock */
+    good = (hr == S_OK && moniker && !lstrcmpW( moniker, expected ));
+    printf( "  [acchild] blockread: hr=%#lx moniker=%s\n", (unsigned long)hr,
+            wine_dbgstr_w(moniker ? moniker : L"(null)") );
+    if (moniker) pAppContainerFreeMemory( moniker );
+    RtlFreeSid( sid );
+    return good ? 0 : 1;
+}
+
 static int ac_child_main( void )
 {
     const WCHAR *cmdline = GetCommandLineW();
@@ -584,6 +612,13 @@ static int ac_child_main( void )
         DWORD ppid = ac_parse_int( &p );
         return child_conc( idx, name, ppid );
     }
+    if (!lstrcmpW( mode, L"blockread" ))
+    {
+        ac_parse_word( &p, name, ARRAY_SIZE(name) );        /* container name */
+        ac_parse_word( &p, expected, ARRAY_SIZE(expected) );/* expected moniker */
+        DWORD ppid = ac_parse_int( &p );
+        return child_blockread( name, expected, ppid );
+    }
     return 1;
 }
 
@@ -601,14 +636,27 @@ static BOOL launch_child( const WCHAR *args, PROCESS_INFORMATION *pi )
 
 /* Bounded, idempotent cleanup of one child: wait briefly, terminate if still
  * running, reap, then close both handles and NULL them so a later call is a no-op.
- * Never double-closes and never leaks or orphans the process. */
+ * Every Win32 call's result is evaluated; a child that will not die is surfaced as an
+ * error (it would otherwise be an orphan) rather than silently ignored. Never
+ * double-closes and never leaks the handles. */
 static void ac_reap( PROCESS_INFORMATION *pi )
 {
+    DWORD wst;
+
     if (!pi || !pi->hProcess) return;
 
-    if (WaitForSingleObject( pi->hProcess, 3000 ) == WAIT_TIMEOUT)
-        TerminateProcess( pi->hProcess, 1 );
-    WaitForSingleObject( pi->hProcess, 5000 );   /* let termination complete */
+    wst = WaitForSingleObject( pi->hProcess, 3000 );
+    if (wst == WAIT_FAILED)
+        fprintf(stderr, "ac_reap: initial wait failed (%lu)\n", (unsigned long)GetLastError() );
+    else if (wst == WAIT_TIMEOUT)
+    {
+        if (!TerminateProcess( pi->hProcess, 1 ))
+            fprintf(stderr, "ac_reap: TerminateProcess failed\n" );
+        wst = WaitForSingleObject( pi->hProcess, 5000 );   /* let termination complete */
+        if (wst != WAIT_OBJECT_0 && wst != WAIT_ABANDONED)
+            fprintf(stderr, "ac_reap: child did not exit after terminate (wait %lu)\n", (unsigned long)wst );
+    }
+
     CloseHandle( pi->hThread );
     CloseHandle( pi->hProcess );
     pi->hThread = NULL;
@@ -635,7 +683,7 @@ static void test_AppContainerPersistence( void )
     sid = ac_derive_sid( name );
     if (!sid)
     {
-        win_skip( "could not derive persistence SID.\n" );
+        ok( FALSE, "could not derive persistence SID.\n" );
         return;
     }
 
@@ -652,7 +700,7 @@ static void test_AppContainerPersistence( void )
         DWORD wst = WaitForSingleObject( pi.hProcess, 30000 );
         if (wst == WAIT_OBJECT_0)
         {
-            GetExitCodeProcess( pi.hProcess, &code );
+            if (!GetExitCodeProcess( pi.hProcess, &code )) code = 0xdeadbeef;
             ok( code == 0, "separate-process lookup failed, exit %lu.\n", code );
         }
         else
@@ -689,7 +737,7 @@ static void test_AppContainerConcurrent( void )
     sid = ac_derive_sid( name );
     if (!sid)
     {
-        win_skip( "could not derive concurrency SID.\n" );
+        ok( FALSE, "could not derive concurrency SID.\n" );
         goto done;
     }
 
@@ -704,7 +752,7 @@ static void test_AppContainerConcurrent( void )
     go = CreateEventW( NULL, TRUE, FALSE, ename );
     if (!ready[0] || !ready[1] || !go)
     {
-        win_skip( "could not create barrier events.\n" );
+        ok( FALSE, "could not create barrier events.\n" );
         goto done;
     }
 
@@ -731,8 +779,8 @@ static void test_AppContainerConcurrent( void )
     if (WaitForMultipleObjects( 2, procs, TRUE, 60000 ) != WAIT_OBJECT_0)
         ok( FALSE, "concurrent children did not both finish in time.\n" );
 
-    GetExitCodeProcess( pi[0].hProcess, &code[0] );
-    GetExitCodeProcess( pi[1].hProcess, &code[1] );
+    if (!GetExitCodeProcess( pi[0].hProcess, &code[0] )) code[0] = 0xdeadbeef;
+    if (!GetExitCodeProcess( pi[1].hProcess, &code[1] )) code[1] = 0xdeadbeef;
 
     ok( (code[0] == 0 && code[1] == 1) || (code[0] == 1 && code[1] == 0),
         "concurrent same-SID writers gave %lu / %lu, expected {S_OK, ALREADY_EXISTS}.\n", code[0], code[1] );
@@ -762,12 +810,12 @@ done:
 static void test_AppContainerBlockedReader( void )
 {
     static const WCHAR lock_name[] = L"\\BaseNamedObjects\\WineAppContainerRegistrationLock";
-    WCHAR name[64], args[160];
+    WCHAR name[64], args[200], ename[96];
     PSID sid;
     PROCESS_INFORMATION pi;
     OBJECT_ATTRIBUTES attr;
     UNICODE_STRING us;
-    HANDLE lock = NULL;
+    HANDLE lock = NULL, entered = NULL;
     NTSTATUS status;
     DWORD code = 0xdeadbeef, wst;
     HRESULT hr;
@@ -782,7 +830,7 @@ static void test_AppContainerBlockedReader( void )
     sid = ac_derive_sid( name );
     if (!sid)
     {
-        win_skip( "could not derive blocked-reader SID.\n" );
+        ok( FALSE, "could not derive blocked-reader SID.\n" );
         return;
     }
 
@@ -796,18 +844,30 @@ static void test_AppContainerBlockedReader( void )
     status = NtCreateMutant( &lock, SYNCHRONIZE, &attr, FALSE );
     if (status && status != STATUS_OBJECT_NAME_EXISTS)
     {
-        win_skip( "could not create lock: %#lx.\n", (unsigned long)status );
+        ok( FALSE, "could not create lock: %#lx.\n", (unsigned long)status );
         goto done;
     }
     if (NtWaitForSingleObject( lock, FALSE, NULL ) != STATUS_WAIT_0)
     {
-        win_skip( "could not take the registration lock.\n" );
+        ok( FALSE, "could not take the registration lock.\n" );
         NtClose( lock );
         lock = NULL;
         goto done;
     }
 
-    swprintf( args, ARRAY_SIZE(args), L"security /acchild lookup %s PubMoniker", name );
+    /* Readiness handshake: the child signals this event the instant it is about to call
+     * the lookup. Waiting on it (instead of an arbitrary sleep) proves the child actually
+     * reached the blocking read, so a subsequent still-running check is a genuine proof
+     * that the held lock -- not slow startup -- is what keeps it from finishing. */
+    swprintf( ename, ARRAY_SIZE(ename), L"WineACBlockReadEntered_%u", GetCurrentProcessId() );
+    entered = CreateEventW( NULL, TRUE, FALSE, ename );
+    if (!entered)
+    {
+        ok( FALSE, "could not create blocked-reader handshake event.\n" );
+        goto done;
+    }
+
+    swprintf( args, ARRAY_SIZE(args), L"security /acchild blockread %s PubMoniker %u", name, GetCurrentProcessId() );
     ZeroMemory( &pi, sizeof(pi) );
     if (!launch_child( args, &pi ))
     {
@@ -815,8 +875,12 @@ static void test_AppContainerBlockedReader( void )
     }
     else
     {
-        /* While we hold the lock the child's lookup must block, so it cannot have
-         * exited yet: a bounded wait that times out proves the serialization. */
+        wst = WaitForSingleObject( entered, 30000 );
+        if (wst != WAIT_OBJECT_0)
+            ok( FALSE, "child did not reach the blocking read in time (wait %lu).\n", wst );   /* failure, not skip */
+
+        /* We hold the lock and the child has reached its lookup, so it cannot have exited:
+         * a bounded wait that times out is the proof reader locking is required. */
         wst = WaitForSingleObject( pi.hProcess, 2000 );
         ok( wst == WAIT_TIMEOUT, "reader should be blocked on the held lock, got %lu.\n", wst );
 
@@ -827,7 +891,7 @@ static void test_AppContainerBlockedReader( void )
         wst = WaitForSingleObject( pi.hProcess, 30000 );
         if (wst == WAIT_OBJECT_0)
         {
-            GetExitCodeProcess( pi.hProcess, &code );
+            if (!GetExitCodeProcess( pi.hProcess, &code )) code = 0xdeadbeef;
             ok( code == 0, "blocked reader saw an incomplete/missing mapping, exit %lu.\n", code );
         }
         else
@@ -837,6 +901,7 @@ static void test_AppContainerBlockedReader( void )
 
 done:
     if (lock) { NtReleaseMutant( lock, NULL ); NtClose( lock ); }
+    if (entered) CloseHandle( entered );
     pAppContainerUnregisterSid( sid );
     RtlFreeSid( sid );
 }
@@ -866,7 +931,7 @@ static void test_AppContainerLockFailure( void )
     sid = ac_derive_sid( name );
     if (!sid)
     {
-        win_skip( "could not derive lock-failure SID.\n" );
+        ok( FALSE, "could not derive lock-failure SID.\n" );
         return;
     }
     pAppContainerUnregisterSid( sid );
@@ -876,7 +941,7 @@ static void test_AppContainerLockFailure( void )
     status = NtCreateEvent( &evh, EVENT_MODIFY_STATE | SYNCHRONIZE, &attr, 0, FALSE );
     if (status)
     {
-        win_skip( "could not occupy the lock name: %#lx.\n", (unsigned long)status );
+        ok( FALSE, "could not occupy the lock name: %#lx.\n", (unsigned long)status );
         goto done;
     }
 
@@ -907,10 +972,8 @@ static void test_AppContainerLockFailure( void )
         ok( !exists, "failed register created a registry leaf despite the lock failure.\n" );
     }
 
-    NtClose( evh );   /* free the name */
-
 done:
-    if (evh) NtClose( evh );
+    if (evh) NtClose( evh );   /* single close; frees the name for other tests */
     RtlFreeSid( sid );
 }
 
