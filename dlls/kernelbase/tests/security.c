@@ -34,30 +34,12 @@ static BOOL (WINAPI *pDeriveCapabilitySidsFromName)(const WCHAR *, PSID **, DWOR
 
 static NTSTATUS (WINAPI *pRtlDeriveCapabilitySidsFromName)(UNICODE_STRING *, PSID, PSID);
 
+static HRESULT (WINAPI *pDeriveAppContainerSidFromAppContainerName)(const WCHAR *, PSID *);
+
 static HRESULT (WINAPI *pAppContainerRegisterSid)(PSID, LPCWSTR, LPCWSTR);
 static HRESULT (WINAPI *pAppContainerUnregisterSid)(PSID);
 static HRESULT (WINAPI *pAppContainerLookupMoniker)(PSID, LPWSTR *);
 static void (WINAPI *pAppContainerFreeMemory)(void *);
-
-/* Deterministic test identities: a given token always yields the same SID, so a
- * parent and a re-exec'd helper process can reconstruct identical SIDs without
- * any IPC beyond the command line. Every token below is owned by this test and
- * cleaned up before it finishes. */
-#define TOKEN_A       0xa11ceu
-#define TOKEN_B       0xb22deu
-#define TOKEN_PERSIST 0x1111u
-#define TOKEN_CONC    0x2222u
-#define TOKEN_CORRUPT 0x3333u
-
-static PSID create_test_sid( DWORD token )
-{
-    static const SID_IDENTIFIER_AUTHORITY nt_auth = { { 0, 0, 0, 0, 0, 5 } }; /* NT authority */
-    PSID sid;
-
-    if (RtlAllocateAndInitializeSid( &nt_auth, 3, 21, token, 0x7f00, 0, 0, 0, 0, 0, &sid ) != STATUS_SUCCESS)
-        return NULL;
-    return sid;
-}
 
 static void test_DeriveCapabilitySidsFromName(void)
 {
@@ -118,14 +100,140 @@ static void test_DeriveCapabilitySidsFromName(void)
  *
  * These exercise the genuine HKCU-backed kernelbase mapping implemented in
  * security.c: new/duplicate/missing lifecycle, exact Unicode round-trip,
- * independent lookup allocation + matching free, per-SID isolation, cross-
- * process persistence, and deterministic concurrent same-SID publication.
+ * independent lookup allocation + matching free, per-SID isolation, corrupt and
+ * abandoned-value handling, cross-process persistence, deterministic concurrent
+ * same-SID publication, and lock serialization (a blocked reader and a failed
+ * lock acquisition that must not touch the registry).
+ *
+ * Identities are NOT fixed S-1-5-21 test SIDs: each run derives fresh package
+ * SIDs from unique per-run app container names via the accepted
+ * DeriveAppContainerSidFromAppContainerName API, so a parent and its re-exec'd
+ * helper processes reconstruct identical SIDs from the name on the command line
+ * without ever unregistering a foreign or hardcoded identity.
  ******************************************************************************/
+
+static const WCHAR AC_TEST_ROOT[] = L"Software\\Wine\\AppContainer\\Mappings";
+
+/* A unique-per-run app container name. The tag guarantees distinctness even if
+ * GetTickCount() collides between two calls in the same process. */
+static void ac_gen_name( WCHAR *buf, int cch, const WCHAR *tag )
+{
+    swprintf( buf, cch, L"%s-%u-%u", tag, (unsigned)GetTickCount(), (unsigned)GetCurrentProcessId() );
+}
+
+/* Derive the deterministic package SID for `name`, or NULL on failure. */
+static PSID ac_derive_sid( const WCHAR *name )
+{
+    PSID sid = NULL;
+    if (!pDeriveAppContainerSidFromAppContainerName) return NULL;
+    if (pDeriveAppContainerSidFromAppContainerName( name, &sid ) != S_OK) return NULL;
+    return sid;
+}
+
+/* Build "<AC_TEST_ROOT>\<SID-string>" for the package SID derived from `name`,
+ * on the process heap, or NULL. */
+static WCHAR *ac_test_path_for_name( const WCHAR *name )
+{
+    PSID sid = ac_derive_sid( name );
+    UNICODE_STRING us;
+    WCHAR *path = NULL, *sidstr;
+    DWORD root_len, slen;
+
+    if (!sid) return NULL;
+    if (RtlConvertSidToUnicodeString( &us, sid, TRUE )) { RtlFreeSid( sid ); return NULL; }
+    sidstr = us.Buffer;
+    root_len = (DWORD)wcslen( AC_TEST_ROOT );
+    slen = (DWORD)wcslen( sidstr );
+    path = HeapAlloc( GetProcessHeap(), 0, (root_len + 1 + slen + 1) * sizeof(WCHAR) );
+    if (path)
+    {
+        memcpy( path, AC_TEST_ROOT, root_len * sizeof(WCHAR) );
+        path[root_len] = L'\\';
+        memcpy( path + root_len + 1, sidstr, (slen + 1) * sizeof(WCHAR) );
+    }
+    RtlFreeUnicodeString( &us );
+    RtlFreeSid( sid );
+    return path;
+}
+
+/* Ensure every level of AC_TEST_ROOT exists under the HKCU key `hkcu`. */
+static NTSTATUS ac_test_ensure_root( HANDLE hkcu )
+{
+    DWORD len = (DWORD)wcslen( AC_TEST_ROOT );
+    HANDLE handle = NULL;
+    NTSTATUS status = STATUS_SUCCESS;
+    DWORD i;
+
+    for (i = 0; i <= len && !status; i++)
+    {
+        if (i < len && AC_TEST_ROOT[i] != L'\\') continue;
+        if (handle) NtClose( handle );
+        {
+            OBJECT_ATTRIBUTES attr; UNICODE_STRING us; ULONG disp;
+
+            RtlInitUnicodeString( &us, AC_TEST_ROOT );
+            us.Length = i * sizeof(WCHAR);
+            InitializeObjectAttributes( &attr, &us, OBJ_CASE_INSENSITIVE, hkcu, NULL );
+            status = NtCreateKey( &handle, KEY_READ | KEY_WRITE, &attr, 0, NULL, REG_OPTION_NON_VOLATILE, &disp );
+        }
+    }
+    if (handle) NtClose( handle );
+    return status;
+}
+
+/* Pre-create an EMPTY mapping leaf for `name` (a key with no values), simulating
+ * a writer that created the key and died before publishing either value. */
+static BOOL ac_precreate_empty_leaf( const WCHAR *name )
+{
+    WCHAR *path = ac_test_path_for_name( name );
+    HANDLE hkcu = NULL, key = NULL;
+    OBJECT_ATTRIBUTES attr; UNICODE_STRING us;
+    BOOL applied = FALSE;
+
+    if (!path) return FALSE;
+    if (!RtlOpenCurrentUser( KEY_READ | KEY_WRITE | KEY_CREATE_SUB_KEY, &hkcu ) &&
+        !ac_test_ensure_root( hkcu ))
+    {
+        RtlInitUnicodeString( &us, path );
+        InitializeObjectAttributes( &attr, &us, OBJ_CASE_INSENSITIVE, hkcu, NULL );
+        applied = (NtCreateKey( &key, KEY_READ | KEY_WRITE, &attr, 0, NULL, REG_OPTION_NON_VOLATILE, NULL ) == STATUS_SUCCESS);
+        if (key) NtClose( key );
+    }
+    if (hkcu) NtClose( hkcu );
+    HeapFree( GetProcessHeap(), 0, path );
+    return applied;
+}
+
+/* Overwrite our OWN leaf's Moniker value with an arbitrary type/bytes to create a
+ * corrupt stored value. Returns TRUE only if the corruption was actually applied. */
+static BOOL ac_corrupt_moniker( const WCHAR *name, DWORD type, const void *bytes, DWORD len )
+{
+    WCHAR *path = ac_test_path_for_name( name );
+    HANDLE hkcu = NULL, key = NULL;
+    OBJECT_ATTRIBUTES attr; UNICODE_STRING us, vus;
+    BOOL applied = FALSE;
+
+    if (!path) return FALSE;
+    if (!RtlOpenCurrentUser( KEY_READ | KEY_SET_VALUE, &hkcu ))
+    {
+        RtlInitUnicodeString( &us, path );
+        InitializeObjectAttributes( &attr, &us, OBJ_CASE_INSENSITIVE, hkcu, NULL );
+        if (!NtOpenKeyEx( &key, KEY_READ | KEY_SET_VALUE, &attr, 0 ))
+        {
+            RtlInitUnicodeString( &vus, L"Moniker" );
+            applied = (NtSetValueKey( key, &vus, 0, type, bytes, len ) == STATUS_SUCCESS);
+            NtClose( key );
+        }
+        NtClose( hkcu );
+    }
+    HeapFree( GetProcessHeap(), 0, path );
+    return applied;
+}
 
 static void test_AppContainerRegistration( void )
 {
-    PSID sid_a = create_test_sid( TOKEN_A );
-    PSID sid_b = create_test_sid( TOKEN_B );
+    WCHAR name_a[64], name_b[64];
+    PSID sid_a, sid_b;
     LPWSTR moniker;
     HRESULT hr;
 
@@ -135,13 +243,18 @@ static void test_AppContainerRegistration( void )
         win_skip( "AppContainer registration APIs are not available.\n" );
         return;
     }
+
+    ac_gen_name( name_a, ARRAY_SIZE(name_a), L"REG-A" );
+    ac_gen_name( name_b, ARRAY_SIZE(name_b), L"REG-B" );
+    sid_a = ac_derive_sid( name_a );
+    sid_b = ac_derive_sid( name_b );
     if (!sid_a || !sid_b)
     {
-        win_skip( "could not create test SIDs.\n" );
+        win_skip( "could not derive test package SIDs.\n" );
         goto done;
     }
 
-    /* Start from a clean slate for the two identities we own. */
+    /* Start from a clean slate for the two identities we own this run. */
     pAppContainerUnregisterSid( sid_a );
     pAppContainerUnregisterSid( sid_b );
 
@@ -178,6 +291,26 @@ static void test_AppContainerRegistration( void )
         ok( !lstrcmpW( moniker, L"TestMonikerA-\x767d" ), "got %s for moniker A.\n", wine_dbgstr_w(moniker) );
         pAppContainerFreeMemory( moniker );
         moniker = NULL;
+    }
+
+    /* --- two lookups yield INDEPENDENT allocations: distinct pointers, each freed
+     *      independently without corrupting the other, both with exact content --- */
+    {
+        LPWSTR m1 = NULL, m2 = NULL;
+
+        hr = pAppContainerLookupMoniker( sid_a, &m1 );
+        ok( hr == S_OK && m1, "independent lookup 1 failed: %#lx.\n", (unsigned long)hr );
+        hr = pAppContainerLookupMoniker( sid_a, &m2 );
+        ok( hr == S_OK && m2, "independent lookup 2 failed: %#lx.\n", (unsigned long)hr );
+        if (m1 && m2)
+        {
+            ok( m1 != m2, "expected two distinct allocations, both %p.\n", (void *)m1 );
+            ok( !lstrcmpW( m1, L"TestMonikerA-\x767d" ) && !lstrcmpW( m2, L"TestMonikerA-\x767d" ),
+                "independent allocations differ in content: %s vs %s.\n",
+                wine_dbgstr_w(m1), wine_dbgstr_w(m2) );
+            pAppContainerFreeMemory( m1 );
+            pAppContainerFreeMemory( m2 );
+        }
     }
 
     /* --- duplicate registration -> ALREADY_EXISTS, original mapping intact --- */
@@ -227,19 +360,14 @@ done:
     if (sid_b) RtlFreeSid( sid_b );
 }
 
-/* Stored-type validation: overwrite our OWN test key's Moniker value with a
- * non-REG_SZ type and confirm the lookup fails cleanly rather than returning
- * garbage. Only touches keys this test created for its own SIDs. */
-static void test_AppContainerStoredType( void )
+/* Corrupt-value handling: overwrite our OWN leaf's Moniker value with a wrong data
+ * type, an unterminated REG_SZ, and an odd-length REG_SZ; each must be rejected as
+ * ERROR_INVALID_DATA with NULL output rather than returned as garbage. */
+static void test_AppContainerCorruptValue( void )
 {
-    static const WCHAR root[] = L"Software\\Wine\\AppContainer\\Mappings";
-    PSID sid = create_test_sid( TOKEN_CORRUPT );
-    UNICODE_STRING us;
-    WCHAR *path = NULL, *moniker = NULL;
-    HANDLE key = NULL, hkcu = NULL;
-    OBJECT_ATTRIBUTES attr;
-    UNICODE_STRING us_path, value_us;
-    DWORD data = 0x12345678;
+    WCHAR name[64];
+    PSID sid;
+    LPWSTR moniker;
     HRESULT hr;
 
     if (!pAppContainerRegisterSid || !pAppContainerLookupMoniker)
@@ -247,61 +375,132 @@ static void test_AppContainerStoredType( void )
         win_skip( "AppContainer registration APIs are not available.\n" );
         return;
     }
+
+    ac_gen_name( name, ARRAY_SIZE(name), L"CT" );
+    sid = ac_derive_sid( name );
     if (!sid)
     {
-        win_skip( "could not create test SID.\n" );
+        win_skip( "could not derive corrupt-value SID.\n" );
         return;
     }
 
     pAppContainerUnregisterSid( sid );
     ok( pAppContainerRegisterSid( sid, L"Good", L"D" ) == S_OK, "setup register failed.\n" );
 
-    if (!RtlConvertSidToUnicodeString( &us, sid, TRUE ))
+    /* (a) wrong data type: REG_DWORD instead of REG_SZ */
     {
-        DWORD root_len = (DWORD)wcslen( root ), sid_len = us.Length / sizeof(WCHAR);
-        path = malloc( (root_len + 1 + sid_len + 1) * sizeof(WCHAR) );
-        if (path)
+        DWORD dword = 0x12345678;
+        if (ac_corrupt_moniker( name, REG_DWORD, &dword, sizeof(dword) ))
         {
-            memcpy( path, root, root_len * sizeof(WCHAR) );
-            path[root_len] = L'\\';
-            memcpy( path + root_len + 1, us.Buffer, (sid_len + 1) * sizeof(WCHAR) );
-
-            RtlInitUnicodeString( &us_path, path );
-            if (!RtlOpenCurrentUser( KEY_READ | KEY_WRITE, &hkcu ))
-            {
-                InitializeObjectAttributes( &attr, &us_path, OBJ_CASE_INSENSITIVE, hkcu, NULL );
-                if (!NtOpenKeyEx( &key, KEY_READ | KEY_SET_VALUE, &attr, 0 ))
-                {
-                    RtlInitUnicodeString( &value_us, L"Moniker" );
-                    NtSetValueKey( key, &value_us, 0, REG_DWORD, &data, sizeof(data) );
-                    NtClose( key );
-
-                    moniker = NULL;
-                    hr = pAppContainerLookupMoniker( sid, &moniker );
-                    ok( hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA) && moniker == NULL,
-                        "corrupt-type lookup returned %#lx / %p (expected INVALID_DATA, NULL).\n",
-                        (unsigned long)hr, (void *)moniker );
-                    if (moniker) pAppContainerFreeMemory( moniker );
-                }
-                else
-                    win_skip( "could not open own test key to corrupt it.\n" );
-                NtClose( hkcu );
-            }
+            moniker = NULL;
+            hr = pAppContainerLookupMoniker( sid, &moniker );
+            ok( hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA) && moniker == NULL,
+                "REG_DWORD lookup returned %#lx / %p (expected INVALID_DATA, NULL).\n",
+                (unsigned long)hr, (void *)moniker );
+            if (moniker) pAppContainerFreeMemory( moniker );
         }
+        else win_skip( "could not store REG_DWORD corrupt value.\n" );
+    }
+
+    /* (b) unterminated REG_SZ: exactly two WCHARs ('A','B'), no trailing NUL. Use an
+     * explicit byte array -- a string literal would append a terminating NUL WCHAR. */
+    {
+        static const BYTE unterm[] = { 'A', 0, 'B', 0 };   /* 4 bytes: two WCHARs, no NUL */
+        if (ac_corrupt_moniker( name, REG_SZ, unterm, sizeof(unterm) ))
+        {
+            moniker = NULL;
+            hr = pAppContainerLookupMoniker( sid, &moniker );
+            ok( hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA) && moniker == NULL,
+                "unterminated lookup returned %#lx / %p (expected INVALID_DATA, NULL).\n",
+                (unsigned long)hr, (void *)moniker );
+            if (moniker) pAppContainerFreeMemory( moniker );
+        }
+        else win_skip( "could not store unterminated corrupt value.\n" );
+    }
+
+    /* (c) odd-length REG_SZ: 3 bytes is not a whole number of WCHARs */
+    {
+        static const BYTE odd[] = { 'A', 0, 'B' };   /* 3 bytes */
+        if (ac_corrupt_moniker( name, REG_SZ, odd, sizeof(odd) ))
+        {
+            moniker = NULL;
+            hr = pAppContainerLookupMoniker( sid, &moniker );
+            ok( hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA) && moniker == NULL,
+                "odd-length lookup returned %#lx / %p (expected INVALID_DATA, NULL).\n",
+                (unsigned long)hr, (void *)moniker );
+            if (moniker) pAppContainerFreeMemory( moniker );
+        }
+        else win_skip( "could not store odd-length corrupt value.\n" );
     }
 
     /* Unregister removes the whole leaf regardless of the value type we left. */
     ok( pAppContainerUnregisterSid( sid ) == S_OK, "cleanup unregister failed.\n" );
 
-    if (path) free( path );
-    RtlFreeUnicodeString( &us );
+    RtlFreeSid( sid );
+}
+
+/* Abandoned-writer policy: a prior writer that created the leaf key but died before
+ * publishing either value leaves an EMPTY subkey. Registering must repair it (publish
+ * both values) rather than report a spurious duplicate or invent an existing mapping. */
+static void test_AppContainerAbandonedWriter( void )
+{
+    WCHAR name[64];
+    PSID sid;
+    LPWSTR moniker;
+    HRESULT hr;
+
+    if (!pAppContainerRegisterSid || !pAppContainerLookupMoniker)
+    {
+        win_skip( "AppContainer registration APIs are not available.\n" );
+        return;
+    }
+
+    ac_gen_name( name, ARRAY_SIZE(name), L"REP" );
+    sid = ac_derive_sid( name );
+    if (!sid)
+    {
+        win_skip( "could not derive repair SID.\n" );
+        return;
+    }
+
+    pAppContainerUnregisterSid( sid );
+    if (!ac_precreate_empty_leaf( name ))
+    {
+        win_skip( "could not pre-create abandoned leaf.\n" );
+        goto done;
+    }
+
+    hr = pAppContainerRegisterSid( sid, L"RepMoniker", L"RepDisp" );
+    ok( hr == S_OK, "repair of abandoned leaf returned %#lx (expected S_OK).\n", (unsigned long)hr );
+
+    moniker = NULL;
+    hr = pAppContainerLookupMoniker( sid, &moniker );
+    ok( hr == S_OK && moniker && !lstrcmpW( moniker, L"RepMoniker" ),
+        "post-repair lookup %#lx / %s (expected RepMoniker).\n",
+        (unsigned long)hr, wine_dbgstr_w(moniker ? moniker : L"(null)") );
+    if (moniker) pAppContainerFreeMemory( moniker );
+
+done:
+    pAppContainerUnregisterSid( sid );
     RtlFreeSid( sid );
 }
 
 
 /* ---- re-exec'd helper processes (launched with a "/acchild ..." command line) ---- */
 
-static DWORD next_int_w( const WCHAR **pp )
+static int ac_parse_word( const WCHAR **pp, WCHAR *out, int cch )
+{
+    const WCHAR *s = *pp;
+    int n = 0;
+
+    while (*s == L' ') s++;
+    while (*s && *s != L' ' && n < cch - 1) out[n++] = *s++;
+    out[n] = 0;
+    *pp = s;
+    return n;
+}
+
+static DWORD ac_parse_int( const WCHAR **pp )
 {
     const WCHAR *s = *pp;
     DWORD v = 0;
@@ -312,44 +511,43 @@ static DWORD next_int_w( const WCHAR **pp )
     return v;
 }
 
-static int child_lookup( DWORD token )
+static int child_lookup( const WCHAR *name, const WCHAR *expected )
 {
-    static const WCHAR expected[] = L"PersistMoniker";
-    PSID sid = create_test_sid( token );
+    PSID sid = ac_derive_sid( name );
     LPWSTR moniker = NULL;
-    BOOL ok_result = FALSE;
+    BOOL good = FALSE;
     HRESULT hr;
 
     if (sid)
     {
         hr = pAppContainerLookupMoniker( sid, &moniker );
-        ok_result = (hr == S_OK && moniker && !lstrcmpW( moniker, expected ));
+        good = (hr == S_OK && moniker && !lstrcmpW( moniker, expected ));
         printf( "  [acchild] lookup: hr=%#lx moniker=%s\n", (unsigned long)hr,
                 wine_dbgstr_w(moniker ? moniker : L"(null)") );
         if (moniker) pAppContainerFreeMemory( moniker );
         RtlFreeSid( sid );
     }
-    return ok_result ? 0 : 1;
+    return good ? 0 : 1;
 }
 
-static int child_conc( int idx, DWORD token, DWORD ppid )
+static int child_conc( int idx, const WCHAR *name, DWORD ppid )
 {
-    WCHAR name[64];
+    WCHAR ename[96];
     HANDLE ready, go;
-    PSID sid = create_test_sid( token );
+    PSID sid = ac_derive_sid( name );
     HRESULT hr;
     int code = 2;
 
     if (!sid) return 2;
 
-    swprintf( name, ARRAY_SIZE(name), L"WineACTestReady%d_%u", idx, ppid );
-    ready = OpenEventW( EVENT_MODIFY_STATE, FALSE, name );
-    swprintf( name, ARRAY_SIZE(name), L"WineACTestGo_%u", ppid );
-    go = OpenEventW( SYNCHRONIZE, FALSE, name );
+    swprintf( ename, ARRAY_SIZE(ename), L"WineACTestReady%d_%u", idx, ppid );
+    ready = OpenEventW( EVENT_MODIFY_STATE, FALSE, ename );
+    swprintf( ename, ARRAY_SIZE(ename), L"WineACTestGo_%u", ppid );
+    go = OpenEventW( SYNCHRONIZE, FALSE, ename );
     if (!ready || !go) { RtlFreeSid( sid ); return 2; }
 
-    SetEvent( ready );                 /* signal "armed" to the parent */
-    WaitForSingleObject( go, INFINITE );/* park until the barrier releases us together */
+    SetEvent( ready );                   /* signal "armed" to the parent */
+    WaitForSingleObject( go, INFINITE ); /* park until the barrier releases us together */
 
     hr = pAppContainerRegisterSid( sid, L"ConcMoniker", L"ConcDisp" );
     if (hr == S_OK) code = 0;
@@ -362,46 +560,32 @@ static int child_conc( int idx, DWORD token, DWORD ppid )
     return code;
 }
 
-/* Case-insensitive ASCII prefix test (lstrncmpiW is not available in this build). */
-static int ac_starts_with( const WCHAR *s, const WCHAR *prefix )
-{
-    while (*prefix)
-    {
-        WCHAR a = *s, b = *prefix;
-        if (a >= L'A' && a <= L'Z') a += 32;
-        if (b >= L'A' && b <= L'Z') b += 32;
-        if (a != b) return 1;
-        s++; prefix++;
-    }
-    return 0;
-}
-
 static int ac_child_main( void )
 {
     const WCHAR *cmdline = GetCommandLineW();
     const WCHAR *p = wcsstr( cmdline, L"/acchild" );
+    WCHAR mode[16], name[96], expected[96];
 
     if (!p) return 1;
     p += 8; /* skip "/acchild" */
-    while (*p == L' ') p++;
 
-    if (!ac_starts_with( p, L"lookup" ))
+    if (ac_parse_word( &p, mode, ARRAY_SIZE(mode) ) == 0) return 1;
+
+    if (!lstrcmpW( mode, L"lookup" ))
     {
-        p += 6; /* skip "lookup"; next_int_w skips the following space */
-        DWORD token = next_int_w( &p );
-        return child_lookup( token );
+        ac_parse_word( &p, name, ARRAY_SIZE(name) );       /* container name */
+        ac_parse_word( &p, expected, ARRAY_SIZE(expected) );/* expected moniker */
+        return child_lookup( name, expected );
     }
-    if (!ac_starts_with( p, L"conc" ))
+    if (!lstrcmpW( mode, L"conc" ))
     {
-        p += 4; /* skip "conc" */
-        int idx = (int)next_int_w( &p );
-        DWORD token = next_int_w( &p );
-        DWORD ppid = next_int_w( &p );
-        return child_conc( idx, token, ppid );
+        int idx = (int)ac_parse_int( &p );
+        ac_parse_word( &p, name, ARRAY_SIZE(name) );       /* container name */
+        DWORD ppid = ac_parse_int( &p );
+        return child_conc( idx, name, ppid );
     }
     return 1;
 }
-
 
 static BOOL launch_child( const WCHAR *args, PROCESS_INFORMATION *pi )
 {
@@ -415,13 +599,29 @@ static BOOL launch_child( const WCHAR *args, PROCESS_INFORMATION *pi )
     return CreateProcessW( path, cmdline, NULL, NULL, TRUE, 0, NULL, NULL, &si, pi );
 }
 
+/* Bounded, idempotent cleanup of one child: wait briefly, terminate if still
+ * running, reap, then close both handles and NULL them so a later call is a no-op.
+ * Never double-closes and never leaks or orphans the process. */
+static void ac_reap( PROCESS_INFORMATION *pi )
+{
+    if (!pi || !pi->hProcess) return;
+
+    if (WaitForSingleObject( pi->hProcess, 3000 ) == WAIT_TIMEOUT)
+        TerminateProcess( pi->hProcess, 1 );
+    WaitForSingleObject( pi->hProcess, 5000 );   /* let termination complete */
+    CloseHandle( pi->hThread );
+    CloseHandle( pi->hProcess );
+    pi->hThread = NULL;
+    pi->hProcess = NULL;
+}
+
 /* A separate process must be able to look up a mapping this process registered:
  * persistence comes from the registry store, not an in-process cache. */
 static void test_AppContainerPersistence( void )
 {
-    PSID sid = create_test_sid( TOKEN_PERSIST );
+    WCHAR name[64], args[160];
+    PSID sid;
     PROCESS_INFORMATION pi;
-    WCHAR args[64];
     DWORD code = 0xdeadbeef;
     HRESULT hr;
 
@@ -430,9 +630,12 @@ static void test_AppContainerPersistence( void )
         win_skip( "AppContainer registration APIs are not available.\n" );
         return;
     }
+
+    ac_gen_name( name, ARRAY_SIZE(name), L"PERSIST" );
+    sid = ac_derive_sid( name );
     if (!sid)
     {
-        win_skip( "could not create persistence SID.\n" );
+        win_skip( "could not derive persistence SID.\n" );
         return;
     }
 
@@ -440,32 +643,38 @@ static void test_AppContainerPersistence( void )
     hr = pAppContainerRegisterSid( sid, L"PersistMoniker", L"PersistDisp" );
     ok( hr == S_OK, "got %#lx for persistence register.\n", (unsigned long)hr );
 
-    swprintf( args, ARRAY_SIZE(args), L"security /acchild lookup %u", TOKEN_PERSIST );
-    if (launch_child( args, &pi ))
-    {
-        WaitForSingleObject( pi.hProcess, 30000 );
-        GetExitCodeProcess( pi.hProcess, &code );
-        ok( code == 0, "separate-process lookup failed, exit %lu.\n", code );
-        CloseHandle( pi.hThread );
-        CloseHandle( pi.hProcess );
-    }
+    swprintf( args, ARRAY_SIZE(args), L"security /acchild lookup %s PersistMoniker", name );
+    ZeroMemory( &pi, sizeof(pi) );
+    if (!launch_child( args, &pi ))
+        ok( FALSE, "could not launch persistence child.\n" );   /* required case: count as failure */
     else
-        win_skip( "could not launch persistence child.\n" );
+    {
+        DWORD wst = WaitForSingleObject( pi.hProcess, 30000 );
+        if (wst == WAIT_OBJECT_0)
+        {
+            GetExitCodeProcess( pi.hProcess, &code );
+            ok( code == 0, "separate-process lookup failed, exit %lu.\n", code );
+        }
+        else
+            ok( FALSE, "persistence child did not finish in time (wait %lu).\n", wst );
+        ac_reap( &pi );
+    }
 
     pAppContainerUnregisterSid( sid ); /* cleanup owned mapping */
     RtlFreeSid( sid );
 }
 
-/* Two real children race to register the SAME SID, released together by a parent
- * barrier. Exactly one must succeed (S_OK) and the other report already-exists;
- * afterward exactly one mapping with the expected moniker exists. */
+/* Two real children race to register the SAME package SID, released together by a
+ * parent barrier (no sleep-based readiness). Exactly one must succeed (S_OK) and the
+ * other report already-exists; afterward exactly one mapping with the expected
+ * moniker exists. */
 static void test_AppContainerConcurrent( void )
 {
-    PSID sid = create_test_sid( TOKEN_CONC );
+    WCHAR name[64], ename[96], args[200];
+    PSID sid;
     PROCESS_INFORMATION pi[2];
-    HANDLE ready[2], go, procs[2];
+    HANDLE ready[2] = { NULL, NULL }, go = NULL, procs[2];
     DWORD code[2] = { 0xdeadbeef, 0xdeadbeef };
-    WCHAR name[64], args[160];
     LPWSTR moniker;
     HRESULT hr;
     int i;
@@ -475,55 +684,53 @@ static void test_AppContainerConcurrent( void )
         win_skip( "AppContainer registration APIs are not available.\n" );
         return;
     }
+
+    ac_gen_name( name, ARRAY_SIZE(name), L"CONC" );
+    sid = ac_derive_sid( name );
     if (!sid)
     {
-        win_skip( "could not create concurrency SID.\n" );
-        return;
+        win_skip( "could not derive concurrency SID.\n" );
+        goto done;
     }
 
     ZeroMemory( pi, sizeof(pi) );
     pAppContainerUnregisterSid( sid );
 
-    swprintf( name, ARRAY_SIZE(name), L"WineACTestReady0_%u", GetCurrentProcessId() );
-    ready[0] = CreateEventW( NULL, TRUE, FALSE, name );
-    swprintf( name, ARRAY_SIZE(name), L"WineACTestReady1_%u", GetCurrentProcessId() );
-    ready[1] = CreateEventW( NULL, TRUE, FALSE, name );
-    swprintf( name, ARRAY_SIZE(name), L"WineACTestGo_%u", GetCurrentProcessId() );
-    go = CreateEventW( NULL, TRUE, FALSE, name );
+    swprintf( ename, ARRAY_SIZE(ename), L"WineACTestReady0_%u", GetCurrentProcessId() );
+    ready[0] = CreateEventW( NULL, TRUE, FALSE, ename );
+    swprintf( ename, ARRAY_SIZE(ename), L"WineACTestReady1_%u", GetCurrentProcessId() );
+    ready[1] = CreateEventW( NULL, TRUE, FALSE, ename );
+    swprintf( ename, ARRAY_SIZE(ename), L"WineACTestGo_%u", GetCurrentProcessId() );
+    go = CreateEventW( NULL, TRUE, FALSE, ename );
     if (!ready[0] || !ready[1] || !go)
     {
         win_skip( "could not create barrier events.\n" );
-        goto cleanup;
+        goto done;
     }
 
     for (i = 0; i < 2; i++)
     {
-        swprintf( args, ARRAY_SIZE(args), L"security /acchild conc %d %u %u", i, TOKEN_CONC, GetCurrentProcessId() );
+        swprintf( args, ARRAY_SIZE(args), L"security /acchild conc %d %s %u", i, name, GetCurrentProcessId() );
         if (!launch_child( args, &pi[i] ))
         {
-            win_skip( "could not launch concurrent child %d.\n", i );
-            for (i = 0; i < 2 && pi[i].hProcess; i++)
-            {
-                CloseHandle( pi[i].hThread );
-                CloseHandle( pi[i].hProcess );
-            }
-            goto cleanup;
+            ok( FALSE, "could not launch concurrent child %d.\n", i );   /* required case: failure */
+            goto done_events;   /* done_events reaps every launched child idempotently */
         }
     }
 
     if (WaitForMultipleObjects( 2, ready, TRUE, 30000 ) != WAIT_OBJECT_0)
     {
-        win_skip( "children did not arm within timeout.\n" );
-        for (i = 0; i < 2; i++) TerminateProcess( pi[i].hProcess, 1 );
-        goto cleanup;
+        ok( FALSE, "children did not arm within timeout.\n" );   /* failure, not skip */
+        goto done_events;
     }
 
-    Sleep( 50 ); /* let both children park on the go event before release */
     SetEvent( go ); /* release both writers together */
 
     procs[0] = pi[0].hProcess;
     procs[1] = pi[1].hProcess;
-    WaitForMultipleObjects( 2, procs, TRUE, 60000 );
+    if (WaitForMultipleObjects( 2, procs, TRUE, 60000 ) != WAIT_OBJECT_0)
+        ok( FALSE, "concurrent children did not both finish in time.\n" );
+
     GetExitCodeProcess( pi[0].hProcess, &code[0] );
     GetExitCodeProcess( pi[1].hProcess, &code[1] );
 
@@ -537,17 +744,173 @@ static void test_AppContainerConcurrent( void )
         (unsigned long)hr, wine_dbgstr_w(moniker ? moniker : L"(null)") );
     if (moniker) pAppContainerFreeMemory( moniker );
 
-cleanup:
-    for (i = 0; i < 2 && pi[i].hProcess; i++)
-    {
-        CloseHandle( pi[i].hThread );
-        CloseHandle( pi[i].hProcess );
-    }
+done_events:
+    for (i = 0; i < 2; i++) ac_reap( &pi[i] );   /* idempotent cleanup, no double-close */
     if (ready[0]) CloseHandle( ready[0] );
     if (ready[1]) CloseHandle( ready[1] );
     if (go) CloseHandle( go );
 
-    pAppContainerUnregisterSid( sid ); /* cleanup owned mapping */
+done:
+    if (sid) { pAppContainerUnregisterSid( sid ); RtlFreeSid( sid ); }
+}
+
+/* Lock serialization across processes, deterministically: the parent holds the real
+ * registration lock while a child attempts a lookup. The child's only path to exit
+ * goes through the same lock, so it provably cannot finish until the parent releases;
+ * a bounded wait that times out is the proof it is waiting for publication, and after
+ * release it must observe the complete value (not a half-published or missing one). */
+static void test_AppContainerBlockedReader( void )
+{
+    static const WCHAR lock_name[] = L"\\BaseNamedObjects\\WineAppContainerRegistrationLock";
+    WCHAR name[64], args[160];
+    PSID sid;
+    PROCESS_INFORMATION pi;
+    OBJECT_ATTRIBUTES attr;
+    UNICODE_STRING us;
+    HANDLE lock = NULL;
+    NTSTATUS status;
+    DWORD code = 0xdeadbeef, wst;
+    HRESULT hr;
+
+    if (!pAppContainerRegisterSid || !pAppContainerLookupMoniker)
+    {
+        win_skip( "AppContainer registration APIs are not available.\n" );
+        return;
+    }
+
+    ac_gen_name( name, ARRAY_SIZE(name), L"BLOCK" );
+    sid = ac_derive_sid( name );
+    if (!sid)
+    {
+        win_skip( "could not derive blocked-reader SID.\n" );
+        return;
+    }
+
+    /* Publish a complete mapping first, then hold the lock ourselves. */
+    pAppContainerUnregisterSid( sid );
+    hr = pAppContainerRegisterSid( sid, L"PubMoniker", L"PubDisp" );
+    ok( hr == S_OK, "setup register for blocked-reader returned %#lx.\n", (unsigned long)hr );
+
+    RtlInitUnicodeString( &us, lock_name );
+    InitializeObjectAttributes( &attr, &us, OBJ_CASE_INSENSITIVE | OBJ_OPENIF, NULL, NULL );
+    status = NtCreateMutant( &lock, SYNCHRONIZE, &attr, FALSE );
+    if (status && status != STATUS_OBJECT_NAME_EXISTS)
+    {
+        win_skip( "could not create lock: %#lx.\n", (unsigned long)status );
+        goto done;
+    }
+    if (NtWaitForSingleObject( lock, FALSE, NULL ) != STATUS_WAIT_0)
+    {
+        win_skip( "could not take the registration lock.\n" );
+        NtClose( lock );
+        lock = NULL;
+        goto done;
+    }
+
+    swprintf( args, ARRAY_SIZE(args), L"security /acchild lookup %s PubMoniker", name );
+    ZeroMemory( &pi, sizeof(pi) );
+    if (!launch_child( args, &pi ))
+    {
+        ok( FALSE, "could not launch blocked-reader child.\n" );   /* required case: failure */
+    }
+    else
+    {
+        /* While we hold the lock the child's lookup must block, so it cannot have
+         * exited yet: a bounded wait that times out proves the serialization. */
+        wst = WaitForSingleObject( pi.hProcess, 2000 );
+        ok( wst == WAIT_TIMEOUT, "reader should be blocked on the held lock, got %lu.\n", wst );
+
+        NtReleaseMutant( lock, NULL );   /* release -> child proceeds to read */
+        NtClose( lock );
+        lock = NULL;
+
+        wst = WaitForSingleObject( pi.hProcess, 30000 );
+        if (wst == WAIT_OBJECT_0)
+        {
+            GetExitCodeProcess( pi.hProcess, &code );
+            ok( code == 0, "blocked reader saw an incomplete/missing mapping, exit %lu.\n", code );
+        }
+        else
+            ok( FALSE, "blocked reader did not finish after lock release (wait %lu).\n", wst );
+        ac_reap( &pi );
+    }
+
+done:
+    if (lock) { NtReleaseMutant( lock, NULL ); NtClose( lock ); }
+    pAppContainerUnregisterSid( sid );
+    RtlFreeSid( sid );
+}
+
+/* Lock-acquisition failure must not fail open: with the lock name occupied by a
+ * DIFFERENT object type (an event) a real NtCreateMutant fails, and the APIs must
+ * abort WITHOUT touching the registry -- never masquerading the failure as an
+ * existing registration. Run last so it leaves no stray object for other tests. */
+static void test_AppContainerLockFailure( void )
+{
+    static const WCHAR lock_name[] = L"\\BaseNamedObjects\\WineAppContainerRegistrationLock";
+    WCHAR name[64];
+    PSID sid;
+    OBJECT_ATTRIBUTES attr;
+    UNICODE_STRING us;
+    HANDLE evh = NULL;
+    NTSTATUS status;
+    HRESULT hr;
+
+    if (!pAppContainerRegisterSid || !pAppContainerUnregisterSid || !pAppContainerLookupMoniker)
+    {
+        win_skip( "AppContainer registration APIs are not available.\n" );
+        return;
+    }
+
+    ac_gen_name( name, ARRAY_SIZE(name), L"LOCKFAIL" );
+    sid = ac_derive_sid( name );
+    if (!sid)
+    {
+        win_skip( "could not derive lock-failure SID.\n" );
+        return;
+    }
+    pAppContainerUnregisterSid( sid );
+
+    RtlInitUnicodeString( &us, lock_name );
+    InitializeObjectAttributes( &attr, &us, OBJ_CASE_INSENSITIVE, NULL, NULL );
+    status = NtCreateEvent( &evh, EVENT_MODIFY_STATE | SYNCHRONIZE, &attr, 0, FALSE );
+    if (status)
+    {
+        win_skip( "could not occupy the lock name: %#lx.\n", (unsigned long)status );
+        goto done;
+    }
+
+    hr = pAppContainerRegisterSid( sid, L"m", L"d" );
+    ok( hr != S_OK, "register should fail when the lock cannot be acquired, got %#lx.\n", (unsigned long)hr );
+    ok( hr != HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS),
+        "lock failure must not masquerade as ALREADY_EXISTS, got %#lx.\n", (unsigned long)hr );
+
+    hr = pAppContainerUnregisterSid( sid );
+    ok( hr != S_OK, "unregister should fail when the lock cannot be acquired, got %#lx.\n", (unsigned long)hr );
+
+    /* Verify directly (bypassing the locked APIs) that no leaf was created. */
+    {
+        WCHAR *path = ac_test_path_for_name( name );
+        HANDLE hkcu = NULL, key = NULL;
+        OBJECT_ATTRIBUTES a2; UNICODE_STRING u2;
+        BOOL exists = FALSE;
+
+        if (path && !RtlOpenCurrentUser( KEY_READ, &hkcu ))
+        {
+            RtlInitUnicodeString( &u2, path );
+            InitializeObjectAttributes( &a2, &u2, OBJ_CASE_INSENSITIVE, hkcu, NULL );
+            exists = (NtOpenKeyEx( &key, KEY_READ, &a2, 0 ) == STATUS_SUCCESS);
+            if (key) NtClose( key );
+            NtClose( hkcu );
+        }
+        HeapFree( GetProcessHeap(), 0, path );
+        ok( !exists, "failed register created a registry leaf despite the lock failure.\n" );
+    }
+
+    NtClose( evh );   /* free the name */
+
+done:
+    if (evh) NtClose( evh );
     RtlFreeSid( sid );
 }
 
@@ -563,6 +926,9 @@ START_TEST(security)
     pAppContainerLookupMoniker    = (void *)GetProcAddress(hmod, "AppContainerLookupMoniker");
     pAppContainerFreeMemory       = (void *)GetProcAddress(hmod, "AppContainerFreeMemory");
 
+    hmod = LoadLibraryA("userenv.dll");
+    pDeriveAppContainerSidFromAppContainerName = (void *)GetProcAddress(hmod, "DeriveAppContainerSidFromAppContainerName");
+
     hmod = LoadLibraryA("ntdll.dll");
     pRtlDeriveCapabilitySidsFromName = (void *)GetProcAddress(hmod, "RtlDeriveCapabilitySidsFromName");
 
@@ -575,7 +941,10 @@ START_TEST(security)
 
     test_DeriveCapabilitySidsFromName();
     test_AppContainerRegistration();
-    test_AppContainerStoredType();
+    test_AppContainerCorruptValue();
+    test_AppContainerAbandonedWriter();
     test_AppContainerPersistence();
     test_AppContainerConcurrent();
+    test_AppContainerBlockedReader();
+    test_AppContainerLockFailure();   /* last: leaves no stray lock object behind */
 }
