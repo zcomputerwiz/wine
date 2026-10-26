@@ -1120,6 +1120,7 @@ SOURCES = \
 	wine/dcetypes.idl \
 	wine/d3dkmt_desc.h \
 	wine/dcomp_layer.h \
+	wine/dcomp_underlay.h \
 	wine/debug.h \
 	wine/dplaysp.h \
 	wine/epm.idl \
