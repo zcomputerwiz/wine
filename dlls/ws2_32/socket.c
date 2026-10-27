@@ -3588,6 +3588,10 @@ int WINAPI setsockopt( SOCKET s, int level, int optname, const char *optval, int
         case IP_DROP_SOURCE_MEMBERSHIP:
             return server_setsockopt( s, IOCTL_AFD_WINE_SET_IP_DROP_SOURCE_MEMBERSHIP, optval, optlen );
 
+        case IP_ECN:
+            FIXME("IP_ECN is ignored!\n");
+            return 0;
+
         case IP_HDRINCL:
             return server_setsockopt( s, IOCTL_AFD_WINE_SET_IP_HDRINCL, optval, optlen );
 
@@ -3695,6 +3699,10 @@ int WINAPI setsockopt( SOCKET s, int level, int optname, const char *optval, int
 
         case IPV6_DROP_MEMBERSHIP:
             return server_setsockopt( s, IOCTL_AFD_WINE_SET_IPV6_DROP_MEMBERSHIP, optval, optlen );
+
+        case IPV6_ECN:
+            FIXME("IPV6_ECN is ignored!\n");
+            return 0;
 
         case IPV6_HOPLIMIT:
             if (optlen < sizeof(DWORD) || !optval)
