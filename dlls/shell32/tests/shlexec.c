@@ -3034,8 +3034,183 @@ static void test_directory(void)
     SetCurrentDirectoryA(curdir);
 }
 
+static void test_elevation(void)
+{
+    static const char manifest_require_admin[] =
+        "<assembly xmlns=\"urn:schemas-microsoft-com:asm.v1\" manifestVersion=\"1.0\">"
+        "<trustInfo xmlns=\"urn:schemas-microsoft-com:asm.v2\">"
+        "  <security>"
+        "    <requestedPrivileges>"
+        "      <requestedExecutionLevel level=\"requireAdministrator\" uiAccess=\"false\"/>"
+        "    </requestedPrivileges>"
+        "  </security>"
+        "</trustInfo>"
+        "</assembly>";
+
+    char helper_yes[MAX_PATH], helper_no[MAX_PATH];
+    char helper_yes_cmd[MAX_PATH + 32], helper_no_cmd[MAX_PATH + 32];
+    char elev_exe[MAX_PATH], elev_manifest[MAX_PATH];
+    char params[1024];
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    SHELLEXECUTEINFOA sei;
+    HKEY hkey;
+    DWORD res, err;
+    HANDLE file;
+    DWORD written;
+    BOOL ret;
+
+    sprintf(helper_yes, "%s\\helper_yes.exe", tmpdir);
+    sprintf(helper_no, "%s\\helper_no.exe", tmpdir);
+    sprintf(helper_yes_cmd, "\"%s\" shlexec", helper_yes);
+    sprintf(helper_no_cmd, "\"%s\" shlexec", helper_no);
+    sprintf(elev_exe, "%s\\elev_test.exe", tmpdir);
+    sprintf(elev_manifest, "%s\\elev_test.exe.manifest", tmpdir);
+
+    if (!CopyFileA(argv0, helper_yes, FALSE) ||
+        !CopyFileA(argv0, helper_no, FALSE) ||
+        !CopyFileA(argv0, elev_exe, FALSE))
+    {
+        win_skip("Failed to create test helper executables\n");
+        return;
+    }
+
+    file = CreateFileA(elev_manifest, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        win_skip("Failed to create test manifest file\n");
+        DeleteFileA(helper_yes);
+        DeleteFileA(helper_no);
+        DeleteFileA(elev_exe);
+        return;
+    }
+    WriteFile(file, manifest_require_admin, strlen(manifest_require_admin), &written, NULL);
+    CloseHandle(file);
+
+    /* 1. Test Stock Behavior without Helper configured:
+     * Direct CreateProcess of manifest_require_admin succeeds unprompted */
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    memset(&pi, 0, sizeof(pi));
+    sprintf(params, "\"%s\" shlexec \"%s\" Exec", elev_exe, child_file);
+
+    ret = CreateProcessA(NULL, params, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+    ok(ret, "CreateProcess without helper failed: %lu\n", GetLastError());
+    if (ret)
+    {
+        WaitForSingleObject(pi.hProcess, 5000);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    }
+
+    /* 2. Configure Elevation Helper -> helper_yes */
+    res = RegCreateKeyExA(HKEY_LOCAL_MACHINE, "Software\\Wine\\Elevation", 0, NULL, 0,
+                          KEY_WRITE, NULL, &hkey, NULL);
+    if (res != ERROR_SUCCESS)
+    {
+        win_skip("Cannot create Software\\Wine\\Elevation key: %lu\n", res);
+        goto cleanup;
+    }
+
+    res = RegSetValueExA(hkey, "Helper", 0, REG_SZ, (const BYTE *)helper_yes_cmd, strlen(helper_yes_cmd) + 1);
+    ok(res == ERROR_SUCCESS, "RegSetValueExA Helper failed: %lu\n", res);
+
+    /* 2a. Direct CreateProcess of requireAdministrator must fail with ERROR_ELEVATION_REQUIRED (740) */
+    SetLastError(0xdeadbeef);
+    ret = CreateProcessA(NULL, params, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+    err = GetLastError();
+    ok(!ret, "CreateProcess with requireAdministrator manifest should fail\n");
+    ok(err == ERROR_ELEVATION_REQUIRED, "expected ERROR_ELEVATION_REQUIRED (740), got %lu\n", err);
+
+    sprintf(params, "shlexec \"%s\" Exec", child_file);
+
+    /* 2b. ShellExecuteEx on requireAdministrator executable invokes helper_yes and succeeds */
+    memset(&sei, 0, sizeof(sei));
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+    sei.lpFile = elev_exe;
+    sei.lpParameters = params;
+    sei.nShow = SW_SHOWNORMAL;
+
+    ret = ShellExecuteExA(&sei);
+    ok(ret, "ShellExecuteEx with approved helper failed: %lu\n", GetLastError());
+    ok(sei.hProcess != NULL, "expected valid hProcess handle\n");
+    if (sei.hProcess)
+    {
+        WaitForSingleObject(sei.hProcess, 5000);
+        CloseHandle(sei.hProcess);
+    }
+
+    /* 2c. ShellExecuteEx with 'runas' verb invokes helper_yes and succeeds */
+    memset(&sei, 0, sizeof(sei));
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+    sei.lpVerb = "runas";
+    sei.lpFile = argv0;
+    sei.lpParameters = params;
+    sei.nShow = SW_SHOWNORMAL;
+
+    ret = ShellExecuteExA(&sei);
+    ok(ret, "ShellExecuteEx runas with approved helper failed: %lu\n", GetLastError());
+    ok(sei.hProcess != NULL, "expected valid hProcess handle\n");
+    if (sei.hProcess)
+    {
+        WaitForSingleObject(sei.hProcess, 5000);
+        CloseHandle(sei.hProcess);
+    }
+
+    /* 3. Configure Elevation Helper -> helper_no (Simulate User Cancellation / Decline) */
+    res = RegSetValueExA(hkey, "Helper", 0, REG_SZ, (const BYTE *)helper_no_cmd, strlen(helper_no_cmd) + 1);
+    ok(res == ERROR_SUCCESS, "RegSetValueExA Helper failed: %lu\n", res);
+
+    /* 3a. ShellExecuteEx on requireAdministrator with helper_no fails with ERROR_CANCELLED (1223) */
+    SetLastError(0xdeadbeef);
+    memset(&sei, 0, sizeof(sei));
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+    sei.lpFile = elev_exe;
+    sei.lpParameters = params;
+    sei.nShow = SW_SHOWNORMAL;
+
+    ret = ShellExecuteExA(&sei);
+    err = GetLastError();
+    ok(!ret, "ShellExecuteEx should fail when helper declines\n");
+    ok(err == ERROR_CANCELLED, "expected ERROR_CANCELLED (1223), got %lu\n", err);
+    ok(sei.hProcess == NULL, "expected NULL hProcess on decline\n");
+
+    /* 3b. ShellExecuteEx with 'runas' with helper_no fails with ERROR_CANCELLED (1223) */
+    SetLastError(0xdeadbeef);
+    memset(&sei, 0, sizeof(sei));
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+    sei.lpVerb = "runas";
+    sei.lpFile = argv0;
+    sei.lpParameters = params;
+    sei.nShow = SW_SHOWNORMAL;
+
+    ret = ShellExecuteExA(&sei);
+    err = GetLastError();
+    ok(!ret, "ShellExecuteEx runas should fail when helper declines\n");
+    ok(err == ERROR_CANCELLED, "expected ERROR_CANCELLED (1223), got %lu\n", err);
+    ok(sei.hProcess == NULL, "expected NULL hProcess on decline\n");
+
+    /* 4. Restore Stock Configuration (delete Helper value) */
+    RegDeleteValueA(hkey, "Helper");
+    RegCloseKey(hkey);
+
+cleanup:
+    DeleteFileA(helper_yes);
+    DeleteFileA(helper_no);
+    DeleteFileA(elev_manifest);
+    DeleteFileA(elev_exe);
+}
+
 START_TEST(shlexec)
 {
+    if (strstr(GetCommandLineA(), "helper_yes.exe"))
+        ExitProcess(0);
+    if (strstr(GetCommandLineA(), "helper_no.exe"))
+        ExitProcess(1223);
 
     myARGC = winetest_get_mainargs(&myARGV);
     if (myARGC >= 3)
@@ -3059,6 +3234,7 @@ START_TEST(shlexec)
     test_dde();
     test_dde_default_app();
     test_directory();
+    test_elevation();
 
     cleanup_test();
 }

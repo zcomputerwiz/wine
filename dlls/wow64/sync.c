@@ -1460,7 +1460,7 @@ NTSTATUS WINAPI wow64_NtSetInformationJobObject( UINT *args )
         else return STATUS_INVALID_PARAMETER;
 
     case JobObjectBasicUIRestrictions:
-        FIXME( "unsupported class JobObjectBasicUIRestrictions\n" );
+        TRACE( "JobObjectBasicUIRestrictions\n" );
         return STATUS_SUCCESS;
 
     case JobObjectAssociateCompletionPortInformation:   /* JOBOBJECT_ASSOCIATE_COMPLETION_PORT */

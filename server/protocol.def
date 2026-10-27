@@ -1269,6 +1269,15 @@ typedef volatile struct
 @END
 
 
+/* Retrieve open handles of a process */
+@REQ(get_process_handle_table)
+    obj_handle_t handle;           /* process handle */
+@REPLY
+    unsigned int count;            /* total number of handles */
+    VARARG(handles,uints);         /* array of handle IDs (obj_handle_t) */
+@END
+
+
 /* Fetch the name of the process image */
 @REQ(get_process_image_name)
     obj_handle_t handle;           /* process handle */
@@ -1332,6 +1341,21 @@ typedef volatile struct
 #define GET_THREAD_INFO_FLAG_TERMINATED    0x02
 #define GET_THREAD_INFO_FLAG_LAST          0x04
 #define GET_THREAD_INFO_FLAG_DISABLE_BOOST 0x08
+
+
+/* Retrieve thread page priority */
+@REQ(get_thread_page_priority)
+    obj_handle_t handle;        /* thread handle */
+@REPLY
+    int          page_priority; /* page priority level */
+@END
+
+
+/* Set thread page priority */
+@REQ(set_thread_page_priority)
+    obj_handle_t handle;        /* thread handle */
+    int          page_priority; /* page priority level */
+@END
 
 
 /* Retrieve information about thread times */
@@ -3563,10 +3587,22 @@ enum caret_state
     obj_handle_t  handle;          /* handle to the token to duplicate */
     unsigned int  flags;           /* flags */
     data_size_t   privileges_size; /* size of privileges */
+    data_size_t   disable_sids_size; /* size of disable_sids */
     VARARG(privileges,luid_attr,privileges_size); /* privileges to remove from new token */
-    VARARG(disable_sids,sid);      /* array of groups to remove from new token */
+    VARARG(disable_sids,sids,disable_sids_size);  /* array of groups to remove from new token */
+    VARARG(restrict_sids,sids);    /* array of restricting SIDs to add to new token */
 @REPLY
     obj_handle_t  new_handle;      /* filtered handle */
+@END
+
+@REQ(create_lowbox_token)
+    obj_handle_t  handle;          /* base token handle */
+    unsigned int  access;          /* desired access */
+    data_size_t   package_sid_size; /* size of package SID */
+    VARARG(package_sid,sid,package_sid_size); /* AppContainer package SID */
+    VARARG(capabilities,sids);     /* capability SIDs */
+@REPLY
+    obj_handle_t  token_handle;    /* new LowBox token handle */
 @END
 
 @REQ(access_check)
@@ -3592,6 +3628,7 @@ enum caret_state
 @REQ(get_token_groups)
     obj_handle_t    handle;       /* handle to the token */
     unsigned int    attr_mask;    /* mask for wanted attributes */
+    unsigned int    which_groups; /* 0 = groups, 1 = restricted SIDs */
 @REPLY
     data_size_t     attr_len;     /* length needed to store attrs */
     data_size_t     sid_len;      /* length needed to store sids */
@@ -3609,6 +3646,11 @@ enum caret_state
 @REQ(set_token_default_dacl)
     obj_handle_t    handle;     /* handle to the token */
     VARARG(acl,acl);            /* default dacl to set */
+@END
+
+@REQ(set_token_integrity_level)
+    obj_handle_t    handle;        /* handle to the token */
+    unsigned int    integrity_rid; /* integrity level RID */
 @END
 
 @REQ(set_security_object)
@@ -3901,6 +3943,9 @@ struct handle_info
     int            is_elevated;   /* is the token elevated as per GetTokenInformation(TokenElevation) */
     int            group_count;   /* the number of groups the token is a member of */
     int            privilege_count; /* the number of privileges the token has */
+    unsigned int   integrity_rid; /* token integrity level RID */
+    int            is_app_container; /* is token LowBox/AppContainer */
+    int            is_restricted; /* has restricted SIDs */
 @END
 
 

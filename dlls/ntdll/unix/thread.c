@@ -2429,6 +2429,21 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
         if (ret_len) *ret_len = sizeof(BOOLEAN);
         return STATUS_SUCCESS;
 
+    case ThreadPagePriority:
+    {
+        if (length != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+        if (!data) return STATUS_ACCESS_VIOLATION;
+        SERVER_START_REQ( get_thread_page_priority )
+        {
+            req->handle = wine_server_obj_handle( handle );
+            status = wine_server_call( req );
+            if (!status) *(ULONG *)data = reply->page_priority;
+        }
+        SERVER_END_REQ;
+        if (!status && ret_len) *ret_len = sizeof(ULONG);
+        return status;
+    }
+
     case ThreadPriorityBoost:
     {
         if (length != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
@@ -2692,6 +2707,22 @@ NTSTATUS WINAPI NtSetInformationThread( HANDLE handle, THREADINFOCLASS class,
             req->handle         = wine_server_obj_handle( handle );
             req->disable_boost  = *disable_boost;
             req->mask           = SET_THREAD_INFO_DISABLE_BOOST;
+            status = wine_server_call( req );
+        }
+        SERVER_END_REQ;
+        return status;
+    }
+
+    case ThreadPagePriority:
+    {
+        const ULONG *priority = data;
+        if (length != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+        if (!priority) return STATUS_ACCESS_VIOLATION;
+        if (*priority > 5) return STATUS_INVALID_PARAMETER;
+        SERVER_START_REQ( set_thread_page_priority )
+        {
+            req->handle        = wine_server_obj_handle( handle );
+            req->page_priority = *priority;
             status = wine_server_call( req );
         }
         SERVER_END_REQ;

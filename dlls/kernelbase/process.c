@@ -27,6 +27,8 @@
 #include "winnls.h"
 #include "wincontypes.h"
 #include "winternl.h"
+#include "winreg.h"
+#include "winuser.h"
 #include "processsnapshot.h"
 
 #include "kernelbase.h"
@@ -502,6 +504,64 @@ done:
     return ret;
 }
 
+static BOOL is_elevation_required( HANDLE token, const WCHAR *filename )
+{
+    ACTIVATION_CONTEXT_RUN_LEVEL_INFORMATION run_level;
+    TOKEN_ELEVATION_TYPE elev_type;
+    HANDLE token_to_check;
+    ACTCTXW actctx_req;
+    HANDLE actctx;
+    HKEY hkey;
+    DWORD size, type, bytes;
+    WCHAR helper[MAX_PATH];
+    BOOL ret = FALSE;
+
+    if (!filename || !filename[0]) return FALSE;
+
+    /* If no elevation helper is configured in HKLM\Software\Wine\Elevation\Helper, keep stock behavior */
+    if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"Software\\Wine\\Elevation", 0, KEY_READ, &hkey ) != ERROR_SUCCESS)
+        return FALSE;
+
+    bytes = sizeof(helper);
+    if (RegQueryValueExW( hkey, L"Helper", NULL, &type, (BYTE *)helper, &bytes ) != ERROR_SUCCESS ||
+        bytes <= sizeof(WCHAR) || !helper[0])
+    {
+        RegCloseKey( hkey );
+        return FALSE;
+    }
+    RegCloseKey( hkey );
+
+    /* Determine token elevation type */
+    token_to_check = token ? token : GetCurrentThreadEffectiveToken();
+    if (!GetTokenInformation( token_to_check, TokenElevationType, &elev_type, sizeof(elev_type), &size ))
+        return FALSE;
+
+    /* An already elevated (Full) token satisfies all elevation requirements */
+    if (elev_type == TokenElevationTypeFull)
+        return FALSE;
+
+    /* Check target image manifest for requested execution level */
+    memset( &actctx_req, 0, sizeof(actctx_req) );
+    actctx_req.cbSize = sizeof(actctx_req);
+    actctx_req.dwFlags = ACTCTX_FLAG_RESOURCE_NAME_VALID;
+    actctx_req.lpSource = filename;
+    actctx_req.lpResourceName = (LPCWSTR)(ULONG_PTR)1;
+
+    actctx = CreateActCtxW( &actctx_req );
+    if (actctx == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    if (QueryActCtxW( 0, actctx, NULL, RunlevelInformationInActivationContext, &run_level, sizeof(run_level), NULL ))
+    {
+        if (run_level.RunLevel == ACTCTX_RUN_LEVEL_REQUIRE_ADMIN)
+            ret = TRUE;
+        else if (run_level.RunLevel == ACTCTX_RUN_LEVEL_HIGHEST_AVAILABLE && elev_type == TokenElevationTypeLimited)
+            ret = TRUE;
+    }
+    ReleaseActCtx( actctx );
+    return ret;
+}
+
 /**********************************************************************
  *           CreateProcessInternalW   (kernelbase.@)
  */
@@ -513,6 +573,8 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
                                                       PROCESS_INFORMATION *info, HANDLE *new_token )
 {
     const struct proc_thread_attr *handle_list = NULL, *job_list = NULL;
+    const SECURITY_CAPABILITIES *sec_cap = NULL;
+    HANDLE appcontainer_token = NULL;
     WCHAR name[MAX_PATH];
     WCHAR *p, *tidy_cmdline = cmd_line;
     RTL_USER_PROCESS_PARAMETERS *params = NULL;
@@ -565,6 +627,13 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
     if (!(params = create_process_params( app_name, tidy_cmdline, cur_dir, env, flags, startup_info )))
     {
         status = STATUS_NO_MEMORY;
+        goto done;
+    }
+
+    if (is_elevation_required( token, params->ImagePathName.Buffer ))
+    {
+        TRACE( "Elevation required for %s\n", debugstr_w(params->ImagePathName.Buffer) );
+        status = STATUS_ELEVATION_REQUIRED;
         goto done;
     }
 
@@ -630,6 +699,17 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
                         machine = *(USHORT *)attrs->attrs[i].value;
                         TRACE( "PROC_THREAD_ATTRIBUTE_MACHINE %x.\n", machine );
                         break;
+                    case PROC_THREAD_ATTRIBUTE_COMPONENT_FILTER:
+                    case PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY:
+                    case PROC_THREAD_ATTRIBUTE_DESKTOP_APP_POLICY:
+                    case PROC_THREAD_ATTRIBUTE_MITIGATION_AUDIT_POLICY:
+                    case PROC_THREAD_ATTRIBUTE_WIN32K_FILTER:
+                        TRACE( "PROC_THREAD_ATTRIBUTE %Iu size %Iu\n", attrs->attrs[i].attr & PROC_THREAD_ATTRIBUTE_NUMBER, attrs->attrs[i].size );
+                        break;
+                    case PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES:
+                        sec_cap = attrs->attrs[i].value;
+                        TRACE( "PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES %p\n", sec_cap );
+                        break;
                     default:
                         FIXME("Unsupported attribute %#Ix.\n", attrs->attrs[i].attr);
                         break;
@@ -642,6 +722,25 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
     if (flags & DEBUG_ONLY_THIS_PROCESS) nt_flags |= PROCESS_CREATE_FLAGS_NO_DEBUG_INHERIT;
     if (flags & CREATE_BREAKAWAY_FROM_JOB) nt_flags |= PROCESS_CREATE_FLAGS_BREAKAWAY;
     if (flags & CREATE_SUSPENDED) nt_flags |= PROCESS_CREATE_FLAGS_SUSPENDED;
+
+    if (sec_cap && sec_cap->AppContainerSid)
+    {
+        HANDLE base_token = token ? token : GetCurrentProcessToken();
+        OBJECT_ATTRIBUTES oa = { sizeof(oa) };
+        status = NtCreateLowBoxToken( &appcontainer_token, base_token,
+                                      TOKEN_ALL_ACCESS, &oa,
+                                      sec_cap->AppContainerSid,
+                                      sec_cap->CapabilityCount,
+                                      sec_cap->Capabilities ? (SID_AND_ATTRIBUTES *)sec_cap->Capabilities : NULL,
+                                      0, NULL );
+        if (!status)
+            token = appcontainer_token;
+        else
+        {
+            WARN( "NtCreateLowBoxToken failed: %08lx\n", status );
+            goto done;
+        }
+    }
 
     status = create_nt_process( token, debug, process_attr, thread_attr,
                                 nt_flags, params, &rtl_info, parent, machine, handle_list, job_list );
@@ -685,6 +784,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
     }
 
  done:
+    if (appcontainer_token) NtClose( appcontainer_token );
     RtlDestroyProcessParameters( params );
     if (tidy_cmdline != cmd_line) HeapFree( GetProcessHeap(), 0, tidy_cmdline );
     return set_ntstatus( status );
@@ -933,7 +1033,13 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetProcessId( HANDLE process )
 BOOL WINAPI /* DECLSPEC_HOTPATCH */ GetProcessMitigationPolicy( HANDLE process, PROCESS_MITIGATION_POLICY policy,
                                                           void *buffer, SIZE_T length )
 {
-    FIXME( "(%p, %u, %p, %Iu): stub\n", process, policy, buffer, length );
+    TRACE( "(%p, %u, %p, %Iu)\n", process, policy, buffer, length );
+    if (!buffer)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+    memset( buffer, 0, length );
     return TRUE;
 }
 
@@ -1828,6 +1934,9 @@ static inline DWORD validate_proc_thread_attribute( DWORD_PTR attr, SIZE_T size 
     case PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY:
        if (size != sizeof(DWORD) && size != sizeof(DWORD64)) return ERROR_BAD_LENGTH;
        break;
+    case PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES:
+       if (size != sizeof(SECURITY_CAPABILITIES)) return ERROR_BAD_LENGTH;
+       break;
     case PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY:
         if (size != sizeof(DWORD) && size != sizeof(DWORD64) && size != sizeof(DWORD64) * 2)
             return ERROR_BAD_LENGTH;
@@ -1843,6 +1952,18 @@ static inline DWORD validate_proc_thread_attribute( DWORD_PTR attr, SIZE_T size 
         break;
     case PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY:
         if (size != sizeof(GROUP_AFFINITY)) return ERROR_BAD_LENGTH;
+        break;
+    case PROC_THREAD_ATTRIBUTE_COMPONENT_FILTER:
+    case PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY:
+    case PROC_THREAD_ATTRIBUTE_DESKTOP_APP_POLICY:
+        if (size != sizeof(DWORD)) return ERROR_BAD_LENGTH;
+        break;
+    case PROC_THREAD_ATTRIBUTE_MITIGATION_AUDIT_POLICY:
+        if (size != sizeof(DWORD) && size != sizeof(DWORD64) && size != sizeof(DWORD64) * 2)
+            return ERROR_BAD_LENGTH;
+        break;
+    case PROC_THREAD_ATTRIBUTE_WIN32K_FILTER:
+        if (size < sizeof(DWORD)) return ERROR_BAD_LENGTH;
         break;
     default:
         FIXME( "Unhandled attribute %Iu\n", attr & PROC_THREAD_ATTRIBUTE_NUMBER );

@@ -4270,6 +4270,30 @@ static void elevate_token(void)
     NtClose( linked.LinkedToken );
 }
 
+static BOOL is_elevation_helper_configured(void)
+{
+    OBJECT_ATTRIBUTES attr;
+    UNICODE_STRING name = RTL_CONSTANT_STRING( L"\\Registry\\Machine\\Software\\Wine\\Elevation" );
+    UNICODE_STRING val_name = RTL_CONSTANT_STRING( L"Helper" );
+    char buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + MAX_PATH * sizeof(WCHAR)];
+    KEY_VALUE_PARTIAL_INFORMATION *info = (KEY_VALUE_PARTIAL_INFORMATION *)buffer;
+    ULONG len;
+    HANDLE hkey;
+    BOOL ret = FALSE;
+
+    InitializeObjectAttributes( &attr, &name, OBJ_CASE_INSENSITIVE, 0, NULL );
+    if (!NtOpenKey( &hkey, KEY_READ, &attr ))
+    {
+        if (!NtQueryValueKey( hkey, &val_name, KeyValuePartialInformation, info, sizeof(buffer), &len )
+            && info->DataLength > sizeof(WCHAR) && *(WCHAR *)info->Data)
+        {
+            ret = TRUE;
+        }
+        NtClose( hkey );
+    }
+    return ret;
+}
+
 static void open_known_dll_ntdir(void)
 {
     UNICODE_STRING dir = RTL_CONSTANT_STRING( L"\\KnownDlls" );
@@ -4525,7 +4549,7 @@ void loader_init( CONTEXT *context, void **entry )
         LdrGetProcedureAddress( kernel32->ldr.DllBase, &ctrl_routine, 0, (void **)&pCtrlRoutine );
 
         locale_init();
-        if (needs_elevation())
+        if (needs_elevation() && !is_elevation_helper_configured())
             elevate_token();
         get_env_var( L"WINESYSTEMDLLPATH", 0, &system_dll_path );
         if (wm->ldr.Flags & LDR_COR_ILONLY)

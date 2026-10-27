@@ -2374,6 +2374,83 @@ static void test_query_process_handlecount(void)
     }
 }
 
+static void test_process_handle_table(void)
+{
+    ULONG handles[64];
+    ULONG return_length = 0xdeadbeef;
+    NTSTATUS status;
+
+    /* Undersized buffer returns STATUS_INFO_LENGTH_MISMATCH with required length */
+    status = NtQueryInformationProcess( GetCurrentProcess(), ProcessHandleTable, handles, sizeof(ULONG), &return_length );
+    ok( status == STATUS_INFO_LENGTH_MISMATCH, "expected STATUS_INFO_LENGTH_MISMATCH, got %08lx\n", status );
+    ok( return_length > sizeof(ULONG), "expected return_length > sizeof(ULONG), got %ld\n", return_length );
+
+    /* With sufficient buffer, returns STATUS_SUCCESS and valid handles */
+    if (return_length <= sizeof(handles))
+    {
+        status = NtQueryInformationProcess( GetCurrentProcess(), ProcessHandleTable, handles, sizeof(handles), &return_length );
+        ok( status == STATUS_SUCCESS, "expected STATUS_SUCCESS, got %08lx\n", status );
+        ok( return_length >= sizeof(ULONG), "expected return_length >= sizeof(ULONG), got %ld\n", return_length );
+        ok( handles[0] > 0, "expected at least one handle in process, got %ld\n", handles[0] );
+    }
+    else
+    {
+        ULONG *buf = malloc( return_length );
+        if (buf)
+        {
+            status = NtQueryInformationProcess( GetCurrentProcess(), ProcessHandleTable, buf, return_length, &return_length );
+            ok( status == STATUS_SUCCESS, "expected STATUS_SUCCESS, got %08lx\n", status );
+            ok( buf[0] > 0, "expected at least one handle in process, got %ld\n", buf[0] );
+            free( buf );
+        }
+    }
+
+    /* Invalid process handle returns STATUS_INVALID_HANDLE */
+    status = NtQueryInformationProcess( NULL, ProcessHandleTable, handles, sizeof(handles), &return_length );
+    ok( status == STATUS_INVALID_HANDLE, "expected STATUS_INVALID_HANDLE, got %08lx\n", status );
+}
+
+static void test_thread_page_priority(void)
+{
+    ULONG priority = 0;
+    ULONG return_length = 0xdeadbeef;
+    NTSTATUS status;
+
+    /* Default should be 5 */
+    status = NtQueryInformationThread( GetCurrentThread(), ThreadPagePriority, &priority, sizeof(priority), &return_length );
+    ok( status == STATUS_SUCCESS, "expected STATUS_SUCCESS, got %08lx\n", status );
+    ok( return_length == sizeof(ULONG), "expected sizeof(ULONG), got %ld\n", return_length );
+    ok( priority == 5, "expected default priority 5, got %ld\n", priority );
+
+    /* Set valid priority (e.g. 2) */
+    priority = 2;
+    status = NtSetInformationThread( GetCurrentThread(), ThreadPagePriority, &priority, sizeof(priority) );
+    ok( status == STATUS_SUCCESS, "expected STATUS_SUCCESS, got %08lx\n", status );
+
+    priority = 0;
+    status = NtQueryInformationThread( GetCurrentThread(), ThreadPagePriority, &priority, sizeof(priority), &return_length );
+    ok( status == STATUS_SUCCESS, "expected STATUS_SUCCESS, got %08lx\n", status );
+    ok( priority == 2, "expected priority 2, got %ld\n", priority );
+
+    /* Set out-of-range priority (> 5, e.g. 6) must fail with STATUS_INVALID_PARAMETER */
+    priority = 6;
+    status = NtSetInformationThread( GetCurrentThread(), ThreadPagePriority, &priority, sizeof(priority) );
+    ok( status == STATUS_INVALID_PARAMETER, "expected STATUS_INVALID_PARAMETER, got %08lx\n", status );
+
+    /* Invalid handle must fail with STATUS_INVALID_HANDLE */
+    priority = 3;
+    status = NtSetInformationThread( NULL, ThreadPagePriority, &priority, sizeof(priority) );
+    ok( status == STATUS_INVALID_HANDLE, "expected STATUS_INVALID_HANDLE, got %08lx\n", status );
+
+    status = NtQueryInformationThread( NULL, ThreadPagePriority, &priority, sizeof(priority), &return_length );
+    ok( status == STATUS_INVALID_HANDLE, "expected STATUS_INVALID_HANDLE, got %08lx\n", status );
+
+    /* Restore priority to 5 */
+    priority = 5;
+    status = NtSetInformationThread( GetCurrentThread(), ThreadPagePriority, &priority, sizeof(priority) );
+    ok( status == STATUS_SUCCESS, "expected STATUS_SUCCESS, got %08lx\n", status );
+}
+
 static void test_query_process_image_file_name(void)
 {
     static const WCHAR deviceW[] = {'\\','D','e','v','i','c','e','\\'};
@@ -4758,4 +4835,6 @@ START_TEST(info)
     test_process_id();
     test_processor_idle_cycle_time();
     test_process_parameters_flags(argc, argv);
+    test_process_handle_table();
+    test_thread_page_priority();
 }

@@ -2308,6 +2308,8 @@ DWORD WINAPI SetEntriesInAclW( ULONG count, PEXPLICIT_ACCESSW pEntries,
                                             pEntries[i].grfAccessPermissions,
                                             ppsid[i], FALSE, TRUE);
             break;
+        case REVOKE_ACCESS:
+            break;
         default:
             FIXME("unhandled access mode %d\n", pEntries[i].grfAccessMode);
         }

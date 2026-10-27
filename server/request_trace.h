@@ -228,6 +228,17 @@ static void dump_get_process_debug_info_reply( const struct get_process_debug_in
     dump_varargs_pe_image_info( ", image=", cur_size );
 }
 
+static void dump_get_process_handle_table_request( const struct get_process_handle_table_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+}
+
+static void dump_get_process_handle_table_reply( const struct get_process_handle_table_reply *req )
+{
+    fprintf( stderr, " count=%08x", req->count );
+    dump_varargs_uints( ", handles=", cur_size );
+}
+
 static void dump_get_process_image_name_request( const struct get_process_image_name_request *req )
 {
     fprintf( stderr, " handle=%04x", req->handle );
@@ -287,6 +298,22 @@ static void dump_get_thread_info_reply( const struct get_thread_info_reply *req 
     fprintf( stderr, ", flags=%08x", req->flags );
     fprintf( stderr, ", desc_len=%u", req->desc_len );
     dump_varargs_unicode_str( ", desc=", cur_size );
+}
+
+static void dump_get_thread_page_priority_request( const struct get_thread_page_priority_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+}
+
+static void dump_get_thread_page_priority_reply( const struct get_thread_page_priority_reply *req )
+{
+    fprintf( stderr, " page_priority=%d", req->page_priority );
+}
+
+static void dump_set_thread_page_priority_request( const struct set_thread_page_priority_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    fprintf( stderr, ", page_priority=%d", req->page_priority );
 }
 
 static void dump_get_thread_times_request( const struct get_thread_times_request *req )
@@ -2683,13 +2710,29 @@ static void dump_filter_token_request( const struct filter_token_request *req )
     fprintf( stderr, " handle=%04x", req->handle );
     fprintf( stderr, ", flags=%08x", req->flags );
     fprintf( stderr, ", privileges_size=%u", req->privileges_size );
+    fprintf( stderr, ", disable_sids_size=%u", req->disable_sids_size );
     dump_varargs_luid_attr( ", privileges=", min( cur_size, req->privileges_size ));
-    dump_varargs_sid( ", disable_sids=", cur_size );
+    dump_varargs_sids( ", disable_sids=", min( cur_size, req->disable_sids_size ));
+    dump_varargs_sids( ", restrict_sids=", cur_size );
 }
 
 static void dump_filter_token_reply( const struct filter_token_reply *req )
 {
     fprintf( stderr, " new_handle=%04x", req->new_handle );
+}
+
+static void dump_create_lowbox_token_request( const struct create_lowbox_token_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    fprintf( stderr, ", access=%08x", req->access );
+    fprintf( stderr, ", package_sid_size=%u", req->package_sid_size );
+    dump_varargs_sid( ", package_sid=", min( cur_size, req->package_sid_size ));
+    dump_varargs_sids( ", capabilities=", cur_size );
+}
+
+static void dump_create_lowbox_token_reply( const struct create_lowbox_token_reply *req )
+{
+    fprintf( stderr, " token_handle=%04x", req->token_handle );
 }
 
 static void dump_access_check_request( const struct access_check_request *req )
@@ -2724,6 +2767,7 @@ static void dump_get_token_groups_request( const struct get_token_groups_request
 {
     fprintf( stderr, " handle=%04x", req->handle );
     fprintf( stderr, ", attr_mask=%08x", req->attr_mask );
+    fprintf( stderr, ", which_groups=%08x", req->which_groups );
 }
 
 static void dump_get_token_groups_reply( const struct get_token_groups_reply *req )
@@ -2749,6 +2793,12 @@ static void dump_set_token_default_dacl_request( const struct set_token_default_
 {
     fprintf( stderr, " handle=%04x", req->handle );
     dump_varargs_acl( ", acl=", cur_size );
+}
+
+static void dump_set_token_integrity_level_request( const struct set_token_integrity_level_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    fprintf( stderr, ", integrity_rid=%08x", req->integrity_rid );
 }
 
 static void dump_set_security_object_request( const struct set_security_object_request *req )
@@ -3074,6 +3124,9 @@ static void dump_get_token_info_reply( const struct get_token_info_reply *req )
     fprintf( stderr, ", is_elevated=%d", req->is_elevated );
     fprintf( stderr, ", group_count=%d", req->group_count );
     fprintf( stderr, ", privilege_count=%d", req->privilege_count );
+    fprintf( stderr, ", integrity_rid=%08x", req->integrity_rid );
+    fprintf( stderr, ", is_app_container=%d", req->is_app_container );
+    fprintf( stderr, ", is_restricted=%d", req->is_restricted );
 }
 
 static void dump_create_linked_token_request( const struct create_linked_token_request *req )
@@ -3554,10 +3607,13 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_terminate_thread_request,
     (dump_func)dump_get_process_info_request,
     (dump_func)dump_get_process_debug_info_request,
+    (dump_func)dump_get_process_handle_table_request,
     (dump_func)dump_get_process_image_name_request,
     (dump_func)dump_get_process_vm_counters_request,
     (dump_func)dump_set_process_info_request,
     (dump_func)dump_get_thread_info_request,
+    (dump_func)dump_get_thread_page_priority_request,
+    (dump_func)dump_set_thread_page_priority_request,
     (dump_func)dump_get_thread_times_request,
     (dump_func)dump_set_thread_info_request,
     (dump_func)dump_suspend_thread_request,
@@ -3771,11 +3827,13 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_check_token_privileges_request,
     (dump_func)dump_duplicate_token_request,
     (dump_func)dump_filter_token_request,
+    (dump_func)dump_create_lowbox_token_request,
     (dump_func)dump_access_check_request,
     (dump_func)dump_get_token_sid_request,
     (dump_func)dump_get_token_groups_request,
     (dump_func)dump_get_token_default_dacl_request,
     (dump_func)dump_set_token_default_dacl_request,
+    (dump_func)dump_set_token_integrity_level_request,
     (dump_func)dump_set_security_object_request,
     (dump_func)dump_get_security_object_request,
     (dump_func)dump_get_system_handles_request,
@@ -3866,10 +3924,13 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_terminate_thread_reply,
     (dump_func)dump_get_process_info_reply,
     (dump_func)dump_get_process_debug_info_reply,
+    (dump_func)dump_get_process_handle_table_reply,
     (dump_func)dump_get_process_image_name_reply,
     (dump_func)dump_get_process_vm_counters_reply,
     NULL,
     (dump_func)dump_get_thread_info_reply,
+    (dump_func)dump_get_thread_page_priority_reply,
+    NULL,
     (dump_func)dump_get_thread_times_reply,
     NULL,
     (dump_func)dump_suspend_thread_reply,
@@ -4083,10 +4144,12 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_check_token_privileges_reply,
     (dump_func)dump_duplicate_token_reply,
     (dump_func)dump_filter_token_reply,
+    (dump_func)dump_create_lowbox_token_reply,
     (dump_func)dump_access_check_reply,
     (dump_func)dump_get_token_sid_reply,
     (dump_func)dump_get_token_groups_reply,
     (dump_func)dump_get_token_default_dacl_reply,
+    NULL,
     NULL,
     NULL,
     (dump_func)dump_get_security_object_reply,
@@ -4178,10 +4241,13 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "terminate_thread",
     "get_process_info",
     "get_process_debug_info",
+    "get_process_handle_table",
     "get_process_image_name",
     "get_process_vm_counters",
     "set_process_info",
     "get_thread_info",
+    "get_thread_page_priority",
+    "set_thread_page_priority",
     "get_thread_times",
     "set_thread_info",
     "suspend_thread",
@@ -4395,11 +4461,13 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "check_token_privileges",
     "duplicate_token",
     "filter_token",
+    "create_lowbox_token",
     "access_check",
     "get_token_sid",
     "get_token_groups",
     "get_token_default_dacl",
     "set_token_default_dacl",
+    "set_token_integrity_level",
     "set_security_object",
     "get_security_object",
     "get_system_handles",

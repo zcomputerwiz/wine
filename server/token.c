@@ -115,6 +115,10 @@ struct token
     int            impersonation_level; /* impersonation level this token is capable of if non-primary token */
     int            elevation;       /* elevation type */
     struct list    kernel_object;   /* list of kernel object pointers */
+    unsigned int   integrity_rid;   /* integrity level RID */
+    struct list    restricted_sids; /* list of restricting SIDs */
+    struct sid    *app_container;   /* AppContainer package SID */
+    struct list    capabilities;    /* capability SIDs */
 };
 
 struct privilege
@@ -433,6 +437,7 @@ static void token_destroy( struct object *obj )
     token = (struct token *)obj;
 
     free( token->user );
+    free( token->app_container );
 
     LIST_FOR_EACH_SAFE( cursor, cursor_next, &token->privileges )
     {
@@ -441,6 +446,20 @@ static void token_destroy( struct object *obj )
     }
 
     LIST_FOR_EACH_SAFE( cursor, cursor_next, &token->groups )
+    {
+        struct group *group = LIST_ENTRY( cursor, struct group, entry );
+        list_remove( &group->entry );
+        free( group );
+    }
+
+    LIST_FOR_EACH_SAFE( cursor, cursor_next, &token->restricted_sids )
+    {
+        struct group *group = LIST_ENTRY( cursor, struct group, entry );
+        list_remove( &group->entry );
+        free( group );
+    }
+
+    LIST_FOR_EACH_SAFE( cursor, cursor_next, &token->capabilities )
     {
         struct group *group = LIST_ENTRY( cursor, struct group, entry );
         list_remove( &group->entry );
@@ -476,6 +495,8 @@ static struct token *create_token( unsigned int primary, unsigned int session_id
             allocate_luid( &token->modified_id );
         list_init( &token->privileges );
         list_init( &token->groups );
+        list_init( &token->restricted_sids );
+        list_init( &token->capabilities );
         list_init( &token->kernel_object );
         token->primary = primary;
         token->session_id = session_id;
@@ -487,6 +508,8 @@ static struct token *create_token( unsigned int primary, unsigned int session_id
         token->default_dacl = NULL;
         token->primary_group = NULL;
         token->elevation = elevation;
+        token->integrity_rid = SECURITY_MANDATORY_HIGH_RID;
+        token->app_container = NULL;
 
         /* copy user */
         token->user = memdup( user, sid_len( user ));
@@ -629,6 +652,45 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
         }
     }
 
+    token->integrity_rid = src_token->integrity_rid;
+    if (src_token->app_container)
+    {
+        token->app_container = memdup( src_token->app_container, sid_len( src_token->app_container ) );
+        if (!token->app_container)
+        {
+            release_object( token );
+            return NULL;
+        }
+    }
+
+    /* copy restricted sids */
+    LIST_FOR_EACH_ENTRY( group, &src_token->restricted_sids, struct group, entry )
+    {
+        size_t size = offsetof( struct group, sid.sub_auth[group->sid.sub_count] );
+        struct group *newgroup = mem_alloc( size );
+        if (!newgroup)
+        {
+            release_object( token );
+            return NULL;
+        }
+        memcpy( newgroup, group, size );
+        list_add_tail( &token->restricted_sids, &newgroup->entry );
+    }
+
+    /* copy capabilities */
+    LIST_FOR_EACH_ENTRY( group, &src_token->capabilities, struct group, entry )
+    {
+        size_t size = offsetof( struct group, sid.sub_auth[group->sid.sub_count] );
+        struct group *newgroup = mem_alloc( size );
+        if (!newgroup)
+        {
+            release_object( token );
+            return NULL;
+        }
+        memcpy( newgroup, group, size );
+        list_add_tail( &token->capabilities, &newgroup->entry );
+    }
+
     if (sd) default_set_sd( &token->obj, sd, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
                             DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION );
 
@@ -722,6 +784,8 @@ int token_assign_label( struct token *token, const struct sid *label )
     if ((sd = create_security_label_sd( token, label )))
     {
         ret = set_sd_defaults_from_token( &token->obj, sd, LABEL_SECURITY_INFORMATION, token );
+        if (ret && label->sub_count > 0)
+            token->integrity_rid = label->sub_auth[label->sub_count - 1];
         free( sd );
     }
 
@@ -892,8 +956,21 @@ int token_sid_present( struct token *token, const struct sid *sid, int deny )
 
     LIST_FOR_EACH_ENTRY( group, &token->groups, struct group, entry )
     {
+        /* Disabled deny-only groups must still participate in deny ACEs, but
+         * must never grant access, even if ENABLED is also present. */
+        if (group->attrs & SE_GROUP_USE_FOR_DENY_ONLY)
+        {
+            if (!deny) continue;
+        }
+        else if (!(group->attrs & SE_GROUP_ENABLED)) continue;
+        if (equal_sid( &group->sid, sid )) return TRUE;
+    }
+
+    if (token->app_container && equal_sid( token->app_container, sid )) return TRUE;
+
+    LIST_FOR_EACH_ENTRY( group, &token->capabilities, struct group, entry )
+    {
         if (!(group->attrs & SE_GROUP_ENABLED)) continue;
-        if (!deny && (group->attrs & SE_GROUP_USE_FOR_DENY_ONLY)) continue;
         if (equal_sid( &group->sid, sid )) return TRUE;
     }
 
@@ -941,15 +1018,55 @@ static unsigned int token_access_check( struct token *token,
         return STATUS_INVALID_SECURITY_DESCR;
     }
 
+    /* Mandatory integrity check: check if object has a mandatory label in SACL */
+    {
+        const struct acl *sacl;
+        int sacl_present;
+        sacl = sd_get_sacl( sd, &sacl_present );
+        if (sacl_present && sacl)
+        {
+            const struct ace *m_ace;
+            const struct sid *m_sid;
+            unsigned int m_idx;
+            for (m_idx = 0, m_ace = ace_first( sacl ); m_idx < sacl->count; m_idx++, m_ace = ace_next( m_ace ))
+            {
+                if (m_ace->type != SYSTEM_MANDATORY_LABEL_ACE_TYPE) continue;
+                m_sid = (const struct sid *)(m_ace + 1);
+                if (m_sid->sub_count > 0)
+                {
+                    unsigned int obj_integrity = m_sid->sub_auth[m_sid->sub_count - 1];
+                    if (token->integrity_rid < obj_integrity)
+                    {
+                        unsigned int policy = m_ace->mask;
+                        if (!policy || (policy & 1 /* SYSTEM_MANDATORY_LABEL_NO_WRITE_UP */))
+                            denied_access |= (mapping->write & ~(READ_CONTROL | SYNCHRONIZE)) | WRITE_DAC | WRITE_OWNER | DELETE;
+                        if (policy & 2 /* SYSTEM_MANDATORY_LABEL_NO_READ_UP */)
+                            denied_access |= mapping->read & ~SYNCHRONIZE;
+                        if (policy & 4 /* SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP */)
+                            denied_access |= mapping->exec & ~(READ_CONTROL | SYNCHRONIZE);
+                    }
+                }
+            }
+        }
+    }
+
+    if (!(desired_access & MAXIMUM_ALLOWED) && (desired_access & denied_access))
+    {
+        if (priv_count) *priv_count = 0;
+        *granted_access = 0;
+        *status = STATUS_ACCESS_DENIED;
+        return STATUS_SUCCESS;
+    }
+
     /* 1: Grant desired access if the object is unprotected */
     if (!dacl_present || !dacl)
     {
         if (priv_count) *priv_count = 0;
         if (desired_access & MAXIMUM_ALLOWED)
-            *granted_access = mapping->all;
+            *granted_access = mapping->all & ~denied_access;
         else
-            *granted_access = desired_access;
-        return *status = STATUS_SUCCESS;
+            *granted_access = desired_access & ~denied_access;
+        return *status = *granted_access == desired_access || (desired_access & MAXIMUM_ALLOWED) ? STATUS_SUCCESS : STATUS_ACCESS_DENIED;
     }
 
     /* 2: Check if caller wants access to system security part. Note: access
@@ -1044,6 +1161,74 @@ static unsigned int token_access_check( struct token *token,
             break;
     }
 
+    if (!list_empty( &token->restricted_sids ))
+    {
+        unsigned int restricted_allowed = 0;
+        unsigned int restricted_denied = 0;
+
+        for (i = 0, ace = ace_first( dacl ); i < dacl->count; i++, ace = ace_next( ace ))
+        {
+            const struct sid *sid = (const struct sid *)(ace + 1);
+            struct group *rg;
+            int match = 0;
+
+            if (ace->flags & INHERIT_ONLY_ACE) continue;
+
+            LIST_FOR_EACH_ENTRY( rg, &token->restricted_sids, struct group, entry )
+            {
+                if (equal_sid( &rg->sid, sid ))
+                {
+                    match = 1;
+                    break;
+                }
+            }
+            if (!match) continue;
+
+            switch (ace->type)
+            {
+            case ACCESS_DENIED_ACE_TYPE:
+            {
+                unsigned int access = map_access( ace->mask, mapping );
+                if (desired_access & MAXIMUM_ALLOWED)
+                    restricted_denied |= access;
+                else
+                {
+                    restricted_denied |= (access & ~restricted_allowed);
+                    if (desired_access & access)
+                    {
+                        *status = STATUS_ACCESS_DENIED;
+                        *granted_access = 0;
+                        return STATUS_SUCCESS;
+                    }
+                }
+                break;
+            }
+            case ACCESS_ALLOWED_ACE_TYPE:
+            {
+                unsigned int access = map_access( ace->mask, mapping );
+                if (desired_access & MAXIMUM_ALLOWED)
+                    restricted_allowed |= access;
+                else
+                    restricted_allowed |= (access & ~restricted_denied);
+                break;
+            }
+            }
+        }
+
+        if (desired_access & MAXIMUM_ALLOWED)
+            current_access &= (restricted_allowed & ~restricted_denied);
+        else
+        {
+            if ((restricted_allowed & desired_access) != desired_access)
+            {
+                *status = STATUS_ACCESS_DENIED;
+                *granted_access = 0;
+                return STATUS_SUCCESS;
+            }
+            current_access &= restricted_allowed;
+        }
+    }
+
 done:
     if (desired_access & MAXIMUM_ALLOWED)
         *granted_access = current_access & ~denied_access;
@@ -1097,6 +1282,37 @@ int check_object_access(struct token *token, struct object *obj, unsigned int *a
     mapping.read  = map_obj_access( obj, GENERIC_READ );
     mapping.write = map_obj_access( obj, GENERIC_WRITE );
     mapping.exec  = map_obj_access( obj, GENERIC_EXECUTE );
+
+    /* Mandatory integrity check: check if object has a mandatory label */
+    {
+        const struct acl *sacl;
+        int sacl_present;
+        sacl = sd_get_sacl( obj->sd, &sacl_present );
+        if (sacl_present && sacl)
+        {
+            const struct ace *ace;
+            const struct sid *sid;
+            unsigned int i;
+            for (i = 0, ace = ace_first( sacl ); i < sacl->count; i++, ace = ace_next( ace ))
+            {
+                if (ace->type != SYSTEM_MANDATORY_LABEL_ACE_TYPE) continue;
+                sid = (const struct sid *)(ace + 1);
+                if (sid->sub_count > 0)
+                {
+                    unsigned int obj_integrity = sid->sub_auth[sid->sub_count - 1];
+                    if (token->integrity_rid < obj_integrity)
+                    {
+                        unsigned int write_mask = (mapping.write & ~(READ_CONTROL | SYNCHRONIZE)) | WRITE_DAC | WRITE_OWNER | DELETE;
+                        if (*access & write_mask)
+                        {
+                            set_error( STATUS_ACCESS_DENIED );
+                            return FALSE;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     res = token_access_check( token, obj->sd, *access, NULL, NULL,
                               &mapping, access, &status ) == STATUS_SUCCESS &&
@@ -1348,20 +1564,177 @@ DECL_HANDLER(filter_token)
     if ((src_token = (struct token *)get_handle_obj( current->process, req->handle, TOKEN_DUPLICATE, &token_ops )))
     {
         const struct luid_attr *filter_privileges = get_req_data();
-        unsigned int priv_count, group_count;
+        unsigned int priv_count, group_count, restrict_count;
         const struct sid *filter_groups;
+        const struct sid *restrict_groups;
+        data_size_t total_size = get_req_data_size();
+        data_size_t priv_size = min( req->privileges_size, total_size );
+        data_size_t disable_size = min( req->disable_sids_size, total_size - priv_size );
+        data_size_t restrict_size = total_size - priv_size - disable_size;
         struct token *token;
 
-        priv_count = min( req->privileges_size, get_req_data_size() ) / sizeof(struct luid_attr);
-        filter_groups = (const struct sid *)((char *)filter_privileges + priv_count * sizeof(struct luid_attr));
-        group_count = get_sid_count( filter_groups, get_req_data_size() - priv_count * sizeof(struct luid_attr) );
+        priv_count = priv_size / sizeof(struct luid_attr);
+        filter_groups = (const struct sid *)((char *)filter_privileges + priv_size);
+        group_count = get_sid_count( filter_groups, disable_size );
+        restrict_groups = (const struct sid *)((char *)filter_groups + disable_size);
+        restrict_count = get_sid_count( restrict_groups, restrict_size );
 
         token = token_duplicate( src_token, src_token->primary, src_token->impersonation_level, NULL,
                                  filter_privileges, priv_count, filter_groups, group_count );
         if (token)
         {
-            unsigned int access = get_handle_access( current->process, req->handle );
-            reply->new_handle = alloc_handle_no_access_check( current->process, token, access, 0 );
+            if (req->flags & DISABLE_MAX_PRIVILEGE)
+            {
+                struct list *cursor, *cursor_next;
+                LIST_FOR_EACH_SAFE( cursor, cursor_next, &token->privileges )
+                {
+                    struct privilege *privilege = LIST_ENTRY( cursor, struct privilege, entry );
+                    if (!is_equal_luid( privilege->luid, SeChangeNotifyPrivilege ))
+                        privilege_remove( privilege );
+                }
+            }
+
+            if (req->flags & LUA_TOKEN)
+            {
+                struct group *group;
+                token->elevation = TokenElevationTypeLimited;
+                LIST_FOR_EACH_ENTRY( group, &token->groups, struct group, entry )
+                {
+                    if (equal_sid( &group->sid, &builtin_admins_sid ))
+                    {
+                        group->attrs &= ~(SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT);
+                        group->attrs |= SE_GROUP_USE_FOR_DENY_ONLY;
+                    }
+                }
+                if (token->integrity_rid > SECURITY_MANDATORY_MEDIUM_RID)
+                {
+                    struct sid med_label = { SID_REVISION, 1, SECURITY_MANDATORY_LABEL_AUTHORITY, { SECURITY_MANDATORY_MEDIUM_RID } };
+                    token_assign_label( token, &med_label );
+                }
+            }
+
+            if (!list_empty( &src_token->restricted_sids ))
+            {
+                if (restrict_count)
+                {
+                    struct list *cursor, *cursor_next;
+                    LIST_FOR_EACH_SAFE( cursor, cursor_next, &token->restricted_sids )
+                    {
+                        struct group *rg = LIST_ENTRY( cursor, struct group, entry );
+                        const struct sid *s = restrict_groups;
+                        unsigned int j, matched = 0;
+                        for (j = 0; j < restrict_count; j++)
+                        {
+                            if (equal_sid( &rg->sid, s )) { matched = 1; break; }
+                            s = (const struct sid *)((const char *)s + sid_len( s ));
+                        }
+                        if (!matched)
+                        {
+                            list_remove( &rg->entry );
+                            free( rg );
+                        }
+                    }
+                    if (list_empty( &token->restricted_sids ))
+                    {
+                        static const struct sid null_sid = { SID_REVISION, 1, SECURITY_NULL_SID_AUTHORITY, { SECURITY_NULL_RID } };
+                        size_t size = offsetof( struct group, sid.sub_auth[1] );
+                        struct group *res_group = mem_alloc( size );
+                        if (res_group)
+                        {
+                            res_group->attrs = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY;
+                            copy_sid( &res_group->sid, &null_sid );
+                            list_add_tail( &token->restricted_sids, &res_group->entry );
+                        }
+                    }
+                }
+            }
+            else if (restrict_count)
+            {
+                const struct sid *sid = restrict_groups;
+                unsigned int i;
+                for (i = 0; i < restrict_count; i++)
+                {
+                    struct group *existing;
+                    int found = 0;
+                    LIST_FOR_EACH_ENTRY( existing, &token->restricted_sids, struct group, entry )
+                    {
+                        if (equal_sid( &existing->sid, sid )) { found = 1; break; }
+                    }
+                    if (!found)
+                    {
+                        size_t size = offsetof( struct group, sid.sub_auth[sid->sub_count] );
+                        struct group *res_group = mem_alloc( size );
+                        if (res_group)
+                        {
+                            res_group->attrs = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY;
+                            copy_sid( &res_group->sid, sid );
+                            list_add_tail( &token->restricted_sids, &res_group->entry );
+                        }
+                    }
+                    sid = (const struct sid *)((char *)sid + sid_len( sid ));
+                }
+            }
+
+            {
+                unsigned int access = get_handle_access( current->process, req->handle );
+                reply->new_handle = alloc_handle_no_access_check( current->process, token, access, 0 );
+                release_object( token );
+            }
+        }
+        release_object( src_token );
+    }
+}
+
+/* creates a LowBox (AppContainer) token */
+DECL_HANDLER(create_lowbox_token)
+{
+    struct token *src_token, *token;
+
+    if ((src_token = (struct token *)get_handle_obj( current->process, req->handle, TOKEN_DUPLICATE, &token_ops )))
+    {
+        const struct sid *package_sid = get_req_data();
+        data_size_t package_sid_size = min( req->package_sid_size, get_req_data_size() );
+        const struct sid *capabilities_data = (const struct sid *)((char *)package_sid + package_sid_size);
+        data_size_t capabilities_size = get_req_data_size() - package_sid_size;
+        struct sid low_label_sid = { SID_REVISION, 1, SECURITY_MANDATORY_LABEL_AUTHORITY, { SECURITY_MANDATORY_LOW_RID } };
+
+        if (!package_sid_size || !sid_valid_size( package_sid, package_sid_size ))
+        {
+            set_error( STATUS_INVALID_PARAMETER );
+            release_object( src_token );
+            return;
+        }
+
+        token = token_duplicate( src_token, src_token->primary, src_token->impersonation_level, NULL,
+                                 NULL, 0, NULL, 0 );
+        if (token)
+        {
+            unsigned int access;
+
+            token->app_container = memdup( package_sid, sid_len( package_sid ) );
+            token_assign_label( token, &low_label_sid );
+
+            /* Add capabilities */
+            while (capabilities_size > 0)
+            {
+                size_t size;
+                struct group *cap;
+
+                if (!sid_valid_size( capabilities_data, capabilities_size )) break;
+                size = offsetof( struct group, sid.sub_auth[capabilities_data->sub_count] );
+                cap = mem_alloc( size );
+                if (cap)
+                {
+                    cap->attrs = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY;
+                    copy_sid( &cap->sid, capabilities_data );
+                    list_add_tail( &token->capabilities, &cap->entry );
+                }
+                capabilities_size -= sid_len( capabilities_data );
+                capabilities_data = (const struct sid *)((char *)capabilities_data + sid_len( capabilities_data ));
+            }
+
+            access = req->access ? req->access : get_handle_access( current->process, req->handle );
+            reply->token_handle = alloc_handle_no_access_check( current->process, token, access, 0 );
             release_object( token );
         }
         release_object( src_token );
@@ -1470,6 +1843,9 @@ DECL_HANDLER(get_token_sid)
         case TokenOwner:
             sid = token->owner;
             break;
+        case TokenAppContainerSid:
+            sid = token->app_container;
+            break;
         default:
             set_error( STATUS_INVALID_PARAMETER );
             break;
@@ -1494,8 +1870,9 @@ DECL_HANDLER(get_token_groups)
     {
         unsigned int group_count = 0;
         const struct group *group;
+        const struct list *group_list = (req->which_groups == 1) ? &token->restricted_sids : &token->groups;
 
-        LIST_FOR_EACH_ENTRY( group, &token->groups, const struct group, entry )
+        LIST_FOR_EACH_ENTRY( group, group_list, const struct group, entry )
         {
             if (req->attr_mask && !(group->attrs & req->attr_mask)) continue;
             group_count++;
@@ -1510,7 +1887,7 @@ DECL_HANDLER(get_token_groups)
 
             if (attr_ptr)
             {
-                LIST_FOR_EACH_ENTRY( group, &token->groups, const struct group, entry )
+                LIST_FOR_EACH_ENTRY( group, group_list, const struct group, entry )
                 {
                     if (req->attr_mask && !(group->attrs & req->attr_mask)) continue;
                     sid = copy_sid( sid, &group->sid );
@@ -1545,6 +1922,21 @@ DECL_HANDLER(get_token_info)
             reply->is_elevated = token->elevation == TokenElevationTypeFull;
         reply->group_count = list_count( &token->groups );
         reply->privilege_count = list_count( &token->privileges );
+        reply->integrity_rid = token->integrity_rid;
+        reply->is_app_container = (token->app_container != NULL);
+        reply->is_restricted = !list_empty( &token->restricted_sids );
+        release_object( token );
+    }
+}
+
+DECL_HANDLER(set_token_integrity_level)
+{
+    struct token *token;
+
+    if ((token = (struct token *)get_handle_obj( current->process, req->handle, TOKEN_ADJUST_DEFAULT, &token_ops )))
+    {
+        struct sid label_sid = { SID_REVISION, 1, SECURITY_MANDATORY_LABEL_AUTHORITY, { req->integrity_rid } };
+        token_assign_label( token, &label_sid );
         release_object( token );
     }
 }
