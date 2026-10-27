@@ -360,6 +360,7 @@ int receive_fd( struct process *process )
     struct msghdr msghdr;
     char cmsg_buffer[256];
     int fd = -1, ret;
+    int saved_errno = 0;
 
     msghdr.msg_name    = NULL;
     msghdr.msg_namelen = 0;
@@ -373,6 +374,7 @@ int receive_fd( struct process *process )
     vec.iov_len  = sizeof(data);
 
     ret = recvmsg( get_unix_fd( process->msg_fd ), &msghdr, 0 );
+    saved_errno = errno;
 
     if (ret > 0)
     {
@@ -411,6 +413,9 @@ int receive_fd( struct process *process )
 
     if (!ret)
     {
+        if (getenv( "WEX_TERM_TRACE" ))
+            fprintf( stderr, "wex_term_trace: request_error pid=%04x op=%s res=%d errno=%d (%s)\n",
+                     process->id, "recvmsg", ret, saved_errno, strerror( saved_errno ) );
         kill_process( process, 0 );
     }
     else if (ret > 0)
@@ -418,6 +423,9 @@ int receive_fd( struct process *process )
         fprintf( stderr, "Protocol error: process %04x: partial recvmsg %d for fd\n",
                  process->id, ret );
         if (fd != -1) close( fd );
+        if (getenv( "WEX_TERM_TRACE" ))
+            fprintf( stderr, "wex_term_trace: request_error pid=%04x op=%s res=%d errno=%d (%s)\n",
+                     process->id, "recvmsg", ret, saved_errno, strerror( saved_errno ) );
         kill_process( process, 1 );
     }
     else
@@ -425,6 +433,9 @@ int receive_fd( struct process *process )
         if (errno != EWOULDBLOCK && (EWOULDBLOCK == EAGAIN || errno != EAGAIN))
         {
             fprintf( stderr, "Protocol error: process %04x: ", process->id );
+            if (getenv( "WEX_TERM_TRACE" ))
+                fprintf( stderr, "wex_term_trace: request_error pid=%04x op=%s res=%d errno=%d (%s)\n",
+                         process->id, "recvmsg", ret, saved_errno, strerror( saved_errno ) );
             perror( "recvmsg" );
             kill_process( process, 1 );
         }
@@ -440,6 +451,7 @@ int send_client_fd( struct process *process, int fd, obj_handle_t handle )
     char cmsg_buffer[256];
     struct cmsghdr *cmsg;
     int ret;
+    int saved_errno = 0;
 
     msghdr.msg_name    = NULL;
     msghdr.msg_namelen = 0;
@@ -463,21 +475,31 @@ int send_client_fd( struct process *process, int fd, obj_handle_t handle )
         fprintf( stderr, "%04x: *fd* %04x -> %d\n", current ? current->id : process->id, handle, fd );
 
     ret = sendmsg( get_unix_fd( process->msg_fd ), &msghdr, 0 );
+    saved_errno = errno;
 
     if (ret == sizeof(handle)) return 0;
 
     if (ret >= 0)
     {
         fprintf( stderr, "Protocol error: process %04x: partial sendmsg %d\n", process->id, ret );
+        if (getenv( "WEX_TERM_TRACE" ))
+            fprintf( stderr, "wex_term_trace: request_error pid=%04x op=%s res=%d errno=%d (%s)\n",
+                     process->id, "sendmsg", ret, saved_errno, strerror( saved_errno ) );
         kill_process( process, 1 );
     }
     else if (errno == EPIPE)
     {
+        if (getenv( "WEX_TERM_TRACE" ))
+            fprintf( stderr, "wex_term_trace: request_error pid=%04x op=%s res=%d errno=%d (%s)\n",
+                     process->id, "sendmsg", ret, saved_errno, strerror( saved_errno ) );
         kill_process( process, 0 );
     }
     else
     {
         fprintf( stderr, "Protocol error: process %04x: ", process->id );
+        if (getenv( "WEX_TERM_TRACE" ))
+            fprintf( stderr, "wex_term_trace: request_error pid=%04x op=%s res=%d errno=%d (%s)\n",
+                     process->id, "sendmsg", ret, saved_errno, strerror( saved_errno ) );
         perror( "sendmsg" );
         kill_process( process, 1 );
     }

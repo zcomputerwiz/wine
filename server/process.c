@@ -828,7 +828,13 @@ static void process_poll_event( struct fd *fd, int event )
     struct process *process = get_fd_user( fd );
     assert( process->obj.ops == &process_ops );
 
-    if (event & (POLLERR | POLLHUP)) kill_process( process, !process->is_terminating );
+    if (event & (POLLERR | POLLHUP))
+    {
+        if (getenv( "WEX_TERM_TRACE" ))
+            fprintf( stderr, "wex_term_trace: process_poll_event server_kill pid=%04x event=0x%x is_terminating=%d unix_fd=%d\n",
+                     get_process_id( process ), (unsigned)event, (int)process->is_terminating, get_unix_fd( fd ) );
+        kill_process( process, !process->is_terminating );
+    }
     else if (event & POLLIN) receive_fd( process );
 }
 

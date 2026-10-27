@@ -974,7 +974,13 @@ void CDECL wine_server_send_fd( int fd )
         if ((ret = sendmsg( fd_socket, &msghdr, 0 )) == sizeof(data)) return;
         if (ret >= 0) server_protocol_error( "partial write %d\n", ret );
         if (errno == EINTR) continue;
-        if (errno == EPIPE) abort_thread(0);
+        if (errno == EPIPE)
+        {
+            if (getenv( "WEX_TERM_TRACE" ))
+                fprintf( stderr, "wex_term_trace: client_socket_close pid=%d fd=%d reason=%s errno=%d\n",
+                         getpid(), fd_socket, "send_eipe", errno );
+            abort_thread(0);
+        }
         server_protocol_perror( "sendmsg" );
     }
 }
@@ -1029,6 +1035,9 @@ int wine_server_receive_fd( obj_handle_t *handle )
         server_protocol_perror("recvmsg");
     }
     /* the server closed the connection; time to die... */
+    if (getenv( "WEX_TERM_TRACE" ))
+        fprintf( stderr, "wex_term_trace: client_socket_close pid=%d fd=%d reason=%s errno=%d\n",
+                 getpid(), fd_socket, "recv_closed", errno );
     abort_thread(0);
 }
 
@@ -1594,6 +1603,9 @@ static void init_teb_data( struct thread_data *data )
  */
 void process_exit_wrapper( int status )
 {
+    if (getenv( "WEX_TERM_TRACE" ))
+        fprintf( stderr, "wex_term_trace: client_socket_close pid=%d fd=%d reason=%s errno=%d\n",
+                 getpid(), fd_socket, "process_exit", 0 );
     close( fd_socket );
     exit( status );
 }
