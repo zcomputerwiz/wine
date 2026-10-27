@@ -331,10 +331,18 @@ static void terminate_job( struct job *job, int exit_code )
     }
 
     job->terminating = 1;
+    if (getenv( "WEX_TERM_TRACE" ))
+        fprintf( stderr, "WEXTERM: server terminate_job exit_code=%d (killing member processes)\n", exit_code );
     LIST_FOR_EACH_ENTRY_SAFE( process, next_process, &job->process_list, struct process, job_entry )
     {
         assert( process->job == job );
-        if (process->running_threads) terminate_process( process, NULL, exit_code );
+        if (process->running_threads)
+        {
+            if (getenv( "WEX_TERM_TRACE" ))
+                fprintf( stderr, "WEXTERM: server terminate_job -> member TARGET_wine_pid=0x%08x exit_code=%d\n",
+                         get_process_id( process ), exit_code );
+            terminate_process( process, NULL, exit_code );
+        }
     }
     job->terminating = 0;
     signal_sync( job->sync );
@@ -874,6 +882,9 @@ static void terminate_process( struct process *process, struct thread *skip, int
 {
     struct thread *thread;
 
+    if (getenv( "WEX_TERM_TRACE" ))
+        fprintf( stderr, "WEXTERM: server terminate_process TARGET_wine_pid=0x%08x exit_code=%d skip_thread=%p\n",
+                 get_process_id( process ), exit_code, (void *)skip );
     grab_object( process );  /* make sure it doesn't get freed when threads die */
     process->is_terminating = 1;
 
@@ -922,6 +933,9 @@ void kill_console_processes( struct thread *renderer, int exit_code )
 /* a process has been killed (i.e. its last thread died) */
 static void process_killed( struct process *process )
 {
+    if (getenv( "WEX_TERM_TRACE" ))
+        fprintf( stderr, "WEXTERM: server process_killed (last thread died) TARGET_wine_pid=0x%08x final_exit_code=%d\n",
+                 get_process_id( process ), process->exit_code );
     assert( list_empty( &process->thread_list ));
     process->end_time = current_time;
     close_process_desktop( process );
@@ -1021,6 +1035,9 @@ void resume_process( struct process *process )
 /* kill a process on the spot */
 void kill_process( struct process *process, int violent_death )
 {
+    if (getenv( "WEX_TERM_TRACE" ))
+        fprintf( stderr, "WEXTERM: server kill_process TARGET_wine_pid=0x%08x violent_death=%d\n",
+                 get_process_id( process ), (int)violent_death );
     if (!violent_death && process->msg_fd)  /* normal termination on pipe close */
     {
         release_object( process->msg_fd );
@@ -1468,6 +1485,9 @@ DECL_HANDLER(terminate_process)
     else process = (struct process *)grab_object( current->process );
 
     reply->self = (current->process == process);
+    if (getenv( "WEX_TERM_TRACE" ))
+        fprintf( stderr, "WEXTERM: server NT-terminate REQUESTER_wine_pid=0x%08x TARGET_wine_pid=0x%08x handle=0x%08x exit_code=%d self=%d\n",
+                 get_process_id( current->process ), get_process_id( process ), (unsigned int)req->handle, req->exit_code, (int)reply->self );
     terminate_process( process, current, req->exit_code );
     release_object( process );
 }

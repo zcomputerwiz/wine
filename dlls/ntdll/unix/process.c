@@ -968,6 +968,10 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
     unsigned int ret;
     BOOL self;
 
+    if (getenv( "WEX_TERM_TRACE" ))
+        fprintf( stderr, "WEXTERM: ntdll NtTerminateProcess ENTRY caller_unix_pid=%d handle=0x%lx exit_code=%ld\n",
+                 (int)getpid(), (unsigned long)handle, (long)exit_code );
+
     SERVER_START_REQ( terminate_process )
     {
         req->handle    = wine_server_obj_handle( handle );
@@ -976,6 +980,9 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
         self = reply->self;
     }
     SERVER_END_REQ;
+    if (getenv( "WEX_TERM_TRACE" ))
+        fprintf( stderr, "WEXTERM: ntdll NtTerminateProcess RETURN caller_unix_pid=%d handle=0x%lx exit_code=%ld ret=0x%08x self=%d\n",
+                 (int)getpid(), (unsigned long)handle, (long)exit_code, (unsigned int)ret, (int)self );
     if (self)
     {
         if (!handle) process_exiting = TRUE;
