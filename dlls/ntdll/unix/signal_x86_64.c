@@ -1468,6 +1468,54 @@ NTSTATUS get_thread_wow64_context( HANDLE handle, void *ctx, ULONG size )
 
 
 /***********************************************************************
+ *           WEX_TERM_TRACE unhandled-fault logging (opt-in, diagnostic only)
+ *
+ * setup_raise_exception() runs in signal context, so this is async-signal-safe:
+ * write(2) on a stack buffer only - no stdio, no allocation, no backtrace. It
+ * logs the fault and never alters control flow or keeps the process alive.
+ */
+static volatile sig_atomic_t wex_term_trace_on;
+
+static void wex_term_append_dec( char *buf, int *n, long v )
+{
+    char tmp[16];
+    int t = 0;
+    if (v == 0) tmp[t++] = '0';
+    while (v > 0) { tmp[t++] = '0' + (int)(v % 10); v /= 10; }
+    while (t > 0) buf[(*n)++] = tmp[--t];
+}
+
+static void wex_term_append_hex( char *buf, int *n, unsigned long v )
+{
+    static const char digits[] = "0123456789abcdef";
+    char tmp[16];
+    int t = 0;
+    if (v == 0) tmp[t++] = '0';
+    while (v > 0) { tmp[t++] = digits[v & 0xf]; v >>= 4; }
+    buf[(*n)++] = '0';
+    buf[(*n)++] = 'x';
+    while (t > 0) buf[(*n)++] = tmp[--t];
+}
+
+static void wex_term_fault_log( unsigned code, const void *addr )
+{
+    char buf[128];
+    int n = 0;
+    size_t i;
+    static const char pre[] = "WEXTERM: ntdll unhandled_fault caller_unix_pid=";
+    for (i = 0; pre[i] && n < (int)sizeof(buf) - 48; i++) buf[n++] = pre[i];
+    wex_term_append_dec( buf, &n, (long)getpid() );
+    buf[n++] = ' ';
+    { const char c[] = "code=0x"; for (i = 0; c[i]; i++) buf[n++] = c[i]; }
+    wex_term_append_hex( buf, &n, code );
+    buf[n++] = ' ';
+    { const char a[] = "addr=0x"; for (i = 0; a[i]; i++) buf[n++] = a[i]; }
+    wex_term_append_hex( buf, &n, (unsigned long)addr );
+    buf[n++] = '\n';
+    (void)!write( STDERR_FILENO, buf, n );
+}
+
+/***********************************************************************
  *           setup_raise_exception
  */
 static void setup_raise_exception( struct thread_data *data, ucontext_t *sigcontext,
@@ -1481,6 +1529,7 @@ static void setup_raise_exception( struct thread_data *data, ucontext_t *sigcont
     XSAVE_AREA_HEADER *src_xs;
     void *callback;
 
+    if (wex_term_trace_on) wex_term_fault_log( rec->ExceptionCode, rec->ExceptionAddress );
     status = send_debug_event( data, rec, context, TRUE );
     if (status == DBG_CONTINUE || status == DBG_EXCEPTION_HANDLED)
     {
@@ -2805,6 +2854,7 @@ void signal_init_process( TEB *teb )
     WOW_TEB *wow_teb = get_wow_teb( teb );
     void *ptr;
 
+    wex_term_trace_on = (getenv( "WEX_TERM_TRACE" ) != NULL );
     if (user_shared_data->XState.Size) xstate_size = user_shared_data->XState.Size - sizeof(XSAVE_FORMAT);
     frame_size = offsetof( struct syscall_frame, xstate ) + xstate_size;
     xstate_extended_features = user_shared_data->XState.EnabledFeatures & ~(UINT64)3;

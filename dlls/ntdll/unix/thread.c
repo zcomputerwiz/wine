@@ -1496,6 +1496,9 @@ NTSTATUS WINAPI PsCreateSystemThread( HANDLE *handle, ACCESS_MASK access, OBJECT
  */
 void abort_thread( int status )
 {
+    if (getenv( "WEX_TERM_TRACE" ))
+        fprintf( stderr, "WEXTERM: ntdll abort_thread caller_unix_pid=%d tid=%d status=0x%x\n",
+                 (int)getpid(), (int)syscall( SYS_gettid ), (unsigned)status );
     pthread_sigmask( SIG_BLOCK, &server_block_set, NULL );
     if (InterlockedDecrement( &nb_threads ) <= 0) abort_process( status );
     pthread_exit_wrapper( status );
@@ -1507,6 +1510,9 @@ void abort_thread( int status )
  */
 void abort_process( int status )
 {
+    if (getenv( "WEX_TERM_TRACE" ))
+        fprintf( stderr, "WEXTERM: ntdll abort_process caller_unix_pid=%d tid=%d status=0x%x\n",
+                 (int)getpid(), (int)syscall( SYS_gettid ), (unsigned)status );
     _exit( get_unix_exit_code( status ));
 }
 
