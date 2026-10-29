@@ -1902,9 +1902,28 @@ HRESULT WINAPI AppContainerRegisterSid( PSID sid, LPCWSTR moniker, LPCWSTR displ
             if (del_status && del_status != STATUS_PENDING)
                 WARN( "rollback NtDeleteKey failed: %08x\n", del_status );
         }
+        else if (*m)
+        {
+            WCHAR local_app_data[MAX_PATH];
+            if (GetEnvironmentVariableW( L"LOCALAPPDATA", local_app_data, ARRAY_SIZE(local_app_data) ))
+            {
+                WCHAR dir_path[MAX_PATH];
+                if (swprintf( dir_path, ARRAY_SIZE(dir_path), L"%s\\Packages", local_app_data ) > 0)
+                {
+                    CreateDirectoryW( dir_path, NULL );
+                    if (swprintf( dir_path, ARRAY_SIZE(dir_path), L"%s\\Packages\\%s", local_app_data, m ) > 0)
+                    {
+                        CreateDirectoryW( dir_path, NULL );
+                        if (swprintf( dir_path, ARRAY_SIZE(dir_path), L"%s\\Packages\\%s\\AC", local_app_data, m ) > 0)
+                            CreateDirectoryW( dir_path, NULL );
+                    }
+                }
+            }
+        }
     }
 
 done:
+    TRACE( "returning hr=0x%08lx, path=%s\n", hr, debugstr_w(path) );
     if (key) NtClose( key );
     if (hkcu) NtClose( hkcu );
     if (path) RtlFreeHeap( GetProcessHeap(), 0, path );
@@ -1955,6 +1974,7 @@ HRESULT WINAPI AppContainerUnregisterSid( PSID sid )
     }
 
 done:
+    TRACE( "returning hr=0x%08lx, path=%s\n", hr, debugstr_w(path) );
     if (key) NtClose( key );
     if (hkcu) NtClose( hkcu );
     if (path) RtlFreeHeap( GetProcessHeap(), 0, path );
@@ -2005,6 +2025,7 @@ HRESULT WINAPI AppContainerLookupMoniker( PSID sid, LPWSTR *moniker )
         hr = ac_read_moniker_value( key, moniker );
 
 done:
+    TRACE( "returning hr=0x%08lx, path=%s\n", hr, debugstr_w(path) );
     if (key) NtClose( key );
     if (hkcu) NtClose( hkcu );
     if (path) RtlFreeHeap( GetProcessHeap(), 0, path );
