@@ -592,6 +592,23 @@ static void test_appcontainer_profile(void)
     hr = pCreateAppContainerProfile( test_name, test_display, test_desc, NULL, 0, NULL );
     ok(hr == E_INVALIDARG, "NULL sid out: %#lx\n", hr);
 
+    /* Traversal and separator validation */
+    hr = pCreateAppContainerProfile( L"../invalid", test_display, test_desc, NULL, 0, &sid );
+    ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_NAME), "expected ERROR_INVALID_NAME for ../, got %#lx\n", hr);
+
+    hr = pCreateAppContainerProfile( L"invalid/name", test_display, test_desc, NULL, 0, &sid );
+    ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_NAME), "expected ERROR_INVALID_NAME for /, got %#lx\n", hr);
+
+    hr = pCreateAppContainerProfile( L"invalid\\name", test_display, test_desc, NULL, 0, &sid );
+    ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_NAME), "expected ERROR_INVALID_NAME for \\, got %#lx\n", hr);
+
+    hr = pDeleteAppContainerProfile( L"../invalid" );
+    ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_NAME), "expected ERROR_INVALID_NAME on delete ../, got %#lx\n", hr);
+
+    /* Deleting non-existent profile returns S_OK */
+    hr = pDeleteAppContainerProfile( L"NonExistentProfile_12345" );
+    ok(hr == S_OK, "expected S_OK on delete nonexistent profile, got %#lx\n", hr);
+
     /* Valid creation */
     sid = NULL;
     hr = pCreateAppContainerProfile( test_name, test_display, test_desc, NULL, 0, &sid );
@@ -658,6 +675,50 @@ static void test_appcontainer_profile(void)
             ok(!wcsicmp(folder_path, expected_folder), "Folder path mismatch: %s != %s\n",
                wine_dbgstr_w(folder_path), wine_dbgstr_w(expected_folder));
             CoTaskMemFree( folder_path );
+        }
+
+        /* Test GetAppContainerFolderPath with corrupt registry data */
+        {
+            static const WCHAR mock_sid[] = L"S-1-15-2-12345-67890-mock";
+            WCHAR mock_key[512];
+            HKEY hmock;
+            BYTE corrupt_bytes[] = { 'b', 'a', 'd' }; /* odd length, not WCHAR aligned */
+            WCHAR unterminated[] = { 'b', 'a', 'd', '!' }; /* not NUL-terminated */
+            WCHAR traversal_moniker[] = L"..\\traversal";
+
+            swprintf( mock_key, ARRAY_SIZE(mock_key),
+                      L"Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppContainer\\Mappings\\%s",
+                      mock_sid );
+
+            if (RegCreateKeyExW( HKEY_CURRENT_USER, mock_key, 0, NULL, 0, KEY_READ | KEY_WRITE, NULL, &hmock, NULL ) == ERROR_SUCCESS)
+            {
+                /* Odd byte count / unaligned */
+                RegSetValueExW( hmock, L"Moniker", 0, REG_SZ, corrupt_bytes, sizeof(corrupt_bytes) );
+                folder_path = NULL;
+                hr = pGetAppContainerFolderPath( mock_sid, &folder_path );
+                ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA), "expected ERROR_INVALID_DATA for odd bytes, got %#lx\n", hr);
+
+                /* Corrupt: REG_BINARY instead of REG_SZ */
+                RegSetValueExW( hmock, L"Moniker", 0, REG_BINARY, corrupt_bytes, 2 );
+                folder_path = NULL;
+                hr = pGetAppContainerFolderPath( mock_sid, &folder_path );
+                ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA), "expected ERROR_INVALID_DATA for REG_BINARY, got %#lx\n", hr);
+
+                /* Corrupt: unterminated string */
+                RegSetValueExW( hmock, L"Moniker", 0, REG_SZ, (BYTE *)unterminated, sizeof(unterminated) );
+                folder_path = NULL;
+                hr = pGetAppContainerFolderPath( mock_sid, &folder_path );
+                ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA), "expected ERROR_INVALID_DATA for unterminated, got %#lx\n", hr);
+
+                /* Traversal in stored moniker */
+                RegSetValueExW( hmock, L"Moniker", 0, REG_SZ, (BYTE *)traversal_moniker, (wcslen(traversal_moniker) + 1) * sizeof(WCHAR) );
+                folder_path = NULL;
+                hr = pGetAppContainerFolderPath( mock_sid, &folder_path );
+                ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_NAME), "expected ERROR_INVALID_NAME for traversal moniker, got %#lx\n", hr);
+
+                RegCloseKey( hmock );
+                RegDeleteKeyW( HKEY_CURRENT_USER, mock_key );
+            }
         }
     }
     else

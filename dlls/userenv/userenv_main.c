@@ -752,12 +752,33 @@ BOOL WINAPI USERENV_138( int csidl, LPCSTR lnk_dir, LPCSTR lnk_filename,
     return FALSE;
 }
 
+static BOOL is_valid_container_name( const WCHAR *name )
+{
+    const WCHAR *p;
+    DWORD len;
+
+    if (!name || !*name) return FALSE;
+    len = wcslen( name );
+    if (len > 64) return FALSE;
+
+    /* Reject path separators, colons, and directory traversal */
+    if (wcsstr( name, L".." )) return FALSE;
+    for (p = name; *p; p++)
+    {
+        if (*p == L'/' || *p == L'\\' || *p == L':')
+            return FALSE;
+    }
+    return TRUE;
+}
+
 HRESULT WINAPI CreateAppContainerProfile(PCWSTR container_name, PCWSTR display_name, PCWSTR description,
                                          SID_AND_ATTRIBUTES *capabilities, DWORD capability_count,
                                          SID **container_sid)
 {
     WCHAR local_app_data[MAX_PATH];
+    WCHAR path[MAX_PATH];
     PSID sid = NULL;
+    DWORD len;
     HRESULT hr;
 
     TRACE("(%s, %s, %s, %p, %ld, %p)\n", debugstr_w(container_name), debugstr_w(display_name),
@@ -765,6 +786,13 @@ HRESULT WINAPI CreateAppContainerProfile(PCWSTR container_name, PCWSTR display_n
 
     if (!container_name || !*container_name || !container_sid) return E_INVALIDARG;
     *container_sid = NULL;
+
+    if (!is_valid_container_name( container_name ))
+        return HRESULT_FROM_WIN32( ERROR_INVALID_NAME );
+
+    len = GetEnvironmentVariableW( L"LOCALAPPDATA", local_app_data, ARRAY_SIZE(local_app_data) );
+    if (!len || len >= ARRAY_SIZE(local_app_data))
+        return E_FAIL;
 
     hr = DeriveAppContainerSidFromAppContainerName( container_name, &sid );
     if (FAILED(hr)) return hr;
@@ -785,34 +813,45 @@ HRESULT WINAPI CreateAppContainerProfile(PCWSTR container_name, PCWSTR display_n
     }
 
     /* Create the profile directory hierarchy under %LOCALAPPDATA%\Packages\<container_name>\AC */
-    if (GetEnvironmentVariableW( L"LOCALAPPDATA", local_app_data, ARRAY_SIZE(local_app_data) ))
-    {
-        WCHAR path[MAX_PATH];
-        if (swprintf( path, ARRAY_SIZE(path), L"%s\\Packages", local_app_data ) > 0)
-        {
-            CreateDirectoryW( path, NULL );
-            if (swprintf( path, ARRAY_SIZE(path), L"%s\\Packages\\%s", local_app_data, container_name ) > 0)
-            {
-                CreateDirectoryW( path, NULL );
-                if (swprintf( path, ARRAY_SIZE(path), L"%s\\Packages\\%s\\AC", local_app_data, container_name ) > 0)
-                    CreateDirectoryW( path, NULL );
-            }
-        }
-    }
+    if (swprintf( path, ARRAY_SIZE(path), L"%s\\Packages", local_app_data ) <= 0)
+        goto err_fs;
+    if (!CreateDirectoryW( path, NULL ) && GetLastError() != ERROR_ALREADY_EXISTS)
+        goto err_fs;
+
+    if (swprintf( path, ARRAY_SIZE(path), L"%s\\Packages\\%s", local_app_data, container_name ) <= 0)
+        goto err_fs;
+    if (!CreateDirectoryW( path, NULL ) && GetLastError() != ERROR_ALREADY_EXISTS)
+        goto err_fs;
+
+    if (swprintf( path, ARRAY_SIZE(path), L"%s\\Packages\\%s\\AC", local_app_data, container_name ) <= 0)
+        goto err_fs;
+    if (!CreateDirectoryW( path, NULL ) && GetLastError() != ERROR_ALREADY_EXISTS)
+        goto err_fs;
 
     *container_sid = sid;
     return S_OK;
+
+err_fs:
+    hr = HRESULT_FROM_WIN32( GetLastError() );
+    if (SUCCEEDED(hr)) hr = E_FAIL;
+    if (pAppContainerUnregisterSid) pAppContainerUnregisterSid( sid );
+    FreeSid( sid );
+    return hr;
 }
 
 HRESULT WINAPI DeleteAppContainerProfile(PCWSTR container_name)
 {
     WCHAR local_app_data[MAX_PATH];
     PSID sid = NULL;
+    DWORD len;
     HRESULT hr;
 
     TRACE("(%s)\n", debugstr_w(container_name));
 
     if (!container_name || !*container_name) return E_INVALIDARG;
+
+    if (!is_valid_container_name( container_name ))
+        return HRESULT_FROM_WIN32( ERROR_INVALID_NAME );
 
     hr = DeriveAppContainerSidFromAppContainerName( container_name, &sid );
     if (FAILED(hr)) return hr;
@@ -825,18 +864,23 @@ HRESULT WINAPI DeleteAppContainerProfile(PCWSTR container_name)
 
     FreeSid( sid );
 
-    /* Clean up the profile directory under %LOCALAPPDATA%\Packages\<container_name> */
-    if (GetEnvironmentVariableW( L"LOCALAPPDATA", local_app_data, ARRAY_SIZE(local_app_data) ))
+    /* If unregister returned file-not-found, Windows maps that to S_OK */
+    if (hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) hr = S_OK;
+
+    /* Clean up the profile directory under %LOCALAPPDATA%\Packages\<container_name> only on success */
+    if (SUCCEEDED(hr))
     {
-        WCHAR path[MAX_PATH];
-        if (swprintf( path, ARRAY_SIZE(path), L"%s\\Packages\\%s\\AC", local_app_data, container_name ) > 0)
-            RemoveDirectoryW( path );
-        if (swprintf( path, ARRAY_SIZE(path), L"%s\\Packages\\%s", local_app_data, container_name ) > 0)
-            RemoveDirectoryW( path );
+        len = GetEnvironmentVariableW( L"LOCALAPPDATA", local_app_data, ARRAY_SIZE(local_app_data) );
+        if (len && len < ARRAY_SIZE(local_app_data))
+        {
+            WCHAR path[MAX_PATH];
+            if (swprintf( path, ARRAY_SIZE(path), L"%s\\Packages\\%s\\AC", local_app_data, container_name ) > 0)
+                RemoveDirectoryW( path );
+            if (swprintf( path, ARRAY_SIZE(path), L"%s\\Packages\\%s", local_app_data, container_name ) > 0)
+                RemoveDirectoryW( path );
+        }
     }
 
-    /* Deleting a profile that was never registered is not an error. */
-    if (hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) hr = S_OK;
     return hr;
 }
 
@@ -872,8 +916,22 @@ HRESULT WINAPI GetAppContainerFolderPath(PCWSTR app_container_sid, PWSTR *path)
     size = sizeof(moniker);
     status = RegQueryValueExW( hkey, L"Moniker", NULL, &type, (BYTE *)moniker, &size );
     RegCloseKey( hkey );
-    if (status != ERROR_SUCCESS || type != REG_SZ)
+    if (status != ERROR_SUCCESS)
         return HRESULT_FROM_WIN32( ERROR_NOT_APPCONTAINER );
+
+    if (type != REG_SZ)
+        return HRESULT_FROM_WIN32( ERROR_INVALID_DATA );
+
+    /* Validate stored REG_SZ: at least 1 WCHAR, even byte count, bounded size, and NUL-terminated */
+    if (size < sizeof(WCHAR) || (size % sizeof(WCHAR)) != 0 || size > sizeof(moniker))
+        return HRESULT_FROM_WIN32( ERROR_INVALID_DATA );
+
+    if (moniker[size / sizeof(WCHAR) - 1] != L'\0')
+        return HRESULT_FROM_WIN32( ERROR_INVALID_DATA );
+
+    /* Reject traversal or path separators in moniker */
+    if (!is_valid_container_name( moniker ))
+        return HRESULT_FROM_WIN32( ERROR_INVALID_NAME );
 
     len = GetEnvironmentVariableW( L"LOCALAPPDATA", local_app_data, ARRAY_SIZE(local_app_data) );
     if (!len || len >= ARRAY_SIZE(local_app_data))
