@@ -262,6 +262,14 @@ static void test_AppContainerRegistration( void )
     /* --- invalid / NULL inputs are rejected safely, never with bad memory --- */
     hr = pAppContainerRegisterSid( NULL, L"m", L"d" );
     ok( hr == E_INVALIDARG, "got %#lx for NULL-SID register.\n", (unsigned long)hr );
+    hr = pAppContainerRegisterSid( sid_a, NULL, L"d" );
+    ok( hr == E_INVALIDARG, "got %#lx for NULL moniker register.\n", (unsigned long)hr );
+    hr = pAppContainerRegisterSid( sid_a, L"", L"d" );
+    ok( hr == E_INVALIDARG, "got %#lx for empty moniker register.\n", (unsigned long)hr );
+    hr = pAppContainerRegisterSid( sid_a, L"m", NULL );
+    ok( hr == E_INVALIDARG, "got %#lx for NULL display_name register.\n", (unsigned long)hr );
+    hr = pAppContainerRegisterSid( sid_a, L"m", L"" );
+    ok( hr == E_INVALIDARG, "got %#lx for empty display_name register.\n", (unsigned long)hr );
     hr = pAppContainerUnregisterSid( NULL );
     ok( hr == E_INVALIDARG, "got %#lx for NULL-SID unregister.\n", (unsigned long)hr );
     moniker = (LPWSTR)0xdeadbeef;
@@ -980,10 +988,18 @@ done:
 
 static void test_CreateAppContainerToken(void)
 {
+    static SID_IDENTIFIER_AUTHORITY sia_app = {SECURITY_APP_PACKAGE_AUTHORITY};
     SECURITY_CAPABILITIES sec_cap;
-    HANDLE token = NULL, app_token = NULL;
-    PSID sid = NULL;
+    SID_AND_ATTRIBUTES cap_attr[1];
+    HANDLE token = NULL, app_token = NULL, dup_only = NULL, app_token2 = NULL;
+    PSID sid = NULL, cap_sid = NULL;
     DWORD is_appcontainer = 0, ret_len = 0;
+    BYTE ac_buf[sizeof(TOKEN_APPCONTAINER_INFORMATION) + 256];
+    BYTE il_buf[sizeof(TOKEN_MANDATORY_LABEL) + 256];
+    BYTE cap_buf[sizeof(TOKEN_GROUPS) + 256];
+    TOKEN_APPCONTAINER_INFORMATION *aci = (TOKEN_APPCONTAINER_INFORMATION *)ac_buf;
+    TOKEN_MANDATORY_LABEL *tml = (TOKEN_MANDATORY_LABEL *)il_buf;
+    TOKEN_GROUPS *tg = (TOKEN_GROUPS *)cap_buf;
     BOOL ret;
 
     if (!pCreateAppContainerToken)
@@ -1021,13 +1037,32 @@ static void test_CreateAppContainerToken(void)
         return;
     }
 
-    ret = OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &token);
-    ok(ret, "OpenProcessToken failed: %lu\n", GetLastError());
+    /* Allocate capability SID S-1-15-3-1 */
+    ret = AllocateAndInitializeSid(&sia_app, 2, SECURITY_CAPABILITY_BASE_RID, 1, 0, 0, 0, 0, 0, 0, &cap_sid);
+    ok(ret && cap_sid != NULL, "AllocateAndInitializeSid cap_sid failed\n");
+
+    cap_attr[0].Sid = cap_sid;
+    cap_attr[0].Attributes = SE_GROUP_ENABLED;
 
     sec_cap.AppContainerSid = sid;
-    sec_cap.Capabilities = NULL;
-    sec_cap.CapabilityCount = 0;
+    sec_cap.Capabilities = cap_attr;
+    sec_cap.CapabilityCount = 1;
     sec_cap.Reserved = 0;
+
+    /* Test with restricted token (TOKEN_DUPLICATE without TOKEN_QUERY) */
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE, &dup_only))
+    {
+        HANDLE bad_app = NULL;
+        SetLastError(0xdeadbeef);
+        ret = pCreateAppContainerToken(dup_only, &sec_cap, &bad_app);
+        ok(!ret, "CreateAppContainerToken should fail without TOKEN_QUERY\n");
+        ok(GetLastError() == ERROR_ACCESS_DENIED, "expected ERROR_ACCESS_DENIED, got %lu\n", GetLastError());
+        if (bad_app) CloseHandle(bad_app);
+        CloseHandle(dup_only);
+    }
+
+    ret = OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &token);
+    ok(ret, "OpenProcessToken failed: %lu\n", GetLastError());
 
     app_token = NULL;
     ret = pCreateAppContainerToken(token, &sec_cap, &app_token);
@@ -1039,10 +1074,36 @@ static void test_CreateAppContainerToken(void)
         ret = GetTokenInformation(app_token, TokenIsAppContainer, &is_appcontainer, sizeof(is_appcontainer), &ret_len);
         ok(ret, "GetTokenInformation(TokenIsAppContainer) failed: %lu\n", GetLastError());
         ok(is_appcontainer == 1, "expected is_appcontainer == 1, got %lu\n", is_appcontainer);
+
+        memset(ac_buf, 0, sizeof(ac_buf));
+        ret = GetTokenInformation(app_token, TokenAppContainerSid, ac_buf, sizeof(ac_buf), &ret_len);
+        ok(ret, "GetTokenInformation(TokenAppContainerSid) failed: %lu\n", GetLastError());
+        ok(aci->TokenAppContainer != NULL, "expected non-NULL TokenAppContainer\n");
+        if (aci->TokenAppContainer)
+            ok(EqualSid(aci->TokenAppContainer, sid), "TokenAppContainer SID mismatch\n");
+
+        memset(il_buf, 0, sizeof(il_buf));
+        ret = GetTokenInformation(app_token, TokenIntegrityLevel, il_buf, sizeof(il_buf), &ret_len);
+        ok(ret, "GetTokenInformation(TokenIntegrityLevel) failed: %lu\n", GetLastError());
+        ok(*GetSidSubAuthority(tml->Label.Sid, 0) == SECURITY_MANDATORY_LOW_RID,
+           "expected SECURITY_MANDATORY_LOW_RID, got %#lx\n", *GetSidSubAuthority(tml->Label.Sid, 0));
+
+        memset(cap_buf, 0, sizeof(cap_buf));
+        ret = GetTokenInformation(app_token, TokenCapabilities, cap_buf, sizeof(cap_buf), &ret_len);
+        ok(ret, "GetTokenInformation(TokenCapabilities) failed: %lu\n", GetLastError());
+        ok(tg->GroupCount >= 1, "expected at least 1 capability group, got %lu\n", tg->GroupCount);
+
         CloseHandle(app_token);
     }
 
+    /* Test NULL token (defaults to current process) */
+    app_token2 = NULL;
+    ret = pCreateAppContainerToken(NULL, &sec_cap, &app_token2);
+    ok(ret, "CreateAppContainerToken with NULL token failed: %lu\n", GetLastError());
+    if (app_token2) CloseHandle(app_token2);
+
     if (token) CloseHandle(token);
+    if (cap_sid) FreeSid(cap_sid);
     FreeSid(sid);
 }
 

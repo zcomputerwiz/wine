@@ -1809,8 +1809,6 @@ static HRESULT ac_read_moniker_value( HANDLE key, LPWSTR *moniker )
  */
 HRESULT WINAPI AppContainerRegisterSid( PSID sid, LPCWSTR moniker, LPCWSTR display_name )
 {
-    const WCHAR *m = moniker ? moniker : L"";
-    const WCHAR *d = display_name ? display_name : L"";
     WCHAR *sid_str = NULL, *path = NULL;
     HANDLE lock = NULL, hkcu = NULL, key = NULL;
     OBJECT_ATTRIBUTES attr;
@@ -1821,7 +1819,8 @@ HRESULT WINAPI AppContainerRegisterSid( PSID sid, LPCWSTR moniker, LPCWSTR displ
 
     TRACE( "(%p, %s, %s)\n", (void *)sid, debugstr_w(moniker), debugstr_w(display_name) );
 
-    if (!RtlValidSid( sid )) return E_INVALIDARG;
+    if (!RtlValidSid( sid ) || !moniker || !*moniker || !display_name || !*display_name)
+        return E_INVALIDARG;
 
     /* Serialize against every other writer and reader; abort before touching the
      * registry if the lock cannot be acquired (no fail-open). */
@@ -1870,7 +1869,7 @@ HRESULT WINAPI AppContainerRegisterSid( PSID sid, LPCWSTR moniker, LPCWSTR displ
             if (disp_status == STATUS_SUCCESS)
                 hr = HRESULT_FROM_WIN32( ERROR_ALREADY_EXISTS );   /* complete: leave the original intact */
             else if (disp_status == STATUS_OBJECT_NAME_NOT_FOUND)
-                hr = ac_publish_values( key, m, d );               /* Moniker w/o DisplayName: incomplete leaf, repair */
+                hr = ac_publish_values( key, moniker, display_name ); /* Moniker w/o DisplayName: incomplete leaf, repair */
             else
                 hr = HRESULT_FROM_WIN32( RtlNtStatusToDosError( disp_status ) );   /* real error: don't clobber */
         }
@@ -1878,7 +1877,7 @@ HRESULT WINAPI AppContainerRegisterSid( PSID sid, LPCWSTR moniker, LPCWSTR displ
         {
             /* The Moniker value is POSITIVELY absent: a writer died after creating the
              * key but before publishing. Repair the incomplete leaf now, under the lock. */
-            hr = ac_publish_values( key, m, d );
+            hr = ac_publish_values( key, moniker, display_name );
         }
         else
         {
@@ -1895,30 +1894,12 @@ HRESULT WINAPI AppContainerRegisterSid( PSID sid, LPCWSTR moniker, LPCWSTR displ
          * incomplete write if either fails. The DELETE right from NtCreateKey above lets
          * the rollback actually remove the leaf; a rollback failure is surfaced (but does
          * not mask the real publish error the caller needs to see). */
-        hr = ac_publish_values( key, m, d );
+        hr = ac_publish_values( key, moniker, display_name );
         if (hr != S_OK)
         {
             NTSTATUS del_status = NtDeleteKey( key );
             if (del_status && del_status != STATUS_PENDING)
                 WARN( "rollback NtDeleteKey failed: %08x\n", del_status );
-        }
-        else if (*m)
-        {
-            WCHAR local_app_data[MAX_PATH];
-            if (GetEnvironmentVariableW( L"LOCALAPPDATA", local_app_data, ARRAY_SIZE(local_app_data) ))
-            {
-                WCHAR dir_path[MAX_PATH];
-                if (swprintf( dir_path, ARRAY_SIZE(dir_path), L"%s\\Packages", local_app_data ) > 0)
-                {
-                    CreateDirectoryW( dir_path, NULL );
-                    if (swprintf( dir_path, ARRAY_SIZE(dir_path), L"%s\\Packages\\%s", local_app_data, m ) > 0)
-                    {
-                        CreateDirectoryW( dir_path, NULL );
-                        if (swprintf( dir_path, ARRAY_SIZE(dir_path), L"%s\\Packages\\%s\\AC", local_app_data, m ) > 0)
-                            CreateDirectoryW( dir_path, NULL );
-                    }
-                }
-            }
         }
     }
 
@@ -2059,8 +2040,17 @@ BOOL WINAPI CreateAppContainerToken( HANDLE token, PSECURITY_CAPABILITIES sec_ca
         return FALSE;
     }
 
-    if (!token)
+    if (token)
+    {
+        TOKEN_USER user;
+        DWORD len;
+        if (!GetTokenInformation( token, TokenUser, &user, sizeof(user), &len ))
+            return FALSE;
+    }
+    else
+    {
         token = GetCurrentProcessToken();
+    }
 
     status = NtCreateLowBoxToken( appcontainer_token, token, TOKEN_ALL_ACCESS, &oa,
                                   sec_cap->AppContainerSid,
