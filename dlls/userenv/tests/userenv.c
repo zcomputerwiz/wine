@@ -29,6 +29,7 @@
 
 #include "userenv.h"
 #include "sddl.h"
+#include "objbase.h"
 
 #include "wine/test.h"
 
@@ -546,6 +547,140 @@ static void test_appcontainer_sid(void)
     }
 }
 
+static void test_appcontainer_profile(void)
+{
+    static const WCHAR test_name[] = L"WineExplorerTestContainer";
+    static const WCHAR test_display[] = L"WineExplorer Test Container";
+    static const WCHAR test_desc[] = L"Test container description";
+    HRESULT (WINAPI *pCreateAppContainerProfile)(PCWSTR, PCWSTR, PCWSTR, SID_AND_ATTRIBUTES *, DWORD, PSID *);
+    HRESULT (WINAPI *pDeleteAppContainerProfile)(PCWSTR);
+    HRESULT (WINAPI *pGetAppContainerFolderPath)(PCWSTR, PWSTR *);
+    WCHAR key_path[512];
+    WCHAR moniker[256];
+    WCHAR local_app_data[MAX_PATH];
+    WCHAR expected_folder[MAX_PATH];
+    PSID sid = NULL, sid2 = NULL;
+    PWSTR folder_path = NULL;
+    DWORD type, size, len;
+    HKEY hkey;
+    HRESULT hr;
+    LSTATUS status;
+    WCHAR *sid_str_w = NULL;
+    DWORD attr;
+
+    pCreateAppContainerProfile = (void *)GetProcAddress( GetModuleHandleW(L"userenv.dll"), "CreateAppContainerProfile" );
+    pDeleteAppContainerProfile = (void *)GetProcAddress( GetModuleHandleW(L"userenv.dll"), "DeleteAppContainerProfile" );
+    pGetAppContainerFolderPath = (void *)GetProcAddress( GetModuleHandleW(L"userenv.dll"), "GetAppContainerFolderPath" );
+
+    if (!pCreateAppContainerProfile || !pDeleteAppContainerProfile)
+    {
+        win_skip("CreateAppContainerProfile / DeleteAppContainerProfile not available\n");
+        return;
+    }
+
+    /* Clean up any leftovers from prior runs */
+    pDeleteAppContainerProfile( test_name );
+
+    /* Parameter validation */
+    sid = (PSID)0xdeadbeef;
+    hr = pCreateAppContainerProfile( NULL, test_display, test_desc, NULL, 0, &sid );
+    ok(hr == E_INVALIDARG && sid == (PSID)0xdeadbeef, "NULL name: %#lx, %p\n", hr, sid);
+
+    hr = pCreateAppContainerProfile( L"", test_display, test_desc, NULL, 0, &sid );
+    ok(hr == E_INVALIDARG && sid == (PSID)0xdeadbeef, "empty name: %#lx, %p\n", hr, sid);
+
+    hr = pCreateAppContainerProfile( test_name, test_display, test_desc, NULL, 0, NULL );
+    ok(hr == E_INVALIDARG, "NULL sid out: %#lx\n", hr);
+
+    /* Valid creation */
+    sid = NULL;
+    hr = pCreateAppContainerProfile( test_name, test_display, test_desc, NULL, 0, &sid );
+    ok(hr == S_OK && sid != NULL, "CreateAppContainerProfile failed: %#lx, %p\n", hr, sid);
+    if (FAILED(hr) || !sid) return;
+
+    ok(IsValidSid(sid), "Invalid SID returned\n");
+
+    ConvertSidToStringSidW( sid, &sid_str_w );
+    ok(sid_str_w != NULL, "ConvertSidToStringSidW failed\n");
+
+    /* Verify registry mapping under HKCU\Software\Classes\Local Settings\... */
+    swprintf( key_path, ARRAY_SIZE(key_path),
+              L"Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppContainer\\Mappings\\%s",
+              sid_str_w );
+    status = RegOpenKeyExW( HKEY_CURRENT_USER, key_path, 0, KEY_READ, &hkey );
+    ok(status == ERROR_SUCCESS, "Registry mapping key not found: %ld\n", status);
+    if (status == ERROR_SUCCESS)
+    {
+        size = sizeof(moniker);
+        status = RegQueryValueExW( hkey, L"Moniker", NULL, &type, (BYTE *)moniker, &size );
+        ok(status == ERROR_SUCCESS, "RegQueryValueExW(Moniker) failed: %ld\n", status);
+        ok(!wcsicmp(moniker, test_name), "Moniker mismatch: %s != %s\n", wine_dbgstr_w(moniker), wine_dbgstr_w(test_name));
+        RegCloseKey( hkey );
+    }
+
+    /* Verify folder creation on disk */
+    len = GetEnvironmentVariableW( L"LOCALAPPDATA", local_app_data, ARRAY_SIZE(local_app_data) );
+    if (len && len < ARRAY_SIZE(local_app_data))
+    {
+        swprintf( expected_folder, ARRAY_SIZE(expected_folder), L"%s\\Packages\\%s\\AC", local_app_data, test_name );
+        attr = GetFileAttributesW( expected_folder );
+        ok(attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY),
+           "Expected folder does not exist: %s (attr=%lx)\n", wine_dbgstr_w(expected_folder), attr);
+    }
+
+    /* Duplicate creation must fail with ERROR_ALREADY_EXISTS */
+    sid2 = NULL;
+    hr = pCreateAppContainerProfile( test_name, test_display, test_desc, NULL, 0, &sid2 );
+    ok(hr == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS), "expected ERROR_ALREADY_EXISTS on duplicate, got %#lx\n", hr);
+    if (sid2) FreeSid(sid2);
+
+    /* Test GetAppContainerFolderPath */
+    if (pGetAppContainerFolderPath)
+    {
+        folder_path = NULL;
+        hr = pGetAppContainerFolderPath( NULL, &folder_path );
+        ok(hr == E_INVALIDARG, "NULL sid to GetAppContainerFolderPath: %#lx\n", hr);
+
+        hr = pGetAppContainerFolderPath( sid_str_w, NULL );
+        ok(hr == E_INVALIDARG, "NULL path out to GetAppContainerFolderPath: %#lx\n", hr);
+
+        hr = pGetAppContainerFolderPath( L"invalid_sid", &folder_path );
+        ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_SID), "invalid SID: %#lx\n", hr);
+
+        hr = pGetAppContainerFolderPath( L"S-1-15-2-999999-999999", &folder_path );
+        ok(hr == HRESULT_FROM_WIN32(4250 /* ERROR_NOT_APPCONTAINER */), "nonexistent SID: %#lx\n", hr);
+
+        folder_path = NULL;
+        hr = pGetAppContainerFolderPath( sid_str_w, &folder_path );
+        ok(hr == S_OK && folder_path != NULL, "GetAppContainerFolderPath failed: %#lx, %p\n", hr, folder_path);
+        if (hr == S_OK && folder_path)
+        {
+            ok(!wcsicmp(folder_path, expected_folder), "Folder path mismatch: %s != %s\n",
+               wine_dbgstr_w(folder_path), wine_dbgstr_w(expected_folder));
+            CoTaskMemFree( folder_path );
+        }
+    }
+    else
+    {
+        win_skip("GetAppContainerFolderPath not available\n");
+    }
+
+    /* Test DeleteAppContainerProfile */
+    hr = pDeleteAppContainerProfile( NULL );
+    ok(hr == E_INVALIDARG, "NULL name to DeleteAppContainerProfile: %#lx\n", hr);
+
+    hr = pDeleteAppContainerProfile( test_name );
+    ok(hr == S_OK, "DeleteAppContainerProfile failed: %#lx\n", hr);
+
+    /* Verify registry mapping removed */
+    status = RegOpenKeyExW( HKEY_CURRENT_USER, key_path, 0, KEY_READ, &hkey );
+    ok(status == ERROR_FILE_NOT_FOUND, "Registry mapping should be deleted: %ld\n", status);
+    if (status == ERROR_SUCCESS) RegCloseKey( hkey );
+
+    LocalFree( sid_str_w );
+    FreeSid( sid );
+}
+
 START_TEST(userenv)
 {
     pIsWow64Process = (void*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "IsWow64Process");
@@ -554,4 +689,5 @@ START_TEST(userenv)
     test_get_profiles_dir();
     test_get_user_profile_dir();
     test_appcontainer_sid();
+    test_appcontainer_profile();
 }
