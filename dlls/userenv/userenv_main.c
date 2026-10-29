@@ -771,6 +771,23 @@ static BOOL is_valid_container_name( const WCHAR *name )
     return TRUE;
 }
 
+static BOOL ensure_directory( const WCHAR *path )
+{
+    DWORD attr;
+
+    if (CreateDirectoryW( path, NULL )) return TRUE;
+    if (GetLastError() != ERROR_ALREADY_EXISTS && GetLastError() != ERROR_FILE_EXISTS)
+        return FALSE;
+
+    attr = GetFileAttributesW( path );
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY))
+    {
+        SetLastError( ERROR_ALREADY_EXISTS );
+        return FALSE;
+    }
+    return TRUE;
+}
+
 HRESULT WINAPI CreateAppContainerProfile(PCWSTR container_name, PCWSTR display_name, PCWSTR description,
                                          SID_AND_ATTRIBUTES *capabilities, DWORD capability_count,
                                          SID **container_sid)
@@ -815,17 +832,17 @@ HRESULT WINAPI CreateAppContainerProfile(PCWSTR container_name, PCWSTR display_n
     /* Create the profile directory hierarchy under %LOCALAPPDATA%\Packages\<container_name>\AC */
     if (swprintf( path, ARRAY_SIZE(path), L"%s\\Packages", local_app_data ) <= 0)
         goto err_fs;
-    if (!CreateDirectoryW( path, NULL ) && GetLastError() != ERROR_ALREADY_EXISTS)
+    if (!ensure_directory( path ))
         goto err_fs;
 
     if (swprintf( path, ARRAY_SIZE(path), L"%s\\Packages\\%s", local_app_data, container_name ) <= 0)
         goto err_fs;
-    if (!CreateDirectoryW( path, NULL ) && GetLastError() != ERROR_ALREADY_EXISTS)
+    if (!ensure_directory( path ))
         goto err_fs;
 
     if (swprintf( path, ARRAY_SIZE(path), L"%s\\Packages\\%s\\AC", local_app_data, container_name ) <= 0)
         goto err_fs;
-    if (!CreateDirectoryW( path, NULL ) && GetLastError() != ERROR_ALREADY_EXISTS)
+    if (!ensure_directory( path ))
         goto err_fs;
 
     *container_sid = sid;
@@ -845,6 +862,7 @@ HRESULT WINAPI DeleteAppContainerProfile(PCWSTR container_name)
     PSID sid = NULL;
     DWORD len;
     HRESULT hr;
+    BOOL unregister_succeeded;
 
     TRACE("(%s)\n", debugstr_w(container_name));
 
@@ -864,11 +882,13 @@ HRESULT WINAPI DeleteAppContainerProfile(PCWSTR container_name)
 
     FreeSid( sid );
 
+    unregister_succeeded = (hr == S_OK);
+
     /* If unregister returned file-not-found, Windows maps that to S_OK */
     if (hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) hr = S_OK;
 
     /* Clean up the profile directory under %LOCALAPPDATA%\Packages\<container_name> only on success */
-    if (SUCCEEDED(hr))
+    if (unregister_succeeded)
     {
         len = GetEnvironmentVariableW( L"LOCALAPPDATA", local_app_data, ARRAY_SIZE(local_app_data) );
         if (len && len < ARRAY_SIZE(local_app_data))
