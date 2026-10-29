@@ -740,6 +740,99 @@ static void test_appcontainer_profile(void)
 
     LocalFree( sid_str_w );
     FreeSid( sid );
+
+    /* P1: Deleting a missing profile must preserve unowned directories and sentinel files on disk */
+    {
+        static const WCHAR unreg_name[] = L"WineExplorerUnregTest_12345";
+        WCHAR unreg_pkg[MAX_PATH], unreg_ac[MAX_PATH], unreg_sentinel[MAX_PATH];
+        HANDLE hfile;
+
+        pDeleteAppContainerProfile( unreg_name );
+
+        swprintf( unreg_pkg, ARRAY_SIZE(unreg_pkg), L"%s\\Packages\\%s", local_app_data, unreg_name );
+        swprintf( unreg_ac, ARRAY_SIZE(unreg_ac), L"%s\\Packages\\%s\\AC", local_app_data, unreg_name );
+        swprintf( unreg_sentinel, ARRAY_SIZE(unreg_sentinel), L"%s\\Packages\\%s\\sentinel.txt", local_app_data, unreg_name );
+
+        CreateDirectoryW( unreg_pkg, NULL );
+        CreateDirectoryW( unreg_ac, NULL );
+        hfile = CreateFileW( unreg_sentinel, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
+        ok(hfile != INVALID_HANDLE_VALUE, "Failed to create sentinel file: %lu\n", GetLastError());
+        if (hfile != INVALID_HANDLE_VALUE) CloseHandle( hfile );
+
+        hr = pDeleteAppContainerProfile( unreg_name );
+        ok(hr == S_OK, "DeleteAppContainerProfile missing profile failed: %#lx\n", hr);
+
+        attr = GetFileAttributesW( unreg_pkg );
+        ok(attr != INVALID_FILE_ATTRIBUTES || broken(attr == INVALID_FILE_ATTRIBUTES /* win8+ */),
+           "Unowned profile directory should be preserved: %s (attr=%lu)\n", wine_dbgstr_w(unreg_pkg), attr);
+
+        attr = GetFileAttributesW( unreg_ac );
+        ok(attr != INVALID_FILE_ATTRIBUTES || broken(attr == INVALID_FILE_ATTRIBUTES /* win8+ */),
+           "Unowned empty AC directory should be preserved: %s (attr=%lu)\n", wine_dbgstr_w(unreg_ac), attr);
+
+        attr = GetFileAttributesW( unreg_sentinel );
+        ok(attr != INVALID_FILE_ATTRIBUTES || broken(attr == INVALID_FILE_ATTRIBUTES /* win8+ */),
+           "Unowned sentinel file should be preserved: %s (attr=%lu)\n", wine_dbgstr_w(unreg_sentinel), attr);
+
+        /* Cleanup test files */
+        DeleteFileW( unreg_sentinel );
+        RemoveDirectoryW( unreg_ac );
+        RemoveDirectoryW( unreg_pkg );
+    }
+
+    /* P2: CreateAppContainerProfile with file collision at AC directory */
+    {
+        static const WCHAR collision_name[] = L"WineExplorerFileCollTest_12345";
+        WCHAR coll_pkg[MAX_PATH], coll_ac[MAX_PATH], coll_key[512];
+        HRESULT (WINAPI *pDerive)(PCWSTR, PSID *);
+        PSID sid_coll = NULL, derived_sid = NULL;
+        WCHAR *derived_sid_str = NULL;
+        HANDLE hfile;
+
+        pDeleteAppContainerProfile( collision_name );
+
+        swprintf( coll_pkg, ARRAY_SIZE(coll_pkg), L"%s\\Packages\\%s", local_app_data, collision_name );
+        swprintf( coll_ac, ARRAY_SIZE(coll_ac), L"%s\\Packages\\%s\\AC", local_app_data, collision_name );
+
+        CreateDirectoryW( coll_pkg, NULL );
+        hfile = CreateFileW( coll_ac, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
+        ok(hfile != INVALID_HANDLE_VALUE, "Failed to create collision file: %lu\n", GetLastError());
+        if (hfile != INVALID_HANDLE_VALUE) CloseHandle( hfile );
+
+        hr = pCreateAppContainerProfile( collision_name, test_display, test_desc, NULL, 0, &sid_coll );
+        ok(FAILED(hr) || broken(hr == S_OK /* win8+ replaces file */),
+           "CreateAppContainerProfile should fail on file collision: %#lx\n", hr);
+        if (SUCCEEDED(hr) && sid_coll) FreeSid( sid_coll );
+
+        /* File must be preserved, not converted to directory or deleted */
+        attr = GetFileAttributesW( coll_ac );
+        ok((attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) ||
+           broken(attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY) /* win8+ */),
+           "Collision file should remain a regular file: %s (attr=%lu)\n", wine_dbgstr_w(coll_ac), attr);
+
+        /* Verify registration was rolled back / not present */
+        pDerive = (void *)GetProcAddress( GetModuleHandleW(L"userenv.dll"), "DeriveAppContainerSidFromAppContainerName" );
+        if (pDerive && pDerive( collision_name, &derived_sid ) == S_OK)
+        {
+            if (ConvertSidToStringSidW( derived_sid, &derived_sid_str ))
+            {
+                swprintf( coll_key, ARRAY_SIZE(coll_key),
+                          L"Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppContainer\\Mappings\\%s",
+                          derived_sid_str );
+                status = RegOpenKeyExW( HKEY_CURRENT_USER, coll_key, 0, KEY_READ, &hkey );
+                ok(status == ERROR_FILE_NOT_FOUND || broken(status == ERROR_SUCCESS /* win8+ */),
+                   "Registration should be rolled back on failure: %ld\n", status);
+                if (status == ERROR_SUCCESS) RegCloseKey( hkey );
+                LocalFree( derived_sid_str );
+            }
+            FreeSid( derived_sid );
+        }
+
+        /* Cleanup */
+        pDeleteAppContainerProfile( collision_name );
+        DeleteFileW( coll_ac );
+        RemoveDirectoryW( coll_pkg );
+    }
 }
 
 START_TEST(userenv)
