@@ -2021,3 +2021,30 @@ void WINAPI AppContainerFreeMemory( void *ptr )
     TRACE( "(%p)\n", ptr );
     if (ptr) RtlFreeHeap( GetProcessHeap(), 0, ptr );
 }
+
+/******************************************************************************
+ * CreateAppContainerToken   (kernelbase.@)
+ */
+BOOL WINAPI CreateAppContainerToken( HANDLE token, PSECURITY_CAPABILITIES sec_cap, PHANDLE appcontainer_token )
+{
+    OBJECT_ATTRIBUTES oa = { sizeof(oa) };
+    NTSTATUS status;
+
+    TRACE( "(%p, %p, %p)\n", token, sec_cap, appcontainer_token );
+
+    if (!sec_cap || !sec_cap->AppContainerSid || !appcontainer_token)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+
+    if (!token)
+        token = GetCurrentProcessToken();
+
+    status = NtCreateLowBoxToken( appcontainer_token, token, TOKEN_ALL_ACCESS, &oa,
+                                  sec_cap->AppContainerSid,
+                                  sec_cap->CapabilityCount,
+                                  sec_cap->Capabilities ? (SID_AND_ATTRIBUTES *)sec_cap->Capabilities : NULL,
+                                  0, NULL );
+    return set_ntstatus( status );
+}
