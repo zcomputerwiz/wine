@@ -40,22 +40,24 @@ WINE_DEFAULT_DEBUG_CHANNEL( userenv );
  * security tests reference them). kernelbase is always present in a running session. */
 static HRESULT (WINAPI *pAppContainerRegisterSid)( PSID sid, LPCWSTR moniker, LPCWSTR display_name );
 static HRESULT (WINAPI *pAppContainerUnregisterSid)( PSID sid );
+static INIT_ONCE reg_procs_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL WINAPI init_reg_procs( INIT_ONCE *once, void *param, void **context )
+{
+    HMODULE h = GetModuleHandleW( L"kernelbase.dll" );
+    if (h)
+    {
+        pAppContainerRegisterSid   = (HRESULT (WINAPI *)( PSID, LPCWSTR, LPCWSTR ))
+                                       GetProcAddress( h, "AppContainerRegisterSid" );
+        pAppContainerUnregisterSid = (HRESULT (WINAPI *)( PSID ))
+                                       GetProcAddress( h, "AppContainerUnregisterSid" );
+    }
+    return TRUE;
+}
 
 static void load_appcontainer_reg_procs(void)
 {
-    static int tried;
-    if (!tried)
-    {
-        HMODULE h = GetModuleHandleW( L"kernelbase.dll" );
-        if (h)
-        {
-            pAppContainerRegisterSid   = (HRESULT (WINAPI *)( PSID, LPCWSTR, LPCWSTR ))
-                                           GetProcAddress( h, "AppContainerRegisterSid" );
-            pAppContainerUnregisterSid = (HRESULT (WINAPI *)( PSID ))
-                                           GetProcAddress( h, "AppContainerUnregisterSid" );
-        }
-        tried = 1;
-    }
+    InitOnceExecuteOnce( &reg_procs_once, init_reg_procs, NULL, NULL );
 }
 
 /***********************************************************************
@@ -754,6 +756,7 @@ HRESULT WINAPI CreateAppContainerProfile(PCWSTR container_name, PCWSTR display_n
                                          SID_AND_ATTRIBUTES *capabilities, DWORD capability_count,
                                          SID **container_sid)
 {
+    WCHAR local_app_data[MAX_PATH];
     PSID sid = NULL;
     HRESULT hr;
 
@@ -766,19 +769,36 @@ HRESULT WINAPI CreateAppContainerProfile(PCWSTR container_name, PCWSTR display_n
     hr = DeriveAppContainerSidFromAppContainerName( container_name, &sid );
     if (FAILED(hr)) return hr;
 
-    /* Publish the moniker -> SID mapping so subsequent token / LowBox operations recognize the
-     * profile. A pre-existing complete mapping is not an error: the derived SID is valid either
-     * way, so only a genuine registration failure is reported (non-fatally). */
     load_appcontainer_reg_procs();
-    if (pAppContainerRegisterSid)
+    if (!pAppContainerRegisterSid)
     {
-        hr = pAppContainerRegisterSid( sid, container_name,
-                                       display_name ? display_name : container_name );
-        if (FAILED(hr) && hr != HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS))
-            WARN("AppContainerRegisterSid(%s) failed, hr=0x%08x\n", debugstr_w(container_name), (unsigned)hr);
+        FreeSid( sid );
+        return E_NOTIMPL;
     }
-    else
-        FIXME("AppContainerRegisterSid unavailable; profile created without registration\n");
+
+    hr = pAppContainerRegisterSid( sid, container_name,
+                                   display_name ? display_name : container_name );
+    if (FAILED(hr))
+    {
+        FreeSid( sid );
+        return hr;
+    }
+
+    /* Create the profile directory hierarchy under %LOCALAPPDATA%\Packages\<container_name>\AC */
+    if (GetEnvironmentVariableW( L"LOCALAPPDATA", local_app_data, ARRAY_SIZE(local_app_data) ))
+    {
+        WCHAR path[MAX_PATH];
+        if (swprintf( path, ARRAY_SIZE(path), L"%s\\Packages", local_app_data ) > 0)
+        {
+            CreateDirectoryW( path, NULL );
+            if (swprintf( path, ARRAY_SIZE(path), L"%s\\Packages\\%s", local_app_data, container_name ) > 0)
+            {
+                CreateDirectoryW( path, NULL );
+                if (swprintf( path, ARRAY_SIZE(path), L"%s\\Packages\\%s\\AC", local_app_data, container_name ) > 0)
+                    CreateDirectoryW( path, NULL );
+            }
+        }
+    }
 
     *container_sid = sid;
     return S_OK;
@@ -786,6 +806,7 @@ HRESULT WINAPI CreateAppContainerProfile(PCWSTR container_name, PCWSTR display_n
 
 HRESULT WINAPI DeleteAppContainerProfile(PCWSTR container_name)
 {
+    WCHAR local_app_data[MAX_PATH];
     PSID sid = NULL;
     HRESULT hr;
 
@@ -802,8 +823,69 @@ HRESULT WINAPI DeleteAppContainerProfile(PCWSTR container_name)
     else
         hr = E_NOTIMPL;
 
-    HeapFree( GetProcessHeap(), 0, sid );
+    FreeSid( sid );
+
+    /* Clean up the profile directory under %LOCALAPPDATA%\Packages\<container_name> */
+    if (GetEnvironmentVariableW( L"LOCALAPPDATA", local_app_data, ARRAY_SIZE(local_app_data) ))
+    {
+        WCHAR path[MAX_PATH];
+        if (swprintf( path, ARRAY_SIZE(path), L"%s\\Packages\\%s\\AC", local_app_data, container_name ) > 0)
+            RemoveDirectoryW( path );
+        if (swprintf( path, ARRAY_SIZE(path), L"%s\\Packages\\%s", local_app_data, container_name ) > 0)
+            RemoveDirectoryW( path );
+    }
+
     /* Deleting a profile that was never registered is not an error. */
     if (hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) hr = S_OK;
     return hr;
+}
+
+HRESULT WINAPI GetAppContainerFolderPath(PCWSTR app_container_sid, PWSTR *path)
+{
+    WCHAR local_app_data[MAX_PATH];
+    WCHAR key_path[512];
+    WCHAR moniker[256];
+    DWORD len, type, size;
+    PSID sid = NULL;
+    HKEY hkey;
+    PWSTR ret_path;
+    int path_len;
+    LSTATUS status;
+
+    TRACE("(%s, %p)\n", debugstr_w(app_container_sid), path);
+
+    if (!app_container_sid || !path) return E_INVALIDARG;
+    *path = NULL;
+
+    if (!ConvertStringSidToSidW( app_container_sid, &sid ))
+        return HRESULT_FROM_WIN32( ERROR_INVALID_SID );
+    LocalFree( sid );
+
+    swprintf( key_path, ARRAY_SIZE(key_path),
+              L"Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppContainer\\Mappings\\%s",
+              app_container_sid );
+
+    status = RegOpenKeyExW( HKEY_CURRENT_USER, key_path, 0, KEY_READ, &hkey );
+    if (status != ERROR_SUCCESS)
+        return HRESULT_FROM_WIN32( ERROR_NOT_APPCONTAINER );
+
+    size = sizeof(moniker);
+    status = RegQueryValueExW( hkey, L"Moniker", NULL, &type, (BYTE *)moniker, &size );
+    RegCloseKey( hkey );
+    if (status != ERROR_SUCCESS || type != REG_SZ)
+        return HRESULT_FROM_WIN32( ERROR_NOT_APPCONTAINER );
+
+    len = GetEnvironmentVariableW( L"LOCALAPPDATA", local_app_data, ARRAY_SIZE(local_app_data) );
+    if (!len || len >= ARRAY_SIZE(local_app_data))
+        return E_FAIL;
+
+    path_len = swprintf( NULL, 0, L"%s\\Packages\\%s\\AC", local_app_data, moniker );
+    if (path_len <= 0) return E_FAIL;
+
+    ret_path = CoTaskMemAlloc( (path_len + 1) * sizeof(WCHAR) );
+    if (!ret_path) return E_OUTOFMEMORY;
+
+    swprintf( ret_path, path_len + 1, L"%s\\Packages\\%s\\AC", local_app_data, moniker );
+    *path = ret_path;
+    return S_OK;
 }

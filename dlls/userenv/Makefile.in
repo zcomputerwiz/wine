@@ -1,6 +1,6 @@
 EXTRADEFS = -D_USERENV_
 MODULE    = userenv.dll
-IMPORTS   = advapi32 bcrypt ntdll
+IMPORTS   = advapi32 bcrypt combase ntdll
 IMPORTLIB = userenv
 
 SOURCES = \

@@ -3,6 +3,7 @@
 @ stdcall CreateAppContainerProfile(wstr wstr wstr ptr long ptr)
 @ stdcall DeriveAppContainerSidFromAppContainerName(wstr ptr)
 @ stdcall DeleteAppContainerProfile(wstr)
+@ stdcall GetAppContainerFolderPath(wstr ptr)
 @ stdcall CreateEnvironmentBlock(ptr ptr long)
 @ stdcall DestroyEnvironmentBlock(ptr)
 @ stdcall EnterCriticalPolicySection(long)

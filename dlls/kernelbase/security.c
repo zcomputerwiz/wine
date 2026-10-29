@@ -1579,7 +1579,7 @@ done:
  * half-published and a failed duplicate can never clobber an existing one.
  ******************************************************************************/
 
-#define AC_MAPPING_ROOT   L"Software\\Wine\\AppContainer\\Mappings"
+#define AC_MAPPING_ROOT   L"Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppContainer\\Mappings"
 #define AC_MONIKER_VALUE  L"Moniker"
 #define AC_DISPLAY_VALUE  L"DisplayName"
 /* A fully qualified NT object path is required: a bare relative name with no

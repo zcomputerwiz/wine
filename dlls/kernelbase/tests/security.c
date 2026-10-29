@@ -40,6 +40,7 @@ static HRESULT (WINAPI *pAppContainerRegisterSid)(PSID, LPCWSTR, LPCWSTR);
 static HRESULT (WINAPI *pAppContainerUnregisterSid)(PSID);
 static HRESULT (WINAPI *pAppContainerLookupMoniker)(PSID, LPWSTR *);
 static void (WINAPI *pAppContainerFreeMemory)(void *);
+static BOOL (WINAPI *pCreateAppContainerToken)(HANDLE, PSECURITY_CAPABILITIES, PHANDLE);
 
 static void test_DeriveCapabilitySidsFromName(void)
 {
@@ -112,7 +113,7 @@ static void test_DeriveCapabilitySidsFromName(void)
  * without ever unregistering a foreign or hardcoded identity.
  ******************************************************************************/
 
-static const WCHAR AC_TEST_ROOT[] = L"Software\\Wine\\AppContainer\\Mappings";
+static const WCHAR AC_TEST_ROOT[] = L"Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppContainer\\Mappings";
 
 /* A unique-per-run app container name. The tag guarantees distinctness even if
  * GetTickCount() collides between two calls in the same process. */
@@ -977,6 +978,74 @@ done:
     RtlFreeSid( sid );
 }
 
+static void test_CreateAppContainerToken(void)
+{
+    SECURITY_CAPABILITIES sec_cap;
+    HANDLE token = NULL, app_token = NULL;
+    PSID sid = NULL;
+    DWORD is_appcontainer = 0, ret_len = 0;
+    BOOL ret;
+
+    if (!pCreateAppContainerToken)
+    {
+        win_skip("CreateAppContainerToken is not available.\n");
+        return;
+    }
+
+    /* Test invalid parameters */
+    SetLastError(0xdeadbeef);
+    ret = pCreateAppContainerToken(NULL, NULL, &app_token);
+    ok(!ret, "CreateAppContainerToken succeeded with NULL sec_cap\n");
+    ok(GetLastError() == ERROR_INVALID_PARAMETER, "wrong error: %lu\n", GetLastError());
+
+    memset(&sec_cap, 0, sizeof(sec_cap));
+    SetLastError(0xdeadbeef);
+    ret = pCreateAppContainerToken(NULL, &sec_cap, &app_token);
+    ok(!ret, "CreateAppContainerToken succeeded with NULL AppContainerSid\n");
+    ok(GetLastError() == ERROR_INVALID_PARAMETER, "wrong error: %lu\n", GetLastError());
+
+    SetLastError(0xdeadbeef);
+    ret = pCreateAppContainerToken(NULL, &sec_cap, NULL);
+    ok(!ret, "CreateAppContainerToken succeeded with NULL output token\n");
+    ok(GetLastError() == ERROR_INVALID_PARAMETER, "wrong error: %lu\n", GetLastError());
+
+    /* Test valid creation with real token and SID */
+    if (pDeriveAppContainerSidFromAppContainerName)
+    {
+        HRESULT hr = pDeriveAppContainerSidFromAppContainerName(L"TestTokenAppContainer", &sid);
+        ok(hr == S_OK && sid != NULL, "DeriveAppContainerSid failed: %#lx\n", hr);
+    }
+    if (!sid)
+    {
+        skip("Cannot derive AppContainer SID for token test\n");
+        return;
+    }
+
+    ret = OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &token);
+    ok(ret, "OpenProcessToken failed: %lu\n", GetLastError());
+
+    sec_cap.AppContainerSid = sid;
+    sec_cap.Capabilities = NULL;
+    sec_cap.CapabilityCount = 0;
+    sec_cap.Reserved = 0;
+
+    app_token = NULL;
+    ret = pCreateAppContainerToken(token, &sec_cap, &app_token);
+    ok(ret, "CreateAppContainerToken failed: %lu\n", GetLastError());
+    ok(app_token != NULL, "AppContainer token handle is NULL\n");
+
+    if (ret && app_token)
+    {
+        ret = GetTokenInformation(app_token, TokenIsAppContainer, &is_appcontainer, sizeof(is_appcontainer), &ret_len);
+        ok(ret, "GetTokenInformation(TokenIsAppContainer) failed: %lu\n", GetLastError());
+        ok(is_appcontainer == 1, "expected is_appcontainer == 1, got %lu\n", is_appcontainer);
+        CloseHandle(app_token);
+    }
+
+    if (token) CloseHandle(token);
+    FreeSid(sid);
+}
+
 
 START_TEST(security)
 {
@@ -988,6 +1057,7 @@ START_TEST(security)
     pAppContainerUnregisterSid    = (void *)GetProcAddress(hmod, "AppContainerUnregisterSid");
     pAppContainerLookupMoniker    = (void *)GetProcAddress(hmod, "AppContainerLookupMoniker");
     pAppContainerFreeMemory       = (void *)GetProcAddress(hmod, "AppContainerFreeMemory");
+    pCreateAppContainerToken      = (void *)GetProcAddress(hmod, "CreateAppContainerToken");
 
     hmod = LoadLibraryA("userenv.dll");
     pDeriveAppContainerSidFromAppContainerName = (void *)GetProcAddress(hmod, "DeriveAppContainerSidFromAppContainerName");
@@ -1009,5 +1079,6 @@ START_TEST(security)
     test_AppContainerPersistence();
     test_AppContainerConcurrent();
     test_AppContainerBlockedReader();
+    test_CreateAppContainerToken();
     test_AppContainerLockFailure();   /* last: leaves no stray lock object behind */
 }
