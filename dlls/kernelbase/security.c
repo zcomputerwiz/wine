@@ -2042,9 +2042,9 @@ BOOL WINAPI CreateAppContainerToken( HANDLE token, PSECURITY_CAPABILITIES sec_ca
 
     if (token)
     {
-        TOKEN_USER user;
+        char buf[sizeof(TOKEN_USER) + 256];
         DWORD len;
-        if (!GetTokenInformation( token, TokenUser, &user, sizeof(user), &len ))
+        if (!GetTokenInformation( token, TokenUser, buf, sizeof(buf), &len ))
             return FALSE;
     }
     else

@@ -679,11 +679,11 @@ static void test_appcontainer_profile(void)
 
         /* Test GetAppContainerFolderPath with corrupt registry data */
         {
-            static const WCHAR mock_sid[] = L"S-1-15-2-12345-67890-mock";
+            static const WCHAR mock_sid[] = L"S-1-15-2-12345-67890-99999";
             WCHAR mock_key[512];
             HKEY hmock;
             BYTE corrupt_bytes[] = { 'b', 'a', 'd' }; /* odd length, not WCHAR aligned */
-            WCHAR unterminated[] = { 'b', 'a', 'd', '!' }; /* not NUL-terminated */
+            WCHAR unterminated[] = { 'b', 'a', 'd', '!', 'x' }; /* not NUL-terminated */
             WCHAR traversal_moniker[] = L"..\\traversal";
 
             swprintf( mock_key, ARRAY_SIZE(mock_key),
@@ -705,7 +705,7 @@ static void test_appcontainer_profile(void)
                 ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA), "expected ERROR_INVALID_DATA for REG_BINARY, got %#lx\n", hr);
 
                 /* Corrupt: unterminated string */
-                RegSetValueExW( hmock, L"Moniker", 0, REG_SZ, (BYTE *)unterminated, sizeof(unterminated) );
+                RegSetValueExW( hmock, L"Moniker", 0, REG_SZ, (BYTE *)unterminated, 4 * sizeof(WCHAR) );
                 folder_path = NULL;
                 hr = pGetAppContainerFolderPath( mock_sid, &folder_path );
                 ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA), "expected ERROR_INVALID_DATA for unterminated, got %#lx\n", hr);
