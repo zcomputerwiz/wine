@@ -35,6 +35,29 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL( userenv );
 
+/* kernelbase AppContainer registration APIs, resolved at load time so userenv does not take a
+ * hard link-time dependency on kernelbase for these calls (and matches how the fork's own
+ * security tests reference them). kernelbase is always present in a running session. */
+static HRESULT (WINAPI *pAppContainerRegisterSid)( PSID sid, LPCWSTR moniker, LPCWSTR display_name );
+static HRESULT (WINAPI *pAppContainerUnregisterSid)( PSID sid );
+
+static void load_appcontainer_reg_procs(void)
+{
+    static int tried;
+    if (!tried)
+    {
+        HMODULE h = GetModuleHandleW( L"kernelbase.dll" );
+        if (h)
+        {
+            pAppContainerRegisterSid   = (HRESULT (WINAPI *)( PSID, LPCWSTR, LPCWSTR ))
+                                           GetProcAddress( h, "AppContainerRegisterSid" );
+            pAppContainerUnregisterSid = (HRESULT (WINAPI *)( PSID ))
+                                           GetProcAddress( h, "AppContainerUnregisterSid" );
+        }
+        tried = 1;
+    }
+}
+
 /***********************************************************************
  * DeriveAppContainerSidFromAppContainerName (USERENV.@)
  */
@@ -731,8 +754,56 @@ HRESULT WINAPI CreateAppContainerProfile(PCWSTR container_name, PCWSTR display_n
                                          SID_AND_ATTRIBUTES *capabilities, DWORD capability_count,
                                          SID **container_sid)
 {
-    FIXME("(%s, %s, %s, %p, %ld, %p): stub\n", debugstr_w(container_name), debugstr_w(display_name),
+    PSID sid = NULL;
+    HRESULT hr;
+
+    TRACE("(%s, %s, %s, %p, %ld, %p)\n", debugstr_w(container_name), debugstr_w(display_name),
           debugstr_w(description), capabilities, capability_count, container_sid);
 
-    return E_NOTIMPL;
+    if (!container_name || !*container_name || !container_sid) return E_INVALIDARG;
+    *container_sid = NULL;
+
+    hr = DeriveAppContainerSidFromAppContainerName( container_name, &sid );
+    if (FAILED(hr)) return hr;
+
+    /* Publish the moniker -> SID mapping so subsequent token / LowBox operations recognize the
+     * profile. A pre-existing complete mapping is not an error: the derived SID is valid either
+     * way, so only a genuine registration failure is reported (non-fatally). */
+    load_appcontainer_reg_procs();
+    if (pAppContainerRegisterSid)
+    {
+        hr = pAppContainerRegisterSid( sid, container_name,
+                                       display_name ? display_name : container_name );
+        if (FAILED(hr) && hr != HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS))
+            WARN("AppContainerRegisterSid(%s) failed, hr=0x%08x\n", debugstr_w(container_name), (unsigned)hr);
+    }
+    else
+        FIXME("AppContainerRegisterSid unavailable; profile created without registration\n");
+
+    *container_sid = sid;
+    return S_OK;
+}
+
+HRESULT WINAPI DeleteAppContainerProfile(PCWSTR container_name)
+{
+    PSID sid = NULL;
+    HRESULT hr;
+
+    TRACE("(%s)\n", debugstr_w(container_name));
+
+    if (!container_name || !*container_name) return E_INVALIDARG;
+
+    hr = DeriveAppContainerSidFromAppContainerName( container_name, &sid );
+    if (FAILED(hr)) return hr;
+
+    load_appcontainer_reg_procs();
+    if (pAppContainerUnregisterSid)
+        hr = pAppContainerUnregisterSid( sid );
+    else
+        hr = E_NOTIMPL;
+
+    HeapFree( GetProcessHeap(), 0, sid );
+    /* Deleting a profile that was never registered is not an error. */
+    if (hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) hr = S_OK;
+    return hr;
 }
