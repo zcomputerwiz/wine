@@ -10,8 +10,9 @@
  *   (other) -> launch the requested command and report its process handle / pid
  *
  * On every call the received request (image / command line / working directory) is
- * written to <temp>\wexhost_binding.txt so the test can verify that the caller's
- * parameters and directory were passed through to the broker.
+ * written to the path in the WEXHOST_BINDING_PATH environment variable if set, else to
+ * <temp>\wexhost_binding.txt, so the test can verify that the caller's parameters and
+ * directory were passed through to the broker.
  *
  * This is a plain Win32 DLL (no Wine-specific APIs), so it can be built with the
  * cross mingw toolchain that a Wine build already uses, per architecture. The matching
@@ -29,8 +30,12 @@ static void record_request(const WCHAR *image, const WCHAR *cmd, const WCHAR *cw
     DWORD written;
     HANDLE file;
 
-    if (!GetTempPathW(MAX_PATH, path)) return;
-    lstrcatW(path, L"wexhost_binding.txt");
+    /* Honor a caller-supplied (process-owned) binding path so the test never writes to a shared fixed name. */
+    if (!GetEnvironmentVariableW(L"WEXHOST_BINDING_PATH", path, sizeof(path) / sizeof(WCHAR)))
+    {
+        if (!GetTempPathW(MAX_PATH, path)) return;
+        lstrcatW(path, L"wexhost_binding.txt");
+    }
 
     lstrcpyW(buf, L"image=");
     lstrcatW(buf, image ? image : L"(null)");

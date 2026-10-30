@@ -3182,30 +3182,42 @@ cleanup:
 
 /* Exercise the elevation broker (execute_with_broker in shlexec.c) through a mock wexhost.dll. The mock is
  * loaded in-process, so its behavior is steered with the WEXHOST_MODE environment variable: "deny" makes it
- * return ERROR_CANCELLED, anything else makes it launch the requested command and report the child handle. */
+ * return ERROR_CANCELLED, anything else makes it launch the requested command and report the child handle.
+ *
+ * This is a mock WexElevateRun client test verifying execute_with_broker parameter passing and error
+ * propagation, not proof of real broker authorization, binding, or secure-desktop isolation.
+ *
+ * Safety: the test never overwrites a pre-existing system32\wexhost.dll (it refuses to install if one is
+ * present), restores any pre-existing HKLM\Software\Wine\Elevation\Helper value exactly (or removes only the
+ * key/value it created itself), and touches only its own PID-scoped binding file. Every exit/error path
+ * funnels through a single cleanup that performs these restorations. */
 static void test_elevation_broker(void)
 {
-    char src[MAX_PATH], sysdir[MAX_PATH], dst[MAX_PATH], bpath[MAX_PATH];
+    char src[MAX_PATH], sysdir[MAX_PATH], dst[MAX_PATH];
+    char bpath[MAX_PATH] = "";
+    char orig_helper[MAX_PATH];
     char *dirname = strdup(argv0);
     SHELLEXECUTEINFOA sei;
     TOKEN_ELEVATION_TYPE etype;
-    DWORD size;
+    DWORD size, src_size = 0, dst_size = 0;
     WCHAR wbuf[4096], *pline;
     HANDLE file;
     DWORD bytes, total;
-    BOOL ret;
+    BOOL ret, installed_mock = FALSE;
     DWORD err;
-    HKEY hkey;
+    HKEY hkey = NULL;
     LSTATUS res;
+    DWORD lpDisp = 0;   /* RegCreateKeyExA's lpDisposition is LPDWORD */
     HMODULE hmock = NULL;
+    DWORD orig_helper_type = 0, orig_helper_size = sizeof(orig_helper);
+    BOOL had_orig_helper = FALSE, key_created_new = FALSE;
 
     /* The broker path is only reached when the token is not already full. */
     if (GetTokenInformation(GetCurrentThreadEffectiveToken(), TokenElevationType, &etype, sizeof(etype), &size)
             && etype == TokenElevationTypeFull)
     {
         win_skip("running with a full token; broker path not reachable\n");
-        free(dirname);
-        return;
+        goto cleanup;
     }
 
     /* Locate the mock broker client next to this test executable. */
@@ -3214,24 +3226,41 @@ static void test_elevation_broker(void)
     if (GetFileAttributesA(src) == INVALID_FILE_ATTRIBUTES)
     {
         win_skip("mock wexhost.dll not built next to the test\n");
-        free(dirname);
-        return;
+        goto cleanup;
     }
 
     /* Install it where LoadLibraryExW(L"wexhost.dll", ..., LOAD_LIBRARY_SEARCH_SYSTEM32) looks. */
     if (!GetSystemDirectoryA(sysdir, sizeof(sysdir)))
     {
         win_skip("cannot determine system directory\n");
-        free(dirname);
-        return;
+        goto cleanup;
     }
     snprintf(dst, sizeof(dst), "%s\\wexhost.dll", sysdir);
-    if (!CopyFileA(src, dst, FALSE))
+
+    /* Never replace an existing DLL: refuse to install if a binary is already present at the target. */
+    if (GetFileAttributesA(dst) != INVALID_FILE_ATTRIBUTES)
+    {
+        win_skip("%s already exists; refusing to overwrite existing binary\n", dst);
+        goto cleanup;
+    }
+
+    /* Record the source size so cleanup can verify we are removing exactly what we installed. */
+    {
+        HANDLE hf = CreateFileA(src, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        if (hf != INVALID_HANDLE_VALUE)
+        {
+            src_size = GetFileSize(hf, NULL);
+            CloseHandle(hf);
+        }
+    }
+
+    /* bFailIfExists=TRUE makes the copy fail closed if a file appears between the check above and here. */
+    if (!CopyFileA(src, dst, TRUE))
     {
         win_skip("cannot install mock wexhost.dll into %s (error %lu)\n", dst, GetLastError());
-        free(dirname);
-        return;
+        goto cleanup;
     }
+    installed_mock = TRUE;
 
     /* Confirm the mock is loadable from exactly where execute_with_broker() will look; otherwise skip rather
      * than fail (e.g. a 32-bit process whose loader cannot see the installed copy). The handle is kept so
@@ -3240,24 +3269,32 @@ static void test_elevation_broker(void)
     if (!hmock)
     {
         win_skip("mock wexhost.dll installed but not loadable from %s (error %lu)\n", dst, GetLastError());
-        DeleteFileA(dst);
-        free(dirname);
-        return;
+        goto cleanup;
     }
 
-    /* Configure the elevation helper so the 'runas' verb routes to the broker. */
+    /* Configure the elevation helper so the 'runas' verb routes to the broker. Capture any pre-existing
+     * Helper value first so cleanup can restore it exactly (or remove only what we created). */
     res = RegCreateKeyExA(HKEY_LOCAL_MACHINE, "Software\\Wine\\Elevation", 0, NULL, 0,
-                          KEY_WRITE | KEY_WOW64_64KEY, NULL, &hkey, NULL);
+                          KEY_READ | KEY_WRITE | KEY_WOW64_64KEY, NULL, &hkey, &lpDisp);
     if (res != ERROR_SUCCESS)
     {
         win_skip("cannot create Software\\Wine\\Elevation key: %lu\n", res);
-        if (hmock) FreeLibrary(hmock);
-        DeleteFileA(dst);
-        free(dirname);
-        return;
+        goto cleanup;
     }
+    if (lpDisp == REG_CREATED_NEW_KEY)
+        key_created_new = TRUE;
+
+    orig_helper_size = sizeof(orig_helper);
+    if (RegQueryValueExA(hkey, "Helper", NULL, &orig_helper_type, (BYTE *)orig_helper, &orig_helper_size) == ERROR_SUCCESS)
+        had_orig_helper = TRUE;
+
     RegSetValueExA(hkey, "Helper", 0, REG_SZ, (const BYTE *)"C:\\Windows\\System32\\cmd.exe",
                    lstrlenA("C:\\Windows\\System32\\cmd.exe") + 1);
+
+    /* Give the mock a unique, process-owned binding path inside the private per-test tmpdir so we never read
+     * or delete a file another test (or process) may own. */
+    snprintf(bpath, sizeof(bpath), "%s\\wexhost_binding_%lu.txt", tmpdir, (unsigned long)GetCurrentProcessId());
+    SetEnvironmentVariableA("WEXHOST_BINDING_PATH", bpath);
 
     /* (a) Broker approval: returns success and a valid child handle. */
     SetEnvironmentVariableA("WEXHOST_MODE", "approve");
@@ -3304,9 +3341,7 @@ static void test_elevation_broker(void)
 
     /* (c) Request binding: caller parameters and working directory reach the broker. */
     SetEnvironmentVariableA("WEXHOST_MODE", "approve");
-    GetTempPathA(MAX_PATH, bpath);
-    lstrcatA(bpath, "wexhost_binding.txt");
-    DeleteFileA(bpath);
+    DeleteFileA(bpath);   /* clear our own PID-scoped path for a deterministic read */
 
     memset(&sei, 0, sizeof(sei));
     sei.cbSize = sizeof(sei);
@@ -3341,13 +3376,49 @@ static void test_elevation_broker(void)
         ok(pline && pline[4] != 0, "binding: broker received no working directory\n");
     }
 
-    /* Cleanup. */
+cleanup:
+    /* Restore registry state exactly: put back a pre-existing Helper, else remove only the value (and key) we
+     * created. */
+    if (hkey)
+    {
+        if (had_orig_helper)
+            RegSetValueExA(hkey, "Helper", 0, orig_helper_type, (const BYTE *)orig_helper, orig_helper_size);
+        else
+            RegDeleteValueA(hkey, "Helper");
+        RegCloseKey(hkey);
+    }
+    if (key_created_new && !had_orig_helper)
+        RegDeleteKeyExA(HKEY_LOCAL_MACHINE, "Software\\Wine\\Elevation", KEY_WOW64_64KEY, 0);
+
+    /* Clear the environment variables we set. */
     SetEnvironmentVariableA("WEXHOST_MODE", NULL);
-    RegDeleteValueA(hkey, "Helper");
-    RegCloseKey(hkey);
-    if (hmock) FreeLibrary(hmock);   /* release the guard's load so DeleteFileA can remove the file */
-    DeleteFileA(dst);
-    DeleteFileA(bpath);
+    SetEnvironmentVariableA("WEXHOST_BINDING_PATH", NULL);
+
+    /* Release the mock load so its file lock is gone before any delete below. */
+    if (hmock) FreeLibrary(hmock);
+
+    /* Sentinel-checked removal of the installed mock: only delete it if it still matches what we copied, so a
+     * modified or unexpected file is left in place and flagged rather than silently removed. */
+    if (installed_mock)
+    {
+        HANDLE hf = CreateFileA(dst, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
+        if (hf != INVALID_HANDLE_VALUE)
+        {
+            dst_size = GetFileSize(hf, NULL);
+            CloseHandle(hf);
+        }
+        ok(dst_size == src_size, "sentinel check: installed mock DLL size mismatch (expected %lu, got %lu)\n",
+           src_size, dst_size);
+        if (dst_size == src_size)
+            DeleteFileA(dst);
+        else
+            ok(0, "sentinel check failed; refusing to delete modified or unexpected %s\n", dst);
+    }
+
+    /* Remove our unique owned binding file. */
+    if (bpath[0])
+        DeleteFileA(bpath);
+
     free(dirname);
 }
 
