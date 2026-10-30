@@ -1405,7 +1405,7 @@ static unsigned int token_access_check( struct token *token,
             break;
     }
 
-    if (!list_empty( &token->restricted_sids ))
+    if (token->is_restricted || !list_empty( &token->restricted_sids ))
     {
         unsigned int restricted_allowed = 0;
         unsigned int restricted_denied = 0;
@@ -1988,12 +1988,16 @@ DECL_HANDLER(filter_token)
                         static const struct sid null_sid = { SID_REVISION, 1, SECURITY_NULL_SID_AUTHORITY, { SECURITY_NULL_RID } };
                         size_t size = offsetof( struct group, sid.sub_auth[1] );
                         struct group *res_group = mem_alloc( size );
-                        if (res_group)
+                        if (!res_group)
                         {
-                            res_group->attrs = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY;
-                            copy_sid( &res_group->sid, &null_sid );
-                            list_add_tail( &token->restricted_sids, &res_group->entry );
+                            set_error( STATUS_NO_MEMORY );
+                            release_object( token );
+                            release_object( src_token );
+                            return;
                         }
+                        res_group->attrs = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY;
+                        copy_sid( &res_group->sid, &null_sid );
+                        list_add_tail( &token->restricted_sids, &res_group->entry );
                     }
                 }
             }
