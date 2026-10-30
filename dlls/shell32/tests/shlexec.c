@@ -3180,6 +3180,39 @@ cleanup:
     DeleteFileA(elev_exe);
 }
 
+/* Return TRUE only if src and dst both exist and are byte-for-byte identical (compared in 4 KB blocks). Used as
+ * a content sentinel so cleanup never deletes an installed mock that was modified or replaced by something else. */
+static BOOL verify_file_identity(const char *src, const char *dst)
+{
+    HANDLE hsrc = CreateFileA(src, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    HANDLE hdst = CreateFileA(dst, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    char sbuf[4096], dbuf[4096];
+    BOOL same = TRUE;
+
+    if (hsrc == INVALID_HANDLE_VALUE || hdst == INVALID_HANDLE_VALUE) return FALSE;
+
+    for (;;)
+    {
+        DWORD rs = 0, rd = 0;
+        if (!ReadFile(hsrc, sbuf, sizeof(sbuf), &rs, NULL) ||
+            !ReadFile(hdst, dbuf, sizeof(dbuf), &rd, NULL))
+        {
+            same = FALSE;
+            break;
+        }
+        if (rs != rd || memcmp(sbuf, dbuf, rs))   /* length or content mismatch */
+        {
+            same = FALSE;
+            break;
+        }
+        if (rs < sizeof(sbuf)) break;             /* final short block: both hit EOF */
+    }
+
+    CloseHandle(hsrc);
+    CloseHandle(hdst);
+    return same;
+}
+
 /* Exercise the elevation broker (execute_with_broker in shlexec.c) through a mock wexhost.dll. The mock is
  * loaded in-process, so its behavior is steered with the WEXHOST_MODE environment variable: "deny" makes it
  * return ERROR_CANCELLED, anything else makes it launch the requested command and report the child handle.
@@ -3188,29 +3221,32 @@ cleanup:
  * propagation, not proof of real broker authorization, binding, or secure-desktop isolation.
  *
  * Safety: the test never overwrites a pre-existing system32\wexhost.dll (it refuses to install if one is
- * present), restores any pre-existing HKLM\Software\Wine\Elevation\Helper value exactly (or removes only the
- * key/value it created itself), and touches only its own PID-scoped binding file. Every exit/error path
- * funnels through a single cleanup that performs these restorations. */
+ * present), and its cleanup removes the installed mock only after a byte-for-byte content-identity check. Any
+ * pre-existing HKLM\Software\Wine\Elevation\Helper value is captured with a dynamically-sized, fail-closed
+ * query and restored exactly (or, if it was absent, the value/key this test created is removed). The broker's
+ * binding file lives in a dedicated process-owned directory. Every exit/error path funnels through one cleanup. */
 static void test_elevation_broker(void)
 {
     char src[MAX_PATH], sysdir[MAX_PATH], dst[MAX_PATH];
     char bpath[MAX_PATH] = "";
-    char orig_helper[MAX_PATH];
+    char bindir[MAX_PATH] = "";
+    char *orig_helper_data = NULL;   /* heap; holds the pre-existing Helper, freed in cleanup */
     char *dirname = strdup(argv0);
     SHELLEXECUTEINFOA sei;
     TOKEN_ELEVATION_TYPE etype;
-    DWORD size, src_size = 0, dst_size = 0;
+    DWORD size;
     WCHAR wbuf[4096], *pline;
     HANDLE file;
     DWORD bytes, total;
-    BOOL ret, installed_mock = FALSE;
+    BOOL ret, installed_mock = FALSE, bindir_created = FALSE;
     DWORD err;
     HKEY hkey = NULL;
     LSTATUS res;
     DWORD lpDisp = 0;   /* RegCreateKeyExA's lpDisposition is LPDWORD */
     HMODULE hmock = NULL;
-    DWORD orig_helper_type = 0, orig_helper_size = sizeof(orig_helper);
-    BOOL had_orig_helper = FALSE, key_created_new = FALSE;
+    DWORD orig_helper_type = 0, orig_helper_size = 0;
+    BOOL key_created_new = FALSE;
+    int helper_state = 0;   /* 0=unknown/failed (leave untouched), 1=absent, 2=captured */
 
     /* The broker path is only reached when the token is not already full. */
     if (GetTokenInformation(GetCurrentThreadEffectiveToken(), TokenElevationType, &etype, sizeof(etype), &size)
@@ -3244,16 +3280,6 @@ static void test_elevation_broker(void)
         goto cleanup;
     }
 
-    /* Record the source size so cleanup can verify we are removing exactly what we installed. */
-    {
-        HANDLE hf = CreateFileA(src, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
-        if (hf != INVALID_HANDLE_VALUE)
-        {
-            src_size = GetFileSize(hf, NULL);
-            CloseHandle(hf);
-        }
-    }
-
     /* bFailIfExists=TRUE makes the copy fail closed if a file appears between the check above and here. */
     if (!CopyFileA(src, dst, TRUE))
     {
@@ -3284,16 +3310,47 @@ static void test_elevation_broker(void)
     if (lpDisp == REG_CREATED_NEW_KEY)
         key_created_new = TRUE;
 
-    orig_helper_size = sizeof(orig_helper);
-    if (RegQueryValueExA(hkey, "Helper", NULL, &orig_helper_type, (BYTE *)orig_helper, &orig_helper_size) == ERROR_SUCCESS)
-        had_orig_helper = TRUE;
+    /* Two-phase query so an oversized (or oddly-typed) pre-existing Helper is preserved exactly rather than
+     * clobbered: first get its exact byte size, then read it fully. Any unexpected error fails closed and the
+     * value is left untouched. */
+    res = RegQueryValueExA(hkey, "Helper", NULL, &orig_helper_type, NULL, &orig_helper_size);
+    if (res == ERROR_FILE_NOT_FOUND)
+        helper_state = 1;   /* absent */
+    else if (res == ERROR_SUCCESS)
+    {
+        orig_helper_data = malloc(orig_helper_size);
+        if (!orig_helper_data)
+        {
+            win_skip("out of memory capturing existing Helper\n");
+            goto cleanup;   /* helper_state stays 0: leave the value untouched */
+        }
+        res = RegQueryValueExA(hkey, "Helper", NULL, &orig_helper_type, (BYTE *)orig_helper_data, &orig_helper_size);
+        if (res != ERROR_SUCCESS)
+        {
+            win_skip("cannot read existing Helper value: %lu\n", res);
+            goto cleanup;   /* helper_state stays 0 */
+        }
+        helper_state = 2;   /* captured */
+    }
+    else
+    {
+        win_skip("cannot safely query existing Helper: %lu\n", res);
+        goto cleanup;       /* helper_state stays 0 */
+    }
 
     RegSetValueExA(hkey, "Helper", 0, REG_SZ, (const BYTE *)"C:\\Windows\\System32\\cmd.exe",
                    lstrlenA("C:\\Windows\\System32\\cmd.exe") + 1);
 
-    /* Give the mock a unique, process-owned binding path inside the private per-test tmpdir so we never read
-     * or delete a file another test (or process) may own. */
-    snprintf(bpath, sizeof(bpath), "%s\\wexhost_binding_%lu.txt", tmpdir, (unsigned long)GetCurrentProcessId());
+    /* Create a dedicated, process-unique owned directory so the binding file can only ever collide with files
+     * we own; a bare PID in a shared temp name is not proof of ownership. */
+    snprintf(bindir, sizeof(bindir), "%s\\wexhost_dir_%lu", tmpdir, (unsigned long)GetCurrentProcessId());
+    if (!CreateDirectoryA(bindir, NULL))
+    {
+        win_skip("cannot create owned binding dir %s (error %lu)\n", bindir, GetLastError());
+        goto cleanup;
+    }
+    bindir_created = TRUE;
+    snprintf(bpath, sizeof(bpath), "%s\\wexhost_binding.txt", bindir);
     SetEnvironmentVariableA("WEXHOST_BINDING_PATH", bpath);
 
     /* (a) Broker approval: returns success and a valid child handle. */
@@ -3377,18 +3434,24 @@ static void test_elevation_broker(void)
     }
 
 cleanup:
-    /* Restore registry state exactly: put back a pre-existing Helper, else remove only the value (and key) we
-     * created. */
+    /* Restore registry state exactly: put back a captured pre-existing Helper (asserting success), else remove
+     * only the value we set; a value we failed to query is left exactly as we found it. */
     if (hkey)
     {
-        if (had_orig_helper)
-            RegSetValueExA(hkey, "Helper", 0, orig_helper_type, (const BYTE *)orig_helper, orig_helper_size);
-        else
+        if (helper_state == 2)
+        {
+            LSTATUS rr = RegSetValueExA(hkey, "Helper", 0, orig_helper_type,
+                                        (const BYTE *)orig_helper_data, orig_helper_size);
+            ok(rr == ERROR_SUCCESS, "restore existing Helper failed: %lu\n", rr);
+        }
+        else if (helper_state == 1)
             RegDeleteValueA(hkey, "Helper");
         RegCloseKey(hkey);
     }
-    if (key_created_new && !had_orig_helper)
+    if (key_created_new && helper_state != 2)
         RegDeleteKeyExA(HKEY_LOCAL_MACHINE, "Software\\Wine\\Elevation", KEY_WOW64_64KEY, 0);
+
+    free(orig_helper_data);   /* NULL-safe; the captured pre-existing Helper is no longer needed */
 
     /* Clear the environment variables we set. */
     SetEnvironmentVariableA("WEXHOST_MODE", NULL);
@@ -3397,27 +3460,187 @@ cleanup:
     /* Release the mock load so its file lock is gone before any delete below. */
     if (hmock) FreeLibrary(hmock);
 
-    /* Sentinel-checked removal of the installed mock: only delete it if it still matches what we copied, so a
-     * modified or unexpected file is left in place and flagged rather than silently removed. */
+    /* Content-identity sentinel: only delete the installed mock if it is byte-for-byte what we copied, so a
+     * modified or replaced file (even of the same size) is left in place and flagged rather than removed. */
     if (installed_mock)
     {
-        HANDLE hf = CreateFileA(dst, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
-        if (hf != INVALID_HANDLE_VALUE)
-        {
-            dst_size = GetFileSize(hf, NULL);
-            CloseHandle(hf);
-        }
-        ok(dst_size == src_size, "sentinel check: installed mock DLL size mismatch (expected %lu, got %lu)\n",
-           src_size, dst_size);
-        if (dst_size == src_size)
+        if (verify_file_identity(src, dst))
             DeleteFileA(dst);
         else
-            ok(0, "sentinel check failed; refusing to delete modified or unexpected %s\n", dst);
+            ok(0, "sentinel failed; refusing to delete modified or unexpected %s\n", dst);
     }
 
-    /* Remove our unique owned binding file. */
-    if (bpath[0])
+    /* Remove our owned binding file, then the directory we created for it. */
+    if (bindir_created)
+    {
         DeleteFileA(bpath);
+        RemoveDirectoryA(bindir);
+    }
+
+    free(dirname);
+}
+
+/* Explicit safety checks for the broker mock harness, requested by review. Each sub-test exercises one safety
+ * primitive directly (rather than re-entering test_elevation_broker(), whose win_skip guards would otherwise be
+ * counted as failures under wine) and cleans up after itself:
+ *   (a) a Helper value larger than MAX_PATH is captured and restored byte-for-byte by the dynamic query;
+ *   (b) a pre-installed system32\wexhost.dll is never overwritten by the install primitive;
+ *   (c) the content sentinel detects a same-size but different-content replacement. */
+static void test_elevation_broker_safety(void)
+{
+    char src[MAX_PATH], sysdir[MAX_PATH], dst[MAX_PATH];
+    char *dirname = strdup(argv0);
+    HKEY hkey;
+    LSTATUS res;
+    DWORD lpDisp = 0;
+
+    /* Locate the mock next to this test executable (needed by sub-tests b and c). */
+    *strrchr(dirname, '\\') = '\0';
+    snprintf(src, sizeof(src), "%s\\wexhost.dll", dirname);
+
+    /* (a) A Helper value larger than MAX_PATH is captured and restored byte-for-byte. This sub-test preserves
+     * any pre-existing Helper value itself, so it never clobbers state either. */
+    {
+        enum { vlen = 512 };   /* > MAX_PATH (260) */
+        char *seeded;
+        int i;
+
+        seeded = malloc(vlen);
+        for (i = 0; i < vlen - 1; i++) seeded[i] = (char)('a' + (i % 26));
+        seeded[vlen - 1] = '\0';   /* proper null-terminated REG_SZ so the stored size is exactly vlen */
+
+        res = RegCreateKeyExA(HKEY_LOCAL_MACHINE, "Software\\Wine\\Elevation", 0, NULL, 0,
+                              KEY_READ | KEY_WRITE | KEY_WOW64_64KEY, NULL, &hkey, &lpDisp);
+        ok(res == ERROR_SUCCESS, "safety(a): cannot open Elevation key: %lu\n", res);
+        if (res == ERROR_SUCCESS)
+        {
+            char *captured, *orig;
+            DWORD size, type, csize, ctype, osize, otype;
+            int had_orig;
+
+            orig = NULL;
+            osize = 0;
+            had_orig = RegQueryValueExA(hkey, "Helper", NULL, &otype, NULL, &osize) == ERROR_SUCCESS;
+            if (had_orig)
+            {
+                orig = malloc(osize);
+                RegQueryValueExA(hkey, "Helper", NULL, &otype, (BYTE *)orig, &osize);
+            }
+
+            ok(RegSetValueExA(hkey, "Helper", 0, REG_SZ, (const BYTE *)seeded, vlen) == ERROR_SUCCESS,
+               "safety(a): cannot seed oversized Helper\n");
+
+            res = RegQueryValueExA(hkey, "Helper", NULL, &type, NULL, &size);
+            ok(res == ERROR_SUCCESS && size == vlen, "safety(a): size query (res %lu, size %lu)\n", res, size);
+
+            captured = malloc(size ? size : 1);
+            res = RegQueryValueExA(hkey, "Helper", NULL, &type, (BYTE *)captured, &size);
+            ok(res == ERROR_SUCCESS && size == vlen && !memcmp(captured, seeded, vlen),
+               "safety(a): full capture of oversized value mismatch\n");
+
+            /* Overwrite with a short mock value, then restore from the captured buffer exactly. */
+            RegSetValueExA(hkey, "Helper", 0, REG_SZ, (const BYTE *)"C:\\Windows\\System32\\cmd.exe",
+                           lstrlenA("C:\\Windows\\System32\\cmd.exe") + 1);
+            ok(RegSetValueExA(hkey, "Helper", 0, type, (const BYTE *)captured, size) == ERROR_SUCCESS,
+               "safety(a): restore oversized Helper failed\n");
+
+            csize = vlen + 8;
+            {
+                char *check = malloc(vlen + 8);
+                res = RegQueryValueExA(hkey, "Helper", NULL, &ctype, (BYTE *)check, &csize);
+                ok(res == ERROR_SUCCESS && csize == vlen && !memcmp(check, seeded, vlen),
+                   "safety(a): oversized Helper not restored byte-for-byte\n");
+                free(check);
+            }
+
+            /* Restore the original state exactly. */
+            if (had_orig)
+                RegSetValueExA(hkey, "Helper", 0, otype, (const BYTE *)orig, osize);
+            else
+                RegDeleteValueA(hkey, "Helper");
+            RegCloseKey(hkey);
+            if (lpDisp == REG_CREATED_NEW_KEY && !had_orig)
+                RegDeleteKeyExA(HKEY_LOCAL_MACHINE, "Software\\Wine\\Elevation", KEY_WOW64_64KEY, 0);
+
+            free(captured);
+            free(orig);   /* NULL-safe */
+        }
+        free(seeded);
+    }
+
+    /* (b) A pre-installed system32\wexhost.dll is never overwritten: the install primitive (CopyFileA with
+     * bFailIfExists=TRUE, exactly as test_elevation_broker() uses) must refuse and leave the file intact. */
+    if (GetSystemDirectoryA(sysdir, sizeof(sysdir)) && GetFileAttributesA(src) != INVALID_FILE_ATTRIBUTES)
+    {
+        static const char dummy[] = "NOT-A-REAL-WEXHOST-DLL";
+        HANDLE hf;
+        DWORD dw, rd;
+        char rbuf[64];
+
+        snprintf(dst, sizeof(dst), "%s\\wexhost.dll", sysdir);
+        if (GetFileAttributesA(dst) == INVALID_FILE_ATTRIBUTES)   /* only act on a clean target */
+        {
+            hf = CreateFileA(dst, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+            ok(hf != INVALID_HANDLE_VALUE, "safety(b): cannot create dummy %s (error %lu)\n", dst, GetLastError());
+            if (hf != INVALID_HANDLE_VALUE)
+            {
+                WriteFile(hf, dummy, sizeof(dummy), &dw, NULL);
+                CloseHandle(hf);
+
+                ok(!CopyFileA(src, dst, TRUE), "safety(b): bFailIfExists copy overwrote a pre-existing DLL\n");
+
+                rd = 0;
+                hf = CreateFileA(dst, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+                ok(hf != INVALID_HANDLE_VALUE, "safety(b): dummy %s missing after refused copy\n", dst);
+                if (hf != INVALID_HANDLE_VALUE && ReadFile(hf, rbuf, sizeof(rbuf), &rd, NULL))
+                    ok(rd == sizeof(dummy) && !memcmp(rbuf, dummy, sizeof(dummy)),
+                       "safety(b): pre-existing %s was modified by the install\n", dst);
+                if (hf != INVALID_HANDLE_VALUE) CloseHandle(hf);
+
+                DeleteFileA(dst);   /* remove our own dummy */
+            }
+        }
+    }
+
+    /* (c) The content sentinel detects a same-size but different-content replacement (size alone is not enough). */
+    if (GetFileAttributesA(src) != INVALID_FILE_ATTRIBUTES)
+    {
+        char idfile[MAX_PATH], idfile2[MAX_PATH];
+        HANDLE hf, hs;
+        DWORD dw, srcsz = 0, n;
+        char fill[4096];
+
+        hs = CreateFileA(src, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        if (hs != INVALID_HANDLE_VALUE)
+        {
+            srcsz = GetFileSize(hs, NULL);
+            CloseHandle(hs);
+        }
+
+        snprintf(idfile, sizeof(idfile), "%s\\wexhost_idtest_%lu.bin", tmpdir, (unsigned long)GetCurrentProcessId());
+        snprintf(idfile2, sizeof(idfile2), "%s\\wexhost_idtest2_%lu.bin", tmpdir, (unsigned long)GetCurrentProcessId());
+
+        ok(CopyFileA(src, idfile, TRUE), "safety(c): cannot copy mock to %s (error %lu)\n", idfile, GetLastError());
+        ok(verify_file_identity(src, idfile), "safety(c): identical file not detected as identical\n");
+
+        /* Build a same-size file with entirely different content. */
+        memset(fill, 0x41, sizeof(fill));
+        hf = CreateFileA(idfile2, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hf != INVALID_HANDLE_VALUE)
+        {
+            while (srcsz > 0)
+            {
+                n = srcsz < sizeof(fill) ? srcsz : sizeof(fill);
+                if (!WriteFile(hf, fill, n, &dw, NULL)) break;
+                srcsz -= n;
+            }
+            CloseHandle(hf);
+        }
+        ok(!verify_file_identity(src, idfile2), "safety(c): same-size foreign replacement not detected as different\n");
+
+        DeleteFileA(idfile);
+        DeleteFileA(idfile2);
+    }
 
     free(dirname);
 }
@@ -3453,6 +3676,7 @@ START_TEST(shlexec)
     test_directory();
     test_elevation();
     test_elevation_broker();
+    test_elevation_broker_safety();
 
     cleanup_test();
 }

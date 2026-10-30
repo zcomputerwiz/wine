@@ -44,7 +44,11 @@ static void record_request(const WCHAR *image, const WCHAR *cmd, const WCHAR *cw
     lstrcatW(buf, L"\ncwd=");
     lstrcatW(buf, cwd ? cwd : L"(null)");
 
-    file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    /* Exclusive creation so we never clobber a pre-existing file; fall back to truncating only the file this
+     * owned run already created (re-opened on subsequent WexElevateRun calls within the same test). */
+    file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE && GetLastError() == ERROR_FILE_EXISTS)
+        file = CreateFileW(path, GENERIC_WRITE, 0, NULL, TRUNCATE_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) return;
     WriteFile(file, buf, (DWORD)(lstrlenW(buf) + 1) * sizeof(WCHAR), &written, NULL);
     CloseHandle(file);
