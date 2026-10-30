@@ -140,6 +140,8 @@ static HRESULT getIconLocationForFolder(IExtractIconWImpl *This, UINT uFlags, LP
         SHELL32_GetCustomFolderAttribute(This->pidl, L".ShellClassInfo", L"IconIndex",
             wszIconIndex, 10);
         *piIndex = wcstol(wszIconIndex, NULL, 10);
+        /* the file was read but never returned */
+        if (!ExpandEnvironmentStringsW(wszPath, szIconFile, cchMax)) lstrcpynW(szIconFile, wszPath, cchMax);
     }
     else if (SHELL32_GetCustomFolderAttribute(This->pidl, L".ShellClassInfo", L"CLSID",
         wszCLSIDValue, CHARS_IN_GUID) &&
@@ -309,6 +311,30 @@ static HRESULT WINAPI IExtractIconW_fnGetIconLocation(IExtractIconW * iface, UIN
 
 		  if (SUCCEEDED(hr) && *szIconFile)
 		    found = TRUE;
+		  else
+		  {
+		    /* no icon of its own: that of what it points to, as on Windows and ReactOS */
+		    LPITEMIDLIST target = NULL;
+		    IShellFolder *parent;
+		    LPCITEMIDLIST child;
+		    IExtractIconW *target_icon;
+		    UINT target_flags;
+		    char extension[MAX_PATH];
+
+		    if (IShellLinkW_GetIDList(psl, &target) == S_OK && target &&
+		        (!_ILGetExtension(target, extension, sizeof(extension)) || lstrcmpiA(extension, "lnk")) &&
+		        SUCCEEDED(SHBindToParent(target, &IID_IShellFolder, (void **)&parent, &child)))
+		    {
+		      if (SUCCEEDED(IShellFolder_GetUIObjectOf(parent, NULL, 1, &child, &IID_IExtractIconW, NULL, (void **)&target_icon)))
+		      {
+		        found = IExtractIconW_GetIconLocation(target_icon, uFlags, szIconFile, cchMax, piIndex, &target_flags) == S_OK &&
+		                *szIconFile;
+		        IExtractIconW_Release(target_icon);
+		      }
+		      IShellFolder_Release(parent);
+		    }
+		    ILFree(target);
+		  }
 
 		  IShellLinkW_Release(psl);
 		}

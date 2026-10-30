@@ -97,6 +97,7 @@ HRESULT WINAPI UnixFolder_Constructor(IUnknown * pUnkOuter, REFIID riid, LPVOID 
 HRESULT WINAPI UnixDosFolder_Constructor(IUnknown * pUnkOuter, REFIID riid, LPVOID *ppv);
 HRESULT WINAPI FolderShortcut_Constructor(IUnknown * pUnkOuter, REFIID riid, LPVOID *ppv);
 HRESULT WINAPI MyDocuments_Constructor(IUnknown * pUnkOuter, REFIID riid, LPVOID *ppv);
+HRESULT WINAPI SharedDocuments_Constructor(IUnknown * pUnkOuter, REFIID riid, LPVOID *ppv);
 HRESULT WINAPI RecycleBin_Constructor(IUnknown * pUnkOuter, REFIID riif, LPVOID *ppv);
 HRESULT WINAPI QueryAssociations_Constructor(IUnknown *pUnkOuter, REFIID riid, LPVOID *ppOutput);
 HRESULT WINAPI ExplorerBrowser_Constructor(IUnknown *pUnkOuter, REFIID riid, LPVOID *ppv);
@@ -116,6 +117,26 @@ HRESULT WINAPI ApplicationDestinations_Constructor(IUnknown *outer, REFIID riid,
 HRESULT WINAPI ApplicationDocumentLists_Constructor(IUnknown *outer, REFIID riid, LPVOID *ppv);
 
 HRESULT WINAPI new_menu_create(IUnknown *outer, REFIID iid, void **out);
+
+/* openwith.c */
+BOOL get_folder_shortcut_target(const WCHAR *folder, WCHAR *target);
+HRESULT create_shortcut(const WCHAR *target, const WCHAR *dir);   /* "Shortcut to target.lnk" in dir */
+
+/* undo.c: Edit > Undo of the shell's file operations */
+enum undo_kind { UNDO_NONE, UNDO_RENAME, UNDO_MOVE, UNDO_COPY, UNDO_DELETE };
+void undo_begin(enum undo_kind kind);
+void undo_add(const WCHAR *from, const WCHAR *to);
+void undo_end(void);
+enum undo_kind undo_top(void);
+void undo_menu_text(WCHAR *text, UINT size);
+BOOL undo_run(HWND hwnd);
+BOOL restore_trashed_file(const WCHAR *path);
+struct open_with_menu;
+HRESULT open_with_choose(HWND parent, const WCHAR *file);
+struct open_with_menu *open_with_menu_add(HMENU hmenu, UINT pos, UINT first, const WCHAR *file);
+UINT open_with_menu_count(const struct open_with_menu *menu);
+void open_with_menu_invoke(struct open_with_menu *menu, HWND hwnd, UINT index, const WCHAR *file);
+void open_with_menu_free(struct open_with_menu *menu);
 
 HRESULT IShellLink_ConstructFromFile(IUnknown * pUnkOuter, REFIID riid, LPCITEMIDLIST pidl, IUnknown **ppv);
 
@@ -183,11 +204,13 @@ extern WCHAR swShell32Name[MAX_PATH];
 
 extern const GUID CLSID_UnixFolder;
 extern const GUID CLSID_UnixDosFolder;
+extern const GUID CLSID_SharedDocuments;
 
 extern BOOL run_winemenubuilder( const WCHAR *args );
 
 /* Default shell folder value registration */
 HRESULT SHELL_RegisterShellFolders(void);
+HRESULT SHELL_RegisterUserShellFolders(void);
 
 /* Detect Shell Links */
 BOOL SHELL_IsShortcut(LPCITEMIDLIST);

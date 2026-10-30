@@ -677,6 +677,7 @@ static void sys_command_size_move( HWND hwnd, WPARAM wparam )
 {
     DWORD msg_pos = NtUserGetMessagePos();
     BOOL thickframe, drag_full_windows = TRUE, moved = FALSE;
+    BOOL button_down = !!(NtUserGetKeyState( VK_LBUTTON ) & 0x8000), button_pressed;
     RECT sizing_rect, mouse_rect, orig_rect;
     UINT hittest = wparam & 0x0f;
     UINT syscommand = wparam & 0xfff0;
@@ -771,8 +772,7 @@ static void sys_command_size_move( HWND hwnd, WPARAM wparam )
     /* Retrieve a default cache DC (without using the window style) */
     hdc = NtUserGetDCEx( parent, 0, DCX_CACHE );
 
-    /* we only allow disabling the full window drag for child windows */
-    if (parent) NtUserSystemParametersInfo( SPI_GETDRAGFULLWINDOWS, 0, &drag_full_windows, 0 );
+    NtUserSystemParametersInfo( SPI_GETDRAGFULLWINDOWS, 0, &drag_full_windows, 0 );
 
     /* repaint the window before moving it around */
     NtUserRedrawWindow( hwnd, NULL, 0, RDW_UPDATENOW | RDW_ALLCHILDREN );
@@ -799,7 +799,12 @@ static void sys_command_size_move( HWND hwnd, WPARAM wparam )
 
             /* It's possible that the window proc that handled the dispatch consumed a
              * WM_LBUTTONUP. Detect that and terminate the loop as if we'd gotten it. */
-            if (!(NtUserGetKeyState( VK_LBUTTON ) & 0x8000))
+            /* A keyboard/menu move starts with no button pressed. Unrelated
+             * messages must not end it; detect a consumed release only after
+             * observing a press, including one made later in a menu move. */
+            button_pressed = !!(NtUserGetKeyState( VK_LBUTTON ) & 0x8000);
+            if (button_pressed) button_down = TRUE;
+            if ((button_down && !button_pressed) || get_capture() != hwnd)
             {
                 DWORD last_pos = NtUserGetMessagePos();
                 pt.x = ((int)(short)LOWORD( last_pos ));
@@ -1464,6 +1469,26 @@ BOOL draw_frame_menu( HDC dc, RECT *r, UINT flags )
     return retval;
 }
 
+static BOOL draw_themed_nc_frame( HWND hwnd, HDC hdc, const RECT *rect, DWORD style, DWORD ex_style,
+                                  UINT flags );
+
+/* draw a caption button through the visual style, if there is one */
+static BOOL draw_themed_nc_button( HWND hwnd, HDC hdc, UINT button, BOOL down, BOOL grayed )
+{
+    RECT rect = {0};
+    WND *win = get_win_ptr( hwnd );
+    UINT flags = button << NCFRAME_PART_SHIFT;
+
+    if (!win || win == WND_OTHER_PROCESS || win == WND_DESKTOP) return FALSE;
+    if (win->flags & WIN_NCACTIVATED) flags |= NCFRAME_ACTIVE;
+    release_win_ptr( win );
+    if (down) flags |= NCFRAME_DOWN;
+    if (grayed) flags |= NCFRAME_GRAYED;
+    get_window_rect_rel( hwnd, COORDS_WINDOW, &rect, get_thread_dpi() );
+    return draw_themed_nc_frame( hwnd, hdc, &rect, get_window_long( hwnd, GWL_STYLE ),
+                                 get_window_long( hwnd, GWL_EXSTYLE ), flags );
+}
+
 static void draw_close_button( HWND hwnd, HDC hdc, BOOL down, BOOL grayed )
 {
     RECT rect;
@@ -1471,6 +1496,7 @@ static void draw_close_button( HWND hwnd, HDC hdc, BOOL down, BOOL grayed )
     DWORD ex_style = get_window_long( hwnd, GWL_EXSTYLE );
     UINT flags = DFCS_CAPTIONCLOSE;
 
+    if (draw_themed_nc_button( hwnd, hdc, NCFRAME_BTN_CLOSE, down, grayed )) return;
     get_inside_rect( hwnd, COORDS_WINDOW, &rect, style, ex_style );
 
     /* A tool window has a smaller Close button */
@@ -1509,6 +1535,7 @@ static void draw_max_button( HWND hwnd, HDC hdc, BOOL down, BOOL grayed )
 
     /* never draw maximize box when window has WS_EX_TOOLWINDOW style */
     if (ex_style & WS_EX_TOOLWINDOW) return;
+    if (draw_themed_nc_button( hwnd, hdc, NCFRAME_BTN_MAX, down, grayed )) return;
 
     flags = (style & WS_MAXIMIZE) ? DFCS_CAPTIONRESTORE : DFCS_CAPTIONMAX;
 
@@ -1532,6 +1559,7 @@ static void draw_min_button( HWND hwnd, HDC hdc, BOOL down, BOOL grayed )
 
     /* never draw minimize box when window has WS_EX_TOOLWINDOW style */
     if (ex_style & WS_EX_TOOLWINDOW) return;
+    if (draw_themed_nc_button( hwnd, hdc, NCFRAME_BTN_MIN, down, grayed )) return;
 
     flags = (style & WS_MINIMIZE) ? DFCS_CAPTIONRESTORE : DFCS_CAPTIONMIN;
 
@@ -1715,6 +1743,25 @@ BOOL WINAPI NtUserDrawCaptionTemp( HWND hwnd, HDC hdc, const RECT *rect, HFONT f
     return FALSE;
 }
 
+/* Let the visual style (uxtheme) draw the frame and caption; FALSE if there is none */
+static BOOL draw_themed_nc_frame( HWND hwnd, HDC hdc, const RECT *rect, DWORD style, DWORD ex_style,
+                                  UINT flags )
+{
+    struct draw_non_client_frame_params params;
+    void *ret_ptr;
+    ULONG ret_len;
+
+    params.hwnd = hwnd;
+    params.hdc = hdc;
+    params.rect = *rect;
+    params.style = style;
+    params.ex_style = ex_style;
+    params.flags = flags;
+    if (KeUserModeCallback( NtUserDrawNonClientFrame, &params, sizeof(params), &ret_ptr, &ret_len ))
+        return FALSE;
+    return ret_len == sizeof(BOOL) && *(BOOL *)ret_ptr;
+}
+
 /* Paint the non-client area for windows */
 static void nc_paint( HWND hwnd, HRGN clip )
 {
@@ -1762,6 +1809,17 @@ static void nc_paint( HWND hwnd, HRGN clip )
 
     NtGdiSelectPen( hdc, get_sys_color_pen( COLOR_WINDOWFRAME ));
 
+    if ((style & WS_CAPTION) == WS_CAPTION && draw_themed_nc_frame( hwnd, hdc, &rect, style, ex_style, active ? NCFRAME_ACTIVE : 0 ))
+    {
+        /* the visual style drew the frame and the caption; only advance the rectangle */
+        if (style & WS_THICKFRAME)
+            InflateRect( &rect, -get_system_metrics( SM_CXFRAME ), -get_system_metrics( SM_CYFRAME ));
+        else
+            InflateRect( &rect, -get_system_metrics( SM_CXDLGFRAME ), -get_system_metrics( SM_CYDLGFRAME ));
+        rect.top += get_system_metrics( (ex_style & WS_EX_TOOLWINDOW) ? SM_CYSMCAPTION : SM_CYCAPTION );
+    }
+    else
+    {
     if (has_static_outer_frame( ex_style ))
         draw_rect_edge( hdc, &rect, BDR_SUNKENOUTER, BF_RECT | BF_ADJUST, 1 );
     else if (has_big_frame( style, ex_style ))
@@ -1784,6 +1842,7 @@ static void nc_paint( HWND hwnd, HRGN clip )
 
         if (intersect_rect( &rfuzz, &r, &clip_rect ))
             draw_nc_caption( hdc, &r, hwnd, style, ex_style, active );
+    }
     }
 
     if (has_menu( hwnd, style ))
@@ -2624,7 +2683,11 @@ LRESULT default_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, 
     case WM_SETTEXT:
         result = set_window_text( hwnd, (void *)lparam, ansi );
         if (result)
+        {
             NtUserNotifyWinEvent( EVENT_OBJECT_NAMECHANGE, hwnd, OBJID_WINDOW, CHILDID_SELF );
+            if (!(get_window_long( hwnd, GWL_STYLE ) & WS_CHILD) && !get_window_relative( hwnd, GW_OWNER ))
+                notify_shell_hook( HSHELL_REDRAW, hwnd );
+        }
         if (result && (get_window_long( hwnd, GWL_STYLE ) & WS_CAPTION) == WS_CAPTION)
             handle_nc_paint( hwnd , (HRGN)1 );  /* repaint caption */
         break;
@@ -2679,6 +2742,8 @@ LRESULT default_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, 
 
     case WM_SETICON:
         result = (LRESULT)set_window_icon( hwnd, wparam, (HICON)lparam );
+        if (!(get_window_long( hwnd, GWL_STYLE ) & WS_CHILD) && !get_window_relative( hwnd, GW_OWNER ))
+            notify_shell_hook( HSHELL_REDRAW, hwnd );
         if ((get_window_long( hwnd, GWL_STYLE ) & WS_CAPTION) == WS_CAPTION)
             handle_nc_paint( hwnd , (HRGN)1 );  /* repaint caption */
         break;

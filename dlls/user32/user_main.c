@@ -50,6 +50,14 @@ static NTSTATUS WINAPI User32DrawNonClientButton( void *args, ULONG size )
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS WINAPI User32DrawNonClientFrame( void *args, ULONG size )
+{
+    const struct draw_non_client_frame_params *params = args;
+    BOOL ret = user_api->pNonClientFrameDraw( params->hwnd, params->hdc, params->rect, params->style,
+                                              params->ex_style, params->flags );
+    return NtCallbackReturn( &ret, sizeof(ret), STATUS_SUCCESS );
+}
+
 static NTSTATUS WINAPI User32DrawScrollBar( void *args, ULONG size )
 {
     const struct draw_scroll_bar_params *params = args;

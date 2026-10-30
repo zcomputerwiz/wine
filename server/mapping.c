@@ -44,6 +44,7 @@
 #include "process.h"
 #include "request.h"
 #include "security.h"
+#include "sysrun.h"
 
 /* list of memory ranges, used to store committed info */
 struct ranges
@@ -433,6 +434,7 @@ static int add_process_view( struct thread *thread, struct memory_view *view )
             if (get_view_nt_name( view, &name ) && (process->image = memdup( name.str, name.len )))
                 process->imagelen = name.len;
             process->image_info = view->image;
+            sysrun_main_image( process, view->fd );
             list_add_head( &process->views, &view->entry );
             return 1;
         }

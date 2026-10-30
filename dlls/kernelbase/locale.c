@@ -2023,11 +2023,34 @@ void init_locale( HMODULE module )
     RtlInitCodePageTable( oem_ptr, &oem_cpinfo );
 
     RegCreateKeyExW( HKEY_LOCAL_MACHINE, L"System\\CurrentControlSet\\Control\\Nls",
-                     0, NULL, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, NULL, &nls_key, NULL );
+                     0, NULL, REG_OPTION_NON_VOLATILE, KEY_READ, NULL, &nls_key, NULL );
     RegCreateKeyExW( HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Time Zones",
-                     0, NULL, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, NULL, &tz_key, NULL );
+                     0, NULL, REG_OPTION_NON_VOLATILE, KEY_READ, NULL, &tz_key, NULL );
     RegCreateKeyExW( HKEY_CURRENT_USER, L"Control Panel\\International",
                      0, NULL, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, NULL, &intl_key, NULL );
+
+    /* The user locale follows the Unix one, unless another one was chosen in the Control Panel (Regional and Language
+     * Options) since the Unix locale last changed; WineUnixLocaleName remembers the Unix locale. */
+    user_locale_name = locale_strings + user_locale->sname + 1;
+    count = sizeof(bufferW);
+    if (!RegQueryValueExW( intl_key, L"WineUnixLocaleName", NULL, NULL, (BYTE *)bufferW, &count ) &&
+        !wcscmp( bufferW, user_locale_name ))
+    {
+        const NLS_LOCALE_DATA *chosen;
+        LCID lcid;
+
+        count = sizeof(bufferW);
+        if (!RegQueryValueExW( intl_key, L"LocaleName", NULL, NULL, (BYTE *)bufferW, &count ) &&
+            wcscmp( bufferW, user_locale_name ) && (chosen = get_locale_by_name( bufferW, &lcid )) &&
+            lcid != LOCALE_CUSTOM_UNSPECIFIED)
+        {
+            user_locale = chosen;
+            user_lcid = lcid;
+            NtSetDefaultLocale( TRUE, lcid );
+        }
+    }
+    else RegSetValueExW( intl_key, L"WineUnixLocaleName", 0, REG_SZ, (BYTE *)user_locale_name,
+                         (lstrlenW( user_locale_name ) + 1) * sizeof(WCHAR) );
 
     current_locale_sort = get_language_sort( LOCALE_NAME_USER_DEFAULT );
 
@@ -5715,7 +5738,7 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetDynamicTimeZoneInformation( DYNAMIC_TIME_ZONE_
     else
     {
         RtlLeaveCriticalSection( &tzname_section );
-        if (!RegOpenKeyExW( tz_key, info->TimeZoneKeyName, 0, KEY_ALL_ACCESS, &key ))
+        if (!RegOpenKeyExW( tz_key, info->TimeZoneKeyName, 0, KEY_READ, &key ))
         {
             RegLoadMUIStringW( key, L"MUI_Std", info->StandardName,
                                sizeof(info->StandardName), NULL, 0, system_dir );
@@ -5747,9 +5770,9 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetDynamicTimeZoneInformationEffectiveYears( cons
     HKEY key, dst_key = 0;
     DWORD type, count, ret = ERROR_FILE_NOT_FOUND;
 
-    if (RegOpenKeyExW( tz_key, info->TimeZoneKeyName, 0, KEY_ALL_ACCESS, &key )) return ret;
+    if (RegOpenKeyExW( tz_key, info->TimeZoneKeyName, 0, KEY_READ, &key )) return ret;
 
-    if (RegOpenKeyExW( key, L"Dynamic DST", 0, KEY_ALL_ACCESS, &dst_key )) goto done;
+    if (RegOpenKeyExW( key, L"Dynamic DST", 0, KEY_READ, &dst_key )) goto done;
     count = sizeof(DWORD);
     if (RegQueryValueExW( dst_key, L"FirstEntry", NULL, &type, (BYTE *)first, &count )) goto done;
     if (type != REG_DWORD) goto done;
@@ -6407,7 +6430,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetTimeZoneInformationForYear( USHORT year,
         dynamic = &local_info;
     }
 
-    if ((ret = RegOpenKeyExW( tz_key, dynamic->TimeZoneKeyName, 0, KEY_ALL_ACCESS, &key ))) goto done;
+    if ((ret = RegOpenKeyExW( tz_key, dynamic->TimeZoneKeyName, 0, KEY_READ, &key ))) goto done;
     if (RegLoadMUIStringW( key, L"MUI_Std", info->StandardName,
                            sizeof(info->StandardName), NULL, 0, system_dir ))
     {
@@ -6425,7 +6448,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetTimeZoneInformationForYear( USHORT year,
 
     ret = ERROR_FILE_NOT_FOUND;
     if (!dynamic->DynamicDaylightTimeDisabled &&
-        !RegOpenKeyExW( key, L"Dynamic DST", 0, KEY_ALL_ACCESS, &dst_key ))
+        !RegOpenKeyExW( key, L"Dynamic DST", 0, KEY_READ, &dst_key ))
     {
         WCHAR yearW[16];
         swprintf( yearW, ARRAY_SIZE(yearW), L"%u", year );

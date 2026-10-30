@@ -29,6 +29,7 @@
 #include <unistd.h>
 
 #include "waylanddrv.h"
+#include "wexwayland.h"
 #include "wine/debug.h"
 #include "wine/server.h"
 
@@ -37,6 +38,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
 static struct wp_image_description_v1 *scrgb_desc;
 static struct wp_image_description_v1 *bt2100_desc;
 static BOOL color_manager_initialized;
+static UINT wex_scale_message;
 
 static void image_description_failed(void *user_data, struct wp_image_description_v1 *desc,
                                      uint32_t cause, const char *message)
@@ -245,6 +247,15 @@ void wp_fractional_scale_handle_scale(void* user_data,
     }
 
     surface->window.scale = scale;
+    if (process_wayland.wex_manager)
+    {
+        UNICODE_STRING name = RTL_CONSTANT_STRING(WEX_WAYLAND_SCALE_EVENT_MESSAGE);
+        NtUserSetProp(hwnd, WEX_WAYLAND_SCALE_PROP, (HANDLE)(ULONG_PTR)scale_fixed);
+        if (!wex_scale_message) wex_scale_message = NtUserRegisterWindowMessage(&name);
+        if (wex_scale_message) NtUserPostMessage(hwnd, wex_scale_message, scale_fixed, 0);
+        NtUserPostMessage(hwnd, WM_WAYLAND_WEX_UPDATE, SWP_FRAMECHANGED | SWP_NOZORDER, 0);
+        surface->wex_host_attempted = FALSE;
+    }
 
     /* reattach client surfaces as their rects have changed */
     update_client_surfaces(hwnd);
@@ -391,6 +402,9 @@ static void wayland_surface_init_fractional_scale(struct wayland_surface *surfac
                                                   double initial_scale)
 {
     surface->window.scale = initial_scale;
+    if (process_wayland.wex_manager)
+        NtUserSetProp(surface->hwnd, WEX_WAYLAND_SCALE_PROP,
+                      (HANDLE)(ULONG_PTR)(unsigned int)(initial_scale * 120));
 
     if (!process_wayland.wp_fractional_scale_manager_v1) return;
 
@@ -445,6 +459,9 @@ void wayland_surface_make_toplevel(struct wayland_surface *surface)
     wayland_surface_assign_icon(surface);
 
     wayland_surface_init_fractional_scale(surface, 1.0);
+    wayland_zone_create_item(surface);
+    wayland_zone_place(surface);
+    wayland_wex_create(surface);
 
     wl_surface_commit(surface->wl_surface);
     wl_display_flush(process_wayland.wl_display);
@@ -524,6 +541,15 @@ void wayland_surface_clear_role(struct wayland_surface *surface)
         break;
 
     case WAYLAND_SURFACE_ROLE_TOPLEVEL:
+        if (surface->wex_window)
+        {
+            wayland_wex_destroy(surface);
+        }
+        if (surface->zone_item)
+        {
+            xx_zone_item_v1_destroy(surface->zone_item);
+            surface->zone_item = NULL;
+        }
         if (surface->xdg_toplevel_icon)
         {
             xdg_toplevel_icon_manager_v1_set_icon(
@@ -740,6 +766,8 @@ static void wayland_surface_reconfigure_geometry(struct wayland_surface *surface
         xdg_surface_set_window_geometry(surface->xdg_surface,
                                         rect.left, rect.top,
                                         width, height);
+        surface->window_geometry_offset.x = rect.left;
+        surface->window_geometry_offset.y = rect.top;
         if (surface->window.resizeable)
         {
             xdg_toplevel_set_min_size(surface->xdg_toplevel, 0, 0);
@@ -900,6 +928,7 @@ BOOL wayland_surface_reconfigure(struct wayland_surface *surface)
     case WAYLAND_SURFACE_ROLE_TOPLEVEL:
         if (!surface->xdg_surface) break; /* surface role has been cleared */
         if (!wayland_surface_reconfigure_xdg(surface, rect)) return FALSE;
+        wayland_zone_place(surface);
         break;
     case WAYLAND_SURFACE_ROLE_SUBSURFACE:
         if (!surface->wl_subsurface) break; /* surface role has been cleared */
@@ -1512,6 +1541,7 @@ void wayland_surface_ensure_contents(struct wayland_surface *surface)
     {
         wayland_surface_attach_shm(surface, dummy_shm_buffer, damage);
         wl_surface_commit(surface->wl_surface);
+        wayland_wex_flush_activation(surface);
     }
 
     wayland_shm_buffer_unref(dummy_shm_buffer);

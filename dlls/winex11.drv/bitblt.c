@@ -807,11 +807,29 @@ BOOL X11DRV_PatBlt( PHYSDEV dev, struct bitblt_coords *dst, DWORD rop )
 /***********************************************************************
  *           X11DRV_StretchBlt
  */
+/* Only screen/desktop reads use the real root while a compositor owns the
+ * selection. Keep the original DC/GC (and all writes) on Wine's desktop.
+ * The root includes the Composite overlay; translate desktop-local pixels to
+ * root pixels on every read, so movement and ownership changes are respected. */
+static BOOL get_read_device( const X11DRV_PDEVICE *source, X11DRV_PDEVICE *read )
+{
+    Window real_root = DefaultRootWindow( gdi_display ), child;
+    int x, y;
+    *read = *source;
+    if (source->drawable != root_window || root_window == real_root ||
+        !X11DRV_has_compositor( gdi_display )) return FALSE;
+    if (!XTranslateCoordinates( gdi_display, root_window, real_root, 0, 0, &x, &y, &child )) return FALSE;
+    read->drawable = real_root;
+    OffsetRect( &read->dc_rect, x, y );
+    return TRUE;
+}
+
 BOOL X11DRV_StretchBlt( PHYSDEV dst_dev, struct bitblt_coords *dst,
                         PHYSDEV src_dev, struct bitblt_coords *src, DWORD rop )
 {
     X11DRV_PDEVICE *physDevDst = get_x11drv_dev( dst_dev );
     X11DRV_PDEVICE *physDevSrc = get_x11drv_dev( src_dev );
+    X11DRV_PDEVICE read_dev;
     INT width, height;
     const BYTE *opcode;
     Pixmap src_pixmap;
@@ -826,6 +844,8 @@ BOOL X11DRV_StretchBlt( PHYSDEV dst_dev, struct bitblt_coords *dst,
         return dst_dev->funcs->pStretchBlt( dst_dev, dst, src_dev, src, rop );
     }
 
+    get_read_device( physDevSrc, &read_dev );
+    physDevSrc = &read_dev;
     width  = dst->visrect.right - dst->visrect.left;
     height = dst->visrect.bottom - dst->visrect.top;
     opcode = BITBLT_Opcodes[(rop >> 16) & 0xff];
@@ -1317,6 +1337,8 @@ DWORD X11DRV_GetImage( PHYSDEV dev, BITMAPINFO *info,
                        struct gdi_image_bits *bits, struct bitblt_coords *src )
 {
     X11DRV_PDEVICE *physdev = get_x11drv_dev( dev );
+    X11DRV_PDEVICE read_dev;
+    BOOL capture;
     DWORD ret = ERROR_SUCCESS;
     XImage *image;
     XVisualInfo vis = default_visual;
@@ -1358,6 +1380,9 @@ DWORD X11DRV_GetImage( PHYSDEV dev, BITMAPINFO *info,
 
     if (!bits) return ERROR_SUCCESS;  /* just querying the color information */
 
+    capture = get_read_device( physdev, &read_dev );
+    physdev = &read_dev;
+
     x = src->visrect.left & ~(align - 1);
     y = src->visrect.top;
     width = src->visrect.right - x;
@@ -1379,6 +1404,7 @@ DWORD X11DRV_GetImage( PHYSDEV dev, BITMAPINFO *info,
         GC gc = XCreateGC( gdi_display, pixmap, 0, NULL );
 
         XSetGraphicsExposures( gdi_display, gc, False );
+        if (capture) XSetSubwindowMode( gdi_display, gc, IncludeInferiors );
         XCopyArea( gdi_display, physdev->drawable, pixmap, gc,
                    physdev->dc_rect.left + x, physdev->dc_rect.top + y, width, height, 0, 0 );
         image = XGetImage( gdi_display, pixmap, 0, 0, width, height, AllPlanes, ZPixmap );

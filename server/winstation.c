@@ -36,6 +36,7 @@
 #include "request.h"
 #include "process.h"
 #include "user.h"
+#include "sysrun.h"
 #include "file.h"
 #include "security.h"
 
@@ -136,6 +137,8 @@ static bool winstation_init( struct object *obj, const void *init_data )
 
     winstation->flags = data->flags;
     winstation->input_desktop = NULL;
+    winstation->input_owner = NULL;
+    winstation->return_desktop = NULL;
     winstation->clipboard = NULL;
     winstation->atom_table = NULL;
     winstation->monitors = NULL;
@@ -280,6 +283,7 @@ static bool desktop_init( struct object *obj, const void *init_data )
     desktop->foreground_input = NULL;
     desktop->foreground_pid = 0;
     desktop->users = 0;
+    desktop->secure = 0;
     desktop->clip_flags = 0;
     desktop->cursor_win = 0;
     desktop->alt_pressed = 0;
@@ -358,13 +362,15 @@ static void desktop_destroy( struct object *obj )
     struct winstation *winstation = desktop->winstation;
 
     list_remove( &desktop->entry );
+    if (desktop == winstation->return_desktop) winstation->return_desktop = NULL;
 
     if (desktop == winstation->input_desktop)
     {
         struct desktop *other, *found = NULL;
         LIST_FOR_EACH_ENTRY(other, &winstation->desktops, struct desktop, entry)
-            if (!found || other->input_time > found->input_time) found = other;
+            if ((!found || other->input_time > found->input_time) && !other->secure) found = other;
         set_input_desktop( winstation, found );
+        winstation->input_owner = NULL;
     }
 
     free_hotkeys( desktop, 0 );
@@ -389,7 +395,8 @@ static void close_desktop_timeout( void *private )
     struct desktop *desktop = private;
 
     desktop->close_timeout = NULL;
-    unlink_named_object( &desktop->obj );  /* make sure no other process can open it */
+    /* make sure no other process can open it; the secure desktop keeps its name, the broker holds it */
+    if (!desktop->secure) unlink_named_object( &desktop->obj );
     post_desktop_message( desktop, WM_CLOSE, 0, 0 );  /* and signal the owner to quit */
 }
 
@@ -420,6 +427,9 @@ static void remove_desktop_user( struct desktop *desktop, struct thread *thread 
 
     assert( desktop->users > 0 );
     desktop->users--;
+
+    /* the desktop of a shell is not closed when the programs are gone (or a thread of the shell ends) */
+    if (desktop->shared->flags & DF_WINE_SHELL_DESKTOP) return;
 
     /* if we have one remaining user, it has to be the manager of the desktop window */
     if ((process = get_top_window_owner( desktop )) && desktop->users == process->running_threads && !desktop->close_timeout)
@@ -670,12 +680,28 @@ DECL_HANDLER(set_process_winstation)
     }
 }
 
+static const WCHAR winlogon_desktop_name[] = {'W','i','n','l','o','g','o','n'};
+static const WCHAR screensaver_desktop_name[] = {'S','c','r','e','e','n','-','S','a','v','e','r'};
+
+/* the names that only the system role may create (docs/ELEVATION_SECURE_DESKTOP_WORKORDER.md): a limited process
+ * that takes the name first would hand the broker a desktop whose descriptor it chose. Returns 2 for the secure
+ * desktop, 1 for the other reserved name. */
+static int reserved_desktop_name( const struct unicode_str *name )
+{
+    if (name->len == sizeof(winlogon_desktop_name) &&
+        !memicmp_strW( name->str, winlogon_desktop_name, name->len )) return 2;
+    if (name->len == sizeof(screensaver_desktop_name) &&
+        !memicmp_strW( name->str, screensaver_desktop_name, name->len )) return 1;
+    return 0;
+}
+
 /* create a desktop */
 DECL_HANDLER(create_desktop)
 {
     struct desktop *desktop;
     struct desktop_init_data data = { .flags = req->flags };
     struct object_params params = { .ops = &desktop_ops, .init_data = &data };
+    int reserved;
 
     if (!get_req_object_attributes( &params )) return;
 
@@ -683,6 +709,20 @@ DECL_HANDLER(create_desktop)
     {
         set_error( STATUS_INVALID_HANDLE );
         return;
+    }
+
+    reserved = reserved_desktop_name( &params.name );
+    if (sysrun_desktops_enforced())
+    {
+        /* the creator needs WINSTA_CREATEDESKTOP on the window station, and the system role to take a reserved name */
+        const struct object_attributes *attr = get_req_data();
+        if ((attr->rootdir && !(get_handle_access( current->process, attr->rootdir ) & WINSTA_CREATEDESKTOP)) ||
+            (reserved && !sysrun_process_is_system( current->process )))
+        {
+            set_error( STATUS_ACCESS_DENIED );
+            if (params.root) release_object( params.root );
+            return;
+        }
     }
 
     if ((desktop = create_named_object( &params )))
@@ -701,6 +741,7 @@ DECL_HANDLER(create_desktop)
         }
         else
         {
+            if (reserved == 2 && sysrun_desktops_enforced()) desktop->secure = 1;
             reply->handle = alloc_handle_no_access_check( current->process, desktop,
                                                           req->access, params.attr );
         }
@@ -760,22 +801,88 @@ DECL_HANDLER(open_input_desktop)
     release_object( winstation );
 }
 
-/* changes the current input desktop */
+/* changes the current input desktop. The handle needs DESKTOP_SWITCHDESKTOP. While the secure desktop is the input
+ * desktop only a process of the system role may switch away from it; the process that switched to it and the desktop
+ * to return to are recorded, and process_killed() switches back when that process dies. */
 DECL_HANDLER(set_input_desktop)
 {
-    /* FIXME: check access rights */
     struct winstation *winstation;
     struct desktop *desktop;
 
     if (!(winstation = get_process_winstation( current->process, 0 ))) return;
 
-    if ((desktop = (struct desktop *)get_handle_obj( current->process, req->handle, 0, &desktop_ops )))
+    if ((desktop = (struct desktop *)get_handle_obj( current->process, req->handle,
+                                                     DESKTOP_SWITCHDESKTOP, &desktop_ops )))
     {
-        if (!set_input_desktop( winstation, desktop )) set_error( STATUS_ILLEGAL_FUNCTION );
+        struct desktop *old = winstation->input_desktop;
+        int system = sysrun_process_is_system( current->process );
+
+        if (desktop->winstation != winstation)  /* the process switches within its own window station only */
+            set_error( STATUS_INVALID_HANDLE );
+        else if (sysrun_desktops_enforced() && old && old != desktop && old->secure && !system)
+            set_error( STATUS_ACCESS_DENIED );
+        else if (sysrun_desktops_enforced() && desktop->secure && !system)
+            set_error( STATUS_ACCESS_DENIED );
+        else if (!set_input_desktop( winstation, desktop )) set_error( STATUS_ILLEGAL_FUNCTION );
+        else if (desktop->secure && old != desktop)
+        {
+            winstation->input_owner = current->process;
+            winstation->return_desktop = old;
+        }
+        else if (!desktop->secure)
+        {
+            winstation->input_owner = NULL;
+            winstation->return_desktop = NULL;
+        }
         release_object( desktop );
     }
 
     release_object( winstation );
+}
+
+/* a process is gone: if it had switched to the secure desktop, give the input back */
+void winstation_process_killed( struct process *process )
+{
+    struct winstation *winstation;
+
+    LIST_FOR_EACH_ENTRY( winstation, &winstation_list, struct winstation, entry )
+    {
+        struct desktop *desktop, *found = winstation->return_desktop;
+
+        if (winstation->input_owner != process) continue;
+        winstation->input_owner = NULL;
+        winstation->return_desktop = NULL;
+        if (!winstation->input_desktop || !winstation->input_desktop->secure) continue;
+        if (!found)
+            LIST_FOR_EACH_ENTRY( desktop, &winstation->desktops, struct desktop, entry )
+                if (!desktop->secure && (!found || desktop->input_time > found->input_time)) found = desktop;
+        set_input_desktop( winstation, found );
+    }
+}
+
+/* the desktop of a thread (a new reference), or NULL; sets no error */
+struct desktop *get_thread_desktop_quiet( struct thread *thread )
+{
+    struct desktop *desktop;
+
+    if (!thread->desktop || !(desktop = get_thread_desktop( thread, 0 ))) return NULL;
+    return desktop;
+}
+
+/* A thread of a process without the system role may not reach the queues, windows or threads of another desktop.
+ * Applies only while the system role is active; returns 1 and sets STATUS_ACCESS_DENIED (provisional: native
+ * Windows' code for each operation was not checked) when the access is refused. */
+int cross_desktop_denied( struct thread *thread, struct desktop *target )
+{
+    struct desktop *own;
+    int ret;
+
+    if (!sysrun_desktops_enforced() || sysrun_process_is_system( thread->process )) return 0;
+    own = get_thread_desktop_quiet( thread );
+    ret = own != target;
+    if (own) release_object( own );
+    if (ret) set_error( STATUS_ACCESS_DENIED );
+    return ret;
 }
 
 /* close a desktop */

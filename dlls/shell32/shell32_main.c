@@ -281,7 +281,7 @@ DWORD_PTR WINAPI SHGetFileInfoW(LPCWSTR path,DWORD dwFileAttributes,
         else
         {
             if (dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-                lstrcatW (psfi->szTypeName, L"Folder");
+                lstrcatW (psfi->szTypeName, L"File Folder");
             else 
             {
                 WCHAR sTemp[64];
@@ -1112,6 +1112,9 @@ WCHAR *shell_get_resource_string(UINT id)
 
 HRESULT WINAPI DllInstall(BOOL bInstall, LPCWSTR cmdline)
 {
+    if (bInstall && cmdline && (!wcscmp(cmdline, L"U") || !wcscmp(cmdline, L"u")))
+        return SHELL_RegisterUserShellFolders();  /* per-user setup at first logon, as Windows' Active Setup */
+
     FIXME("%s %s: stub\n", bInstall ? "TRUE":"FALSE", debugstr_w(cmdline));
     return S_OK;        /* indicate success */
 }

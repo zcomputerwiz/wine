@@ -49,6 +49,9 @@
 #ifdef HAVE_SYS_PARAM_H
 # include <sys/param.h>
 #endif
+#ifdef HAVE_SYS_PRCTL_H
+# include <sys/prctl.h>
+#endif
 #ifdef HAVE_SYS_QUEUE_H
 # include <sys/queue.h>
 #endif
@@ -389,7 +392,11 @@ static void kernel_writewatch_init(void)
     pagemap_fd = open( "/proc/self/pagemap", O_CLOEXEC | O_RDONLY );
     if (pagemap_fd == -1)
     {
-        ERR( "Error opening /proc/self/pagemap.\n" );
+        /* a non-dumpable process (the system group of the elevation launcher) does not own /proc/self/ */
+        if ((errno == EACCES || errno == EPERM) && prctl( PR_GET_DUMPABLE, 0, 0, 0, 0 ) == 0)
+            WARN( "Cannot open /proc/self/pagemap in a non-dumpable process.\n" );
+        else
+            ERR( "Error opening /proc/self/pagemap.\n" );
         close( uffd_fd );
         return;
     }

@@ -243,8 +243,9 @@ void WINAPI RegisterSystemThread(DWORD flags, DWORD reserved)
  */
 BOOL WINAPI RegisterShellHookWindow(HWND hWnd)
 {
-    FIXME("(%p): stub\n", hWnd);
-    return FALSE;
+    /* One hook window per desktop, stored as the desktop's taskman window; win32u posts the
+     * "SHELLHOOK" message to it for top-level window events. */
+    return hWnd && NtUserSetTaskmanWindow( hWnd ) != NULL;
 }
 
 
@@ -253,8 +254,9 @@ BOOL WINAPI RegisterShellHookWindow(HWND hWnd)
  */
 BOOL WINAPI DeregisterShellHookWindow(HWND hWnd)
 {
-    FIXME("(%p): stub\n", hWnd);
-    return FALSE;
+    if (!hWnd || NtUserGetTaskmanWindow() != hWnd) return FALSE;
+    NtUserSetTaskmanWindow( NULL );
+    return TRUE;
 }
 
 

@@ -2466,6 +2466,8 @@ void _ILGetFileType(LPCITEMIDLIST pidl, LPSTR pOut, UINT uOutSize)
             }
         }
     }
+    else if (_ILIsFolder(pidl))
+        lstrcpynA(pOut, "File Folder", uOutSize);
     else
         lstrcpynA(pOut, "Folder", uOutSize);
 }

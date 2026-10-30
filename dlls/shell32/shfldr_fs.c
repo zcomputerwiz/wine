@@ -68,6 +68,7 @@ typedef struct {
 
     LPITEMIDLIST pidlRoot; /* absolute pidl */
     DWORD drop_effects_mask;
+    DWORD drop_default;    /* the effect without keys: a move on the same drive, else a copy */
 } IGenericSFImpl;
 
 static UINT cfShellIDList;
@@ -718,8 +719,16 @@ IShellFolder_fnGetUIObjectOf (IShellFolder2 * iface,
             ILFree(pidl);
             hr = S_OK;
         } else if (IsEqualIID (riid, &IID_IDropTarget) && (cidl >= 1)) {
-            hr = IShellFolder2_QueryInterface (iface, &IID_IDropTarget,
-             (LPVOID *) & pObj);
+            /* the drop target of a folder item is that folder's; a file takes no drops */
+            IShellFolder *child;
+
+            hr = E_FAIL;
+            if (cidl == 1 && _ILIsFolder(apidl[0]) &&
+                SUCCEEDED(IShellFolder2_BindToObject(iface, apidl[0], NULL, &IID_IShellFolder, (void **)&child)))
+            {
+                hr = IShellFolder_QueryInterface(child, &IID_IDropTarget, (void **)&pObj);
+                IShellFolder_Release(child);
+            }
         } else if ((IsEqualIID(riid,&IID_IShellLinkW) ||
          IsEqualIID(riid,&IID_IShellLinkA)) && (cidl == 1)) {
             pidl = ILCombine (This->pidlRoot, apidl[0]);
@@ -879,7 +888,26 @@ IShellFolder_fnGetDisplayNameOf (IShellFolder2 * iface, LPCITEMIDLIST pidl,
             get_display_name( pszPath, This->sPathTarget, pidl,
                               IsEqualCLSID( This->pclsid, &CLSID_UnixFolder ));
         }
-        else _ILSimpleGetTextW(pidl, pszPath, MAX_PATH);
+        else
+        {
+            _ILSimpleGetTextW(pidl, pszPath, MAX_PATH);
+            /* a folder can be shown by another name: desktop.ini LocalizedResourceName, as Windows does for
+             * "Documents" and the like */
+            if (_ILIsFolder(pidl) && !(GET_SHGDN_FOR(dwFlags) & (SHGDN_FORPARSING | SHGDN_FOREDITING)) &&
+                This->sPathTarget)
+            {
+                WCHAR ini[MAX_PATH], raw[MAX_PATH], value[MAX_PATH];
+
+                lstrcpynW(ini, This->sPathTarget, MAX_PATH);
+                PathAppendW(ini, pszPath);
+                PathAppendW(ini, L"desktop.ini");
+                if (GetPrivateProfileStringW(L".ShellClassInfo", L"LocalizedResourceName", L"", raw,
+                                             MAX_PATH, ini) &&
+                    ExpandEnvironmentStringsW(raw, value, MAX_PATH) &&
+                    FAILED(SHLoadIndirectString(value, pszPath, MAX_PATH, NULL)))
+                    _ILSimpleGetTextW(pidl, pszPath, MAX_PATH);
+            }
+        }
         if (!_ILIsFolder(pidl)) SHELL_FS_ProcessDisplayFilename(pszPath, dwFlags);
     } else {
         hr = SHELL32_GetDisplayNameOfChild(iface, pidl, dwFlags, pszPath, MAX_PATH);
@@ -959,6 +987,10 @@ static HRESULT WINAPI IShellFolder_fnSetNameOf (IShellFolder2 * iface,
     if (MoveFileW (szSrc, szDest)) {
         HRESULT hr = S_OK;
 
+        undo_begin(UNDO_RENAME);
+        undo_add(szSrc, szDest);
+        undo_end();
+
         if (pPidlOut)
             hr = _ILCreateFromPathW(szDest, pPidlOut);
 
@@ -1034,6 +1066,22 @@ IShellFolder_fnGetDetailsOf (IShellFolder2 * iface, LPCITEMIDLIST pidl,
         return E_INVALIDARG;
 
     if (!pidl) return SHELL32_GetColumnDetails(GenericSFHeader, iColumn, psd);
+
+    if (GenericSFHeader[iColumn].pid == PID_STG_SIZE && _ILIsValue(pidl) && !_ILIsFolder(pidl))
+    {
+        WCHAR file_path[MAX_PATH];
+        WIN32_FILE_ATTRIBUTE_DATA file_attributes;
+
+        get_display_name(file_path, This->sPathTarget, pidl, FALSE);
+
+        if (GetFileAttributesExW(file_path, GetFileExInfoStandard, &file_attributes))
+        {
+            psd->str.uType = STRRET_CSTR;
+            StrFormatByteSize64A((LONGLONG)file_attributes.nFileSizeHigh << 32 | file_attributes.nFileSizeLow,
+                                 psd->str.cStr, MAX_PATH);
+            return S_OK;
+        }
+    }
 
     return shellfolder_get_file_details( iface, pidl, GenericSFHeader, iColumn, psd );
 }
@@ -1410,6 +1458,10 @@ IFSFldr_PersistFolder3_Initialize (IPersistFolder3 * iface, LPCITEMIDLIST pidl)
         {
             if (!SHGetSpecialFolderPathW( 0, wszTemp, CSIDL_PERSONAL, FALSE )) return E_FAIL;
         }
+        else if (IsEqualCLSID( This->pclsid, &CLSID_SharedDocuments ))
+        {
+            if (!SHGetSpecialFolderPathW( 0, wszTemp, CSIDL_COMMON_DOCUMENTS, FALSE )) return E_FAIL;
+        }
         else lstrcpyW( wszTemp, L"\\\\?\\unix\\" );
     }
     else SHGetPathFromIDListW( pidl, wszTemp );
@@ -1650,39 +1702,67 @@ static ULONG WINAPI ISFDropTarget_Release(IDropTarget *iface)
 #define HIDA_GetPIDLFolder(pida) (LPCITEMIDLIST)(((LPBYTE)pida)+(pida)->aoffset[0])
 #define HIDA_GetPIDLItem(pida, i) (LPCITEMIDLIST)(((LPBYTE)pida)+(pida)->aoffset[i+1])
 
+/* The files of a drag as a double-null-terminated list: its CF_HDROP, from the shell or another program */
+static WCHAR *drop_paths(IDataObject *data)
+{
+    FORMATETC format;
+    STGMEDIUM medium;
+    WCHAR *list = NULL;
+    UINT count, i, len, size = 1;
+
+    InitFormatEtc(format, CF_HDROP, TYMED_HGLOBAL);
+    if (FAILED(IDataObject_GetData(data, &format, &medium))) return NULL;
+    count = DragQueryFileW(medium.hGlobal, ~0u, NULL, 0);
+    for (i = 0; i < count; i++) size += DragQueryFileW(medium.hGlobal, i, NULL, 0) + 1;
+    if (count && (list = calloc(size, sizeof(WCHAR))))
+        for (i = 0, len = 0; i < count; i++) len += DragQueryFileW(medium.hGlobal, i, list + len, size - len) + 1;
+    ReleaseStgMedium(&medium);
+    return list;
+}
+
+/* The effect of a drop for the keys held, as on Windows: Ctrl copies, Shift moves, both make shortcuts */
+static DWORD drop_effect(const IGenericSFImpl *This, DWORD keys)
+{
+    DWORD effect;
+
+    if ((keys & (MK_CONTROL | MK_SHIFT)) == (MK_CONTROL | MK_SHIFT) || (keys & MK_ALT)) effect = DROPEFFECT_LINK;
+    else if (keys & MK_CONTROL) effect = DROPEFFECT_COPY;
+    else if (keys & MK_SHIFT) effect = DROPEFFECT_MOVE;
+    else effect = This->drop_default;
+    return effect & This->drop_effects_mask;
+}
+
 static HRESULT WINAPI
 ISFDropTarget_DragEnter (IDropTarget * iface, IDataObject * pDataObject,
                          DWORD dwKeyState, POINTL pt, DWORD * pdwEffect)
 {
     IGenericSFImpl *This = impl_from_IDropTarget(iface);
-    FORMATETC format;
-    STGMEDIUM medium;
+    WCHAR *paths, *p, dir[MAX_PATH];
+    BOOL same_drive = TRUE;
 
     TRACE("(%p)->(%p 0x%08lx {.x=%ld, .y=%ld} %p)\n", This, pDataObject, dwKeyState, pt.x, pt.y, pdwEffect);
 
     if (!pdwEffect || !pDataObject)
         return E_INVALIDARG;
 
-    /* Compute a mask of supported drop-effects for this shellfolder object and the given data
-     * object. Dropping is only supported on folders, which represent filesystem locations. One
-     * can't drop on file objects. And the 'move' drop effect is only supported, if the source
-     * folder is not identical to the target folder. */
+    /* Items can be dropped into a file system folder; moved only when they are not in it already */
     This->drop_effects_mask = DROPEFFECT_NONE;
-    InitFormatEtc(format, cfShellIDList, TYMED_HGLOBAL);
-    if (_ILIsFolder(ILFindLastID(This->pidlRoot)) && /* Only drop to folders, not to files */
-        SUCCEEDED(IDataObject_GetData(pDataObject, &format, &medium))) /* Only ShellIDList format */
+    This->drop_default = DROPEFFECT_MOVE;
+    if (This->sPathTarget && PathIsDirectoryW(This->sPathTarget) && (paths = drop_paths(pDataObject)))
     {
-        LPIDA pidaShellIDList = GlobalLock(medium.hGlobal);
-        This->drop_effects_mask |= DROPEFFECT_COPY|DROPEFFECT_LINK;
-
-        if (pidaShellIDList) { /* Files can only be moved between two different folders */
-            if (!ILIsEqual(HIDA_GetPIDLFolder(pidaShellIDList), This->pidlRoot))
-                This->drop_effects_mask |= DROPEFFECT_MOVE;
-            GlobalUnlock(medium.hGlobal);
+        This->drop_effects_mask = DROPEFFECT_COPY | DROPEFFECT_LINK;
+        for (p = paths; *p; p += wcslen(p) + 1)
+        {
+            lstrcpynW(dir, p, MAX_PATH);
+            PathRemoveFileSpecW(dir);
+            if (wcsicmp(dir, This->sPathTarget)) This->drop_effects_mask |= DROPEFFECT_MOVE;
+            if (towupper(p[0]) != towupper(This->sPathTarget[0]) || p[1] != ':') same_drive = FALSE;
         }
+        if (!same_drive) This->drop_default = DROPEFFECT_COPY;
+        free(paths);
     }
 
-    *pdwEffect = KeyStateToDropEffect(dwKeyState) & This->drop_effects_mask;
+    *pdwEffect = drop_effect(This, dwKeyState);
 
     return S_OK;
 }
@@ -1698,7 +1778,7 @@ ISFDropTarget_DragOver (IDropTarget * iface, DWORD dwKeyState, POINTL pt,
     if (!pdwEffect)
         return E_INVALIDARG;
 
-    *pdwEffect = KeyStateToDropEffect(dwKeyState) & This->drop_effects_mask;
+    *pdwEffect = drop_effect(This, dwKeyState);
 
     return S_OK;
 }
@@ -1718,72 +1798,43 @@ ISFDropTarget_Drop (IDropTarget * iface, IDataObject * pDataObject,
                     DWORD dwKeyState, POINTL pt, DWORD * pdwEffect)
 {
     IGenericSFImpl *This = impl_from_IDropTarget(iface);
-    FORMATETC format;
-    STGMEDIUM medium;
-    HRESULT hr;
+    SHFILEOPSTRUCTW op = { NULL };
+    WCHAR *paths, *p, *target;
+    HRESULT hr = S_OK;
+    size_t len;
 
-    TRACE("(%p)->(%p %ld {.x=%ld, .y=%ld} %p) semi-stub\n",
-        This, pDataObject, dwKeyState, pt.x, pt.y, pdwEffect);
+    TRACE("(%p)->(%p %ld {.x=%ld, .y=%ld} %p)\n", This, pDataObject, dwKeyState, pt.x, pt.y, pdwEffect);
 
-    InitFormatEtc(format, cfShellIDList, TYMED_HGLOBAL);
-    hr = IDataObject_GetData(pDataObject, &format, &medium);
-    if (FAILED(hr))
-        return hr;
-
-    if (medium.tymed == TYMED_HGLOBAL) {
-        IShellFolder *psfSourceFolder, *psfDesktopFolder;
-        LPIDA pidaShellIDList = GlobalLock(medium.hGlobal);
-        STRRET strret;
-        UINT i;
-
-        if (!pidaShellIDList)
-            return HRESULT_FROM_WIN32(GetLastError());
-
-        hr = SHGetDesktopFolder(&psfDesktopFolder);
-        if (FAILED(hr)) {
-            GlobalUnlock(medium.hGlobal);
-            return hr;
-        }
-
-        hr = IShellFolder_BindToObject(psfDesktopFolder, HIDA_GetPIDLFolder(pidaShellIDList), NULL,
-                                       &IID_IShellFolder, (LPVOID*)&psfSourceFolder);
-        IShellFolder_Release(psfDesktopFolder);
-        if (FAILED(hr)) {
-            GlobalUnlock(medium.hGlobal);
-            return hr;
-        }
-
-        for (i = 0; i < pidaShellIDList->cidl; i++) {
-            WCHAR wszSourcePath[MAX_PATH];
-
-            hr = IShellFolder_GetDisplayNameOf(psfSourceFolder, HIDA_GetPIDLItem(pidaShellIDList, i),
-                                               SHGDN_FORPARSING, &strret);
-            if (FAILED(hr))
-                break;
-
-            hr = StrRetToBufW(&strret, NULL, wszSourcePath, MAX_PATH);
-            if (FAILED(hr))
-                break;
-
-            switch (*pdwEffect) {
-                case DROPEFFECT_MOVE:
-                    FIXME("Move %s to %s!\n", debugstr_w(wszSourcePath), debugstr_w(This->sPathTarget));
-                    break;
-                case DROPEFFECT_COPY:
-                    FIXME("Copy %s to %s!\n", debugstr_w(wszSourcePath), debugstr_w(This->sPathTarget));
-                    break;
-                case DROPEFFECT_LINK:
-                    FIXME("Link %s from %s!\n", debugstr_w(wszSourcePath), debugstr_w(This->sPathTarget));
-                    break;
-            }
-        }
-
-        IShellFolder_Release(psfSourceFolder);
-        GlobalUnlock(medium.hGlobal);
-        return hr;
+    if (!pdwEffect || !pDataObject) return E_INVALIDARG;
+    /* OLE gives the keys of the moment the button went up, without the button */
+    if (!(*pdwEffect &= This->drop_effects_mask) || !(paths = drop_paths(pDataObject)))
+    {
+        *pdwEffect = DROPEFFECT_NONE;
+        return S_OK;
     }
 
-    return E_NOTIMPL;
+    if (*pdwEffect & DROPEFFECT_MOVE) *pdwEffect = DROPEFFECT_MOVE;
+    else if (*pdwEffect & DROPEFFECT_COPY) *pdwEffect = DROPEFFECT_COPY;
+    else *pdwEffect = DROPEFFECT_LINK;
+
+    if (*pdwEffect == DROPEFFECT_LINK)
+    {
+        for (p = paths; *p && SUCCEEDED(hr); p += wcslen(p) + 1) hr = create_shortcut(p, This->sPathTarget);
+    }
+    else if ((target = calloc((len = wcslen(This->sPathTarget)) + 2, sizeof(WCHAR))))
+    {
+        memcpy(target, This->sPathTarget, len * sizeof(WCHAR));
+        op.wFunc = *pdwEffect == DROPEFFECT_MOVE ? FO_MOVE : FO_COPY;
+        op.pFrom = paths;
+        op.pTo = target;
+        /* a copy into the folder the items are in makes "Copy of" them */
+        op.fFlags = FOF_ALLOWUNDO | (op.wFunc == FO_COPY && !(This->drop_effects_mask & DROPEFFECT_MOVE) ? FOF_RENAMEONCOLLISION : 0);
+        if (SHFileOperationW(&op) || op.fAnyOperationsAborted) *pdwEffect = DROPEFFECT_NONE;
+        free(target);
+    }
+    free(paths);
+    This->drop_effects_mask = DROPEFFECT_NONE;
+    return hr;
 }
 
 static const IDropTargetVtbl dtvt = {
@@ -1855,6 +1906,11 @@ HRESULT WINAPI UnixDosFolder_Constructor(IUnknown *outer_unk, REFIID riid, void 
 HRESULT WINAPI FolderShortcut_Constructor(IUnknown *outer_unk, REFIID riid, void **ppv)
 {
     return create_fs( outer_unk, riid, ppv, &CLSID_FolderShortcut, NULL );
+}
+
+HRESULT WINAPI SharedDocuments_Constructor(IUnknown *outer_unk, REFIID riid, void **ppv)
+{
+    return create_fs( outer_unk, riid, ppv, &CLSID_SharedDocuments, NULL );
 }
 
 HRESULT WINAPI MyDocuments_Constructor(IUnknown *outer_unk, REFIID riid, void **ppv)

@@ -1250,24 +1250,25 @@ BOOL WINAPI EnumDependentServicesW( SC_HANDLE hService, DWORD dwServiceState,
 BOOL WINAPI DECLSPEC_HOTPATCH QueryServiceObjectSecurity( SC_HANDLE service, SECURITY_INFORMATION type,
                                                           PSECURITY_DESCRIPTOR ret_descriptor, DWORD size, DWORD *ret_size )
 {
-    SECURITY_DESCRIPTOR descriptor;
-    NTSTATUS status;
-    ACL acl;
+    BYTE dummy[1];
+    DWORD err;
 
-    FIXME( "%p %ld %p %lu %p - semi-stub\n", service, type, ret_descriptor, size, ret_size );
+    TRACE( "%p %ld %p %lu %p\n", service, type, ret_descriptor, size, ret_size );
 
-    if (type != DACL_SECURITY_INFORMATION)
-        FIXME("information %ld not supported\n", type);
+    if (!service) return set_error( ERROR_INVALID_HANDLE );
+    if (!ret_size) return set_error( ERROR_INVALID_ADDRESS );
 
-    InitializeSecurityDescriptor( &descriptor, SECURITY_DESCRIPTOR_REVISION );
+    __TRY
+    {
+        err = svcctl_QueryServiceObjectSecurity( service, type, size ? ret_descriptor : dummy, size, ret_size );
+    }
+    __EXCEPT(rpc_filter)
+    {
+        err = map_exception_code( GetExceptionCode() );
+    }
+    __ENDTRY
 
-    InitializeAcl( &acl, sizeof(ACL), ACL_REVISION );
-    SetSecurityDescriptorDacl( &descriptor, TRUE, &acl, TRUE );
-
-    status = RtlMakeSelfRelativeSD( &descriptor, ret_descriptor, &size );
-    *ret_size = size;
-
-    return set_error( RtlNtStatusToDosError( status ) );
+    return set_error( err );
 }
 
 /******************************************************************************
@@ -1277,8 +1278,44 @@ BOOL WINAPI SetServiceObjectSecurity(SC_HANDLE hService,
        SECURITY_INFORMATION dwSecurityInformation,
        PSECURITY_DESCRIPTOR lpSecurityDescriptor)
 {
-    FIXME("%p %ld %p\n", hService, dwSecurityInformation, lpSecurityDescriptor);
-    return TRUE;
+    SECURITY_DESCRIPTOR_CONTROL control;
+    DWORD err, size = 0, revision;
+    BYTE *buffer = lpSecurityDescriptor, *copy = NULL;
+    NTSTATUS status;
+
+    TRACE( "%p %ld %p\n", hService, dwSecurityInformation, lpSecurityDescriptor );
+
+    if (!hService) return set_error( ERROR_INVALID_HANDLE );
+    if (!lpSecurityDescriptor) return set_error( ERROR_INVALID_PARAMETER );
+
+    /* the service wants a self-relative descriptor */
+    if ((status = RtlGetControlSecurityDescriptor( lpSecurityDescriptor, &control, &revision )))
+        return set_error( RtlNtStatusToDosError( status ));
+    if (control & SE_SELF_RELATIVE) size = RtlLengthSecurityDescriptor( lpSecurityDescriptor );
+    else
+    {
+        RtlMakeSelfRelativeSD( lpSecurityDescriptor, NULL, &size );
+        if (!size || !(copy = malloc( size ))) return set_error( ERROR_NOT_ENOUGH_MEMORY );
+        if ((status = RtlMakeSelfRelativeSD( lpSecurityDescriptor, (SECURITY_DESCRIPTOR *)copy, &size )))
+        {
+            free( copy );
+            return set_error( RtlNtStatusToDosError( status ));
+        }
+        buffer = copy;
+    }
+
+    __TRY
+    {
+        err = svcctl_SetServiceObjectSecurity( hService, dwSecurityInformation, buffer, size );
+    }
+    __EXCEPT(rpc_filter)
+    {
+        err = map_exception_code( GetExceptionCode() );
+    }
+    __ENDTRY
+
+    free( copy );
+    return set_error( err );
 }
 
 static DWORD WINAPI notify_thread(void *user)
@@ -1741,7 +1778,7 @@ static DWORD WINAPI service_control_dispatcher( void *arg )
         {
             if (!(service->handle = OpenServiceW( disp->manager, name, SERVICE_SET_STATUS )) ||
                 !(service->full_access_handle = OpenServiceW( disp->manager, name,
-                        GENERIC_READ|GENERIC_WRITE )))
+                        SERVICE_QUERY_STATUS|SERVICE_QUERY_CONFIG )))
                 FIXME( "failed to open service %s\n", debugstr_w(name) );
         }
 

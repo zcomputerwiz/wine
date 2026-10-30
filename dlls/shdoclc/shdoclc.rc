@@ -244,3 +244,8 @@ IDR_BROWSE_CONTEXT_MENU MENU
 
 /* @makedep: ERROR.HTM */
 ERROR.HTM HTML "ERROR.HTM"
+
+/* the Internet Explorer desktop item (CLSID_Internet DefaultIcon "shdoclc.dll,-190") */
+LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
+/* @makedep: iexplore.ico */
+190 ICON "iexplore.ico"

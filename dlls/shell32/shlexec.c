@@ -309,86 +309,201 @@ static HANDLE get_admin_token(void)
     return linked.LinkedToken;
 }
 
-static BOOL get_elevation_helper(WCHAR *helper, DWORD size)
+
+enum elevation_helper_status
+{
+    HELPER_UNSET = 0,       /* Key or value absent, or explicitly empty (L"") */
+    HELPER_CONFIGURED = 1,  /* Valid non-empty path in Helper */
+    HELPER_INVALID = 2      /* Read denied, invalid type, odd bytes, oversized, invalid path */
+};
+
+static enum elevation_helper_status get_elevation_helper(WCHAR *helper, DWORD size, DWORD *error_code)
 {
     HKEY hkey;
-    DWORD type, bytes = (size - 1) * sizeof(WCHAR);
-    BOOL ret = FALSE;
+    DWORD type, bytes;
+    LSTATUS status;
 
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Wine\\Elevation", 0, KEY_READ, &hkey) == ERROR_SUCCESS)
+    if (error_code) *error_code = ERROR_SUCCESS;
+    if (size > 0) helper[0] = 0;
+
+    status = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Wine\\Elevation", 0, KEY_READ | KEY_WOW64_64KEY, &hkey);
+    if (status == ERROR_FILE_NOT_FOUND)
+        return HELPER_UNSET;
+    if (status != ERROR_SUCCESS)
     {
-        if (RegQueryValueExW(hkey, L"Helper", NULL, &type, (BYTE *)helper, &bytes) == ERROR_SUCCESS && bytes >= sizeof(WCHAR))
-        {
-            helper[bytes / sizeof(WCHAR)] = 0;
-            ret = (helper[0] != 0);
-        }
-        RegCloseKey(hkey);
+        if (error_code) *error_code = status;
+        return HELPER_INVALID;
     }
-    return ret;
+
+    bytes = (size - 1) * sizeof(WCHAR);
+    status = RegQueryValueExW(hkey, L"Helper", NULL, &type, (BYTE *)helper, &bytes);
+    RegCloseKey(hkey);
+
+    if (status == ERROR_FILE_NOT_FOUND)
+        return HELPER_UNSET;
+    if (status != ERROR_SUCCESS)
+    {
+        if (error_code) *error_code = (status == ERROR_MORE_DATA) ? ERROR_FILENAME_EXCED_RANGE : status;
+        return HELPER_INVALID;
+    }
+
+    if (type != REG_SZ && type != REG_EXPAND_SZ)
+    {
+        if (error_code) *error_code = ERROR_DATATYPE_MISMATCH;
+        return HELPER_INVALID;
+    }
+
+    if (bytes == 0)
+        return HELPER_UNSET;
+
+    if (bytes % sizeof(WCHAR) != 0)
+    {
+        if (error_code) *error_code = ERROR_INVALID_DATA;
+        return HELPER_INVALID;
+    }
+
+    helper[bytes / sizeof(WCHAR)] = 0;
+    if (!helper[0])
+        return HELPER_UNSET;
+
+    {
+        const WCHAR *p = helper;
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p)
+        {
+            if (error_code) *error_code = ERROR_BAD_PATHNAME;
+            return HELPER_INVALID;
+        }
+        for (p = helper; *p; p++)
+        {
+            if (*p < 32 && *p != '\t')
+            {
+                if (error_code) *error_code = ERROR_BAD_PATHNAME;
+                return HELPER_INVALID;
+            }
+        }
+    }
+
+    return HELPER_CONFIGURED;
 }
 
-static BOOL run_elevation_helper(const WCHAR *helper, HWND hwnd, const WCHAR *cmd, const WCHAR *dir)
+static BOOL is_full_token(void)
 {
-    STARTUPINFOW si = { sizeof(si) };
-    PROCESS_INFORMATION pi;
-    WCHAR *helper_cmd;
-    const WCHAR *cur_dir = (dir && dir[0]) ? dir : NULL;
-    DWORD len, exit_code = ERROR_GEN_FAILURE, error = ERROR_SUCCESS;
-    BOOL ok;
+    TOKEN_ELEVATION_TYPE type;
+    DWORD size;
 
-    len = lstrlenW(helper) + lstrlenW(cmd) + (dir ? lstrlenW(dir) : 0) + 64;
-    if (!(helper_cmd = malloc(len * sizeof(WCHAR))))
+    return GetTokenInformation(GetCurrentThreadEffectiveToken(), TokenElevationType, &type, sizeof(type), &size)
+            && type == TokenElevationTypeFull;
+}
+
+/* The image CreateProcess would run for this command line: a quoted name, or the shortest prefix up to a blank
+ * that names a file (".exe" added when there is no extension). */
+static BOOL get_command_image(const WCHAR *cmd, WCHAR *path, DWORD size)
+{
+    WCHAR *name;
+    const WCHAR *p;
+    BOOL found = FALSE;
+    DWORD len;
+
+    while (*cmd == ' ' || *cmd == '\t') cmd++;
+    if (!(name = malloc((lstrlenW(cmd) + 1) * sizeof(WCHAR)))) return FALSE;
+    if (*cmd == '"')
     {
-        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-        return FALSE;
-    }
-
-    if (helper[0] == '"')
-        swprintf(helper_cmd, len, L"%s /hwnd %p /cmd %s", helper, hwnd, cmd);
-    else
-        swprintf(helper_cmd, len, L"\"%s\" /hwnd %p /cmd %s", helper, hwnd, cmd);
-
-    TRACE("invoking elevation helper: %s in directory %s\n", debugstr_w(helper_cmd), debugstr_w(cur_dir));
-    ok = CreateProcessW(NULL, helper_cmd, NULL, NULL, FALSE, 0, NULL, cur_dir, &si, &pi);
-
-    if (ok)
-    {
-        DWORD wait_res = WaitForSingleObject(pi.hProcess, 30000);
-        if (wait_res == WAIT_TIMEOUT)
-        {
-            WARN("elevation helper timed out after 30 seconds; terminating\n");
-            error = ERROR_TIMEOUT;
-            TerminateProcess(pi.hProcess, error);
-            WaitForSingleObject(pi.hProcess, 5000);
-        }
-        else if (wait_res == WAIT_OBJECT_0)
-        {
-            if (!GetExitCodeProcess(pi.hProcess, &exit_code))
-                error = GetLastError() ? GetLastError() : ERROR_GEN_FAILURE;
-            else
-                error = exit_code;
-            TRACE("elevation helper finished with exit code %lu\n", exit_code);
-        }
-        else
-        {
-            error = GetLastError();
-            if (!error) error = ERROR_GEN_FAILURE;
-            WARN("WaitForSingleObject on elevation helper failed: %lu\n", error);
-            TerminateProcess(pi.hProcess, error);
-            WaitForSingleObject(pi.hProcess, 5000);
-        }
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
+        for (p = cmd + 1; *p && *p != '"'; p++) ;
+        len = p - (cmd + 1);
+        memcpy(name, cmd + 1, len * sizeof(WCHAR));
+        name[len] = 0;
+        found = SearchPathW(NULL, name, L".exe", size, path, NULL) != 0;
     }
     else
     {
-        error = GetLastError();
-        if (!error) error = ERROR_GEN_FAILURE;
-        WARN("failed to execute elevation helper %s: %lu\n", debugstr_w(helper), error);
+        for (p = cmd; ; p++)
+        {
+            if (*p && *p != ' ' && *p != '\t') continue;
+            len = p - cmd;
+            memcpy(name, cmd, len * sizeof(WCHAR));
+            name[len] = 0;
+            if (len && SearchPathW(NULL, name, L".exe", size, path, NULL) != 0)
+            {
+                DWORD attr = GetFileAttributesW(path);
+                if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY))
+                {
+                    found = TRUE;
+                    break;
+                }
+            }
+            if (!*p) break;
+        }
     }
-    free(helper_cmd);
-    SetLastError(error);
-    return !error;
+    free(name);
+    return found;
+}
+
+/* Hand the launch to the elevation broker (docs/ELEVATION_CALLERS_WORKORDER.md, E1/E2). The broker is reached
+ * through wexhost.dll, loaded only here; if it is not there the launch fails, it never falls back to a linked
+ * token. The broker's error code is the error of ShellExecuteEx; hInstApp is the SE_ERR_ value that fits it.
+ * Cancel (ERROR_CANCELLED) stays ERROR_CANCELLED with SE_ERR_ACCESSDENIED, as native ShellExecuteEx does. */
+typedef DWORD (WINAPI *WEXELEVATERUN)(const WCHAR *, const WCHAR *, const WCHAR *, const WCHAR *, DWORD, DWORD,
+                                      DWORD, HANDLE *, DWORD *);
+
+static UINT_PTR execute_with_broker(const WCHAR *cmd, const WCHAR *env, const SHELLEXECUTEINFOW *psei,
+                                    SHELLEXECUTEINFOW *psei_out)
+{
+    WCHAR image[MAX_PATH], cwd[MAX_PATH], *own_env = NULL;
+    WEXELEVATERUN run;
+    HMODULE wexhost;
+    HANDLE process = NULL;
+    DWORD err, env_len = 0, pid;
+    const WCHAR *p;
+    UINT_PTR ret = SE_ERR_ACCESSDENIED;
+
+    if (!(wexhost = LoadLibraryExW(L"wexhost.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32))
+            || !(run = (WEXELEVATERUN)GetProcAddress(wexhost, "WexElevateRun")))
+    {
+        WARN("no elevation client in wexhost.dll\n");
+        if (wexhost) FreeLibrary(wexhost);
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return SE_ERR_ACCESSDENIED;
+    }
+
+    if (!get_command_image(cmd, image, ARRAY_SIZE(image)))
+    {
+        err = ERROR_FILE_NOT_FOUND;
+        ret = SE_ERR_FNF;
+        goto done;
+    }
+    if (!GetCurrentDirectoryW(ARRAY_SIZE(cwd), cwd)) cwd[0] = 0;
+    if (!env) env = own_env = GetEnvironmentStringsW();
+    if (env)
+    {
+        for (p = env; *p; p += lstrlenW(p) + 1) ;
+        env_len = p + 1 - env;
+    }
+
+    err = run(image, cmd, cwd, env, env_len, psei->nShow, 1 /* WEXELEVATE_WANT_HANDLE */, &process, &pid);
+    if (!err)
+    {
+        if (process && (psei->fMask & SEE_MASK_NOCLOSEPROCESS)) psei_out->hProcess = process;
+        else if (process) CloseHandle(process);
+        ret = 33;
+    }
+    else
+    {
+        TRACE("broker returned %lu\n", err);
+        switch (err)
+        {
+        case ERROR_FILE_NOT_FOUND: ret = SE_ERR_FNF; break;
+        case ERROR_PATH_NOT_FOUND: ret = SE_ERR_PNF; break;
+        case ERROR_SHARING_VIOLATION: ret = SE_ERR_SHARE; break;
+        case ERROR_NOT_ENOUGH_MEMORY: ret = SE_ERR_OOM; break;
+        default: ret = SE_ERR_ACCESSDENIED;
+        }
+    }
+done:
+    if (own_env) FreeEnvironmentStringsW(own_env);
+    FreeLibrary(wexhost);
+    SetLastError(err);
+    return ret;
 }
 
 /*************************************************************************
@@ -406,7 +521,8 @@ static UINT_PTR SHELL_ExecuteW(const WCHAR *lpCmd, WCHAR *env, BOOL shWait,
     DWORD dwCreationFlags;
     HANDLE token = NULL;
     WCHAR helper[MAX_PATH];
-    BOOL has_helper;
+    enum elevation_helper_status helper_status;
+    DWORD helper_error = ERROR_SUCCESS;
     DWORD launch_error;
 
     TRACE("Execute %s from directory %s\n", debugstr_w(lpCmd), debugstr_w(psei->lpDirectory));
@@ -430,24 +546,33 @@ static UINT_PTR SHELL_ExecuteW(const WCHAR *lpCmd, WCHAR *env, BOOL shWait,
     if (!(psei->fMask & SEE_MASK_NO_CONSOLE))
         dwCreationFlags |= CREATE_NEW_CONSOLE;
 
-    has_helper = get_elevation_helper(helper, ARRAY_SIZE(helper));
+    helper_status = get_elevation_helper(helper, ARRAY_SIZE(helper), &helper_error);
     psei_out->hProcess = NULL;
 
     if (psei->lpVerb && !wcsicmp(psei->lpVerb, L"runas"))
     {
-        if (has_helper)
+        if (helper_status == HELPER_CONFIGURED)
         {
-            if (!run_elevation_helper(helper, psei->hwnd, lpCmd, psei->lpDirectory))
+            /* Elevation is enforced: the broker starts the program, never a linked token of ours. A process
+             * that is elevated already runs it directly, as on Windows. */
+            if (!is_full_token())
             {
-                DWORD error = GetLastError();
-                psei_out->hInstApp = (HINSTANCE)SE_ERR_ACCESSDENIED;
-                psei_out->hProcess = NULL;
-                if (gcdret) SetCurrentDirectoryW(curdir);
-                SetLastError(error);
-                return SE_ERR_ACCESSDENIED;
+                retval = execute_with_broker(lpCmd, env, psei, psei_out);
+                goto finish;
             }
         }
-        token = get_admin_token();
+        else if (helper_status == HELPER_INVALID)
+        {
+            psei_out->hInstApp = (HINSTANCE)SE_ERR_ACCESSDENIED;
+            psei_out->hProcess = NULL;
+            if (gcdret) SetCurrentDirectoryW(curdir);
+            SetLastError(helper_error ? helper_error : ERROR_INVALID_DATA);
+            return SE_ERR_ACCESSDENIED;
+        }
+        else /* HELPER_UNSET */
+        {
+            token = get_admin_token();
+        }
     }
 
     if (CreateProcessAsUserW(token, NULL, (LPWSTR)lpCmd, NULL, NULL, FALSE,
@@ -465,35 +590,23 @@ static UINT_PTR SHELL_ExecuteW(const WCHAR *lpCmd, WCHAR *env, BOOL shWait,
             CloseHandle( info.hProcess );
         CloseHandle( info.hThread );
     }
-    else if (GetLastError() == ERROR_ELEVATION_REQUIRED && has_helper)
+    else if (GetLastError() == ERROR_ELEVATION_REQUIRED)
     {
-        TRACE("CreateProcess returned ERROR_ELEVATION_REQUIRED; prompting elevation helper\n");
-        if (run_elevation_helper(helper, psei->hwnd, lpCmd, psei->lpDirectory))
+        if (helper_status == HELPER_CONFIGURED)
         {
-            token = get_admin_token();
-            if (CreateProcessAsUserW(token, NULL, (LPWSTR)lpCmd, NULL, NULL, FALSE,
-                    dwCreationFlags, env, NULL, &startup, &info))
-            {
-                if (shWait)
-                    if (WaitForInputIdle( info.hProcess, 30000 ) == WAIT_FAILED)
-                        WARN("WaitForInputIdle failed: Error %ld\n", GetLastError() );
-                retval = 33;
-                if (psei->fMask & SEE_MASK_NOCLOSEPROCESS)
-                    psei_out->hProcess = info.hProcess;
-                else
-                    CloseHandle( info.hProcess );
-                CloseHandle( info.hThread );
-            }
-            else
-            {
-                retval = GetLastError();
-                if (retval >= 32) retval = ERROR_BAD_FORMAT;
-            }
+            TRACE("CreateProcess returned ERROR_ELEVATION_REQUIRED; asking the elevation broker\n");
+            retval = execute_with_broker(lpCmd, env, psei, psei_out);
         }
-        else
+        else if (helper_status == HELPER_INVALID)
         {
-            retval = SE_ERR_ACCESSDENIED;
+            psei_out->hInstApp = (HINSTANCE)SE_ERR_ACCESSDENIED;
+            psei_out->hProcess = NULL;
+            if (gcdret) SetCurrentDirectoryW(curdir);
+            SetLastError(helper_error ? helper_error : ERROR_INVALID_DATA);
+            return SE_ERR_ACCESSDENIED;
         }
+        else /* HELPER_UNSET: same result as before the helper audit */
+            retval = ERROR_BAD_FORMAT;
     }
     else if ((retval = GetLastError()) >= 32)
     {
@@ -501,6 +614,7 @@ static UINT_PTR SHELL_ExecuteW(const WCHAR *lpCmd, WCHAR *env, BOOL shWait,
         retval = ERROR_BAD_FORMAT;
     }
 
+finish:
     launch_error = GetLastError();
     if (token) CloseHandle(token);
 
@@ -2307,22 +2421,6 @@ void WINAPI ShellExec_RunDLLA(HWND hwnd, HINSTANCE instance, CHAR *cmdline, int 
     WCHAR *cmdlineW;
     ShellExec_RunDLLW(hwnd, instance, __SHCloneStrAtoW(&cmdlineW, cmdline), cmdshow);
     SHFree(cmdlineW);
-}
-
-/*************************************************************************
- * OpenAs_RunDLLA          [SHELL32.@]
- */
-void WINAPI OpenAs_RunDLLA(HWND hwnd, HINSTANCE hinst, LPCSTR cmdline, int cmdshow)
-{
-    FIXME("%p, %p, %s, %d\n", hwnd, hinst, debugstr_a(cmdline), cmdshow);
-}
-
-/*************************************************************************
- * OpenAs_RunDLLW          [SHELL32.@]
- */
-void WINAPI OpenAs_RunDLLW(HWND hwnd, HINSTANCE hinst, LPCWSTR cmdline, int cmdshow)
-{
-    FIXME("%p, %p, %s, %d\n", hwnd, hinst, debugstr_w(cmdline), cmdshow);
 }
 
 /*************************************************************************

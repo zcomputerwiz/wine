@@ -145,6 +145,12 @@ coclass KnownFolderManager { interface IKnownFolderManager; }
 ] coclass MyDocuments { interface IShellFolder2; }
 
 [
+    helpstring("Shared Documents"),
+    threading(apartment),
+    uuid(59031a47-3f72-44a7-89c5-5595fe6b30ee)
+] coclass SharedDocuments { interface IShellFolder2; }
+
+[
     helpstring("Trash"),
     threading(apartment),
     uuid(645ff040-5081-101b-9f08-00aa002f954e)

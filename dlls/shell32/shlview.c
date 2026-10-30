@@ -54,6 +54,9 @@
 #include "winuser.h"
 #include "shlobj.h"
 #include "shobjidl.h"
+#include "commoncontrols.h"
+#include "stgprop.h"
+#include "gdiplus.h"
 #include "shresdef.h"
 #include "wine/debug.h"
 
@@ -61,6 +64,7 @@
 #include "pidl.h"
 #include "shell32_main.h"
 #include "shellfolder.h"
+#include "shfldr.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(shell);
 
@@ -134,6 +138,10 @@ typedef struct
 	LPITEMIDLIST	*apidl;
         LISTVIEW_SORT_INFO ListViewSortInfo;
 	ULONG			hNotify;	/* change notification handle */
+	HANDLE			watch_thread;	/* watches the folder on disk: other programs change it too */
+	HANDLE			watch_stop;
+	WCHAR			watch_path[MAX_PATH];
+	BOOL			sync_pending;
 	HANDLE		hAccel;
 	DWORD		dwAspects;
 	DWORD		dwAdvf;
@@ -144,6 +152,13 @@ typedef struct
         UINT            cScrollDelay;   /* Send a WM_*SCROLL msg every 250 ms during drag-scroll */
         POINT           ptLastMousePos; /* Mouse position at last DragOver call */
         UINT            columns;        /* Number of shell folder columns */
+        UINT            tile_columns[2]; /* the type and size columns, the details of a tile */
+        UINT            tile_column_count;
+        HIMAGELIST      thumbnails;     /* the pictures of the Thumbnails view */
+        BOOL            drive_groups;   /* My Computer: its items in groups by the kind of drive */
+        struct thumbnail *thumbnail_map; /* item -> picture */
+        UINT            thumbnail_count;
+        HWND            preview;        /* Filmstrip: the picture of the selection above the thumbnails */
 } IShellViewImpl;
 
 static inline IShellViewImpl *impl_from_IShellView3(IShellView3 *iface)
@@ -201,6 +216,7 @@ static inline IShellViewImpl *impl_from_IShellFolderViewDual3(IShellFolderViewDu
 #define ID_LISTVIEW     1
 
 #define SHV_CHANGE_NOTIFY WM_USER + 0x1111
+#define SHV_FOLDER_CHANGED WM_USER + 0x1112   /* the folder changed on disk (watch_folder) */
 
 /*windowsx.h */
 #define GET_WM_COMMAND_ID(wp, lp)               LOWORD(wp)
@@ -323,6 +339,479 @@ static void SetStyle(IShellViewImpl * This, DWORD dwAdd, DWORD dwRemove)
 	SetWindowLongW(This->hWndList, GWL_STYLE, dwAdd | (tmpstyle & ~dwRemove));
 }
 
+static DWORD ViewModeToListStyle(UINT ViewMode);
+
+#define FCIDM_SHVIEW_TILE 0x7191   /* "Tiles" of the View menu, MENU_002 */
+#define FCIDM_SHVIEW_THUMBNAIL 0x7190
+#define FCIDM_SHVIEW_FILMSTRIP 0x7193   /* Windows XP: picture folders */
+#define HAS_THUMBNAILS(mode) ((mode) == FVM_THUMBNAIL || (mode) == FVM_THUMBSTRIP)
+
+#define THUMBNAIL_SIZE 96
+
+struct thumbnail
+{
+    LPCITEMIDLIST pidl;   /* the item's data in the list */
+    int index;            /* its picture */
+};
+
+static void free_thumbnails(IShellViewImpl *This)
+{
+    free(This->thumbnail_map);
+    This->thumbnail_map = NULL;
+    This->thumbnail_count = 0;
+    if (This->thumbnails) ImageList_RemoveAll(This->thumbnails);
+}
+
+static BOOL is_picture(const WCHAR *path)
+{
+    static const WCHAR *exts[] = { L".bmp", L".dib", L".jpg", L".jpeg", L".jpe", L".gif", L".png", L".tif", L".tiff",
+                                   L".ico", L".emf", L".wmf" };
+    const WCHAR *ext = PathFindExtensionW(path);
+    UINT i;
+
+    for (i = 0; i < ARRAY_SIZE(exts); i++) if (!wcsicmp(ext, exts[i])) return TRUE;
+    return FALSE;
+}
+
+/* The picture of an item as Windows XP shows it in Thumbnails: an image scaled into a white square with a gray
+ * frame, or the item's 48 pixel icon in that square. */
+/* a picture scaled into rc, smaller ones keeping their size */
+static BOOL draw_picture(HDC hdc, const WCHAR *path, const RECT *rc)
+{
+    GpImage *image;
+    GpGraphics *graphics;
+    UINT cx, cy, w, h, maxw = rc->right - rc->left, maxh = rc->bottom - rc->top;
+    BOOL drawn = FALSE;
+
+    if (GdipLoadImageFromFile(path, &image)) return FALSE;
+    if (!GdipGetImageWidth(image, &cx) && !GdipGetImageHeight(image, &cy) && cx && cy && !GdipCreateFromHDC(hdc, &graphics))
+    {
+        if (cx <= maxw && cy <= maxh) { w = cx; h = cy; }
+        else if ((ULONGLONG)cx * maxh >= (ULONGLONG)cy * maxw) { w = maxw; h = max(1, (UINT)((ULONGLONG)cy * maxw / cx)); }
+        else { h = maxh; w = max(1, (UINT)((ULONGLONG)cx * maxh / cy)); }
+        GdipSetInterpolationMode(graphics, InterpolationModeHighQualityBicubic);
+        drawn = !GdipDrawImageRectI(graphics, image, rc->left + (maxw - w) / 2, rc->top + (maxh - h) / 2, w, h);
+        GdipDeleteGraphics(graphics);
+    }
+    GdipDisposeImage(image);
+    return drawn;
+}
+
+/* the folder icon as the shell shows folders: the one of Shell Icons (the genuine XP pack), else shell32's */
+static HICON folder_icon(int size)
+{
+    WCHAR value[MAX_PATH + 16] = {0}, *comma;
+    DWORD len = sizeof(value);
+    HICON icon = NULL;
+
+    /* value 3: the index of the closed folder */
+    if (!RegGetValueW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Icons", L"3",
+                      RRF_RT_REG_SZ, NULL, value, &len) && (comma = wcsrchr(value, ',')))
+    {
+        WCHAR file[MAX_PATH];
+        HMODULE module;
+        int id = _wtoi(comma + 1);
+
+        *comma = 0;
+        ExpandEnvironmentStringsW(value, file, ARRAY_SIZE(file));
+        if ((module = LoadLibraryExW(file, NULL, LOAD_LIBRARY_AS_DATAFILE)))
+        {
+            if (id < 0) icon = LoadImageW(module, MAKEINTRESOURCEW(-id), IMAGE_ICON, size, size, 0);
+            else PrivateExtractIconsW(file, id, size, size, &icon, NULL, 1, 0);
+            FreeLibrary(module);
+        }
+    }
+    TRACE("Shell Icons folder: %s -> %p\n", debugstr_w(value), icon);
+    if (!icon) icon = LoadImageW(shell32_hInstance, MAKEINTRESOURCEW(IDI_SHELL_FOLDER), IMAGE_ICON, size, size, 0);
+    return icon;
+}
+
+/* Windows XP shows a folder in Thumbnails as a large folder holding small pictures of up to four of its pictures */
+static BOOL draw_folder_thumbnail(HDC hdc, const WCHAR *dir)
+{
+    WCHAR pattern[MAX_PATH], file[MAX_PATH];
+    WIN32_FIND_DATAW fd;
+    HANDLE find;
+    HICON icon;
+    int count = 0;
+
+    swprintf(pattern, ARRAY_SIZE(pattern), L"%s\\*", dir);
+    if ((find = FindFirstFileW(pattern, &fd)) == INVALID_HANDLE_VALUE) return FALSE;
+    /* the folder, as large as the thumbnail */
+    if ((icon = folder_icon(THUMBNAIL_SIZE - 8)))
+    {
+        DrawIconEx(hdc, 4, 4, icon, THUMBNAIL_SIZE - 8, THUMBNAIL_SIZE - 8, 0, NULL, DI_NORMAL);
+        DestroyIcon(icon);
+    }
+    do
+    {
+        RECT cell;
+        int col = count % 2, row = count / 2;
+
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !is_picture(fd.cFileName)) continue;
+        swprintf(file, ARRAY_SIZE(file), L"%s\\%s", dir, fd.cFileName);
+        /* two by two in the body of the folder */
+        SetRect(&cell, 18 + col * 31, 30 + row * 26, 18 + col * 31 + 29, 30 + row * 26 + 24);
+        if (draw_picture(hdc, file, &cell)) count++;
+    } while (count < 4 && FindNextFileW(find, &fd));
+    FindClose(find);
+    return TRUE;
+}
+
+static HBITMAP make_thumbnail(IShellViewImpl *This, LPCITEMIDLIST pidl)
+{
+    HDC screen = GetDC(NULL), hdc = CreateCompatibleDC(screen);
+    HBITMAP bitmap = CreateCompatibleBitmap(screen, THUMBNAIL_SIZE, THUMBNAIL_SIZE), old;
+    RECT rc = { 0, 0, THUMBNAIL_SIZE, THUMBNAIL_SIZE };
+    HBRUSH frame = CreateSolidBrush(RGB(0xd0, 0xd0, 0xbf));
+    WCHAR path[MAX_PATH] = {0};
+    BOOL drawn = FALSE;
+    STRRET str;
+
+    old = SelectObject(hdc, bitmap);
+    FillRect(hdc, &rc, GetStockObject(WHITE_BRUSH));
+    FrameRect(hdc, &rc, frame);
+    DeleteObject(frame);
+
+    if (SUCCEEDED(IShellFolder_GetDisplayNameOf(This->pSFParent, pidl, SHGDN_FORPARSING, &str)))
+        StrRetToBufW(&str, pidl, path, ARRAY_SIZE(path));
+    if (path[0] && !_ILIsFolder(pidl) && is_picture(path))
+    {
+        RECT inside = { 3, 3, THUMBNAIL_SIZE - 3, THUMBNAIL_SIZE - 3 };
+        drawn = draw_picture(hdc, path, &inside);
+    }
+    else if (path[0] && _ILIsFolder(pidl) && PathIsDirectoryW(path))
+    {
+        /* a folder shortcut such as My Pictures shows its target */
+        WCHAR target[MAX_PATH];
+        drawn = draw_folder_thumbnail(hdc, get_folder_shortcut_target(path, target) ? target : path);
+    }
+    if (!drawn)
+    {
+        IImageList *icons;
+        HICON icon = NULL;
+        int index = SHMapPIDLToSystemImageListIndex(This->pSFParent, pidl, 0);
+
+        if (SUCCEEDED(SHGetImageList(SHIL_EXTRALARGE, &IID_IImageList, (void **)&icons)))
+        {
+            IImageList_GetIcon(icons, index, ILD_TRANSPARENT, &icon);
+            IImageList_Release(icons);
+        }
+        if (icon)
+        {
+            DrawIconEx(hdc, (THUMBNAIL_SIZE - 48) / 2, (THUMBNAIL_SIZE - 48) / 2, icon, 48, 48, 0, NULL, DI_NORMAL);
+            DestroyIcon(icon);
+        }
+    }
+    SelectObject(hdc, old);
+    DeleteDC(hdc);
+    ReleaseDC(NULL, screen);
+    return bitmap;
+}
+
+/* the index of an item's picture in the Thumbnails view, made when it is first shown */
+/* ponytail: linear search and made on the UI thread; a map and a worker thread when folders are large */
+static int thumbnail_index(IShellViewImpl *This, LPCITEMIDLIST pidl)
+{
+    struct thumbnail *map;
+    HBITMAP bitmap;
+    UINT i;
+    int index;
+
+    for (i = 0; i < This->thumbnail_count; i++)
+        if (This->thumbnail_map[i].pidl == pidl) return This->thumbnail_map[i].index;
+    if (!(map = realloc(This->thumbnail_map, (This->thumbnail_count + 1) * sizeof(*map)))) return -1;
+    This->thumbnail_map = map;
+    bitmap = make_thumbnail(This, pidl);
+    index = ImageList_Add(This->thumbnails, bitmap, NULL);
+    DeleteObject(bitmap);
+    map[This->thumbnail_count].pidl = pidl;
+    map[This->thumbnail_count++].index = index;
+    return index;
+}
+
+/* ---- Filmstrip ---- */
+
+/* My Pictures, Shared Pictures and the folders in them */
+static BOOL is_picture_folder(IShellViewImpl *This)
+{
+    static const int csidls[] = { CSIDL_MYPICTURES, CSIDL_COMMON_PICTURES };
+    WCHAR path[MAX_PATH], pictures[MAX_PATH];
+    IPersistFolder2 *folder;
+    LPITEMIDLIST pidl;
+    BOOL ret = FALSE;
+    size_t len;
+    UINT i;
+
+    if (FAILED(IShellFolder_QueryInterface(This->pSFParent, &IID_IPersistFolder2, (void **)&folder))) return FALSE;
+    if (SUCCEEDED(IPersistFolder2_GetCurFolder(folder, &pidl)))
+    {
+        if (SHGetPathFromIDListW(pidl, path))
+            for (i = 0; i < ARRAY_SIZE(csidls) && !ret; i++)
+                ret = SUCCEEDED(SHGetFolderPathW(NULL, csidls[i], NULL, SHGFP_TYPE_CURRENT, pictures)) &&
+                      !wcsnicmp(path, pictures, (len = wcslen(pictures))) && (!path[len] || path[len] == '\\');
+        ILFree(pidl);
+    }
+    IPersistFolder2_Release(folder);
+    return ret;
+}
+
+#define PREVIEW_CLASS L"WineShellFilmstripPreview"
+#define BUTTON_SIZE   22
+enum { BUTTON_PREV, BUTTON_NEXT, BUTTON_ROTATE_CW, BUTTON_ROTATE_CCW, BUTTON_COUNT };
+
+/* the path of the focused (or first selected) item */
+static BOOL preview_item(IShellViewImpl *This, int *index, WCHAR *path)
+{
+    LVITEMW item = { LVIF_PARAM };
+    STRRET str;
+
+    item.iItem = SendMessageW(This->hWndList, LVM_GETNEXTITEM, -1, LVNI_SELECTED);
+    if (item.iItem < 0) return FALSE;
+    if (!SendMessageW(This->hWndList, LVM_GETITEMW, 0, (LPARAM)&item)) return FALSE;
+    *index = item.iItem;
+    if (FAILED(IShellFolder_GetDisplayNameOf(This->pSFParent, (LPCITEMIDLIST)item.lParam, SHGDN_FORPARSING, &str)))
+        return FALSE;
+    return SUCCEEDED(StrRetToBufW(&str, (LPCITEMIDLIST)item.lParam, path, MAX_PATH));
+}
+
+static void button_rect(HWND hwnd, int button, RECT *rc)
+{
+    RECT client;
+    int width = BUTTON_COUNT * (BUTTON_SIZE + 4) + 12, x;
+
+    GetClientRect(hwnd, &client);
+    x = (client.right - width) / 2 + button * (BUTTON_SIZE + 4) + (button >= BUTTON_ROTATE_CW ? 12 : 0);
+    SetRect(rc, x, client.bottom - BUTTON_SIZE - 6, x + BUTTON_SIZE, client.bottom - 6);
+}
+
+/* XP's round blue buttons with white arrows; green arrows to turn a picture */
+static void draw_button(HDC hdc, int button, const RECT *rc, BOOL enabled)
+{
+    COLORREF fill = enabled ? RGB(0x2b, 0x5b, 0xd8) : RGB(0xb8, 0xc4, 0xe0);
+    HBRUSH brush = CreateSolidBrush(fill), white = GetStockObject(WHITE_BRUSH), old_brush;
+    HPEN pen = CreatePen(PS_SOLID, 1, enabled ? RGB(0x1c, 0x3c, 0x9c) : fill), old_pen;
+    int cx = (rc->left + rc->right) / 2, cy = (rc->top + rc->bottom) / 2;
+
+    old_pen = SelectObject(hdc, pen);
+    if (button <= BUTTON_NEXT)
+    {
+        POINT tri[3];
+        int dir = button == BUTTON_NEXT ? 1 : -1;
+
+        old_brush = SelectObject(hdc, brush);
+        Ellipse(hdc, rc->left + 2, rc->top + 2, rc->right - 2, rc->bottom - 2);
+        tri[0].x = cx - 3 * dir; tri[0].y = cy - 5;
+        tri[1].x = cx - 3 * dir; tri[1].y = cy + 5;
+        tri[2].x = cx + 4 * dir; tri[2].y = cy;
+        SelectObject(hdc, white);
+        SelectObject(hdc, GetStockObject(WHITE_PEN));
+        Polygon(hdc, tri, 3);
+        /* the bar of "first"/"last" look of XP's buttons */
+        MoveToEx(hdc, cx + 5 * dir, cy - 5, NULL);
+        LineTo(hdc, cx + 5 * dir, cy + 6);
+    }
+    else
+    {
+        HPEN green = CreatePen(PS_SOLID, 3, enabled ? RGB(0x3a, 0x9a, 0x2a) : RGB(0xb0, 0xd0, 0xa8));
+        POINT head[3];
+        int dir = button == BUTTON_ROTATE_CW ? 1 : -1;
+
+        SelectObject(hdc, green);
+        Arc(hdc, cx - 7, cy - 6, cx + 7, cy + 8, dir > 0 ? cx - 7 : cx + 7, cy + 1, dir > 0 ? cx + 7 : cx - 7, cy + 1);
+        SelectObject(hdc, pen);
+        old_brush = SelectObject(hdc, CreateSolidBrush(enabled ? RGB(0x3a, 0x9a, 0x2a) : RGB(0xb0, 0xd0, 0xa8)));
+        head[0].x = cx + 7 * dir; head[0].y = cy - 2;
+        head[1].x = cx + 3 * dir; head[1].y = cy + 3;
+        head[2].x = cx + 11 * dir; head[2].y = cy + 3;
+        Polygon(hdc, head, 3);
+        DeleteObject(SelectObject(hdc, old_brush));
+        old_brush = SelectObject(hdc, brush);
+        DeleteObject(green);
+    }
+    SelectObject(hdc, old_brush);
+    SelectObject(hdc, old_pen);
+    DeleteObject(brush);
+    DeleteObject(pen);
+}
+
+static void paint_preview(IShellViewImpl *This, HWND hwnd)
+{
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(hwnd, &ps);
+    WCHAR path[MAX_PATH];
+    RECT client, area, rc;
+    BOOL picture;
+    int index, i;
+
+    GetClientRect(hwnd, &client);
+    FillRect(hdc, &client, GetSysColorBrush(COLOR_WINDOW));
+    picture = preview_item(This, &index, path) && is_picture(path);
+    SetRect(&area, 10, 10, client.right - 10, client.bottom - BUTTON_SIZE - 16);
+    if (picture && area.right > area.left && area.bottom > area.top) draw_picture(hdc, path, &area);
+    for (i = 0; i < BUTTON_COUNT; i++)
+    {
+        button_rect(hwnd, i, &rc);
+        draw_button(hdc, i, &rc, i <= BUTTON_NEXT || picture);
+    }
+    EndPaint(hwnd, &ps);
+}
+
+/* Turn the picture a quarter and save it in its own format, as XP's buttons do */
+static void rotate_picture(IShellViewImpl *This, const WCHAR *path, BOOL clockwise)
+{
+    WCHAR temp[MAX_PATH + 8];
+    ImageCodecInfo *codecs;
+    GpImage *image;
+    GUID format;
+    UINT count, size, i;
+    BOOL saved = FALSE;
+
+    if (GdipLoadImageFromFile(path, &image)) return;
+    GdipGetImageRawFormat(image, &format);   /* before turning it: it becomes a bitmap in memory */
+    GdipImageRotateFlip(image, clockwise ? Rotate90FlipNone : Rotate270FlipNone);
+    if (!GdipGetImageEncodersSize(&count, &size) && (codecs = malloc(size)))
+    {
+        if (!GdipGetImageEncoders(count, size, codecs))
+            for (i = 0; i < count && !saved; i++)
+                if (IsEqualGUID(&codecs[i].FormatID, &format))
+                {
+                    swprintf(temp, ARRAY_SIZE(temp), L"%s.new", path);
+                    saved = !GdipSaveImageToFile(image, temp, &codecs[i].Clsid, NULL);
+                }
+        free(codecs);
+    }
+    GdipDisposeImage(image);
+    if (saved && MoveFileExW(temp, path, MOVEFILE_REPLACE_EXISTING))
+    {
+        free_thumbnails(This);   /* drawn again from the file */
+        InvalidateRect(This->hWndList, NULL, TRUE);
+        SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW, path, NULL);
+    }
+    else if (saved) DeleteFileW(temp);
+}
+
+static LRESULT CALLBACK preview_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    IShellViewImpl *This = (IShellViewImpl *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    WCHAR path[MAX_PATH];
+    RECT rc;
+    int i, index, count;
+
+    switch (msg)
+    {
+    case WM_CREATE:
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)((CREATESTRUCTW *)lparam)->lpCreateParams);
+        return 0;
+    case WM_PAINT:
+        paint_preview(This, hwnd);
+        return 0;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_SIZE:
+        InvalidateRect(hwnd, NULL, TRUE);
+        return 0;
+    case WM_LBUTTONUP:
+    {
+        POINT pt = { (short)LOWORD(lparam), (short)HIWORD(lparam) };
+
+        for (i = 0; i < BUTTON_COUNT; i++)
+        {
+            button_rect(hwnd, i, &rc);
+            if (!PtInRect(&rc, pt)) continue;
+            count = SendMessageW(This->hWndList, LVM_GETITEMCOUNT, 0, 0);
+            if (!preview_item(This, &index, path)) index = -1;
+            if (i <= BUTTON_NEXT && count)
+            {
+                LVITEMW item = { 0 };
+                int next = i == BUTTON_NEXT ? (index + 1) % count : (index <= 0 ? count - 1 : index - 1);
+
+                item.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+                SendMessageW(This->hWndList, LVM_SETITEMSTATE, -1, (LPARAM)&item);
+                item.state = LVIS_SELECTED | LVIS_FOCUSED;
+                SendMessageW(This->hWndList, LVM_SETITEMSTATE, next, (LPARAM)&item);
+                SendMessageW(This->hWndList, LVM_ENSUREVISIBLE, next, FALSE);
+            }
+            else if (index >= 0 && is_picture(path)) rotate_picture(This, path, i == BUTTON_ROTATE_CW);
+            InvalidateRect(hwnd, NULL, TRUE);
+        }
+        return 0;
+    }
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+static void show_preview(IShellViewImpl *This, BOOL show)
+{
+    RECT rc;
+
+    if (show && !This->preview)
+    {
+        WNDCLASSW wc = { 0 };
+
+        wc.lpfnWndProc = preview_proc;
+        wc.hInstance = shell32_hInstance;
+        wc.lpszClassName = PREVIEW_CLASS;
+        wc.hCursor = LoadCursorW(NULL, (const WCHAR *)IDC_ARROW);
+        RegisterClassW(&wc);
+        This->preview = CreateWindowExW(0, PREVIEW_CLASS, NULL, WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, This->hWnd, NULL,
+                                        shell32_hInstance, This);
+    }
+    else if (!show && This->preview)
+    {
+        DestroyWindow(This->preview);
+        This->preview = NULL;
+    }
+    GetClientRect(This->hWnd, &rc);
+    SendMessageW(This->hWnd, WM_SIZE, 0, MAKELPARAM(rc.right, rc.bottom));
+}
+
+/* Switch the list to a view mode.  Tiles have the 48 pixel icons (SHIL_EXTRALARGE) and show the type and size
+ * of each item under its name, as on Windows XP. */
+static void shellview_set_view(IShellViewImpl *This, UINT mode)
+{
+    HIMAGELIST big_icons, small_icons;
+    IImageList *tile_icons = NULL;
+    DWORD view;
+
+    Shell_GetImageLists(&big_icons, &small_icons);
+    if (mode == FVM_TILE && FAILED(SHGetImageList(SHIL_EXTRALARGE, &IID_IImageList, (void **)&tile_icons)))
+        tile_icons = NULL;
+    free_thumbnails(This);
+    if (HAS_THUMBNAILS(mode))
+    {
+        if (!This->thumbnails)
+            This->thumbnails = ImageList_Create(THUMBNAIL_SIZE, THUMBNAIL_SIZE, ILC_COLOR24, 16, 16);
+        SendMessageW(This->hWndList, LVM_SETIMAGELIST, LVSIL_NORMAL, (LPARAM)This->thumbnails);
+        SendMessageW(This->hWndList, LVM_SETICONSPACING, 0, MAKELPARAM(THUMBNAIL_SIZE + 22, THUMBNAIL_SIZE + 40));
+    }
+    else
+    {
+        SendMessageW(This->hWndList, LVM_SETIMAGELIST, LVSIL_NORMAL, (LPARAM)(tile_icons ? (HIMAGELIST)tile_icons : big_icons));
+        SendMessageW(This->hWndList, LVM_SETICONSPACING, 0, (LPARAM)-1);
+    }
+    if (tile_icons) IImageList_Release(tile_icons);   /* the system image list stays */
+
+    SetStyle(This, ViewModeToListStyle(mode), LVS_TYPEMASK | LVS_ALIGNMASK);
+    switch (mode)
+    {
+    case FVM_TILE:      view = LV_VIEW_TILE; break;
+    case FVM_DETAILS:   view = LV_VIEW_DETAILS; break;
+    case FVM_LIST:      view = LV_VIEW_LIST; break;
+    case FVM_SMALLICON: view = LV_VIEW_SMALLICON; break;
+    default:            view = LV_VIEW_ICON; break;
+    }
+    if (SendMessageW(This->hWndList, LVM_SETVIEW, view, 0) == -1 && mode == FVM_TILE)
+    {
+        mode = FVM_ICON;   /* no tiles in this comctl32 */
+        SendMessageW(This->hWndList, LVM_SETIMAGELIST, LVSIL_NORMAL, (LPARAM)big_icons);
+        SendMessageW(This->hWndList, LVM_SETVIEW, LV_VIEW_ICON, 0);
+    }
+    This->FolderSettings.ViewMode = mode;
+    show_preview(This, mode == FVM_THUMBSTRIP);
+    SendMessageW(This->hWndList, LVM_ARRANGE, LVA_DEFAULT, 0);
+}
+
 static DWORD ViewModeToListStyle(UINT ViewMode)
 {
 	DWORD dwStyle;
@@ -335,6 +824,9 @@ static DWORD ViewModeToListStyle(UINT ViewMode)
 	  case FVM_DETAILS:	dwStyle = LVS_REPORT;		break;
 	  case FVM_SMALLICON:	dwStyle = LVS_SMALLICON;	break;
 	  case FVM_LIST:	dwStyle = LVS_LIST;		break;
+	  case FVM_TILE:	dwStyle = LVS_ICON;		break;   /* LVM_SETVIEW makes it tiles */
+	  case FVM_THUMBNAIL:	dwStyle = LVS_ICON;		break;
+	  case FVM_THUMBSTRIP:	dwStyle = LVS_ICON | LVS_ALIGNLEFT;	break;   /* one row: columns of one item */
 	  default:
 	  {
 		FIXME("ViewMode %d not implemented\n", ViewMode);
@@ -395,7 +887,7 @@ static BOOL ShellView_CreateList (IShellViewImpl * This)
 	TRACE("%p\n",This);
 
 	dwStyle = WS_TABSTOP | WS_VISIBLE | WS_CHILDWINDOW | WS_CLIPSIBLINGS | WS_CLIPCHILDREN |
-		  LVS_SHAREIMAGELISTS | LVS_EDITLABELS | LVS_ALIGNLEFT | LVS_AUTOARRANGE | LVS_SHOWSELALWAYS;
+		  LVS_SHAREIMAGELISTS | LVS_EDITLABELS | LVS_AUTOARRANGE | LVS_SHOWSELALWAYS;
         dwExStyle = WS_EX_CLIENTEDGE;
 
         dwStyle |= ViewModeToListStyle(This->FolderSettings.ViewMode);
@@ -495,6 +987,24 @@ static void ShellView_InitList(IShellViewImpl *This)
         else
             hr = IShellDetails_GetDetailsOf(details, NULL, This->columns, &sd);
         if (FAILED(hr)) break;
+
+        if (This->pSF2Parent && This->tile_column_count < ARRAY_SIZE(This->tile_columns))
+        {
+            SHCOLUMNID scid;
+
+            if (SUCCEEDED(IShellFolder2_MapColumnToSCID(This->pSF2Parent, This->columns, &scid)) &&
+                IsEqualGUID(&scid.fmtid, &FMTID_Storage) && (scid.pid == PID_STG_STORAGETYPE || scid.pid == PID_STG_SIZE))
+            {
+                /* the type above the size */
+                if (scid.pid == PID_STG_STORAGETYPE && This->tile_column_count)
+                {
+                    This->tile_columns[1] = This->tile_columns[0];
+                    This->tile_columns[0] = This->columns;
+                    This->tile_column_count++;
+                }
+                else This->tile_columns[This->tile_column_count++] = This->columns;
+            }
+        }
 
         lvColumn.fmt = sd.fmt;
         lvColumn.cx = MulDiv(sd.cxChar, tm.tmAveCharWidth * 3, 2); /* chars->pixel */
@@ -642,7 +1152,68 @@ static int LV_FindItemByPidl(
 	    return lvItem.iItem;
 	  }
   	}
+	/* a notification's simple pidl of an item that is gone does not compare equal: look for its name */
+	{
+	  WCHAR name[MAX_PATH], current[MAX_PATH];
+
+	  if (!_ILSimpleGetTextW(ILFindLastID(pidl), name, ARRAY_SIZE(name))) return -1;
+	  for (lvItem.iItem = 0; SendMessageW(This->hWndList, LVM_GETITEMW, 0, (LPARAM)&lvItem); lvItem.iItem++)
+	    if (_ILSimpleGetTextW((LPCITEMIDLIST)lvItem.lParam, current, ARRAY_SIZE(current)) && !wcsicmp(name, current))
+	      return lvItem.iItem;
+	}
 	return -1;
+}
+
+/* Windows XP's groups of My Computer */
+static const UINT drive_group_ids[] = { IDS_DRIVES_SHAREDDOCS_GROUP, IDS_DRIVES_FIXED_GROUP, IDS_DRIVES_REMOVABLE_GROUP,
+                                        IDS_DRIVES_NETDRIVE_GROUP, IDS_DRIVES_OTHER_GROUP };
+
+static void create_drive_groups(IShellViewImpl *This)
+{
+    IPersist *persist;
+    CLSID clsid;
+    UINT i;
+
+    This->drive_groups = FALSE;
+    if (SUCCEEDED(IShellFolder_QueryInterface(This->pSFParent, &IID_IPersist, (void **)&persist)))
+    {
+        This->drive_groups = SUCCEEDED(IPersist_GetClassID(persist, &clsid)) && IsEqualCLSID(&clsid, &CLSID_MyComputer);
+        IPersist_Release(persist);
+    }
+    SendMessageW(This->hWndList, LVM_REMOVEALLGROUPS, 0, 0);
+    if (!This->drive_groups) return;
+    for (i = 0; i < ARRAY_SIZE(drive_group_ids); i++)
+    {
+        WCHAR header[64];
+        LVGROUP group = { sizeof(group), LVGF_HEADER | LVGF_GROUPID };
+
+        LoadStringW(shell32_hInstance, drive_group_ids[i], header, ARRAY_SIZE(header));
+        group.pszHeader = header;
+        group.iGroupId = drive_group_ids[i];
+        SendMessageW(This->hWndList, LVM_INSERTGROUP, -1, (LPARAM)&group);
+    }
+    SendMessageW(This->hWndList, LVM_ENABLEGROUPVIEW, TRUE, 0);
+}
+
+static UINT drive_group(LPCITEMIDLIST pidl)
+{
+    WCHAR root[MAX_PATH];
+
+    /* Shared Documents and the user's documents: "Files Stored on This Computer" */
+    if (_ILIsSpecialFolder(pidl))
+    {
+        GUID *guid = _ILGetGUIDPointer(pidl);
+        if (guid && (IsEqualGUID(guid, &CLSID_MyDocuments) || IsEqualGUID(guid, &CLSID_SharedDocuments)))
+            return IDS_DRIVES_SHAREDDOCS_GROUP;
+    }
+    if (!_ILIsDrive(pidl) || !_ILSimpleGetTextW(pidl, root, ARRAY_SIZE(root))) return IDS_DRIVES_OTHER_GROUP;
+    switch (GetDriveTypeW(root))
+    {
+    case DRIVE_REMOVABLE:
+    case DRIVE_CDROM:  return IDS_DRIVES_REMOVABLE_GROUP;
+    case DRIVE_REMOTE: return IDS_DRIVES_NETDRIVE_GROUP;
+    default:           return IDS_DRIVES_FIXED_GROUP;
+    }
 }
 
 static void shellview_add_item(IShellViewImpl *shellview, LPCITEMIDLIST pidl)
@@ -653,18 +1224,26 @@ static void shellview_add_item(IShellViewImpl *shellview, LPCITEMIDLIST pidl)
     TRACE("(%p)(pidl=%p)\n", shellview, pidl);
 
     item.mask = LVIF_TEXT | LVIF_IMAGE | LVIF_PARAM;
-    item.iItem = 0;
+    item.iItem = INT_MAX;   /* at the end, as Windows shows a new item until the folder is refreshed */
     item.iSubItem = 0;
     item.lParam = (LPARAM)pidl;
     item.pszText = LPSTR_TEXTCALLBACKW;
     item.iImage = I_IMAGECALLBACK;
-    SendMessageW(shellview->hWndList, LVM_INSERTITEMW, 0, (LPARAM)&item);
+    item.iItem = SendMessageW(shellview->hWndList, LVM_INSERTITEMW, 0, (LPARAM)&item);
+    if (shellview->drive_groups)
+        SendMessageW(shellview->hWndList, LVM_MOVEITEMTOGROUP, item.iItem, drive_group(pidl));
+    if (shellview->tile_column_count)
+    {
+        /* Windows XP shows the type and size of a file under its name, nothing for folders and drives */
+        LVTILEINFO tile = { sizeof(tile), item.iItem, _ILIsValue(pidl) ? shellview->tile_column_count : 0,
+                            shellview->tile_columns };
+        SendMessageW(shellview->hWndList, LVM_SETTILEINFO, 0, (LPARAM)&tile);
+    }
 
     for (i = 1; i < shellview->columns; i++)
     {
         item.mask = LVIF_TEXT;
-        item.iItem = 0;
-        item.iSubItem = 1;
+        item.iSubItem = i;
         item.pszText = LPSTR_TEXTCALLBACKW;
         SendMessageW(shellview->hWndList, LVM_SETITEMW, 0, (LPARAM)&item);
     }
@@ -688,8 +1267,11 @@ static BOOLEAN LV_RenameItem(IShellViewImpl * This, LPCITEMIDLIST pidlOld, LPCIT
 	  SendMessageW(This->hWndList, LVM_GETITEMW, 0, (LPARAM) &lvItem);
 
 	  SHFree((LPITEMIDLIST)lvItem.lParam);
-	  lvItem.mask = LVIF_PARAM;
+	  /* the name comes from the new pidl again (an edited label is kept as fixed text) */
+	  lvItem.mask = LVIF_PARAM | LVIF_TEXT;
 	  lvItem.iItem = nItem;
+	  lvItem.iSubItem = 0;
+	  lvItem.pszText = LPSTR_TEXTCALLBACKW;
 	  lvItem.lParam = (LPARAM) ILClone(ILFindLastID(pidlNew));	/* set the item's data */
 	  SendMessageW(This->hWndList, LVM_SETITEMW, 0, (LPARAM) &lvItem);
 	  SendMessageW(This->hWndList, LVM_UPDATE, nItem, 0);
@@ -714,6 +1296,8 @@ static HRESULT ShellView_FillList(IShellViewImpl *This)
     HRESULT hr;
 
     TRACE("(%p)\n", This);
+    free_thumbnails(This);
+    create_drive_groups(This);
 
     /* get the itemlist from the shfolder*/
     hr = IShellFolder_EnumObjects(This->pSFParent, This->hWnd, SHCONTF_NONFOLDERS | SHCONTF_FOLDERS, &pEnumIDList);
@@ -734,6 +1318,8 @@ static HRESULT ShellView_FillList(IShellViewImpl *This)
     SendMessageW(This->hWndList, LVM_SORTITEMS, (WPARAM)This->pSFParent, (LPARAM)ShellView_CompareItems);
 
     IFolderView2_SetRedraw(folderview, TRUE);
+    /* sizes seen while the list did not redraw were not laid out */
+    SendMessageW(This->hWndList, LVM_ARRANGE, LVA_DEFAULT, 0);
 
     IEnumIDList_Release(pEnumIDList);
     return S_OK;
@@ -742,6 +1328,106 @@ static HRESULT ShellView_FillList(IShellViewImpl *This)
 /**********************************************************
 *  ShellView_OnCreate()
 */
+/* Windows shows what other programs do in a folder: a thread waits for changes of the folder on disk
+ * (inotify behind FindFirstChangeNotification) and the view then takes the folder's items again. */
+static DWORD WINAPI watch_folder(void *arg)
+{
+    IShellViewImpl *This = arg;
+    HANDLE change = FindFirstChangeNotificationW(This->watch_path, FALSE, FILE_NOTIFY_CHANGE_FILE_NAME |
+                                                 FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_SIZE |
+                                                 FILE_NOTIFY_CHANGE_LAST_WRITE);
+    HANDLE handles[2] = { This->watch_stop, change };
+
+    if (change == INVALID_HANDLE_VALUE) return 0;
+    while (WaitForMultipleObjects(2, handles, FALSE, INFINITE) == WAIT_OBJECT_0 + 1)
+    {
+        /* a burst of changes is taken once */
+        if (WaitForSingleObject(This->watch_stop, 300) == WAIT_OBJECT_0) break;
+        if (!This->sync_pending)
+        {
+            This->sync_pending = TRUE;
+            PostMessageW(This->hWnd, SHV_FOLDER_CHANGED, 0, 0);
+        }
+        if (!FindNextChangeNotification(change)) break;
+    }
+    FindCloseChangeNotification(change);
+    return 0;
+}
+
+static void start_watching(IShellViewImpl *This, LPCITEMIDLIST folder)
+{
+    if (!SHGetPathFromIDListW(folder, This->watch_path) || !PathIsDirectoryW(This->watch_path)) return;
+    if (!(This->watch_stop = CreateEventW(NULL, TRUE, FALSE, NULL))) return;
+    if (!(This->watch_thread = CreateThread(NULL, 0, watch_folder, This, 0, NULL)))
+    {
+        CloseHandle(This->watch_stop);
+        This->watch_stop = NULL;
+    }
+}
+
+static void stop_watching(IShellViewImpl *This)
+{
+    if (!This->watch_thread) return;
+    SetEvent(This->watch_stop);
+    WaitForSingleObject(This->watch_thread, INFINITE);
+    CloseHandle(This->watch_thread);
+    CloseHandle(This->watch_stop);
+    This->watch_thread = This->watch_stop = NULL;
+}
+
+static int find_item_by_name(IShellViewImpl *This, const WCHAR *name)
+{
+    WCHAR current[MAX_PATH];
+    LVITEMW item = { LVIF_PARAM };
+
+    for (item.iItem = 0; SendMessageW(This->hWndList, LVM_GETITEMW, 0, (LPARAM)&item); item.iItem++)
+        if (_ILSimpleGetTextW((LPCITEMIDLIST)item.lParam, current, ARRAY_SIZE(current)) && !wcsicmp(name, current))
+            return item.iItem;
+    return -1;
+}
+
+/* the list takes the folder's items again: new ones are added at the end, gone ones removed, the others kept
+ * (with their new size and date) so that the selection and the scroll position stay */
+static void sync_with_folder(IShellViewImpl *This)
+{
+    IEnumIDList *enumerator;
+    LPITEMIDLIST pidl;
+    ULONG fetched;
+    WCHAR name[MAX_PATH];
+    BYTE *seen;
+    int count, i;
+
+    This->sync_pending = FALSE;
+    if (IShellFolder_EnumObjects(This->pSFParent, This->hWnd, SHCONTF_NONFOLDERS | SHCONTF_FOLDERS, &enumerator) != S_OK)
+        return;
+    count = SendMessageW(This->hWndList, LVM_GETITEMCOUNT, 0, 0);
+    seen = calloc(count + 1, 1);
+    while (IEnumIDList_Next(enumerator, 1, &pidl, &fetched) == S_OK && fetched)
+    {
+        if (!_ILSimpleGetTextW(pidl, name, ARRAY_SIZE(name)) || (i = find_item_by_name(This, name)) < 0)
+        {
+            shellview_add_item(This, pidl);   /* the list owns it */
+            continue;
+        }
+        if (i < count) seen[i] = 1;
+        if (!SendMessageW(This->hWndList, LVM_GETEDITCONTROL, 0, 0))   /* not while a name is edited */
+        {
+            LVITEMW item = { LVIF_PARAM, i };
+
+            SendMessageW(This->hWndList, LVM_GETITEMW, 0, (LPARAM)&item);
+            SHFree((LPITEMIDLIST)item.lParam);
+            item.lParam = (LPARAM)pidl;
+            SendMessageW(This->hWndList, LVM_SETITEMW, 0, (LPARAM)&item);
+            SendMessageW(This->hWndList, LVM_UPDATE, i, 0);
+        }
+        else SHFree(pidl);
+    }
+    IEnumIDList_Release(enumerator);
+    for (i = count - 1; i >= 0; i--)
+        if (!seen[i]) SendMessageW(This->hWndList, LVM_DELETEITEM, i, 0);
+    free(seen);
+}
+
 static LRESULT ShellView_OnCreate(IShellViewImpl *This)
 {
     IShellView3 *iface = &This->IShellView3_iface;
@@ -755,6 +1441,8 @@ static LRESULT ShellView_OnCreate(IShellViewImpl *This)
     {
         ShellView_InitList(This);
         ShellView_FillList(This);
+        if (This->FolderSettings.ViewMode == FVM_TILE || HAS_THUMBNAILS(This->FolderSettings.ViewMode))
+            shellview_set_view(This, This->FolderSettings.ViewMode);
     }
 
     hr = IShellView3_QueryInterface(iface, &IID_IDropTarget, (void**)&pdt);
@@ -791,6 +1479,7 @@ static LRESULT ShellView_OnCreate(IShellViewImpl *This)
             ntreg.fRecursive = TRUE;
             This->hNotify = SHChangeNotifyRegister(This->hWnd, SHCNRF_InterruptLevel, SHCNE_ALLEVENTS,
                                                    SHV_CHANGE_NOTIFY, 1, &ntreg);
+            start_watching(This, ntreg.pidl);
             SHFree((LPITEMIDLIST)ntreg.pidl);
             SHFree(computer_pidl);
         }
@@ -1113,6 +1802,26 @@ static void ShellView_DoContextMenu(IShellViewImpl * This, WORD x, WORD y, BOOL 
 
 	  BackgroundMenu_Constructor(This->pSFParent, FALSE, &IID_IContextMenu2, (void**)&pCM);
 	  IContextMenu2_QueryContextMenu(pCM, hMenu, 0, FCIDM_SHVIEWFIRST, FCIDM_SHVIEWLAST, 0);
+	  {
+	      /* the current view and arrangement, ids relative to FCIDM_SHVIEWFIRST */
+	      UINT current = This->FolderSettings.ViewMode == FVM_LIST ? FCIDM_SHVIEW_LISTVIEW :
+	                     This->FolderSettings.ViewMode == FVM_DETAILS ? FCIDM_SHVIEW_REPORTVIEW : FCIDM_SHVIEW_BIGICON;
+	      EnableMenuItem(hMenu, FCIDM_SHVIEW_TILE - 0x7000, MF_BYCOMMAND | MF_ENABLED);
+	      EnableMenuItem(hMenu, FCIDM_SHVIEW_THUMBNAIL - 0x7000, MF_BYCOMMAND | MF_ENABLED);
+	      /* Windows XP offers Filmstrip in picture folders */
+	      if (!is_picture_folder(This)) DeleteMenu(hMenu, FCIDM_SHVIEW_FILMSTRIP - 0x7000, MF_BYCOMMAND);
+	      if (This->FolderSettings.ViewMode == FVM_TILE || HAS_THUMBNAILS(This->FolderSettings.ViewMode))
+	      {
+	          UINT id = This->FolderSettings.ViewMode == FVM_TILE ? FCIDM_SHVIEW_TILE :
+	                    This->FolderSettings.ViewMode == FVM_THUMBSTRIP ? FCIDM_SHVIEW_FILMSTRIP : FCIDM_SHVIEW_THUMBNAIL;
+	          CheckMenuRadioItem(hMenu, id - 0x7000, id - 0x7000, id - 0x7000, MF_BYCOMMAND);
+	      }
+	      else
+	          CheckMenuRadioItem(hMenu, FCIDM_SHVIEW_BIGICON - 0x7000, FCIDM_SHVIEW_REPORTVIEW - 0x7000,
+	                             current - 0x7000, MF_BYCOMMAND);
+	      if (This->FolderSettings.fFlags & FWF_AUTOARRANGE)
+	          CheckMenuItem(hMenu, FCIDM_SHVIEW_AUTOARRANGE - 0x7000, MF_BYCOMMAND | MF_CHECKED);
+	  }
 
 	  uCommand = TrackPopupMenu( hMenu, TPM_LEFTALIGN | TPM_RETURNCMD,x,y,0,This->hWnd,NULL);
 	  DestroyMenu(hMenu);
@@ -1141,7 +1850,15 @@ static LRESULT ShellView_OnSize(IShellViewImpl * This, WORD wWidth, WORD wHeight
 	TRACE("%p width=%u height=%u\n",This, wWidth,wHeight);
 
 	/*resize the ListView to fit our window*/
-	if(This->hWndList)
+	if (This->hWndList && This->preview)
+	{
+	  /* Filmstrip: the picture above, the row of thumbnails with its scroll bar below */
+	  int strip = min(wHeight, THUMBNAIL_SIZE + 44 + GetSystemMetrics(SM_CYHSCROLL));
+	  MoveWindow(This->preview, 0, 0, wWidth, wHeight - strip, TRUE);
+	  MoveWindow(This->hWndList, 0, wHeight - strip, wWidth, strip, TRUE);
+	  SendMessageW(This->hWndList, LVM_ARRANGE, LVA_DEFAULT, 0);
+	}
+	else if(This->hWndList)
 	{
 	  MoveWindow(This->hWndList, 0, 0, wWidth, wHeight, TRUE);
 	}
@@ -1296,26 +2013,37 @@ static LRESULT ShellView_OnCommand(IShellViewImpl * This,DWORD dwCmdID, DWORD dw
 	switch(dwCmdID)
 	{
 	  case FCIDM_SHVIEW_SMALLICON:
-	    This->FolderSettings.ViewMode = FVM_SMALLICON;
-	    SetStyle (This, LVS_SMALLICON, LVS_TYPEMASK);
+	    shellview_set_view(This, FVM_SMALLICON);
 	    CheckToolbar(This);
 	    break;
 
 	  case FCIDM_SHVIEW_BIGICON:
-	    This->FolderSettings.ViewMode = FVM_ICON;
-	    SetStyle (This, LVS_ICON, LVS_TYPEMASK);
+	    shellview_set_view(This, FVM_ICON);
+	    CheckToolbar(This);
+	    break;
+
+	  case FCIDM_SHVIEW_TILE:
+	    shellview_set_view(This, FVM_TILE);
+	    CheckToolbar(This);
+	    break;
+
+	  case FCIDM_SHVIEW_THUMBNAIL:
+	    shellview_set_view(This, FVM_THUMBNAIL);
+	    CheckToolbar(This);
+	    break;
+
+	  case FCIDM_SHVIEW_FILMSTRIP:
+	    shellview_set_view(This, FVM_THUMBSTRIP);
 	    CheckToolbar(This);
 	    break;
 
 	  case FCIDM_SHVIEW_LISTVIEW:
-	    This->FolderSettings.ViewMode = FVM_LIST;
-	    SetStyle (This, LVS_LIST, LVS_TYPEMASK);
+	    shellview_set_view(This, FVM_LIST);
 	    CheckToolbar(This);
 	    break;
 
 	  case FCIDM_SHVIEW_REPORTVIEW:
-	    This->FolderSettings.ViewMode = FVM_DETAILS;
-	    SetStyle (This, LVS_REPORT, LVS_TYPEMASK);
+	    shellview_set_view(This, FVM_DETAILS);
 	    CheckToolbar(This);
 	    break;
 
@@ -1334,6 +2062,17 @@ static LRESULT ShellView_OnCommand(IShellViewImpl * This,DWORD dwCmdID, DWORD dw
 	    TRACE("-- COMMAND 0x%04lx unhandled\n", dwCmdID);
 	}
 	return 0;
+}
+
+/* a string verb of the item menu of the selection or of the background menu, for the keyboard shortcuts */
+static void invoke_view_verb(IShellViewImpl *This, UINT which, const char *verb)
+{
+    CMINVOKECOMMANDINFO info = { sizeof(info), 0, This->hWndParent, verb, NULL, NULL, SW_SHOWNORMAL };
+    IContextMenu *menu;
+
+    if (FAILED(IShellView3_GetItemObject(&This->IShellView3_iface, which, &IID_IContextMenu, (void **)&menu))) return;
+    IContextMenu_InvokeCommand(menu, &info);
+    IContextMenu_Release(menu);
 }
 
 /**********************************************************
@@ -1363,6 +2102,40 @@ static LRESULT ShellView_OnNotify(IShellViewImpl * This, UINT CtlID, LPNMHDR lpn
 
 	  case NM_CUSTOMDRAW:
 	    TRACE("-- NM_CUSTOMDRAW %p\n",This);
+	    if (HAS_THUMBNAILS(This->FolderSettings.ViewMode) && This->thumbnails)
+	    {
+	      /* Windows XP: a selected thumbnail keeps its picture and gets a thick frame of the selection color */
+	      NMLVCUSTOMDRAW *cd = (NMLVCUSTOMDRAW *)lpnmh;
+	      int item = cd->nmcd.dwItemSpec;
+	      RECT rc;
+
+	      if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
+	      if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) return CDRF_NOTIFYPOSTPAINT;
+	      if (cd->nmcd.dwDrawStage == CDDS_ITEMPOSTPAINT &&
+	          (SendMessageW(This->hWndList, LVM_GETITEMSTATE, item, LVIS_SELECTED) & LVIS_SELECTED))
+	      {
+	        LVITEMW lvitem = { LVIF_IMAGE, item };
+
+	        rc.left = LVIR_ICON;
+	        if (SendMessageW(This->hWndList, LVM_GETITEMRECT, item, (LPARAM)&rc) &&
+	            SendMessageW(This->hWndList, LVM_GETITEMW, 0, (LPARAM)&lvitem))
+	        {
+	          HBRUSH brush = GetSysColorBrush(COLOR_HIGHLIGHT);
+	          RECT frame;
+	          int x = rc.left + (rc.right - rc.left - THUMBNAIL_SIZE) / 2, y = rc.top + (rc.bottom - rc.top - THUMBNAIL_SIZE) / 2;
+	          int i;
+
+	          ImageList_Draw(This->thumbnails, lvitem.iImage, cd->nmcd.hdc, x, y, ILD_NORMAL);
+	          SetRect(&frame, x, y, x + THUMBNAIL_SIZE, y + THUMBNAIL_SIZE);
+	          for (i = 0; i < 3; i++)
+	          {
+	            FrameRect(cd->nmcd.hdc, &frame, brush);
+	            InflateRect(&frame, -1, -1);
+	          }
+	        }
+	      }
+	      return CDRF_DODEFAULT;
+	    }
 	    return CDRF_DODEFAULT;
 
 	  case NM_RELEASEDCAPTURE:
@@ -1478,12 +2251,16 @@ static LRESULT ShellView_OnNotify(IShellViewImpl * This, UINT CtlID, LPNMHDR lpn
 
 	    if(lpdi->item.mask & LVIF_IMAGE)	/* image requested */
 	    {
-	      lpdi->item.iImage = SHMapPIDLToSystemImageListIndex(This->pSFParent, pidl, 0);
+	      if (HAS_THUMBNAILS(This->FolderSettings.ViewMode) && This->thumbnails)
+	        lpdi->item.iImage = thumbnail_index(This, pidl);
+	      else
+	        lpdi->item.iImage = SHMapPIDLToSystemImageListIndex(This->pSFParent, pidl, 0);
 	    }
 	    break;
 
 	  case LVN_ITEMCHANGED:
 	    TRACE("-- LVN_ITEMCHANGED %p\n",This);
+	    if (This->preview) InvalidateRect(This->preview, NULL, TRUE);   /* the filmstrip shows the selection */
 	    OnStateChange(This, CDBOSC_SELCHANGE);  /* the browser will get the IDataObject now */
 	    break;
 
@@ -1646,6 +2423,25 @@ static LRESULT ShellView_OnNotify(IShellViewImpl * This, UINT CtlID, LPNMHDR lpn
 	        }
 		break;
 
+	      case 'A':
+	      case 'C':
+	      case 'X':
+	      case 'V':
+	      case 'Z':
+		if (GetKeyState(VK_CONTROL) >= 0 || GetKeyState(VK_MENU) < 0) break;
+		if (plvKeyDown->wVKey == 'A')
+		{
+		  LVITEMW item = { .state = LVIS_SELECTED, .stateMask = LVIS_SELECTED };
+		  SendMessageW(This->hWndList, LVM_SETITEMSTATE, -1, (LPARAM)&item);
+		}
+		else if (plvKeyDown->wVKey == 'V')
+		  invoke_view_verb(This, SVGIO_BACKGROUND, "paste");
+		else if (plvKeyDown->wVKey == 'Z')
+		  invoke_view_verb(This, SVGIO_BACKGROUND, "undo");
+		else if (SendMessageW(This->hWndList, LVM_GETSELECTEDCOUNT, 0, 0))
+		  invoke_view_verb(This, SVGIO_SELECTION, plvKeyDown->wVKey == 'C' ? "copy" : "cut");
+		break;
+
 	      default:
 		FIXME("LVN_KEYDOWN key=0x%08x\n", plvKeyDown->wVKey);
 	      }
@@ -1663,10 +2459,42 @@ static LRESULT ShellView_OnNotify(IShellViewImpl * This, UINT CtlID, LPNMHDR lpn
 * ShellView_OnChange()
 */
 
+/* The notifications are recursive: is the item directly in the folder of the view? Items of
+ * folders without a file system path are taken to be. */
+static BOOL item_in_view(IShellViewImpl *This, LPCITEMIDLIST pidl)
+{
+    WCHAR dir[MAX_PATH], path[MAX_PATH];
+    IPersistFolder2 *folder;
+    LPITEMIDLIST folder_pidl;
+    BOOL ret = FALSE;
+
+    if (!SHGetPathFromIDListW(pidl, path) || !PathRemoveFileSpecW(path)) return TRUE;
+    if (FAILED(IShellFolder_QueryInterface(This->pSFParent, &IID_IPersistFolder2, (void **)&folder))) return TRUE;
+    if (SUCCEEDED(IPersistFolder2_GetCurFolder(folder, &folder_pidl)))
+    {
+        ret = !SHGetPathFromIDListW(folder_pidl, dir) || !wcsicmp(dir, path);
+        ILFree(folder_pidl);
+    }
+    IPersistFolder2_Release(folder);
+    return ret;
+}
+
+/* a notification by path has a simple pidl without the file's size and dates: read the item again */
+static LPITEMIDLIST reparse_item(IShellViewImpl *This, LPCITEMIDLIST pidl)
+{
+    WCHAR name[MAX_PATH];
+    LPITEMIDLIST full;
+
+    if (_ILSimpleGetTextW(ILFindLastID(pidl), name, ARRAY_SIZE(name)) &&
+        SUCCEEDED(IShellFolder_ParseDisplayName(This->pSFParent, NULL, NULL, name, NULL, &full, NULL)))
+        return full;
+    return ILClone(ILFindLastID(pidl));
+}
+
 static LRESULT ShellView_OnChange(IShellViewImpl * This, const LPCITEMIDLIST *pidls, LONG event)
 {
-    LPCITEMIDLIST pidl;
-    BOOL ret = TRUE;
+    LPITEMIDLIST pidl;
+    BOOL ret = TRUE, old_in, new_in;
 
     TRACE("(%p)->(%p, %p, 0x%08lx)\n", This, pidls[0], pidls[1], event);
 
@@ -1674,19 +2502,34 @@ static LRESULT ShellView_OnChange(IShellViewImpl * This, const LPCITEMIDLIST *pi
     {
         case SHCNE_MKDIR:
         case SHCNE_CREATE:
-            pidl = ILClone(ILFindLastID(pidls[0]));
-            shellview_add_item(This, pidl);
+            if (!item_in_view(This, pidls[0]) || LV_FindItemByPidl(This, ILFindLastID(pidls[0])) != -1) break;
+            shellview_add_item(This, reparse_item(This, pidls[0]));
             break;
         case SHCNE_RMDIR:
         case SHCNE_DELETE:
         {
-            INT i = LV_FindItemByPidl(This, ILFindLastID(pidls[0]));
+            INT i;
+
+            if (!item_in_view(This, pidls[0])) break;
+            i = LV_FindItemByPidl(This, ILFindLastID(pidls[0]));
             ret = SendMessageW(This->hWndList, LVM_DELETEITEM, i, 0);
             break;
         }
         case SHCNE_RENAMEFOLDER:
         case SHCNE_RENAMEITEM:
-            LV_RenameItem(This, pidls[0], pidls[1]);
+            /* a move into or out of the folder shows as a rename */
+            old_in = item_in_view(This, pidls[0]);
+            new_in = item_in_view(This, pidls[1]);
+            if (old_in && new_in)
+            {
+                pidl = reparse_item(This, pidls[1]);
+                LV_RenameItem(This, pidls[0], pidl);
+                ILFree(pidl);
+            }
+            else if (old_in)
+                SendMessageW(This->hWndList, LVM_DELETEITEM, LV_FindItemByPidl(This, ILFindLastID(pidls[0])), 0);
+            else if (new_in && LV_FindItemByPidl(This, ILFindLastID(pidls[1])) == -1)
+                shellview_add_item(This, reparse_item(This, pidls[1]));
             break;
         case SHCNE_UPDATEITEM:
 	    break;
@@ -1724,6 +2567,7 @@ static LRESULT CALLBACK ShellView_WndProc(HWND hWnd, UINT uMessage, WPARAM wPara
 					GET_WM_COMMAND_CMD(wParam, lParam),
 					GET_WM_COMMAND_HWND(wParam, lParam));
 	  case SHV_CHANGE_NOTIFY: return ShellView_OnChange(pThis, (const LPCITEMIDLIST*)wParam, (LONG)lParam);
+	  case SHV_FOLDER_CHANGED: sync_with_folder(pThis); return 0;
 
 	  case WM_CONTEXTMENU:  ShellView_DoContextMenu(pThis, LOWORD(lParam), HIWORD(lParam), FALSE);
 	                        return 0;
@@ -1736,6 +2580,7 @@ static LRESULT CALLBACK ShellView_WndProc(HWND hWnd, UINT uMessage, WPARAM wPara
           case WM_GETFONT:      return SendMessageW(pThis->hWndList, WM_GETFONT, wParam, lParam);
 
 	  case WM_DESTROY:	
+				stop_watching(pThis);
 				SHChangeNotifyDeregister(pThis->hNotify);
 				RevokeDragDrop(pThis->hWnd);
 	                        break;
@@ -1840,6 +2685,8 @@ static ULONG WINAPI IShellView_fnRelease(IShellView3 *iface)
 
 	  if(This->pSFParent)
 	    IShellFolder_Release(This->pSFParent);
+	    free_thumbnails(This);
+	    if (This->thumbnails) ImageList_Destroy(This->thumbnails);
 
 	  if(This->pSF2Parent)
 	    IShellFolder2_Release(This->pSF2Parent);
@@ -2733,7 +3580,6 @@ static HRESULT WINAPI FolderView_GetCurrentViewMode(IFolderView2 *iface, UINT *m
 static HRESULT WINAPI FolderView_SetCurrentViewMode(IFolderView2 *iface, UINT mode)
 {
     IShellViewImpl *shellview = impl_from_IFolderView2(iface);
-    DWORD style;
 
     TRACE("folder view %p, mode %u.\n", iface, mode);
 
@@ -2742,9 +3588,8 @@ static HRESULT WINAPI FolderView_SetCurrentViewMode(IFolderView2 *iface, UINT mo
 
     if (mode >= FVM_FIRST && mode <= FVM_LAST)
     {
-        style = ViewModeToListStyle(mode);
-        SetStyle(shellview, style, LVS_TYPEMASK);
-        shellview->FolderSettings.ViewMode = mode;
+        if (shellview->hWndList) shellview_set_view(shellview, mode);
+        else shellview->FolderSettings.ViewMode = mode;
     }
 
     return S_OK;

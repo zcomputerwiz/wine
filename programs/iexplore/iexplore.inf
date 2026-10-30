@@ -16,6 +16,7 @@ HKCR,"CLSID\%CLSID_InternetExplorer%\LocalServer32",,,"""%16422%\Internet Explor
 HKCR,"CLSID\%CLSID_InternetExplorer%\ProgID",,,"InternetExplorer.Application.1"
 HKCR,"CLSID\%CLSID_InternetExplorer%\VersionIndependentProgID",,,"InternetExplorer.Application"
 
+HKCR,"CLSID\%CLSID_Internet%",,,"Internet Explorer"
 HKCR,"CLSID\%CLSID_Internet%\DefaultIcon",,,"shdoclc.dll,-190"
 HKCR,"CLSID\%CLSID_Internet%\Shell",,,"OpenHomePage"
 HKCR,"CLSID\%CLSID_Internet%\Shell\OpenHomePage",,,"Open &Home Page"

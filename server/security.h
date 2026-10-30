@@ -63,11 +63,22 @@ struct ace
 
 extern struct token *get_token_obj( struct process *process, obj_handle_t handle, unsigned int access );
 extern struct token *token_create_admin( unsigned primary, int impersonation_level, int elevation, unsigned int session_id );
+/* accounts of the system role (docs/ELEVATION_SYSTEM_ROLE_WORKORDER.md, C3); the numbers are in the protocol */
+enum { SERVICE_ACCOUNT_SYSTEM, SERVICE_ACCOUNT_LOCAL_SERVICE, SERVICE_ACCOUNT_NETWORK_SERVICE };
+extern struct token *token_create_service( unsigned int account, unsigned int session_id );
+extern int token_service_account( const struct token *token );
+extern int token_is_elevated( const struct token *token );
+extern int token_protect_elevated( struct token *token );
+extern void token_make_filtered( struct token *token );
+extern void token_make_standard( struct token *token );
+extern int user_is_administrator(void);
+extern int standard_user_session;
 extern int token_assign_label( struct token *token, const struct sid *label );
 extern struct token *token_duplicate( struct token *src_token, unsigned primary,
                                       int impersonation_level, const struct security_descriptor *sd,
                                       const struct luid_attr *remove_privs, unsigned int remove_priv_count,
                                       const struct sid *remove_groups, unsigned int remove_group_count );
+extern int token_impersonation_level( struct token *client, struct token *server );
 extern int token_check_privileges( struct token *token, int all_required,
                                    const struct luid_attr *reqprivs,
                                    unsigned int count, struct luid_attr *usedprivs );
@@ -122,6 +133,15 @@ static inline struct ace *set_ace( struct ace *ace, const struct sid *sid, unsig
 extern void security_set_thread_token( struct thread *thread, obj_handle_t handle );
 extern const struct sid *security_unix_uid_to_sid( uid_t uid );
 extern int check_object_access( struct token *token, struct object *obj, unsigned int *access );
+
+/* elevation enforcement is on while an elevation helper is configured (registry.c) */
+extern int elevation_helper_unset(void);
+static inline int elevation_enforced(void) { return !elevation_helper_unset(); }
+extern int object_is_registry_key( struct object *obj );
+extern const struct luid SeAssignPrimaryTokenPrivilege;
+extern const struct luid SeTcbPrivilege;
+extern int token_has_privilege( struct token *token, struct luid priv );
+extern unsigned int token_check_assign_primary( struct token *token );
 
 static inline int thread_single_check_privilege( struct thread *thread, struct luid priv )
 {

@@ -33,6 +33,7 @@
 
 #include "wine/debug.h"
 #include "explorer_private.h"
+#include "wexshell.h"
 #include "resource.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(explorer);
@@ -1056,8 +1057,10 @@ static void load_graphics_driver( const WCHAR *driver, GUID *guid )
               guid->Data4[0], guid->Data4[1], guid->Data4[2], guid->Data4[3],
               guid->Data4[4], guid->Data4[5], guid->Data4[6], guid->Data4[7] );
 
+    /* MAXIMUM_ALLOWED: creating the missing parents opens the existing ones with the requested access, which
+     * a process without write access to HKLM\System does not have */
     if (!RegCreateKeyExW( HKEY_LOCAL_MACHINE, key, 0, NULL,
-                          REG_OPTION_VOLATILE, KEY_SET_VALUE, NULL, &hkey, NULL  ))
+                          REG_OPTION_VOLATILE, MAXIMUM_ALLOWED, NULL, &hkey, NULL  ))
     {
         if (module || null_driver)
             RegSetValueExW( hkey, L"GraphicsDriver", 0, REG_SZ,
@@ -1204,7 +1207,12 @@ void manage_desktop( WCHAR *arg )
     WCHAR *cmdline = NULL, *driver = NULL;
     WCHAR *p = arg;
     const WCHAR *name = NULL;
-    BOOL enable_shell, enable_launchers, show_systray, no_tray_items;
+    BOOL enable_shell, enable_launchers, show_systray, no_tray_items, force_shell = FALSE;
+    BOOL native_shell = !wcsnicmp(arg, L"/shell", 6) && (!arg[6] || is_whitespace(arg[6]));
+    BOOL plugin_started = FALSE;
+    HMODULE plugin = NULL;
+    WEX_SHELL_START start = NULL;
+    WEX_SHELL_STOP stop = NULL;
     void (WINAPI *pShellDDEInit)( BOOL ) = NULL;
     HMODULE shell32;
     HANDLE thread;
@@ -1218,6 +1226,14 @@ void manage_desktop( WCHAR *arg )
         *p++ = 0;
         while (*p && is_whitespace(*p)) p++;
         if (*p) cmdline = p;
+    }
+
+    if (cmdline && !wcsncmp(cmdline, L"/shell", 6) && (!cmdline[6] || is_whitespace(cmdline[6])))
+    {
+        force_shell = TRUE;
+        cmdline += 6;
+        while (*cmdline && is_whitespace(*cmdline)) cmdline++;
+        if (!*cmdline) cmdline = NULL;
     }
 
     /* parse the desktop option */
@@ -1234,12 +1250,12 @@ void manage_desktop( WCHAR *arg )
         if (!p || !parse_size( p, &width, &height ))
             get_default_desktop_size( name, &width, &height );
     }
-    else if ((name = get_default_desktop_name()))
+    else if (!native_shell && (name = get_default_desktop_name()))
     {
         if (!get_default_desktop_size( name, &width, &height )) width = height = 0;
     }
 
-    enable_shell = name ? get_default_enable_shell( name ) : FALSE;
+    enable_shell = native_shell || force_shell || (name ? get_default_enable_shell( name ) : FALSE);
     enable_launchers = get_default_enable_launchers();
     show_systray = get_default_show_systray( name );
     no_tray_items = get_no_tray_items_display();
@@ -1287,11 +1303,25 @@ void manage_desktop( WCHAR *arg )
         if (thread) CloseHandle( thread );
         SystemParametersInfoW( SPI_SETDESKWALLPAPER, 0, NULL, FALSE );
         ClipCursor( NULL );
-        initialize_display_settings( width, height );
-        initialize_appbar();
-
-        initialize_systray( using_root, enable_shell, show_systray, no_tray_items );
-        if (!using_root && enable_launchers) initialize_launchers( hwnd );
+        if (!native_shell) initialize_display_settings( width, height );
+        if (native_shell)
+        {
+            width = GetSystemMetrics(SM_CXSCREEN);
+            height = GetSystemMetrics(SM_CYSCREEN);
+        }
+        if (enable_shell && (!using_root || native_shell) && (plugin = LoadLibraryW(L"wexshell.dll")))
+        {
+            start = (WEX_SHELL_START)GetProcAddress(plugin, "WexShellStart");
+            stop = (WEX_SHELL_STOP)GetProcAddress(plugin, "WexShellStop");
+            if (start && stop)
+                plugin_started = start(WEX_SHELL_VERSION, hwnd, width, height, show_systray, no_tray_items);
+        }
+        if (!plugin_started)
+        {
+            initialize_appbar();
+            initialize_systray(using_root, enable_shell, show_systray, no_tray_items);
+            if (!using_root && enable_launchers) initialize_launchers(hwnd);
+        }
 
         if ((shell32 = LoadLibraryW( L"shell32.dll" )) &&
             (pShellDDEInit = (void *)GetProcAddress( shell32, (LPCSTR)188)))
@@ -1327,10 +1357,15 @@ void manage_desktop( WCHAR *arg )
     if (hwnd)
     {
         TRACE( "desktop message loop starting on hwnd %p\n", hwnd );
-        while (GetMessageW( &msg, 0, 0, 0 )) DispatchMessageW( &msg );
+        while (GetMessageW( &msg, 0, 0, 0 ))
+        {
+            if (plugin_started) TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
         TRACE( "desktop message loop exiting for hwnd %p\n", hwnd );
     }
 
+    if (plugin_started) stop();
     if (pShellDDEInit) pShellDDEInit( FALSE );
 
     ExitProcess( 0 );

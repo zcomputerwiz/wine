@@ -3462,6 +3462,17 @@ NTSTATUS CDECL wine_server_handle_to_fd( HANDLE handle, unsigned int access, int
     return WINE_UNIX_CALL( unix_wine_server_handle_to_fd, &params );
 }
 
+
+/***********************************************************************
+ *           wine_create_symlink (NTDLL.@)
+ */
+NTSTATUS CDECL wine_create_symlink( const WCHAR *target, const WCHAR *link )
+{
+    struct wine_create_symlink_params params = { target, link };
+
+    return WINE_UNIX_CALL( unix_wine_create_symlink, &params );
+}
+
 /******************************************************************
  *		LdrLoadDll (NTDLL.@)
  */
@@ -4259,7 +4270,10 @@ static void elevate_token(void)
     NtClose( linked.LinkedToken );
 }
 
-static BOOL is_elevation_helper_configured(void)
+/* The helper is unset only if the key or value is absent, or the value is an empty string.
+ * Any other state (denied read, wrong type, odd or oversized data, a path) is not unset, so the
+ * loader never elevates silently when the helper configuration cannot be trusted. */
+static BOOL is_elevation_helper_unset(void)
 {
     OBJECT_ATTRIBUTES attr;
     UNICODE_STRING name = RTL_CONSTANT_STRING( L"\\Registry\\Machine\\Software\\Wine\\Elevation" );
@@ -4268,19 +4282,21 @@ static BOOL is_elevation_helper_configured(void)
     KEY_VALUE_PARTIAL_INFORMATION *info = (KEY_VALUE_PARTIAL_INFORMATION *)buffer;
     ULONG len;
     HANDLE hkey;
-    BOOL ret = FALSE;
+    NTSTATUS status;
 
     InitializeObjectAttributes( &attr, &name, OBJ_CASE_INSENSITIVE, 0, NULL );
-    if (!NtOpenKey( &hkey, KEY_READ, &attr ))
-    {
-        if (!NtQueryValueKey( hkey, &val_name, KeyValuePartialInformation, info, sizeof(buffer), &len )
-            && info->DataLength > sizeof(WCHAR) && *(WCHAR *)info->Data)
-        {
-            ret = TRUE;
-        }
-        NtClose( hkey );
-    }
-    return ret;
+    status = NtOpenKey( &hkey, KEY_READ | KEY_WOW64_64KEY, &attr );
+    if (status == STATUS_OBJECT_NAME_NOT_FOUND) return TRUE;
+    if (status) return FALSE;
+
+    status = NtQueryValueKey( hkey, &val_name, KeyValuePartialInformation, info, sizeof(buffer), &len );
+    NtClose( hkey );
+    if (status == STATUS_OBJECT_NAME_NOT_FOUND) return TRUE;
+    if (status) return FALSE;
+
+    if (info->Type != REG_SZ && info->Type != REG_EXPAND_SZ) return FALSE;
+    if (info->DataLength % sizeof(WCHAR)) return FALSE;
+    return !info->DataLength || !*(const WCHAR *)info->Data;
 }
 
 static void open_known_dll_ntdir(void)
@@ -4541,7 +4557,7 @@ void loader_init( CONTEXT *context, void **entry )
         LdrGetProcedureAddress( kernel32->ldr.DllBase, &ctrl_routine, 0, (void **)&pCtrlRoutine );
 
         locale_init();
-        if (needs_elevation() && !is_elevation_helper_configured())
+        if (needs_elevation() && is_elevation_helper_unset())
             elevate_token();
         get_env_var( L"WINESYSTEMDLLPATH", 0, &system_dll_path );
         if (wm->ldr.Flags & LDR_COR_ILONLY)

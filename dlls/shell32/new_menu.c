@@ -28,6 +28,8 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(shell);
 
+enum new_kind { NEW_DIRECTORY, NEW_NULL_FILE, NEW_DATA, NEW_TEMPLATE, NEW_COMMAND };
+
 struct new_menu
 {
     IShellExtInit IShellExtInit_iface;
@@ -35,13 +37,19 @@ struct new_menu
     IObjectWithSite IObjectWithSite_iface;
     LONG refcount;
 
-    struct
+    struct new_item
     {
-        WCHAR *name;
+        WCHAR *name;        /* the new item's name, without extension */
+        WCHAR *text;        /* menu text */
+        WCHAR *ext;         /* file extension; NULL for a folder */
+        enum new_kind kind;
+        BYTE *data;         /* NEW_DATA bytes, the NEW_TEMPLATE file name or the NEW_COMMAND command line */
+        DWORD size;
     } *items;
     size_t item_count;
 
     ITEMIDLIST *pidl;
+    IUnknown *site;         /* the shell view: it shows the new item for renaming */
 };
 
 static struct new_menu *impl_from_IShellExtInit(IShellExtInit *iface)
@@ -94,8 +102,14 @@ static ULONG WINAPI ext_init_Release(IShellExtInit *iface)
     if (!refcount)
     {
         for (unsigned int i = 0; i < menu->item_count; ++i)
+        {
             free(menu->items[i].name);
+            free(menu->items[i].text);
+            free(menu->items[i].ext);
+            free(menu->items[i].data);
+        }
         free(menu->items);
+        if (menu->site) IUnknown_Release(menu->site);
         ILFree(menu->pidl);
         free(menu);
     }
@@ -163,69 +177,141 @@ static WCHAR *load_mui_string(HKEY key, const WCHAR *value)
     return string;
 }
 
-static void add_menu_item(struct new_menu *menu, HMENU hmenu, const WCHAR *ext, UINT id)
+/* a value that may be a "@dll,-id" resource string or plain text */
+static WCHAR *get_string(HKEY key, const WCHAR *value)
 {
-    HKEY ext_key, shellnew_key, config_key;
-    WCHAR *menu_text, *item_name;
-    MENUITEMINFOW info;
-    DWORD ret;
+    WCHAR *string;
+    DWORD size = 0;
 
-    if ((ret = RegOpenKeyExW(HKEY_CLASSES_ROOT, ext, 0, KEY_READ, &ext_key)))
+    if ((string = load_mui_string(key, value))) return string;
+    if (RegGetValueW(key, NULL, value, RRF_RT_REG_SZ, NULL, NULL, &size) || !size) return NULL;
+    string = malloc(size);
+    if (RegGetValueW(key, NULL, value, RRF_RT_REG_SZ, NULL, string, &size)) { free(string); return NULL; }
+    return string;
+}
+
+static WCHAR *format_resource(UINT id, const WCHAR *arg)
+{
+    WCHAR format[64], *ret = NULL;
+    DWORD_PTR args[1] = { (DWORD_PTR)arg };
+
+    LoadStringW(shell32_hInstance, id, format, ARRAY_SIZE(format));
+    FormatMessageW(FORMAT_MESSAGE_FROM_STRING | FORMAT_MESSAGE_ARGUMENT_ARRAY | FORMAT_MESSAGE_ALLOCATE_BUFFER,
+                   format, 0, 0, (WCHAR *)&ret, 0, (va_list *)args);
+    if (!ret) return NULL;
     {
-        ERR("Failed to open %s, error %lu.\n", debugstr_w(ext), ret);
-        return;
+        WCHAR *copy = wcsdup(ret);
+        LocalFree(ret);
+        return copy;
     }
+}
 
-    if ((ret = RegOpenKeyExW(ext_key, L"ShellNew", 0, KEY_READ, &shellnew_key)))
-    {
-        ERR("Failed to open ShellNew key, error %lu.\n", ret);
-        RegCloseKey(ext_key);
-        return;
-    }
-    RegCloseKey(ext_key);
+/* The folder: HKCR\Folder\ShellNew names it */
+static void add_folder(struct new_menu *menu)
+{
+    struct new_item *item;
+    HKEY key;
 
-    if (RegQueryValueExW(shellnew_key, L"Directory", NULL, NULL, NULL, NULL))
-    {
-        FIXME("Ignoring non-directory item for extension %s.\n", debugstr_w(ext));
-        RegCloseKey(shellnew_key);
-        return;
-    }
-
-    if (!RegOpenKeyExW(shellnew_key, L"Config", 0, KEY_READ, &config_key))
-    {
-        FIXME("Ignoring Config key for extension %s.\n", debugstr_w(ext));
-        RegCloseKey(config_key);
-    }
-
-    if (!(item_name = load_mui_string(shellnew_key, L"ItemName")))
-    {
-        ERR("Missing ItemName value for extension %s.\n", debugstr_w(ext));
-        RegCloseKey(shellnew_key);
-        return;
-    }
-
-    if (!(menu_text = load_mui_string(shellnew_key, L"MenuText")))
-    {
-        ERR("Missing MenuText value for extension %s.\n", debugstr_w(ext));
-        free(item_name);
-        RegCloseKey(shellnew_key);
-        return;
-    }
-
-    info.cbSize = sizeof(info);
-    info.fMask = MIIM_ID | MIIM_FTYPE | MIIM_STATE | MIIM_STRING;
-    info.dwTypeData = menu_text;
-    info.fState = MFS_ENABLED;
-    info.wID = id;
-    info.fType = MFT_STRING;
-    InsertMenuItemW(hmenu, menu->item_count, MF_BYPOSITION, &info);
-
+    if (RegOpenKeyExW(HKEY_CLASSES_ROOT, L"Folder\\ShellNew", 0, KEY_READ, &key)) return;
     menu->items = realloc(menu->items, (menu->item_count + 1) * sizeof(*menu->items));
-    menu->items[menu->item_count].name = item_name;
-    ++menu->item_count;
+    item = &menu->items[menu->item_count];
+    memset(item, 0, sizeof(*item));
+    item->kind = NEW_DIRECTORY;
+    item->name = get_string(key, L"ItemName");
+    item->text = get_string(key, L"MenuText");
+    RegCloseKey(key);
+    if (!item->name || !item->text)
+    {
+        free(item->name);
+        free(item->text);
+        return;
+    }
+    menu->item_count++;
+}
 
-    free(menu_text);
-    RegCloseKey(shellnew_key);
+/* A file type: ".ext\ShellNew" or ".ext\progid\ShellNew" with NullFile, Data or FileName, as Windows reads them.
+ * The menu shows the type's description, the new file is "New <description>.ext". */
+static void add_file_type(struct new_menu *menu, const WCHAR *ext)
+{
+    WCHAR progid[MAX_PATH], path[MAX_PATH * 2];
+    struct new_item item = { 0 };
+    DWORD size = sizeof(progid), type;
+    HKEY key = NULL, progid_key;
+
+    if (RegGetValueW(HKEY_CLASSES_ROOT, ext, NULL, RRF_RT_REG_SZ, NULL, progid, &size)) progid[0] = 0;
+    swprintf(path, ARRAY_SIZE(path), L"%s\\%s\\ShellNew", ext, progid);
+    if (!progid[0] || RegOpenKeyExW(HKEY_CLASSES_ROOT, path, 0, KEY_READ, &key))
+    {
+        swprintf(path, ARRAY_SIZE(path), L"%s\\ShellNew", ext);
+        if (RegOpenKeyExW(HKEY_CLASSES_ROOT, path, 0, KEY_READ, &key)) return;
+    }
+
+    if (!RegQueryValueExW(key, L"NullFile", NULL, NULL, NULL, NULL)) item.kind = NEW_NULL_FILE;
+    else if (!RegQueryValueExW(key, L"Data", NULL, &type, NULL, &item.size))
+    {
+        item.kind = NEW_DATA;
+        item.data = malloc(item.size ? item.size : 1);
+        RegQueryValueExW(key, L"Data", NULL, NULL, item.data, &item.size);
+        if (type == REG_SZ || type == REG_EXPAND_SZ)   /* a string is stored as ANSI text */
+        {
+            DWORD len = WideCharToMultiByte(CP_ACP, 0, (WCHAR *)item.data, -1, NULL, 0, NULL, NULL);
+            char *text = malloc(len);
+            WideCharToMultiByte(CP_ACP, 0, (WCHAR *)item.data, -1, text, len, NULL, NULL);
+            free(item.data);
+            item.data = (BYTE *)text;
+            item.size = len ? len - 1 : 0;
+        }
+    }
+    else if ((item.data = (BYTE *)get_string(key, L"FileName"))) item.kind = NEW_TEMPLATE;
+    else if ((item.data = (BYTE *)get_string(key, L"Command"))) item.kind = NEW_COMMAND;   /* a wizard: Shortcut */
+    else
+    {
+        RegCloseKey(key);
+        return;
+    }
+
+    item.text = get_string(key, L"MenuText");
+    RegCloseKey(key);
+    if (!item.text && progid[0] && !RegOpenKeyExW(HKEY_CLASSES_ROOT, progid, 0, KEY_READ, &progid_key))
+    {
+        if (!(item.text = get_string(progid_key, L"FriendlyTypeName")))
+            item.text = get_string(progid_key, NULL);
+        RegCloseKey(progid_key);
+    }
+    if (!item.text || !item.text[0] || !(item.name = format_resource(IDS_NEW_ITEM, item.text)))
+    {
+        free(item.text);
+        free(item.data);
+        return;
+    }
+    item.ext = wcsdup(ext);
+    menu->items = realloc(menu->items, (menu->item_count + 1) * sizeof(*menu->items));
+    menu->items[menu->item_count++] = item;
+}
+
+/* Windows XP: the wizards (Shortcut) come before the file types */
+static int __cdecl compare_items(const void *a, const void *b)
+{
+    const struct new_item *item1 = a, *item2 = b;
+
+    if ((item1->kind == NEW_COMMAND) != (item2->kind == NEW_COMMAND)) return item1->kind == NEW_COMMAND ? -1 : 1;
+    return lstrcmpiW(item1->text, item2->text);
+}
+
+static void load_items(struct new_menu *menu)
+{
+    WCHAR name[MAX_PATH];
+    size_t first;
+    DWORD i, len;
+
+    if (menu->item_count) return;
+    add_folder(menu);
+    first = menu->item_count;
+    for (i = 0; len = ARRAY_SIZE(name), !RegEnumKeyExW(HKEY_CLASSES_ROOT, i, name, &len, NULL, NULL, NULL, NULL); i++)
+        if (name[0] == '.') add_file_type(menu, name);
+    qsort(menu->items + first, menu->item_count - first, sizeof(*menu->items), compare_items);
+    for (i = 0; i < menu->item_count; i++)
+        TRACE("item %s: %s kind %u\n", debugstr_w(menu->items[i].text), debugstr_w(menu->items[i].name), menu->items[i].kind);
 }
 
 static HRESULT WINAPI context_menu_QueryContextMenu(IContextMenu3 *iface,
@@ -235,6 +321,7 @@ static HRESULT WINAPI context_menu_QueryContextMenu(IContextMenu3 *iface,
     MENUITEMINFOW info;
     WCHAR *new_string;
     HMENU submenu;
+    unsigned int i;
 
     TRACE("menu %p, hmenu %p, index %u, min_id %u, max_id %u, flags %#x.\n",
             menu, hmenu, index, min_id, max_id, flags);
@@ -245,19 +332,18 @@ static HRESULT WINAPI context_menu_QueryContextMenu(IContextMenu3 *iface,
         return S_OK;
     }
 
+    load_items(menu);
     submenu = CreatePopupMenu();
+    for (i = 0; i < menu->item_count && min_id + 1 + i <= max_id && i < 0x3e; ++i)
+    {
+        /* Windows XP: Folder, Shortcut, a separator, then the file types */
+        if (i && menu->items[i].kind != NEW_COMMAND &&
+            (menu->items[i - 1].kind == NEW_DIRECTORY || menu->items[i - 1].kind == NEW_COMMAND))
+            AppendMenuW(submenu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(submenu, MF_STRING, min_id + 1 + i, menu->items[i].text);
+    }
+
     new_string = shell_get_resource_string(IDS_NEW_MENU);
-
-    /* Native apparently hardcodes "Folder" and "Briefcase".
-     * The remaining entries come from scanning all extension registry keys
-     * (not the file types). Then, for e.g. .txt, it looks up a ShellNew key in
-     * both .txt/txtfile [possibly an accident] and .txt itself.
-     *
-     * FIXME: For now only implement Folder. We don't currently have any other
-     * builtin verbs anyway. */
-
-    add_menu_item(menu, submenu, L"Folder", min_id + 1);
-
     info.cbSize = sizeof(info);
     info.fMask = MIIM_ID | MIIM_FTYPE | MIIM_STATE | MIIM_STRING | MIIM_SUBMENU;
     info.dwTypeData = new_string;
@@ -265,7 +351,7 @@ static HRESULT WINAPI context_menu_QueryContextMenu(IContextMenu3 *iface,
     info.wID = min_id;
     info.fType = MFT_STRING;
     info.hSubMenu = submenu;
-    InsertMenuItemW(hmenu, 0, MF_BYPOSITION, &info);
+    InsertMenuItemW(hmenu, index, MF_BYPOSITION, &info);
 
     free(new_string);
 
@@ -273,10 +359,63 @@ static HRESULT WINAPI context_menu_QueryContextMenu(IContextMenu3 *iface,
     return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0x40);
 }
 
+static BOOL create_item(const struct new_item *item, const WCHAR *path)
+{
+    WCHAR template[MAX_PATH];
+    HANDLE file;
+    DWORD written;
+    BOOL ret;
+
+    switch (item->kind)
+    {
+    case NEW_DIRECTORY:
+        return CreateDirectoryW(path, NULL);
+    case NEW_TEMPLATE:
+        /* a bare name is in the ShellNew folder of Windows */
+        if (PathIsFileSpecW((WCHAR *)item->data))
+        {
+            GetWindowsDirectoryW(template, ARRAY_SIZE(template));
+            PathAppendW(template, L"ShellNew");
+            PathAppendW(template, (WCHAR *)item->data);
+        }
+        else ExpandEnvironmentStringsW((WCHAR *)item->data, template, ARRAY_SIZE(template));
+        return CopyFileW(template, path, TRUE);
+    default:
+        file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (file == INVALID_HANDLE_VALUE) return FALSE;
+        ret = item->kind == NEW_NULL_FILE || WriteFile(file, item->data, item->size, &written, NULL);
+        CloseHandle(file);
+        return ret;
+    }
+}
+
+/* the view shows the new item ready to be renamed, as on Windows */
+static void edit_new_item(struct new_menu *menu, const WCHAR *name)
+{
+    IShellFolder *folder;
+    IShellView *view;
+    ITEMIDLIST *child;
+
+    if (!menu->site || FAILED(IUnknown_QueryInterface(menu->site, &IID_IShellView, (void **)&view))) return;
+    IShellView_Refresh(view);
+    if (SUCCEEDED(SHBindToObject(NULL, menu->pidl, NULL, &IID_IShellFolder, (void **)&folder)))
+    {
+        if (SUCCEEDED(IShellFolder_ParseDisplayName(folder, NULL, NULL, (WCHAR *)name, NULL, &child, NULL)))
+        {
+            IShellView_SelectItem(view, child, SVSI_DESELECTOTHERS | SVSI_EDIT | SVSI_ENSUREVISIBLE |
+                                  SVSI_FOCUSED | SVSI_SELECT);
+            ILFree(child);
+        }
+        IShellFolder_Release(folder);
+    }
+    IShellView_Release(view);
+}
+
 static HRESULT WINAPI context_menu_InvokeCommand(IContextMenu3 *iface, CMINVOKECOMMANDINFO *info)
 {
     struct new_menu *menu = impl_from_IContextMenu3(iface);
     WCHAR path[MAX_PATH], name[MAX_PATH];
+    const struct new_item *item;
     unsigned int id;
 
     TRACE("menu %p, info %p.\n", menu, info);
@@ -288,6 +427,7 @@ static HRESULT WINAPI context_menu_InvokeCommand(IContextMenu3 *iface, CMINVOKEC
         ERR("Invalid verb %p.\n", info->lpVerb);
         return E_FAIL;
     }
+    item = &menu->items[id];
 
     if (!SHGetPathFromIDListW(menu->pidl, path))
     {
@@ -295,21 +435,52 @@ static HRESULT WINAPI context_menu_InvokeCommand(IContextMenu3 *iface, CMINVOKEC
         return E_FAIL;
     }
 
-    for (unsigned int i = 0;; ++i)
+    if (item->kind == NEW_COMMAND)
     {
-        if (!i)
-            swprintf(name, ARRAY_SIZE(name), L"%s/%s", path, menu->items[id].name);
-        else
-            swprintf(name, ARRAY_SIZE(name), L"%s/%s (%u)", path, menu->items[id].name, i);
+        /* the wizard gets the name the new item would have, "%1", and makes it itself */
+        WCHAR full[MAX_PATH], command[MAX_PATH * 3], expanded[MAX_PATH * 3], *p;
+        STARTUPINFOW si = { sizeof(si) };
+        PROCESS_INFORMATION pi;
 
-        if (CreateDirectoryW(name, NULL))
-            return S_OK;
-        if (GetLastError() != ERROR_ALREADY_EXISTS)
+        swprintf(full, ARRAY_SIZE(full), L"%s\\%s%s", path, item->name, item->ext ? item->ext : L"");
+        ExpandEnvironmentStringsW((WCHAR *)item->data, expanded, ARRAY_SIZE(expanded));
+        if ((p = wcsstr(expanded, L"%1")))
         {
-            WARN("Failed to create %s, error %lu.\n", debugstr_w(name), GetLastError());
+            *p = 0;
+            swprintf(command, ARRAY_SIZE(command), L"%s%s%s", expanded, full, p + 2);
+        }
+        else lstrcpynW(command, expanded, ARRAY_SIZE(command));
+        TRACE("running %s\n", debugstr_w(command));
+        if (!CreateProcessW(NULL, command, NULL, NULL, FALSE, 0, NULL, path, &si, &pi))
+            return HRESULT_FROM_WIN32(GetLastError());
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        return S_OK;
+    }
+
+    for (unsigned int i = 0; i < 1000; ++i)
+    {
+        WCHAR full[MAX_PATH];
+
+        if (!i)
+            swprintf(name, ARRAY_SIZE(name), L"%s%s", item->name, item->ext ? item->ext : L"");
+        else
+            swprintf(name, ARRAY_SIZE(name), L"%s (%u)%s", item->name, i + 1, item->ext ? item->ext : L"");
+        swprintf(full, ARRAY_SIZE(full), L"%s\\%s", path, name);
+
+        if (create_item(item, full))
+        {
+            SHChangeNotify(item->kind == NEW_DIRECTORY ? SHCNE_MKDIR : SHCNE_CREATE, SHCNF_PATHW, full, NULL);
+            edit_new_item(menu, name);
+            return S_OK;
+        }
+        if (GetLastError() != ERROR_ALREADY_EXISTS && GetLastError() != ERROR_FILE_EXISTS)
+        {
+            WARN("Failed to create %s, error %lu.\n", debugstr_w(full), GetLastError());
             return HRESULT_FROM_WIN32(GetLastError());
         }
     }
+    return E_FAIL;
 }
 
 static HRESULT WINAPI context_menu_GetCommandString(IContextMenu3 *iface,
@@ -377,16 +548,25 @@ static ULONG WINAPI object_with_site_Release(IObjectWithSite *iface)
 
 static HRESULT WINAPI object_with_site_SetSite(IObjectWithSite *iface, IUnknown *site)
 {
-    FIXME("iface %p, site %p, stub!\n", iface, site);
+    struct new_menu *menu = impl_from_IObjectWithSite(iface);
 
-    return E_NOTIMPL;
+    TRACE("iface %p, site %p.\n", iface, site);
+
+    if (site) IUnknown_AddRef(site);
+    if (menu->site) IUnknown_Release(menu->site);
+    menu->site = site;
+    return S_OK;
 }
 
 static HRESULT WINAPI object_with_site_GetSite(IObjectWithSite *iface, REFIID iid, void **out)
 {
-    FIXME("iface %p, iid %s, out %p, stub!\n", iface, debugstr_guid(iid), out);
+    struct new_menu *menu = impl_from_IObjectWithSite(iface);
 
-    return E_NOTIMPL;
+    TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
+
+    *out = NULL;
+    if (!menu->site) return E_FAIL;
+    return IUnknown_QueryInterface(menu->site, iid, out);
 }
 
 static const IObjectWithSiteVtbl object_with_site_vtbl =

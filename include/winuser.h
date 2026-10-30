@@ -4864,14 +4864,25 @@ enum NONCLIENT_BUTTON_TYPE
     MENU_HELP_BUTTON,                /* Menu help button */
 };
 
+/* flags for user_api_hook.pNonClientFrameDraw */
+#define NCFRAME_ACTIVE     0x01
+#define NCFRAME_DOWN       0x02
+#define NCFRAME_GRAYED     0x04
+#define NCFRAME_PART_SHIFT 8   /* 0 = whole frame and caption, else NCFRAME_BTN_* */
+#define NCFRAME_BTN_CLOSE  1
+#define NCFRAME_BTN_MAX    2
+#define NCFRAME_BTN_MIN    3
+
 struct user_api_hook
 {
     LRESULT (WINAPI *pDefDlgProc)(HWND, UINT, WPARAM, LPARAM, BOOL);
     void (WINAPI *pNonClientButtonDraw)(HWND, HDC, enum NONCLIENT_BUTTON_TYPE, RECT, BOOL, BOOL);
+    BOOL (WINAPI *pNonClientFrameDraw)(HWND, HDC, RECT, DWORD, DWORD, UINT);
     void (WINAPI *pScrollBarDraw)(HWND, HDC, INT, enum SCROLL_HITTEST,
                                   const struct SCROLL_TRACKING_INFO *, BOOL, BOOL, RECT *, UINT,
                                   INT, INT, INT, BOOL);
     LRESULT (WINAPI *pScrollBarWndProc)(HWND, UINT, WPARAM, LPARAM, BOOL);
+    INT (WINAPI *pSetWindowRgn)(HWND, HRGN, BOOL);
 };
 
 WINUSERAPI BOOL WINAPI RegisterUserApiHook(const struct user_api_hook *new_hook, struct user_api_hook *old_hook);

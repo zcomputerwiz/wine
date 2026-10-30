@@ -263,6 +263,15 @@ struct get_prop_value_params
     unsigned int *buffer_size;
 };
 
+struct endpoint_volume_params
+{
+    const char *device;
+    EDataFlow flow;
+    float *volume;   /* master volume, 0..1 on PulseAudio's scale (what pavucontrol/wpctl show); NULL: untouched */
+    BOOL *mute;      /* NULL: untouched */
+    HRESULT result;
+};
+
 struct midi_init_params
 {
     UINT *err;
@@ -358,5 +367,7 @@ enum unix_funcs
     midi_in_message,
     midi_notify_wait,
     aux_message,
+    get_endpoint_volume,
+    set_endpoint_volume,
     funcs_count
 };

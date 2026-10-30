@@ -544,9 +544,17 @@ void start_server( BOOL debug )
 
         argv[1] = debug ? debug_flag : NULL;
         argv[2] = NULL;
+        if (!debug && sysrun_launcher_usable() && !sysrun_spawn( "wineserver", &pid ))
+        {
+            waitpid( pid, &status, 0 );
+            status = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+            if (status != SYSRUN_REFUSED) goto done;
+            sysrun_warn_refused( "wineserver" );
+        }
         if (exec_wineserver( &pid, argv )) fatal_error( "could not exec wineserver\n" );
         waitpid( pid, &status, 0 );
         status = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+    done:
         if (status == 2) return;  /* server lock held by someone else, will retry later */
         if (status) exit(status);  /* server failed */
         started = TRUE;
@@ -1015,6 +1023,7 @@ static const unixlib_entry_t unix_call_funcs[] =
     unixcall_wine_server_handle_to_fd,
     unixcall_wine_spawnvp,
     system_time_precise,
+    unixcall_wine_create_symlink,
 };
 
 
@@ -1033,6 +1042,7 @@ const unixlib_entry_t unix_call_wow64_funcs[] =
     wow64_wine_server_handle_to_fd,
     wow64_wine_spawnvp,
     system_time_precise,
+    wow64_wine_create_symlink,
 };
 
 #endif  /* _WIN64 */
@@ -2102,6 +2112,7 @@ DECLSPEC_EXPORT void __wine_main( int argc, char *argv[] )
     main_argc = argc;
     main_argv = argv;
 
+    sysrun_early_init();
     init_paths();
     if (!getenv( "WINELOADERNOEXEC" ) || argc <= 1) check_command_line( argc, argv );
     unsetenv( "WINELOADERNOEXEC" );

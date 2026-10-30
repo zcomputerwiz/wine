@@ -238,6 +238,8 @@ BOOL WINAPI SystemParametersInfoForDpi( UINT action, UINT val, PVOID ptr, UINT w
     BOOL ret = NtUserSystemParametersInfoForDpi( action, val, ptr, winini, dpi );
     if (ret && (action == SPI_SETDESKWALLPAPER || action == SPI_SETDESKPATTERN))
         ret = update_desktop_wallpaper();
+    if (ret && action == SPI_SETCURSORS)
+        reset_scheme_cursors();
     return ret;
 }
 
@@ -250,6 +252,8 @@ BOOL WINAPI SystemParametersInfoW( UINT action, UINT val, void *ptr, UINT winini
     BOOL ret = NtUserSystemParametersInfo( action, val, ptr, winini );
     if (ret && (action == SPI_SETDESKWALLPAPER || action == SPI_SETDESKPATTERN))
         ret = update_desktop_wallpaper();
+    if (ret && action == SPI_SETCURSORS)
+        reset_scheme_cursors();
     return ret;
 }
 

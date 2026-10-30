@@ -253,6 +253,12 @@ UINT WINAPI MsiInstallProductW(LPCWSTR szPackagePath, LPCWSTR szCommandLine)
         }
     }
 
+    /* a limited administrator cannot open the package (it is copied into the machine's Installer directory)
+     * for a per-machine install: the elevated msiexec does everything */
+    if (!msi_elevation_helper_unset() && msi_package_file_is_machine( szPackagePath, szCommandLine ) &&
+        msi_install_through_broker( szPackagePath, szCommandLine, gUILevel, &r ))
+        return r;
+
     r = MSI_OpenPackageW( szPackagePath, options, &package );
     if (r == ERROR_SUCCESS)
     {

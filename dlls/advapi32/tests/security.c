@@ -9463,6 +9463,156 @@ static void test_revoke_access_acl(void)
     FreeSid(sid_world);
 }
 
+/* The linked token of a limited (filtered) token must not be usable as an identity by a non-elevated caller.
+ * Expected values were measured on Windows 10.0.26300 (docs/ELEVATION_BOUNDARY_PLAN.md). Wine enforces this only
+ * while an elevation helper is configured (HKLM\Software\Wine\Elevation\Helper, 64-bit view); without one it keeps
+ * the stock behaviour that shell32, msi and the loader rely on. */
+static void check_linked_token_routes( BOOL enforced )
+{
+    PROCESS_INFORMATION pi = {0};
+    STARTUPINFOA si = {0};
+    TOKEN_LINKED_TOKEN linked = {0};
+    SECURITY_IMPERSONATION_LEVEL level;
+    HANDLE token, copy;
+    TOKEN_TYPE type;
+    DWORD size, error;
+    char cmd[MAX_PATH + 16];
+    HANDLE file, process_token;
+    BOOL ret;
+
+    ret = OpenProcessToken( GetCurrentProcess(), TOKEN_ALL_ACCESS, &token );
+    ok( ret, "OpenProcessToken failed, error %lu\n", GetLastError() );
+    ret = GetTokenInformation( token, TokenLinkedToken, &linked, sizeof(linked), &size );
+    ok( ret, "got error %lu\n", GetLastError() );
+    if (!ret) goto done;
+
+    ret = GetTokenInformation( linked.LinkedToken, TokenType, &type, sizeof(type), &size );
+    ok( ret && type == TokenImpersonation, "got type %d, error %lu\n", type, GetLastError() );
+    ret = GetTokenInformation( linked.LinkedToken, TokenImpersonationLevel, &level, sizeof(level), &size );
+    ok( ret && level == SecurityIdentification, "got level %d, error %lu\n", level, GetLastError() );
+
+    /* raising it to impersonation is refused everywhere */
+    SetLastError( 0xdeadbeef );
+    ret = DuplicateTokenEx( linked.LinkedToken, MAXIMUM_ALLOWED, NULL, SecurityImpersonation, TokenImpersonation, &copy );
+    error = GetLastError();
+    ok( !ret, "DuplicateTokenEx succeeded\n" );
+    ok( error == ERROR_BAD_IMPERSONATION_LEVEL, "got error %lu\n", error );
+
+    /* it cannot be turned into a primary token */
+    SetLastError( 0xdeadbeef );
+    ret = DuplicateTokenEx( linked.LinkedToken, MAXIMUM_ALLOWED, NULL, SecurityIdentification, TokenPrimary, &copy );
+    error = GetLastError();
+    todo_wine_if(!enforced) ok( !ret, "DuplicateTokenEx succeeded\n" );
+    todo_wine_if(!enforced) ok( error == ERROR_BAD_IMPERSONATION_LEVEL || broken(ret), "got error %lu\n", error );
+    if (ret) CloseHandle( copy );
+
+    /* nor used to start a process */
+    GetSystemDirectoryA( cmd, sizeof(cmd) );
+    strcat( cmd, "\\cmd.exe /c exit 0" );
+    si.cb = sizeof(si);
+    SetLastError( 0xdeadbeef );
+    ret = CreateProcessAsUserA( linked.LinkedToken, NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi );
+    error = GetLastError();
+    todo_wine_if(!enforced) ok( !ret, "CreateProcessAsUserA succeeded\n" );
+    todo_wine_if(!enforced) ok( error == ERROR_BAD_IMPERSONATION_LEVEL || broken(ret), "got error %lu\n", error );
+    if (ret)
+    {
+        WaitForSingleObject( pi.hProcess, 10000 );
+        CloseHandle( pi.hProcess );
+        CloseHandle( pi.hThread );
+    }
+
+    /* and impersonating it opens no objects */
+    ret = SetThreadToken( NULL, linked.LinkedToken );
+    ok( ret, "SetThreadToken failed, error %lu\n", GetLastError() );
+    if (ret)
+    {
+        GetSystemDirectoryA( cmd, sizeof(cmd) );
+        strcat( cmd, "\\kernel32.dll" );
+        SetLastError( 0xdeadbeef );
+        file = CreateFileA( cmd, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL );
+        error = GetLastError();
+        todo_wine_if(!enforced) ok( file == INVALID_HANDLE_VALUE, "CreateFileA succeeded\n" );
+        todo_wine_if(!enforced) ok( error == ERROR_BAD_IMPERSONATION_LEVEL || broken(file != INVALID_HANDLE_VALUE),
+                                    "got error %lu\n", error );
+        if (file != INVALID_HANDLE_VALUE) CloseHandle( file );
+
+        SetLastError( 0xdeadbeef );
+        ret = OpenProcessToken( GetCurrentProcess(), TOKEN_QUERY, &process_token );
+        error = GetLastError();
+        todo_wine_if(!enforced) ok( !ret, "OpenProcessToken succeeded\n" );
+        todo_wine_if(!enforced) ok( error == ERROR_BAD_IMPERSONATION_LEVEL || broken(ret), "got error %lu\n", error );
+        if (ret) CloseHandle( process_token );
+        RevertToSelf();
+    }
+
+    /* the caller's own token is always usable */
+    ret = DuplicateTokenEx( token, MAXIMUM_ALLOWED, NULL, SecurityImpersonation, TokenImpersonation, &copy );
+    ok( ret, "DuplicateTokenEx failed, error %lu\n", GetLastError() );
+    if (ret)
+    {
+        GetSystemDirectoryA( cmd, sizeof(cmd) );
+        strcat( cmd, "\\cmd.exe /c exit 0" );
+        ret = CreateProcessAsUserA( copy, NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi );
+        ok( ret || broken(GetLastError() == ERROR_PRIVILEGE_NOT_HELD), "CreateProcessAsUserA failed, error %lu\n",
+            GetLastError() );
+        if (ret)
+        {
+            WaitForSingleObject( pi.hProcess, 10000 );
+            CloseHandle( pi.hProcess );
+            CloseHandle( pi.hThread );
+        }
+        CloseHandle( copy );
+    }
+
+    CloseHandle( linked.LinkedToken );
+done:
+    CloseHandle( token );
+}
+
+static void test_linked_token_routes(void)
+{
+    static const char helper[] = "C:\\windows\\system32\\wine-test-helper-never-run.exe";
+    TOKEN_ELEVATION_TYPE elevation;
+    HKEY key;
+    DWORD size, old_type = 0, old_size = 0, res;
+    BYTE old_value[MAX_PATH];
+    BOOL ret, had_value;
+    HANDLE token;
+
+    if (!OpenProcessToken( GetCurrentProcess(), TOKEN_QUERY, &token )) return;
+    ret = GetTokenInformation( token, TokenElevationType, &elevation, sizeof(elevation), &size );
+    CloseHandle( token );
+    if (!ret || elevation != TokenElevationTypeLimited)
+    {
+        skip( "needs a limited token\n" );
+        return;
+    }
+
+    /* native Windows and a stock Wine prefix: no helper, so no enforcement */
+    check_linked_token_routes( !strcmp( winetest_platform, "windows" ) );
+
+    if (!strcmp( winetest_platform, "windows" )) return;
+
+    res = RegCreateKeyExA( HKEY_LOCAL_MACHINE, "Software\\Wine\\Elevation", 0, NULL, 0,
+                           KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &key, NULL );
+    if (res)
+    {
+        skip( "cannot configure an elevation helper: %lu\n", res );
+        return;
+    }
+    old_size = sizeof(old_value);
+    had_value = !RegQueryValueExA( key, "Helper", NULL, &old_type, old_value, &old_size );
+    res = RegSetValueExA( key, "Helper", 0, REG_SZ, (const BYTE *)helper, sizeof(helper) );
+    ok( !res, "RegSetValueExA failed: %lu\n", res );
+
+    check_linked_token_routes( TRUE );
+
+    if (had_value) RegSetValueExA( key, "Helper", 0, old_type, old_value, old_size );
+    else RegDeleteValueA( key, "Helper" );
+    RegCloseKey( key );
+}
+
 START_TEST(security)
 {
     init();
@@ -9531,6 +9681,7 @@ START_TEST(security)
     test_duplicate_token();
     test_GetKernelObjectSecurity();
     test_elevation();
+    test_linked_token_routes();
     test_admin_elevation();
     test_group_as_file_owner();
     test_IsValidSecurityDescriptor();

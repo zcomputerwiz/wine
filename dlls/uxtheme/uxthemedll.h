@@ -86,6 +86,7 @@ HRESULT WINAPI OpenThemeFile(LPCWSTR pszThemeFileName, LPCWSTR pszColorName,
                              LPCWSTR pszSizeName, HTHEMEFILE *hThemeFile,
                              DWORD unknown);
 HRESULT WINAPI CloseThemeFile(HTHEMEFILE hThemeFile);
+HTHEME WINAPI OpenThemeDataFromFile(HTHEMEFILE file, HWND hwnd, LPCWSTR classes, DWORD flags);
 HRESULT WINAPI ApplyTheme(HTHEMEFILE hThemeFile, char *unknown, HWND hWnd);
 HRESULT WINAPI GetThemeDefaults(LPCWSTR pszThemeFileName, LPWSTR pszColorName,
                                 DWORD dwColorNameLen, LPWSTR pszSizeName,
@@ -104,9 +105,12 @@ BOOL WINAPI ThemeHooksRemove(void);
 extern void UXTHEME_InitSystem(HINSTANCE hInst);
 extern HRESULT UXTHEME_SetActiveTheme(PTHEME_FILE tf);
 extern void UXTHEME_UninitSystem(void);
+extern void UXTHEME_CheckReload(void);
 
 extern struct user_api_hook user_api;
 LRESULT WINAPI UXTHEME_DefDlgProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, BOOL unicode);
+BOOL WINAPI UXTHEME_NonClientFrameDraw(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex_style, UINT flags);
+INT WINAPI UXTHEME_SetWindowRgn(HWND hwnd, HRGN region, BOOL redraw);
 void WINAPI UXTHEME_NonClientButtonDraw(HWND hwnd, HDC hdc, enum NONCLIENT_BUTTON_TYPE type,
                                         RECT rect, BOOL down, BOOL grayed);
 void WINAPI UXTHEME_ScrollBarDraw(HWND hwnd, HDC dc, INT bar, enum SCROLL_HITTEST hit_test,
@@ -122,5 +126,7 @@ LRESULT WINAPI UXTHEME_ScrollbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 #define ALPHABLEND_BINARY           1
 /* Full alpha blending */
 #define ALPHABLEND_FULL             2
+
+HTHEME UXTHEME_OpenNonClientTheme(UINT dpi);
 
 #endif /* __WINE_UXTHEMEDLL_H */

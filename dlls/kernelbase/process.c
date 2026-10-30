@@ -514,22 +514,31 @@ static BOOL is_elevation_required( HANDLE token, const WCHAR *filename )
     HKEY hkey;
     DWORD size, type, bytes;
     WCHAR helper[MAX_PATH];
+    LSTATUS status;
+    BOOL helper_unset = FALSE;
     BOOL ret = FALSE;
 
     if (!filename || !filename[0]) return FALSE;
 
-    /* If no elevation helper is configured in HKLM\Software\Wine\Elevation\Helper, keep stock behavior */
-    if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"Software\\Wine\\Elevation", 0, KEY_READ, &hkey ) != ERROR_SUCCESS)
-        return FALSE;
-
-    bytes = sizeof(helper);
-    if (RegQueryValueExW( hkey, L"Helper", NULL, &type, (BYTE *)helper, &bytes ) != ERROR_SUCCESS ||
-        bytes <= sizeof(WCHAR) || !helper[0])
+    /* Audit HKLM\Software\Wine\Elevation\Helper before touching the manifest. An absent or explicitly
+     * empty value selects stock Wine behavior (silent elevation in the loader), which must stay free of
+     * extra work. Denied reads, wrong registry types, odd or oversized data must NOT select it: they
+     * fall through and require elevation. */
+    status = RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"Software\\Wine\\Elevation", 0, KEY_READ | KEY_WOW64_64KEY, &hkey );
+    if (status == ERROR_FILE_NOT_FOUND)
+        helper_unset = TRUE;
+    else if (status == ERROR_SUCCESS)
     {
+        bytes = sizeof(helper) - sizeof(WCHAR);
+        status = RegQueryValueExW( hkey, L"Helper", NULL, &type, (BYTE *)helper, &bytes );
         RegCloseKey( hkey );
-        return FALSE;
+        if (status == ERROR_FILE_NOT_FOUND)
+            helper_unset = TRUE;
+        else if (status == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) &&
+                 !(bytes % sizeof(WCHAR)) && (!bytes || !helper[0]))
+            helper_unset = TRUE;
     }
-    RegCloseKey( hkey );
+    if (helper_unset) return FALSE;
 
     /* Determine token elevation type */
     token_to_check = token ? token : GetCurrentThreadEffectiveToken();

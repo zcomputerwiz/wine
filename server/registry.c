@@ -28,12 +28,16 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
+#include <pwd.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -49,6 +53,7 @@
 #include "process.h"
 #include "unicode.h"
 #include "security.h"
+#include "sysrun.h"
 
 #include "winternl.h"
 
@@ -93,6 +98,7 @@ struct key
     unsigned int      flags;       /* flags */
     timeout_t         modif;       /* last modification time */
     struct list       notify_list; /* list of notifications */
+    uint64_t          mod_seq;     /* modification sequence in session */
 };
 
 /* key flags */
@@ -113,6 +119,7 @@ struct key_value
     unsigned int      type;    /* value type */
     data_size_t       len;     /* value data length in bytes */
     void             *data;    /* pointer to value data */
+    uint64_t          mod_seq; /* modification sequence in session */
 };
 
 #define MIN_SUBKEYS  8   /* min. number of allocated subkeys per key */
@@ -136,16 +143,461 @@ static const struct unicode_str symlink_str = { symlink_value, sizeof(symlink_va
 static void set_periodic_save_timer(void);
 static struct key_value *find_value( const struct key *key, struct unicode_str name, int *index );
 
+static inline struct key *get_parent( const struct key *key );
+static struct key *find_subkey( const struct key *key, struct unicode_str name, int *index );
+static void delete_value( struct key *key, struct unicode_str name );
+static int delete_key( struct key *key, int recurse );
+static void make_dirty( struct key *key );
+static void touch_key_ex( struct key *key, unsigned int change, bool mark_dirty );
+
+struct reg_tombstone
+{
+    struct list   entry;
+    WCHAR        *key_path;
+    data_size_t   key_pathlen;
+    WCHAR        *val_name;
+    data_size_t   val_namelen;
+    bool          is_value;
+};
+
 /* information about where to save a registry branch */
 struct save_branch_info
 {
-    struct key  *key;
-    const char  *filename;
+    struct key     *key;
+    const char     *filename;
+    dev_t           dev;
+    ino_t           ino;
+    struct timespec mtime;
+    bool            has_stat;
+    bool            has_ephemeral_mods;
+    bool            is_shared_machine;
+    bool            sysrun;  /* machine hive of a system role server: fixed path, saved with the system group */
+    struct list     tombstones;
 };
 
 #define MAX_SAVE_BRANCH_INFO 3
 static int save_branch_count;
+static bool machine_hive_saved;  /* elevation enforced by the machine hive loaded at startup */
 static struct save_branch_info save_branch_info[MAX_SAVE_BRANCH_INFO];
+
+static bool registry_loaded = false;
+static bool in_merge = false;
+static uint64_t next_mod_seq = 0;
+
+static struct save_branch_info *find_branch_info( const struct key *key )
+{
+    const struct key *k;
+    int i;
+    for (k = key; k; k = get_parent( k ))
+    {
+        for (i = 0; i < save_branch_count; i++)
+        {
+            if (save_branch_info[i].key == k)
+                return &save_branch_info[i];
+        }
+    }
+    return NULL;
+}
+
+static WCHAR *build_relative_key_path( const struct key *key, const struct key *base, data_size_t *ret_len )
+{
+    const struct key *k;
+    data_size_t total_len = 0;
+    WCHAR *path, *p;
+
+    if (key == base)
+    {
+        *ret_len = 0;
+        return NULL;
+    }
+
+    for (k = key; k && k != base; k = get_parent( k ))
+    {
+        if (total_len) total_len += sizeof(WCHAR);
+        total_len += k->obj.name->len;
+    }
+    if (!k || !total_len)
+    {
+        *ret_len = 0;
+        return NULL;
+    }
+
+    if (!(path = mem_alloc( total_len )))
+    {
+        *ret_len = 0;
+        return NULL;
+    }
+
+    p = (WCHAR *)((char *)path + total_len);
+    for (k = key; k && k != base; k = get_parent( k ))
+    {
+        p = (WCHAR *)((char *)p - k->obj.name->len);
+        memcpy( p, k->obj.name->name, k->obj.name->len );
+        if (p > path)
+        {
+            p = (WCHAR *)((char *)p - sizeof(WCHAR));
+            *p = '\\';
+        }
+    }
+
+    *ret_len = total_len;
+    return path;
+}
+
+static bool match_ascii_prefix_ci( const WCHAR *path, data_size_t pathlen, const char *prefix )
+{
+    size_t plen = strlen( prefix );
+    size_t wlen = pathlen / sizeof(WCHAR);
+    size_t i;
+
+    if (wlen < plen) return false;
+    for (i = 0; i < plen; i++)
+    {
+        WCHAR c1 = path[i];
+        WCHAR c2 = (unsigned char)prefix[i];
+        if (c1 >= 'A' && c1 <= 'Z') c1 += 'a' - 'A';
+        if (c2 >= 'A' && c2 <= 'Z') c2 += 'a' - 'A';
+        if (c1 != c2) return false;
+    }
+    return (wlen == plen || path[plen] == '\\');
+}
+
+static bool ascii_equals_unicode( const char *ascii, const WCHAR *uni, data_size_t unilen )
+{
+    size_t len = strlen( ascii );
+    size_t i;
+
+    if (unilen != len * sizeof(WCHAR)) return false;
+    for (i = 0; i < len; i++)
+    {
+        WCHAR c1 = uni[i];
+        WCHAR c2 = (unsigned char)ascii[i];
+        if (c1 >= 'A' && c1 <= 'Z') c1 += 'a' - 'A';
+        if (c2 >= 'A' && c2 <= 'Z') c2 += 'a' - 'A';
+        if (c1 != c2) return false;
+    }
+    return true;
+}
+
+static const char * const hklm_ephemeral_prefixes[] =
+{
+    "System\\ControlSet001\\Enum",
+    "System\\CurrentControlSet\\Enum",
+    "System\\ControlSet001\\Control\\Class",
+    "System\\CurrentControlSet\\Control\\Class",
+    "System\\ControlSet001\\Control\\Video",
+    "System\\CurrentControlSet\\Control\\Video",
+    "System\\ControlSet001\\Control\\DeviceClasses",
+    "System\\CurrentControlSet\\Control\\DeviceClasses",
+    "System\\ControlSet001\\Control\\Print",
+    "System\\CurrentControlSet\\Control\\Print",
+    "System\\ControlSet001\\Control\\ComputerName",
+    "System\\CurrentControlSet\\Control\\ComputerName",
+    "System\\ControlSet001\\Services\\Tcpip\\Parameters",
+    "System\\CurrentControlSet\\Services\\Tcpip\\Parameters",
+    "Software\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList",
+    "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders",
+    "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders",
+    "Software\\Wine\\Drives",
+    "Software\\Wine\\Ports",
+    "Software\\Wow6432Node\\Wine\\Ports",
+};
+
+static const char * const hku_default_ephemeral_prefixes[] =
+{
+    "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders",
+    "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders",
+};
+
+static bool is_per_session_key( const struct key *key )
+{
+    struct save_branch_info *branch;
+    WCHAR *rel_path;
+    data_size_t rel_len;
+    size_t i;
+    bool match = false;
+
+    if (!registry_loaded || in_merge) return false;
+    if (geteuid() == 0) return false;
+
+    branch = find_branch_info( key );
+    if (!branch || !branch->key) return false;
+    if (!branch->is_shared_machine) return false;
+    if (save_branch_count >= 3 && branch == &save_branch_info[2]) return false;
+
+    rel_path = build_relative_key_path( key, branch->key, &rel_len );
+    if (!rel_path) return false;
+
+    if (branch == &save_branch_info[0])
+    {
+        for (i = 0; i < ARRAY_SIZE(hklm_ephemeral_prefixes); i++)
+        {
+            if (match_ascii_prefix_ci( rel_path, rel_len, hklm_ephemeral_prefixes[i] ))
+            {
+                match = true;
+                break;
+            }
+        }
+    }
+    else if (branch == &save_branch_info[1])
+    {
+        for (i = 0; i < ARRAY_SIZE(hku_default_ephemeral_prefixes); i++)
+        {
+            if (match_ascii_prefix_ci( rel_path, rel_len, hku_default_ephemeral_prefixes[i] ))
+            {
+                match = true;
+                break;
+            }
+        }
+    }
+
+    free( rel_path );
+    return match;
+}
+
+static void mark_branch_ephemeral( const struct key *key )
+{
+    struct save_branch_info *branch = find_branch_info( key );
+    if (branch) branch->has_ephemeral_mods = true;
+}
+
+static bool is_per_session_value( const struct key *key, struct unicode_str val_name )
+{
+    struct save_branch_info *branch;
+    WCHAR *rel_path;
+    data_size_t rel_len;
+    bool match = false;
+
+    if (!registry_loaded || in_merge) return false;
+    if (geteuid() == 0) return false;
+
+    branch = find_branch_info( key );
+    if (!branch || branch != &save_branch_info[0]) return false;
+    if (!branch->is_shared_machine) return false;
+
+    rel_path = build_relative_key_path( key, branch->key, &rel_len );
+    if (!rel_path) return false;
+
+    if (match_ascii_prefix_ci( rel_path, rel_len, "System\\ControlSet001\\Control\\Session Manager\\Environment" ) ||
+        match_ascii_prefix_ci( rel_path, rel_len, "System\\CurrentControlSet\\Control\\Session Manager\\Environment" ))
+    {
+        static const char * const env_cpu_vals[] = {
+            "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER",
+            "PROCESSOR_LEVEL", "PROCESSOR_REVISION", "NUMBER_OF_PROCESSORS"
+        };
+        size_t i;
+        for (i = 0; i < ARRAY_SIZE(env_cpu_vals); i++)
+        {
+            if (ascii_equals_unicode( env_cpu_vals[i], val_name.str, val_name.len ))
+            {
+                match = true;
+                break;
+            }
+        }
+    }
+
+    free( rel_path );
+    return match;
+}
+
+static void record_tombstone( struct key *key, const WCHAR *val_name, data_size_t val_namelen, bool is_value )
+{
+    struct save_branch_info *branch;
+    struct reg_tombstone *ts;
+    WCHAR *path;
+    data_size_t pathlen;
+
+    if (!registry_loaded || in_merge) return;
+    if (key->flags & KEY_VOLATILE) return;
+    if (is_per_session_key( key )) return;
+
+    branch = find_branch_info( key );
+    if (!branch || !branch->is_shared_machine) return;
+
+    path = build_relative_key_path( key, branch->key, &pathlen );
+    if (!path && key != branch->key) return;
+
+    ts = mem_alloc( sizeof(*ts) );
+    if (!ts)
+    {
+        free( path );
+        return;
+    }
+    ts->key_path = path;
+    ts->key_pathlen = pathlen;
+    ts->is_value = is_value;
+    if (is_value && val_namelen)
+    {
+        ts->val_name = memdup( val_name, val_namelen );
+        ts->val_namelen = ts->val_name ? val_namelen : 0;
+    }
+    else
+    {
+        ts->val_name = NULL;
+        ts->val_namelen = 0;
+    }
+    list_add_tail( &branch->tombstones, &ts->entry );
+}
+
+static struct key *find_subkey_by_path( struct key *root, const WCHAR *path, data_size_t pathlen )
+{
+    struct key *cur = root;
+    while (pathlen && cur)
+    {
+        struct unicode_str elem;
+        int index;
+        elem.str = path;
+        elem.len = get_path_element( path, pathlen );
+        cur = find_subkey( cur, elem, &index );
+        if (!cur) return NULL;
+        if (elem.len < pathlen)
+        {
+            elem.len += sizeof(WCHAR);
+            path += elem.len / sizeof(WCHAR);
+            pathlen -= elem.len;
+        }
+        else break;
+    }
+    return cur;
+}
+
+/* The elevation helper (HKLM/Software/Wine/Elevation/Helper) is unset when the key or the value is absent,
+ * or the value is an empty string. Any other state, including a wrong type or an odd length, counts as
+ * configured: elevation enforcement fails closed. Same rule as is_elevation_helper_unset() in ntdll. */
+int elevation_helper_unset(void)
+{
+    static const WCHAR key_path[] = {'M','a','c','h','i','n','e','\\','S','o','f','t','w','a','r','e','\\',
+                                     'W','i','n','e','\\','E','l','e','v','a','t','i','o','n'};
+    static const WCHAR value_name[] = {'H','e','l','p','e','r'};
+    struct unicode_str name = { value_name, sizeof(value_name) };
+    struct key_value *value;
+    struct key *key;
+    int index;
+
+    if (!root_key || !(key = find_subkey_by_path( root_key, key_path, sizeof(key_path) ))) return TRUE;
+    if (!(value = find_value( key, name, &index ))) return TRUE;
+    if (value->type != REG_SZ && value->type != REG_EXPAND_SZ) return FALSE;
+    if (value->len % sizeof(WCHAR)) return FALSE;
+    return !value->len || !*(const WCHAR *)value->data;
+}
+
+/* The administrator group: "admin_group" of the root-owned sysrun.conf (a user controls its own environment, so
+ * the name cannot come from there), else "sudo". */
+static const char *admin_group_name(void)
+{
+    static char name[64];
+    char buf[4096], *line, *next;
+    struct stat st;
+    ssize_t n;
+    int fd;
+
+    strcpy( name, "sudo" );
+    if ((fd = open( "/etc/wineexplorer/sysrun.conf", O_RDONLY | O_NOFOLLOW | O_CLOEXEC )) == -1) return name;
+    if (fstat( fd, &st ) || !S_ISREG( st.st_mode ) || st.st_uid != 0 || (st.st_mode & (S_IWGRP | S_IWOTH)))
+        n = 0;
+    else
+        n = read( fd, buf, sizeof(buf) - 1 );
+    close( fd );
+    if (n <= 0) return name;
+    buf[n] = 0;
+    for (line = buf; line; line = next)
+    {
+        if ((next = strchr( line, '\n' ))) *next++ = 0;
+        if (strncmp( line, "admin_group=", 12 )) continue;
+        if (line[12] && strlen( line + 12 ) < sizeof(name)) strcpy( name, line + 12 );
+        break;
+    }
+    return name;
+}
+
+/* Whether the user of this server is in the administrator group of the group database. Decided once, when the
+ * first process (the logon) gets its token, so a membership change applies at the next logon. A missing user or
+ * group counts as no. */
+int user_is_administrator(void)
+{
+    static int is_admin = -1;
+    struct passwd *pw;
+    struct group *gr;
+    gid_t *gids;
+    int i, count = 32;
+
+    if (is_admin != -1) return is_admin;
+    is_admin = 0;
+    if (!(pw = getpwuid( getuid() )) || !(gr = getgrnam( admin_group_name() ))) return 0;
+    for (;;)
+    {
+        int n = count;
+        if (!(gids = malloc( count * sizeof(*gids) ))) return 0;
+        if (getgrouplist( pw->pw_name, pw->pw_gid, gids, &n ) != -1) { count = n; break; }
+        free( gids );
+        if (n <= count) return 0;
+        count = n;
+    }
+    for (i = 0; i < count; i++) if (gids[i] == gr->gr_gid) is_admin = 1;
+    free( gids );
+    return is_admin;
+}
+
+static void replay_tombstones( struct save_branch_info *info, struct key *tmp_root )
+{
+    struct reg_tombstone *ts;
+
+    LIST_FOR_EACH_ENTRY( ts, &info->tombstones, struct reg_tombstone, entry )
+    {
+        struct key *k;
+        if (!ts->key_pathlen)
+            k = tmp_root;
+        else
+            k = find_subkey_by_path( tmp_root, ts->key_path, ts->key_pathlen );
+
+        if (!k) continue;
+
+        if (ts->is_value)
+        {
+            struct unicode_str vname = { ts->val_name, ts->val_namelen };
+            delete_value( k, vname );
+            clear_error();
+        }
+        else if (k != tmp_root)
+        {
+            delete_key( k, 1 );
+            clear_error();
+        }
+    }
+}
+
+static void mark_subtree_mod_seq( struct key *key )
+{
+    int i;
+    if (key->flags & KEY_VOLATILE) return;
+    key->mod_seq = ++next_mod_seq;
+    for (i = 0; i <= key->last_value; i++)
+        key->values[i].mod_seq = ++next_mod_seq;
+    for (i = 0; i <= key->last_subkey; i++)
+        mark_subtree_mod_seq( key->subkeys[i] );
+}
+
+static void clear_branch_mod_seq( struct key *key )
+{
+    int i;
+    key->mod_seq = 0;
+    for (i = 0; i <= key->last_value; i++)
+        key->values[i].mod_seq = 0;
+    for (i = 0; i <= key->last_subkey; i++)
+        clear_branch_mod_seq( key->subkeys[i] );
+}
+
+static void free_tombstones( struct save_branch_info *info )
+{
+    struct reg_tombstone *ts, *next;
+    LIST_FOR_EACH_ENTRY_SAFE( ts, next, &info->tombstones, struct reg_tombstone, entry )
+    {
+        list_remove( &ts->entry );
+        free( ts->key_path );
+        free( ts->val_name );
+        free( ts );
+    }
+}
 
 unsigned int supported_machines_count = 0;
 unsigned short supported_machines[8];
@@ -404,6 +856,7 @@ static bool key_init( struct object *obj, const void *init_data )
     key->last_value  = -1;
     key->values      = NULL;
     key->modif       = data->modif;
+    key->mod_seq     = 0;
     list_init( &key->notify_list );
 
     if ((key->classlen = (data->classlen / sizeof(WCHAR)) * sizeof(WCHAR)) &&
@@ -416,7 +869,22 @@ static bool key_init( struct object *obj, const void *init_data )
         set_error( STATUS_CHILD_MUST_BE_VOLATILE );
         return false;
     }
-    else key->flags |= KEY_DIRTY;
+    else if (!registry_loaded || in_merge)
+    {
+        key->flags |= KEY_DIRTY;
+    }
+    else
+    {
+        if (is_per_session_key( key ))
+        {
+            mark_branch_ephemeral( key );
+        }
+        else
+        {
+            key->mod_seq = ++next_mod_seq;
+            make_dirty( key );
+        }
+    }
 
     return true;
 }
@@ -460,40 +928,197 @@ static unsigned int key_map_access( struct object *obj, unsigned int access )
     return access & ~(KEY_WOW64_64KEY | KEY_WOW64_32KEY);
 }
 
+struct default_ace { const struct sid *sid; unsigned char flags; unsigned int mask; };
+
+static struct security_descriptor *key_alloc_default_sd( const struct default_ace *aces, unsigned int count )
+{
+    struct security_descriptor *sd;
+    struct acl *dacl;
+    struct ace *ace;
+    struct sid *sid;
+    size_t admins_sid_len = sid_len( &builtin_admins_sid );
+    size_t dacl_len = sizeof(*dacl);
+    unsigned int i;
+
+    for (i = 0; i < count; i++) dacl_len += sizeof(*ace) + sid_len( aces[i].sid );
+
+    sd = mem_alloc( sizeof(*sd) + 2 * admins_sid_len + dacl_len );
+    sd->control   = SE_DACL_PRESENT;
+    sd->owner_len = admins_sid_len;
+    sd->group_len = admins_sid_len;
+    sd->sacl_len  = 0;
+    sd->dacl_len  = dacl_len;
+    sid = (struct sid *)(sd + 1);
+    sid = copy_sid( sid, &builtin_admins_sid );
+    copy_sid( sid, &builtin_admins_sid );
+
+    dacl = (struct acl *)((char *)(sd + 1) + 2 * admins_sid_len);
+    dacl->revision = ACL_REVISION;
+    dacl->pad1     = 0;
+    dacl->size     = dacl_len;
+    dacl->count    = count;
+    dacl->pad2     = 0;
+    for (i = 0, ace = ace_first( dacl ); i < count; i++, ace = ace_next( ace ))
+        set_ace( ace, aces[i].sid, ACCESS_ALLOWED_ACE_TYPE, aces[i].flags, aces[i].mask );
+    return sd;
+}
+
+static WCHAR *format_user_registry_path( const struct sid *sid, struct unicode_str *path );
+
+/* is the key in the \Registry\User tree (HKCU, HKU\.Default)? */
+static int key_in_user_tree( struct key *key )
+{
+    static const WCHAR user[] = {'U','s','e','r'};
+    static const WCHAR classes[] = {'_','C','l','a','s','s','e','s'};
+    static WCHAR *own_name;  /* "S-1-5-21-...", the name of the token user's key below User */
+    static data_size_t own_len;
+    const WCHAR *name;
+    data_size_t len;
+    struct key *parent, *sub = NULL;
+
+    while ((parent = get_parent( key )) && parent != root_key) { sub = key; key = parent; }
+    if (!parent || !(name = get_object_name( &key->obj, &len ))) return FALSE;
+    if (len != sizeof(user) || memicmp_strW( name, user, sizeof(user) )) return FALSE;
+    /* With a system role server only the token user's own subtree and its _Classes belong to the user: HKU\S-1-5-18,
+     * S-1-5-19, S-1-5-20 and .DEFAULT get the machine default descriptor. */
+    if (!sysrun_active || !elevation_enforced() || !sub) return TRUE;
+    if (!own_name)
+    {
+        struct unicode_str path;
+        WCHAR *full = format_user_registry_path( &local_user_sid, &path );
+        own_len = path.len - 5 * sizeof(WCHAR);  /* skip "User\\" */
+        own_name = memdup( full + 5, own_len );
+        free( full );
+    }
+    if (!(name = get_object_name( &sub->obj, &len ))) return FALSE;
+    if (len == own_len && !memicmp_strW( name, own_name, own_len )) return TRUE;
+    return len == own_len + sizeof(classes) && !memicmp_strW( name, own_name, own_len ) &&
+           !memicmp_strW( name + own_len / sizeof(WCHAR), classes, sizeof(classes) );
+}
+
+/* Keys under HKLM that win32u's prepare_devices rewrites on every GUI process start (the display device
+ * cache). Windows has SYSTEM components do this; here every process does, so while elevation is enforced these
+ * keys and their subkeys default to Users full control. Deviation from Windows, see STOCK_CHANGES.md. */
+static const char * const display_cache_paths[] =
+{
+    "System\\ControlSet001\\Enum\\DISPLAY",
+    "System\\ControlSet001\\Enum\\PCI",
+    "System\\ControlSet001\\Control\\Class\\{4D36E968-E325-11CE-BFC1-08002BE10318}",
+    "System\\ControlSet001\\Control\\Class\\{4D36E96E-E325-11CE-BFC1-08002BE10318}",
+    "System\\ControlSet001\\Control\\Video",
+    "System\\ControlSet001\\Control\\DeviceClasses",
+    "System\\ControlSet001\\Hardware Profiles\\Current",
+    "HARDWARE\\DEVICEMAP",
+    "Software\\Microsoft\\DirectX",
+};
+
+/* Written by services.exe and wineboot --init. With the system role active they run as SYSTEM and need no grant;
+ * without it (a user-writable prefix, no launcher) they run limited, so these two stay Users-writable. */
+static const char * const boot_state_paths[] =
+{
+    "System\\ControlSet001\\Control\\ServiceCurrent",
+    "System\\ControlSet001\\Control\\ComputerName\\ActiveComputerName",
+};
+
+/* is path a key above an entry of display_cache_paths? */
+static bool is_display_cache_ancestor( const WCHAR *path, data_size_t len, const char *entry )
+{
+    size_t i, wlen = len / sizeof(WCHAR);
+
+    if (strlen( entry ) <= wlen || entry[wlen] != '\\') return false;
+    for (i = 0; i < wlen; i++)
+        if ((path[i] < 128 ? tolower( path[i] ) : path[i]) != tolower( (unsigned char)entry[i] )) return false;
+    return true;
+}
+
+/* Is the key, or with new_name the subkey of it that is about to be created, part of the display cache?
+ * A new subkey also counts when it is above a cache key, because the cache path has to be created. */
+static int key_in_display_cache( struct key *key, const struct unicode_str *new_name )
+{
+    static const WCHAR machine[] = {'M','a','c','h','i','n','e'};
+    struct key *top = key, *parent;
+    const WCHAR *name;
+    data_size_t len, total;
+    WCHAR *path, *full;
+    unsigned int i;
+    int ret = FALSE;
+
+    while ((parent = get_parent( top )) && parent != root_key) top = parent;
+    if (!parent || (top == key && !new_name) || !(name = get_object_name( &top->obj, &len ))) return FALSE;
+    if (len != sizeof(machine) || memicmp_strW( name, machine, sizeof(machine) )) return FALSE;
+
+    path = build_relative_key_path( key, top, &len );  /* NULL for the Machine key itself */
+    total = len + (new_name ? new_name->len + (len ? sizeof(WCHAR) : 0) : 0);
+    if (!(full = mem_alloc( total + sizeof(WCHAR) ))) goto done;
+    if (len) memcpy( full, path, len );
+    if (new_name)
+    {
+        if (len) full[len / sizeof(WCHAR)] = '\\';
+        memcpy( (char *)full + total - new_name->len, new_name->str, new_name->len );
+    }
+    for (i = 0; i < ARRAY_SIZE(display_cache_paths) && !ret; i++)
+        ret = match_ascii_prefix_ci( full, total, display_cache_paths[i] ) ||
+              (new_name && is_display_cache_ancestor( full, total, display_cache_paths[i] ));
+    for (i = 0; i < ARRAY_SIZE(boot_state_paths) && !ret && !sysrun_active; i++)
+        ret = match_ascii_prefix_ci( full, total, boot_state_paths[i] ) ||
+              (new_name && is_display_cache_ancestor( full, total, boot_state_paths[i] ));
+    free( full );
+done:
+    free( path );
+    return ret;
+}
+
+/* Default descriptors for keys that have none. A limited token has Administrators deny-only, so the
+ * descriptors have to name the user (HKCU) and Users (everywhere else) instead of relying on Administrators:
+ * the user and SYSTEM get full control of the user tree; elsewhere Users can read the key itself and
+ * Administrators and SYSTEM have full control. */
 static struct security_descriptor *key_get_sd( struct object *obj )
 {
-    static struct security_descriptor *key_default_sd;
+    static struct security_descriptor *key_default_sd, *key_user_sd, *key_display_sd;
 
     if (obj->sd) return obj->sd;
 
+    if (key_in_user_tree( (struct key *)obj ))
+    {
+        if (!key_user_sd)
+        {
+            const struct default_ace aces[] =
+            {
+                { &local_user_sid,    CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+                { &local_system_sid,  CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+                { &builtin_admins_sid, CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+            };
+            key_user_sd = key_alloc_default_sd( aces, ARRAY_SIZE(aces) );
+        }
+        return key_user_sd;
+    }
+
+    if (elevation_enforced() && key_in_display_cache( (struct key *)obj, NULL ))
+    {
+        if (!key_display_sd)
+        {
+            const struct default_ace aces[] =
+            {
+                { &builtin_users_sid,  CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+                { &local_system_sid,   CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+                { &builtin_admins_sid, CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+            };
+            key_display_sd = key_alloc_default_sd( aces, ARRAY_SIZE(aces) );
+        }
+        return key_display_sd;
+    }
+
     if (!key_default_sd)
     {
-        struct acl *dacl;
-        struct ace *ace;
-        struct sid *sid;
-        size_t users_sid_len = sid_len( &builtin_users_sid );
-        size_t admins_sid_len = sid_len( &builtin_admins_sid );
-        size_t dacl_len = sizeof(*dacl) + 2 * sizeof(*ace) + users_sid_len + admins_sid_len;
-
-        key_default_sd = mem_alloc( sizeof(*key_default_sd) + 2 * admins_sid_len + dacl_len );
-        key_default_sd->control   = SE_DACL_PRESENT;
-        key_default_sd->owner_len = admins_sid_len;
-        key_default_sd->group_len = admins_sid_len;
-        key_default_sd->sacl_len  = 0;
-        key_default_sd->dacl_len  = dacl_len;
-        sid = (struct sid *)(key_default_sd + 1);
-        sid = copy_sid( sid, &builtin_admins_sid );
-        copy_sid( sid, &builtin_admins_sid );
-
-        dacl = (struct acl *)((char *)(key_default_sd + 1) + 2 * admins_sid_len);
-        dacl->revision = ACL_REVISION;
-        dacl->pad1     = 0;
-        dacl->size     = dacl_len;
-        dacl->count    = 2;
-        dacl->pad2     = 0;
-        ace = set_ace( ace_first( dacl ), &builtin_users_sid, ACCESS_ALLOWED_ACE_TYPE,
-                       INHERIT_ONLY_ACE | CONTAINER_INHERIT_ACE, GENERIC_READ );
-        set_ace( ace_next( ace ), &builtin_admins_sid, ACCESS_ALLOWED_ACE_TYPE, 0, KEY_ALL_ACCESS );
+        const struct default_ace aces[] =
+        {
+            { &builtin_users_sid,  0, KEY_READ },
+            { &local_system_sid,   0, KEY_ALL_ACCESS },
+            { &builtin_admins_sid, 0, KEY_ALL_ACCESS },
+            /* the old inherit-only ACE stays last: advapi32 security.c looks for the last Users ACE */
+            { &builtin_users_sid,  INHERIT_ONLY_ACE | CONTAINER_INHERIT_ACE, GENERIC_READ },
+        };
+        key_default_sd = key_alloc_default_sd( aces, ARRAY_SIZE(aces) );
     }
     return key_default_sd;
 }
@@ -726,6 +1351,11 @@ static void make_dirty( struct key *key )
     while (key)
     {
         if (key->flags & (KEY_DIRTY|KEY_VOLATILE)) return;  /* nothing to do */
+        if (is_per_session_key( key ))
+        {
+            mark_branch_ephemeral( key );
+            return;
+        }
         key->flags |= KEY_DIRTY;
         key = get_parent( key );
     }
@@ -756,14 +1386,23 @@ static void check_notify( struct key *key, unsigned int change, int not_subtree 
 }
 
 /* update key modification time */
-static void touch_key( struct key *key, unsigned int change )
+static void touch_key_ex( struct key *key, unsigned int change, bool mark_dirty )
 {
+    if (in_merge) return;
     key->modif = current_time;
-    make_dirty( key );
+    if (mark_dirty && !(key->flags & KEY_VOLATILE) && !is_per_session_key( key ))
+        make_dirty( key );
+    else if (!(key->flags & KEY_VOLATILE) && is_per_session_key( key ))
+        mark_branch_ephemeral( key );
 
     /* do notifications */
     check_notify( key, change, 1 );
     for (key = get_parent( key ); key; key = get_parent( key )) check_notify( key, change, 0 );
+}
+
+static void touch_key( struct key *key, unsigned int change )
+{
+    touch_key_ex( key, change, true );
 }
 
 /* get the wow6432node key if any, grabbing it and releasing the original key */
@@ -819,7 +1458,7 @@ static struct key *create_key_recursive( struct key *root, struct unicode_str na
 {
     struct key *key, *parent = (struct key *)grab_object( root );
     struct key_init_data data = { .modif = modif };
-    struct object_params params = { .ops = &key_ops, .name = name, .attr = OBJ_OPENIF, .init_data = &data };
+    struct object_params params = { .ops = &key_ops, .name = name, .attr = OBJ_OPENIF | (in_merge ? OBJ_OPENLINK : 0), .init_data = &data };
     data_size_t len = name.len;
 
     while (len)
@@ -947,6 +1586,7 @@ static void rename_key( struct key *key, struct unicode_str new_name )
     struct key *parent = get_parent( key );
     data_size_t len;
     int i, index, cur_index;
+    bool ephemeral;
 
     /* changing to a path is not allowed */
     len = get_path_element( new_name.str, new_name.len );
@@ -967,6 +1607,15 @@ static void rename_key( struct key *key, struct unicode_str new_name )
     {
         set_error( STATUS_INVALID_PARAMETER );
         return;
+    }
+
+    ephemeral = is_per_session_key( key );
+    if (registry_loaded && !in_merge && !(key->flags & KEY_VOLATILE))
+    {
+        if (!ephemeral)
+            record_tombstone( key, NULL, 0, false );
+        else
+            mark_branch_ephemeral( key );
     }
 
     if (!(new_name_ptr = mem_alloc( offsetof( struct object_name, name[new_name.len / sizeof(WCHAR)] ))))
@@ -994,14 +1643,18 @@ static void rename_key( struct key *key, struct unicode_str new_name )
     free( key->obj.name );
     key->obj.name = new_name_ptr;
 
+    if (registry_loaded && !in_merge && !(key->flags & KEY_VOLATILE) && !ephemeral)
+        mark_subtree_mod_seq( key );
+
     if (debug_level > 1) dump_operation( key, NULL, "Rename" );
-    touch_key( key, REG_NOTIFY_CHANGE_NAME );
+    touch_key_ex( key, REG_NOTIFY_CHANGE_NAME, !(key->flags & KEY_VOLATILE) && !ephemeral );
 }
 
 /* delete a key and its values */
 static int delete_key( struct key *key, int recurse )
 {
     struct key *parent;
+    bool ephemeral;
 
     if (key->flags & KEY_DELETED) return 1;
 
@@ -1027,10 +1680,24 @@ static int delete_key( struct key *key, int recurse )
         return 0;
     }
 
+    ephemeral = is_per_session_key( key );
+    if (registry_loaded && !in_merge && !(key->flags & KEY_VOLATILE))
+    {
+        if (!ephemeral)
+        {
+            record_tombstone( key, NULL, 0, false );
+            parent->mod_seq = ++next_mod_seq;
+        }
+        else
+        {
+            mark_branch_ephemeral( key );
+        }
+    }
+
     if (debug_level > 1) dump_operation( key, NULL, "Delete" );
     key->flags |= KEY_DELETED;
     unlink_named_object( &key->obj );
-    touch_key( parent, REG_NOTIFY_CHANGE_NAME );
+    touch_key_ex( parent, REG_NOTIFY_CHANGE_NAME, !(key->flags & KEY_VOLATILE) && !ephemeral );
     return 1;
 }
 
@@ -1108,6 +1775,7 @@ static struct key_value *insert_value( struct key *key, struct unicode_str name,
     value->namelen = name.len;
     value->len     = 0;
     value->data    = NULL;
+    value->mod_seq = (registry_loaded && !in_merge && !is_per_session_key( key )) ? ++next_mod_seq : 0;
     return value;
 }
 
@@ -1161,6 +1829,19 @@ static void set_value( struct key *key, struct unicode_str name,
     value->type  = type;
     value->len   = len;
     value->data  = ptr;
+    if (registry_loaded && !in_merge)
+    {
+        if (!(key->flags & KEY_VOLATILE) && !is_per_session_key( key ) && !is_per_session_value( key, name ))
+        {
+            value->mod_seq = ++next_mod_seq;
+            key->mod_seq = ++next_mod_seq;
+        }
+        else
+        {
+            value->mod_seq = 0;
+            mark_branch_ephemeral( key );
+        }
+    }
     touch_key( key, REG_NOTIFY_CHANGE_LAST_SET );
     if (debug_level > 1) dump_operation( key, value, "Set" );
 }
@@ -1264,6 +1945,18 @@ static void delete_value( struct key *key, struct unicode_str name )
     {
         set_error( STATUS_OBJECT_NAME_NOT_FOUND );
         return;
+    }
+    if (registry_loaded && !in_merge && !(key->flags & KEY_VOLATILE))
+    {
+        if (!is_per_session_key( key ) && !is_per_session_value( key, name ))
+        {
+            record_tombstone( key, value->name, value->namelen, true );
+            key->mod_seq = ++next_mod_seq;
+        }
+        else
+        {
+            mark_branch_ephemeral( key );
+        }
     }
     if (debug_level > 1) dump_operation( key, value, "Delete" );
     free( value->name );
@@ -1748,13 +2441,91 @@ static void load_registry( struct key *key, obj_handle_t handle )
     }
 }
 
-/* load one of the initial registry files */
-static int load_init_registry_from_file( const char *filename, struct key *key )
+static bool is_shared_machine_file( const char *filename )
 {
-    FILE *f;
+    struct stat lst;
+    char target[PATH_MAX];
+    char machine_root[PATH_MAX];
+    const char *env_root = getenv( "WINE_MACHINE_ROOT" );
+    size_t root_len;
 
-    if ((f = fopen( filename, "r" )))
+    if (lstat( filename, &lst ) != 0 || !S_ISLNK( lst.st_mode ))
+        return false;
+
+    if (!realpath( filename, target ))
+        return false;
+
+    if (!env_root || !*env_root) env_root = "/var/lib/wineexplorer/machine";
+    if (!realpath( env_root, machine_root ))
     {
+        snprintf( machine_root, sizeof(machine_root), "%s", env_root );
+    }
+
+    root_len = strlen( machine_root );
+    if (strncmp( target, machine_root, root_len ) == 0 &&
+        (target[root_len] == '/' || target[root_len] == '\0'))
+    {
+        return true;
+    }
+
+    return false;
+}
+
+/* The path of a machine hive of a system role server: the machine root of the root-owned configuration, never
+ * the prefix, whose symlinks the user controls. */
+static const char *machine_hive_path( const char *name )
+{
+    char *path;
+
+    if (asprintf( &path, "%s/%s", sysrun_machine_root(), name ) == -1) fatal_error( "out of memory\n" );
+    return path;
+}
+
+/* Open a machine hive for reading with the system group. The last component must not be a symlink, and the file
+ * must be a regular file of the system group that others cannot write and that root owns (a file of the user's
+ * uid would stay writable for the user), else the server refuses to start. */
+static FILE *fopen_machine_hive( const char *filename )
+{
+    struct stat st;
+    FILE *f;
+    int fd, raised = sysrun_raise();
+
+    fd = open( filename, O_RDONLY | O_NOFOLLOW | O_CLOEXEC );
+    sysrun_drop( raised );
+    if (fd == -1)
+    {
+        if (errno != ENOENT) fatal_error( "cannot open the machine hive %s: %s\n", filename, strerror( errno ));
+        return NULL;
+    }
+    if (fstat( fd, &st ) || !S_ISREG( st.st_mode ) || st.st_uid != 0 || st.st_gid != sysrun_group() ||
+        (st.st_mode & S_IWOTH))
+        fatal_error( "the machine hive %s is not a regular file of root and the system group\n", filename );
+    if (!(f = fdopen( fd, "r" ))) fatal_error( "out of memory\n" );
+    return f;
+}
+
+/* load one of the initial registry files; machine is set for the hives that a system role server takes from the
+ * machine root */
+static int load_init_registry_from_file( const char *filename, struct key *key, bool machine )
+{
+    struct stat st;
+    FILE *f;
+    struct save_branch_info *info;
+
+    assert( save_branch_count < MAX_SAVE_BRANCH_INFO );
+    info = &save_branch_info[save_branch_count];
+    memset( info, 0, sizeof(*info) );
+    list_init( &info->tombstones );
+
+    if ((f = machine ? fopen_machine_hive( filename ) : fopen( filename, "r" )))
+    {
+        if (!fstat( fileno( f ), &st ))
+        {
+            info->dev      = st.st_dev;
+            info->ino      = st.st_ino;
+            info->mtime    = st.st_mtim;
+            info->has_stat = true;
+        }
         load_keys( key, filename, f, 0 );
         fclose( f );
         if (get_error() == STATUS_NOT_REGISTRY_FILE)
@@ -1764,10 +2535,11 @@ static int load_init_registry_from_file( const char *filename, struct key *key )
         }
     }
 
-    assert( save_branch_count < MAX_SAVE_BRANCH_INFO );
-
-    save_branch_info[save_branch_count].filename = filename;
-    save_branch_info[save_branch_count++].key = (struct key *)grab_object( key );
+    info->filename = filename;
+    info->key = (struct key *)grab_object( key );
+    info->sysrun = machine;
+    info->is_shared_machine = machine || is_shared_machine_file( filename );
+    save_branch_count++;
     make_object_permanent( &key->obj );
     return (f != NULL);
 }
@@ -1879,7 +2651,8 @@ void init_registry(void)
     if (!(hklm = create_key_recursive( root_key, HKLM_name, current_time )))
         fatal_error( "could not create Machine registry key\n" );
 
-    if (!load_init_registry_from_file( "system.reg", hklm ))
+    if (!load_init_registry_from_file( sysrun_active ? machine_hive_path( "system.reg" ) : "system.reg",
+                                       hklm, sysrun_active ))
     {
         if ((p = getenv( "WINEARCH" )) && !strcmp( p, "win32" ))
             prefix_type = PREFIX_32BIT;
@@ -1896,6 +2669,8 @@ void init_registry(void)
     else if (prefix_type == PREFIX_UNKNOWN)
         prefix_type = PREFIX_32BIT;
 
+    machine_hive_saved = sysrun_active && elevation_enforced();
+
     init_supported_machines();
 
     /* load userdef.reg into Registry\User\.Default */
@@ -1903,7 +2678,8 @@ void init_registry(void)
     if (!(key = create_key_recursive( root_key, HKU_name, current_time )))
         fatal_error( "could not create User\\.Default registry key\n" );
 
-    load_init_registry_from_file( "userdef.reg", key );
+    load_init_registry_from_file( sysrun_active ? machine_hive_path( "userdef.reg" ) : "userdef.reg",
+                                  key, sysrun_active );
     release_object( key );
 
     /* load user.reg into HKEY_CURRENT_USER */
@@ -1914,7 +2690,7 @@ void init_registry(void)
         !(hkcu = create_key_recursive( root_key, current_user_str, current_time )))
         fatal_error( "could not create HKEY_CURRENT_USER registry key\n" );
     free( current_user_path );
-    load_init_registry_from_file( "user.reg", hkcu );
+    load_init_registry_from_file( "user.reg", hkcu, false );
 
     /* set the shared flag on Software\Classes\Wow6432Node for all platforms */
     for (i = 1; i < supported_machines_count; i++)
@@ -1944,6 +2720,29 @@ void init_registry(void)
     release_object( hklm );
     release_object( hkcu );
 
+    for (i = 0; i < save_branch_count; i++)
+    {
+        if (save_branch_info[i].has_stat)
+            make_clean( save_branch_info[i].key );
+    }
+    registry_loaded = true;
+
+    /* With a system role server the service profiles exist from the start, so that a limited user cannot create
+     * them (and their subkeys) through its create access to the User key; they get the machine default descriptor. */
+    if (sysrun_active && elevation_enforced())
+    {
+        static const char * const service_profiles[] = { "User\\S-1-5-18", "User\\S-1-5-19", "User\\S-1-5-20" };
+
+        for (i = 0; i < ARRAY_SIZE(service_profiles); i++)
+        {
+            struct unicode_str name;
+            WCHAR *path = ascii_to_unicode_str( service_profiles[i], &name );
+
+            if (path && (key = create_key_recursive( root_key, name, current_time ))) release_object( key );
+            free( path );
+        }
+    }
+
     /* start the periodic save timer */
     set_periodic_save_timer();
 
@@ -1966,12 +2765,89 @@ void init_registry(void)
     if (fchdir( server_dir_fd ) == -1) fatal_error( "chdir to server dir: %s\n", strerror( errno ));
 }
 
+static void replay_dirty_keys( const struct key *src, const struct key *src_base, struct key *dst_base )
+{
+    int i;
+
+    if (src->flags & KEY_VOLATILE) return;
+    if (is_per_session_key( src )) return;
+
+    if (src != src_base)
+    {
+        bool has_dirty_val = false;
+        for (i = 0; i <= src->last_value; i++)
+        {
+            if (src->values[i].mod_seq > 0)
+            {
+                has_dirty_val = true;
+                break;
+            }
+        }
+
+        if (src->mod_seq > 0 || has_dirty_val)
+        {
+            data_size_t rel_len;
+            WCHAR *rel_path = build_relative_key_path( src, src_base, &rel_len );
+            if (rel_path)
+            {
+                struct unicode_str path_str;
+                struct key *dst;
+                path_str.str = rel_path;
+                path_str.len = rel_len;
+                dst = create_key_recursive( dst_base, path_str, src->modif );
+                free( rel_path );
+                if (dst)
+                {
+                    if (src->mod_seq > 0)
+                    {
+                        dst->modif = src->modif;
+                        if (src->classlen)
+                        {
+                            free( dst->class );
+                            dst->class = memdup( src->class, src->classlen );
+                            dst->classlen = dst->class ? src->classlen : 0;
+                        }
+                        if (src->flags & KEY_SYMLINK) dst->flags |= KEY_SYMLINK;
+                    }
+                    for (i = 0; i <= src->last_value; i++)
+                    {
+                        if (src->values[i].mod_seq > 0)
+                        {
+                            struct unicode_str vname;
+                            vname.str = src->values[i].name;
+                            vname.len = src->values[i].namelen;
+                            set_value( dst, vname, src->values[i].type, src->values[i].data, src->values[i].len );
+                        }
+                    }
+                    release_object( dst );
+                }
+            }
+        }
+    }
+    else
+    {
+        for (i = 0; i <= src->last_value; i++)
+        {
+            if (src->values[i].mod_seq > 0)
+            {
+                struct unicode_str vname;
+                vname.str = src->values[i].name;
+                vname.len = src->values[i].namelen;
+                set_value( dst_base, vname, src->values[i].type, src->values[i].data, src->values[i].len );
+            }
+        }
+    }
+
+    for (i = 0; i <= src->last_subkey; i++)
+        replay_dirty_keys( src->subkeys[i], src_base, dst_base );
+}
+
 /* save a registry branch to a file */
-static void save_all_subkeys( struct key *key, FILE *f )
+static void save_all_subkeys_from( struct key *header_key, struct key *save_root, FILE *f )
 {
     fprintf( f, "WINE REGISTRY Version 2\n" );
     fprintf( f, ";; All keys relative to " );
-    dump_path( key, NULL, f );
+    dump_path( header_key, NULL, f );
     fprintf( f, "\n" );
     switch (prefix_type)
     {
@@ -1984,7 +2860,12 @@ static void save_all_subkeys( struct key *key, FILE *f )
     default:
         break;
     }
-    save_subkeys( key, key, f );
+    save_subkeys( save_root, save_root, f );
+}
+
+static void save_all_subkeys( struct key *key, FILE *f )
+{
+    save_all_subkeys_from( key, key, f );
 }
 
 /* save a registry branch to a file handle */
@@ -2012,13 +2893,63 @@ static void save_registry( struct key *key, obj_handle_t handle )
     }
 }
 
-/* save a registry branch to a file */
-static int save_branch( struct key *key, const char *filename )
+/* Save a machine hive of a system role server into the existing file. A new file would belong to the user's uid,
+ * and its owner could change it afterwards; the existing one belongs to root and is writable through the group.
+ * shortcut: not atomic (one write, then a truncate); upgrade when the system role has its own uid. */
+static int save_hive_in_place( struct save_branch_info *info, const char *path, struct key *save_root )
 {
+    char *buf = NULL;
+    size_t size = 0;
     struct stat st;
-    char tmp[32];
-    int fd, count = 0, ret = 0;
     FILE *f;
+    int fd, ret = 0;
+
+    if (!(f = open_memstream( &buf, &size ))) return 0;
+    save_all_subkeys_from( info->key, save_root, f );
+    ret = !fflush( f ) && !ferror( f );
+    fclose( f );
+    if (ret && (fd = open( path, O_WRONLY | O_NOFOLLOW | O_CLOEXEC )) != -1)
+    {
+        ret = !fstat( fd, &st ) && S_ISREG( st.st_mode ) && st.st_uid == 0 && st.st_gid == sysrun_group() &&
+              pwrite( fd, buf, size, 0 ) == (ssize_t)size && !ftruncate( fd, size ) && !fsync( fd );
+        if (ret && !fstat( fd, &st ))
+        {
+            info->dev      = st.st_dev;
+            info->ino      = st.st_ino;
+            info->mtime    = st.st_mtim;
+            info->has_stat = true;
+        }
+        close( fd );
+    }
+    else ret = 0;
+    free( buf );
+    return ret;
+}
+
+/* access() tests the real ids; a machine hive is saved with the effective, raised group */
+static int hive_access( const struct save_branch_info *info, const char *path, int mode )
+{
+    return info->sysrun ? faccessat( AT_FDCWD, path, mode, AT_EACCESS ) : access( path, mode );
+}
+
+/* save a registry branch to a file */
+static int do_save_branch( struct save_branch_info *info )
+{
+    struct key *key = info->key;
+    const char *filename = info->filename;
+    struct stat st, lst;
+    char target_path[PATH_MAX];
+    char target_dir[PATH_MAX];
+    char lock_path[PATH_MAX];
+    char tmp[PATH_MAX];
+    int fd, lock_fd = -1, count = 0, ret = 0;
+    FILE *f;
+    bool is_symlink = false;
+    bool file_exists = false;
+    bool disk_changed = false;
+    struct key *save_root = key;
+    struct key *tmp_root = NULL;
+    const char *slash;
 
     if (!(key->flags & KEY_DIRTY))
     {
@@ -2027,33 +2958,177 @@ static int save_branch( struct key *key, const char *filename )
     }
     tmp[0] = 0;
 
-    /* test the file type */
-
-    if ((fd = open( filename, O_WRONLY )) != -1)
+    /* Check if accessed via symbolic link */
+    if (!lstat( filename, &lst ) && S_ISLNK( lst.st_mode ))
     {
-        /* if file is not a regular file or has multiple links or is accessed
-         * via symbolic links, write directly into it; otherwise use a temp file */
-        if (!lstat( filename, &st ) && (!S_ISREG(st.st_mode) || st.st_nlink > 1))
+        if (info->sysrun) return 0;  /* a machine hive is never reached through a symlink */
+        is_symlink = true;
+        if (!realpath( filename, target_path ))
         {
-            ftruncate( fd, 0 );
-            goto save;
+            ssize_t len = readlink( filename, target_path, sizeof(target_path) - 1 );
+            if (len < 0) return 0;
+            target_path[len] = 0;
         }
-        close( fd );
+    }
+    else
+    {
+        snprintf( target_path, sizeof(target_path), "%s", filename );
     }
 
-    /* create a temp file */
+    /* Extract target directory */
+    slash = strrchr( target_path, '/' );
+    if (slash)
+    {
+        size_t dirlen = slash - target_path;
+        if (dirlen == 0) dirlen = 1;
+        if (dirlen >= sizeof(target_dir)) return 0;
+        memcpy( target_dir, target_path, dirlen );
+        target_dir[dirlen] = 0;
+    }
+    else
+    {
+        strcpy( target_dir, "." );
+    }
 
+    /* Check write permission: if target or directory is not writable (EACCES/EROFS),
+     * clear dirty state and return 1 without modifying file or replacing link (Requirements 2 & 3). */
+    if (access( target_path, F_OK ) == 0)
+    {
+        if (hive_access( info, target_path, W_OK ) == -1)
+        {
+            if (errno == EACCES || errno == EROFS)
+            {
+                make_clean( key );
+                clear_branch_mod_seq( key );
+                free_tombstones( info );
+                info->has_ephemeral_mods = false;
+                return 1;
+            }
+        }
+    }
+    if (info->sysrun && access( target_path, F_OK ))  /* no file to write in place */
+    {
+        make_clean( key );
+        clear_branch_mod_seq( key );
+        free_tombstones( info );
+        info->has_ephemeral_mods = false;
+        return 1;
+    }
+    if (hive_access( info, target_dir, W_OK ) == -1)
+    {
+        if (errno == EACCES || errno == EROFS)
+        {
+            make_clean( key );
+            clear_branch_mod_seq( key );
+            free_tombstones( info );
+            info->has_ephemeral_mods = false;
+            return 1;
+        }
+    }
+
+    /* Acquire flock(LOCK_EX) on lock file in target directory */
+    snprintf( lock_path, sizeof(lock_path), "%s/.reg.lock", target_dir );
+    lock_fd = open( lock_path, O_CREAT | O_RDWR, 0664 );
+    if (lock_fd == -1 && (errno == EACCES || errno == EROFS))
+    {
+        lock_fd = open( lock_path, O_RDONLY );
+    }
+    if (lock_fd == -1)
+    {
+        if (errno == EACCES || errno == EROFS)
+        {
+            make_clean( key );
+            clear_branch_mod_seq( key );
+            free_tombstones( info );
+            info->has_ephemeral_mods = false;
+            return 1;
+        }
+        return 0;
+    }
+    fchmod( lock_fd, 0664 );
+    flock( lock_fd, LOCK_EX );
+
+    /* Check file stat on disk */
+    if (stat( target_path, &st ) == 0)
+    {
+        file_exists = true;
+        if (info->has_stat)
+        {
+            if (st.st_dev != info->dev || st.st_ino != info->ino ||
+                st.st_mtim.tv_sec != info->mtime.tv_sec ||
+                st.st_mtim.tv_nsec != info->mtime.tv_nsec)
+            {
+                disk_changed = true;
+            }
+        }
+        else
+        {
+            disk_changed = true;
+        }
+    }
+
+    /* For shared hives (symlinks into machine root or when ephemeral mods exist or external change occurred),
+     * load current on-disk hive into tmp_root, replay session tombstones, and replay session dirty tree. */
+    if (file_exists && info->is_shared_machine && (disk_changed || info->has_ephemeral_mods || is_symlink))
+    {
+        FILE *f_in = info->sysrun ? fopen_machine_hive( target_path ) : fopen( target_path, "r" );
+        if (f_in)
+        {
+            static const WCHAR merge_tmp_name[] = {'_','_','m','e','r','g','e','_','t','m','p','_','_'};
+            struct unicode_str tmp_str;
+            tmp_str.str = merge_tmp_name;
+            tmp_str.len = sizeof(merge_tmp_name);
+            in_merge = true;
+            tmp_root = create_key_recursive( root_key, tmp_str, current_time );
+            if (tmp_root)
+            {
+                load_keys( tmp_root, target_path, f_in, 0 );
+                clear_error();
+                replay_tombstones( info, tmp_root );
+                replay_dirty_keys( key, key, tmp_root );
+                clear_error();
+                save_root = tmp_root;
+            }
+            in_merge = false;
+            fclose( f_in );
+        }
+    }
+
+    if (info->sysrun)
+    {
+        ret = save_hive_in_place( info, target_path, save_root );
+        goto done;
+    }
+
+    /* Create temporary file in target directory */
     for (;;)
     {
-        snprintf( tmp, sizeof(tmp), "reg%lx%04x.tmp", (long) getpid(), count++ );
-        if ((fd = open( tmp, O_CREAT | O_EXCL | O_WRONLY, 0666 )) != -1) break;
+        snprintf( tmp, sizeof(tmp), "%s/reg%lx%04x.tmp", target_dir, (long)getpid(), count++ );
+        if ((fd = open( tmp, O_CREAT | O_EXCL | O_WRONLY, 0664 )) != -1) break;
+        if (errno == EACCES || errno == EROFS)
+        {
+            if (tmp_root)
+            {
+                in_merge = true;
+                delete_key( tmp_root, 1 );
+                release_object( tmp_root );
+                in_merge = false;
+                clear_error();
+            }
+            flock( lock_fd, LOCK_UN );
+            close( lock_fd );
+            make_clean( key );
+            clear_branch_mod_seq( key );
+            free_tombstones( info );
+            info->has_ephemeral_mods = false;
+            return 1;
+        }
         if (errno != EEXIST) goto done;
         close( fd );
     }
 
-    /* now save to it */
+    fchmod( fd, is_symlink ? 0664 : (file_exists ? (st.st_mode & 0777) : 0664) );
 
- save:
     if (!(f = fdopen( fd, "w" )))
     {
         if (tmp[0]) unlink( tmp );
@@ -2063,22 +3138,66 @@ static int save_branch( struct key *key, const char *filename )
 
     if (debug_level > 1)
     {
-        fprintf( stderr, "%s: ", filename );
+        fprintf( stderr, "%s: ", target_path );
         dump_operation( key, NULL, "saving" );
     }
 
-    save_all_subkeys( key, f );
-    ret = !fclose(f);
+    save_all_subkeys_from( key, save_root, f );
+    ret = (fflush( f ) == 0 && fsync( fileno( f ) ) == 0);
+    if (fclose( f ) != 0) ret = 0;
 
     if (tmp[0])
     {
-        /* if successfully written, rename to final name */
-        if (ret) ret = !rename( tmp, filename );
+        if (ret)
+        {
+            chmod( tmp, is_symlink ? 0664 : (file_exists ? (st.st_mode & 0777) : 0664) );
+            ret = !rename( tmp, target_path );
+            if (ret && stat( target_path, &st ) == 0)
+            {
+                info->dev      = st.st_dev;
+                info->ino      = st.st_ino;
+                info->mtime    = st.st_mtim;
+                info->has_stat = true;
+            }
+        }
         if (!ret) unlink( tmp );
     }
 
 done:
-    if (ret) make_clean( key );
+    if (tmp_root)
+    {
+        in_merge = true;
+        delete_key( tmp_root, 1 );
+        release_object( tmp_root );
+        in_merge = false;
+        clear_error();
+    }
+
+    if (lock_fd != -1)
+    {
+        flock( lock_fd, LOCK_UN );
+        close( lock_fd );
+    }
+
+    if (ret)
+    {
+        make_clean( key );
+        clear_branch_mod_seq( key );
+        free_tombstones( info );
+        info->has_ephemeral_mods = false;
+    }
+    return ret;
+}
+
+static int save_branch( struct save_branch_info *info )
+{
+    /* The system group is raised for the save only if elevation was enforced by the on-disk hive at startup (the
+     * access checks then decide which writes exist); otherwise a machine hive keeps the stock rule: it is saved if
+     * the real user can write it. The live value is not used: a user could set the helper in memory. */
+    int raised = info->sysrun && machine_hive_saved ? sysrun_raise() : 0;
+    int ret = do_save_branch( info );
+
+    sysrun_drop( raised );
     return ret;
 }
 
@@ -2090,7 +3209,7 @@ static void periodic_save( void *arg )
     if (fchdir( config_dir_fd ) == -1) return;
     save_timeout_user = NULL;
     for (i = 0; i < save_branch_count; i++)
-        save_branch( save_branch_info[i].key, save_branch_info[i].filename );
+        save_branch( &save_branch_info[i] );
     if (fchdir( server_dir_fd ) == -1) fatal_error( "chdir to server dir: %s\n", strerror( errno ));
     set_periodic_save_timer();
 }
@@ -2110,7 +3229,7 @@ void flush_registry(void)
     if (fchdir( config_dir_fd ) == -1) return;
     for (i = 0; i < save_branch_count; i++)
     {
-        if (!save_branch( save_branch_info[i].key, save_branch_info[i].filename ))
+        if (!save_branch( &save_branch_info[i] ))
         {
             fprintf( stderr, "wineserver: could not save registry branch to %s",
                      save_branch_info[i].filename );
@@ -2120,6 +3239,26 @@ void flush_registry(void)
     if (fchdir( server_dir_fd ) == -1) fatal_error( "chdir to server dir: %s\n", strerror( errno ));
 }
 
+
+/* a key that does not exist yet needs KEY_CREATE_SUB_KEY on the parent it would be created in */
+static int check_create_subkey( const struct object_params *params )
+{
+    struct unicode_str left;
+    struct object *parent;
+    unsigned int access = KEY_CREATE_SUB_KEY;
+    int ret = TRUE;
+
+    if (!params->name.len) return TRUE;
+    /* a lookup failure is reported by the create itself */
+    if (!(parent = lookup_named_object( params->root, params->name, params->attr, &left ))) return TRUE;
+    if (left.len && parent->ops == &key_ops && !check_object_access( NULL, parent, &access ))
+    {
+        ret = key_in_display_cache( (struct key *)parent, &left );
+        if (ret) clear_error();
+    }
+    release_object( parent );
+    return ret;
+}
 
 /* create a registry key */
 DECL_HANDLER(create_key)
@@ -2143,6 +3282,8 @@ DECL_HANDLER(create_key)
         params.root = get_wow6432_parent( parent, access, params.name );
     }
 
+    if (elevation_enforced() && !check_create_subkey( &params )) goto done;
+
     if ((key = params.name.len ? create_named_object( &params ) : open_named_object( &params )))
     {
         if (!params.name.len || get_error() == STATUS_OBJECT_NAME_EXISTS)
@@ -2155,12 +3296,15 @@ DECL_HANDLER(create_key)
         {
             reply->hkey = alloc_handle_no_access_check( current->process, key,
                                                         access, params.attr );
-            if (parent) touch_key( get_parent( key ), REG_NOTIFY_CHANGE_NAME );
+            if (parent)
+                touch_key_ex( get_parent( key ), REG_NOTIFY_CHANGE_NAME,
+                              !(key->flags & KEY_VOLATILE) && !is_per_session_key( key ) );
             if (debug_level > 1) dump_operation( key, NULL, "Create" );
         }
         release_object( key );
     }
 
+done:
     if (parent) release_object( parent );
 }
 
@@ -2427,4 +3571,9 @@ DECL_HANDLER(rename_key)
         rename_key( key, name );
         release_object( key );
     }
+}
+
+int object_is_registry_key( struct object *obj )
+{
+    return obj->ops == &key_ops;
 }

@@ -1000,6 +1000,17 @@ SOURCES = \
 	webservices.h \
 	websocket.h \
 	werapi.h \
+	wexshell.h \
+	wexwayland.h \
+	wexres.h \
+	wextheme.h \
+	wexpower.h \
+	wexnet.h \
+	wexwlan.h \
+	wexsearch.h \
+	wexbrowse.h \
+	wexhost.h \
+	wexelevate.h \
 	wfext.h \
 	wia.h \
 	wia_lh.idl \

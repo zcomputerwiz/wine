@@ -24,6 +24,7 @@
 
 #include "wine/debug.h"
 #include "explorer_private.h"
+#include "wexshell.h"
 #include "resource.h"
 
 #include <initguid.h>
@@ -891,6 +892,10 @@ static void parse_command_line(LPWSTR commandline,parameters_struct *parameters)
                 copy_path_root(parameters->root,
                                parameters->selection);
         }
+        else if (!wcsnicmp(p, L"/shell", 6) && (!p[6] || iswspace(p[6])))
+        {
+            manage_desktop(p); /* shell on the driver's desktop, without a virtual desktop */
+        }
         else if (wcsnicmp(p, arg_desktop, len_desktop )==0)
         {
             p += len_desktop;
@@ -920,6 +925,10 @@ int WINAPI wWinMain(HINSTANCE hinstance,
     parameters_struct   parameters;
     HRESULT hres;
     INITCOMMONCONTROLSEX init_info;
+
+    HMODULE plugin = LoadLibraryW(L"wexshell.dll");
+    WEX_SHELL_COMMAND command = plugin ? (WEX_SHELL_COMMAND)GetProcAddress(plugin, "WexShellCommand") : NULL;
+    if (command && command(WEX_SHELL_VERSION, cmdline, cmdshow)) return 0;
 
     memset(&parameters,0,sizeof(parameters));
     explorer_hInstance = hinstance;

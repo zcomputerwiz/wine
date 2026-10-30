@@ -3104,8 +3104,9 @@ static void test_elevation(void)
     }
 
     /* 2. Configure Elevation Helper -> helper_yes */
+    /* the helper is read from the 64-bit registry view by every process */
     res = RegCreateKeyExA(HKEY_LOCAL_MACHINE, "Software\\Wine\\Elevation", 0, NULL, 0,
-                          KEY_WRITE, NULL, &hkey, NULL);
+                          KEY_WRITE | KEY_WOW64_64KEY, NULL, &hkey, NULL);
     if (res != ERROR_SUCCESS)
     {
         win_skip("Cannot create Software\\Wine\\Elevation key: %lu\n", res);
@@ -3124,7 +3125,9 @@ static void test_elevation(void)
 
     sprintf(params, "shlexec \"%s\" Exec", child_file);
 
-    /* 2b. ShellExecuteEx on requireAdministrator executable invokes helper_yes and succeeds */
+    /* 2b. While a helper is configured elevation goes to the broker (docs/ELEVATION_CALLERS_WORKORDER.md); the
+     * helper program is never run and its exit code decides nothing. Without a broker that can approve (this
+     * test has none) the launch fails and no process handle comes back. */
     memset(&sei, 0, sizeof(sei));
     sei.cbSize = sizeof(sei);
     sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
@@ -3132,16 +3135,21 @@ static void test_elevation(void)
     sei.lpParameters = params;
     sei.nShow = SW_SHOWNORMAL;
 
+    SetLastError(0xdeadbeef);
     ret = ShellExecuteExA(&sei);
-    ok(ret, "ShellExecuteEx with approved helper failed: %lu\n", GetLastError());
-    ok(sei.hProcess != NULL, "expected valid hProcess handle\n");
+    err = GetLastError();
+    ok(!ret, "ShellExecuteEx with a helper configured and no broker succeeded\n");
+    ok(err != ERROR_BAD_IMPERSONATION_LEVEL && err != 0xdeadbeef, "unexpected error %lu\n", err);
+    ok(sei.hProcess == NULL, "expected no process handle\n");
+    ok(sei.hInstApp == (HINSTANCE)SE_ERR_ACCESSDENIED || sei.hInstApp == (HINSTANCE)SE_ERR_FNF,
+       "got hInstApp %p\n", sei.hInstApp);
     if (sei.hProcess)
     {
         WaitForSingleObject(sei.hProcess, 5000);
         CloseHandle(sei.hProcess);
     }
 
-    /* 2c. ShellExecuteEx with 'runas' verb invokes helper_yes and succeeds */
+    /* 2c. The same for the 'runas' verb */
     memset(&sei, 0, sizeof(sei));
     sei.cbSize = sizeof(sei);
     sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
@@ -3150,50 +3158,17 @@ static void test_elevation(void)
     sei.lpParameters = params;
     sei.nShow = SW_SHOWNORMAL;
 
+    SetLastError(0xdeadbeef);
     ret = ShellExecuteExA(&sei);
-    ok(ret, "ShellExecuteEx runas with approved helper failed: %lu\n", GetLastError());
-    ok(sei.hProcess != NULL, "expected valid hProcess handle\n");
+    err = GetLastError();
+    ok(!ret, "ShellExecuteEx runas with a helper configured and no broker succeeded\n");
+    ok(err != ERROR_BAD_IMPERSONATION_LEVEL && err != 0xdeadbeef, "unexpected error %lu\n", err);
+    ok(sei.hProcess == NULL, "expected no process handle\n");
     if (sei.hProcess)
     {
         WaitForSingleObject(sei.hProcess, 5000);
         CloseHandle(sei.hProcess);
     }
-
-    /* 3. Configure Elevation Helper -> helper_no (Simulate User Cancellation / Decline) */
-    res = RegSetValueExA(hkey, "Helper", 0, REG_SZ, (const BYTE *)helper_no_cmd, strlen(helper_no_cmd) + 1);
-    ok(res == ERROR_SUCCESS, "RegSetValueExA Helper failed: %lu\n", res);
-
-    /* 3a. ShellExecuteEx on requireAdministrator with helper_no fails with ERROR_CANCELLED (1223) */
-    SetLastError(0xdeadbeef);
-    memset(&sei, 0, sizeof(sei));
-    sei.cbSize = sizeof(sei);
-    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
-    sei.lpFile = elev_exe;
-    sei.lpParameters = params;
-    sei.nShow = SW_SHOWNORMAL;
-
-    ret = ShellExecuteExA(&sei);
-    err = GetLastError();
-    ok(!ret, "ShellExecuteEx should fail when helper declines\n");
-    ok(err == ERROR_CANCELLED, "expected ERROR_CANCELLED (1223), got %lu\n", err);
-    ok(sei.hProcess == NULL, "expected NULL hProcess on decline\n");
-
-    /* 3b. ShellExecuteEx with 'runas' with helper_no fails with ERROR_CANCELLED (1223) */
-    SetLastError(0xdeadbeef);
-    memset(&sei, 0, sizeof(sei));
-    sei.cbSize = sizeof(sei);
-    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
-    sei.lpVerb = "runas";
-    sei.lpFile = argv0;
-    sei.lpParameters = params;
-    sei.nShow = SW_SHOWNORMAL;
-
-    ret = ShellExecuteExA(&sei);
-    err = GetLastError();
-    ok(!ret, "ShellExecuteEx runas should fail when helper declines\n");
-    ok(err == ERROR_CANCELLED, "expected ERROR_CANCELLED (1223), got %lu\n", err);
-    ok(sei.hProcess == NULL, "expected NULL hProcess on decline\n");
-
     /* 4. Restore Stock Configuration (delete Helper value) */
     RegDeleteValueA(hkey, "Helper");
     RegCloseKey(hkey);

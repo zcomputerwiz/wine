@@ -32,6 +32,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <errno.h>
 #include <sys/time.h>
@@ -3104,6 +3105,21 @@ static void get_timezone_info( RTL_DYNAMIC_TIME_ZONE_INFORMATION *tzi )
 
     mutex_lock( &timezone_mutex );
 
+    /* the host zone can change while we run (timedatectl, a settings panel): drop the cache then */
+    {
+        static dev_t tz_dev;
+        static ino_t tz_ino;
+        static time_t tz_mtime;
+        struct stat st;
+
+        if (!stat( "/etc/localtime", &st ) &&
+            (st.st_dev != tz_dev || st.st_ino != tz_ino || st.st_mtime != tz_mtime))
+        {
+            tz_dev = st.st_dev; tz_ino = st.st_ino; tz_mtime = st.st_mtime;
+            current_year = -1;
+        }
+    }
+
     year_start = time(NULL);
     tm = gmtime(&year_start);
     bias = (LONG)(mktime(tm) - year_start) / 60;
@@ -4625,9 +4641,10 @@ NTSTATUS WINAPI NtPowerInformation( POWER_INFORMATION_LEVEL level, void *input, 
     case SystemPowerCapabilities:
     {
         PSYSTEM_POWER_CAPABILITIES PowerCaps = output;
+        SYSTEM_BATTERY_STATE bs = {0};
         FIXME("semi-stub: SystemPowerCapabilities\n");
         if (out_size < sizeof(SYSTEM_POWER_CAPABILITIES)) return STATUS_BUFFER_TOO_SMALL;
-        /* FIXME: These values are based off a native XP desktop, should probably use APM/ACPI to get the 'real' values */
+        /* Fill power capabilities */
         PowerCaps->PowerButtonPresent = TRUE;
         PowerCaps->SleepButtonPresent = FALSE;
         PowerCaps->LidPresent = FALSE;
@@ -4646,7 +4663,8 @@ NTSTATUS WINAPI NtPowerInformation( POWER_INFORMATION_LEVEL level, void *input, 
         PowerCaps->ProcessorMinThrottle = 100;
         PowerCaps->ProcessorMaxThrottle = 100;
         PowerCaps->DiskSpinDown = TRUE;
-        PowerCaps->SystemBatteriesPresent = FALSE;
+        PowerCaps->SystemBatteriesPresent = (fill_battery_state(&bs) == STATUS_SUCCESS && bs.BatteryPresent);
+
         PowerCaps->BatteriesAreShortTerm = FALSE;
         PowerCaps->BatteryScale[0].Granularity = 0;
         PowerCaps->BatteryScale[0].Capacity = 0;

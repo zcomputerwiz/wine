@@ -451,6 +451,32 @@ static HRESULT restore_trash_item( LPCITEMIDLIST pidl )
     return S_OK;
 }
 
+/* Undo of a delete: put back the most recently deleted item that was at path */
+BOOL restore_trashed_file( const WCHAR *path )
+{
+    LPITEMIDLIST *pidls, found = NULL;
+    FILETIME newest = { 0 };
+    int i, count;
+    BOOL ret = FALSE;
+
+    if (FAILED(enum_trash_items( &pidls, &count ))) return FALSE;
+    for (i = 0; i < count; i++)
+    {
+        const WIN32_FIND_DATAW *data = get_trash_item_data( pidls[i] );
+
+        /* the deletion date is kept as the last access time */
+        if (!wcsicmp( data->cFileName, path ) && CompareFileTime( &data->ftLastAccessTime, &newest ) >= 0)
+        {
+            found = pidls[i];
+            newest = data->ftLastAccessTime;
+        }
+    }
+    if (found && !PathFileExistsW( path )) ret = SUCCEEDED(restore_trash_item( found ));
+    for (i = 0; i < count; i++) SHFree( pidls[i] );
+    SHFree( pidls );
+    return ret;
+}
+
 static HRESULT erase_trash_item( LPCITEMIDLIST pidl )
 {
     const WIN32_FIND_DATAW *data = get_trash_item_data( pidl );

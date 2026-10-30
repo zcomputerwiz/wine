@@ -4325,6 +4325,126 @@ NTSTATUS open_unix_file( HANDLE *handle, const char *unix_name, ACCESS_MASK acce
 }
 
 
+static BOOL check_dir_prefix( const char *target, const char *dir )
+{
+    char canonical[PATH_MAX];
+    size_t len;
+
+    if (!dir || !realpath( dir, canonical )) return FALSE;
+    len = strlen( canonical );
+    if (!strncmp( target, canonical, len ) && (target[len] == '/' || target[len] == 0))
+        return TRUE;
+    return FALSE;
+}
+
+static BOOL is_in_wine_dll_dirs( const char *target )
+{
+    int i;
+    if (!target) return FALSE;
+    if (build_dir && check_dir_prefix( target, build_dir )) return TRUE;
+    if (dll_paths)
+    {
+        for (i = 0; dll_paths[i]; i++)
+            if (check_dir_prefix( target, dll_paths[i] )) return TRUE;
+    }
+    if (system_dll_paths)
+    {
+        for (i = 0; system_dll_paths[i]; i++)
+            if (check_dir_prefix( target, system_dll_paths[i] )) return TRUE;
+    }
+    return FALSE;
+}
+
+static void check_cow_break_symlink( int root_fd, const char *unix_name, ACCESS_MASK access, ULONG disposition, ULONG options )
+{
+    struct stat st_link, st_target;
+    char resolved[PATH_MAX];
+    char tmp[PATH_MAX];
+    BOOL truncate_only;
+    int dir_fd;
+    int fd_src = -1, fd_dst = -1;
+    mode_t cow_mode;
+    ssize_t n;
+    char buf[65536];
+
+    /* Do not break on delete */
+    if (options & FILE_DELETE_ON_CLOSE)
+        return;
+
+    /* Only break for data writes, overwrite, supersede, or truncation */
+    if (!(access & (FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE | GENERIC_ALL)) &&
+        disposition != FILE_OVERWRITE && disposition != FILE_OVERWRITE_IF && disposition != FILE_SUPERSEDE)
+        return;
+
+    dir_fd = (root_fd != -1) ? root_fd : AT_FDCWD;
+
+    if (fstatat( dir_fd, unix_name, &st_link, AT_SYMLINK_NOFOLLOW ) != 0 || !S_ISLNK( st_link.st_mode ))
+        return;
+
+    if (dir_fd == AT_FDCWD)
+    {
+        if (!realpath( unix_name, resolved )) return;
+    }
+    else
+    {
+        char dir_path[PATH_MAX];
+        char proc_path[64];
+        char full_link[PATH_MAX * 2];
+        ssize_t len;
+        snprintf( proc_path, sizeof(proc_path), "/proc/self/fd/%d", dir_fd );
+        if ((len = readlink( proc_path, dir_path, sizeof(dir_path) - 1 )) <= 0) return;
+        dir_path[len] = 0;
+        snprintf( full_link, sizeof(full_link), "%s/%s", dir_path, unix_name );
+        if (!realpath( full_link, resolved )) return;
+    }
+
+    if (stat( resolved, &st_target ) != 0 || !S_ISREG( st_target.st_mode ))
+        return;
+
+    if (!is_in_wine_dll_dirs( resolved ))
+        return;
+
+    truncate_only = (disposition == FILE_OVERWRITE || disposition == FILE_OVERWRITE_IF || disposition == FILE_SUPERSEDE);
+    cow_mode = (st_target.st_mode & 0777) | ((st_target.st_mode & S_IWUSR) ? S_IWGRP : 0);
+
+    snprintf( tmp, sizeof(tmp), "%s.cow.%d", unix_name, (int)getpid() );
+
+    if (!truncate_only)
+    {
+        if ((fd_src = open( resolved, O_RDONLY )) == -1)
+            return;
+        if ((fd_dst = openat( dir_fd, tmp, O_WRONLY | O_CREAT | O_EXCL, cow_mode )) == -1)
+        {
+            close( fd_src );
+            return;
+        }
+        while ((n = read( fd_src, buf, sizeof(buf) )) > 0)
+        {
+            if (write( fd_dst, buf, n ) != n)
+            {
+                close( fd_src );
+                close( fd_dst );
+                unlinkat( dir_fd, tmp, 0 );
+                return;
+            }
+        }
+        close( fd_src );
+        close( fd_dst );
+    }
+    else
+    {
+        if ((fd_dst = openat( dir_fd, tmp, O_WRONLY | O_CREAT | O_EXCL, cow_mode )) == -1)
+            return;
+        close( fd_dst );
+    }
+
+    if (renameat( dir_fd, tmp, dir_fd, unix_name ) == -1)
+    {
+        unlinkat( dir_fd, tmp, 0 );
+    }
+}
+
+
 /******************************************************************************
  *              NtCreateFile   (NTDLL.@)
  */
@@ -4378,6 +4498,16 @@ NTSTATUS WINAPI NtCreateFile( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBU
 
     if (status == STATUS_SUCCESS)
     {
+        int root_fd = -1, needs_close = 0;
+        if (new_attr.RootDirectory)
+        {
+            enum server_fd_type type;
+            if (server_get_unix_fd( new_attr.RootDirectory, 0, &root_fd, &needs_close, &type, NULL ))
+                root_fd = -1;
+        }
+        check_cow_break_symlink( root_fd, unix_name, access, disposition, options );
+        if (needs_close) close( root_fd );
+
         name_hidden = is_hidden_file( unix_name );
         status = open_unix_file( handle, unix_name, access, &new_attr, attributes,
                                  sharing, disposition, options, ea_buffer, ea_length );
@@ -7681,3 +7811,100 @@ NTSTATUS WINAPI NtSetInformationObject( HANDLE handle, OBJECT_INFORMATION_CLASS 
     }
     return status;
 }
+
+
+/******************************************************************************
+ *              wine_create_symlink (Unix implementation)
+ */
+NTSTATUS unixcall_wine_create_symlink( void *args )
+{
+    struct wine_create_symlink_params *params = args;
+    static const WCHAR dos_unix_prefixW[] = {'\\','\\','?','\\','u','n','i','x'};
+    char *unix_link = NULL, *unix_target = NULL;
+    NTSTATUS status;
+    struct stat st;
+    char buf[PATH_MAX];
+    ssize_t len;
+    int i;
+
+    if (!params->target || !params->link) return STATUS_INVALID_PARAMETER;
+
+    /* Parse target: if it starts with \??\unix or \\?\unix, extract the unix path directly */
+    if (!wcsncmp( params->target, unix_prefixW, ARRAY_SIZE(unix_prefixW) ) ||
+        !wcsncmp( params->target, dos_unix_prefixW, ARRAY_SIZE(dos_unix_prefixW) ))
+    {
+        const WCHAR *src = params->target + 8;
+        int target_len = wcslen( src );
+        if (!(unix_target = malloc( target_len + 1 ))) return STATUS_NO_MEMORY;
+        for (i = 0; i < target_len; i++)
+            unix_target[i] = (src[i] == '\\') ? '/' : (char)src[i];
+        unix_target[target_len] = 0;
+    }
+    else
+    {
+        status = ntdll_get_unix_file_name( params->target, &unix_target, FILE_OPEN );
+        if (status && status != STATUS_NO_SUCH_FILE) return status;
+    }
+
+    status = ntdll_get_unix_file_name( params->link, &unix_link, FILE_OPEN_IF );
+    if (status && status != STATUS_NO_SUCH_FILE)
+    {
+        free( unix_target );
+        return status;
+    }
+
+    if (unix_target)
+    {
+        char canonical_target[PATH_MAX];
+        if (realpath( unix_target, canonical_target ))
+        {
+            free( unix_target );
+            if (!(unix_target = strdup( canonical_target )))
+            {
+                free( unix_link );
+                return STATUS_NO_MEMORY;
+            }
+        }
+    }
+
+    if (lstat( unix_link, &st ) == 0)
+    {
+        if (S_ISLNK( st.st_mode ))
+        {
+            len = readlink( unix_link, buf, sizeof(buf) - 1 );
+            if (len != -1)
+            {
+                buf[len] = 0;
+                if (!strcmp( buf, unix_target ))
+                {
+                    free( unix_target );
+                    free( unix_link );
+                    return STATUS_SUCCESS;
+                }
+            }
+        }
+        unlink( unix_link );
+    }
+
+    if (symlink( unix_target, unix_link ) == -1)
+        status = errno_to_status( errno );
+    else
+        status = STATUS_SUCCESS;
+
+    free( unix_target );
+    free( unix_link );
+    return status;
+}
+
+#ifdef _WIN64
+NTSTATUS wow64_wine_create_symlink( void *args )
+{
+    struct wine_create_symlink_params32 *params32 = args;
+    struct wine_create_symlink_params params =
+    {
+        ULongToPtr( params32->target ),
+        ULongToPtr( params32->link )
+    };
+    return unixcall_wine_create_symlink( &params );
+}
+#endif

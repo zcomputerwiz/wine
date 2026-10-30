@@ -439,7 +439,7 @@ static BOOL is_window_managed( HWND hwnd, UINT swp_flags, BOOL fullscreen )
 {
     DWORD style, ex_style;
 
-    if (!managed_mode) return FALSE;
+    if (!managed_mode || x11drv_secure_desktop()) return FALSE;
 
     /* child windows are not managed */
     style = NtUserGetWindowLongW( hwnd, GWL_STYLE );
@@ -978,6 +978,9 @@ static BOOL window_needs_net_wm_state_change_delay( struct x11drv_win_data *data
 
 static BOOL window_needs_config_change_delay( struct x11drv_win_data *data )
 {
+    /* A standalone Wine desktop can have no host window manager to acknowledge
+     * fullscreen hints. Its size is controlled by Wine's display mode. */
+    if (data->whole_window == root_window && is_virtual_desktop()) return FALSE;
     if (!data->managed || data->embedded) return FALSE; /* window is not managed or is embedded, safe to make changes */
     if (data->pending_state.wm_state == WithdrawnState) return FALSE; /* window is unmapped, should be safe to make any change */
     if (data->configure_serial) return TRUE; /* another config update is pending, wait for it to complete */
@@ -2137,12 +2140,18 @@ void make_window_embedded( struct x11drv_win_data *data )
  *
  * Synchronize the X window position with the Windows one
  */
+static int restack_error( Display *display, XErrorEvent *event, void *arg )
+{
+    return (event->error_code == BadMatch || event->error_code == BadWindow);
+}
+
 static void sync_window_position( struct x11drv_win_data *data, UINT swp_flags, const struct window_rects *old_rects )
 {
     DWORD style = NtUserGetWindowLongW( data->hwnd, GWL_STYLE );
     DWORD ex_style = NtUserGetWindowLongW( data->hwnd, GWL_EXSTYLE );
     RECT new_rect, window_rect;
     BOOL above = FALSE;
+    Window below = 0;
 
     if (data->managed && ((style & WS_MINIMIZE) || data->desired_state.wm_state == IconicState)) return;
 
@@ -2155,6 +2164,9 @@ static void sync_window_position( struct x11drv_win_data *data, UINT swp_flags, 
         if (!prev) above = TRUE;  /* top child */
         /* should use stack_mode Below but most window managers don't get it right */
         /* and Above with a sibling doesn't work so well either, so we ignore it */
+        /* WineExplorer: in a virtual desktop no window manager is involved, and a new window would otherwise stay
+         * mapped above topmost ones like the taskbar */
+        else if (is_virtual_desktop() && !data->managed && !data->embedded) below = X11DRV_get_whole_window( prev );
     }
 
     set_size_hints( data, style );
@@ -2169,6 +2181,17 @@ static void sync_window_position( struct x11drv_win_data *data, UINT swp_flags, 
                                         window_rect.top - old_rects->window.top );
 
     window_set_config( data, new_rect, above );
+
+    if (below && data->whole_window && below != data->whole_window)
+    {
+        XWindowChanges changes = { .sibling = below, .stack_mode = Below };
+
+        /* BadMatch when the other window is not a sibling (embedded or owned by another parent) */
+        TRACE( "window %p/%lx below %lx\n", data->hwnd, data->whole_window, below );
+        X11DRV_expect_error( data->display, restack_error, NULL );
+        XConfigureWindow( data->display, data->whole_window, CWSibling | CWStackMode, &changes );
+        X11DRV_check_error();
+    }
 }
 
 
@@ -2412,7 +2435,37 @@ Window create_client_window( HWND hwnd, RECT client_rect, const XVisualInfo *vis
 
 
 /**********************************************************************
- *		create_whole_window
+ *              X11DRV_has_compositor
+ *
+ * Query ownership rather than caching it across compositor enable/disable.
+ */
+BOOL X11DRV_has_compositor( Display *display )
+{
+    char name[40];
+    Atom selection;
+    snprintf( name, sizeof(name), "_NET_WM_CM_S%d", DefaultScreen( display ) );
+    selection = XInternAtom( display, name, False );
+    return XGetSelectionOwner( display, selection ) != None;
+}
+
+/* Explorer cannot read another process's __wine_x11_whole_window property.
+ * Publish the shadow predicate on the actual X window before mapping it.
+ * This private hint has no effect without a compositing manager. */
+static void sync_window_shadow( struct x11drv_win_data *data )
+{
+    BOOL shadow = FALSE;
+    unsigned long value;
+    if (!(NtUserGetClassLongW( data->hwnd, GCL_STYLE ) & CS_DROPSHADOW) ||
+        !X11DRV_has_compositor( data->display )) return;
+    NtUserSystemParametersInfo( SPI_GETDROPSHADOW, 0, &shadow, 0 );
+    value = !!shadow;
+    XChangeProperty( data->display, data->whole_window,
+                     XInternAtom( data->display, "_WEX_DROPSHADOW", False ),
+                     XA_CARDINAL, 32, PropModeReplace, (unsigned char *)&value, 1 );
+}
+
+/**********************************************************************
+ *              create_whole_window
  *
  * Create the whole X window for a given window
  */
@@ -2438,6 +2491,7 @@ static void create_whole_window( struct x11drv_win_data *data )
     if (data->vis.visualid != default_visual.visualid)
         data->whole_colormap = XCreateColormap( data->display, root_window, data->vis.visual, AllocNone );
 
+    x11drv_secure_exclusive( data->display );  /* only on the secure desktop */
     data->managed = is_window_managed( data->hwnd, SWP_NOACTIVATE, FALSE );
     mask = get_window_attributes( data, &attr ) | CWOverrideRedirect;
     attr.override_redirect = !data->managed;
@@ -2459,6 +2513,8 @@ static void create_whole_window( struct x11drv_win_data *data )
     x11drv_xinput2_enable( data->display, data->whole_window );
     set_initial_wm_hints( data->display, data->whole_window );
     set_wm_hints( data );
+
+    sync_window_shadow( data );
 
     XSaveContext( data->display, data->whole_window, winContext, (char *)data->hwnd );
     NtUserSetProp( data->hwnd, whole_window_prop, (HANDLE)data->whole_window );
@@ -3331,6 +3387,7 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
 #endif
     }
 
+    if (swp_flags & SWP_SHOWWINDOW) sync_window_shadow( data );
     window_set_wm_state( data, get_desired_wm_state( new_style, new_rects ), activate );
     if (!data->wm_state_serial && data->pending_state.wm_state != WithdrawnState)
     {

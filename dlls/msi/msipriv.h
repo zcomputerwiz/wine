@@ -1016,6 +1016,9 @@ extern UINT ACTION_PerformAction(MSIPACKAGE *package, const WCHAR *action);
 extern void ACTION_FinishCustomActions( const MSIPACKAGE* package);
 extern UINT ACTION_CustomAction(MSIPACKAGE *package, const WCHAR *action);
 extern void custom_stop_server(HANDLE process, HANDLE pipe);
+extern BOOL msi_elevation_helper_unset(void);
+extern BOOL msi_package_file_is_machine(const WCHAR *path, const WCHAR *props);
+extern BOOL msi_install_through_broker(const WCHAR *package, const WCHAR *props, DWORD ui_level, UINT *result);
 
 /* actions in other modules */
 extern UINT ACTION_AppSearch(MSIPACKAGE *package);

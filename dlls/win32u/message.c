@@ -2835,7 +2835,8 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
         {
             HWND hwndTop = NtUserGetAncestor( msg->hwnd, GA_ROOT );
 
-            if ((get_window_long( hwndTop, GWL_STYLE ) & (WS_POPUP|WS_CHILD)) != WS_CHILD)
+            if ((get_window_long( hwndTop, GWL_STYLE ) & (WS_POPUP|WS_CHILD)) != WS_CHILD &&
+                !(get_window_long( hwndTop, GWL_EXSTYLE ) & WS_EX_NOACTIVATE))
             {
                 UINT ret = send_message( msg->hwnd, WM_MOUSEACTIVATE, (WPARAM)hwndTop,
                                          MAKELONG( hittest, msg->message ) );

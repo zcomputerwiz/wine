@@ -38,10 +38,12 @@
 #include "process.h"
 #include "request.h"
 #include "security.h"
+#include "sysrun.h"
 
 #define MAX_SUBAUTH_COUNT 1
 
 const struct luid SeIncreaseQuotaPrivilege        = {  5, 0 };
+const struct luid SeAssignPrimaryTokenPrivilege  = {  3, 0 };
 const struct luid SeTcbPrivilege                  = {  7, 0 };
 const struct luid SeSecurityPrivilege             = {  8, 0 };
 const struct luid SeTakeOwnershipPrivilege        = {  9, 0 };
@@ -62,6 +64,14 @@ const struct luid SeUndockPrivilege               = { 25, 0 };
 const struct luid SeManageVolumePrivilege         = { 28, 0 };
 const struct luid SeImpersonatePrivilege          = { 29, 0 };
 const struct luid SeCreateGlobalPrivilege         = { 30, 0 };
+static const struct luid SeIncreaseWorkingSetPrivilege = { 33, 0 };
+static const struct luid SeTimeZonePrivilege       = { 34, 0 };
+static const struct luid SeCreateSymbolicLinkPrivilege = { 35, 0 };
+static const struct luid SeDelegateSessionUserImpersonatePrivilege = { 36, 0 };
+static const struct luid SeCreateTokenPrivilege   = {  2, 0 };
+static const struct luid SeLockMemoryPrivilege    = {  4, 0 };
+static const struct luid SeCreatePermanentPrivilege = { 16, 0 };
+static const struct luid SeAuditPrivilege         = { 21, 0 };
 
 struct sid_attrs
 {
@@ -77,10 +87,16 @@ const struct sid builtin_users_sid = { SID_REVISION, 2, SECURITY_NT_AUTHORITY, {
 const struct sid domain_users_sid = { SID_REVISION, 5, SECURITY_NT_AUTHORITY, { SECURITY_NT_NON_UNIQUE, 0, 0, 0, DOMAIN_GROUP_RID_USERS } };
 
 static const struct sid local_sid = { SID_REVISION, 1, SECURITY_LOCAL_SID_AUTHORITY, { SECURITY_LOCAL_RID } };
+static const struct sid console_logon_sid = { SID_REVISION, 1, SECURITY_LOCAL_SID_AUTHORITY, { 1 } };
+static const struct sid this_organization_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_THIS_ORGANIZATION_RID } };
 static const struct sid interactive_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_INTERACTIVE_RID } };
 static const struct sid anonymous_logon_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_ANONYMOUS_LOGON_RID } };
 static const struct sid authenticated_user_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_AUTHENTICATED_USER_RID } };
 static const struct sid high_label_sid = { SID_REVISION, 1, SECURITY_MANDATORY_LABEL_AUTHORITY, { SECURITY_MANDATORY_HIGH_RID } };
+static const struct sid system_label_sid = { SID_REVISION, 1, SECURITY_MANDATORY_LABEL_AUTHORITY, { SECURITY_MANDATORY_SYSTEM_RID } };
+static const struct sid service_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_SERVICE_RID } };
+static const struct sid local_service_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_LOCAL_SERVICE_RID } };
+static const struct sid network_service_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_NETWORK_SERVICE_RID } };
 
 static struct luid prev_luid_value = { 1000, 0 };
 
@@ -104,6 +120,7 @@ struct token
     struct object  obj;             /* object header */
     struct luid    token_id;        /* system-unique id of token */
     struct luid    modified_id;     /* new id allocated every time token is modified */
+    struct luid    lineage_id;      /* token_id of the first token of the chain of duplicates and filtered copies */
     struct list    privileges;      /* privileges available to the token */
     struct list    groups;          /* groups that the user of this token belongs to (sid_and_attributes) */
     struct sid    *user;            /* SID of user this token represents */
@@ -117,6 +134,7 @@ struct token
     struct list    kernel_object;   /* list of kernel object pointers */
     unsigned int   integrity_rid;   /* integrity level RID */
     struct list    restricted_sids; /* list of restricting SIDs */
+    int            is_restricted;   /* token has restricting SIDs */
     struct sid    *app_container;   /* AppContainer package SID */
     struct list    capabilities;    /* capability SIDs */
 };
@@ -492,6 +510,7 @@ static struct token *create_token( unsigned int primary, unsigned int session_id
         unsigned int i;
 
         allocate_luid( &token->token_id );
+        token->lineage_id = token->token_id;
         if (modified_id)
             token->modified_id = *modified_id;
         else
@@ -512,6 +531,7 @@ static struct token *create_token( unsigned int primary, unsigned int session_id
         token->elevation = elevation;
         token->integrity_rid = SECURITY_MANDATORY_HIGH_RID;
         token->app_container = NULL;
+        token->is_restricted = 0;
 
         /* copy user */
         token->user = memdup( user, sid_len( user ));
@@ -613,6 +633,16 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
     struct privilege *privilege;
     struct group *group;
 
+    /* Windows will not turn an identification-level token into a primary token. Stock Wine relies on it
+     * (shell32 runas, msi custom actions and the ntdll loader start processes from the linked token), so this
+     * only applies while an elevation helper is configured. */
+    if (primary && !src_token->primary && src_token->impersonation_level < SecurityImpersonation &&
+        elevation_enforced())
+    {
+        set_error( STATUS_BAD_IMPERSONATION_LEVEL );
+        return NULL;
+    }
+
     if (!primary &&
         (impersonation_level < SecurityAnonymous ||
          impersonation_level > SecurityDelegation ||
@@ -626,6 +656,7 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
                           src_token->primary_group, NULL, 0, NULL, 0, src_token->default_dacl,
                           modified_id, impersonation_level, src_token->elevation );
     if (!token) return token;
+    token->lineage_id = src_token->lineage_id;
 
     /* copy groups */
     LIST_FOR_EACH_ENTRY( group, &src_token->groups, struct group, entry )
@@ -681,6 +712,7 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
         memcpy( newgroup, group, size );
         list_add_tail( &token->restricted_sids, &newgroup->entry );
     }
+    token->is_restricted = src_token->is_restricted;
 
     /* copy capabilities */
     LIST_FOR_EACH_ENTRY( group, &src_token->capabilities, struct group, entry )
@@ -866,6 +898,170 @@ struct token *token_create_admin( unsigned primary, int impersonation_level, int
     return token;
 }
 
+/* Tokens of the system role (docs/ELEVATION_SYSTEM_ROLE_WORKORDER.md, C3): LocalSystem, LocalService and
+ * NetworkService, all primary, Default elevation, no linked token, System integrity.
+ * Privileges and groups follow the native tokens measured in docs/ELEVATION_LOCAL_VALIDATION_WORKORDER.md
+ * (Task Scheduler tokens). Left out on purpose: the per-task/per-service SIDs and the unknown S-1-5-32-* SIDs. */
+struct token *token_create_service( unsigned int account, unsigned int session_id )
+{
+    const unsigned int on = SE_PRIVILEGE_ENABLED;
+    const unsigned int grp = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY;
+    const struct luid_attr system_privs[] =
+    {
+        { SeLockMemoryPrivilege, on }, { SeTcbPrivilege, on }, { SeSystemProfilePrivilege, on },
+        { SeProfileSingleProcessPrivilege, on }, { SeIncreaseBasePriorityPrivilege, on },
+        { SeCreatePagefilePrivilege, on }, { SeCreatePermanentPrivilege, on }, { SeDebugPrivilege, on },
+        { SeAuditPrivilege, on }, { SeChangeNotifyPrivilege, on }, { SeImpersonatePrivilege, on },
+        { SeCreateGlobalPrivilege, on }, { SeIncreaseWorkingSetPrivilege, on }, { SeTimeZonePrivilege, on },
+        { SeCreateSymbolicLinkPrivilege, on }, { SeDelegateSessionUserImpersonatePrivilege, on },
+        { SeAssignPrimaryTokenPrivilege, 0 }, { SeIncreaseQuotaPrivilege, 0 }, { SeSecurityPrivilege, 0 },
+        { SeTakeOwnershipPrivilege, 0 }, { SeLoadDriverPrivilege, 0 }, { SeSystemtimePrivilege, 0 },
+        { SeBackupPrivilege, 0 }, { SeRestorePrivilege, 0 }, { SeShutdownPrivilege, 0 },
+        { SeSystemEnvironmentPrivilege, 0 }, { SeUndockPrivilege, 0 }, { SeManageVolumePrivilege, 0 },
+    };
+    /* SeImpersonate stays enabled although the measured Task Scheduler tokens lack it: Microsoft documents it as a
+     * default privilege of Local Service, Network Service and Local System services */
+    const struct luid_attr local_service_privs[] =
+    {
+        { SeChangeNotifyPrivilege, on }, { SeCreateGlobalPrivilege, on }, { SeImpersonatePrivilege, on },
+        { SeAssignPrimaryTokenPrivilege, 0 }, { SeSystemtimePrivilege, 0 }, { SeShutdownPrivilege, 0 },
+        { SeAuditPrivilege, 0 }, { SeUndockPrivilege, 0 }, { SeIncreaseWorkingSetPrivilege, 0 },
+        { SeTimeZonePrivilege, 0 },
+    };
+    const struct luid_attr network_service_privs[] =
+    {
+        { SeChangeNotifyPrivilege, on }, { SeCreateGlobalPrivilege, on }, { SeImpersonatePrivilege, on },
+        { SeAssignPrimaryTokenPrivilege, 0 }, { SeIncreaseQuotaPrivilege, 0 }, { SeShutdownPrivilege, 0 },
+        { SeAuditPrivilege, 0 }, { SeUndockPrivilege, 0 }, { SeIncreaseWorkingSetPrivilege, 0 },
+        { SeTimeZonePrivilege, 0 },
+    };
+    /* CONSOLE LOGON may be an artifact of the Task Scheduler measurement: provisional */
+    const struct sid_attrs service_groups[] =
+    {
+        { &world_sid, grp }, { &builtin_users_sid, grp }, { &service_sid, grp }, { &console_logon_sid, grp },
+        { &authenticated_user_sid, grp }, { &this_organization_sid, grp }, { &local_sid, grp },
+        { &builtin_admins_sid, SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_OWNER },
+    };
+    const struct sid *user;
+    const struct sid_attrs *groups = service_groups;
+    const struct luid_attr *privs = local_service_privs;
+    unsigned int group_count = ARRAY_SIZE( service_groups ) - 1;  /* no Administrators */
+    unsigned int priv_count = ARRAY_SIZE( local_service_privs );
+    unsigned int primary_group = 1;  /* BUILTIN\Users */
+    struct token *token;
+    struct acl *default_dacl;
+
+    switch (account)
+    {
+    case SERVICE_ACCOUNT_SYSTEM:
+        user = &local_system_sid;
+        group_count = ARRAY_SIZE( service_groups );
+        primary_group = 7;  /* BUILTIN\Administrators, also the owner */
+        privs = system_privs;
+        priv_count = ARRAY_SIZE( system_privs );
+        break;
+    case SERVICE_ACCOUNT_LOCAL_SERVICE:
+        user = &local_service_sid;
+        break;
+    case SERVICE_ACCOUNT_NETWORK_SERVICE:
+        user = &network_service_sid;
+        privs = network_service_privs;
+        priv_count = ARRAY_SIZE( network_service_privs );
+        break;
+    default:
+        return NULL;
+    }
+
+    /* the default DACL of the account: SYSTEM and Administrators for LocalSystem, SYSTEM and the account for the others */
+    if (!(default_dacl = create_default_dacl( account == SERVICE_ACCOUNT_SYSTEM ? &builtin_admins_sid : user )))
+        return NULL;
+    token = create_token( 1, session_id, user, groups, group_count, privs, priv_count, default_dacl, NULL,
+                          primary_group, -1, TokenElevationTypeDefault );
+    free( default_dacl );
+    if (!token) return NULL;
+    if (account != SERVICE_ACCOUNT_SYSTEM) token->owner = token->user;
+    if (!token_assign_label( token, &system_label_sid ))
+    {
+        release_object( token );
+        return NULL;
+    }
+    return token;
+}
+
+/* which system role account the user of a token is (SERVICE_ACCOUNT_*), or -1 */
+int token_service_account( const struct token *token )
+{
+    if (equal_sid( token->user, &local_system_sid )) return SERVICE_ACCOUNT_SYSTEM;
+    if (equal_sid( token->user, &local_service_sid )) return SERVICE_ACCOUNT_LOCAL_SERVICE;
+    if (equal_sid( token->user, &network_service_sid )) return SERVICE_ACCOUNT_NETWORK_SERVICE;
+    return -1;
+}
+
+/* The token of an elevated process is only for SYSTEM and Administrators (enabled in the full token only, deny-only
+ * in the user's limited token): the user's limited processes must not duplicate, impersonate or assign it. */
+int token_protect_elevated( struct token *token )
+{
+    size_t acl_size = sizeof(struct acl) + 2 * sizeof(struct ace) + sid_len( &local_system_sid ) + sid_len( &builtin_admins_sid );
+    size_t size = sizeof(struct security_descriptor) + acl_size;
+    struct security_descriptor *sd;
+    struct acl *acl;
+    struct ace *ace;
+    int ret;
+
+    if (!(sd = mem_alloc( size ))) return 0;
+    memset( sd, 0, size );
+    sd->control = SE_DACL_PRESENT;
+    sd->dacl_len = acl_size;
+    acl = (struct acl *)(sd + 1);
+    acl->revision = ACL_REVISION;
+    acl->size = acl_size;
+    acl->count = 2;
+    ace = set_ace( ace_first( acl ), &local_system_sid, ACCESS_ALLOWED_ACE_TYPE, 0, GENERIC_ALL );
+    set_ace( ace_next( ace ), &builtin_admins_sid, ACCESS_ALLOWED_ACE_TYPE, 0, GENERIC_ALL );
+    ret = set_sd_defaults_from_token( &token->obj, sd, DACL_SECURITY_INFORMATION, token );
+    free( sd );
+    return ret;
+}
+
+/* a token of a process that was elevated: the full half of a split administrator token */
+int token_is_elevated( const struct token *token )
+{
+    return token->primary && token->elevation == TokenElevationTypeFull;
+}
+
+/* create the primary token of a service account; only the system role may (SeTcbPrivilege, enabled) */
+DECL_HANDLER(create_service_token)
+{
+    struct token *caller = current->process->token, *token;
+
+    if (!sysrun_active || !elevation_enforced())
+    {
+        set_error( STATUS_NOT_SUPPORTED );
+        return;
+    }
+    if (!token_has_privilege( caller, SeTcbPrivilege ))
+    {
+        set_error( STATUS_PRIVILEGE_NOT_HELD );
+        return;
+    }
+    /* Wine's administrator token also holds SeTcbPrivilege: require the system role itself */
+    if (token_service_account( caller ) != SERVICE_ACCOUNT_SYSTEM || !sysrun_process_privileged( current->process ))
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
+    if (req->account > SERVICE_ACCOUNT_NETWORK_SERVICE)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if ((token = token_create_service( req->account, caller->session_id )))
+    {
+        reply->token = alloc_handle_no_access_check( current->process, token, TOKEN_ALL_ACCESS, 0 );
+        release_object( token );
+    }
+}
+
 static struct privilege *token_find_privilege( struct token *token, struct luid luid, int enabled_only )
 {
     struct privilege *privilege;
@@ -924,6 +1120,48 @@ static void token_disable_privileges( struct token *token )
 
     LIST_FOR_EACH_ENTRY( privilege, &token->privileges, struct privilege, entry )
         privilege->enabled = FALSE;
+}
+
+/* Windows only honours a privilege that is enabled in the primary token. */
+int token_has_privilege( struct token *token, struct luid priv )
+{
+    return token_find_privilege( token, priv, TRUE ) != NULL;
+}
+
+/* Can the caller give a process this token? Only enforced while an elevation helper is configured.
+ * A token that is not at least an impersonation-level token is refused. A copy of the caller's own
+ * token (same lineage: a duplicate or a filtered version) is always allowed. Anything else needs
+ * SeAssignPrimaryTokenPrivilege, which Wine's service tokens do not have yet, so SeTcbPrivilege (held
+ * by a full administrator token and by the planned elevation broker) stands in for it.
+ * shortcut: SeTcbPrivilege stands in for SeAssignPrimaryTokenPrivilege, drop it once the broker has its own token. */
+unsigned int token_check_assign_primary( struct token *token )
+{
+    struct token *caller = current->process->token;
+
+    if (!elevation_enforced()) return STATUS_SUCCESS;
+    if (!token->primary && token->impersonation_level < SecurityImpersonation)
+        return STATUS_BAD_IMPERSONATION_LEVEL;
+    if (is_equal_luid( token->lineage_id, caller->lineage_id )) return STATUS_SUCCESS;
+    if (token_has_privilege( caller, SeAssignPrimaryTokenPrivilege ) || token_has_privilege( caller, SeTcbPrivilege ))
+        return STATUS_SUCCESS;
+    return STATUS_PRIVILEGE_NOT_HELD;
+}
+
+/* Impersonation level a pipe server gets for a client token (Windows SeTokenCanImpersonate).
+ * Without SeImpersonatePrivilege in the server's primary token the level drops to identification, unless the
+ * client has the server's user and is neither more trusted (integrity) nor elevated while the server is not.
+ * shortcut: the client's requested SQOS level is not sent to the server, so it is the client token's own level
+ * (impersonation by default), upgrade when create_file carries SecurityQualityOfService. */
+int token_impersonation_level( struct token *client, struct token *server )
+{
+    int level = client->primary ? SecurityImpersonation : client->impersonation_level;
+
+    if (level > SecurityImpersonation) level = SecurityImpersonation;
+    if (token_has_privilege( server, SeImpersonatePrivilege )) return level;
+    if (equal_sid( client->user, server->user ) && client->integrity_rid <= server->integrity_rid &&
+        !(client->elevation == TokenElevationTypeFull && server->elevation != TokenElevationTypeFull))
+        return level;
+    return level < SecurityIdentification ? level : SecurityIdentification;
 }
 
 int token_check_privileges( struct token *token, int all_required, const struct luid_attr *reqprivs,
@@ -1268,15 +1506,36 @@ unsigned int token_get_session_id( struct token *token )
 int check_object_access(struct token *token, struct object *obj, unsigned int *access)
 {
     struct generic_map mapping;
+    struct security_descriptor *sd;
     unsigned int status;
     int res;
 
     if (!token)
         token = current->token ? current->token : current->process->token;
 
+    /* Identification-level impersonation is for reading the client's identity only. Windows fails every
+     * object open with it, a registry key with access denied. */
+    if (!token->primary && token->impersonation_level < SecurityImpersonation && elevation_enforced())
+    {
+        set_error( object_is_registry_key( obj ) ? STATUS_ACCESS_DENIED : STATUS_BAD_IMPERSONATION_LEVEL );
+        return FALSE;
+    }
+
     mapping.all = map_obj_access( obj, GENERIC_ALL );
 
-    if (!obj->sd)
+    /* as on Windows, an enabled SeDebugPrivilege opens any process or thread, whatever its descriptor says; the
+     * descriptors of the system role's processes would otherwise shut out an administrator */
+    if (sysrun_active && (obj->ops->type == &process_type || obj->ops->type == &thread_type) &&
+        token_has_privilege( token, SeDebugPrivilege ))
+    {
+        if (*access & MAXIMUM_ALLOWED) *access = mapping.all;
+        return TRUE;
+    }
+
+    /* a key without a descriptor is checked against its default one while elevation is enforced */
+    sd = obj->sd;
+    if (!sd && elevation_enforced() && object_is_registry_key( obj )) sd = obj->ops->get_sd( obj );
+    if (!sd)
     {
         if (*access & MAXIMUM_ALLOWED) *access = mapping.all;
         return TRUE;
@@ -1290,7 +1549,7 @@ int check_object_access(struct token *token, struct object *obj, unsigned int *a
     {
         const struct acl *sacl;
         int sacl_present;
-        sacl = sd_get_sacl( obj->sd, &sacl_present );
+        sacl = sd_get_sacl( sd, &sacl_present );
         if (sacl_present && sacl)
         {
             const struct ace *ace;
@@ -1317,7 +1576,7 @@ int check_object_access(struct token *token, struct object *obj, unsigned int *a
         }
     }
 
-    res = token_access_check( token, obj->sd, *access, NULL, NULL,
+    res = token_access_check( token, sd, *access, NULL, NULL,
                               &mapping, access, &status ) == STATUS_SUCCESS &&
           status == STATUS_SUCCESS;
 
@@ -1342,6 +1601,14 @@ DECL_HANDLER(create_token)
     struct acl *default_dacl = NULL;
     unsigned int *attrs;
     struct sid *sid;
+
+    /* native NtCreateToken needs SeCreateTokenPrivilege, which no Wine token has; without this check a limited
+     * process could make itself an administrator token and impersonate it, past every access check */
+    if (elevation_enforced() && !token_has_privilege( current->process->token, SeCreateTokenPrivilege ))
+    {
+        set_error( STATUS_PRIVILEGE_NOT_HELD );
+        return;
+    }
 
     if (!get_req_object_attributes( &params )) return;
     if (params.root) release_object( params.root );  /* unused */
@@ -1445,9 +1712,13 @@ DECL_HANDLER(create_token)
 /* open a security token */
 DECL_HANDLER(open_token)
 {
+    /* Windows needs the query right on the process or thread; with only the limited query a limited process could
+     * open the full token of an elevated process of its user (the descriptor of the token is the second line of defense) */
+    unsigned int query = sysrun_active && elevation_enforced();
+
     if (req->flags & OPEN_TOKEN_THREAD)
     {
-        struct thread *thread = get_thread_from_handle( req->handle, 0 );
+        struct thread *thread = get_thread_from_handle( req->handle, query ? THREAD_QUERY_INFORMATION : 0 );
         if (thread)
         {
             if (thread->token)
@@ -1455,8 +1726,14 @@ DECL_HANDLER(open_token)
                 if (!thread->token->primary && thread->token->impersonation_level <= SecurityAnonymous)
                     set_error( STATUS_CANT_OPEN_ANONYMOUS );
                 else
-                    reply->token = alloc_handle( current->process, thread->token,
-                                                 req->access, req->attributes );
+                {
+                    /* OpenAsSelf: the access check uses the process token, which matters when the caller is
+                     * impersonating at identification level (a pipe server reading its client's identity) */
+                    struct token *target = thread->token, *impersonated = current->token;
+                    if (req->flags & OPEN_TOKEN_AS_SELF) current->token = NULL;
+                    reply->token = alloc_handle( current->process, target, req->access, req->attributes );
+                    current->token = impersonated;
+                }
             }
             else
                 set_error( STATUS_NO_TOKEN );
@@ -1465,7 +1742,7 @@ DECL_HANDLER(open_token)
     }
     else
     {
-        struct process *process = get_process_from_handle( req->handle, 0 );
+        struct process *process = get_process_from_handle( req->handle, query ? PROCESS_QUERY_INFORMATION : 0 );
         if (process)
         {
             if (process->token)
@@ -1575,6 +1852,82 @@ DECL_HANDLER(duplicate_token)
     if (params.root) release_object( params.root );
 }
 
+/* native filter_token: DISABLE_MAX_PRIVILEGE keeps only SeChangeNotify; LUA_TOKEN: Administrators deny-only, Limited, Medium label */
+static void token_apply_filter( struct token *token, unsigned int flags )
+{
+    if (flags & DISABLE_MAX_PRIVILEGE)
+    {
+        struct list *cursor, *cursor_next;
+        LIST_FOR_EACH_SAFE( cursor, cursor_next, &token->privileges )
+        {
+            struct privilege *privilege = LIST_ENTRY( cursor, struct privilege, entry );
+            if (!is_equal_luid( privilege->luid, SeChangeNotifyPrivilege ))
+                privilege_remove( privilege );
+        }
+    }
+
+    if (flags & LUA_TOKEN)
+    {
+        struct group *group;
+        token->elevation = TokenElevationTypeLimited;
+        LIST_FOR_EACH_ENTRY( group, &token->groups, struct group, entry )
+        {
+            if (equal_sid( &group->sid, &builtin_admins_sid ))
+            {
+                group->attrs &= ~(SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT);
+                group->attrs |= SE_GROUP_USE_FOR_DENY_ONLY;
+            }
+        }
+        if (token->integrity_rid > SECURITY_MANDATORY_MEDIUM_RID)
+        {
+            struct sid med_label = { SID_REVISION, 1, SECURITY_MANDATORY_LABEL_AUTHORITY, { SECURITY_MANDATORY_MEDIUM_RID } };
+            token_assign_label( token, &med_label );
+        }
+    }
+}
+
+/* native LSA filtered (UAC) token: only SeChangeNotify (enabled), SeShutdown, SeUndock,
+ * SeIncreaseWorkingSet and SeTimeZone (disabled) */
+void token_make_filtered( struct token *token )
+{
+    struct list *cursor, *cursor_next;
+
+    token_apply_filter( token, LUA_TOKEN );
+    LIST_FOR_EACH_SAFE( cursor, cursor_next, &token->privileges )
+    {
+        struct privilege *privilege = LIST_ENTRY( cursor, struct privilege, entry );
+        if (is_equal_luid( privilege->luid, SeChangeNotifyPrivilege )) continue;
+        if (is_equal_luid( privilege->luid, SeShutdownPrivilege ) ||
+            is_equal_luid( privilege->luid, SeUndockPrivilege ))
+            privilege->def = privilege->enabled = FALSE;
+        else
+            privilege_remove( privilege );
+    }
+    privilege_add( token, SeIncreaseWorkingSetPrivilege, FALSE );
+    privilege_add( token, SeTimeZonePrivilege, FALSE );
+}
+
+/* set when this server gave its user a standard token: tokens derived from it (a filtered copy is Limited
+ * again) must not get a linked full token or an administrator grant */
+int standard_user_session;
+
+/* a standard user (not in the administrator group): the filtered token without Administrators and without a
+ * split, so TokenElevationType is Default as for a non-split token on Windows */
+void token_make_standard( struct token *token )
+{
+    struct group *group, *next;
+
+    standard_user_session = 1;
+
+    LIST_FOR_EACH_ENTRY_SAFE( group, next, &token->groups, struct group, entry )
+    {
+        if (!equal_sid( &group->sid, &builtin_admins_sid )) continue;
+        list_remove( &group->entry );
+        free( group );
+    }
+    token->elevation = TokenElevationTypeDefault;
+}
+
 /* creates a restricted version of a token */
 DECL_HANDLER(filter_token)
 {
@@ -1602,37 +1955,11 @@ DECL_HANDLER(filter_token)
                                  filter_privileges, priv_count, filter_groups, group_count );
         if (token)
         {
-            if (req->flags & DISABLE_MAX_PRIVILEGE)
-            {
-                struct list *cursor, *cursor_next;
-                LIST_FOR_EACH_SAFE( cursor, cursor_next, &token->privileges )
-                {
-                    struct privilege *privilege = LIST_ENTRY( cursor, struct privilege, entry );
-                    if (!is_equal_luid( privilege->luid, SeChangeNotifyPrivilege ))
-                        privilege_remove( privilege );
-                }
-            }
+            token_apply_filter( token, req->flags );
 
-            if (req->flags & LUA_TOKEN)
-            {
-                struct group *group;
-                token->elevation = TokenElevationTypeLimited;
-                LIST_FOR_EACH_ENTRY( group, &token->groups, struct group, entry )
-                {
-                    if (equal_sid( &group->sid, &builtin_admins_sid ))
-                    {
-                        group->attrs &= ~(SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT);
-                        group->attrs |= SE_GROUP_USE_FOR_DENY_ONLY;
-                    }
-                }
-                if (token->integrity_rid > SECURITY_MANDATORY_MEDIUM_RID)
-                {
-                    struct sid med_label = { SID_REVISION, 1, SECURITY_MANDATORY_LABEL_AUTHORITY, { SECURITY_MANDATORY_MEDIUM_RID } };
-                    token_assign_label( token, &med_label );
-                }
-            }
+            token->is_restricted = (src_token->is_restricted || restrict_count > 0);
 
-            if (!list_empty( &src_token->restricted_sids ))
+            if (src_token->is_restricted || !list_empty( &src_token->restricted_sids ))
             {
                 if (restrict_count)
                 {
@@ -1683,12 +2010,16 @@ DECL_HANDLER(filter_token)
                     {
                         size_t size = offsetof( struct group, sid.sub_auth[sid->sub_count] );
                         struct group *res_group = mem_alloc( size );
-                        if (res_group)
+                        if (!res_group)
                         {
-                            res_group->attrs = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY;
-                            copy_sid( &res_group->sid, sid );
-                            list_add_tail( &token->restricted_sids, &res_group->entry );
+                            set_error( STATUS_NO_MEMORY );
+                            release_object( token );
+                            release_object( src_token );
+                            return;
                         }
+                        res_group->attrs = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY;
+                        copy_sid( &res_group->sid, sid );
+                        list_add_tail( &token->restricted_sids, &res_group->entry );
                     }
                     sid = (const struct sid *)((char *)sid + sid_len( sid ));
                 }
@@ -1943,7 +2274,7 @@ DECL_HANDLER(get_token_info)
         reply->privilege_count = list_count( &token->privileges );
         reply->integrity_rid = token->integrity_rid;
         reply->is_app_container = (token->app_container != NULL);
-        reply->is_restricted = !list_empty( &token->restricted_sids );
+        reply->is_restricted = token->is_restricted || !list_empty( &token->restricted_sids );
         release_object( token );
     }
 }
@@ -1955,6 +2286,15 @@ DECL_HANDLER(set_token_integrity_level)
     if ((token = (struct token *)get_handle_obj( current->process, req->handle, TOKEN_ADJUST_DEFAULT, &token_ops )))
     {
         struct sid label_sid = { SID_REVISION, 1, SECURITY_MANDATORY_LABEL_AUTHORITY, { req->integrity_rid } };
+
+        /* raising the integrity level needs SeTcbPrivilege, lowering does not */
+        if (elevation_enforced() && req->integrity_rid > token->integrity_rid &&
+            !token_has_privilege( current->process->token, SeTcbPrivilege ))
+        {
+            set_error( STATUS_PRIVILEGE_NOT_HELD );
+            release_object( token );
+            return;
+        }
         token_assign_label( token, &label_sid );
         release_object( token );
     }
@@ -2010,7 +2350,14 @@ DECL_HANDLER(set_token_default_dacl)
 DECL_HANDLER(create_linked_token)
 {
     struct token *token, *linked;
-    int elevation;
+    int elevation, primary;
+
+    /* a standard user has no linked token (native: ERROR_NO_SUCH_LOGON_SESSION) */
+    if (elevation_enforced() && standard_user_session)
+    {
+        set_error( STATUS_NO_SUCH_LOGON_SESSION );
+        return;
+    }
 
     if ((token = (struct token *)get_handle_obj( current->process, req->handle,
                                                  TOKEN_QUERY, &token_ops )))
@@ -2027,9 +2374,17 @@ DECL_HANDLER(create_linked_token)
             release_object( token );
             return;
         }
-        if ((linked = token_create_admin( FALSE, SecurityIdentification, elevation, token->session_id )))
+        /* Everyone gets an identification-level token. Windows hands a SeTcbPrivilege caller a usable primary
+         * token (docs/ELEVATION_BOUNDARY_PLAN.md, N6): here only the system role does (the elevation broker),
+         * because Wine's administrator token holds SeTcbPrivilege too. */
+        primary = elevation_enforced() && token_service_account( current->process->token ) == SERVICE_ACCOUNT_SYSTEM &&
+                  sysrun_process_privileged( current->process ) && token_has_privilege( current->process->token, SeTcbPrivilege );
+        if ((linked = token_create_admin( primary, primary ? -1 : SecurityIdentification, elevation, token->session_id )))
         {
-            reply->linked = alloc_handle( current->process, linked, TOKEN_ALL_ACCESS, 0 );
+            /* a Medium caller cannot get the write rights of a High token (mandatory label) */
+            unsigned int access = MAXIMUM_ALLOWED;
+            if (check_object_access( NULL, &linked->obj, &access ))
+                reply->linked = alloc_handle_no_access_check( current->process, linked, access & TOKEN_ALL_ACCESS, 0 );
             release_object( linked );
         }
         release_object( token );

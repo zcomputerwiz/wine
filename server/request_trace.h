@@ -3112,6 +3112,16 @@ static void dump_grant_process_admin_token_request( const struct grant_process_a
     fprintf( stderr, " handle=%04x", req->handle );
 }
 
+static void dump_create_service_token_request( const struct create_service_token_request *req )
+{
+    fprintf( stderr, " account=%08x", req->account );
+}
+
+static void dump_create_service_token_reply( const struct create_service_token_reply *req )
+{
+    fprintf( stderr, " token=%04x", req->token );
+}
+
 static void dump_get_token_info_request( const struct get_token_info_request *req )
 {
     fprintf( stderr, " handle=%04x", req->handle );
@@ -3868,6 +3878,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_kernel_object_handle_request,
     (dump_func)dump_make_process_system_request,
     (dump_func)dump_grant_process_admin_token_request,
+    (dump_func)dump_create_service_token_request,
     (dump_func)dump_get_token_info_request,
     (dump_func)dump_create_linked_token_request,
     (dump_func)dump_create_completion_request,
@@ -4186,6 +4197,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_kernel_object_handle_reply,
     (dump_func)dump_make_process_system_reply,
     NULL,
+    (dump_func)dump_create_service_token_reply,
     (dump_func)dump_get_token_info_reply,
     (dump_func)dump_create_linked_token_reply,
     (dump_func)dump_create_completion_reply,
@@ -4504,6 +4516,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "get_kernel_object_handle",
     "make_process_system",
     "grant_process_admin_token",
+    "create_service_token",
     "get_token_info",
     "create_linked_token",
     "create_completion",
@@ -4570,6 +4583,7 @@ static const struct
     { "BUFFER_TOO_SMALL",            STATUS_BUFFER_TOO_SMALL },
     { "CANCELLED",                   STATUS_CANCELLED },
     { "CANNOT_DELETE",               STATUS_CANNOT_DELETE },
+    { "CANNOT_IMPERSONATE",          STATUS_CANNOT_IMPERSONATE },
     { "CANT_OPEN_ANONYMOUS",         STATUS_CANT_OPEN_ANONYMOUS },
     { "CHILD_MUST_BE_VOLATILE",      STATUS_CHILD_MUST_BE_VOLATILE },
     { "CONNECTION_ABORTED",          STATUS_CONNECTION_ABORTED },
@@ -4658,6 +4672,7 @@ static const struct
     { "NO_MORE_ENTRIES",             STATUS_NO_MORE_ENTRIES },
     { "NO_SUCH_DEVICE",              STATUS_NO_SUCH_DEVICE },
     { "NO_SUCH_FILE",                STATUS_NO_SUCH_FILE },
+    { "NO_SUCH_LOGON_SESSION",       STATUS_NO_SUCH_LOGON_SESSION },
     { "NO_TOKEN",                    STATUS_NO_TOKEN },
     { "OBJECT_NAME_COLLISION",       STATUS_OBJECT_NAME_COLLISION },
     { "OBJECT_NAME_EXISTS",          STATUS_OBJECT_NAME_EXISTS },

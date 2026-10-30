@@ -135,7 +135,7 @@ static DWORD query_reg_path (HKEY hKey, LPCWSTR lpszValue,
  *
  * Set the current active theme from the registry
  */
-static void UXTHEME_LoadTheme(void)
+static void UXTHEME_LoadTheme(BOOL reload)
 {
     HKEY hKey;
     DWORD buffsize;
@@ -184,7 +184,10 @@ static void UXTHEME_LoadTheme(void)
             lstrcpynW(szCurrentColor, pt->pszSelectedColor, ARRAY_SIZE(szCurrentColor));
             lstrcpynW(szCurrentSize, pt->pszSelectedSize, ARRAY_SIZE(szCurrentSize));
 
-            UXTHEME_SetActiveTheme(pt);
+            if (reload)
+                MSSTYLES_SetActiveTheme(pt, FALSE); /* another process changed the theme; only follow it */
+            else
+                UXTHEME_SetActiveTheme(pt);
             TRACE("Theme active: %s %s %s\n", debugstr_w(szCurrentTheme),
                 debugstr_w(szCurrentColor), debugstr_w(szCurrentSize));
             MSSTYLES_CloseThemeFile(pt);
@@ -500,6 +503,29 @@ HRESULT UXTHEME_SetActiveTheme(PTHEME_FILE tf)
     return hr;
 }
 
+/* The active theme lives in the registry (ThemeManager).  A process that applies a theme only changes its own
+ * state, so every process watches the key and follows changes made by others. */
+static HKEY theme_watch_key;
+static HANDLE theme_watch_event;
+
+static void UXTHEME_WatchThemeChanges(void)
+{
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, szThemeManager, 0, NULL, 0, KEY_READ | KEY_NOTIFY, NULL, &theme_watch_key, NULL))
+        return;
+    theme_watch_event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (theme_watch_event)
+        RegNotifyChangeKeyValue(theme_watch_key, TRUE, REG_NOTIFY_CHANGE_LAST_SET, theme_watch_event, TRUE);
+}
+
+void UXTHEME_CheckReload(void)
+{
+    if (theme_watch_event && WaitForSingleObject(theme_watch_event, 0) == WAIT_OBJECT_0)
+    {
+        RegNotifyChangeKeyValue(theme_watch_key, TRUE, REG_NOTIFY_CHANGE_LAST_SET, theme_watch_event, TRUE);
+        UXTHEME_LoadTheme(TRUE);
+    }
+}
+
 /***********************************************************************
  *      UXTHEME_InitSystem
  */
@@ -510,7 +536,8 @@ void UXTHEME_InitSystem(HINSTANCE hInst)
     atSubIdList          = GlobalAddAtomW(L"ux_subidlst");
     atDialogThemeEnabled = GlobalAddAtomW(L"ux_dialogtheme");
 
-    UXTHEME_LoadTheme();
+    UXTHEME_LoadTheme(FALSE);
+    UXTHEME_WatchThemeChanges();
     ThemeHooksInstall();
 }
 
@@ -539,6 +566,7 @@ BOOL WINAPI IsAppThemed(void)
 BOOL WINAPI IsThemeActive(void)
 {
     TRACE("\n");
+    UXTHEME_CheckReload();
     SetLastError(ERROR_SUCCESS);
     return bThemeActive;
 }
@@ -613,7 +641,20 @@ static LPWSTR UXTHEME_GetWindowProperty(HWND hwnd, ATOM aProp, LPWSTR pszBuffer,
     return NULL;
 }
 
+static HTHEME open_theme_data_internal(HWND hwnd, LPCWSTR pszClassList, DWORD flags, UINT dpi, BOOL controls);
+
 static HTHEME open_theme_data(HWND hwnd, LPCWSTR pszClassList, DWORD flags, UINT dpi)
+{
+    return open_theme_data_internal(hwnd, pszClassList, flags, dpi, TRUE);
+}
+
+/* The theme the non-client frame draws from; STAP_ALLOW_NONCLIENT is checked by the caller. */
+HTHEME UXTHEME_OpenNonClientTheme(UINT dpi)
+{
+    return open_theme_data_internal(NULL, L"Window", 0, dpi, FALSE);
+}
+
+static HTHEME open_theme_data_internal(HWND hwnd, LPCWSTR pszClassList, DWORD flags, UINT dpi, BOOL controls)
 {
     WCHAR szAppBuff[256];
     WCHAR szClassBuff[256];
@@ -631,7 +672,8 @@ static HTHEME open_theme_data(HWND hwnd, LPCWSTR pszClassList, DWORD flags, UINT
     if(flags)
         FIXME("unhandled flags: %lx\n", flags);
 
-    if(bThemeActive)
+    UXTHEME_CheckReload();
+    if(bThemeActive && (!controls || (dwThemeAppProperties & STAP_ALLOW_CONTROLS)))
     {
         pszAppName = UXTHEME_GetWindowProperty(hwnd, atSubAppName, szAppBuff, ARRAY_SIZE(szAppBuff));
         /* If SetWindowTheme was used on the window, that overrides the class list passed to this function */
@@ -678,6 +720,15 @@ HTHEME WINAPI OpenThemeDataForDpi(HWND hwnd, LPCWSTR class_list, UINT dpi)
 HTHEME WINAPI OpenThemeData(HWND hwnd, LPCWSTR classlist)
 {
     return OpenThemeDataEx(hwnd, classlist, 0);
+}
+
+/* Open preview theme data without changing the active desktop theme. */
+HTHEME WINAPI OpenThemeDataFromFile(HTHEMEFILE file, HWND hwnd, LPCWSTR classes, DWORD flags)
+{
+    UINT dpi = GetDpiForWindow(hwnd);
+    if (!file || !classes) return NULL;
+    if (!dpi) dpi = GetDpiForSystem();
+    return MSSTYLES_OpenThemeClassFromFile((PTHEME_FILE)file, NULL, classes, dpi);
 }
 
 /***********************************************************************
@@ -834,7 +885,11 @@ HRESULT WINAPI GetThemeDocumentationProperty(LPCWSTR pszThemeName,
     PTHEME_FILE pt;
     HRESULT hr;
     unsigned int i;
-    int iDocId;
+    int iDocId = 0;
+    const WCHAR *p, *slash, *name, *dot;
+    WCHAR mui_path[MAX_PATH];
+    HMODULE hMui = NULL;
+    int len, dir_len;
     TRACE("(%s,%s,%p,%d)\n", debugstr_w(pszThemeName), debugstr_w(pszPropertyName),
           pszValueBuff, cchMaxValChars);
 
@@ -865,6 +920,45 @@ HRESULT WINAPI GetThemeDocumentationProperty(LPCWSTR pszThemeName,
             }
         }
         UXINI_CloseINI(uf);
+    }
+    /* If still failed, try MUI file */
+    if(FAILED(hr) && MSSTYLES_LookupProperty(pszPropertyName, NULL, &iDocId)) {
+        p = wcsrchr(pszThemeName, '\\');
+        slash = p ? p + 1 : pszThemeName;
+
+        if (p) {
+            dir_len = (int)(p - pszThemeName);
+            swprintf(mui_path, ARRAY_SIZE(mui_path), L"%.*s\\en-US\\%s.mui", dir_len, pszThemeName, slash);
+            hMui = LoadLibraryExW(mui_path, 0, LOAD_LIBRARY_AS_DATAFILE);
+            if (!hMui) {
+                swprintf(mui_path, ARRAY_SIZE(mui_path), L"%.*s\\%s.mui", dir_len, pszThemeName, slash);
+                hMui = LoadLibraryExW(mui_path, 0, LOAD_LIBRARY_AS_DATAFILE);
+            }
+        }
+        if (hMui) {
+            for(i=0; i<ARRAY_SIZE(wDocToRes); i+=2) {
+                if(wDocToRes[i] == iDocId) {
+                    if(LoadStringW(hMui, wDocToRes[i+1], pszValueBuff, cchMaxValChars)) {
+                        hr = S_OK;
+                        break;
+                    }
+                }
+            }
+            FreeLibrary(hMui);
+        }
+    }
+    /* Fallback: derive displayname or tooltip from file name */
+    if(FAILED(hr) && (iDocId == TMT_DISPLAYNAME || iDocId == TMT_TOOLTIP) && cchMaxValChars > 0) {
+        p = wcsrchr(pszThemeName, '\\');
+        name = p ? p + 1 : pszThemeName;
+        dot = wcsrchr(name, '.');
+        len = dot ? (int)(dot - name) : lstrlenW(name);
+        if (len > 0 && len < cchMaxValChars) {
+            lstrcpynW(pszValueBuff, name, len + 1);
+            if (pszValueBuff[0] >= 'a' && pszValueBuff[0] <= 'z')
+                pszValueBuff[0] = pszValueBuff[0] - 'a' + 'A';
+            hr = S_OK;
+        }
     }
 
     MSSTYLES_CloseThemeFile(pt);
@@ -1116,10 +1210,12 @@ HRESULT WINAPI EnumThemeColors(LPWSTR pszThemeFileName, LPWSTR pszSizeName,
     if(!dwColorNum && *tmp) {
         TRACE("%s\n", debugstr_w(tmp));
         lstrcpyW(pszColorNames->szName, tmp);
-        LoadStringW(pt->hTheme, resourceId, pszColorNames->szDisplayName,
-            ARRAY_SIZE(pszColorNames->szDisplayName));
-        LoadStringW(pt->hTheme, resourceId+1000, pszColorNames->szTooltip,
-            ARRAY_SIZE(pszColorNames->szTooltip));
+        if (!LoadStringW(pt->hTheme, resourceId, pszColorNames->szDisplayName,
+                         ARRAY_SIZE(pszColorNames->szDisplayName)))
+            lstrcpyW(pszColorNames->szDisplayName, pszColorNames->szName);
+        if (!LoadStringW(pt->hTheme, resourceId+1000, pszColorNames->szTooltip,
+                         ARRAY_SIZE(pszColorNames->szTooltip)))
+            pszColorNames->szTooltip[0] = '\0';
     }
     else
         hr = E_PROP_ID_UNSUPPORTED;
@@ -1174,10 +1270,12 @@ HRESULT WINAPI EnumThemeSizes(LPWSTR pszThemeFileName, LPWSTR pszColorName,
     if(!dwSizeNum && *tmp) {
         TRACE("%s\n", debugstr_w(tmp));
         lstrcpyW(pszSizeNames->szName, tmp);
-        LoadStringW(pt->hTheme, resourceId, pszSizeNames->szDisplayName,
-            ARRAY_SIZE(pszSizeNames->szDisplayName));
-        LoadStringW(pt->hTheme, resourceId+1000, pszSizeNames->szTooltip,
-            ARRAY_SIZE(pszSizeNames->szTooltip));
+        if (!LoadStringW(pt->hTheme, resourceId, pszSizeNames->szDisplayName,
+                         ARRAY_SIZE(pszSizeNames->szDisplayName)))
+            lstrcpyW(pszSizeNames->szDisplayName, pszSizeNames->szName);
+        if (!LoadStringW(pt->hTheme, resourceId+1000, pszSizeNames->szTooltip,
+                         ARRAY_SIZE(pszSizeNames->szTooltip)))
+            pszSizeNames->szTooltip[0] = '\0';
     }
     else
         hr = E_PROP_ID_UNSUPPORTED;
@@ -1242,8 +1340,10 @@ BOOL WINAPI ThemeHooksInstall(void)
 
     hooks.pDefDlgProc = UXTHEME_DefDlgProc;
     hooks.pNonClientButtonDraw = UXTHEME_NonClientButtonDraw;
+    hooks.pNonClientFrameDraw = UXTHEME_NonClientFrameDraw;
     hooks.pScrollBarDraw = UXTHEME_ScrollBarDraw;
     hooks.pScrollBarWndProc = UXTHEME_ScrollbarWndProc;
+    hooks.pSetWindowRgn = UXTHEME_SetWindowRgn;
     return RegisterUserApiHook(&hooks, &user_api);
 }
 

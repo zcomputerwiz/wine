@@ -2501,6 +2501,10 @@ static HRESULT _SHOpenProfilesKey(PHKEY pKey)
 
     lRet = RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList", 0, NULL, 0,
      KEY_ALL_ACCESS, NULL, pKey, &disp);
+    /* a process without write access to HKLM can still read the profile locations */
+    if (lRet == ERROR_ACCESS_DENIED)
+        lRet = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList", 0,
+         KEY_READ, pKey);
     return HRESULT_FROM_WIN32(lRet);
 }
 
@@ -3277,7 +3281,7 @@ static HRESULT _SHRegisterCommonShellFolders(void)
  *
  * Create some extra folders that don't have a standard CSIDL definition.
  */
-static HRESULT create_extra_folders(void)
+static HRESULT create_extra_folders(BOOL user_only)
 {
     WCHAR path[MAX_PATH+5];
     HRESULT hr;
@@ -3300,7 +3304,7 @@ static HRESULT create_extra_folders(void)
     }
     RegCloseKey( hkey );
 
-    if (SUCCEEDED(hr))
+    if (SUCCEEDED(hr) && !user_only)
     {
         hr = SHGetFolderPathAndSubDirW( 0, CSIDL_COMMON_APPDATA | CSIDL_FLAG_CREATE, NULL,
                                         SHGFP_TYPE_DEFAULT, L"Microsoft", path );
@@ -3348,6 +3352,8 @@ static HRESULT set_folder_attributes(void)
           SFGAO_FILESYSTEM|SFGAO_FOLDER|SFGAO_LINK,
           SFGAO_HASSUBFOLDER|SFGAO_FILESYSTEM|SFGAO_FOLDER|SFGAO_FILESYSANCESTOR },
         { &CLSID_MyDocuments, TRUE, FALSE, FALSE,
+          SFGAO_FILESYSANCESTOR|SFGAO_FOLDER|SFGAO_HASSUBFOLDER, SFGAO_FILESYSTEM },
+        { &CLSID_SharedDocuments, TRUE, FALSE, FALSE,
           SFGAO_FILESYSANCESTOR|SFGAO_FOLDER|SFGAO_HASSUBFOLDER, SFGAO_FILESYSTEM },
         { &CLSID_RecycleBin, FALSE, FALSE, FALSE,
           SFGAO_FOLDER|SFGAO_DROPTARGET|SFGAO_HASPROPSHEET },
@@ -4722,6 +4728,15 @@ static void register_system_knownfolders(void)
     }
 }
 
+/* The per-user half of SHELL_RegisterShellFolders (DllInstall "U", Windows' Active Setup at first logon):
+ * writes only HKCU and the user's profile, so it works when HKLM is not writable. */
+HRESULT SHELL_RegisterUserShellFolders(void)
+{
+    HRESULT hr = _SHRegisterUserShellFolders(FALSE);
+    if (SUCCEEDED(hr)) hr = create_extra_folders(TRUE);
+    return hr;
+}
+
 HRESULT SHELL_RegisterShellFolders(void)
 {
     HRESULT hr;
@@ -4732,7 +4747,7 @@ HRESULT SHELL_RegisterShellFolders(void)
     if (SUCCEEDED(hr))
         hr = _SHRegisterCommonShellFolders();
     if (SUCCEEDED(hr))
-        hr = create_extra_folders();
+        hr = create_extra_folders(FALSE);
     if (SUCCEEDED(hr))
         hr = set_folder_attributes();
     if (SUCCEEDED(hr))

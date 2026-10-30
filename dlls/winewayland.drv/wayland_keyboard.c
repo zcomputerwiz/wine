@@ -695,7 +695,7 @@ static void release_all_keys(HWND hwnd)
  *          Keyboard handling
  */
 
-static HWND wayland_keyboard_get_focused_hwnd(void)
+HWND wayland_keyboard_get_focused_hwnd(void)
 {
     struct wayland_keyboard *keyboard = &process_wayland.keyboard;
     HWND hwnd;
@@ -789,6 +789,7 @@ static void keyboard_handle_enter(void *private, struct wl_keyboard *wl_keyboard
     struct wayland_keyboard *keyboard = &process_wayland.keyboard;
     struct wayland_surface *surface;
     struct wayland_win_data *data;
+    uint32_t *key;
     HWND hwnd;
 
     InterlockedExchange(&process_wayland.input_serial, serial);
@@ -820,12 +821,42 @@ static void keyboard_handle_enter(void *private, struct wl_keyboard *wl_keyboard
     }
 
     wayland_win_data_release(data);
+
+    /* wl_keyboard.enter includes keys already held when focus changes. In
+     * particular, entering Wine from a native terminal for Alt+Tab must carry
+     * Alt/Shift into the Win32 switcher before the Tab press arrives. Restore
+     * modifiers only: ordinary held keys must not become fresh text input. */
+    wl_array_for_each(key, keys)
+    {
+        INPUT input = {.type = INPUT_KEYBOARD};
+        UINT scan, vkey;
+        switch (*key)
+        {
+        case KEY_LEFTSHIFT: case KEY_RIGHTSHIFT:
+        case KEY_LEFTCTRL: case KEY_RIGHTCTRL:
+        case KEY_LEFTALT: case KEY_RIGHTALT:
+        case KEY_LEFTMETA: case KEY_RIGHTMETA:
+            break;
+        default:
+            continue;
+        }
+        scan = key2scan(*key);
+        input.ki.wScan = (scan & 0x300) ? scan + 0xdf00 : scan;
+        vkey = NtUserMapVirtualKeyEx(input.ki.wScan, MAPVK_VSC_TO_VK_EX, keyboard_hkl);
+        if (NtUserGetAsyncKeyState(vkey) & 0x8000) continue;
+        input.ki.dwFlags = KEYEVENTF_SCANCODE;
+        if (scan & ~0xff) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+        NtUserSendHardwareInput(hwnd, 0, &input, 0);
+    }
 }
 
 static void keyboard_handle_leave(void *data, struct wl_keyboard *wl_keyboard,
                                   uint32_t serial, struct wl_surface *wl_surface)
 {
     struct wayland_keyboard *keyboard = &process_wayland.keyboard;
+    struct wayland_win_data *win;
+    unsigned int epoch = 0;
+    BOOL private_view = FALSE;
     HWND hwnd;
 
     InterlockedExchange(&process_wayland.input_serial, serial);
@@ -845,6 +876,17 @@ static void keyboard_handle_leave(void *data, struct wl_keyboard *wl_keyboard,
     /* The spec for the leave event tells us to treat all keys as released,
      * and for any key repetition to stop. */
     release_all_keys(hwnd);
+
+    if ((win = wayland_win_data_get(hwnd)))
+    {
+        if (win->wayland_surface && win->wayland_surface->wex_window)
+        {
+            private_view = TRUE;
+            epoch = win->wayland_surface->wex_activation_epoch;
+        }
+        wayland_win_data_release(win);
+    }
+    if (private_view) NtUserPostMessage(hwnd, WM_WAYLAND_CLEAR_FOREGROUND, epoch, 0);
 
     /* FIXME: update foreground window as well */
 }

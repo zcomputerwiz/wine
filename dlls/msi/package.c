@@ -1256,6 +1256,37 @@ static WCHAR *get_product_version( MSIDATABASE *db )
     return get_property( db, L"ProductVersion" );
 }
 
+/* Is installing this package file going to be a per-machine install (what msi_set_context decides later, from the
+ * package file alone, because a limited token cannot open the package for the install: opening copies it into the
+ * machine's Installer directory)? The product is installed per machine already, or ALLUSERS is 1 or 2 on the command
+ * line or in the package. */
+BOOL msi_package_file_is_machine( const WCHAR *path, const WCHAR *props )
+{
+    MSIDATABASE *db;
+    MSIINSTALLCONTEXT context;
+    const WCHAR *opt;
+    WCHAR *code, *value;
+    UINT len;
+    int allusers = 0;
+    BOOL machine;
+
+    if (!path || !path[0] || path[0] == '#' || GetFileAttributesW( path ) == INVALID_FILE_ATTRIBUTES) return FALSE;
+    if (MSI_OpenDatabaseW( path, MSIDBOPEN_READONLY, &db ) != ERROR_SUCCESS) return FALSE;
+    code = get_property( db, L"ProductCode" );
+    if (code && msi_locate_product( code, &context ) == ERROR_SUCCESS)
+        machine = context == MSIINSTALLCONTEXT_MACHINE;
+    else
+    {
+        if ((value = get_property( db, L"ALLUSERS" ))) allusers = wcstol( value, NULL, 10 );
+        free( value );
+        if (props && (opt = msi_get_command_line_option( props, L"ALLUSERS", &len )) && len == 1) allusers = opt[0] - '0';
+        machine = allusers == 1 || allusers == 2;
+    }
+    free( code );
+    msiobj_release( &db->hdr );
+    return machine;
+}
+
 static UINT get_registered_local_package( const WCHAR *product, WCHAR *localfile )
 {
     MSIINSTALLCONTEXT context;

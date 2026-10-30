@@ -30,6 +30,7 @@
 #include "ntstatus.h"
 
 #include "waylanddrv.h"
+#include "wexwayland.h"
 
 #include "wine/debug.h"
 
@@ -50,6 +51,19 @@ static int wayland_win_data_cmp_rb(const void *key,
 
 static pthread_mutex_t win_data_mutex;
 static struct rb_tree win_data_rb = { wayland_win_data_cmp_rb };
+
+void wayland_zones_reposition(void)
+{
+    struct wayland_win_data *data;
+    pthread_mutex_lock(&win_data_mutex);
+    RB_FOR_EACH_ENTRY(data, &win_data_rb, struct wayland_win_data, entry)
+    {
+        if (!data->wayland_surface || !data->wayland_surface->zone_item) continue;
+        wayland_zone_place(data->wayland_surface);
+        wl_surface_commit(data->wayland_surface->wl_surface);
+    }
+    pthread_mutex_unlock(&win_data_mutex);
+}
 
 /***********************************************************************
  *           wayland_win_data_create
@@ -139,6 +153,7 @@ static void wayland_win_data_get_config(struct wayland_win_data *data,
     DWORD style;
 
     conf->rect = data->rects.visible;
+    conf->client_rect = data->rects.client;
     style = NtUserGetWindowLongW(data->hwnd, GWL_STYLE);
 
     TRACE("window=%s style=%#x\n", wine_dbgstr_rect(&conf->rect), style);
@@ -186,7 +201,9 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
                (!(exstyle & WS_EX_LAYERED) || data->layered_attribs_set);
 
     if (!visible) role = WAYLAND_SURFACE_ROLE_NONE;
-    else if (owner_surface) role = WAYLAND_SURFACE_ROLE_SUBSURFACE;
+    else if (owner_surface && !(process_wayland.wex_manager &&
+             wex_window_manager_v1_get_version(process_wayland.wex_manager) >= 4 &&
+             NtUserGetProp(data->hwnd, WEX_WAYLAND_NATIVE_PROP))) role = WAYLAND_SURFACE_ROLE_SUBSURFACE;
     else role = WAYLAND_SURFACE_ROLE_TOPLEVEL;
 
     /* we can temporarily clear the role of a surface but cannot assign a different one after it's set */
@@ -210,6 +227,8 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
     wl_surface_set_input_region(surface->wl_surface, input_region);
     if (input_region) wl_region_destroy(input_region);
 
+    wayland_win_data_get_config(data, &surface->window);
+
     /* If the window is a visible toplevel make it a wayland
      * xdg_toplevel. Otherwise keep it role-less to avoid polluting the
      * compositor with empty xdg_toplevels. */
@@ -225,8 +244,6 @@ static BOOL wayland_win_data_create_wayland_surface(struct wayland_win_data *dat
         wayland_surface_make_subsurface(surface, owner_surface);
         break;
     }
-
-    wayland_win_data_get_config(data, &surface->window);
 
     /* Size/position changes affect the effective pointer constraint, so update
      * it as needed. */
@@ -393,6 +410,10 @@ static BOOL is_window_managed(HWND hwnd, UINT swp_flags, BOOL fullscreen)
     /* application windows are managed */
     ex_style = NtUserGetWindowLongW(hwnd, GWL_EXSTYLE);
     if (ex_style & WS_EX_APPWINDOW) return TRUE;
+    /* The private shell compositor can position nonactivating topmost
+     * overlays independently. Explorer's Alt+Tab UI must not become a
+     * subsurface clipped by a hosted native frame's client hole. */
+    if (process_wayland.wex_manager && (ex_style & WS_EX_TOPMOST)) return TRUE;
     /* windows that own popups are managed */
     if (has_owned_popups(hwnd)) return TRUE;
     /* default: not managed */
@@ -466,6 +487,25 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     else if (wayland_win_data_create_wayland_surface(data, owner_surface))
     {
         wayland_win_data_update_wayland_state(data);
+        /* A CSD host's entire client is a hole, so changing its size need not
+         * produce any GDI damage. Real gedit shrinks to the 150% work area
+         * during startup; keep its transparent proxy extent current using the
+         * same dummy-content path as native client surfaces. SSD frame pixels
+         * still require their ordinary paint/transaction, never a dummy. */
+        if (data->wayland_surface->wex_window && NtUserGetProp(hwnd, WEX_WAYLAND_HOST_PROP) &&
+            !data->wayland_surface->window.minimized &&
+            EqualRect(&data->wayland_surface->window.rect, &data->wayland_surface->window.client_rect))
+            wayland_surface_ensure_contents(data->wayland_surface);
+        wayland_wex_update(data->wayland_surface, insert_after, swp_flags);
+        /* A pure move can reuse the existing buffer without another paint.
+         * Apply zone placement now, including rollback after Escape. */
+        if (!(swp_flags & SWP_NOMOVE) && (swp_flags & SWP_NOSIZE) &&
+            data->wayland_surface->zone_item && data->wayland_surface->content_width)
+        {
+            wayland_zone_place(data->wayland_surface);
+            wl_surface_commit(data->wayland_surface->wl_surface);
+            wl_display_flush(process_wayland.wl_display);
+        }
     }
 
     if (owner_data) wayland_win_data_release(owner_data);
@@ -482,6 +522,7 @@ static void wayland_configure_window(HWND hwnd)
     BOOL needs_enter_size_move = FALSE;
     BOOL needs_exit_size_move = FALSE;
     BOOL restoring_from_minimize = FALSE;
+    BOOL move_to_work_area = FALSE;
     struct wayland_win_data *data;
     RECT rect, surface_rect;
 
@@ -508,6 +549,42 @@ static void wayland_configure_window(HWND hwnd)
 
     surface->processing = surface->requested;
     memset(&surface->requested, 0, sizeof(surface->requested));
+
+    /* wex views restore only through explicit client activation. A configure
+     * after minimize may merely acknowledge geometry or a work-area change. */
+    if (surface->wex_window && surface->window.minimized)
+    {
+        surface->current = surface->processing;
+        memset(&surface->processing, 0, sizeof(surface->processing));
+        xdg_surface_ack_configure(surface->xdg_surface, surface->current.serial);
+        wayland_win_data_release(data);
+        return;
+    }
+
+    /* The hosted frame controller owns Win32 maximize/restore geometry. An
+     * xdg state acknowledgement can still contain the old frame size; applying
+     * it with NOSENDCHANGING would bypass the controller and undo its matching
+     * native-ready frame (reproduced with real foot work-area maximize). */
+    if (surface->wex_window && NtUserGetProp(hwnd, WEX_WAYLAND_HOST_PROP) &&
+        NtUserGetProp(hwnd, WEX_WAYLAND_RESIZE_ENABLE_PROP) &&
+        surface->wex_group == WEX_WINDOW_V1_GROUP_STATUS_ACTIVE)
+    {
+        surface->processing.processed = TRUE;
+        if (wayland_surface_reconfigure(surface))
+        {
+            if (data->window_contents && !data->window_contents->busy)
+            {
+                wayland_surface_attach_shm(surface, data->window_contents, NULL);
+                wl_surface_damage_buffer(surface->wl_surface, 0, 0,
+                    data->window_contents->width, data->window_contents->height);
+            }
+            wl_surface_commit(surface->wl_surface);
+            wayland_wex_flush_activation(surface);
+        }
+        wl_display_flush(process_wayland.wl_display);
+        wayland_win_data_release(data);
+        return;
+    }
 
     state = surface->processing.state;
     /* Ignore size hints if we don't have a state that requires strict
@@ -581,6 +658,25 @@ static void wayland_configure_window(HWND hwnd)
     rect = map_rect_from_surface(surface, rect);
     OffsetRect(&rect, data->rects.window.left, data->rects.window.top);
 
+    /* Compositor maximize dimensions describe the visible frame. Win32's
+     * maximized window rectangle also includes its invisible resize borders. */
+    if (surface->wex_window && width && height && (state & WAYLAND_SURFACE_CONFIG_STATE_MAXIMIZED))
+    {
+        RECT borders = {0};
+        UINT dpi = NtUserCallHwnd(hwnd, NtUserCallHwnd_GetDpiForWindow);
+        DWORD style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
+        if (style & WS_THICKFRAME)
+        {
+            RECT work;
+            NtUserAdjustWindowRect(&borders, WS_THICKFRAME | WS_BORDER, FALSE, 0, dpi);
+            NtUserSystemParametersInfo(SPI_GETWORKAREA, 0, &work, 0);
+            rect.right += borders.right - borders.left;
+            rect.bottom += borders.bottom - borders.top;
+            OffsetRect(&rect, work.left + borders.left - rect.left, work.top + borders.top - rect.top);
+            move_to_work_area = TRUE;
+        }
+    }
+
     wayland_win_data_release(data);
 
     TRACE("processing=%dx%d,%#x\n", width, height, state);
@@ -589,6 +685,7 @@ static void wayland_configure_window(HWND hwnd)
     if (needs_exit_size_move) send_message(hwnd, WM_EXITSIZEMOVE, 0, 0);
 
     flags |= SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOMOVE;
+    if (move_to_work_area) flags &= ~SWP_NOMOVE;
     if (rect.left == rect.right || rect.bottom == rect.top) flags |= SWP_NOSIZE;
 
     style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
@@ -615,6 +712,8 @@ static void wayland_configure_window(HWND hwnd)
  */
 LRESULT WAYLAND_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    struct wayland_win_data *data;
+    BOOL clear;
     switch (msg)
     {
     case WM_WAYLAND_INIT_DISPLAY_DEVICES:
@@ -623,8 +722,66 @@ LRESULT WAYLAND_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_WAYLAND_CONFIGURE:
         wayland_configure_window(hwnd);
         return 0;
+    case WM_WAYLAND_WEX_UPDATE:
+        if (wp & SWP_FRAMECHANGED)
+        {
+            /* A preferred-scale change affects zone placement, the reserved
+             * shell edge and client-hole extents even at unchanged Win32
+             * geometry. Refresh on the owner thread, outside callback locks. */
+            NtUserSetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                              SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                              SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            return 0;
+        }
+        if ((data = wayland_win_data_get(hwnd)))
+        {
+            /* Pointer-free refresh of current state. Destroyed/recreated
+             * surfaces do not consume any callback's old surface pointer. */
+            if (data->wayland_surface && data->wayland_surface->wex_window)
+                wayland_wex_update(data->wayland_surface, HWND_TOP, wp & SWP_NOZORDER);
+            wayland_win_data_release(data);
+        }
+        return 0;
+    case WM_WAYLAND_WEX_RESIZE:
+        wayland_wex_dispatch_resize(hwnd);
+        return 0;
     case WM_WAYLAND_SET_FOREGROUND:
+        /* Private shell views are focused only in response to Wine's own
+         * activation requests. A queued keyboard-enter is an acknowledgement,
+         * not a new foreground decision; echoing stale enters back to the
+         * compositor can endlessly alternate two windows during creation. */
+        if (process_wayland.wex_manager) return 0;
         NtUserSetForegroundWindowInternal(hwnd);
+        return 0;
+    case WM_WAYLAND_CLEAR_FOREGROUND:
+        clear = FALSE;
+        if ((data = wayland_win_data_get(hwnd)))
+        {
+            if (data->wayland_surface && data->wayland_surface->wex_window &&
+                data->wayland_surface->wex_activation_epoch == (unsigned int)wp &&
+                (data->wayland_surface->wex_group != WEX_WINDOW_V1_GROUP_STATUS_ACTIVE ||
+                 (data->wayland_surface->wex_focus == WEX_WINDOW_V1_FOCUS_TARGET_NONE &&
+                  data->wayland_surface->wex_focus_epoch == (unsigned int)wp))) clear = TRUE;
+            wayland_win_data_release(data);
+        }
+        /* On native-app focus, deactivate on the owning UI thread so the next
+         * click can activate this window again. Reject old leave messages after
+         * a new Wine activation or a focus change to another Wine window. */
+        if (clear && !wayland_keyboard_get_focused_hwnd() && NtUserGetForegroundWindow() == hwnd)
+            NtUserSetActiveWindow(NULL);
+        return 0;
+    case WM_WAYLAND_FOREIGN_FOREGROUND:
+        clear = FALSE;
+        if ((data = wayland_win_data_get(hwnd)))
+        {
+            if (data->wayland_surface &&
+                data->wayland_surface->wex_activation_epoch == (unsigned int)wp &&
+                data->wayland_surface->wex_group == WEX_WINDOW_V1_GROUP_STATUS_ACTIVE &&
+                data->wayland_surface->wex_focus == WEX_WINDOW_V1_FOCUS_TARGET_NATIVE &&
+                !(NtUserGetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_NOACTIVATE)) clear = TRUE;
+            wayland_win_data_release(data);
+        }
+        if (clear && NtUserGetForegroundWindow() != hwnd) NtUserSetForegroundWindowInternal(hwnd);
         return 0;
     default:
         FIXME("got window msg %x hwnd %p wp %lx lp %lx\n", msg, hwnd, (long)wp, lp);
@@ -755,6 +912,17 @@ LRESULT WAYLAND_SysCommand(HWND hwnd, WPARAM wparam, LPARAM lparam, const POINT 
     TRACE("cmd=%lx hwnd=%p, %lx, %lx\n",
           (long)command, hwnd, (long)wparam, lparam);
 
+    /* Hosted native frames use Wine's move loop and zone geometry. The xdg
+     * interactive move requires a live pointer serial, which a keyboard menu
+     * command does not have, and cannot supply Win32 move-loop focus/lifetime. */
+    if (process_wayland.wex_manager && (command == SC_MOVE || (command == SC_SIZE &&
+         wex_window_manager_v1_get_version(process_wayland.wex_manager) >= 10 &&
+         NtUserGetProp(hwnd, WEX_WAYLAND_RESIZE_ENABLE_PROP))) &&
+        wex_window_manager_v1_get_version(process_wayland.wex_manager) >= 8 &&
+        NtUserGetProp(hwnd, WEX_WAYLAND_HOST_PROP) &&
+        (ULONG_PTR)NtUserGetProp(hwnd, WEX_WAYLAND_GROUP_PROP) == WEX_WAYLAND_GROUP_ACTIVE)
+        return -1;
+
     pthread_mutex_lock(&process_wayland.pointer.mutex);
     if (process_wayland.pointer.focused_hwnd == hwnd)
         button_serial = process_wayland.pointer.button_serial;
@@ -845,12 +1013,29 @@ BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffe
 
     if (!(data = wayland_win_data_get(hwnd))) return FALSE;
 
+    /* Hosted native groups retain the normal frame buffer while minimized.
+     * Painting Wine's iconic caption would shrink it and detach the native,
+     * leaving restore with only an obsolete frame to activate. Do not replace
+     * window_contents with that iconic buffer either. */
+    if (data->wayland_surface && data->wayland_surface->window.minimized &&
+        NtUserGetProp(hwnd, WEX_WAYLAND_HOST_PROP))
+    {
+        wayland_win_data_release(data);
+        return TRUE;
+    }
+
     if ((wayland_surface = data->wayland_surface))
     {
         if (wayland_surface_reconfigure(wayland_surface))
         {
+            /* An active group's new logical client hole must reach the
+             * compositor before its differently sized frame buffer. It can
+             * retain both old roots until matching native content arrives. */
+            if (wayland_surface->wex_group == WEX_WINDOW_V1_GROUP_STATUS_ACTIVE)
+                wayland_wex_update_hosting(wayland_surface);
             wayland_surface_attach_shm(wayland_surface, shm_buffer, damage_region);
             wl_surface_commit(wayland_surface->wl_surface);
+            wayland_wex_flush_activation(wayland_surface);
             committed = TRUE;
         }
         else

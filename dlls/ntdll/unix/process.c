@@ -400,7 +400,7 @@ static BOOL is_unix_console_handle( HANDLE handle )
  *           spawn_process
  */
 static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int socketfd,
-                               int unixdir, char *winedebug, const struct pe_image_info *pe_info )
+                               int unixdir, char *winedebug, const struct pe_image_info *pe_info, BOOL drop_group )
 {
     NTSTATUS status = STATUS_SUCCESS;
     int stdin_fd = -1, stdout_fd = -1;
@@ -434,6 +434,7 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
             if (stdout_fd != -1 && stdout_fd != 1) close( stdout_fd );
 
             if (winedebug) putenv( winedebug );
+            if (!sysrun_prepare_child( drop_group )) _exit(1);
             if (unixdir != -1)
             {
                 fchdir( unixdir );
@@ -884,7 +885,8 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
 
     /* create the child process */
 
-    if ((status = spawn_process( params, socketfd[0], unixdir, winedebug, &pe_info ))) goto done;
+    if ((status = spawn_process( params, socketfd[0], unixdir, winedebug, &pe_info,
+                                 sysrun_must_drop_group( token )))) goto done;
 
     close( socketfd[0] );
     socketfd[0] = -1;
@@ -1855,6 +1857,17 @@ NTSTATUS WINAPI NtSetInformationProcess( HANDLE handle, PROCESSINFOCLASS class, 
             req->handle = wine_server_obj_handle( handle );
             if (!(ret = wine_server_call( req )))
                 *(HANDLE *)info = wine_server_ptr_handle( reply->event );
+        }
+        SERVER_END_REQ;
+        return ret;
+
+    case ProcessWineCreateServiceToken:  /* in: account (0 LocalSystem, 1 LocalService, 2 NetworkService), out: token handle */
+        if (size != sizeof(HANDLE *)) return STATUS_INFO_LENGTH_MISMATCH;
+        SERVER_START_REQ( create_service_token )
+        {
+            req->account = *(ULONG_PTR *)info;
+            if (!(ret = wine_server_call( req )))
+                *(HANDLE *)info = wine_server_ptr_handle( reply->token );
         }
         SERVER_END_REQ;
         return ret;

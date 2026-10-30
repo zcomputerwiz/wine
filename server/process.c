@@ -63,6 +63,7 @@
 #include "request.h"
 #include "user.h"
 #include "security.h"
+#include "sysrun.h"
 
 /* process object */
 
@@ -636,6 +637,20 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->desktop         = 0;
     process->token           = NULL;
     process->trace_data      = 0;
+    process->peer_pid        = -1;
+    process->peer_uid        = -1;
+    process->peer_gid        = -1;
+    if (sysrun_active)  /* the connection's credentials, never the unix_pid the client sends */
+    {
+        struct ucred cred;
+        socklen_t len = sizeof(cred);
+        if (!getsockopt( fd, SOL_SOCKET, SO_PEERCRED, &cred, &len ))
+        {
+            process->peer_pid = cred.pid;
+            process->peer_uid = cred.uid;
+            process->peer_gid = cred.gid;
+        }
+    }
     process->rawinput_devices = NULL;
     process->rawinput_device_count = 0;
     process->rawinput_mouse  = NULL;
@@ -670,6 +685,12 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     {
         process->handles = alloc_handle_table( process, 0 );
         process->token = token_create_admin( TRUE, -1, TokenElevationTypeLimited, default_session_id );
+        /* the registry is loaded before the first client connects, so the helper setting is known here */
+        if (process->token && elevation_enforced())
+        {
+            token_make_filtered( process->token );
+            if (!user_is_administrator()) token_make_standard( process->token );
+        }
         process->affinity = ~0;
     }
     else
@@ -692,6 +713,7 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     }
     if (!process->handles || !process->token) goto error;
     process->session_id = token_get_session_id( process->token );
+    if (!sysrun_process_created( process, !parent )) goto error;
 
     set_fd_events( process->msg_fd, POLLIN );  /* start listening to events */
     return process;
@@ -924,6 +946,7 @@ static void process_killed( struct process *process )
 {
     assert( list_empty( &process->thread_list ));
     process->end_time = current_time;
+    winstation_process_killed( process );
     close_process_desktop( process );
     process->winstation = 0;
     process->desktop = 0;
@@ -1105,7 +1128,7 @@ DECL_HANDLER(new_process)
     int socket_fd = thread_get_inflight_fd( current, req->socket_fd );
     const obj_handle_t *handles = NULL;
     const obj_handle_t *job_handles = NULL;
-    unsigned int i, job_handle_count;
+    unsigned int i, job_handle_count, status;
     struct job *job;
 
     if (socket_fd == -1)
@@ -1257,6 +1280,12 @@ DECL_HANDLER(new_process)
     if (req->token && !(token = get_token_obj( current->process, req->token, TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY )))
     {
         close( socket_fd );
+        goto done;
+    }
+    if (token && (status = token_check_assign_primary( token )))
+    {
+        close( socket_fd );
+        set_error( status );
         goto done;
     }
     if (req->debug && !(debug_obj = get_debug_obj( current->process, req->debug, DEBUG_PROCESS_ASSIGN )))
@@ -1704,8 +1733,18 @@ DECL_HANDLER(set_process_info)
 
             if ((token = get_token_obj( current->process, req->token, TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY )))
             {
-                release_object( process->token );
-                process->token = token;
+                unsigned int status = token_check_assign_primary( token );
+
+                if (status)
+                {
+                    set_error( status );
+                    release_object( token );
+                }
+                else
+                {
+                    release_object( process->token );
+                    process->token = token;
+                }
             }
         }
         release_object( process );
@@ -1799,6 +1838,19 @@ DECL_HANDLER(grant_process_admin_token)
 {
     struct process *process;
     struct token *token;
+
+    /* any process could elevate itself with this request; only a TCB caller may while elevation is enforced */
+    if (elevation_enforced() && !token_has_privilege( current->process->token, SeTcbPrivilege ))
+    {
+        set_error( STATUS_PRIVILEGE_NOT_HELD );
+        return;
+    }
+
+    if (elevation_enforced() && standard_user_session)
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
 
     if (!(process = get_process_from_handle( req->handle, PROCESS_SET_INFORMATION )))
         return;

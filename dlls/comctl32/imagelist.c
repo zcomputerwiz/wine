@@ -220,9 +220,10 @@ static void add_dib_bits( HIMAGELIST himl, int pos, int count, int width, int he
             for (j = n * width; j < (n + 1) * width; j++)
                 if ((has_alpha = ((bits[i * stride + j] & 0xff000000) != 0))) break;
 
+        /* also cleared: a replaced image must not keep the alpha of the one before (it would draw invisible) */
+        himl->item_flags[pos + n] = has_alpha ? ILIF_ALPHA : 0;
         if (has_alpha)
         {
-            himl->item_flags[pos + n] = ILIF_ALPHA;
 
             if (mask_info && himl->hbmMask)  /* generate the mask from the alpha channel */
             {

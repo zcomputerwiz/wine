@@ -54,7 +54,7 @@ AddService=MountMgr,0x800,MountMgrService
 RegisterDlls=RegisterDllsSection
 WineFakeDlls=FakeDlls
 UpdateInis=SystemIni
-CopyFiles=ColorFiles,EtcFiles,InfFiles,NlsFiles,SortFiles,WinmdFiles
+CopyFiles=ColorFiles,EtcFiles,InfFiles,MscFiles,NlsFiles,SortFiles,WinmdFiles
 AddReg=\
     Classes,\
     ContentIndex,\
@@ -71,6 +71,33 @@ AddReg=\
     Services, \
     SessionMgr,\
     ThemeManager
+
+[UserInstall]
+RegisterDlls=UserRegisterDlls
+AddReg=\
+    UserRegistry,\
+    ThemeManager
+
+[UserRegisterDlls]
+11,,shell32.dll,1
+
+[UserRegistry]
+HKCU,Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced,"HideFileExt",0x10003,1
+HKCU,Software\Microsoft\Windows\CurrentVersion\Explorer\HideMyComputerIcons,"{21EC2020-3AEA-1069-A2DD-08002B30309D}",0x10003,1
+HKCU,%CurrentVersion%\Explorer\Advanced,,16
+HKCU,%CurrentVersion%\Explorer\FileExts,,16
+HKCU,%CurrentVersion%\ImmersiveShell,"TabletMode",0x10003,0
+HKCU,%CurrentVersion%\Run,,16
+HKCU,%CurrentVersionNT%\Winlogon,,16
+HKCU,Software\Wine\Debug,"RelayExclude",2,"ntdll.RtlEnterCriticalSection;ntdll.RtlTryEnterCriticalSection;ntdll.RtlLeaveCriticalSection;kernel32.48;kernel32.49;kernel32.94;kernel32.95;kernel32.96;kernel32.97;kernel32.98;kernel32.TlsGetValue;kernel32.TlsSetValue;kernel32.FlsGetValue;kernel32.FlsSetValue;kernel32.SetLastError"
+HKCU,Software\Wine\Debug,"RelayFromExclude",2,"winex11.drv;winemac.drv;user32;gdi32;advapi32;kernel32"
+HKCU,AppEvents\Schemes\Apps\Explorer\Navigating\.Current,,,""
+HKCU,Software\Classes,,16
+HKCU,Software\Microsoft\Protected Storage System Provider,,16
+HKCU,Software\Microsoft\Windows\Shell\Associations\UrlAssociations\ftp\UserChoice,"ProgId",,"ftp"
+HKCU,Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice,"ProgId",,"http"
+HKCU,Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice,"ProgId",,"https"
+
 
 [DefaultInstall]
 Needs=BaseInstall
@@ -153,6 +180,7 @@ AddService=Winmgmt,0,WinmgmtService
 AddService=wuauserv,0,wuauService
 AddService=NDIS,0x800,NDISService
 AddService=nsiproxy,0x800,NsiProxyService
+AddService=wexelevate,0,WexElevateService
 
 [DefaultInstall.ntx86.Services]
 AddService=BITS,0,BITSService
@@ -174,6 +202,7 @@ AddService=Winmgmt,0,WinmgmtService
 AddService=wuauserv,0,wuauService
 AddService=NDIS,0x800,NDISService
 AddService=nsiproxy,0x800,NsiProxyService
+AddService=wexelevate,0,WexElevateService
 
 [DefaultInstall.ntamd64.Services]
 AddService=BITS,0,BITSService
@@ -195,6 +224,7 @@ AddService=Winmgmt,0,WinmgmtService
 AddService=wuauserv,0,wuauService
 AddService=NDIS,0x800,NDISService
 AddService=nsiproxy,0x800,NsiProxyService
+AddService=wexelevate,0,WexElevateService
 
 [DefaultInstall.ntarm64.Services]
 AddService=BITS,0,BITSService
@@ -216,6 +246,7 @@ AddService=Winmgmt,0,WinmgmtService
 AddService=wuauserv,0,wuauService
 AddService=NDIS,0x800,NDISService
 AddService=nsiproxy,0x800,NsiProxyService
+AddService=wexelevate,0,WexElevateService
 
 [Strings]
 MciExtStr="Software\Microsoft\Windows NT\CurrentVersion\MCI Extensions"
@@ -226,27 +257,62 @@ FontSubStr="Software\Microsoft\Windows NT\CurrentVersion\FontSubstitutes"
 Control="System\CurrentControlSet\Control"
 
 [Classes]
+HKCR,.bat,,2,"batfile"
+HKCR,.cmd,,2,"cmdfile"
 HKCR,.chm,,2,"chm.file"
 HKCR,.cpl,,2,"cplfile"
 HKCR,.crt,,2,"CERFile"
 HKCR,.hlp,,2,"hlpfile"
 HKCR,.inf,,2,"inffile"
+HKCR,.msc,,2,"MSCFile"
 HKCR,.ini,,2,"inifile"
 HKCR,.lnk,,2,"lnkfile"
+HKCR,.log,,2,"txtfile"
 HKCR,.msi,,2,"Msi.Package"
 HKCR,.msp,,2,"Msi.Patch"
 HKCR,.pdf,,2,"pdffile"
 HKCR,.reg,,2,"regfile"
 HKCR,.rtf,,2,"rtffile"
+HKCR,.txt,,2,"txtfile"
+HKCR,.txt\ShellNew,"NullFile",2,""
+HKCR,.bmp,,2,"Paint.Picture"
+HKCR,.bmp\ShellNew,"NullFile",2,""
+HKCR,Paint.Picture,,2,"Bitmap Image"
+HKCR,Paint.Picture\DefaultIcon,,2,"%11%\mspaint.exe,1"
+HKCR,Paint.Picture\shell\open\command,,2,"""%11%\mspaint.exe"" ""%1"""
+HKCR,.rtf\ShellNew,"Data",2,"{\rtf1}"
+HKCR,Folder\ShellNew,"Directory",2,""
+HKCR,Folder\ShellNew,"ItemName",2,"New Folder"
+HKCR,Folder\ShellNew,"MenuText",2,"&Folder"
+HKCU,Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced,"HideFileExt",0x10003,1
+HKCU,Software\Microsoft\Windows\CurrentVersion\Explorer\HideMyComputerIcons,"{21EC2020-3AEA-1069-A2DD-08002B30309D}",0x10003,1
 HKCR,.wri,,2,"wrifile"
 HKCR,*\shellex\ContextMenuHandlers,,16
 HKCR,AppID\{B8C54A54-355E-11D3-83EB-00A0C92A2F2D},,2,"Windows Media Player"
 HKCR,Applications\wmplayer.exe,,2,"Windows Media Player"
+HKCR,Applications\notepad.exe,"FriendlyAppName",2,"Notepad"
+HKCR,Applications\notepad.exe\shell\open\command,,2,"""%11%\notepad.exe"" ""%1"""
+HKCR,Applications\mspaint.exe,"FriendlyAppName",2,"Paint"
+HKCR,Applications\mspaint.exe\shell\open\command,,2,"""%11%\mspaint.exe"" ""%1"""
+HKCR,Applications\wordpad.exe,"FriendlyAppName",2,"WordPad"
+HKCR,Applications\wordpad.exe\shell\open\command,,2,"""%16422%\Windows NT\Accessories\wordpad.exe"" ""%1"""
+HKCR,.txt\OpenWithList\wordpad.exe,,16
+HKCR,.bmp\OpenWithList\mspaint.exe,,16
+HKCR,.rtf\OpenWithList\wordpad.exe,,16
+HKCR,batfile,,2,"MS-DOS Batch File"
+HKCR,batfile\DefaultIcon,,2,"%11%\shell32.dll,-153"
+HKCR,batfile\shell\open\command,,2,"""%11%\cmd.exe"" /c ""%1"" %*"
+HKCR,cmdfile,,2,"Windows Command Script"
+HKCR,cmdfile\DefaultIcon,,2,"%11%\shell32.dll,-153"
+HKCR,cmdfile\shell\open\command,,2,"""%11%\cmd.exe"" /c ""%1"" %*"
 HKCR,CERfile,,2,"Security Certificate"
 HKCR,CERfile\shell\open\command,,2,"%11%\rundll32.exe cryptext.dll,CryptExtOpenCER %1"
 HKCR,chm.file,,2,"Compiled HTML Help File"
 HKCR,chm.file\DefaultIcon,,2,"%10%\hh.exe,0"
 HKCR,chm.file\shell\open\command,,2,"""%10%\hh.exe"" ""%1"""
+HKCR,MSCFile,,2,"Microsoft Common Console Document"
+HKCR,MSCFile\DefaultIcon,,2,"%11%\mmc.exe,0"
+HKCR,MSCFile\shell\open\command,,2,"""%11%\mmc.exe"" ""%1"" %*"
 HKCR,cplfile,,2,"Control Panel Item"
 HKCR,cplfile\shell\cplopen,,2,"Open with Control Panel"
 HKCR,cplfile\shell\cplopen\command,,2,"rundll32.exe shell32.dll,Control_RunDLL ""%1"",%*"
@@ -256,6 +322,9 @@ HKCR,exefile,,2,"Application"
 HKCR,exefile\DefaultIcon,,2,"%1"
 HKCR,exefile\shell\open\command,,2,"""%1"" %*"
 HKCR,exefile\shell\runas\command,,2,"""%1"" %*"
+HKCR,Directory\shell\open\command,,2,"""%11%\explorer.exe"" ""%1"""
+HKCR,Drive\shell\open\command,,2,"""%11%\explorer.exe"" ""%1"""
+HKCR,folder\shell\open\command,,2,"""%11%\explorer.exe"" ""%1"""
 HKCR,folder\shell\open\ddeexec,,2,"[ViewFolder("%l", %I, %S)]"
 HKCR,folder\shell\open\ddeexec,"NoActivateHandler",2,""
 HKCR,folder\shell\open\ddeexec\application,,2,"Folders"
@@ -267,13 +336,16 @@ HKCR,hlpfile,,2,"Help File"
 HKCR,hlpfile\shell\open\command,,2,"""%11%\winhlp32.exe"" ""%1"""
 HKCR,htmlfile\shell\open\command,,2,"""%11%\winebrowser.exe"" ""%1"""
 HKCR,inffile,,2,"Setup Information"
+HKCR,inffile\DefaultIcon,,2,"%11%\shell32.dll,-151"
 HKCR,inffile\shell\install\command,,2,"%11%\rundll32.exe setupapi,InstallHinfSection DefaultInstall 132 %1"
 HKCR,inifile,,2,"Configuration Settings"
+HKCR,inifile\DefaultIcon,,2,"%11%\shell32.dll,-151"
 HKCR,inifile\shell\open\command,,2,"""%11%\notepad.exe"" ""%1"""
 HKCR,inifile\shell\print\command,,2,"""%11%\notepad.exe"" /p ""%1"""
 HKCR,lnkfile,,2,"Shortcut"
 HKCR,lnkfile,"NeverShowExt",2,""
 HKCR,lnkfile,"IsShortcut",2,"yes"
+HKCR,.lnk\ShellNew,"Command",2,"rundll32.exe appwiz.cpl,NewLinkHere %1"
 HKCR,lnkfile\CLSID,,2,"{00021401-0000-0000-C000-000000000046}"
 HKCR,lnkfile\shellex\IconHandler,,2,"{00021401-0000-0000-C000-000000000046}"
 HKCR,lnkfile\shellex\ContextMenuHandlers\{00021401-0000-0000-C000-000000000046},,0x10,
@@ -294,6 +366,7 @@ HKCR,rtffile,,2,"Rich Text Document"
 HKCR,rtffile\shell\open\command,,2,"""%16422%\Windows NT\Accessories\wordpad.exe"" ""%1"""
 HKCR,rtffile\shell\print\command,,2,"""%16422%\Windows NT\Accessories\wordpad.exe"" /p ""%1"""
 HKCR,txtfile,,2,"Text Document"
+HKCR,txtfile\DefaultIcon,,2,"%11%\shell32.dll,-152"
 HKCR,txtfile\shell\open\command,,2,"""%11%\notepad.exe"" ""%1"""
 HKCR,txtfile\shell\print\command,,2,"""%11%\notepad.exe"" /p ""%1"""
 HKCR,wrifile\shell\open\command,,2,"""%16422%\Windows NT\Accessories\wordpad.exe"" ""%1"""
@@ -689,6 +762,8 @@ HKLM,SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86,"Version",2,"14.51.362
 [RegisterDllsSection]
 ;;some dlls have to be registered first
 11,,shell32.dll,1
+11,,stobject.dll,1
+11,,netshell.dll,1
 11,,quartz.dll,1
 
 11,,colorcnv.dll,1
@@ -1118,6 +1193,18 @@ ErrorControl=1
 HKR,Parameters,"ServiceDll",,"%11%\schedsvc.dll"
 HKLM,%CurrentVersionNT%\SvcHost,"netsvcs",0x00010008,"Schedule"
 
+[WexElevateService]
+AddReg=WexElevateServiceKeys
+Description="Starts programs with the full token of an administrator, on behalf of a caller"
+DisplayName="Application Information"
+ServiceBinary="%11%\wexelevate.exe"
+ServiceType=16
+StartType=3
+ErrorControl=1
+
+[WexElevateServiceKeys]
+HKLM,"System\CurrentControlSet\Services\wexelevate","Security",1,01,00,04,80,5c,00,00,00,68,00,00,00,00,00,00,00,14,00,00,00,02,00,48,00,03,00,00,00,00,00,14,00,9d,01,02,00,01,01,00,00,00,00,00,05,0b,00,00,00,00,00,14,00,fd,a1,02,00,01,01,00,00,00,00,00,05,12,00,00,00,00,00,18,00,ff,01,0f,00,01,02,00,00,00,00,00,05,20,00,00,00,20,02,00,00,01,01,00,00,00,00,00,05,12,00,00,00,01,01,00,00,00,00,00,05,12,00,00,00
+
 [wuauService]
 Description="wuauserv"
 DisplayName="Automatic Updates"
@@ -1253,6 +1340,9 @@ winehid.inf,"@%12%\winehid.sys,-1"
 wineusb.inf,"@%12%\wineusb.sys,-1"
 winexinput.inf,"@%12%\winexinput.sys,-1"
 
+[MscFiles]
+devmgmt.msc,"@%11%\mmc.exe,-1"
+
 [NlsFiles]
 c_037.nls
 c_10000.nls
@@ -1354,6 +1444,7 @@ WinmdFiles = winmd,include
 ColorFiles = 23
 EtcFiles  = 12,etc
 InfFiles  = 17
+MscFiles  = 11
 NlsFiles  = 11
 SortFiles = 10,globalization\sorting
 WinmdFiles = 11,winmetadata

@@ -66,6 +66,20 @@ struct unwind_builtin_dll_params
     CONTEXT                    *context;
 };
 
+struct wine_create_symlink_params
+{
+    const WCHAR *target;
+    const WCHAR *link;
+};
+
+#ifdef _WIN64
+struct wine_create_symlink_params32
+{
+    ULONG target;
+    ULONG link;
+};
+#endif
+
 enum ntdll_unix_funcs
 {
     unix_load_so_dll,
@@ -76,6 +90,7 @@ enum ntdll_unix_funcs
     unix_wine_server_handle_to_fd,
     unix_wine_spawnvp,
     unix_system_time_precise,
+    unix_wine_create_symlink,
 };
 
 extern unixlib_handle_t __wine_unixlib_handle;

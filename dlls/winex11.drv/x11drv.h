@@ -476,6 +476,9 @@ extern XVisualInfo argb_visual;
 extern Colormap default_colormap;
 extern XPixmapFormatValues **pixmap_formats;
 extern Window root_window;
+extern void x11drv_secure_init( Display *display );
+extern BOOL x11drv_secure_desktop(void);
+extern void x11drv_secure_exclusive( Display *display );
 extern BOOL clipping_cursor;
 extern BOOL keyboard_grabbed;
 extern unsigned int screen_bpp;
@@ -1030,5 +1033,7 @@ static inline UINT asciiz_to_unicode( WCHAR *dst, const char *src )
     while ((*p++ = *src++));
     return (p - dst) * sizeof(WCHAR);
 }
+
+extern BOOL X11DRV_has_compositor( Display *display );
 
 #endif  /* __WINE_X11DRV_H */

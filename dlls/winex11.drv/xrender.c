@@ -1743,6 +1743,12 @@ static BOOL xrenderdrv_StretchBlt( PHYSDEV dst_dev, struct bitblt_coords *dst,
         return dst_dev->funcs->pStretchBlt( dst_dev, dst, src_dev, src, rop );
     }
 
+    /* A named desktop picture lacks manually redirected children. Let core
+     * readback capture the real root/overlay, including for scaled blits. */
+    if (physdev_src->x11dev->drawable == root_window &&
+        root_window != DefaultRootWindow( gdi_display ) && X11DRV_has_compositor( gdi_display ))
+        goto x11drv_fallback;
+
     /* XRender is of no use for color -> mono */
     if (physdev_dst->format == WXR_FORMAT_MONO && physdev_src->format != WXR_FORMAT_MONO)
         goto x11drv_fallback;

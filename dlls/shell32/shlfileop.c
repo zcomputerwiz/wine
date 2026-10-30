@@ -83,6 +83,7 @@ typedef struct
     SHFILEOPSTRUCTW *req;
     DWORD dwYesToAllMask;
     BOOL bManyItems;
+    int nested;   /* inside a folder that is copied or moved: its items are not recorded for undo */
     BOOL bCancelled;
 } FILE_OPERATION;
 
@@ -234,7 +235,7 @@ static BOOL SHELL_ConfirmIDs(int nKindOfDialog, SHELL_ConfirmIDstruc *ids)
 	    return TRUE;
 	  case ASK_DELETE_MULTIPLE_ITEM:
             ids->icon_resource_id = IDI_SHELL_CONFIRM_DELETE;
-	    ids->caption_resource_id  = IDS_DELETEITEM_CAPTION;
+	    ids->caption_resource_id  = IDS_DELETEMULTIPLE_CAPTION;
 	    ids->text_resource_id  = IDS_DELETEMULTIPLE_TEXT;
 	    return TRUE;
           case ASK_TRASH_FILE:
@@ -249,7 +250,7 @@ static BOOL SHELL_ConfirmIDs(int nKindOfDialog, SHELL_ConfirmIDstruc *ids)
             return TRUE;
           case ASK_TRASH_MULTIPLE_ITEM:
             ids->icon_resource_id = IDI_SHELL_TRASH_FILE;
-            ids->caption_resource_id = IDS_DELETEITEM_CAPTION;
+            ids->caption_resource_id = IDS_DELETEMULTIPLE_CAPTION;
             ids->text_resource_id = IDS_TRASHMULTIPLE_TEXT;
             return TRUE;
           case ASK_CANT_TRASH_ITEM:
@@ -298,7 +299,18 @@ static BOOL SHELL_ConfirmDialogW(HWND hWnd, int nKindOfDialog, LPCWSTR szDir, FI
         LoadStringW(shell32_hInstance, ids.text_resource_id, szText, ARRAY_SIZE(szText));
 
         args[0] = (DWORD_PTR)szDir;
-        FormatMessageW(FORMAT_MESSAGE_FROM_STRING|FORMAT_MESSAGE_ARGUMENT_ARRAY,
+        /* Windows names the item to delete as the shell shows it, without its folder */
+        if (nKindOfDialog == ASK_DELETE_FILE || nKindOfDialog == ASK_DELETE_FOLDER || nKindOfDialog == ASK_TRASH_FILE ||
+            nKindOfDialog == ASK_TRASH_FOLDER || nKindOfDialog == ASK_CANT_TRASH_ITEM)
+        {
+            SHFILEINFOW info;
+
+            if (SHGetFileInfoW(szDir, 0, &info, sizeof(info), SHGFI_DISPLAYNAME))
+                args[0] = (DWORD_PTR)info.szDisplayName;
+            FormatMessageW(FORMAT_MESSAGE_FROM_STRING|FORMAT_MESSAGE_ARGUMENT_ARRAY,
+                szText, 0, 0, szBuffer, ARRAY_SIZE(szBuffer), (va_list*)args);
+        }
+        else FormatMessageW(FORMAT_MESSAGE_FROM_STRING|FORMAT_MESSAGE_ARGUMENT_ARRAY,
             szText, 0, 0, szBuffer, ARRAY_SIZE(szBuffer), (va_list*)args);
 
         hIcon = LoadIconW(ids.hIconInstance, (LPWSTR)MAKEINTRESOURCE(ids.icon_resource_id));
@@ -1153,7 +1165,9 @@ static DWORD copy_move_dir(FILE_OPERATION *op, const WCHAR *dir, const WCHAR *ta
     file_entry_init(&from_dir, buffer, INVALID_FILE_ATTRIBUTES, TRUE);
     file_entry_init(&to_dir, target, GetFileAttributesW(target), FALSE);
 
+    op->nested++;
     ret = do_copy_move(op, &from_dir, &to_dir, TRUE);
+    op->nested--;
 
     if (op->req->wFunc == FO_MOVE && ret == ERROR_SUCCESS)
         RemoveDirectoryW(dir);
@@ -1163,9 +1177,34 @@ static DWORD copy_move_dir(FILE_OPERATION *op, const WCHAR *dir, const WCHAR *ta
     return ret;
 }
 
+/* FOF_RENAMEONCOLLISION: "Copy of name", then "Copy (2) of name" ..., as Windows Explorer names a copy in place */
+static BOOL get_collision_name(WCHAR *target)
+{
+    WCHAR dir[MAX_PATH], name[MAX_PATH], format[64], new_name[MAX_PATH];
+    DWORD_PTR args[2];
+    UINT n;
+
+    wcscpy(dir, target);
+    PathRemoveFileSpecW(dir);
+    lstrcpynW(name, PathFindFileNameW(target), MAX_PATH);
+    for (n = 1; n < 1000; n++)
+    {
+        LoadStringW(shell32_hInstance, n == 1 ? IDS_COPY_OF : IDS_COPY_N_OF, format, ARRAY_SIZE(format));
+        args[0] = (DWORD_PTR)name;
+        args[1] = n;
+        if (!FormatMessageW(FORMAT_MESSAGE_FROM_STRING | FORMAT_MESSAGE_ARGUMENT_ARRAY, format, 0, 0,
+                            new_name, ARRAY_SIZE(new_name), (va_list *)args))
+            return FALSE;
+        if (!PathCombineW(target, dir, new_name)) return FALSE;
+        if (!PathFileExistsW(target)) return TRUE;
+    }
+    return FALSE;
+}
+
 static DWORD do_copy_move(FILE_OPERATION *op, const FILE_ENTRY *from, const FILE_ENTRY *to, BOOL append_file_name)
 {
     WCHAR target[MAX_PATH], target_dir[MAX_PATH];
+    DWORD ret;
 
     TRACE("Copying %s to %s, flags %#x, append_file_name %d.\n",
             debugstr_w(from->szFullPath), debugstr_w(to->szFullPath), op->req->fFlags, append_file_name);
@@ -1178,6 +1217,9 @@ static DWORD do_copy_move(FILE_OPERATION *op, const FILE_ENTRY *from, const FILE
         PathAppendW(target_dir, to->szFilename);
         PathAppendW(target, from->szFilename);
     }
+
+    if ((op->req->fFlags & FOF_RENAMEONCOLLISION) && PathFileExistsW(target) && !get_collision_name(target))
+        return DE_SAMEFILE;
 
     /* Fail if target is illegal. */
     if (PathFileExistsW(target))
@@ -1205,18 +1247,15 @@ static DWORD do_copy_move(FILE_OPERATION *op, const FILE_ENTRY *from, const FILE
 
     /* Source is a dir. */
     if (IsAttribDir(from->attributes))
-        return copy_move_dir(op, from->szFullPath, target);
-
+        ret = copy_move_dir(op, from->szFullPath, target);
     /* Source is a single file. */
-    switch (op->req->wFunc)
-    {
-        case FO_COPY:
-            return SHNotifyCopyFileW(from->szFullPath, target, FALSE);
-        case FO_MOVE:
-            return SHNotifyMoveFileW(from->szFullPath, target);
-        default:
-            assert(0); /* Should never be here. */
-    }
+    else if (op->req->wFunc == FO_COPY)
+        ret = SHNotifyCopyFileW(from->szFullPath, target, FALSE);
+    else
+        ret = SHNotifyMoveFileW(from->szFullPath, target);
+
+    if (!ret && !op->nested) undo_add(from->szFullPath, target);
+    return ret;
 }
 
 /* The FO_COPY operation. */
@@ -1320,7 +1359,10 @@ static int delete_files(LPSHFILEOPSTRUCTW lpFileOp, const FILE_LIST *flFrom)
         {
             BOOL bDelete;
             if (trash_file(fileEntry->szFullPath))
+            {
+                undo_add(fileEntry->szFullPath, NULL);
                 continue;
+            }
 
             /* Note: Windows silently deletes the file in such a situation, we show a dialog */
             if (!(lpFileOp->fFlags & FOF_NOCONFIRMATION) || (lpFileOp->fFlags & FOF_WANTNUKEWARNING))
@@ -1353,6 +1395,7 @@ static int delete_files(LPSHFILEOPSTRUCTW lpFileOp, const FILE_LIST *flFrom)
 static DWORD rename_files(SHFILEOPSTRUCTW *op, const FILE_LIST *from, const FILE_LIST *to)
 {
     const FILE_ENTRY *entry_from, *entry_to;
+    DWORD ret;
 
     if (from->dwNumFiles != 1)
         return DE_MANYSRC1DEST;
@@ -1373,15 +1416,16 @@ static DWORD rename_files(SHFILEOPSTRUCTW *op, const FILE_LIST *from, const FILE
     if (entry_to->bExists && IsAttribDir(entry_from->attributes) != IsAttribDir(entry_to->attributes))
         return IsAttribDir(entry_to->attributes) ? DE_FILEDESTISFLD : DE_FLDDESTISFILE;
 
-    return SHNotifyMoveFileW(entry_from->szFullPath, entry_to->szFullPath);
+    ret = SHNotifyMoveFileW(entry_from->szFullPath, entry_to->szFullPath);
+    if (!ret) undo_add(entry_from->szFullPath, entry_to->szFullPath);
+    return ret;
 }
 
 /* alert the user if an unsupported flag is used */
 static void check_flags(FILEOP_FLAGS fFlags)
 {
     WORD wUnsupportedFlags = FOF_NO_CONNECTED_ELEMENTS |
-        FOF_NOCOPYSECURITYATTRIBS | FOF_NORECURSEREPARSE |
-        FOF_RENAMEONCOLLISION | FOF_WANTMAPPINGHANDLE;
+        FOF_NOCOPYSECURITYATTRIBS | FOF_NORECURSEREPARSE | FOF_WANTMAPPINGHANDLE;
 
     if (fFlags & wUnsupportedFlags)
         FIXME("Unsupported flags: %04x\n", fFlags);
@@ -1425,6 +1469,13 @@ int WINAPI SHFileOperationW(LPSHFILEOPSTRUCTW lpFileOp)
         return ret;
     }
 
+    /* Windows can undo what is done with FOF_ALLOWUNDO */
+    if (lpFileOp->fFlags & FOF_ALLOWUNDO)
+    {
+        static const enum undo_kind kinds[] = { UNDO_NONE, UNDO_MOVE, UNDO_COPY, UNDO_DELETE, UNDO_RENAME };
+        undo_begin(kinds[lpFileOp->wFunc]);
+    }
+
     switch (lpFileOp->wFunc)
     {
         case FO_COPY:
@@ -1441,6 +1492,7 @@ int WINAPI SHFileOperationW(LPSHFILEOPSTRUCTW lpFileOp)
             assert(0); /* Should never be here. */
     }
 
+    if (lpFileOp->fFlags & FOF_ALLOWUNDO) undo_end();
     file_list_destroy(&flFrom);
     file_list_destroy(&flTo);
 

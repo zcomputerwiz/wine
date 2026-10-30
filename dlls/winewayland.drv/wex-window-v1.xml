@@ -1,0 +1,403 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="wex_window_v1">
+  <copyright>
+    Copyright © 2026 WineExplorer contributors
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice (including the next
+    paragraph) shall be included in all copies or substantial portions of the
+    Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+    THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+  </copyright>
+
+  <description summary="private privileged window management interface">
+    This protocol allows privileged clients to manage window layering,
+    relative stacking orders within layers, exclusive edge reservations
+    for shell components (taskbars), and activation without tokens.
+  </description>
+
+  <interface name="wex_window_manager_v1" version="10">
+    <description summary="manager interface for privileged window controls">
+      Allows obtaining a wex_window_v1 interface for an xdg_toplevel.
+      Only advertised to privileged clients on the wex-shell socket.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the manager object"/>
+    </request>
+
+    <request name="get_window">
+      <description summary="create a wex_window_v1 from an xdg_toplevel"/>
+      <arg name="id" type="new_id" interface="wex_window_v1"/>
+      <arg name="toplevel" type="object" interface="xdg_toplevel" summary="the toplevel surface"/>
+    </request>
+    <request name="get_foreign" since="3">
+      <description summary="observe supplemental native window metadata">
+        The toplevel must belong to this connection's standard
+        zwlr_foreign_toplevel_manager_v1 inventory. Metadata and ordinary
+        controls remain on that standard interface. An ineligible or closed
+        toplevel yields a closed object without a token. This request neither
+        adopts the view nor changes its decoration or focus.
+      </description>
+      <arg name="id" type="new_id" interface="wex_foreign_window_v1"/>
+      <arg name="toplevel" type="object" interface="zwlr_foreign_toplevel_handle_v1"/>
+    </request>
+    <event name="native_environment" since="3">
+      <description summary="compositor-owned native application endpoints">
+        Sent once on binding. Native programs use the normal Wayland socket,
+        rather than inherit the shell's privileged socket. xwayland_display is
+        empty if XWayland is unavailable; remove DISPLAY in that case. These
+        values belong to this compositor, not an enclosing nested session.
+        Launch and D-Bus activation environments must agree on these endpoints.
+      </description>
+      <arg name="wayland_display" type="string"/>
+      <arg name="xwayland_display" type="string"/>
+    </event>
+  </interface>
+
+  <interface name="wex_window_v1" version="10">
+    <description summary="window controls interface">
+      Provides operations for stacking, layering, shell edge reservation,
+      and direct activation.
+    </description>
+
+    <enum name="layer">
+      <entry name="normal" value="0" summary="normal application window"/>
+      <entry name="topmost" value="1" summary="above normal windows"/>
+      <entry name="desktop" value="2" summary="below everything, not in window cycling"/>
+      <entry name="shell" value="3" summary="above topmost, not in window cycling"/>
+    </enum>
+
+    <enum name="edge">
+      <entry name="none" value="0" summary="no exclusive edge"/>
+      <entry name="top" value="1" summary="top edge"/>
+      <entry name="bottom" value="2" summary="bottom edge"/>
+      <entry name="left" value="3" summary="left edge"/>
+      <entry name="right" value="4" summary="right edge"/>
+    </enum>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy this window object"/>
+    </request>
+
+    <request name="place_above">
+      <description summary="place above sibling in the same layer"/>
+      <arg name="sibling" type="object" interface="wex_window_v1"/>
+    </request>
+
+    <request name="place_below">
+      <description summary="place below sibling in the same layer"/>
+      <arg name="sibling" type="object" interface="wex_window_v1"/>
+    </request>
+
+    <request name="place_bottom">
+      <description summary="lower to the bottom of its layer"/>
+    </request>
+
+    <request name="set_layer">
+      <description summary="assign window to a layer"/>
+      <arg name="layer" type="uint" enum="layer" summary="layer type"/>
+    </request>
+
+    <request name="set_exclusive_edge">
+      <description summary="reserve edge for shell window"/>
+      <arg name="edge" type="uint" enum="edge" summary="reserved edge"/>
+      <arg name="size" type="uint" summary="reserved size in pixels"/>
+    </request>
+
+    <request name="activate">
+      <description summary="give keyboard focus and raise within its layer"/>
+    </request>
+    <event name="handle" since="2">
+      <description summary="shared opaque window handle">
+        Sent once when the object is created. This compositor-generated token
+        identifies the window until its view or control object is destroyed.
+        Privileged clients may share it across connections. Treat it as opaque.
+      </description>
+      <arg name="handle" type="string"/>
+    </event>
+
+    <request name="place_above_handle" since="2">
+      <description summary="place above a shared sibling handle">
+        Like place_above, but accepts a sibling from another privileged client.
+        Unknown, stale, self, or different-layer handles are harmless no-ops.
+      </description>
+      <arg name="handle" type="string"/>
+    </request>
+
+    <request name="place_below_handle" since="2">
+      <description summary="place below a shared sibling handle">
+        Like place_below, but accepts a sibling from another privileged client.
+        Unknown, stale, self, or different-layer handles are harmless no-ops.
+      </description>
+      <arg name="handle" type="string"/>
+    </request>
+    <request name="restore" since="2">
+      <description summary="restore without changing keyboard focus">
+        Clear minimization without activating or raising the window. Use
+        activate instead when the client also wants to give keyboard focus.
+      </description>
+    </request>
+    <enum name="association_status" since="4">
+      <entry name="unbound" value="0"/>
+      <entry name="prepared" value="1" summary="reserved; native composition and focus unchanged"/>
+      <entry name="unavailable" value="2"/>
+    </enum>
+    <request name="associate_foreign" since="4">
+      <description summary="reserve a native view and live controller for this frame">
+        Both opaque handles must identify the same eligible native view and a
+        live privileged observer. Only one frame may reserve a native view.
+        An empty pair releases this frame's reservation. Unknown, stale,
+        mismatched or busy handles return unavailable without replacing an
+        existing reservation. Repeating the current pair is idempotent.
+        A prepared association does not change native decoration, scene nodes,
+        geometry or focus. Rendering/input preparation must precede adoption.
+        Controller, native-view or frame destruction releases the reservation.
+      </description>
+      <arg name="native_token" type="string"/>
+      <arg name="controller_handle" type="string"/>
+    </request>
+    <event name="foreign_association" since="4">
+      <arg name="status" type="uint" enum="association_status"/>
+    </event>
+    <enum name="group_status" since="5">
+      <entry name="detached" value="0"/>
+      <entry name="active" value="1"/>
+      <entry name="not_ready" value="2"/>
+    </enum>
+    <request name="commit_foreign" since="5">
+      <description summary="compose a prepared native/frame pair">
+        The rectangle is the native client area in frame root-surface logical
+        coordinates. Both views must be mapped with matching native client
+        dimensions. The frame root renders only outside this rectangle; native
+        buffers and popup trees remain in the compositor scene. CSD/borderless
+        natives require a full-surface cutout. Invalid or not-ready requests
+        leave the reservation unchanged and return not_ready. Reservation
+        destruction detaches the group, restores native decorations and hides
+        the obsolete proxy frame. This request does not activate either view.
+      </description>
+      <arg name="x" type="int"/><arg name="y" type="int"/>
+      <arg name="width" type="int"/><arg name="height" type="int"/>
+    </request>
+    <event name="foreign_group" since="5">
+      <arg name="status" type="uint" enum="group_status"/>
+    </event>
+    <enum name="focus_target" since="6">
+      <entry name="none" value="0" summary="query only, or focus outside this group"/>
+      <entry name="native" value="1" summary="activate native content"/>
+      <entry name="frame" value="2" summary="temporary frame keyboard focus"/>
+      <entry name="restore_native" value="3" summary="guarded native focus restoration, request only"/>
+    </enum>
+    <request name="set_foreign_focus" since="6">
+      <description summary="request physical focus with a client activation epoch">
+        Requests apply only to an active group. Native activates and raises the
+        group. Frame and restore_native apply only while physical focus already
+        belongs to this group, so a late frame-menu completion cannot steal
+        focus from another application. None queries without changing focus.
+        Every request replies with foreign_focus reporting actual focus and
+        echoing epoch, even if the requested transition was rejected. Unknown
+        targets leave focus unchanged. The client must also check its current
+        logical foreground window before restoring native focus.
+        Minimized groups reject focus requests. Restore them explicitly using
+        activate or restore; a delayed focus request must not undo a minimize.
+      </description>
+      <arg name="epoch" type="uint"/>
+      <arg name="target" type="uint" enum="focus_target"/>
+    </request>
+    <event name="foreign_focus" since="6">
+      <description summary="observed physical keyboard focus for this group">
+        Sent after requests and on seat keyboard focus changes, including
+        native popups and frame subsurfaces. Epoch is the most recent request's
+        epoch, or zero before the first request. Target is none, native or frame;
+        restore_native is never reported. Detached groups report none. This
+        event acknowledges physical focus, not a Win32 foreground transition.
+      </description>
+      <arg name="epoch" type="uint"/>
+      <arg name="target" type="uint" enum="focus_target"/>
+    </event>
+    <request name="uncommit_foreign" since="7">
+      <description summary="detach content while retaining its reservation">
+        Detaches an active group, restores native decorations and hides the
+        obsolete frame. Replies with detached even if no group was active.
+        The prepared reservation remains available for a later commit after
+        matching buffers and client geometry are ready. Does not activate.
+      </description>
+      <arg name="serial" type="uint"/>
+    </request>
+    <request name="configure_foreign" since="7">
+      <description summary="numbered commit for asynchronous controllers">
+        Same geometry and validation as commit_foreign. Replies with configured_foreign
+        after reporting observed group state, distinguishing request completion
+        from unsolicited detached notifications. Serial is opaque to the server.
+        An active group may change its client rectangle without detaching.
+        The server retains the previous roots until the updated frame and
+        matching native content have both committed, then replies ACTIVE.
+      </description>
+      <arg name="serial" type="uint"/>
+      <arg name="x" type="int"/><arg name="y" type="int"/>
+      <arg name="width" type="int"/><arg name="height" type="int"/>
+    </request>
+    <event name="configured_foreign" since="7">
+      <arg name="serial" type="uint"/>
+      <arg name="status" type="uint" enum="group_status"/>
+    </event>
+    <request name="capture_foreign_pointer" since="8">
+      <description summary="temporary pointer capture for a hosted frame loop">
+        Capture requires an active group, physical frame keyboard focus and
+        the current focus epoch. Pointer events then target the frame surface,
+        including outside its input region. Release never changes keyboard focus.
+        Capture is revoked on focus loss, group detach or resource destruction.
+        Stale requests cannot acquire capture or displace another frame.
+      </description>
+      <arg name="epoch" type="uint"/>
+      <arg name="capture" type="uint"/>
+    </request>
+    <event name="foreign_pointer_capture" since="8">
+      <description summary="capture acknowledgement or asynchronous revocation">
+        Acknowledges every request. Revocation uses the epoch that acquired
+        capture. Captured is zero or one; keyboard focus is reported separately.
+      </description>
+      <arg name="epoch" type="uint"/>
+      <arg name="captured" type="uint"/>
+    </event>
+    <enum name="resize_stage" since="10">
+      <entry name="accepted" value="0" summary="constrained request, not a buffer completion"/>
+      <entry name="acknowledged" value="1" summary="native xdg configure acknowledged, buffer not yet committed"/>
+      <entry name="native_ready" value="2" summary="actual native client geometry, awaiting matching frame"/>
+      <entry name="complete" value="3" summary="matching frame and native buffers made visible atomically"/>
+      <entry name="rolling_back" value="4" summary="restore this old geometry and submit its matching frame"/>
+      <entry name="cancelled" value="5" summary="old matching buffers and geometry restored"/>
+      <entry name="superseded" value="6" summary="a newer request replaced this transaction"/>
+      <entry name="unavailable" value="7" summary="unsupported client, invalid geometry or missing frame capture"/>
+      <entry name="stale" value="8" summary="serial is no longer current"/>
+      <entry name="failed" value="9" summary="bounded rollback failed; normal native scene restored"/>
+    </enum>
+    <request name="resize_foreign" since="10">
+      <description summary="negotiate a hosted native size without exposing mismatched buffers">
+        Requires an active group and pointer capture for the physically focused
+        frame at its current focus epoch. Initially supported for xdg toplevels;
+        other native types reply unavailable. Serial is nonzero and increases
+        modulo 2^32 within this frame resource. Coordinates are the desired native
+        client rectangle in compositor logical layout units, not Wine pixels.
+        Edges use wlroots edge bits: top=1, bottom=2, left=4, right=8; opposing
+        edges are invalid. Left/top retain the desired right/bottom anchor after
+        constraints or client-selected sizes. Current native hints are read at
+        request time. Accepted, acknowledged and native_ready are distinct.
+        Old matching root buffers remain visible until commit_foreign_resize.
+        Popup and subsurface ownership remains unchanged. A newer request
+        supersedes the old one while retaining the original rollback geometry.
+        No request here changes focus or implicitly activates a window.
+      </description>
+      <arg name="serial" type="uint"/>
+      <arg name="edges" type="uint"/>
+      <arg name="x" type="int"/><arg name="y" type="int"/>
+      <arg name="width" type="int"/><arg name="height" type="int"/>
+    </request>
+    <request name="commit_foreign_resize" since="10">
+      <description summary="publish an already committed matching frame">
+        Send after receiving native_ready and committing the corresponding
+        Wine frame buffer, in that connection's request order. The rectangle is
+        the native client hole in frame surface logical units. All four saved
+        frame margins and the actual native size must match. Early, stale or
+        mismatched requests reply unavailable/stale without changing the scene;
+        they may be retried. Complete is sent only after the atomic handover.
+        During rollback the same request submits the restored frame and produces
+        cancelled. Controllers must not coalesce these completion events.
+      </description>
+      <arg name="serial" type="uint"/>
+      <arg name="x" type="int"/><arg name="y" type="int"/>
+      <arg name="width" type="int"/><arg name="height" type="int"/>
+    </request>
+    <request name="cancel_foreign_resize" since="10">
+      <description summary="restore the original group before releasing capture">
+        Current serial only. Rolling_back supplies the old geometry; native
+        configure acknowledgement and native_ready follow as usual. Submit the
+        restored frame with commit_foreign_resize before releasing capture or
+        returning native focus. Loss of physical frame focus also starts rollback.
+        A two-second timeout starts rollback; a second timeout restores the
+        ordinary native scene and reports failed. Detachment also reports failed.
+      </description>
+      <arg name="serial" type="uint"/>
+    </request>
+    <event name="foreign_resize" since="10">
+      <description summary="serial-specific resize transition">
+        Geometry is constrained for accepted/rolling_back, actual committed
+        client geometry for native_ready/complete/cancelled, zero when unavailable
+        or stale. Configure_serial is the separate native xdg configure serial,
+        never the controller serial. Acknowledgement does not imply a buffer
+        commit. Old requests cannot complete or cancel a newer transaction.
+      </description>
+      <arg name="serial" type="uint"/>
+      <arg name="stage" type="uint" enum="resize_stage"/>
+      <arg name="configure_serial" type="uint"/>
+      <arg name="x" type="int"/><arg name="y" type="int"/>
+      <arg name="width" type="int"/><arg name="height" type="int"/>
+    </event>
+  </interface>
+  <interface name="wex_foreign_window_v1" version="10">
+    <description summary="supplemental native window observation">
+      A compositor-generated token identifies a native view for its lifetime,
+      across privileged connections. Tokens are never reused for another view.
+      All geometry and size hints use compositor logical coordinates for the
+      native client area. Each initial or changed snapshot ends with done.
+      closed is terminal; requests other than destroy are ignored afterward.
+    </description>
+    <enum name="decoration">
+      <entry name="none" value="0" summary="borderless native view"/>
+      <entry name="client" value="1" summary="application draws its frame"/>
+      <entry name="server" value="2" summary="eligible for a Wine frame"/>
+    </enum>
+    <request name="destroy" type="destructor"/>
+    <request name="refresh">
+      <description summary="request a fresh supplemental snapshot"/>
+    </request>
+    <event name="token">
+      <arg name="token" type="string" summary="32 lowercase hexadecimal characters"/>
+    </event>
+    <event name="geometry">
+      <arg name="x" type="int"/><arg name="y" type="int"/>
+      <arg name="width" type="int"/><arg name="height" type="int"/>
+    </event>
+    <event name="decoration">
+      <arg name="mode" type="uint" enum="decoration"/>
+    </event>
+    <event name="size_hints">
+      <arg name="min_width" type="int"/><arg name="min_height" type="int"/>
+      <arg name="width_inc" type="int"/><arg name="height_inc" type="int"/>
+      <arg name="base_width" type="int"/><arg name="base_height" type="int"/>
+    </event>
+    <event name="done"/>
+    <event name="closed"/>
+    <event name="controller_handle" since="4">
+      <description summary="opaque handle valid only while this observer lives">
+        A privileged frame on another connection may pair this handle with the
+        native view token in associate_foreign. Unlike the view token, this
+        handle is unique to the controller and becomes invalid on disconnect.
+      </description>
+      <arg name="handle" type="string"/>
+    </event>
+    <event name="maximum_size" since="9">
+      <description summary="native maximum client dimensions">
+        Compositor logical coordinates, with zero meaning no limit on that axis.
+        This supplements size_hints and belongs to the same done-delimited
+        snapshot. Minima equal to nonzero maxima describe a fixed-size axis.
+        Only managers bound at version 9 create version 9 observers; older
+        clients keep their original event set and infer no maximum.
+      </description>
+      <arg name="width" type="int"/><arg name="height" type="int"/>
+    </event>
+  </interface>
+</protocol>

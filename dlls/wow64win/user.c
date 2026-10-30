@@ -1225,6 +1225,34 @@ static NTSTATUS WINAPI wow64_NtUserDrawNonClientButton( void *arg, ULONG size )
     return dispatch_callback( NtUserDrawNonClientButton, &params32, sizeof(params32) );
 }
 
+static NTSTATUS WINAPI wow64_NtUserDrawNonClientFrame( void *arg, ULONG size )
+{
+    struct draw_non_client_frame_params *params = arg;
+    struct
+    {
+        ULONG hwnd;
+        ULONG hdc;
+        RECT rect;
+        DWORD style;
+        DWORD ex_style;
+        UINT flags;
+    } params32;
+    void *ret_ptr;
+    ULONG ret_len;
+    NTSTATUS status;
+
+    params32.hwnd = HandleToUlong( params->hwnd );
+    params32.hdc = HandleToUlong( params->hdc );
+    params32.rect = params->rect;
+    params32.style = params->style;
+    params32.ex_style = params->ex_style;
+    params32.flags = params->flags;
+    status = Wow64KiUserCallbackDispatcher( NtUserDrawNonClientFrame, &params32, sizeof(params32),
+                                            &ret_ptr, &ret_len );
+    if (!status && ret_len == sizeof(BOOL)) return NtCallbackReturn( ret_ptr, ret_len, status );
+    return status;
+}
+
 static NTSTATUS WINAPI wow64_NtUserDrawScrollBar( void *arg, ULONG size )
 {
     struct draw_scroll_bar_params *params = arg;
