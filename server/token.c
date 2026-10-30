@@ -943,11 +943,12 @@ struct token *token_create_service( unsigned int account, unsigned int session_i
         { &builtin_admins_sid, SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_OWNER },
     };
     const struct sid *user;
+    const struct sid *owner;
+    const struct sid *primary_group = &builtin_users_sid;
     const struct sid_attrs *groups = service_groups;
     const struct luid_attr *privs = local_service_privs;
     unsigned int group_count = ARRAY_SIZE( service_groups ) - 1;  /* no Administrators */
     unsigned int priv_count = ARRAY_SIZE( local_service_privs );
-    unsigned int primary_group = 1;  /* BUILTIN\Users */
     struct token *token;
     struct acl *default_dacl;
 
@@ -955,16 +956,19 @@ struct token *token_create_service( unsigned int account, unsigned int session_i
     {
     case SERVICE_ACCOUNT_SYSTEM:
         user = &local_system_sid;
+        owner = &builtin_admins_sid;
+        primary_group = &builtin_admins_sid;
         group_count = ARRAY_SIZE( service_groups );
-        primary_group = 7;  /* BUILTIN\Administrators, also the owner */
         privs = system_privs;
         priv_count = ARRAY_SIZE( system_privs );
         break;
     case SERVICE_ACCOUNT_LOCAL_SERVICE:
         user = &local_service_sid;
+        owner = user;
         break;
     case SERVICE_ACCOUNT_NETWORK_SERVICE:
         user = &network_service_sid;
+        owner = user;
         privs = network_service_privs;
         priv_count = ARRAY_SIZE( network_service_privs );
         break;
@@ -975,11 +979,10 @@ struct token *token_create_service( unsigned int account, unsigned int session_i
     /* the default DACL of the account: SYSTEM and Administrators for LocalSystem, SYSTEM and the account for the others */
     if (!(default_dacl = create_default_dacl( account == SERVICE_ACCOUNT_SYSTEM ? &builtin_admins_sid : user )))
         return NULL;
-    token = create_token( 1, session_id, user, groups, group_count, privs, priv_count, default_dacl, NULL,
-                          primary_group, -1, TokenElevationTypeDefault );
+    token = create_token( 1, session_id, user, owner, primary_group, groups, group_count, privs, priv_count,
+                          default_dacl, NULL, -1, TokenElevationTypeDefault );
     free( default_dacl );
     if (!token) return NULL;
-    if (account != SERVICE_ACCOUNT_SYSTEM) token->owner = token->user;
     if (!token_assign_label( token, &system_label_sid ))
     {
         release_object( token );
