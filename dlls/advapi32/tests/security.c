@@ -9380,6 +9380,89 @@ static void test_restricted_sid_intersection(void)
     FreeSid(sid3);
 }
 
+static void test_restricted_token_empty_intersection_access_check(void)
+{
+    HANDLE process_token, base_token, r_token, imp_token;
+    BOOL ret, is_restricted, access_status;
+    DWORD size, access, priv_set_len;
+    BYTE priv_set_buf[FIELD_OFFSET(PRIVILEGE_SET, Privilege[16])];
+    PRIVILEGE_SET *priv_set = (PRIVILEGE_SET *)priv_set_buf;
+    SECURITY_DESCRIPTOR sd;
+    char dacl_buf[256];
+    static SID_IDENTIFIER_AUTHORITY sia_world = {SECURITY_WORLD_SID_AUTHORITY};
+    static SID_IDENTIFIER_AUTHORITY sia_nt = {SECURITY_NT_AUTHORITY};
+    PSID sid_world = NULL, sid_a = NULL, sid_b = NULL;
+    SID_AND_ATTRIBUTES sids_a[1], sids_b[1];
+    GENERIC_MAPPING mapping = {KEY_READ, KEY_WRITE, KEY_EXECUTE, KEY_ALL_ACCESS};
+
+    ret = OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &process_token);
+    ok(ret, "OpenProcessToken failed\n");
+
+    ret = AllocateAndInitializeSid(&sia_world, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &sid_world);
+    ok(ret, "AllocateAndInitializeSid world failed\n");
+    ret = AllocateAndInitializeSid(&sia_nt, 1, SECURITY_RESTRICTED_CODE_RID, 0, 0, 0, 0, 0, 0, 0, &sid_a);
+    ok(ret, "AllocateAndInitializeSid sid_a failed\n");
+    ret = AllocateAndInitializeSid(&sia_nt, 1, SECURITY_ANONYMOUS_LOGON_RID, 0, 0, 0, 0, 0, 0, 0, &sid_b);
+    ok(ret, "AllocateAndInitializeSid sid_b failed\n");
+
+    /* Base restricted token restricting to {sid_a}. */
+    sids_a[0].Sid = sid_a;
+    sids_a[0].Attributes = 0;
+    base_token = NULL;
+    ret = CreateRestrictedToken(process_token, 0, 0, NULL, 0, NULL, 1, sids_a, &base_token);
+    CloseHandle(process_token);
+    ok(ret, "CreateRestrictedToken base failed with error %lu\n", GetLastError());
+
+    /* Filter the base token with a completely disjoint set {sid_b}. The intersection is empty, so
+     * the result must stay restricted with an unmatchable (null) restricting SID -- i.e. an
+     * effectively empty restricting set that can match no granting ACE. */
+    sids_b[0].Sid = sid_b;
+    sids_b[0].Attributes = 0;
+    r_token = NULL;
+    ret = CreateRestrictedToken(base_token, 0, 0, NULL, 0, NULL, 1, sids_b, &r_token);
+    CloseHandle(base_token);
+    ok(ret, "CreateRestrictedToken filter failed with error %lu\n", GetLastError());
+
+    is_restricted = FALSE;
+    ret = GetTokenInformation(r_token, TokenIsRestricted, &is_restricted, sizeof(is_restricted), &size);
+    ok(ret, "GetTokenInformation(TokenIsRestricted) failed\n");
+    ok(is_restricted, "expected token to remain restricted after disjoint filter\n");
+
+    ret = DuplicateToken(r_token, SecurityImpersonation, &imp_token);
+    CloseHandle(r_token);
+    ok(ret, "DuplicateToken failed\n");
+
+    /* DACL grants KEY_READ to World only. The unmatchable restricting SID intersects no granting ACE,
+     * so the restricted pass must fail closed and deny access even if a normal group could match. */
+    ret = InitializeAcl((ACL *)dacl_buf, sizeof(dacl_buf), ACL_REVISION);
+    ok(ret, "InitializeAcl failed\n");
+    ret = AddAccessAllowedAce((ACL *)dacl_buf, ACL_REVISION, KEY_READ, sid_world);
+    ok(ret, "AddAccessAllowedAce failed\n");
+
+    ret = InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+    ok(ret, "InitializeSecurityDescriptor failed\n");
+    ret = SetSecurityDescriptorOwner(&sd, sid_world, FALSE);
+    ok(ret, "SetSecurityDescriptorOwner failed\n");
+    ret = SetSecurityDescriptorGroup(&sd, sid_world, FALSE);
+    ok(ret, "SetSecurityDescriptorGroup failed\n");
+    ret = SetSecurityDescriptorDacl(&sd, TRUE, (ACL *)dacl_buf, FALSE);
+    ok(ret, "SetSecurityDescriptorDacl failed\n");
+
+    memset(priv_set_buf, 0, sizeof(priv_set_buf));
+    priv_set->PrivilegeCount = 16;
+    priv_set_len = sizeof(priv_set_buf);
+    access = access_status = 0;
+    ret = AccessCheck(&sd, imp_token, KEY_READ, &mapping, priv_set, &priv_set_len, &access, &access_status);
+    ok(ret, "AccessCheck call returned %d with error %lu\n", ret, GetLastError());
+    ok(!access_status,
+       "expected AccessCheck DENIED: restricted token whose restricting SIDs match no granting ACE must fail closed\n");
+
+    CloseHandle(imp_token);
+    FreeSid(sid_world);
+    FreeSid(sid_a);
+    FreeSid(sid_b);
+}
+
 
 static void test_claim_security_attributes(void)
 {
@@ -9693,6 +9776,7 @@ START_TEST(security)
     test_mandatory_integrity_access_check();
     test_restricted_token_access_check();
     test_restricted_sid_intersection();
+    test_restricted_token_empty_intersection_access_check();
     test_claim_security_attributes();
     test_revoke_access_acl();
 

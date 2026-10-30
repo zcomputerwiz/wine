@@ -3180,6 +3180,177 @@ cleanup:
     DeleteFileA(elev_exe);
 }
 
+/* Exercise the elevation broker (execute_with_broker in shlexec.c) through a mock wexhost.dll. The mock is
+ * loaded in-process, so its behavior is steered with the WEXHOST_MODE environment variable: "deny" makes it
+ * return ERROR_CANCELLED, anything else makes it launch the requested command and report the child handle. */
+static void test_elevation_broker(void)
+{
+    char src[MAX_PATH], sysdir[MAX_PATH], dst[MAX_PATH], bpath[MAX_PATH];
+    char *dirname = strdup(argv0);
+    SHELLEXECUTEINFOA sei;
+    TOKEN_ELEVATION_TYPE etype;
+    DWORD size;
+    WCHAR wbuf[4096], *pline;
+    HANDLE file;
+    DWORD bytes, total;
+    BOOL ret;
+    DWORD err;
+    HKEY hkey;
+    LSTATUS res;
+    HMODULE hmock = NULL;
+
+    /* The broker path is only reached when the token is not already full. */
+    if (GetTokenInformation(GetCurrentThreadEffectiveToken(), TokenElevationType, &etype, sizeof(etype), &size)
+            && etype == TokenElevationTypeFull)
+    {
+        win_skip("running with a full token; broker path not reachable\n");
+        free(dirname);
+        return;
+    }
+
+    /* Locate the mock broker client next to this test executable. */
+    *strrchr(dirname, '\\') = '\0';
+    snprintf(src, sizeof(src), "%s\\wexhost.dll", dirname);
+    if (GetFileAttributesA(src) == INVALID_FILE_ATTRIBUTES)
+    {
+        win_skip("mock wexhost.dll not built next to the test\n");
+        free(dirname);
+        return;
+    }
+
+    /* Install it where LoadLibraryExW(L"wexhost.dll", ..., LOAD_LIBRARY_SEARCH_SYSTEM32) looks. */
+    if (!GetSystemDirectoryA(sysdir, sizeof(sysdir)))
+    {
+        win_skip("cannot determine system directory\n");
+        free(dirname);
+        return;
+    }
+    snprintf(dst, sizeof(dst), "%s\\wexhost.dll", sysdir);
+    if (!CopyFileA(src, dst, FALSE))
+    {
+        win_skip("cannot install mock wexhost.dll into %s (error %lu)\n", dst, GetLastError());
+        free(dirname);
+        return;
+    }
+
+    /* Confirm the mock is loadable from exactly where execute_with_broker() will look; otherwise skip rather
+     * than fail (e.g. a 32-bit process whose loader cannot see the installed copy). The handle is kept so
+     * cleanup can FreeLibrary it, releasing the file lock before DeleteFileA below. */
+    hmock = LoadLibraryExA("wexhost.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!hmock)
+    {
+        win_skip("mock wexhost.dll installed but not loadable from %s (error %lu)\n", dst, GetLastError());
+        DeleteFileA(dst);
+        free(dirname);
+        return;
+    }
+
+    /* Configure the elevation helper so the 'runas' verb routes to the broker. */
+    res = RegCreateKeyExA(HKEY_LOCAL_MACHINE, "Software\\Wine\\Elevation", 0, NULL, 0,
+                          KEY_WRITE | KEY_WOW64_64KEY, NULL, &hkey, NULL);
+    if (res != ERROR_SUCCESS)
+    {
+        win_skip("cannot create Software\\Wine\\Elevation key: %lu\n", res);
+        if (hmock) FreeLibrary(hmock);
+        DeleteFileA(dst);
+        free(dirname);
+        return;
+    }
+    RegSetValueExA(hkey, "Helper", 0, REG_SZ, (const BYTE *)"C:\\Windows\\System32\\cmd.exe",
+                   lstrlenA("C:\\Windows\\System32\\cmd.exe") + 1);
+
+    /* (a) Broker approval: returns success and a valid child handle. */
+    SetEnvironmentVariableA("WEXHOST_MODE", "approve");
+    memset(&sei, 0, sizeof(sei));
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+    sei.lpVerb = "runas";
+    sei.lpFile = "cmd.exe";
+    sei.lpParameters = "/c exit 0";
+    sei.lpDirectory = tmpdir;
+    sei.nShow = SW_SHOWNORMAL;
+
+    SetLastError(0xdeadbeef);
+    ret = ShellExecuteExA(&sei);
+    err = GetLastError();
+    ok(ret, "broker approval: ShellExecuteEx failed (hInstApp %p, error %lu)\n", sei.hInstApp, err);
+    ok(sei.hInstApp == (HINSTANCE)33, "broker approval: expected hInstApp 33, got %p\n", sei.hInstApp);
+    ok(sei.hProcess != NULL, "broker approval: expected a process handle from the broker\n");
+    if (sei.hProcess)
+    {
+        WaitForSingleObject(sei.hProcess, 5000);
+        CloseHandle(sei.hProcess);
+    }
+
+    /* (b) Broker denial / cancel: returns ERROR_CANCELLED. */
+    SetEnvironmentVariableA("WEXHOST_MODE", "deny");
+    memset(&sei, 0, sizeof(sei));
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+    sei.lpVerb = "runas";
+    sei.lpFile = "cmd.exe";
+    sei.lpParameters = "/c exit 0";
+    sei.lpDirectory = tmpdir;
+    sei.nShow = SW_SHOWNORMAL;
+
+    SetLastError(0xdeadbeef);
+    ret = ShellExecuteExA(&sei);
+    err = GetLastError();
+    ok(!ret, "broker denial: ShellExecuteEx unexpectedly succeeded\n");
+    ok(sei.hInstApp == (HINSTANCE)SE_ERR_ACCESSDENIED,
+       "broker denial: expected SE_ERR_ACCESSDENIED, got %p\n", sei.hInstApp);
+    ok(err == ERROR_CANCELLED, "broker denial: expected ERROR_CANCELLED, got %lu\n", err);
+    ok(sei.hProcess == NULL, "broker denial: expected no process handle\n");
+
+    /* (c) Request binding: caller parameters and working directory reach the broker. */
+    SetEnvironmentVariableA("WEXHOST_MODE", "approve");
+    GetTempPathA(MAX_PATH, bpath);
+    lstrcatA(bpath, "wexhost_binding.txt");
+    DeleteFileA(bpath);
+
+    memset(&sei, 0, sizeof(sei));
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+    sei.lpVerb = "runas";
+    sei.lpFile = "cmd.exe";
+    sei.lpParameters = "/c exit 0";
+    sei.lpDirectory = tmpdir;
+    sei.nShow = SW_SHOWNORMAL;
+
+    ret = ShellExecuteExA(&sei);
+    ok(ret, "binding: broker approval ShellExecuteEx failed\n");
+    if (sei.hProcess)
+    {
+        WaitForSingleObject(sei.hProcess, 5000);
+        CloseHandle(sei.hProcess);
+    }
+
+    file = CreateFileA(bpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    ok(file != INVALID_HANDLE_VALUE, "binding: cannot read %s (error %lu)\n", bpath, GetLastError());
+    if (file != INVALID_HANDLE_VALUE)
+    {
+        total = GetFileSize(file, NULL);
+        if (total >= sizeof(wbuf)) total = sizeof(wbuf) - sizeof(WCHAR);
+        ReadFile(file, wbuf, total, &bytes, NULL);
+        CloseHandle(file);
+        wbuf[bytes / sizeof(WCHAR)] = 0;
+
+        pline = wcsstr(wbuf, L"cmd=");
+        ok(pline && wcsstr(pline, L"exit 0"), "binding: broker did not receive the caller parameters\n");
+        pline = wcsstr(wbuf, L"cwd=");
+        ok(pline && pline[4] != 0, "binding: broker received no working directory\n");
+    }
+
+    /* Cleanup. */
+    SetEnvironmentVariableA("WEXHOST_MODE", NULL);
+    RegDeleteValueA(hkey, "Helper");
+    RegCloseKey(hkey);
+    if (hmock) FreeLibrary(hmock);   /* release the guard's load so DeleteFileA can remove the file */
+    DeleteFileA(dst);
+    DeleteFileA(bpath);
+    free(dirname);
+}
+
 START_TEST(shlexec)
 {
     if (strstr(GetCommandLineA(), "helper_yes.exe"))
@@ -3210,6 +3381,7 @@ START_TEST(shlexec)
     test_dde_default_app();
     test_directory();
     test_elevation();
+    test_elevation_broker();
 
     cleanup_test();
 }
