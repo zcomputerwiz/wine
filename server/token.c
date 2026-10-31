@@ -97,6 +97,7 @@ static const struct sid system_label_sid = { SID_REVISION, 1, SECURITY_MANDATORY
 static const struct sid service_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_SERVICE_RID } };
 static const struct sid local_service_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_LOCAL_SERVICE_RID } };
 static const struct sid network_service_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_NETWORK_SERVICE_RID } };
+static const struct sid all_app_packages_sid = { SID_REVISION, 2, { 0, 0, 0, 0, 0, 15 }, { 2, 1 } };
 
 static struct luid prev_luid_value = { 1000, 0 };
 
@@ -728,25 +729,32 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
         list_add_tail( &token->capabilities, &newgroup->entry );
     }
 
-    if (sd) default_set_sd( &token->obj, sd, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
-                            DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION );
-
-    if (src_token->obj.sd)
+    if (sd)
     {
-        const struct acl *sacl;
-        const struct ace *ace;
-        unsigned int i;
-        int present;
-
-        sacl = sd_get_sacl( src_token->obj.sd, &present );
-        if (present)
+        default_set_sd( &token->obj, sd, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                                DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION );
+        if (src_token->obj.sd)
         {
-            for (i = 0, ace = ace_first( sacl ); i < sacl->count; i++, ace = ace_next( ace ))
+            const struct acl *sacl;
+            const struct ace *ace;
+            unsigned int i;
+            int present;
+
+            sacl = sd_get_sacl( src_token->obj.sd, &present );
+            if (present)
             {
-                if (ace->type != SYSTEM_MANDATORY_LABEL_ACE_TYPE) continue;
-                token_assign_label( token, (const struct sid *)(ace + 1) );
+                for (i = 0, ace = ace_first( sacl ); i < sacl->count; i++, ace = ace_next( ace ))
+                {
+                    if (ace->type != SYSTEM_MANDATORY_LABEL_ACE_TYPE) continue;
+                    token_assign_label( token, (const struct sid *)(ace + 1) );
+                }
             }
         }
+    }
+    else if (src_token->obj.sd)
+    {
+        default_set_sd( &token->obj, src_token->obj.sd, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                                DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION );
     }
 
     return token;
@@ -842,7 +850,7 @@ struct token *token_create_admin( unsigned primary, int impersonation_level, int
     /* on Windows, this value changes every time the user logs on */
     struct sid logon_sid = { SID_REVISION, 3, SECURITY_NT_AUTHORITY, { SECURITY_LOGON_IDS_RID, 0, 0 /* FIXME: should be randomly generated when tokens are inherited by new processes */ }};
     const struct sid *user_sid = security_unix_uid_to_sid( getuid() );
-    struct acl *default_dacl = create_default_dacl( &domain_users_sid );
+    struct acl *default_dacl = create_default_dacl( user_sid );
     const struct luid_attr admin_privs[] =
     {
         { SeChangeNotifyPrivilege, SE_PRIVILEGE_ENABLED },
@@ -1210,7 +1218,11 @@ int token_sid_present( struct token *token, const struct sid *sid, int deny )
         if (equal_sid( &group->sid, sid )) return TRUE;
     }
 
-    if (token->app_container && equal_sid( token->app_container, sid )) return TRUE;
+    if (token->app_container)
+    {
+        if (equal_sid( token->app_container, sid )) return TRUE;
+        if (equal_sid( &all_app_packages_sid, sid )) return TRUE;
+    }
 
     LIST_FOR_EACH_ENTRY( group, &token->capabilities, struct group, entry )
     {
@@ -1697,7 +1709,7 @@ DECL_HANDLER(create_token)
         }
     }
     else
-        dacl = default_dacl = create_default_dacl( &domain_users_sid );
+        dacl = default_dacl = create_default_dacl( user );
 
     token = create_token( req->primary, default_session_id, user, owner, primary_group, groups,
                           req->group_count, privs, req->priv_count, dacl, NULL,
