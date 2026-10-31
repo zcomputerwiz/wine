@@ -729,32 +729,25 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
         list_add_tail( &token->capabilities, &newgroup->entry );
     }
 
-    if (sd)
-    {
-        default_set_sd( &token->obj, sd, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
-                                DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION );
-        if (src_token->obj.sd)
-        {
-            const struct acl *sacl;
-            const struct ace *ace;
-            unsigned int i;
-            int present;
+    if (sd) default_set_sd( &token->obj, sd, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                            DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION );
 
-            sacl = sd_get_sacl( src_token->obj.sd, &present );
-            if (present)
+    if (src_token->obj.sd)
+    {
+        const struct acl *sacl;
+        const struct ace *ace;
+        unsigned int i;
+        int present;
+
+        sacl = sd_get_sacl( src_token->obj.sd, &present );
+        if (present)
+        {
+            for (i = 0, ace = ace_first( sacl ); i < sacl->count; i++, ace = ace_next( ace ))
             {
-                for (i = 0, ace = ace_first( sacl ); i < sacl->count; i++, ace = ace_next( ace ))
-                {
-                    if (ace->type != SYSTEM_MANDATORY_LABEL_ACE_TYPE) continue;
-                    token_assign_label( token, (const struct sid *)(ace + 1) );
-                }
+                if (ace->type != SYSTEM_MANDATORY_LABEL_ACE_TYPE) continue;
+                token_assign_label( token, (const struct sid *)(ace + 1) );
             }
         }
-    }
-    else if (src_token->obj.sd)
-    {
-        default_set_sd( &token->obj, src_token->obj.sd, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
-                                DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION );
     }
 
     return token;
