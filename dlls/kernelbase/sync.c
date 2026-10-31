@@ -38,6 +38,7 @@
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(sync);
+WINE_DECLARE_DEBUG_CHANNEL(wex_mojo);
 
 static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
 
@@ -1442,9 +1443,24 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateNamedPipeW( LPCWSTR name, DWORD open_mode,
     if (instances >= PIPE_UNLIMITED_INSTANCES) instances = ~0U;
 
     time.QuadPart = (ULONGLONG)timeout * -10000;
+
+    if (TRACE_ON(wex_mojo))
+        TRACE_(wex_mojo)( "pipe %s open_mode %#lx pipe_mode %#lx access %#lx sharing %#lx options %#lx "
+                          "instances %ld in_buff %ld out_buff %ld timeout %ld sa %p inherit %d sd %p tid %04lx\n",
+                          debugstr_wn(nt_name.Buffer, nt_name.Length / sizeof(WCHAR)), open_mode, pipe_mode,
+                          access, sharing, options, instances, in_buff, out_buff, timeout,
+                          sa, sa && sa->bInheritHandle, sa ? sa->lpSecurityDescriptor : NULL,
+                          GetCurrentThreadId() );
+
     status = NtCreateNamedPipeFile( &handle, access, &attr, &iosb, sharing,
                                     FILE_OPEN_IF, options, pipe_type,
                                     read_mode, non_block, instances, in_buff, out_buff, &time );
+
+    if (TRACE_ON(wex_mojo))
+        TRACE_(wex_mojo)( "pipe %s status %#lx handle %p info %#Ix tid %04lx\n",
+                          debugstr_wn(nt_name.Buffer, nt_name.Length / sizeof(WCHAR)), status, status ? NULL : handle,
+                          status ? 0 : iosb.Information, GetCurrentThreadId() );
+
     RtlFreeUnicodeString( &nt_name );
     if (!set_ntstatus( status )) return INVALID_HANDLE_VALUE;
     SetLastError( iosb.Information == FILE_CREATED ? ERROR_SUCCESS : ERROR_ALREADY_EXISTS );

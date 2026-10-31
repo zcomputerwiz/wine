@@ -43,6 +43,7 @@
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(file);
+WINE_DECLARE_DEBUG_CHANNEL(wex_mojo);
 
 /* info structure for FindFirstFile handle */
 typedef struct
@@ -803,6 +804,7 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateFileW( LPCWSTR filename, DWORD access, DWO
     HANDLE ret;
     const WCHAR *vxd_name = NULL;
     SECURITY_QUALITY_OF_SERVICE qos;
+    BOOL is_named_pipe = FALSE;
 
     static const UINT nt_disposition[5] =
     {
@@ -853,6 +855,14 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateFileW( LPCWSTR filename, DWORD access, DWO
         return INVALID_HANDLE_VALUE;
     }
 
+    /* Use the same NT pipe prefix as WaitNamedPipeW(), only while tracing. */
+    if (TRACE_ON(wex_mojo))
+    {
+        static const int pipe_prefix_len = sizeof(L"\\??\\PIPE\\") - sizeof(WCHAR);
+        is_named_pipe = (nameW.Length >= pipe_prefix_len &&
+                         !wcsnicmp( nameW.Buffer, L"\\??\\PIPE\\", pipe_prefix_len / sizeof(WCHAR) ));
+    }
+
     /* now call NtCreateFile */
 
     if (attributes & FILE_FLAG_DELETE_ON_CLOSE)
@@ -868,6 +878,16 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateFileW( LPCWSTR filename, DWORD access, DWO
         attr.SecurityQualityOfService = &qos;
     }
     if (sa && sa->bInheritHandle) attr.Attributes |= OBJ_INHERIT;
+
+    if (is_named_pipe && TRACE_ON(wex_mojo))
+        TRACE_(wex_mojo)( "pipe %s access %#lx sharing %#lx creation %ld options %#x sqos %d "
+                          "sa %p inherit %d sd %p tid %04lx\n",
+                          debugstr_wn(nameW.Buffer, nameW.Length / sizeof(WCHAR)),
+                          access | SYNCHRONIZE | FILE_READ_ATTRIBUTES, sharing, creation,
+                          get_nt_file_options( attributes, creation ),
+                          (attributes & SECURITY_SQOS_PRESENT) != 0,
+                          sa, sa && sa->bInheritHandle, sa ? sa->lpSecurityDescriptor : NULL,
+                          GetCurrentThreadId() );
 
     status = NtCreateFile( &ret, access | SYNCHRONIZE | FILE_READ_ATTRIBUTES, &attr, &io,
                            NULL, attributes & FILE_ATTRIBUTE_VALID_FLAGS, sharing,
@@ -888,6 +908,11 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateFileW( LPCWSTR filename, DWORD access, DWO
                                    get_nt_file_options( attributes, creation ), NULL, 0 );
         }
     }
+
+    if (is_named_pipe && TRACE_ON(wex_mojo))
+        TRACE_(wex_mojo)( "pipe %s status %#lx handle %p info %#Ix tid %04lx\n",
+                          debugstr_wn(nameW.Buffer, nameW.Length / sizeof(WCHAR)), status, status ? NULL : ret,
+                          status ? 0 : io.Information, GetCurrentThreadId() );
 
     if (status)
     {
