@@ -77,7 +77,8 @@ extern int token_assign_label( struct token *token, const struct sid *label );
 extern struct token *token_duplicate( struct token *src_token, unsigned primary,
                                       int impersonation_level, const struct security_descriptor *sd,
                                       const struct luid_attr *remove_privs, unsigned int remove_priv_count,
-                                      const struct sid *remove_groups, unsigned int remove_group_count );
+                                      const struct sid *remove_groups, unsigned int remove_group_count,
+                                      unsigned int from_public_api );
 extern int token_impersonation_level( struct token *client, struct token *server );
 extern int token_check_privileges( struct token *token, int all_required,
                                    const struct luid_attr *reqprivs,

@@ -708,7 +708,7 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
             process->handles = alloc_handle_table( process, 0 );
         /* Note: for security reasons, starting a new process does not attempt
          * to use the current impersonation token for the new process */
-        process->token = token_duplicate( token ? token : parent->token, TRUE, 0, NULL, NULL, 0, NULL, 0 );
+        process->token = token_duplicate( token ? token : parent->token, TRUE, 0, NULL, NULL, 0, NULL, 0, FALSE );
         process->affinity = parent->affinity;
     }
     if (!process->handles || !process->token) goto error;

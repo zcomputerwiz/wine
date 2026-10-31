@@ -160,6 +160,7 @@ static void token_destroy( struct object *obj );
 static int token_set_sd( struct object *obj, const struct security_descriptor *sd,
                          unsigned int set_info );
 static struct list *token_get_kernel_obj_list( struct object *obj );
+static struct security_descriptor *create_security_label_sd( struct token *token, const struct sid *label_sid );
 
 static const struct object_ops token_ops =
 {
@@ -625,7 +626,8 @@ static int filter_privilege( struct privilege *privilege, const struct luid_attr
 struct token *token_duplicate( struct token *src_token, unsigned primary,
                                int impersonation_level, const struct security_descriptor *sd,
                                const struct luid_attr *remove_privs, unsigned int remove_priv_count,
-                               const struct sid *remove_groups, unsigned int remove_group_count)
+                               const struct sid *remove_groups, unsigned int remove_group_count,
+                               unsigned int from_public_api )
 {
     const struct luid *modified_id =
         primary || (impersonation_level == src_token->impersonation_level) ?
@@ -729,10 +731,54 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
         list_add_tail( &token->capabilities, &newgroup->entry );
     }
 
-    if (sd) default_set_sd( &token->obj, sd, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
-                            DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION );
+    if (sd && !default_set_sd( &token->obj, sd, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                              DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION ))
+    {
+        release_object( token );
+        return NULL;
+    }
 
-    if (src_token->obj.sd)
+    if (from_public_api)
+    {
+        /* Public duplication uses creator object defaults, but derives an omitted label from
+         * source token integrity state rather than the source object's security descriptor. */
+        int has_label = FALSE;
+
+        if (sd)
+        {
+            const struct acl *sacl;
+            int present;
+
+            sacl = sd_get_sacl( sd, &present );
+            if (present && sacl)
+            {
+                const struct ace *ace;
+                unsigned int i;
+                for (i = 0, ace = ace_first( sacl ); i < sacl->count; i++, ace = ace_next( ace ))
+                    if (ace->type == SYSTEM_MANDATORY_LABEL_ACE_TYPE) { has_label = TRUE; break; }
+            }
+        }
+
+        if (!has_label)
+        {
+            struct sid label_sid = { SID_REVISION, 1, SECURITY_MANDATORY_LABEL_AUTHORITY, { token->integrity_rid } };
+            struct security_descriptor *label_sd = create_security_label_sd( token, &label_sid );
+
+            if (!label_sd)
+            {
+                release_object( token );
+                return NULL;
+            }
+            if (!default_set_sd( &token->obj, label_sd, LABEL_SECURITY_INFORMATION ))
+            {
+                free( label_sd );
+                release_object( token );
+                return NULL;
+            }
+            free( label_sd );
+        }
+    }
+    else if (src_token->obj.sd)
     {
         const struct acl *sacl;
         const struct ace *ace;
@@ -1848,7 +1894,7 @@ DECL_HANDLER(duplicate_token)
                                                      TOKEN_DUPLICATE,
                                                      &token_ops )))
     {
-        struct token *token = token_duplicate( src_token, req->primary, req->impersonation_level, params.sd, NULL, 0, NULL, 0 );
+        struct token *token = token_duplicate( src_token, req->primary, req->impersonation_level, params.sd, NULL, 0, NULL, 0, TRUE );
         if (token)
         {
             unsigned int access = req->access ? req->access : get_handle_access( current->process, req->handle );
@@ -1960,7 +2006,7 @@ DECL_HANDLER(filter_token)
         restrict_count = get_sid_count( restrict_groups, restrict_size );
 
         token = token_duplicate( src_token, src_token->primary, src_token->impersonation_level, NULL,
-                                 filter_privileges, priv_count, filter_groups, group_count );
+                                 filter_privileges, priv_count, filter_groups, group_count, FALSE );
         if (token)
         {
             token_apply_filter( token, req->flags );
@@ -2068,7 +2114,7 @@ DECL_HANDLER(create_lowbox_token)
         }
 
         token = token_duplicate( src_token, src_token->primary, src_token->impersonation_level, NULL,
-                                 NULL, 0, NULL, 0 );
+                                 NULL, 0, NULL, 0, FALSE );
         if (token)
         {
             unsigned int access;

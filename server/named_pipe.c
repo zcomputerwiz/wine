@@ -1324,7 +1324,7 @@ static void pipe_server_ioctl( struct fd *fd, ioctl_code_t code, struct async *a
             }
             if (!(token = token_duplicate( client_token, 0,
                                             token_impersonation_level( client_token, current->process->token ),
-                                            NULL, NULL, 0, NULL, 0 )))
+                                            NULL, NULL, 0, NULL, 0, FALSE )))
                 return;
             if (current->token) release_object( current->token );
             current->token = token;
@@ -1333,7 +1333,7 @@ static void pipe_server_ioctl( struct fd *fd, ioctl_code_t code, struct async *a
         if (current->process->token) /* FIXME: use the client token */
         {
             struct token *token;
-            if (!(token = token_duplicate( current->process->token, 0, SecurityImpersonation, NULL, NULL, 0, NULL, 0 )))
+            if (!(token = token_duplicate( current->process->token, 0, SecurityImpersonation, NULL, NULL, 0, NULL, 0, FALSE )))
                 return;
             if (current->token) release_object( current->token );
             current->token = token;
