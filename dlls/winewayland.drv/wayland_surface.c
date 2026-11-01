@@ -1303,19 +1303,16 @@ static void wayland_client_surface_update(struct client_surface *client)
 {
     struct wayland_client_surface *surface = impl_from_client_surface(client);
     HWND hwnd = client->hwnd, toplevel = client->toplevel;
-    struct wayland_win_data *data;
     BOOL visible = FALSE;
 
     TRACE("%s\n", debugstr_client_surface(client));
-    if(toplevel) visible = NtUserIsWindowVisible(hwnd);
-    data = wayland_win_data_get(hwnd);
-    TRACE("render update hwnd %p parent %p visible %u local_data %p\n", hwnd, toplevel, visible, data);
+
+    if (toplevel) visible = NtUserIsWindowVisible(hwnd);
+
     if (toplevel && visible)
         wayland_client_surface_attach(surface, toplevel, &client->monitor_rect);
     else
         wayland_client_surface_attach(surface, NULL, NULL);
-
-    if (data) wayland_win_data_release(data);
 }
 
 static void wayland_client_surface_present(struct client_surface *client, HDC hdc)

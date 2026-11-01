@@ -214,18 +214,24 @@ static struct key *create_key_object(enum algid algid, NCRYPT_PROV_HANDLE provid
         key->algid = ECDSA_P256;
         set_object_property(&key->obj, NCRYPT_ALGORITHM_PROPERTY, (BYTE *)BCRYPT_ECDSA_P256_ALGORITHM,
                             sizeof(BCRYPT_ECDSA_P256_ALGORITHM));
+        set_object_property(&key->obj, NCRYPT_ALGORITHM_GROUP_PROPERTY, (BYTE *)BCRYPT_ECDSA_ALGORITHM,
+                            sizeof(BCRYPT_ECDSA_ALGORITHM));
         break;
 
     case ECDSA_P384:
         key->algid = ECDSA_P384;
         set_object_property(&key->obj, NCRYPT_ALGORITHM_PROPERTY, (BYTE *)BCRYPT_ECDSA_P384_ALGORITHM,
                             sizeof(BCRYPT_ECDSA_P384_ALGORITHM));
+        set_object_property(&key->obj, NCRYPT_ALGORITHM_GROUP_PROPERTY, (BYTE *)BCRYPT_ECDSA_ALGORITHM,
+                            sizeof(BCRYPT_ECDSA_ALGORITHM));
         break;
 
     case ECDSA_P521:
         key->algid = ECDSA_P521;
         set_object_property(&key->obj, NCRYPT_ALGORITHM_PROPERTY, (BYTE *)BCRYPT_ECDSA_P521_ALGORITHM,
                             sizeof(BCRYPT_ECDSA_P521_ALGORITHM));
+        set_object_property(&key->obj, NCRYPT_ALGORITHM_GROUP_PROPERTY, (BYTE *)BCRYPT_ECDSA_ALGORITHM,
+                            sizeof(BCRYPT_ECDSA_ALGORITHM));
         break;
 
     default:
@@ -463,7 +469,7 @@ SECURITY_STATUS WINAPI NCryptImportKey(NCRYPT_PROV_HANDLE provider, NCRYPT_KEY_H
     BCRYPT_KEY_BLOB *header = (BCRYPT_KEY_BLOB *)data;
     struct key *key;
     NTSTATUS status;
-    ULONG bitlen;
+    ULONG bitlen, i;
     BCRYPT_ALG_HANDLE alg;
 
     TRACE("(%#Ix, %#Ix, %s, %p, %p, %p, %lu, %#lx)\n", provider, decrypt_key, wine_dbgstr_w(type),
@@ -476,8 +482,8 @@ SECURITY_STATUS WINAPI NCryptImportKey(NCRYPT_PROV_HANDLE provider, NCRYPT_KEY_H
     }
     if (params)
     {
-        FIXME("Parameter information not implemented\n");
-        return NTE_NOT_SUPPORTED;
+        for (i = 0; i < params->cBuffers; i++)
+            FIXME("unsupported parameter %lu\n", params->pBuffers[i].BufferType);
     }
     if (flags == NCRYPT_SILENT_FLAG)
     {
