@@ -52,6 +52,10 @@
 #define SEMAPHORE_QUERY_STATE 0x0001
 #endif
 
+#ifndef UNPROTECTED_DACL_SECURITY_INFORMATION
+#define UNPROTECTED_DACL_SECURITY_INFORMATION 0x20000000
+#endif
+
 #ifndef THREAD_SET_LIMITED_INFORMATION
 #define THREAD_SET_LIMITED_INFORMATION 0x0400
 #define THREAD_QUERY_LIMITED_INFORMATION 0x0800
@@ -4142,6 +4146,108 @@ static void test_GetNamedSecurityInfoA(void)
 
     FreeSid(localsys_sid);
     LocalFree(pSD);
+}
+
+static void test_named_security_info_label(void)
+{
+    static SID low_level = {SID_REVISION, 1, {SECURITY_MANDATORY_LABEL_AUTHORITY},
+                            {SECURITY_MANDATORY_LOW_RID}};
+    static SID_IDENTIFIER_AUTHORITY sia_world = {SECURITY_WORLD_SID_AUTHORITY};
+    const SECURITY_INFORMATION info = DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION
+                                      | UNPROTECTED_DACL_SECURITY_INFORMATION;
+    char dacl_buffer[64], sacl_buffer[64];
+    ACL *dacl = (ACL *)dacl_buffer, *sacl = (ACL *)sacl_buffer, *sacl2;
+    SYSTEM_MANDATORY_LABEL_ACE *ace;
+    ACL_SIZE_INFORMATION acl_size_info;
+    WCHAR tmp[MAX_PATH], dir[MAX_PATH], file[MAX_PATH];
+    PSECURITY_DESCRIPTOR sd;
+    HANDLE handle;
+    SID *everyone;
+    DWORD ret;
+    BOOL bret;
+
+    if (!pAddMandatoryAce)
+    {
+        win_skip("Mandatory integrity control is not supported.\n");
+        return;
+    }
+
+    bret = AllocateAndInitializeSid(&sia_world, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, (PSID *)&everyone);
+    ok(bret, "AllocateAndInitializeSid failed with error %lu\n", GetLastError());
+
+    bret = InitializeAcl(dacl, sizeof(dacl_buffer), ACL_REVISION);
+    ok(bret, "InitializeAcl failed with error %lu\n", GetLastError());
+    bret = AddAccessAllowedAceEx(dacl, ACL_REVISION, OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+                                 GENERIC_ALL, everyone);
+    ok(bret, "AddAccessAllowedAceEx failed with error %lu\n", GetLastError());
+
+    bret = InitializeAcl(sacl, sizeof(sacl_buffer), ACL_REVISION);
+    ok(bret, "InitializeAcl failed with error %lu\n", GetLastError());
+    bret = pAddMandatoryAce(sacl, ACL_REVISION, OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
+                            SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, &low_level);
+    ok(bret, "AddMandatoryAce failed with error %lu\n", GetLastError());
+
+    GetTempPathW(MAX_PATH, tmp);
+    GetTempFileNameW(tmp, L"lbl", 0, dir);
+    DeleteFileW(dir);
+    bret = CreateDirectoryW(dir, NULL);
+    ok(bret, "CreateDirectoryW failed with error %lu\n", GetLastError());
+    lstrcpyW(file, dir);
+    lstrcatW(file, L"\\file");
+    handle = CreateFileW(file, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    ok(handle != INVALID_HANDLE_VALUE, "CreateFileW failed with error %lu\n", GetLastError());
+    CloseHandle(handle);
+
+    /* The call that creates an AppContainer profile directory. */
+    ret = SetNamedSecurityInfoW(dir, SE_FILE_OBJECT, info, NULL, NULL, dacl, sacl);
+    ok(!ret, "SetNamedSecurityInfoW failed with error %lu\n", ret);
+
+    ret = SetNamedSecurityInfoW(dir, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, NULL, NULL, NULL, sacl);
+    ok(!ret, "SetNamedSecurityInfoW failed with error %lu\n", ret);
+
+    ret = SetNamedSecurityInfoW(file, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, NULL, NULL, NULL, sacl);
+    ok(!ret, "SetNamedSecurityInfoW failed with error %lu\n", ret);
+
+    sd = NULL;
+    sacl2 = (void *)0xdeadbeef;
+    ret = GetNamedSecurityInfoW(file, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, NULL, NULL, NULL, &sacl2, &sd);
+    ok(!ret, "GetNamedSecurityInfoW failed with error %lu\n", ret);
+    todo_wine ok(sacl2 && sacl2 != (void *)0xdeadbeef, "Label not returned.\n");
+    if (!ret && sacl2 && sacl2 != (void *)0xdeadbeef)
+    {
+        bret = GetAclInformation(sacl2, &acl_size_info, sizeof(acl_size_info), AclSizeInformation);
+        ok(bret, "GetAclInformation failed with error %lu\n", GetLastError());
+        ok(acl_size_info.AceCount == 1, "Unexpected ACE count %lu\n", acl_size_info.AceCount);
+
+        bret = GetAce(sacl2, 0, (void **)&ace);
+        ok(bret, "GetAce failed with error %lu\n", GetLastError());
+        ok(ace->Header.AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE, "Unexpected ACE type %#x\n",
+           ace->Header.AceType);
+        ok(ace->Mask == SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, "Unexpected ACE mask %#lx\n", ace->Mask);
+        ok(EqualSid(&ace->SidStart, &low_level), "Expected low integrity level.\n");
+    }
+    LocalFree(sd);
+
+    /* Setting a label requires WRITE_OWNER access to the object. */
+    handle = CreateFileW(dir, WRITE_DAC | READ_CONTROL | SYNCHRONIZE,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    ok(handle != INVALID_HANDLE_VALUE, "CreateFileW failed with error %lu\n", GetLastError());
+    ret = SetSecurityInfo(handle, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, NULL, NULL, NULL, sacl);
+    ok(ret == ERROR_ACCESS_DENIED, "Unexpected SetSecurityInfo result %lu\n", ret);
+    CloseHandle(handle);
+
+    handle = CreateFileW(dir, WRITE_OWNER | READ_CONTROL | SYNCHRONIZE,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    ok(handle != INVALID_HANDLE_VALUE, "CreateFileW failed with error %lu\n", GetLastError());
+    ret = SetSecurityInfo(handle, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, NULL, NULL, NULL, sacl);
+    ok(!ret, "SetSecurityInfo failed with error %lu\n", ret);
+    CloseHandle(handle);
+
+    DeleteFileW(file);
+    RemoveDirectoryW(dir);
+    FreeSid(everyone);
 }
 
 static void test_ConvertStringSecurityDescriptor(void)
@@ -9733,6 +9839,7 @@ START_TEST(security)
     test_SetEntriesInAclA();
     test_CreateDirectoryA();
     test_GetNamedSecurityInfoA();
+    test_named_security_info_label();
     test_ConvertStringSecurityDescriptor();
     test_ConvertSecurityDescriptorToString();
     test_PrivateObjectSecurity();
