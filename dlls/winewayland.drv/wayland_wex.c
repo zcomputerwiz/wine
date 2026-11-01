@@ -14,6 +14,7 @@
 WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
 
 static const WCHAR handle_prop[] = u"__wine_wayland_window_handle";
+static const WCHAR render_scale_prop[] = u"__wine_wayland_render_scale";
 static UINT resize_message;
 static ULONGLONG resize_generation;
 struct wex_resize_event
@@ -453,6 +454,19 @@ static BOOL get_atom_handle(RTL_ATOM id, char handle[33])
     return TRUE;
 }
 
+BOOL wayland_wex_get_render_parent(HWND hwnd, char handle[33], double *scale)
+{
+    ULONG_PTR fixed = (ULONG_PTR)NtUserGetProp(hwnd, render_scale_prop);
+    RTL_ATOM atom = (ULONG_PTR)NtUserGetProp(hwnd, handle_prop);
+    if (!fixed || !atom || !get_atom_handle(atom, handle))
+    {
+        TRACE("render parent %p has no published identity/scale (%lu, %u)\n", hwnd, fixed, atom);
+        return FALSE;
+    }
+    *scale = fixed / 65536.0;
+    return *scale > 0 && *scale <= 16;
+}
+
 static void update_foreign_association(struct wayland_surface *surface)
 {
     RTL_ATOM native, controller;
@@ -476,6 +490,7 @@ void wayland_wex_destroy(struct wayland_surface *surface)
 {
     struct wex_resize_event *event;
     unsigned int i;
+    NtUserRemoveProp(surface->hwnd, render_scale_prop);
     while ((event = surface->wex_resize_head))
     {
         surface->wex_resize_head = event->next;
@@ -563,6 +578,7 @@ void wayland_wex_update(struct wayland_surface *surface, HWND insert_after, UINT
     HWND hwnd;
     unsigned int layer, edge = 0, size = 0;
     if (!surface->wex_window) return;
+    NtUserSetProp(surface->hwnd, render_scale_prop, (HANDLE)(ULONG_PTR)round(surface->window.scale * 65536.0));
     if (flags & SWP_FRAMECHANGED) surface->wex_host_attempted = FALSE;
     update_foreign_association(surface);
     if (hosting_enabled(surface) && surface->wex_group == WEX_WINDOW_V1_GROUP_STATUS_ACTIVE &&

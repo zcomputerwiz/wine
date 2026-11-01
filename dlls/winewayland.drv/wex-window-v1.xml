@@ -29,7 +29,7 @@
     for shell components (taskbars), and activation without tokens.
   </description>
 
-  <interface name="wex_window_manager_v1" version="10">
+  <interface name="wex_window_manager_v1" version="11">
     <description summary="manager interface for privileged window controls">
       Allows obtaining a wex_window_v1 interface for an xdg_toplevel.
       Only advertised to privileged clients on the wex-shell socket.
@@ -66,9 +66,33 @@
       <arg name="wayland_display" type="string"/>
       <arg name="xwayland_display" type="string"/>
     </event>
+    <request name="get_render_surface" since="11">
+      <description summary="privileged cross-connection Wine rendering surface">
+        Assigns a role to a producer-owned surface. Only the private endpoint
+        may create it. The parent is selected by an existing unpredictable
+        frame handle, not a raw HWND or caller-supplied process identifier.
+      </description>
+      <arg name="id" type="new_id" interface="wex_render_surface_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
   </interface>
 
-  <interface name="wex_window_v1" version="10">
+  <interface name="wex_render_surface_v1" version="1">
+    <request name="destroy" type="destructor"/>
+    <request name="set_parent">
+      <description summary="attach or detach within a privileged frame">
+        Coordinates are frame-content logical units. Width and height bound
+        the rendering region. Empty, unknown or stale handles detach without
+        changing frame input/focus. Frame destruction revokes the attachment.
+        The surface inherits the frame's position, visibility and minimization.
+      </description>
+      <arg name="handle" type="string"/>
+      <arg name="x" type="int"/><arg name="y" type="int"/>
+      <arg name="width" type="int"/><arg name="height" type="int"/>
+    </request>
+  </interface>
+
+  <interface name="wex_window_v1" version="11">
     <description summary="window controls interface">
       Provides operations for stacking, layering, shell edge reservation,
       and direct activation.
