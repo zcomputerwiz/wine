@@ -82,6 +82,7 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(server);
 WINE_DECLARE_DEBUG_CHANNEL(syscall);
+WINE_DECLARE_DEBUG_CHANNEL(wex_process);
 
 #ifndef MSG_CMSG_CLOEXEC
 #define MSG_CMSG_CLOEXEC 0
@@ -1708,6 +1709,8 @@ void server_init_process( struct thread_data *data )
     close( reply_pipe );
 
     if (ret) server_protocol_error( "init_first_thread failed with status %x\n", ret );
+    TRACE_(wex_process)( "win_pid=%04x win_tid=%04x unix_pid=%u unix_tid=%u\n",
+                        pid, data->tid, getpid(), get_unix_tid() );
 
     if (!supported_machines_count)
         fatal_error( "'%s' is a 64-bit installation, it cannot be used with a 32-bit wineserver.\n",
@@ -1804,6 +1807,8 @@ void server_init_thread( struct thread_data *data )
 
     if (data->teb)
     {
+        TRACE_(wex_process)( "win_pid=%04x win_tid=%04x unix_pid=%u unix_tid=%u\n",
+                            pid, data->tid, getpid(), get_unix_tid() );
         init_teb_data( data );
         signal_start_thread( data->start, data->param, data->teb );
     }
