@@ -86,6 +86,7 @@ extern void _thread_set_tsd_base(uint64_t);
 
 WINE_DEFAULT_DEBUG_CHANNEL(unwind);
 WINE_DECLARE_DEBUG_CHANNEL(seh);
+WINE_DECLARE_DEBUG_CHANNEL(wex_exception);
 
 #include "dwarf.h"
 
@@ -1478,6 +1479,7 @@ static void setup_raise_exception( struct thread_data *data, ucontext_t *sigcont
     struct exc_stack_layout *stack;
     size_t stack_size;
     NTSTATUS status;
+    DWORD initial_code;
     XSAVE_AREA_HEADER *src_xs;
     void *callback;
 
@@ -1491,10 +1493,22 @@ static void setup_raise_exception( struct thread_data *data, ucontext_t *sigcont
     /* fix up instruction pointer in context for EXCEPTION_BREAKPOINT */
     if (rec->ExceptionCode == EXCEPTION_BREAKPOINT) context->Rip--;
 
+    initial_code = rec->ExceptionCode;
+    if (rec->ExceptionCode == STATUS_ACCESS_VIOLATION || rec->ExceptionCode == STATUS_STACK_OVERFLOW)
+        TRACE_(wex_exception)( "dispatch code %08x addr %p rsp %lx rcx %lx rsi %lx rdi %lx "
+                              "parameters %u access %zu fault %p\n",
+                              rec->ExceptionCode, rec->ExceptionAddress, context->Rsp, context->Rcx,
+                              context->Rsi, context->Rdi, rec->NumberParameters,
+                              rec->NumberParameters ? rec->ExceptionInformation[0] : 0,
+                              rec->NumberParameters > 1 ? (void *)rec->ExceptionInformation[1] : NULL );
+
     rsp = is_16bit(sigcontext) ? get_wow_teb(data->teb)->SystemReserved1[0] : RSP_sig(sigcontext);
     rsp &= ~(ULONG_PTR)15;
     stack_size = rsp - ((rsp - sizeof(*stack) - xstate_size) & ~(ULONG_PTR)63);
     stack = virtual_setup_exception( data, (void *)rsp, stack_size, rec );
+    if (initial_code != STATUS_STACK_OVERFLOW && rec->ExceptionCode == STATUS_STACK_OVERFLOW)
+        TRACE_(wex_exception)( "dispatch changed from %08x to stack overflow addr %p rsp %lx allocated_stack %p size %zu\n",
+                              initial_code, rec->ExceptionAddress, context->Rsp, stack, stack_size );
     stack->rec               = *rec;
     stack->context           = *context;
     stack->machine_frame.rip = context->Rip;
@@ -2550,6 +2564,8 @@ static void usr1_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
 
     if (!data->teb)
     {
+        TRACE_(wex_exception)( "suspend signal without TEB signal %d code %d tid %04x data %p rsp %llx rip %llx\n",
+                              signal, siginfo->si_code, data->tid, data, RSP_sig(sigcontext), RIP_sig(sigcontext) );
         server_select( NULL, 0, SELECT_INTERRUPTIBLE, 0, NULL, NULL );
     }
     else if (is_inside_syscall( data, RSP_sig(sigcontext) ))

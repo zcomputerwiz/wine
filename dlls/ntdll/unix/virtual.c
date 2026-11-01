@@ -4375,9 +4375,11 @@ void *virtual_setup_exception( struct thread_data *data, void *stack_ptr, size_t
     {
         /* stack overflow on last page, unrecoverable */
         UINT diff = stack_info.start + host_page_size - stack;
-        TRACE_(wex_exception)( "terminal exception code %08x flags %08x addr %p input_stack %p size %zu allocated_stack %p "
+        TRACE_(wex_exception)( "terminal exception code %08x flags %08x addr %p parameters %u access %zu fault %p input_stack %p size %zu allocated_stack %p "
                               "bounds %p-%p-%p guaranteed %zu teb_guaranteed %u wow %d\n",
-                              rec->ExceptionCode, rec->ExceptionFlags, rec->ExceptionAddress, stack_ptr, size, stack,
+                              rec->ExceptionCode, rec->ExceptionFlags, rec->ExceptionAddress, rec->NumberParameters,
+                              rec->NumberParameters ? rec->ExceptionInformation[0] : 0,
+                              rec->NumberParameters > 1 ? (void *)rec->ExceptionInformation[1] : NULL, stack_ptr, size, stack,
                               stack_info.start, stack_info.limit, stack_info.end, stack_info.guaranteed,
                               data->teb->GuaranteedStackBytes, stack_info.is_wow );
         ERR( "stack overflow %u bytes addr %p stack %p (%p-%p-%p)\n",
