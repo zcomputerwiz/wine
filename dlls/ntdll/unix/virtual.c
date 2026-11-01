@@ -2768,6 +2768,13 @@ static BOOL pe_has_unaligned_sections( const IMAGE_SECTION_HEADER *sec, unsigned
 }
 
 
+#ifndef SOCK_CLOEXEC
+# define SOCK_CLOEXEC 0
+#endif
+#ifndef MSG_CMSG_CLOEXEC
+# define MSG_CMSG_CLOEXEC 0
+#endif
+
 /* Wire format of the wexprefetchd service: keep in sync with src/wexprefetchd/protocol.h */
 #define WEXPF_SOCKET_PATH   "/run/wineexplorer/prefetch.sock"
 #define WEXPF_MAGIC         0x31465058u
@@ -2793,6 +2800,22 @@ struct wexpf_reply
 
 
 /***********************************************************************
+ *           fd_maps_exec
+ *
+ * Can a page of this file be mapped executable?  Not when the cache lives on a noexec filesystem; the section
+ * would then be left without execute permission, where the read() fallback (anonymous memory) works.
+ */
+static BOOL fd_maps_exec( int fd )
+{
+    void *p = mmap( NULL, host_page_size, PROT_READ | PROT_EXEC, MAP_PRIVATE, fd, 0 );
+
+    if (p == MAP_FAILED) return FALSE;
+    munmap( p, host_page_size );
+    return TRUE;
+}
+
+
+/***********************************************************************
  *           open_prefetch_image
  *
  * Ask the wexprefetchd service (if present) for a page-aligned "flat image" of the PE file open on fd:
@@ -2812,7 +2835,7 @@ static int open_prefetch_image( int fd, UINT64 *image_size )
     union { struct cmsghdr align; char buf[CMSG_SPACE( 4 * sizeof(int) )]; } ctl;
     struct timeval timeout = { 15, 0 };
     const char *path = getenv( "WINE_PREFETCH_SOCKET" );
-    int sock, flat_fd = -1, nfds = 0, fds[4];
+    int i, sock, flat_fd = -1, nfds = 0, fds[4];
     struct stat st;
     ssize_t n;
 
@@ -2820,7 +2843,12 @@ static int open_prefetch_image( int fd, UINT64 *image_size )
     if (!path || !*path) path = WEXPF_SOCKET_PATH;
     if (strlen( path ) >= sizeof(addr.sun_path)) return -1;
 
-    if ((sock = socket( AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0 )) == -1) return -1;
+    if ((sock = socket( AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0 )) == -1)
+    {
+        if (errno == EPROTOTYPE || errno == EPROTONOSUPPORT || errno == EAFNOSUPPORT) unavailable = TRUE;
+        return -1;
+    }
+    fcntl( sock, F_SETFD, FD_CLOEXEC );  /* for systems without SOCK_CLOEXEC */
     setsockopt( sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout) );
     setsockopt( sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout) );
     memset( &addr, 0, sizeof(addr) );
@@ -2877,6 +2905,8 @@ static int open_prefetch_image( int fd, UINT64 *image_size )
                 memcpy( &fds[nfds], (char *)CMSG_DATA( cmsg ) + nfds * sizeof(int), sizeof(int) );
             break;
         }
+    if (!MSG_CMSG_CLOEXEC)  /* systems without it: set close-on-exec by hand */
+        for (i = 0; i < nfds; i++) fcntl( fds[i], F_SETFD, FD_CLOEXEC );
     if (n != sizeof(reply) || (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) || nfds != 1 ||
         reply.magic != WEXPF_MAGIC || reply.version != WEXPF_VERSION || reply.status != 0 ||
         reply.layout != WEXPF_LAYOUT_FLAT || !reply.image_size || reply.image_size > WEXPF_MAX_IMAGE)
@@ -3278,9 +3308,21 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
     /* sections that cannot be mmap'ed from the file: ask the service, then the in-process cache */
     if (!removable && pe_has_unaligned_sections( sec, nt->FileHeader.NumberOfSections, align_mask, &st ))
         flat_fd = open_prefetch_image( fd, &flat_size );
+    if (flat_fd != -1 && !fd_maps_exec( flat_fd ))
+    {
+        close( flat_fd );
+        flat_fd = -1;
+    }
     if (flat_fd == -1)
+    {
         cache_fd = open_pe_section_cache( fd, &st, sec, nt->FileHeader.NumberOfSections,
                                           align_mask, total_size, nt_name, removable );
+        if (cache_fd != -1 && !fd_maps_exec( cache_fd ))
+        {
+            close( cache_fd );
+            cache_fd = -1;
+        }
+    }
 
     for (i = pos = 0; i < nt->FileHeader.NumberOfSections; i++)
     {
@@ -5289,14 +5331,25 @@ void virtual_trim_working_set( void )
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
     WINE_RB_FOR_EACH_ENTRY( view, &views_tree, struct file_view, entry )
     {
-        /* only committed private anonymous memory, skip system/guard/no-access views */
-        if (!is_view_valloc( view )) continue;
-        if (!(view->protect & VPROT_COMMITTED)) continue;
-        if (view->protect & (VPROT_SYSTEM | VPROT_GUARD)) continue;
-        if (!(view->protect & 0x0f)) continue;  /* PAGE_NOACCESS */
+        char *addr = view->base, *end = addr + view->size;
+
+        /* only private anonymous memory; commitment is kept per page, so a reserved view that was committed
+         * later has to be walked range by range (this visits every page entry of huge reservations too) */
+        if (!is_view_valloc( view ) || (view->protect & VPROT_SYSTEM)) continue;
+        while (addr < end)
+        {
+            BYTE vprot;
+            SIZE_T size = get_committed_size( view, addr, end - addr, &vprot,
+                                              VPROT_COMMITTED | VPROT_GUARD | VPROT_READ | VPROT_WRITE |
+                                              VPROT_EXEC | VPROT_WRITECOPY );
+            if (!size) break;
 #ifdef MADV_PAGEOUT
-        madvise( view->base, view->size, MADV_PAGEOUT );
+            if ((vprot & VPROT_COMMITTED) && !(vprot & VPROT_GUARD) &&
+                (vprot & (VPROT_READ | VPROT_WRITE | VPROT_EXEC | VPROT_WRITECOPY)))
+                madvise( addr, size, MADV_PAGEOUT );
 #endif
+            addr += size;
+        }
     }
     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
 }
