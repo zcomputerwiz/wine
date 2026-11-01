@@ -97,6 +97,7 @@
 WINE_DEFAULT_DEBUG_CHANNEL(virtual);
 WINE_DECLARE_DEBUG_CHANNEL(module);
 WINE_DECLARE_DEBUG_CHANNEL(mem_areas);
+WINE_DECLARE_DEBUG_CHANNEL(wex_exception);
 
 struct preload_info
 {
@@ -4266,6 +4267,9 @@ static NTSTATUS grow_thread_stack( struct thread_data *data, char *page, struct 
     }
     else  /* inside guaranteed space -> overflow exception */
     {
+        TRACE_(wex_exception)( "guaranteed overflow page %p bounds %p-%p-%p guaranteed %zu teb_guaranteed %u wow %d\n",
+                              page, stack_info->start, stack_info->limit, stack_info->end,
+                              stack_info->guaranteed, data->teb->GuaranteedStackBytes, stack_info->is_wow );
         page = stack_info->start + host_page_size;
         set_page_vprot_bits( page, stack_info->guaranteed, VPROT_COMMITTED, VPROT_GUARD );
         mprotect_range( page, stack_info->guaranteed, 0, 0 );
@@ -4371,6 +4375,11 @@ void *virtual_setup_exception( struct thread_data *data, void *stack_ptr, size_t
     {
         /* stack overflow on last page, unrecoverable */
         UINT diff = stack_info.start + host_page_size - stack;
+        TRACE_(wex_exception)( "terminal exception code %08x flags %08x addr %p input_stack %p size %zu allocated_stack %p "
+                              "bounds %p-%p-%p guaranteed %zu teb_guaranteed %u wow %d\n",
+                              rec->ExceptionCode, rec->ExceptionFlags, rec->ExceptionAddress, stack_ptr, size, stack,
+                              stack_info.start, stack_info.limit, stack_info.end, stack_info.guaranteed,
+                              data->teb->GuaranteedStackBytes, stack_info.is_wow );
         ERR( "stack overflow %u bytes addr %p stack %p (%p-%p-%p)\n",
              diff, rec->ExceptionAddress, stack, stack_info.start, stack_info.limit, stack_info.end );
         abort_thread(1);
