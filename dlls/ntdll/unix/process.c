@@ -1196,7 +1196,7 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
                 else
                 {
                     memset(&pvmi, 0, sizeof(pvmi));
-                    if (handle == GetCurrentProcess()) fill_vm_counters( &pvmi, -1 );
+                    if (handle == NtCurrentProcess()) fill_vm_counters( &pvmi, -1 );
                     else
                     {
                         SERVER_START_REQ(get_process_vm_counters)
@@ -1436,7 +1436,7 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
     case ProcessWow64Information:
         len = sizeof(ULONG_PTR);
         if (size != len) return STATUS_INFO_LENGTH_MISMATCH;
-        if (handle == GetCurrentProcess())
+        if (handle == NtCurrentProcess())
             *(ULONG_PTR *)info = is_old_wow64() ? (ULONG_PTR)peb : (ULONG_PTR)wow_peb;
         else
         {
@@ -1885,6 +1885,24 @@ NTSTATUS WINAPI NtSetInformationProcess( HANDLE handle, PROCESSINFOCLASS class, 
     case ProcessPowerThrottlingState:
         FIXME( "ProcessPowerThrottlingState - stub\n" );
         return STATUS_SUCCESS;
+
+    case ProcessQuotaLimits:
+    {
+        const QUOTA_LIMITS *limits = info;
+
+        if (size == sizeof(QUOTA_LIMITS) && limits && handle == NtCurrentProcess() &&
+            limits->MinimumWorkingSetSize == (SIZE_T)-1 && limits->MaximumWorkingSetSize == (SIZE_T)-1)
+        {
+            virtual_trim_working_set();
+            ret = STATUS_SUCCESS;
+        }
+        else
+        {
+            FIXME( "(%p,0x%08x,%p,0x%08x) stub\n", handle, class, info, size );
+            ret = STATUS_NOT_IMPLEMENTED;
+        }
+        break;
+    }
 
     default:
         FIXME( "(%p,0x%08x,%p,0x%08x) stub\n", handle, class, info, size );

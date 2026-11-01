@@ -4702,6 +4702,38 @@ void virtual_set_force_exec( BOOL enable )
 }
 
 
+#ifdef __linux__
+#ifndef MADV_PAGEOUT
+#define MADV_PAGEOUT 21
+#endif
+#endif
+
+/***********************************************************************
+ *           virtual_trim_working_set
+ *
+ * Ask the kernel to page out committed private anonymous memory.
+ */
+void virtual_trim_working_set( void )
+{
+    struct file_view *view;
+    sigset_t sigset;
+
+    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+    WINE_RB_FOR_EACH_ENTRY( view, &views_tree, struct file_view, entry )
+    {
+        /* only committed private anonymous memory, skip system/guard/no-access views */
+        if (!is_view_valloc( view )) continue;
+        if (!(view->protect & VPROT_COMMITTED)) continue;
+        if (view->protect & (VPROT_SYSTEM | VPROT_GUARD)) continue;
+        if (!(view->protect & 0x0f)) continue;  /* PAGE_NOACCESS */
+#ifdef MADV_PAGEOUT
+        madvise( view->base, view->size, MADV_PAGEOUT );
+#endif
+    }
+    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+}
+
+
 /***********************************************************************
  *           virtual_manage_exec_writes
  */
