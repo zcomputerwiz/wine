@@ -83,6 +83,7 @@
 WINE_DEFAULT_DEBUG_CHANNEL(server);
 WINE_DECLARE_DEBUG_CHANNEL(syscall);
 WINE_DECLARE_DEBUG_CHANNEL(wex_process);
+WINE_DECLARE_DEBUG_CHANNEL(wex_wait);
 
 #ifndef MSG_CMSG_CLOEXEC
 #define MSG_CMSG_CLOEXEC 0
@@ -775,7 +776,18 @@ unsigned int server_select( const union select_op *select_op, data_size_t size, 
         pthread_sigmask( SIG_SETMASK, &old_set, NULL );
         if (signaled) break;
 
+        if (TRACE_ON(wex_wait))
+        {
+            obj_handle_t first_handle = 0;
+            unsigned int op = SELECT_NONE;
+            if (select_op && size >= sizeof(select_op->op)) op = select_op->op;
+            if (select_op && size >= offsetof( union select_op, wait.handles[1] ))
+                first_handle = select_op->wait.handles[0];
+            TRACE_(wex_wait)( "pending cookie=%p op=%u size=%u flags=%#x timeout=%lld context=%d first_handle=%04x\n",
+                             &cookie, op, size, flags, (long long)abs_timeout, !!context, first_handle );
+        }
         ret = wait_select_reply( data->wait_fd, &cookie );
+        TRACE_(wex_wait)( "returned cookie=%p status=%08x\n", &cookie, ret );
     }
     while (ret == STATUS_USER_APC || ret == STATUS_KERNEL_APC);
 

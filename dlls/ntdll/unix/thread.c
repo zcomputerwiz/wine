@@ -80,6 +80,7 @@
 WINE_DEFAULT_DEBUG_CHANNEL(thread);
 WINE_DECLARE_DEBUG_CHANNEL(seh);
 WINE_DECLARE_DEBUG_CHANNEL(threadname);
+WINE_DECLARE_DEBUG_CHANNEL(wex_wait);
 
 static LONG nb_threads = 1;
 
@@ -1927,7 +1928,9 @@ NTSTATUS get_thread_context( HANDLE handle, void *context, BOOL *self, USHORT ma
     {
         sigset_t sigset;
 
+        TRACE_(wex_wait)( "get_context_pending target=%p context_handle=%p\n", handle, context_handle );
         NtWaitForSingleObject( context_handle, FALSE, NULL );
+        TRACE_(wex_wait)( "get_context_resumed context_handle=%p\n", context_handle );
 
         server_enter_uninterrupted_section( &fd_cache_mutex, &sigset );
 
