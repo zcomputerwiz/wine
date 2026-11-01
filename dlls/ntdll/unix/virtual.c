@@ -25,6 +25,7 @@
 #include "config.h"
 
 #include <assert.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -32,7 +33,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include <signal.h>
+#include <time.h>
 #include <sys/types.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
@@ -2655,6 +2658,74 @@ static IMAGE_BASE_RELOCATION *process_relocation_block( char *page, IMAGE_BASE_R
 
 
 /***********************************************************************
+ *           prune_pe_section_cache
+ *
+ * Remove the oldest pe-*.cache files in cache_dir until their total
+ * size fits within the cap (4 GiB by default, or WINE_PE_CACHE_MAX_MB
+ * MiB if set). keep_name is never removed.
+ */
+static void prune_pe_section_cache( const char *cache_dir, const char *keep_name )
+{
+    static const off_t default_cap = 4ULL * 1024 * 1024 * 1024;
+    const char *env;
+    off_t cap = default_cap;
+    DIR *dir;
+    int dir_fd;
+
+    if ((env = getenv( "WINE_PE_CACHE_MAX_MB" )) && *env)
+    {
+        off_t mb = strtoll( env, NULL, 10 );
+        if (mb > 0) cap = mb * 1024 * 1024;
+    }
+
+    if ((dir = opendir( cache_dir )) == NULL) return;
+    dir_fd = dirfd( dir );
+
+    for (;;)
+    {
+        struct dirent *entry;
+        struct stat st;
+        off_t total = 0;
+        time_t oldest = 0;
+        BOOL found = FALSE, removed = FALSE;
+
+        rewinddir( dir );
+        while ((entry = readdir( dir )) != NULL)
+        {
+            size_t len = strlen( entry->d_name );
+            if (len < 9 || strncmp( entry->d_name, "pe-", 3 ) ||
+                strcmp( entry->d_name + len - 6, ".cache" )) continue;
+            if (fstatat( dir_fd, entry->d_name, &st, 0 ) == -1 || !S_ISREG( st.st_mode )) continue;
+            total += st.st_size;
+            if (strcmp( entry->d_name, keep_name ) && (!found || st.st_mtime < oldest))
+            {
+                oldest = st.st_mtime;
+                found = TRUE;
+            }
+        }
+
+        if (total <= cap || !found) break;
+
+        rewinddir( dir );
+        while ((entry = readdir( dir )) != NULL)
+        {
+            size_t len = strlen( entry->d_name );
+            if (len < 9 || strncmp( entry->d_name, "pe-", 3 ) ||
+                strcmp( entry->d_name + len - 6, ".cache" )) continue;
+            if (fstatat( dir_fd, entry->d_name, &st, 0 ) == -1 || !S_ISREG( st.st_mode )) continue;
+            if (!strcmp( entry->d_name, keep_name ) || st.st_mtime != oldest) continue;
+            if (unlinkat( dir_fd, entry->d_name, 0 ) == -1) break;
+            removed = TRUE;
+            break;
+        }
+        if (!removed) break;
+    }
+
+    closedir( dir );
+}
+
+
+/***********************************************************************
  *           open_pe_section_cache
  *
  * Open or atomically create a per-image page-aligned section cache file
@@ -2662,12 +2733,14 @@ static IMAGE_BASE_RELOCATION *process_relocation_block( char *page, IMAGE_BASE_R
  * offsets are not host-page aligned (e.g. FileAlignment 0x200).
  *
  * Cleanup policy: one file is stored per distinct image, keyed by
- * (st_dev, st_ino, st_size, st_mtime) plus a 64-bit FNV-1a digest of
- * the unaligned section raw offsets/sizes. Stale cache files from
- * updated or removed binaries can be pruned on prefix startup/shutdown
- * (e.g. in wineboot) by unlinking entries in <config_dir>/pe_section_cache
- * not accessed within N days or exceeding a size cap; unlinking an
- * active file is safe on Unix as existing mmap regions keep the inode.
+ * (st_dev, st_ino, st_size, st_mtime, st_ctime) plus a 64-bit FNV-1a
+ * digest of the unaligned section raw offsets/sizes. After a new cache
+ * file is created, prune_pe_section_cache() removes the oldest entries
+ * until the total size fits within the cap (4 GiB by default, or
+ * WINE_PE_CACHE_MAX_MB MiB); stale files from updated or removed
+ * binaries can additionally be pruned on prefix startup/shutdown (e.g.
+ * in wineboot). Unlinking an active file is safe on Unix as existing
+ * mmap regions keep the inode.
  */
 static int open_pe_section_cache( int fd, const struct stat *st, const IMAGE_SECTION_HEADER *sec,
                                   unsigned int nb_sec, SIZE_T align_mask, SIZE_T total_size,
@@ -2678,8 +2751,10 @@ static int open_pe_section_cache( int fd, const struct stat *st, const IMAGE_SEC
     UINT64 hash = 0xcbf29ce484222325ULL;
     off_t total_cache_size = 0, cache_pos = 0;
     SIZE_T max_sec_size = 0, buf_size;
-    char *cache_dir = NULL, *cache_path = NULL, *tmp_path = NULL, *buf = NULL;
-    int cache_fd = -1, tmp_fd = -1;
+    char *cache_dir = NULL, *cache_path = NULL, *lock_path = NULL, *tmp_path = NULL, *buf = NULL;
+    int cache_fd = -1, tmp_fd = -1, lock_fd = -1, ret;
+    time_t mtime_sec, ctime_sec;
+    unsigned long long mtime_nsec, ctime_nsec;
     struct stat cache_st;
     unsigned int i, seq;
 
@@ -2737,10 +2812,21 @@ static int open_pe_section_cache( int fd, const struct stat *st, const IMAGE_SEC
     if (!total_cache_size) return -1;
 
     if (asprintf( &cache_dir, "%s/pe_section_cache", config_dir ) == -1) return -1;
-    if (asprintf( &cache_path, "%s/pe-%llx-%llx-%llx-%llx-%016llx.cache",
+    mtime_sec = st->st_mtime;
+    mtime_nsec = 0;
+    ctime_sec = 0;
+    ctime_nsec = 0;
+#ifdef __linux__
+    mtime_sec = st->st_mtim.tv_sec;
+    mtime_nsec = st->st_mtim.tv_nsec;
+    ctime_sec = st->st_ctim.tv_sec;
+    ctime_nsec = st->st_ctim.tv_nsec;
+#endif
+    if (asprintf( &cache_path, "%s/pe-%llx-%llx-%llx-%llx-%llx-%llx-%llx-%016llx.cache",
                   cache_dir, (unsigned long long)st->st_dev, (unsigned long long)st->st_ino,
-                  (unsigned long long)st->st_size, (unsigned long long)st->st_mtime,
-                  (unsigned long long)hash ) == -1)
+                  (unsigned long long)st->st_size, (unsigned long long)mtime_sec,
+                  (unsigned long long)mtime_nsec, (unsigned long long)ctime_sec,
+                  (unsigned long long)ctime_nsec, (unsigned long long)hash ) == -1)
     {
         free( cache_dir );
         return -1;
@@ -2752,6 +2838,12 @@ static int open_pe_section_cache( int fd, const struct stat *st, const IMAGE_SEC
         if (!fstat( cache_fd, &cache_st ) && S_ISREG( cache_st.st_mode ) &&
             cache_st.st_size == total_cache_size)
         {
+            if (time( NULL ) - cache_st.st_mtime > 3600)
+            {
+#ifdef HAVE_FUTIMENS
+                futimens( cache_fd, NULL );
+#endif
+            }
             TRACE_(module)( "PE section cache hit for %s (%s)\n", debugstr_us(nt_name), cache_path );
             goto done;
         }
@@ -2763,6 +2855,37 @@ static int open_pe_section_cache( int fd, const struct stat *st, const IMAGE_SEC
     TRACE_(module)( "PE section cache miss for %s (%s)\n", debugstr_us(nt_name), cache_path );
 
     if (mkdir( cache_dir, 0700 ) == -1 && errno != EEXIST) goto done;
+
+    if (asprintf( &lock_path, "%s.lock", cache_path ) == -1) goto done;
+    if ((lock_fd = open( lock_path, O_RDWR | O_CREAT, 0600 )) != -1)
+    {
+        fcntl( lock_fd, F_SETFD, FD_CLOEXEC );
+        while ((ret = flock( lock_fd, LOCK_EX )) == -1 && errno == EINTR);
+        if (ret == -1)
+        {
+            close( lock_fd );
+            lock_fd = -1;
+        }
+        else if ((cache_fd = open( cache_path, O_RDONLY )) != -1)
+        {
+            fcntl( cache_fd, F_SETFD, FD_CLOEXEC );
+            if (!fstat( cache_fd, &cache_st ) && S_ISREG( cache_st.st_mode ) &&
+                cache_st.st_size == total_cache_size)
+            {
+                if (time( NULL ) - cache_st.st_mtime > 3600)
+                {
+#ifdef HAVE_FUTIMENS
+                    futimens( cache_fd, NULL );
+#endif
+                }
+                TRACE_(module)( "PE section cache hit for %s (%s)\n", debugstr_us(nt_name), cache_path );
+                goto done;
+            }
+            close( cache_fd );
+            cache_fd = -1;
+            unlink( cache_path );
+        }
+    }
 
     seq = __atomic_fetch_add( &tmp_seq, 1, __ATOMIC_RELAXED );
     if (asprintf( &tmp_path, "%s/.pe-%llx-%llx-%u-%u.tmp",
@@ -2848,6 +2971,8 @@ static int open_pe_section_cache( int fd, const struct stat *st, const IMAGE_SEC
 
     if (rename( tmp_path, cache_path ) == -1)
         unlink( tmp_path );
+    else
+        prune_pe_section_cache( cache_dir, strrchr( cache_path, '/' ) + 1 );
 
     if ((cache_fd = open( cache_path, O_RDONLY )) != -1)
     {
@@ -2866,8 +2991,14 @@ cleanup_tmp:
     if (tmp_path) unlink( tmp_path );
 
 done:
+    if (lock_fd != -1)
+    {
+        close( lock_fd );
+        if (lock_path) unlink( lock_path );
+    }
     free( buf );
     free( tmp_path );
+    free( lock_path );
     free( cache_path );
     free( cache_dir );
     return cache_fd;
