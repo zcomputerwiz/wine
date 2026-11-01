@@ -37,6 +37,7 @@
 #include <sys/types.h>
 #include <sys/file.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
@@ -2726,6 +2727,175 @@ static void prune_pe_section_cache( const char *cache_dir, const char *keep_name
 
 
 /***********************************************************************
+ *           pe_cache_disabled
+ *
+ * WINE_PE_CACHE=0 turns off both the wexprefetchd request and the in-process cache.
+ */
+static BOOL pe_cache_disabled(void)
+{
+    const char *env = getenv( "WINE_PE_CACHE" );
+    return env && !strcmp( env, "0" );
+}
+
+
+/***********************************************************************
+ *           pe_has_unaligned_sections
+ *
+ * Same test as the section loop in map_image_into_view: does any section have to be read() because its
+ * sector-rounded file offset is not host-page aligned?
+ */
+static BOOL pe_has_unaligned_sections( const IMAGE_SECTION_HEADER *sec, unsigned int nb_sec,
+                                       SIZE_T align_mask, const struct stat *st )
+{
+    static const SIZE_T sector_align = 0x1ff;
+    unsigned int i;
+
+    for (i = 0; i < nb_sec; i++)
+    {
+        SIZE_T map_size, file_start, file_size;
+
+        if ((sec[i].Characteristics & IMAGE_SCN_MEM_SHARED) && (sec[i].Characteristics & IMAGE_SCN_MEM_WRITE))
+            continue;
+        if (!sec[i].PointerToRawData || sec[i].PointerToRawData >= st->st_size) continue;
+        if (!sec[i].Misc.VirtualSize) map_size = ROUND_SIZE( 0, sec[i].SizeOfRawData, align_mask );
+        else map_size = ROUND_SIZE( 0, sec[i].Misc.VirtualSize, align_mask );
+        file_start = sec[i].PointerToRawData & ~sector_align;
+        file_size = ROUND_SIZE( sec[i].PointerToRawData, sec[i].SizeOfRawData, sector_align );
+        if (file_size > map_size) file_size = map_size;
+        if (file_size && (file_start & host_page_mask)) return TRUE;
+    }
+    return FALSE;
+}
+
+
+/* Wire format of the wexprefetchd service: keep in sync with src/wexprefetchd/protocol.h */
+#define WEXPF_SOCKET_PATH   "/run/wineexplorer/prefetch.sock"
+#define WEXPF_MAGIC         0x31465058u
+#define WEXPF_VERSION       1u
+#define WEXPF_OP_GET_IMAGE  1u
+#define WEXPF_LAYOUT_FLAT   1u
+#define WEXPF_MAX_IMAGE     (1ull << 30)
+
+struct wexpf_request
+{
+    UINT32 magic, version, op, flags;
+};
+
+struct wexpf_reply
+{
+    UINT32 magic, version;
+    INT32  status;
+    UINT32 layout;
+    UINT64 image_size;
+    char   sha256[65];
+    char   pad[7];
+};
+
+
+/***********************************************************************
+ *           open_prefetch_image
+ *
+ * Ask the wexprefetchd service (if present) for a page-aligned "flat image" of the PE file open on fd:
+ * the file is sent as a descriptor, never as a path, and the service computes everything itself.
+ * Returns a read-only descriptor to the flat image (section data at its RVA, see protocol.h) or -1,
+ * in which case the caller falls back to the in-process cache and then to read().
+ */
+static int open_prefetch_image( int fd, UINT64 *image_size )
+{
+    static BOOL unavailable;  /* protected by virtual_mutex: ask at most once per process when there is no service */
+    struct wexpf_request req = { WEXPF_MAGIC, WEXPF_VERSION, WEXPF_OP_GET_IMAGE, 0 };
+    struct wexpf_reply reply;
+    struct sockaddr_un addr;
+    struct msghdr msg;
+    struct cmsghdr *cmsg;
+    struct iovec iov;
+    union { struct cmsghdr align; char buf[CMSG_SPACE( 4 * sizeof(int) )]; } ctl;
+    struct timeval timeout = { 15, 0 };
+    const char *path = getenv( "WINE_PREFETCH_SOCKET" );
+    int sock, flat_fd = -1, nfds = 0, fds[4];
+    struct stat st;
+    ssize_t n;
+
+    if (unavailable || pe_cache_disabled()) return -1;
+    if (!path || !*path) path = WEXPF_SOCKET_PATH;
+    if (strlen( path ) >= sizeof(addr.sun_path)) return -1;
+
+    if ((sock = socket( AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0 )) == -1) return -1;
+    setsockopt( sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout) );
+    setsockopt( sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout) );
+    memset( &addr, 0, sizeof(addr) );
+    addr.sun_family = AF_UNIX;
+    strcpy( addr.sun_path, path );
+    /* Wine delivers signals to its threads all the time, and a socket with a timeout is not restarted after one:
+     * retry the calls that can be interrupted instead of giving up on the service */
+    while (connect( sock, (struct sockaddr *)&addr, sizeof(addr) ) == -1)
+    {
+        if (errno == EINTR) continue;
+        if (errno == ENOENT || errno == ECONNREFUSED || errno == EACCES) unavailable = TRUE;
+        goto done;
+    }
+
+    memset( &msg, 0, sizeof(msg) );
+    memset( &ctl, 0, sizeof(ctl) );
+    iov.iov_base = &req;
+    iov.iov_len = sizeof(req);
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = ctl.buf;
+    msg.msg_controllen = CMSG_SPACE( sizeof(int) );
+    cmsg = CMSG_FIRSTHDR( &msg );
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN( sizeof(int) );
+    memcpy( CMSG_DATA( cmsg ), &fd, sizeof(int) );
+    do n = sendmsg( sock, &msg, MSG_NOSIGNAL ); while (n == -1 && errno == EINTR);
+    if (n != sizeof(req)) goto done;
+
+    memset( &msg, 0, sizeof(msg) );
+    memset( &ctl, 0, sizeof(ctl) );
+    memset( &reply, 0, sizeof(reply) );
+    iov.iov_base = &reply;
+    iov.iov_len = sizeof(reply);
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = ctl.buf;
+    for (;;)
+    {
+        msg.msg_controllen = sizeof(ctl.buf);
+        msg.msg_flags = 0;
+        n = recvmsg( sock, &msg, MSG_CMSG_CLOEXEC );
+        if (n != -1 || errno != EINTR) break;
+    }
+
+    /* take ownership of every descriptor that arrived so none can leak */
+    if (n >= 0)
+        for (cmsg = CMSG_FIRSTHDR( &msg ); cmsg; cmsg = CMSG_NXTHDR( &msg, cmsg ))
+        {
+            if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) continue;
+            for (nfds = 0; nfds < 4 && (char *)CMSG_DATA( cmsg ) + (nfds + 1) * sizeof(int) <=
+                            (char *)cmsg + cmsg->cmsg_len; nfds++)
+                memcpy( &fds[nfds], (char *)CMSG_DATA( cmsg ) + nfds * sizeof(int), sizeof(int) );
+            break;
+        }
+    if (n != sizeof(reply) || (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) || nfds != 1 ||
+        reply.magic != WEXPF_MAGIC || reply.version != WEXPF_VERSION || reply.status != 0 ||
+        reply.layout != WEXPF_LAYOUT_FLAT || !reply.image_size || reply.image_size > WEXPF_MAX_IMAGE)
+        goto done;
+    if (fstat( fds[0], &st ) || !S_ISREG( st.st_mode ) || (UINT64)st.st_size < reply.image_size) goto done;
+
+    flat_fd = fds[0];
+    nfds = 0;
+    *image_size = reply.image_size;
+    TRACE_(module)( "PE image served by wexprefetchd, sha256 %.64s\n", reply.sha256 );
+
+done:
+    while (nfds > 0) close( fds[--nfds] );
+    close( sock );
+    return flat_fd;
+}
+
+
+/***********************************************************************
  *           open_pe_section_cache
  *
  * Open or atomically create a per-image page-aligned section cache file
@@ -2758,7 +2928,7 @@ static int open_pe_section_cache( int fd, const struct stat *st, const IMAGE_SEC
     struct stat cache_st;
     unsigned int i, seq;
 
-    if (removable || !config_dir || !*config_dir || st->st_size <= 0) return -1;
+    if (removable || !config_dir || !*config_dir || st->st_size <= 0 || pe_cache_disabled()) return -1;
 
     hash ^= (UINT64)host_page_size;
     hash *= 0x100000001b3ULL;
@@ -3037,7 +3207,8 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
     IMAGE_SECTION_HEADER *sections = NULL, *sec;
     IMAGE_DATA_DIRECTORY *imports, *dir;
     NTSTATUS status = STATUS_CONFLICTING_ADDRESSES;
-    int i, cache_fd = -1;
+    int i, cache_fd = -1, flat_fd = -1;
+    UINT64 flat_size = 0;
     off_t pos, cache_pos = 0;
     struct stat st;
     char *header_end;
@@ -3104,8 +3275,12 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
 
     /* map all the sections */
 
-    cache_fd = open_pe_section_cache( fd, &st, sec, nt->FileHeader.NumberOfSections,
-                                      align_mask, total_size, nt_name, removable );
+    /* sections that cannot be mmap'ed from the file: ask the service, then the in-process cache */
+    if (!removable && pe_has_unaligned_sections( sec, nt->FileHeader.NumberOfSections, align_mask, &st ))
+        flat_fd = open_prefetch_image( fd, &flat_size );
+    if (flat_fd == -1)
+        cache_fd = open_pe_section_cache( fd, &st, sec, nt->FileHeader.NumberOfSections,
+                                          align_mask, total_size, nt_name, removable );
 
     for (i = pos = 0; i < nt->FileHeader.NumberOfSections; i++)
     {
@@ -3184,6 +3359,12 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
         if (file_start & host_page_mask)
         {
             off_t sec_cache_pos = cache_pos;
+
+            /* the service's flat image holds the section at its RVA */
+            if (flat_fd != -1 && sec[i].VirtualAddress + ROUND_SIZE( 0, file_size, host_page_mask ) <= flat_size &&
+                map_pe_cache_section( view, flat_fd, sec[i].VirtualAddress, file_size, sec[i].VirtualAddress ))
+                continue;
+
             cache_pos += ROUND_SIZE( 0, file_size, host_page_mask );
             if (map_pe_cache_section( view, cache_fd, sec[i].VirtualAddress, file_size, sec_cache_pos ))
                 continue;
@@ -3282,6 +3463,7 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
 
 done:
     if (cache_fd != -1) close( cache_fd );
+    if (flat_fd != -1) close( flat_fd );
     free( sections );
     return status;
 }
