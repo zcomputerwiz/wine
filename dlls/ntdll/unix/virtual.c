@@ -2655,6 +2655,243 @@ static IMAGE_BASE_RELOCATION *process_relocation_block( char *page, IMAGE_BASE_R
 
 
 /***********************************************************************
+ *           open_pe_section_cache
+ *
+ * Open or atomically create a per-image page-aligned section cache file
+ * under <config_dir>/pe_section_cache for PE images whose section raw
+ * offsets are not host-page aligned (e.g. FileAlignment 0x200).
+ *
+ * Cleanup policy: one file is stored per distinct image, keyed by
+ * (st_dev, st_ino, st_size, st_mtime) plus a 64-bit FNV-1a digest of
+ * the unaligned section raw offsets/sizes. Stale cache files from
+ * updated or removed binaries can be pruned on prefix startup/shutdown
+ * (e.g. in wineboot) by unlinking entries in <config_dir>/pe_section_cache
+ * not accessed within N days or exceeding a size cap; unlinking an
+ * active file is safe on Unix as existing mmap regions keep the inode.
+ */
+static int open_pe_section_cache( int fd, const struct stat *st, const IMAGE_SECTION_HEADER *sec,
+                                  unsigned int nb_sec, SIZE_T align_mask, SIZE_T total_size,
+                                  const UNICODE_STRING *nt_name, BOOL removable )
+{
+    static const SIZE_T sector_align = 0x1ff;
+    static unsigned int tmp_seq;
+    UINT64 hash = 0xcbf29ce484222325ULL;
+    off_t total_cache_size = 0, cache_pos = 0;
+    SIZE_T max_sec_size = 0, buf_size;
+    char *cache_dir = NULL, *cache_path = NULL, *tmp_path = NULL, *buf = NULL;
+    int cache_fd = -1, tmp_fd = -1;
+    struct stat cache_st;
+    unsigned int i, seq;
+
+    if (removable || !config_dir || !*config_dir || st->st_size <= 0) return -1;
+
+    hash ^= (UINT64)host_page_size;
+    hash *= 0x100000001b3ULL;
+
+    for (i = 0; i < nb_sec; i++)
+    {
+        SIZE_T map_size, file_start, file_size, end, cache_sec_size;
+
+        if (!sec[i].Misc.VirtualSize)
+            map_size = ROUND_SIZE( 0, sec[i].SizeOfRawData, align_mask );
+        else
+            map_size = ROUND_SIZE( 0, sec[i].Misc.VirtualSize, align_mask );
+
+        file_start = sec[i].PointerToRawData & ~sector_align;
+        file_size = ROUND_SIZE( sec[i].PointerToRawData, sec[i].SizeOfRawData, sector_align );
+        if (file_size > map_size) file_size = map_size;
+
+        end = sec[i].VirtualAddress + ROUND_SIZE( sec[i].VirtualAddress, map_size, align_mask );
+        if (sec[i].VirtualAddress > total_size || end > total_size || end < sec[i].VirtualAddress)
+            return -1;
+
+        if ((sec[i].Characteristics & IMAGE_SCN_MEM_SHARED) &&
+            (sec[i].Characteristics & IMAGE_SCN_MEM_WRITE))
+            continue;
+
+        if (!sec[i].PointerToRawData || !file_size) continue;
+
+        end = file_start + file_size;
+        if (sec[i].PointerToRawData >= st->st_size ||
+            end > ((st->st_size + sector_align) & ~sector_align) ||
+            end < file_start)
+            return -1;
+
+        if (!(file_start & host_page_mask)) continue;
+
+        cache_sec_size = ROUND_SIZE( 0, file_size, host_page_mask );
+        if (cache_sec_size < file_size || total_cache_size + (off_t)cache_sec_size < total_cache_size)
+            return -1;
+
+        total_cache_size += cache_sec_size;
+        if (cache_sec_size > max_sec_size) max_sec_size = cache_sec_size;
+
+        hash ^= (UINT64)i;
+        hash *= 0x100000001b3ULL;
+        hash ^= (UINT64)file_start;
+        hash *= 0x100000001b3ULL;
+        hash ^= (UINT64)file_size;
+        hash *= 0x100000001b3ULL;
+    }
+
+    if (!total_cache_size) return -1;
+
+    if (asprintf( &cache_dir, "%s/pe_section_cache", config_dir ) == -1) return -1;
+    if (asprintf( &cache_path, "%s/pe-%llx-%llx-%llx-%llx-%016llx.cache",
+                  cache_dir, (unsigned long long)st->st_dev, (unsigned long long)st->st_ino,
+                  (unsigned long long)st->st_size, (unsigned long long)st->st_mtime,
+                  (unsigned long long)hash ) == -1)
+    {
+        free( cache_dir );
+        return -1;
+    }
+
+    if ((cache_fd = open( cache_path, O_RDONLY )) != -1)
+    {
+        fcntl( cache_fd, F_SETFD, FD_CLOEXEC );
+        if (!fstat( cache_fd, &cache_st ) && S_ISREG( cache_st.st_mode ) &&
+            cache_st.st_size == total_cache_size)
+        {
+            TRACE_(module)( "PE section cache hit for %s (%s)\n", debugstr_us(nt_name), cache_path );
+            goto done;
+        }
+        close( cache_fd );
+        cache_fd = -1;
+        unlink( cache_path );
+    }
+
+    TRACE_(module)( "PE section cache miss for %s (%s)\n", debugstr_us(nt_name), cache_path );
+
+    if (mkdir( cache_dir, 0700 ) == -1 && errno != EEXIST) goto done;
+
+    seq = __atomic_fetch_add( &tmp_seq, 1, __ATOMIC_RELAXED );
+    if (asprintf( &tmp_path, "%s/.pe-%llx-%llx-%u-%u.tmp",
+                  cache_dir, (unsigned long long)st->st_dev, (unsigned long long)st->st_ino,
+                  (unsigned int)getpid(), seq ) == -1)
+        goto done;
+
+    if ((tmp_fd = open( tmp_path, O_RDWR | O_CREAT | O_EXCL, 0600 )) == -1) goto done;
+    fcntl( tmp_fd, F_SETFD, FD_CLOEXEC );
+
+    buf_size = min( max_sec_size, (SIZE_T)0x100000 );
+    if (!(buf = malloc( buf_size ))) goto cleanup_tmp;
+
+    for (i = 0; i < nb_sec; i++)
+    {
+        SIZE_T map_size, file_start, file_size, copy_size, cache_sec_size, remaining;
+        off_t read_off, write_off;
+
+        if (!sec[i].Misc.VirtualSize)
+            map_size = ROUND_SIZE( 0, sec[i].SizeOfRawData, align_mask );
+        else
+            map_size = ROUND_SIZE( 0, sec[i].Misc.VirtualSize, align_mask );
+
+        file_start = sec[i].PointerToRawData & ~sector_align;
+        file_size = ROUND_SIZE( sec[i].PointerToRawData, sec[i].SizeOfRawData, sector_align );
+        if (file_size > map_size) file_size = map_size;
+
+        if ((sec[i].Characteristics & IMAGE_SCN_MEM_SHARED) &&
+            (sec[i].Characteristics & IMAGE_SCN_MEM_WRITE))
+            continue;
+        if (!sec[i].PointerToRawData || !file_size) continue;
+        if (!(file_start & host_page_mask)) continue;
+
+        cache_sec_size = ROUND_SIZE( 0, file_size, host_page_mask );
+        copy_size = min( file_size, (SIZE_T)(st->st_size - file_start) );
+        read_off = file_start;
+        write_off = cache_pos;
+        remaining = cache_sec_size;
+
+        while (remaining)
+        {
+            SIZE_T chunk = min( remaining, buf_size );
+            SIZE_T to_read = (read_off < (off_t)(file_start + copy_size))
+                             ? min( chunk, (SIZE_T)(file_start + copy_size - read_off) ) : 0;
+            SIZE_T pos_in_chunk = 0;
+
+            while (pos_in_chunk < to_read)
+            {
+                ssize_t r = pread( fd, buf + pos_in_chunk, to_read - pos_in_chunk,
+                                   read_off + pos_in_chunk );
+                if (r < 0)
+                {
+                    if (errno == EINTR) continue;
+                    goto cleanup_tmp;
+                }
+                if (!r) goto cleanup_tmp;
+                pos_in_chunk += r;
+            }
+            if (pos_in_chunk < chunk) memset( buf + pos_in_chunk, 0, chunk - pos_in_chunk );
+            read_off += pos_in_chunk;
+
+            pos_in_chunk = 0;
+            while (pos_in_chunk < chunk)
+            {
+                ssize_t w = pwrite( tmp_fd, buf + pos_in_chunk, chunk - pos_in_chunk,
+                                    write_off + pos_in_chunk );
+                if (w < 0)
+                {
+                    if (errno == EINTR) continue;
+                    goto cleanup_tmp;
+                }
+                if (!w) goto cleanup_tmp;
+                pos_in_chunk += w;
+            }
+            write_off += chunk;
+            remaining -= chunk;
+        }
+        cache_pos += cache_sec_size;
+    }
+
+    close( tmp_fd );
+    tmp_fd = -1;
+
+    if (rename( tmp_path, cache_path ) == -1)
+        unlink( tmp_path );
+
+    if ((cache_fd = open( cache_path, O_RDONLY )) != -1)
+    {
+        fcntl( cache_fd, F_SETFD, FD_CLOEXEC );
+        if (fstat( cache_fd, &cache_st ) || !S_ISREG( cache_st.st_mode ) ||
+            cache_st.st_size != total_cache_size)
+        {
+            close( cache_fd );
+            cache_fd = -1;
+        }
+    }
+    goto done;
+
+cleanup_tmp:
+    if (tmp_fd != -1) close( tmp_fd );
+    if (tmp_path) unlink( tmp_path );
+
+done:
+    free( buf );
+    free( tmp_path );
+    free( cache_path );
+    free( cache_dir );
+    return cache_fd;
+}
+
+static BOOL map_pe_cache_section( struct file_view *view, int cache_fd, size_t start,
+                                  size_t size, off_t cache_offset )
+{
+    char *map_addr = ROUND_ADDR( (char *)view->base + start, page_mask );
+    char *host_addr = ROUND_ADDR( (char *)view->base + start, host_page_mask );
+    size_t map_size = ROUND_SIZE( start, size, page_mask );
+    size_t host_size;
+
+    if (cache_fd == -1) return FALSE;
+    if (map_addr + map_size >= (char *)view->base + view->size) host_size = map_size;
+    else host_size = ROUND_SIZE( 0, map_size, host_page_mask );
+    if (host_addr != map_addr || host_size != map_size) return FALSE;
+
+    return mmap( host_addr, host_size, PROT_READ | PROT_WRITE,
+                 MAP_FIXED | MAP_PRIVATE, cache_fd, cache_offset ) != MAP_FAILED;
+}
+
+
+/***********************************************************************
  *           map_image_into_view
  *
  * Map an executable (PE format) image into an existing view.
@@ -2669,8 +2906,8 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
     IMAGE_SECTION_HEADER *sections = NULL, *sec;
     IMAGE_DATA_DIRECTORY *imports, *dir;
     NTSTATUS status = STATUS_CONFLICTING_ADDRESSES;
-    int i;
-    off_t pos;
+    int i, cache_fd = -1;
+    off_t pos, cache_pos = 0;
     struct stat st;
     char *header_end;
     char *ptr = view->base;
@@ -2735,6 +2972,9 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
 
 
     /* map all the sections */
+
+    cache_fd = open_pe_section_cache( fd, &st, sec, nt->FileHeader.NumberOfSections,
+                                      align_mask, total_size, nt_name, removable );
 
     for (i = pos = 0; i < nt->FileHeader.NumberOfSections; i++)
     {
@@ -2803,8 +3043,22 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
         end = file_start + file_size;
         if (sec[i].PointerToRawData >= st.st_size ||
             end > ((st.st_size + sector_align) & ~sector_align) ||
-            end < file_start ||
-            map_file_into_view( view, fd, sec[i].VirtualAddress, file_size, file_start,
+            end < file_start)
+        {
+            ERR_(module)( "Could not map %s section %.8s, file probably truncated\n",
+                          debugstr_us(nt_name), sec[i].Name );
+            goto done;
+        }
+
+        if (file_start & host_page_mask)
+        {
+            off_t sec_cache_pos = cache_pos;
+            cache_pos += ROUND_SIZE( 0, file_size, host_page_mask );
+            if (map_pe_cache_section( view, cache_fd, sec[i].VirtualAddress, file_size, sec_cache_pos ))
+                continue;
+        }
+
+        if (map_file_into_view( view, fd, sec[i].VirtualAddress, file_size, file_start,
                                 VPROT_COMMITTED | VPROT_READ | VPROT_WRITECOPY,
                                 removable ) != STATUS_SUCCESS)
         {
@@ -2896,6 +3150,7 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
     status = STATUS_SUCCESS;
 
 done:
+    if (cache_fd != -1) close( cache_fd );
     free( sections );
     return status;
 }
