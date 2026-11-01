@@ -975,6 +975,19 @@ NTSTATUS WINAPI wow64_NtSetInformationProcess( UINT *args )
         }
         else return STATUS_INVALID_PARAMETER;
 
+    case ProcessQuotaLimits:   /* QUOTA_LIMITS */
+        if (len == sizeof(QUOTA_LIMITS32))
+        {
+            const QUOTA_LIMITS32 *info32 = ptr;
+            QUOTA_LIMITS info = { 0 };
+
+            /* keep (ULONG)-1 meaning (SIZE_T)-1 */
+            info.MinimumWorkingSetSize = info32->MinimumWorkingSetSize == ~0u ? (SIZE_T)-1 : info32->MinimumWorkingSetSize;
+            info.MaximumWorkingSetSize = info32->MaximumWorkingSetSize == ~0u ? (SIZE_T)-1 : info32->MaximumWorkingSetSize;
+            return NtSetInformationProcess( handle, class, &info, sizeof(info) );
+        }
+        else return STATUS_INFO_LENGTH_MISMATCH;
+
     case ProcessInstrumentationCallback:   /* PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION */
         if (len >= sizeof(ULONG))
         {

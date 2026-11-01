@@ -1890,17 +1890,12 @@ NTSTATUS WINAPI NtSetInformationProcess( HANDLE handle, PROCESSINFOCLASS class, 
     {
         const QUOTA_LIMITS *limits = info;
 
-        if (size == sizeof(QUOTA_LIMITS) && limits && handle == NtCurrentProcess() &&
-            limits->MinimumWorkingSetSize == (SIZE_T)-1 && limits->MaximumWorkingSetSize == (SIZE_T)-1)
-        {
+        if (size != sizeof(QUOTA_LIMITS)) return STATUS_INFO_LENGTH_MISMATCH;
+        /* working set (-1, -1) is EmptyWorkingSet(); other limits are accepted and ignored as before */
+        if (handle == NtCurrentProcess() && limits->MinimumWorkingSetSize == (SIZE_T)-1 &&
+            limits->MaximumWorkingSetSize == (SIZE_T)-1)
             virtual_trim_working_set();
-            ret = STATUS_SUCCESS;
-        }
-        else
-        {
-            FIXME( "(%p,0x%08x,%p,0x%08x) stub\n", handle, class, info, size );
-            ret = STATUS_NOT_IMPLEMENTED;
-        }
+        ret = STATUS_SUCCESS;
         break;
     }
 

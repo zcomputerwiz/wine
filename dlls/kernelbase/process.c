@@ -1398,7 +1398,11 @@ BOOL WINAPI DECLSPEC_HOTPATCH SetProcessShutdownParameters( DWORD level, DWORD f
 BOOL WINAPI DECLSPEC_HOTPATCH SetProcessWorkingSetSizeEx( HANDLE process, SIZE_T minset,
                                                           SIZE_T maxset, DWORD flags )
 {
-    return TRUE;
+    QUOTA_LIMITS limits = { 0 };
+
+    limits.MinimumWorkingSetSize = minset;
+    limits.MaximumWorkingSetSize = maxset;
+    return set_ntstatus( NtSetInformationProcess( process, ProcessQuotaLimits, &limits, sizeof(limits) ));
 }
 
 
