@@ -5,4 +5,5 @@ SOURCES = \
 	dwm_attr.c \
 	dwm_channel.c \
 	dwm_clock.c \
+	dwm_thumb.c \
 	dwmapi.c

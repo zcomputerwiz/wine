@@ -38,8 +38,31 @@ enum dwm_opcode
     DWM_OP_SET_ATTR = 2,   /* window_token = HWND; payload struct dwm_attr_set; reply struct dwm_attr_reply */
     DWM_OP_GET_ATTR = 3,   /* window_token = HWND; payload struct dwm_attr_get; reply struct dwm_attr_reply */
     DWM_OP_POLL     = 4,   /* payload struct dwm_poll_req; reply struct dwm_poll_reply + count struct dwm_change */
-    DWM_OP_LAST     = DWM_OP_POLL,
+    DWM_OP_THUMB_SET  = 5, /* window_token = destination HWND; payload struct dwm_thumb_set; no reply payload */
+    DWM_OP_THUMB_DEL  = 6, /* window_token = destination HWND; payload struct dwm_thumb_del; no reply payload */
+    DWM_OP_THUMB_LIST = 7, /* payload struct dwm_thumb_list_req; reply struct dwm_thumb_list_reply + count struct dwm_thumb */
+    DWM_OP_LAST     = DWM_OP_THUMB_LIST,
 };
+
+/* live thumbnails (P8). A thumbnail is keyed by the registering connection's epoch and its HTHUMBNAIL value;
+ * rectangles are left, top, right, bottom. dest is relative to the destination window (window rectangle, as
+ * on Windows), source to the source window (or its client area with DWM_THUMB_CLIENT_ONLY). */
+#define DWM_THUMB_VISIBLE     0x1u
+#define DWM_THUMB_CLIENT_ONLY 0x2u
+#define DWM_THUMB_HAS_SOURCE  0x4u  /* source is set; otherwise the whole source window */
+#define DWM_THUMB_MAX         80u   /* per desktop (one list reply fits a message); registrations beyond fail with STATUS_QUOTA_EXCEEDED */
+
+struct dwm_thumb_set        { uint32_t handle; uint32_t src; uint32_t flags; uint32_t opacity; int32_t dest[4]; int32_t source[4]; };
+struct dwm_thumb_del        { uint32_t handle; uint32_t pad; };
+struct dwm_thumb_list_req   { uint64_t since_revision; };
+struct dwm_thumb_list_reply { uint64_t revision; uint32_t count; uint32_t pad; };  /* count 0 and same revision: unchanged */
+struct dwm_thumb            { uint32_t dest; uint32_t src; uint32_t flags; uint32_t opacity; int32_t dest_rect[4]; int32_t source[4]; };
+
+C_ASSERT( sizeof(struct dwm_thumb_set) == 48 );
+C_ASSERT( sizeof(struct dwm_thumb_del) == 8 );
+C_ASSERT( sizeof(struct dwm_thumb_list_req) == 8 );
+C_ASSERT( sizeof(struct dwm_thumb_list_reply) == 16 );
+C_ASSERT( sizeof(struct dwm_thumb) == 48 );
 
 /* scalar (DWORD) window attributes held by the broker */
 struct dwm_attr_set   { uint32_t attribute; uint32_t value; };
@@ -121,6 +144,8 @@ C_ASSERT( offsetof(struct dwm_msg_header, capabilities) == 36 );
 /* a full DWM_OP_POLL reply (header + reply + a full page of changes) must fit in one message */
 C_ASSERT( sizeof(struct dwm_msg_header) + sizeof(struct dwm_poll_reply) +
           DWM_POLL_MAX_CHANGES * sizeof(struct dwm_change) <= DWM_MAX_MESSAGE_SIZE );
+C_ASSERT( sizeof(struct dwm_msg_header) + sizeof(struct dwm_thumb_list_reply) +
+          DWM_THUMB_MAX * sizeof(struct dwm_thumb) <= DWM_MAX_MESSAGE_SIZE );
 
 /*
  * Operations and fixed-width 32/64-bit invariant parameter block for the private

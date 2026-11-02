@@ -278,6 +278,8 @@ HRESULT WINAPI DwmGetTransportAttributes(BOOL *pfIsRemoting, BOOL *pfIsConnected
  */
 HRESULT WINAPI DwmUnregisterThumbnail(HTHUMBNAIL thumbnail)
 {
+    THUMBNAIL_ENTRY entry;
+    BOOL found = FALSE;
     int i;
 
     TRACE("(%p)\n", thumbnail);
@@ -290,13 +292,19 @@ HRESULT WINAPI DwmUnregisterThumbnail(HTHUMBNAIL thumbnail)
     {
         if (thumbnail_table[i].handle == thumbnail)
         {
+            entry = thumbnail_table[i];
             memset(&thumbnail_table[i], 0, sizeof(thumbnail_table[i]));
-            LeaveCriticalSection(&thumbnail_cs);
-            return S_OK;
+            found = TRUE;
+            break;
         }
     }
     LeaveCriticalSection(&thumbnail_cs);
-    return E_INVALIDARG;
+    if (!found)
+        return E_INVALIDARG;
+
+    /* tell the broker to drop the thumbnail (best effort; fails quietly without one) */
+    dwm_client_thumb_del(entry.dest, (UINT)(ULONG_PTR)entry.handle);
+    return S_OK;
 }
 
 /**********************************************************************
@@ -553,6 +561,7 @@ HRESULT WINAPI DwmRegisterThumbnail(HWND dest, HWND src, PHTHUMBNAIL thumbnail_i
     thumbnail_table[i].dest = dest;
     thumbnail_table[i].src = src;
     memset(&thumbnail_table[i].props, 0, sizeof(thumbnail_table[i].props));
+    thumbnail_table[i].props.opacity = 255;  /* fully opaque until DWM_TNP_OPACITY says otherwise */
     LeaveCriticalSection(&thumbnail_cs);
 
     *thumbnail_id = handle;
@@ -779,6 +788,8 @@ HRESULT WINAPI DwmDetachMilContent(HWND hwnd)
 HRESULT WINAPI DwmUpdateThumbnailProperties(HTHUMBNAIL thumbnail, const DWM_THUMBNAIL_PROPERTIES *props)
 {
     DWM_THUMBNAIL_PROPERTIES local_props;
+    THUMBNAIL_ENTRY entry;
+    BOOL found = FALSE;
     int i;
 
     TRACE("(%p, %p)\n", thumbnail, props);
@@ -814,12 +825,40 @@ HRESULT WINAPI DwmUpdateThumbnailProperties(HTHUMBNAIL thumbnail, const DWM_THUM
                 thumbnail_table[i].props.fVisible = local_props.fVisible;
             if (local_props.dwFlags & DWM_TNP_SOURCECLIENTAREAONLY)
                 thumbnail_table[i].props.fSourceClientAreaOnly = local_props.fSourceClientAreaOnly;
-            LeaveCriticalSection(&thumbnail_cs);
-            return S_OK;
+            /* copy the merged state out before leaving the lock; the broker is called unlocked */
+            entry = thumbnail_table[i];
+            found = TRUE;
+            break;
         }
     }
     LeaveCriticalSection(&thumbnail_cs);
-    return E_INVALIDARG;
+    if (!found)
+        return E_INVALIDARG;
+
+    /* publish the merged state to the broker (best effort; fails quietly without one) */
+    {
+        struct dwm_thumb_set set;
+        DWORD flags = 0;
+
+        memset(&set, 0, sizeof(set));
+        if (entry.props.fVisible) flags |= DWM_THUMB_VISIBLE;
+        if (entry.props.fSourceClientAreaOnly) flags |= DWM_THUMB_CLIENT_ONLY;
+        if (entry.props.rcSource.left || entry.props.rcSource.top ||
+            entry.props.rcSource.right || entry.props.rcSource.bottom)
+            flags |= DWM_THUMB_HAS_SOURCE;
+        set.flags = flags;
+        set.opacity = entry.props.opacity;
+        set.dest[0] = entry.props.rcDestination.left;
+        set.dest[1] = entry.props.rcDestination.top;
+        set.dest[2] = entry.props.rcDestination.right;
+        set.dest[3] = entry.props.rcDestination.bottom;
+        set.source[0] = entry.props.rcSource.left;
+        set.source[1] = entry.props.rcSource.top;
+        set.source[2] = entry.props.rcSource.right;
+        set.source[3] = entry.props.rcSource.bottom;
+        dwm_client_thumb_set(entry.dest, (UINT)(ULONG_PTR)entry.handle, entry.src, &set);
+    }
+    return S_OK;
 }
 
 /**********************************************************************

@@ -91,3 +91,4 @@
 @ stdcall DwmUpdateThumbnailProperties(ptr ptr)
 @ stdcall WexDwmpChannelEcho(ptr long ptr ptr)
 @ stdcall WexDwmpPoll(int64 long ptr ptr)
+@ stdcall WexDwmpThumbList(int64 ptr ptr)

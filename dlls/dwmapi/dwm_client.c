@@ -321,6 +321,25 @@ NTSTATUS dwm_client_get_attr( HWND hwnd, DWORD attribute, BOOL *found, DWORD *va
     return STATUS_SUCCESS;
 }
 
+/* live thumbnails (P8): register or update a thumbnail on the broker; best effort, fails quietly without one */
+NTSTATUS dwm_client_thumb_set( HWND dest, UINT handle, HWND src, const struct dwm_thumb_set *set )
+{
+    struct dwm_thumb_set req;
+
+    if (!set) return STATUS_INVALID_PARAMETER;
+    req = *set;
+    req.handle = handle;
+    req.src    = HandleToUlong( src );
+    return dwm_client_call_window( DWM_OP_THUMB_SET, dest, &req, sizeof(req), NULL, NULL, 2000 );
+}
+
+NTSTATUS dwm_client_thumb_del( HWND dest, UINT handle )
+{
+    struct dwm_thumb_del del = { handle, 0 };
+
+    return dwm_client_call_window( DWM_OP_THUMB_DEL, dest, &del, sizeof(del), NULL, NULL, 2000 );
+}
+
 /***********************************************************************
  *           WexDwmpChannelEcho   (DWMAPI.@)
  *
@@ -356,6 +375,25 @@ HRESULT WINAPI WexDwmpPoll( UINT64 since_revision, DWORD cursor, void *out, DWOR
     if (!out || !out_len) return E_INVALIDARG;
     len = *out_len;
     status = dwm_client_call( DWM_OP_POLL, &req, sizeof(req), out, &len, 2000 );
+    *out_len = len;
+    return status ? HRESULT_FROM_NT( status ) : S_OK;
+}
+
+/***********************************************************************
+ *           WexDwmpThumbList   (DWMAPI.@)
+ *
+ * Private: the compositor bridge asks the broker for the live thumbnails after a revision.
+ * out receives struct dwm_thumb_list_reply followed by its struct dwm_thumb records.
+ */
+HRESULT WINAPI WexDwmpThumbList( UINT64 since_revision, void *out, DWORD *out_len )
+{
+    struct dwm_thumb_list_req req = { since_revision };
+    uint32_t len;
+    NTSTATUS status;
+
+    if (!out || !out_len) return E_INVALIDARG;
+    len = *out_len;
+    status = dwm_client_call( DWM_OP_THUMB_LIST, &req, sizeof(req), out, &len, 2000 );
     *out_len = len;
     return status ? HRESULT_FROM_NT( status ) : S_OK;
 }
