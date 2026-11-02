@@ -115,8 +115,8 @@ NTSTATUS dwm_client_connect( HANDLE *ret_handle, uint64_t *ret_epoch )
  * Perform a bounded synchronous request/reply call to the current desktop's
  * DWM broker with brief failure caching when no broker is registered.
  */
-NTSTATUS dwm_client_call( uint32_t opcode, const void *in, uint32_t in_len,
-                          void *out, uint32_t *out_len, uint32_t timeout_ms )
+NTSTATUS dwm_client_call_window( uint32_t opcode, HWND hwnd, const void *in, uint32_t in_len,
+                                 void *out, uint32_t *out_len, uint32_t timeout_ms )
 {
     unsigned char req_buf[sizeof(struct dwm_msg_header) + DWM_MAX_MESSAGE_SIZE];
     unsigned char rep_buf[sizeof(struct dwm_msg_header) + DWM_MAX_MESSAGE_SIZE];
@@ -170,7 +170,7 @@ retry_connect:
     hdr.length           = in_len;
     hdr.request_id       = 0;
     hdr.connection_epoch = cached_epoch;
-    hdr.window_token     = 0;
+    hdr.window_token     = HandleToUlong( hwnd );
     hdr.revision         = 0;
     hdr.capabilities     = 0;
 
@@ -285,6 +285,39 @@ retry_connect:
     }
 
     LeaveCriticalSection( &dwm_client_cs );
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS dwm_client_call( uint32_t opcode, const void *in, uint32_t in_len,
+                          void *out, uint32_t *out_len, uint32_t timeout_ms )
+{
+    return dwm_client_call_window( opcode, NULL, in, in_len, out, out_len, timeout_ms );
+}
+
+/* Attribute state held by the broker. Returns the call status; STATUS_PORT_DISCONNECTED etc. mean no broker. */
+NTSTATUS dwm_client_set_attr( HWND hwnd, DWORD attribute, DWORD value )
+{
+    struct dwm_attr_set req = { attribute, value };
+    struct dwm_attr_reply rep;
+    uint32_t len = sizeof(rep);
+    NTSTATUS status = dwm_client_call_window( DWM_OP_SET_ATTR, hwnd, &req, sizeof(req), &rep, &len, 2000 );
+
+    if (!status && len == sizeof(rep) && !rep.found) status = STATUS_UNSUCCESSFUL;
+    return status;
+}
+
+/* *found tells whether the broker holds a value for the attribute */
+NTSTATUS dwm_client_get_attr( HWND hwnd, DWORD attribute, BOOL *found, DWORD *value )
+{
+    struct dwm_attr_get req = { attribute };
+    struct dwm_attr_reply rep;
+    uint32_t len = sizeof(rep);
+    NTSTATUS status = dwm_client_call_window( DWM_OP_GET_ATTR, hwnd, &req, sizeof(req), &rep, &len, 2000 );
+
+    if (status) return status;
+    if (len != sizeof(rep)) return STATUS_INVALID_NETWORK_RESPONSE;
+    *found = rep.found != 0;
+    *value = rep.value;
     return STATUS_SUCCESS;
 }
 

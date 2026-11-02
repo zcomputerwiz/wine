@@ -34,8 +34,20 @@
 
 enum dwm_opcode
 {
-    DWM_OP_ECHO = 1,
+    DWM_OP_ECHO     = 1,
+    DWM_OP_SET_ATTR = 2,   /* window_token = HWND; payload struct dwm_attr_set; reply struct dwm_attr_reply */
+    DWM_OP_GET_ATTR = 3,   /* window_token = HWND; payload struct dwm_attr_get; reply struct dwm_attr_reply */
+    DWM_OP_LAST     = DWM_OP_GET_ATTR,
 };
+
+/* scalar (DWORD) window attributes held by the broker */
+struct dwm_attr_set   { uint32_t attribute; uint32_t value; };
+struct dwm_attr_get   { uint32_t attribute; };
+struct dwm_attr_reply { uint32_t found; uint32_t value; };
+
+C_ASSERT( sizeof(struct dwm_attr_set) == 8 );
+C_ASSERT( sizeof(struct dwm_attr_get) == 4 );
+C_ASSERT( sizeof(struct dwm_attr_reply) == 8 );
 
 /*
  * Fixed-width control-channel message envelope (Section 2.1 of DWM_ARCHITECTURE.md).

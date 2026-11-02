@@ -2,5 +2,6 @@ TESTDLL = dwmapi.dll
 IMPORTS = dwmapi user32
 
 SOURCES = \
-	dwmapi.c \
-	dwm_channel.c
+	dwm_attr.c \
+	dwm_channel.c \
+	dwmapi.c

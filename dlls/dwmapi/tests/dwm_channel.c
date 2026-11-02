@@ -83,10 +83,11 @@ static void build_echo_message( unsigned char *buf, uint32_t len, const void *pa
 /* Broker loop thread: receive requests and reply with the same payload. */
 static DWORD WINAPI broker_thread_fn( LPVOID arg )
 {
-    use_test_desktop();
     unsigned char buf[sizeof(struct dwm_msg_header) + DWM_MAX_MESSAGE_SIZE];
     struct dwm_channel_call call;
     NTSTATUS status;
+
+    use_test_desktop();
 
     for (;;)
     {
@@ -235,12 +236,13 @@ struct echo_thread_arg { DWORD thread_id; int failures; };
 
 static DWORD WINAPI echo_thread_fn( LPVOID arg )
 {
-    use_test_desktop();
     struct echo_thread_arg *targ = arg;
     unsigned char payload[3], reply[3];
     ULONG reply_len;
     HRESULT hr;
     int i;
+
+    use_test_desktop();
 
     for (i = 0; i < CONCURRENT_ECHOES; i++)
     {

@@ -840,7 +840,8 @@ DECL_HANDLER(dwm_send)
     }
 
     memcpy( &hdr, get_req_data(), sizeof(hdr) );
-    if (hdr.version != DWM_PROTOCOL_VERSION || hdr.length != payload_size || hdr.opcode != DWM_OP_ECHO)
+    if (hdr.version != DWM_PROTOCOL_VERSION || hdr.length != payload_size ||
+        hdr.opcode == 0 || hdr.opcode > DWM_OP_LAST)
     {
         set_error( STATUS_INVALID_PARAMETER );
         release_object( desktop );

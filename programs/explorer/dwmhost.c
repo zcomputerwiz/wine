@@ -111,7 +111,7 @@ static DWORD WINAPI dwm_supervisor( void *arg )
     if (!SetThreadDesktop( dwm_desktop )) return 1;
     for (;;)
     {
-        HANDLE process = launch_broker();
+        HANDLE process = launch_broker(), objs[2];
         ULONGLONG start = GetTickCount64(), now;
         DWORD wait;
 
@@ -123,7 +123,8 @@ static DWORD WINAPI dwm_supervisor( void *arg )
                 CloseHandle( process );
                 return 0;
             }
-            HANDLE objs[2] = { process, dwm_stop_event };
+            objs[0] = process;
+            objs[1] = dwm_stop_event;
             wait = WaitForMultipleObjects( 2, objs, FALSE, INFINITE );
             if (wait == WAIT_OBJECT_0 + 1)
             {

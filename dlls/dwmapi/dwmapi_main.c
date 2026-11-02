@@ -31,6 +31,7 @@
 #include "winuser.h"
 #include "dwmapi.h"
 #include "wine/debug.h"
+#include "dwm_client.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dwmapi);
 
@@ -94,6 +95,30 @@ static BOOL get_stored_attribute(HWND hwnd, DWORD attribute, DWORD *value)
     if (found)
         *value = stored;
     return found;
+}
+
+/* The broker, when there is one, holds the canonical value, so a setter in another process is seen. The local
+ * table is a mirror: it answers when there is no broker, and it refills a broker that lost its state. */
+static BOOL get_attribute_value(HWND hwnd, DWORD attribute, DWORD *value)
+{
+    BOOL found = FALSE;
+    DWORD brokered;
+
+    if (!dwm_client_get_attr(hwnd, attribute, &found, &brokered))
+    {
+        if (found)
+        {
+            *value = brokered;
+            return TRUE;
+        }
+        if (get_stored_attribute(hwnd, attribute, value))
+        {
+            dwm_client_set_attr(hwnd, attribute, *value);
+            return TRUE;
+        }
+        return FALSE;
+    }
+    return get_stored_attribute(hwnd, attribute, value);
 }
 
 
@@ -198,6 +223,8 @@ HRESULT WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD attributenum, LPCVOID attr
         return E_INVALIDARG;
 
     value = *(const DWORD *)attribute;
+
+    dwm_client_set_attr(hwnd, attributenum, value);  /* best effort: the local table is the mirror */
 
     EnterCriticalSection(&thumbnail_cs);
     for (i = 0; i < ATTRIBUTE_TABLE_SIZE; i++)
@@ -451,7 +478,7 @@ HRESULT WINAPI DwmGetWindowAttribute(HWND hwnd, DWORD attribute, PVOID pv_attrib
             default_value = DWMWA_COLOR_DEFAULT;
         else
             default_value = 0;
-        if (!get_stored_attribute(hwnd, attribute, value))
+        if (!get_attribute_value(hwnd, attribute, value))
             *value = default_value;
         hr = S_OK;
         break;
