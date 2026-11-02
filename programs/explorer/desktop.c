@@ -1276,6 +1276,9 @@ void manage_desktop( WCHAR *arg )
             ExitProcess( 1 );
         }
         SetThreadDesktop( desktop );
+        /* the server accepts hardware input only on the input desktop and host events no longer move it, so the
+         * desktop this process creates has to be made the input desktop, as on Windows */
+        if (!SwitchDesktop( desktop )) WARN( "failed to switch to desktop %s, error %ld\n", debugstr_w(name), GetLastError() );
     }
 
     /* the desktop process should always have an admin token */
