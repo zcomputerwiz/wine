@@ -324,6 +324,12 @@ DECL_HANDLER(d3dkmt_mutex_release);
 DECL_HANDLER(d3dkmt_sync_wait);
 DECL_HANDLER(d3dkmt_sync_signal);
 DECL_HANDLER(alpc_create_port);
+DECL_HANDLER(dwm_connect);
+DECL_HANDLER(dwm_get_broker_capability);
+DECL_HANDLER(dwm_broker_register);
+DECL_HANDLER(dwm_send);
+DECL_HANDLER(dwm_recv);
+DECL_HANDLER(dwm_reply);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -645,6 +651,12 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_d3dkmt_sync_wait,
     (req_handler)req_d3dkmt_sync_signal,
     (req_handler)req_alpc_create_port,
+    (req_handler)req_dwm_connect,
+    (req_handler)req_dwm_get_broker_capability,
+    (req_handler)req_dwm_broker_register,
+    (req_handler)req_dwm_send,
+    (req_handler)req_dwm_recv,
+    (req_handler)req_dwm_reply,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -2454,3 +2466,36 @@ C_ASSERT( offsetof(struct alpc_create_port_request, max_msg_len) == 16 );
 C_ASSERT( sizeof(struct alpc_create_port_request) == 24 );
 C_ASSERT( offsetof(struct alpc_create_port_reply, handle) == 8 );
 C_ASSERT( sizeof(struct alpc_create_port_reply) == 16 );
+C_ASSERT( sizeof(struct dwm_connect_request) == 16 );
+C_ASSERT( offsetof(struct dwm_connect_reply, handle) == 8 );
+C_ASSERT( offsetof(struct dwm_connect_reply, version) == 12 );
+C_ASSERT( offsetof(struct dwm_connect_reply, epoch) == 16 );
+C_ASSERT( sizeof(struct dwm_connect_reply) == 24 );
+C_ASSERT( sizeof(struct dwm_get_broker_capability_request) == 16 );
+C_ASSERT( offsetof(struct dwm_get_broker_capability_reply, capability) == 8 );
+C_ASSERT( offsetof(struct dwm_get_broker_capability_reply, epoch) == 16 );
+C_ASSERT( sizeof(struct dwm_get_broker_capability_reply) == 24 );
+C_ASSERT( offsetof(struct dwm_broker_register_request, flags) == 12 );
+C_ASSERT( offsetof(struct dwm_broker_register_request, capability) == 16 );
+C_ASSERT( sizeof(struct dwm_broker_register_request) == 24 );
+C_ASSERT( offsetof(struct dwm_broker_register_reply, handle) == 8 );
+C_ASSERT( offsetof(struct dwm_broker_register_reply, version) == 12 );
+C_ASSERT( offsetof(struct dwm_broker_register_reply, epoch) == 16 );
+C_ASSERT( sizeof(struct dwm_broker_register_reply) == 24 );
+C_ASSERT( offsetof(struct dwm_send_request, handle) == 12 );
+C_ASSERT( sizeof(struct dwm_send_request) == 16 );
+C_ASSERT( offsetof(struct dwm_send_reply, epoch) == 8 );
+C_ASSERT( offsetof(struct dwm_send_reply, request_id) == 16 );
+C_ASSERT( sizeof(struct dwm_send_reply) == 24 );
+C_ASSERT( offsetof(struct dwm_recv_request, handle) == 12 );
+C_ASSERT( sizeof(struct dwm_recv_request) == 16 );
+C_ASSERT( offsetof(struct dwm_recv_reply, request_id) == 8 );
+C_ASSERT( offsetof(struct dwm_recv_reply, sender_pid) == 12 );
+C_ASSERT( offsetof(struct dwm_recv_reply, sender_tid) == 16 );
+C_ASSERT( offsetof(struct dwm_recv_reply, desktop_id) == 20 );
+C_ASSERT( offsetof(struct dwm_recv_reply, status) == 24 );
+C_ASSERT( sizeof(struct dwm_recv_reply) == 32 );
+C_ASSERT( offsetof(struct dwm_reply_request, handle) == 12 );
+C_ASSERT( offsetof(struct dwm_reply_request, request_id) == 16 );
+C_ASSERT( offsetof(struct dwm_reply_request, status) == 20 );
+C_ASSERT( sizeof(struct dwm_reply_request) == 24 );

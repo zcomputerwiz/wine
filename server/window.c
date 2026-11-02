@@ -169,9 +169,14 @@ static inline struct window *get_window( user_handle_t handle )
 }
 
 /* a window of another desktop may be changed only by the system role (docs/ELEVATION_SECURE_DESKTOP_WORKORDER.md) */
-static int window_desktop_denied( struct window *win )
+int window_desktop_denied( struct window *win )
 {
     return cross_desktop_denied( current, win->desktop );
+}
+
+struct desktop *get_window_desktop( struct window *win )
+{
+    return win->desktop;
 }
 
 /* check if window is the desktop */

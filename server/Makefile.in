@@ -13,6 +13,7 @@ SOURCES = \
 	debugger.c \
 	device.c \
 	directory.c \
+	dwm.c \
 	event.c \
 	fd.c \
 	file.c \

@@ -287,6 +287,8 @@ static bool desktop_init( struct object *obj, const void *init_data )
     desktop->clip_flags = 0;
     desktop->cursor_win = 0;
     desktop->alt_pressed = 0;
+    desktop->dwm_endpoint = NULL;
+    desktop->dwm_epoch = 1;
     memset( &desktop->key_repeat, 0, sizeof(desktop->key_repeat) );
     list_init( &desktop->threads );
     list_init( &desktop->hotkeys );
@@ -375,6 +377,7 @@ static void desktop_destroy( struct object *obj )
 
     free_hotkeys( desktop, 0 );
     free_pointers( desktop );
+    dwm_revoke_desktop( desktop );
     if (desktop->top_window) free_window_handle( desktop->top_window );
     if (desktop->msg_window) free_window_handle( desktop->msg_window );
     if (desktop->global_hooks) release_object( desktop->global_hooks );

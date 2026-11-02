@@ -4422,3 +4422,63 @@ enum inproc_sync_type
 @REPLY
     obj_handle_t        handle;         /* handle to the ALPC port */
 @END
+
+
+/* Connect a client channel to the current thread's desktop DWM broker endpoint */
+@REQ(dwm_connect)
+@REPLY
+    obj_handle_t        handle;         /* waitable client channel handle */
+    unsigned int        version;        /* DWM protocol version */
+    unsigned __int64    epoch;          /* current desktop connection epoch */
+@END
+
+
+/* Mint a one-use DWM broker capability token for the desktop's top-window owner */
+@REQ(dwm_get_broker_capability)
+@REPLY
+    unsigned __int64    capability;     /* one-use capability token */
+    unsigned __int64    epoch;          /* current desktop connection epoch */
+@END
+
+
+/* Register the current process as the DWM broker for the current thread's desktop */
+@REQ(dwm_broker_register)
+    unsigned int        flags;          /* reserved registration flags (must be 0) */
+    unsigned __int64    capability;     /* one-use capability token */
+@REPLY
+    obj_handle_t        handle;         /* waitable broker channel handle */
+    unsigned int        version;        /* DWM protocol version */
+    unsigned __int64    epoch;          /* new desktop connection epoch */
+@END
+
+
+/* Send a bounded DWM control message from a client channel to its desktop broker */
+@REQ(dwm_send)
+    obj_handle_t        handle;         /* client channel handle */
+    VARARG(msg,bytes);                  /* message header + payload */
+@REPLY
+    unsigned __int64    epoch;          /* desktop connection epoch stamped on message */
+    unsigned int        request_id;     /* server-assigned request id */
+@END
+
+
+/* Receive the next queued DWM request (broker) or completed reply (client) */
+@REQ(dwm_recv)
+    obj_handle_t        handle;         /* broker or client channel handle */
+@REPLY
+    unsigned int        request_id;     /* message request id */
+    process_id_t        sender_pid;     /* server-stamped sender process id */
+    thread_id_t         sender_tid;     /* server-stamped sender thread id */
+    unsigned int        desktop_id;     /* server-stamped desktop cookie */
+    unsigned int        status;         /* reply status (for client recv) */
+    VARARG(msg,bytes);                  /* message header + payload */
+@END
+
+
+/* Reply to a pending DWM client request from the broker channel */
+@REQ(dwm_reply)
+    obj_handle_t        handle;         /* broker channel handle */
+    unsigned int        request_id;     /* request id being answered */
+    unsigned int        status;         /* reply NTSTATUS */
+    VARARG(msg,bytes);                  /* reply message header + payload */
+@END

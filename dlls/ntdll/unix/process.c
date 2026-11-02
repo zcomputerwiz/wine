@@ -67,6 +67,7 @@
 #include "ddk/ntddk.h"
 #include "unix_private.h"
 #include "wine/condrv.h"
+#include "wine/dwm_protocol.h"
 #include "wine/server.h"
 #include "wine/debug.h"
 
@@ -1881,6 +1882,110 @@ NTSTATUS WINAPI NtSetInformationProcess( HANDLE handle, PROCESSINFOCLASS class, 
         }
         SERVER_END_REQ;
         break;
+
+    case ProcessWineDwmChannel:
+    {
+        struct dwm_channel_call *call = info;
+
+        if (!call || size != sizeof(*call)) return STATUS_INFO_LENGTH_MISMATCH;
+        if (handle != NtCurrentProcess()) return STATUS_ACCESS_DENIED;
+
+        switch (call->op)
+        {
+        case DWM_CHANNEL_OP_CONNECT:
+            SERVER_START_REQ( dwm_connect )
+            {
+                if (!(ret = wine_server_call( req )))
+                {
+                    call->handle  = reply->handle;
+                    call->version = reply->version;
+                    call->epoch   = reply->epoch;
+                }
+            }
+            SERVER_END_REQ;
+            return ret;
+
+        case DWM_CHANNEL_OP_GET_CAPABILITY:
+            SERVER_START_REQ( dwm_get_broker_capability )
+            {
+                if (!(ret = wine_server_call( req )))
+                {
+                    call->capability = reply->capability;
+                    call->epoch      = reply->epoch;
+                }
+            }
+            SERVER_END_REQ;
+            return ret;
+
+        case DWM_CHANNEL_OP_BROKER_REGISTER:
+            SERVER_START_REQ( dwm_broker_register )
+            {
+                req->flags      = 0;
+                req->capability = call->capability;
+                if (!(ret = wine_server_call( req )))
+                {
+                    call->handle  = reply->handle;
+                    call->version = reply->version;
+                    call->epoch   = reply->epoch;
+                }
+            }
+            SERVER_END_REQ;
+            return ret;
+
+        case DWM_CHANNEL_OP_SEND:
+            if (call->in_len && !call->in_ptr) return STATUS_INVALID_PARAMETER;
+            SERVER_START_REQ( dwm_send )
+            {
+                req->handle = call->handle;
+                if (call->in_len)
+                    wine_server_add_data( req, (const void *)(uintptr_t)call->in_ptr, call->in_len );
+                if (!(ret = wine_server_call( req )))
+                {
+                    call->request_id = reply->request_id;
+                    call->epoch      = reply->epoch;
+                }
+            }
+            SERVER_END_REQ;
+            return ret;
+
+        case DWM_CHANNEL_OP_RECV:
+            if (call->out_len && !call->out_ptr) return STATUS_INVALID_PARAMETER;
+            SERVER_START_REQ( dwm_recv )
+            {
+                req->handle = call->handle;
+                if (call->out_len)
+                    wine_server_set_reply( req, (void *)(uintptr_t)call->out_ptr, call->out_len );
+                if (!(ret = wine_server_call( req )))
+                {
+                    call->request_id = reply->request_id;
+                    call->sender_pid = reply->sender_pid;
+                    call->sender_tid = reply->sender_tid;
+                    call->desktop_id = reply->desktop_id;
+                    call->status     = reply->status;
+                    call->out_len    = wine_server_reply_size( reply );
+                }
+            }
+            SERVER_END_REQ;
+            return ret;
+
+        case DWM_CHANNEL_OP_REPLY:
+            if (call->in_len && !call->in_ptr) return STATUS_INVALID_PARAMETER;
+            SERVER_START_REQ( dwm_reply )
+            {
+                req->handle     = call->handle;
+                req->request_id = call->request_id;
+                req->status     = call->status;
+                if (call->in_len)
+                    wine_server_add_data( req, (const void *)(uintptr_t)call->in_ptr, call->in_len );
+                ret = wine_server_call( req );
+            }
+            SERVER_END_REQ;
+            return ret;
+
+        default:
+            return STATUS_INVALID_PARAMETER;
+        }
+    }
 
     case ProcessPowerThrottlingState:
         FIXME( "ProcessPowerThrottlingState - stub\n" );

@@ -2014,6 +2014,7 @@ typedef enum _PROCESSINFOCLASS {
     ProcessWineMakeProcessSystem = 1000,
     ProcessWineGrantAdminToken = 1002,
     ProcessWineCreateServiceToken = 1003,
+    ProcessWineDwmChannel = 1004,
 #endif
 } PROCESSINFOCLASS;
 

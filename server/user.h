@@ -89,6 +89,8 @@ struct desktop
     user_handle_t        cursor_win;       /* window that contains the cursor */
     desktop_shm_t       *shared;           /* desktop session shared memory */
     unsigned char        secure;           /* the secure desktop (Winlogon created by the system role) */
+    struct dwm_endpoint *dwm_endpoint;     /* per-desktop DWM broker control channel endpoint */
+    unsigned __int64     dwm_epoch;        /* DWM broker connection epoch */
 };
 
 /* user handles functions */
@@ -188,6 +190,13 @@ extern struct thread *window_thread_from_point( user_handle_t scope, int x, int 
 extern user_handle_t find_window_to_repaint( user_handle_t parent, struct thread *thread );
 extern struct window_class *get_window_class( user_handle_t window );
 extern void set_window_rect_visible( user_handle_t window, struct rectangle rect );
+extern int window_desktop_denied( struct window *win );
+extern struct desktop *get_window_desktop( struct window *win );
+
+/* dwm functions */
+
+extern void dwm_revoke_desktop( struct desktop *desktop );
+extern void dwm_cleanup_process( struct process *process );
 
 /* window class functions */
 

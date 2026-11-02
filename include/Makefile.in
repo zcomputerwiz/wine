@@ -1124,6 +1124,7 @@ SOURCES = \
 	wine/dcomp_layer.h \
 	wine/dcomp_underlay.h \
 	wine/debug.h \
+	wine/dwm_protocol.h \
 	wine/dplaysp.h \
 	wine/epm.idl \
 	wine/exception.h \

@@ -947,6 +947,7 @@ NTSTATUS WINAPI wow64_NtSetInformationProcess( UINT *args )
     case ProcessPowerThrottlingState:   /* PROCESS_POWER_THROTTLING_STATE */
     case ProcessLeapSecondInformation:   /* PROCESS_LEAP_SECOND_INFO */
     case ProcessWineGrantAdminToken:   /* NULL */
+    case ProcessWineDwmChannel:   /* struct dwm_channel_call */
         return NtSetInformationProcess( handle, class, ptr, len );
 
     case ProcessExecuteFlags:   /* ULONG */

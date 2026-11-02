@@ -89,3 +89,4 @@
 @ stdcall DwmTransitionOwnedWindow(ptr long)
 @ stdcall DwmUnregisterThumbnail(long)
 @ stdcall DwmUpdateThumbnailProperties(ptr ptr)
+@ stdcall WexDwmpChannelEcho(ptr long ptr ptr)
