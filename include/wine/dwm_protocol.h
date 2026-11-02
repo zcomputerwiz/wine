@@ -64,6 +64,34 @@ C_ASSERT( sizeof(struct dwm_change) == 16 );
 C_ASSERT( sizeof(struct dwm_poll_reply) == 16 );
 
 /*
+ * Frame clock page (Section 2.3 of DWM_ARCHITECTURE.md, P6 slice 1). The compositor (the only writer)
+ * publishes one record per composed frame; dwmapi reads it to pace DwmFlush and to fill
+ * DwmGetCompositionTimingInfo. seq is a sequence lock: the writer makes it odd, writes the fields, then
+ * makes it even (with release barriers); readers retry while seq is odd or changed. QPC values are Wine
+ * QPC units (100 ns, CLOCK_MONOTONIC, the same as ntdll's monotonic_counter).
+ */
+struct dwm_clock_page
+{
+    volatile LONG seq;
+    UINT32 flags;
+    UINT64 frame;
+    INT64 qpc_composed;
+    INT64 qpc_period;
+};
+
+C_ASSERT( sizeof(struct dwm_clock_page) == 32 );
+C_ASSERT( offsetof(struct dwm_clock_page, seq) == 0 );
+C_ASSERT( offsetof(struct dwm_clock_page, flags) == 4 );
+C_ASSERT( offsetof(struct dwm_clock_page, frame) == 8 );
+C_ASSERT( offsetof(struct dwm_clock_page, qpc_composed) == 16 );
+C_ASSERT( offsetof(struct dwm_clock_page, qpc_period) == 24 );
+
+#define DWM_CLOCK_COMPOSED 0x1   /* frame and qpc_composed come from the compositor: composed, not displayed */
+/* the desktop name is appended to both; the mapping and the event are per desktop */
+#define DWM_CLOCK_NAME       L"Local\\__wex_dwm_clock_"
+#define DWM_CLOCK_EVENT_NAME L"Local\\__wex_dwm_frame_"
+
+/*
  * Fixed-width control-channel message envelope (Section 2.1 of DWM_ARCHITECTURE.md).
  * Uses only fixed-width integer types (uint32_t / uint64_t), never long, size_t, or
  * pointers, so 32-bit (WoW64) and 64-bit processes share the exact wire layout.

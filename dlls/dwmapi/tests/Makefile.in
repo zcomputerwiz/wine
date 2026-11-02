@@ -1,7 +1,8 @@
 TESTDLL = dwmapi.dll
-IMPORTS = dwmapi user32
+IMPORTS = dwmapi user32 gdi32
 
 SOURCES = \
 	dwm_attr.c \
 	dwm_channel.c \
+	dwm_clock.c \
 	dwmapi.c

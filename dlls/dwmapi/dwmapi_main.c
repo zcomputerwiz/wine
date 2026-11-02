@@ -31,6 +31,7 @@
 #include "winuser.h"
 #include "dwmapi.h"
 #include "wine/debug.h"
+#include "wine/dwm_protocol.h"
 #include "dwm_client.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dwmapi);
@@ -577,11 +578,75 @@ static int get_display_frequency(void)
     }
 }
 
+/* Frame clock (docs/DWM_ARCHITECTURE.md section 2.3, P6 slice 1): the compositor publishes one record per
+ * composed frame into a per-desktop shared page and pulses an event. We open both read-only, once per
+ * process, and read a consistent snapshot with the sequence lock. Never wait while holding any lock. */
+static HANDLE clock_mapping, clock_event;
+static struct dwm_clock_page *clock_page;
+static BOOL clock_opened;
+static INT64 clock_last_failed;   /* QPC time of the last failed open */
+
+static BOOL clock_open(void)
+{
+    WCHAR desk_name[MAX_PATH], name[MAX_PATH + 64], event_name[MAX_PATH + 64];
+    HDESK desk;
+    LARGE_INTEGER li;
+    INT64 now;
+
+    if (clock_opened) return clock_page != NULL;
+
+    /* retry the open at most once per second when it failed */
+    NtQueryPerformanceCounter(&li, NULL);
+    now = li.QuadPart;
+    if (clock_last_failed && now - clock_last_failed < 10000000) return FALSE;
+
+    if (!(desk = GetThreadDesktop(GetCurrentThreadId()))) return FALSE;
+    if (!GetUserObjectInformationW(desk, UOI_NAME, desk_name, ARRAY_SIZE(desk_name), NULL)) return FALSE;
+    lstrcpynW(name, DWM_CLOCK_NAME, ARRAY_SIZE(name));
+    lstrcatW(name, desk_name);
+    lstrcpynW(event_name, DWM_CLOCK_EVENT_NAME, ARRAY_SIZE(event_name));
+    lstrcatW(event_name, desk_name);
+
+    clock_mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, name);
+    if (!clock_mapping)
+    {
+        clock_last_failed = now;
+        return FALSE;
+    }
+    clock_event = OpenEventW(SYNCHRONIZE, FALSE, event_name);
+    clock_page = MapViewOfFile(clock_mapping, FILE_MAP_READ, 0, 0, sizeof(*clock_page));
+    clock_opened = TRUE;
+    return clock_page != NULL;
+}
+
+/* read a consistent snapshot with the sequence lock: retry while seq is odd or changed */
+static BOOL clock_read(struct dwm_clock_page *out)
+{
+    LONG seq1, seq2;
+    int tries;
+
+    if (!clock_open()) return FALSE;
+    /* bounded: a writer that died in the middle of an update must not hang the reader */
+    for (tries = 0; tries < 1000; tries++)
+    {
+        seq1 = __atomic_load_n(&clock_page->seq, __ATOMIC_ACQUIRE);
+        if (seq1 & 1) continue;
+        out->flags = clock_page->flags;
+        out->frame = clock_page->frame;
+        out->qpc_composed = clock_page->qpc_composed;
+        out->qpc_period = clock_page->qpc_period;
+        seq2 = __atomic_load_n(&clock_page->seq, __ATOMIC_ACQUIRE);
+        if (seq1 == seq2) return TRUE;
+    }
+    return FALSE;
+}
+
 /**********************************************************************
  *           DwmGetCompositionTimingInfo         (DWMAPI.@)
  */
 HRESULT WINAPI DwmGetCompositionTimingInfo(HWND hwnd, DWM_TIMING_INFO *info)
 {
+    struct dwm_clock_page snapshot;
     LARGE_INTEGER performance_frequency, qpc;
     static int i;
     int display_frequency;
@@ -622,6 +687,25 @@ HRESULT WINAPI DwmGetCompositionTimingInfo(HWND hwnd, DWM_TIMING_INFO *info)
     QueryPerformanceCounter(&qpc);
     info->qpcVBlank = (qpc.QuadPart / info->qpcRefreshPeriod) * info->qpcRefreshPeriod;
 
+    /* when the compositor publishes a frame clock, use its composed frame and refresh period */
+    if (clock_read(&snapshot) && (snapshot.flags & DWM_CLOCK_COMPOSED))
+    {
+        info->cFrame = snapshot.frame;
+        info->cRefresh = snapshot.frame;
+        info->qpcCompose = snapshot.qpc_composed;
+        info->qpcRefreshPeriod = snapshot.qpc_period;
+        numerator = (ULONGLONG)performance_frequency.QuadPart;
+        denominator = (ULONGLONG)snapshot.qpc_period;
+        while ((numerator > 0xFFFFFFFFULL) || (denominator > 0xFFFFFFFFULL))
+        {
+            numerator >>= 1;
+            denominator >>= 1;
+        }
+        info->rateRefresh.uiNumerator = (UINT32)numerator;
+        info->rateRefresh.uiDenominator = (UINT32)denominator;
+        info->rateCompose = info->rateRefresh;
+    }
+
     return S_OK;
 }
 
@@ -630,6 +714,7 @@ HRESULT WINAPI DwmGetCompositionTimingInfo(HWND hwnd, DWM_TIMING_INFO *info)
  */
 HRESULT WINAPI DwmFlush(void)
 {
+    struct dwm_clock_page snapshot;
     LARGE_INTEGER qpf, qpc, delay;
     LONG64 qpc_refresh_period;
     int display_frequency;
@@ -639,6 +724,24 @@ HRESULT WINAPI DwmFlush(void)
         FIXME("stub.\n");
     else
         TRACE("stub.\n");
+
+    /* when the compositor publishes a frame clock, wait for a new composed frame (or two refresh periods) */
+    if (clock_read(&snapshot) && (snapshot.flags & DWM_CLOCK_COMPOSED))
+    {
+        UINT64 frame = snapshot.frame;
+        DWORD period_ms = (DWORD)(snapshot.qpc_period / 10000);
+        int i;
+
+        if (period_ms < 1) period_ms = 1;
+        for (i = 0; i < 2; i++)
+        {
+            WaitForSingleObject(clock_event, period_ms);
+            if (clock_read(&snapshot) && snapshot.frame != frame)
+                return S_OK;
+        }
+        /* nothing changed on screen: the compositor idles */
+        return S_OK;
+    }
 
     display_frequency = get_display_frequency();
     NtQueryPerformanceCounter(&qpc, &qpf);
