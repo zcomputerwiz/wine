@@ -42,14 +42,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(dwmapi);
 #define DWMWA_COLOR_DEFAULT 0xFFFFFFFF
 #endif
 
-typedef enum DWMTRANSITION_OWNEDWINDOW_TARGET
-{
-    DWMTOWT_NONE = 0,
-    DWMTOWT_DESKTOP,
-    DWMTOWT_LAST
-} DWMTRANSITION_OWNEDWINDOW_TARGET;
-
 #define THUMBNAIL_TABLE_SIZE 64
+#define ATTRIBUTE_TABLE_SIZE 256
 
 typedef struct
 {
@@ -59,32 +53,47 @@ typedef struct
     DWM_THUMBNAIL_PROPERTIES props;
 } THUMBNAIL_ENTRY;
 
+typedef struct
+{
+    HWND hwnd;
+    DWORD attribute;
+    DWORD value;
+} ATTRIBUTE_ENTRY;
+
 static THUMBNAIL_ENTRY thumbnail_table[THUMBNAIL_TABLE_SIZE];
-static LONG thumbnail_lock;
-static LONG thumbnail_next_handle;
+/* A future DWM service will own this state; until then it is kept in a process-local table. */
+static ATTRIBUTE_ENTRY attribute_table[ATTRIBUTE_TABLE_SIZE];
+static DWORD thumbnail_next_handle;
 
-static void enter_thumbnail_lock(void)
-{
-    while (InterlockedCompareExchange(&thumbnail_lock, 1, 0))
-        ;
-}
-
-static void leave_thumbnail_lock(void)
-{
-    InterlockedExchange(&thumbnail_lock, 0);
-}
+static CRITICAL_SECTION thumbnail_cs;
+static CRITICAL_SECTION_DEBUG thumbnail_cs_debug = {
+    0, 0, &thumbnail_cs,
+    { &thumbnail_cs_debug.ProcessLocksList,
+      &thumbnail_cs_debug.ProcessLocksList },
+    0, 0, { (DWORD_PTR)"dwmapi thumbnail_cs" }
+};
+static CRITICAL_SECTION thumbnail_cs = { &thumbnail_cs_debug, -1, 0, 0, 0, 0 };
 
 static BOOL get_stored_attribute(HWND hwnd, DWORD attribute, DWORD *value)
 {
-    WCHAR name[32];
-    HANDLE prop;
+    DWORD stored;
+    int i;
+    BOOL found = FALSE;
 
-    swprintf(name, 32, L"WexDwmAttr%d", attribute);
-    prop = GetPropW(hwnd, name);
-    if (!prop)
-        return FALSE;
-    *value = (DWORD)((ULONG_PTR)prop - 1);
-    return TRUE;
+    EnterCriticalSection(&thumbnail_cs);
+    for (i = 0; i < ATTRIBUTE_TABLE_SIZE; i++)
+    {
+        if (attribute_table[i].hwnd == hwnd && attribute_table[i].attribute == attribute)
+        {
+            stored = attribute_table[i].value;
+            found = TRUE;
+            break;
+        }
+    }
+    LeaveCriticalSection(&thumbnail_cs);
+    if (found)
+        *value = stored;
+    return found;
 }
 
 
@@ -175,7 +184,7 @@ HRESULT WINAPI DwmInvalidateIconicBitmaps(HWND hwnd)
 HRESULT WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD attributenum, LPCVOID attribute, DWORD size)
 {
     DWORD value;
-    WCHAR name[32];
+    int i;
 
     TRACE("(%p, %lx, %p, %lx)\n", hwnd, attributenum, attribute, size);
 
@@ -189,9 +198,31 @@ HRESULT WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD attributenum, LPCVOID attr
         return E_INVALIDARG;
 
     value = *(const DWORD *)attribute;
-    swprintf(name, 32, L"WexDwmAttr%d", attributenum);
-    SetPropW(hwnd, name, (HANDLE)((ULONG_PTR)value + 1));
-    return S_OK;
+
+    EnterCriticalSection(&thumbnail_cs);
+    for (i = 0; i < ATTRIBUTE_TABLE_SIZE; i++)
+    {
+        if (attribute_table[i].hwnd == hwnd && attribute_table[i].attribute == attributenum)
+        {
+            attribute_table[i].value = value;
+            LeaveCriticalSection(&thumbnail_cs);
+            return S_OK;
+        }
+    }
+    /* no existing entry; take a free slot, reclaiming dead windows first */
+    for (i = 0; i < ATTRIBUTE_TABLE_SIZE; i++)
+    {
+        if (!attribute_table[i].hwnd || !IsWindow(attribute_table[i].hwnd))
+        {
+            attribute_table[i].hwnd = hwnd;
+            attribute_table[i].attribute = attributenum;
+            attribute_table[i].value = value;
+            LeaveCriticalSection(&thumbnail_cs);
+            return S_OK;
+        }
+    }
+    LeaveCriticalSection(&thumbnail_cs);
+    return E_OUTOFMEMORY;
 }
 
 /**********************************************************************
@@ -223,17 +254,20 @@ HRESULT WINAPI DwmUnregisterThumbnail(HTHUMBNAIL thumbnail)
 
     TRACE("(%p)\n", thumbnail);
 
-    enter_thumbnail_lock();
+    if (!thumbnail)
+        return E_INVALIDARG;
+
+    EnterCriticalSection(&thumbnail_cs);
     for (i = 0; i < THUMBNAIL_TABLE_SIZE; i++)
     {
         if (thumbnail_table[i].handle == thumbnail)
         {
             memset(&thumbnail_table[i], 0, sizeof(thumbnail_table[i]));
-            leave_thumbnail_lock();
+            LeaveCriticalSection(&thumbnail_cs);
             return S_OK;
         }
     }
-    leave_thumbnail_lock();
+    LeaveCriticalSection(&thumbnail_cs);
     return E_INVALIDARG;
 }
 
@@ -371,7 +405,11 @@ HRESULT WINAPI DwmGetWindowAttribute(HWND hwnd, DWORD attribute, PVOID pv_attrib
             hr = S_OK;
             break;
         }
-        GetWindowRect(hwnd, &window_rect);
+        if (!GetWindowRect(hwnd, &window_rect))
+        {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+            break;
+        }
         width = window_rect.right - window_rect.left;
         rect->top = 0;
         rect->bottom = GetSystemMetrics(SM_CYCAPTION) + GetSystemMetrics(SM_CYFRAME);
@@ -432,7 +470,7 @@ HRESULT WINAPI DwmGetWindowAttribute(HWND hwnd, DWORD attribute, PVOID pv_attrib
  */
 HRESULT WINAPI DwmRegisterThumbnail(HWND dest, HWND src, PHTHUMBNAIL thumbnail_id)
 {
-    int i;
+    int i, j;
     HTHUMBNAIL handle;
 
     TRACE("(%p %p %p)\n", dest, src, thumbnail_id);
@@ -441,10 +479,12 @@ HRESULT WINAPI DwmRegisterThumbnail(HWND dest, HWND src, PHTHUMBNAIL thumbnail_i
         return E_INVALIDARG;
     if (!dest)
         return E_INVALIDARG;
+    if (!src)
+        return E_INVALIDARG;
     if (!IsWindow(dest) || !IsWindow(src))
         return E_HANDLE;
 
-    enter_thumbnail_lock();
+    EnterCriticalSection(&thumbnail_cs);
     for (i = 0; i < THUMBNAIL_TABLE_SIZE; i++)
     {
         if (!thumbnail_table[i].handle)
@@ -452,16 +492,40 @@ HRESULT WINAPI DwmRegisterThumbnail(HWND dest, HWND src, PHTHUMBNAIL thumbnail_i
     }
     if (i == THUMBNAIL_TABLE_SIZE)
     {
-        leave_thumbnail_lock();
-        return E_OUTOFMEMORY;
+        /* table full; reclaim a slot whose dest or src is no longer a window */
+        for (i = 0; i < THUMBNAIL_TABLE_SIZE; i++)
+        {
+            if (!IsWindow(thumbnail_table[i].dest) || !IsWindow(thumbnail_table[i].src))
+            {
+                memset(&thumbnail_table[i], 0, sizeof(thumbnail_table[i]));
+                break;
+            }
+        }
+        if (i == THUMBNAIL_TABLE_SIZE)
+        {
+            LeaveCriticalSection(&thumbnail_cs);
+            return E_OUTOFMEMORY;
+        }
     }
 
-    handle = (HTHUMBNAIL)(ULONG_PTR)InterlockedIncrement(&thumbnail_next_handle);
+    /* allocate a handle from the counter, skipping 0 and any value currently in the table */
+    do
+    {
+        if (++thumbnail_next_handle == 0)
+            thumbnail_next_handle = 1;
+        handle = (HTHUMBNAIL)(ULONG_PTR)thumbnail_next_handle;
+        for (j = 0; j < THUMBNAIL_TABLE_SIZE; j++)
+        {
+            if (thumbnail_table[j].handle == handle)
+                break;
+        }
+    } while (j != THUMBNAIL_TABLE_SIZE);
+
     thumbnail_table[i].handle = handle;
     thumbnail_table[i].dest = dest;
     thumbnail_table[i].src = src;
     memset(&thumbnail_table[i].props, 0, sizeof(thumbnail_table[i].props));
-    leave_thumbnail_lock();
+    LeaveCriticalSection(&thumbnail_cs);
 
     *thumbnail_id = handle;
     return S_OK;
@@ -475,7 +539,7 @@ static int get_display_frequency(void)
     memset(&mode, 0, sizeof(mode));
     mode.dmSize = sizeof(mode);
     ret = EnumDisplaySettingsExW(NULL, ENUM_CURRENT_SETTINGS, &mode, 0);
-    if (ret && mode.dmFields & DM_DISPLAYFREQUENCY && mode.dmDisplayFrequency)
+    if (ret && (mode.dmFields & DM_DISPLAYFREQUENCY) && mode.dmDisplayFrequency > 1)
     {
         return mode.dmDisplayFrequency;
     }
@@ -492,7 +556,10 @@ static int get_display_frequency(void)
 HRESULT WINAPI DwmGetCompositionTimingInfo(HWND hwnd, DWM_TIMING_INFO *info)
 {
     LARGE_INTEGER performance_frequency, qpc;
-    static int i, display_frequency;
+    static int i;
+    int display_frequency;
+    QPC_TIME qpc_refresh_period;
+    ULONGLONG numerator, denominator;
 
     if (!info)
         return E_INVALIDARG;
@@ -508,10 +575,21 @@ HRESULT WINAPI DwmGetCompositionTimingInfo(HWND hwnd, DWM_TIMING_INFO *info)
     display_frequency = get_display_frequency();
 
     QueryPerformanceFrequency(&performance_frequency);
-    info->qpcRefreshPeriod = performance_frequency.QuadPart / display_frequency;
+    qpc_refresh_period = performance_frequency.QuadPart / display_frequency;
+    if (!qpc_refresh_period)
+        qpc_refresh_period = 1;
+    info->qpcRefreshPeriod = qpc_refresh_period;
+
     /* like Windows 10 and later: the rates are the counter frequency over the refresh period in counter ticks */
-    info->rateRefresh.uiNumerator = performance_frequency.QuadPart;
-    info->rateRefresh.uiDenominator = info->qpcRefreshPeriod;
+    numerator = (ULONGLONG)performance_frequency.QuadPart;
+    denominator = qpc_refresh_period;
+    while ((numerator > 0xFFFFFFFFULL) || (denominator > 0xFFFFFFFFULL))
+    {
+        numerator >>= 1;
+        denominator >>= 1;
+    }
+    info->rateRefresh.uiNumerator = (UINT32)numerator;
+    info->rateRefresh.uiDenominator = (UINT32)denominator;
     info->rateCompose = info->rateRefresh;
 
     QueryPerformanceCounter(&qpc);
@@ -538,6 +616,8 @@ HRESULT WINAPI DwmFlush(void)
     display_frequency = get_display_frequency();
     NtQueryPerformanceCounter(&qpc, &qpf);
     qpc_refresh_period = qpf.QuadPart / display_frequency;
+    if (!qpc_refresh_period)
+        qpc_refresh_period = 1;
     delay.QuadPart = (qpc.QuadPart - ((qpc.QuadPart + qpc_refresh_period - 1) / qpc_refresh_period) * qpc_refresh_period)
             * 10000000 / qpf.QuadPart;
     NtDelayExecution(FALSE, &delay);
@@ -568,33 +648,47 @@ HRESULT WINAPI DwmDetachMilContent(HWND hwnd)
  */
 HRESULT WINAPI DwmUpdateThumbnailProperties(HTHUMBNAIL thumbnail, const DWM_THUMBNAIL_PROPERTIES *props)
 {
+    DWM_THUMBNAIL_PROPERTIES local_props;
     int i;
 
     TRACE("(%p, %p)\n", thumbnail, props);
 
+    if (!thumbnail)
+        return E_INVALIDARG;
     if (!props)
         return E_INVALIDARG;
 
-    enter_thumbnail_lock();
+    /* copy *props into a local first, validate, then lock */
+    local_props = *props;
+    if (local_props.dwFlags & ~(DWM_TNP_RECTDESTINATION | DWM_TNP_RECTSOURCE | DWM_TNP_OPACITY |
+                                DWM_TNP_VISIBLE | DWM_TNP_SOURCECLIENTAREAONLY))
+        return E_INVALIDARG;
+
+    EnterCriticalSection(&thumbnail_cs);
     for (i = 0; i < THUMBNAIL_TABLE_SIZE; i++)
     {
         if (thumbnail_table[i].handle == thumbnail)
         {
-            if (props->dwFlags & DWM_TNP_RECTDESTINATION)
-                thumbnail_table[i].props.rcDestination = props->rcDestination;
-            if (props->dwFlags & DWM_TNP_RECTSOURCE)
-                thumbnail_table[i].props.rcSource = props->rcSource;
-            if (props->dwFlags & DWM_TNP_OPACITY)
-                thumbnail_table[i].props.opacity = props->opacity;
-            if (props->dwFlags & DWM_TNP_VISIBLE)
-                thumbnail_table[i].props.fVisible = props->fVisible;
-            if (props->dwFlags & DWM_TNP_SOURCECLIENTAREAONLY)
-                thumbnail_table[i].props.fSourceClientAreaOnly = props->fSourceClientAreaOnly;
-            leave_thumbnail_lock();
+            if (!IsWindow(thumbnail_table[i].dest) || !IsWindow(thumbnail_table[i].src))
+            {
+                LeaveCriticalSection(&thumbnail_cs);
+                return E_HANDLE;
+            }
+            if (local_props.dwFlags & DWM_TNP_RECTDESTINATION)
+                thumbnail_table[i].props.rcDestination = local_props.rcDestination;
+            if (local_props.dwFlags & DWM_TNP_RECTSOURCE)
+                thumbnail_table[i].props.rcSource = local_props.rcSource;
+            if (local_props.dwFlags & DWM_TNP_OPACITY)
+                thumbnail_table[i].props.opacity = local_props.opacity;
+            if (local_props.dwFlags & DWM_TNP_VISIBLE)
+                thumbnail_table[i].props.fVisible = local_props.fVisible;
+            if (local_props.dwFlags & DWM_TNP_SOURCECLIENTAREAONLY)
+                thumbnail_table[i].props.fSourceClientAreaOnly = local_props.fSourceClientAreaOnly;
+            LeaveCriticalSection(&thumbnail_cs);
             return S_OK;
         }
     }
-    leave_thumbnail_lock();
+    LeaveCriticalSection(&thumbnail_cs);
     return E_INVALIDARG;
 }
 
@@ -622,6 +716,10 @@ HRESULT WINAPI DwmSetIconicLivePreviewBitmap(HWND hwnd, HBITMAP hbmp, POINT *pos
         return E_INVALIDARG;
     if (!hbmp)
         return E_INVALIDARG;
+    if (GetObjectType(hbmp) != OBJ_BITMAP)
+        return E_INVALIDARG;
+    if (flags & ~DWM_SIT_DISPLAYFRAME)
+        return E_INVALIDARG;
 
     return S_OK;
 }
@@ -640,6 +738,10 @@ HRESULT WINAPI DwmSetIconicThumbnail(HWND hwnd, HBITMAP hbmp, DWORD flags)
     if (!get_stored_attribute(hwnd, DWMWA_FORCE_ICONIC_REPRESENTATION, &value) || !value)
         return E_INVALIDARG;
     if (!hbmp)
+        return E_INVALIDARG;
+    if (GetObjectType(hbmp) != OBJ_BITMAP)
+        return E_INVALIDARG;
+    if (flags & ~DWM_SIT_DISPLAYFRAME)
         return E_INVALIDARG;
 
     return S_OK;
@@ -671,23 +773,32 @@ HRESULT WINAPI DwmQueryThumbnailSourceSize(HTHUMBNAIL thumbnail, SIZE *size)
     HWND src = NULL;
     RECT rect;
     int i;
+    BOOL found = FALSE;
 
     TRACE("(%p, %p)\n", thumbnail, size);
 
+    if (!thumbnail)
+        return E_INVALIDARG;
     if (!size)
         return E_INVALIDARG;
 
-    enter_thumbnail_lock();
+    EnterCriticalSection(&thumbnail_cs);
     for (i = 0; i < THUMBNAIL_TABLE_SIZE; i++)
     {
         if (thumbnail_table[i].handle == thumbnail)
         {
+            found = TRUE;
+            if (!IsWindow(thumbnail_table[i].dest) || !IsWindow(thumbnail_table[i].src))
+            {
+                LeaveCriticalSection(&thumbnail_cs);
+                return E_HANDLE;
+            }
             src = thumbnail_table[i].src;
             break;
         }
     }
-    leave_thumbnail_lock();
-    if (i == THUMBNAIL_TABLE_SIZE)
+    LeaveCriticalSection(&thumbnail_cs);
+    if (!found)
         return E_INVALIDARG;
 
     /* Windows reports the visible frame of the source, the same rectangle as DWMWA_EXTENDED_FRAME_BOUNDS */

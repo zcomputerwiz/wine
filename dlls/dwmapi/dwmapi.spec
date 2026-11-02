@@ -75,8 +75,8 @@
 @ stdcall DwmGetWindowAttribute(ptr long ptr long)
 @ stdcall DwmInvalidateIconicBitmaps(ptr)
 @ stdcall DwmIsCompositionEnabled(ptr)
-@ stdcall DwmModifyPreviousDxFrameDuration(long long long)
-@ stdcall DwmQueryThumbnailSourceSize(long ptr)
+@ stdcall DwmModifyPreviousDxFrameDuration(ptr long long)
+@ stdcall DwmQueryThumbnailSourceSize(ptr ptr)
 @ stdcall DwmRegisterThumbnail(long long ptr)
 # @ stub DwmRenderGesture
 @ stub DwmSetDxFrameDuration
@@ -86,6 +86,6 @@
 @ stdcall DwmSetWindowAttribute(long long ptr long)
 @ stdcall DwmShowContact(long long)
 # @ stub DwmTetherContact
-@ stdcall DwmTransitionOwnedWindow(long long)
+@ stdcall DwmTransitionOwnedWindow(ptr long)
 @ stdcall DwmUnregisterThumbnail(long)
 @ stdcall DwmUpdateThumbnailProperties(ptr ptr)

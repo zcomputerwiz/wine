@@ -100,6 +100,12 @@ enum DWM_SHOWCONTACT
     DWMSC_ALL       = 0xFFFFFFFF
 };
 
+enum DWMTRANSITION_OWNEDWINDOW_TARGET
+{
+    DWMTRANSITION_OWNEDWINDOW_NULL = -1,
+    DWMTRANSITION_OWNEDWINDOW_REPOSITION = 0
+};
+
 typedef struct _UNSIGNED_RATIO {
     UINT32 uiNumerator;
     UINT32 uiDenominator;
@@ -226,12 +232,15 @@ DWMAPI DwmGetTransportAttributes(BOOL*, BOOL*, DWORD*);
 DWMAPI DwmGetWindowAttribute(HWND, DWORD, PVOID, DWORD);
 DWMAPI DwmInvalidateIconicBitmaps(HWND);
 DWMAPI DwmIsCompositionEnabled(BOOL*);
+DWMAPI DwmModifyPreviousDxFrameDuration(HWND, INT, BOOL);
+DWMAPI DwmQueryThumbnailSourceSize(HTHUMBNAIL, SIZE *);
 DWMAPI DwmRegisterThumbnail(HWND, HWND, PHTHUMBNAIL);
 DWMAPI DwmSetIconicLivePreviewBitmap(HWND, HBITMAP, POINT*, DWORD);
 DWMAPI DwmSetIconicThumbnail(HWND, HBITMAP, DWORD);
 DWMAPI DwmSetPresentParameters(HWND, DWM_PRESENT_PARAMETERS *);
 DWMAPI DwmSetWindowAttribute(HWND, DWORD, LPCVOID, DWORD);
 DWMAPI DwmShowContact(DWORD, enum DWM_SHOWCONTACT);
+DWMAPI DwmTransitionOwnedWindow(HWND, enum DWMTRANSITION_OWNEDWINDOW_TARGET);
 DWMAPI DwmUnregisterThumbnail(HTHUMBNAIL);
 DWMAPI DwmUpdateThumbnailProperties(HTHUMBNAIL, const DWM_THUMBNAIL_PROPERTIES *);
 
