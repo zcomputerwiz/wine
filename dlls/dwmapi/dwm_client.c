@@ -340,3 +340,22 @@ HRESULT WINAPI WexDwmpChannelEcho( const void *in, ULONG in_len, void *out, ULON
     if (out_len) *out_len = len;
     return status ? HRESULT_FROM_NT( status ) : S_OK;
 }
+
+/***********************************************************************
+ *           WexDwmpPoll   (DWMAPI.@)
+ *
+ * Private: the compositor bridge asks the broker for the attribute changes after a revision.
+ * out receives struct dwm_poll_reply followed by its struct dwm_change records.
+ */
+HRESULT WINAPI WexDwmpPoll( UINT64 since_revision, DWORD cursor, void *out, DWORD *out_len )
+{
+    struct dwm_poll_req req = { since_revision, cursor, 0 };
+    uint32_t len;
+    NTSTATUS status;
+
+    if (!out || !out_len) return E_INVALIDARG;
+    len = *out_len;
+    status = dwm_client_call( DWM_OP_POLL, &req, sizeof(req), out, &len, 2000 );
+    *out_len = len;
+    return status ? HRESULT_FROM_NT( status ) : S_OK;
+}

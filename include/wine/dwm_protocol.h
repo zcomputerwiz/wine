@@ -37,7 +37,8 @@ enum dwm_opcode
     DWM_OP_ECHO     = 1,
     DWM_OP_SET_ATTR = 2,   /* window_token = HWND; payload struct dwm_attr_set; reply struct dwm_attr_reply */
     DWM_OP_GET_ATTR = 3,   /* window_token = HWND; payload struct dwm_attr_get; reply struct dwm_attr_reply */
-    DWM_OP_LAST     = DWM_OP_GET_ATTR,
+    DWM_OP_POLL     = 4,   /* payload struct dwm_poll_req; reply struct dwm_poll_reply + count struct dwm_change */
+    DWM_OP_LAST     = DWM_OP_POLL,
 };
 
 /* scalar (DWORD) window attributes held by the broker */
@@ -48,6 +49,19 @@ struct dwm_attr_reply { uint32_t found; uint32_t value; };
 C_ASSERT( sizeof(struct dwm_attr_set) == 8 );
 C_ASSERT( sizeof(struct dwm_attr_get) == 4 );
 C_ASSERT( sizeof(struct dwm_attr_reply) == 8 );
+
+/* change log and table snapshot for DWM_OP_POLL */
+#define DWM_POLL_MAX_CHANGES 100u
+#define DWM_POLL_SNAPSHOT    1u  /* entries are table pages, not log entries */
+#define DWM_POLL_MORE        2u  /* more pages follow: call again with the returned cursor */
+
+struct dwm_poll_req   { uint64_t since_revision; uint32_t cursor; uint32_t pad; };
+struct dwm_change     { uint32_t hwnd; uint32_t attribute; uint32_t value; uint32_t pad; };
+struct dwm_poll_reply { uint64_t revision; uint32_t count; uint32_t flags; };
+
+C_ASSERT( sizeof(struct dwm_poll_req) == 16 );
+C_ASSERT( sizeof(struct dwm_change) == 16 );
+C_ASSERT( sizeof(struct dwm_poll_reply) == 16 );
 
 /*
  * Fixed-width control-channel message envelope (Section 2.1 of DWM_ARCHITECTURE.md).
@@ -75,6 +89,10 @@ C_ASSERT( offsetof(struct dwm_msg_header, connection_epoch) == 16 );
 C_ASSERT( offsetof(struct dwm_msg_header, window_token) == 24 );
 C_ASSERT( offsetof(struct dwm_msg_header, revision) == 32 );
 C_ASSERT( offsetof(struct dwm_msg_header, capabilities) == 36 );
+
+/* a full DWM_OP_POLL reply (header + reply + a full page of changes) must fit in one message */
+C_ASSERT( sizeof(struct dwm_msg_header) + sizeof(struct dwm_poll_reply) +
+          DWM_POLL_MAX_CHANGES * sizeof(struct dwm_change) <= DWM_MAX_MESSAGE_SIZE );
 
 /*
  * Operations and fixed-width 32/64-bit invariant parameter block for the private
