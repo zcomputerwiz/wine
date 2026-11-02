@@ -70,6 +70,7 @@ static BOOL CALLBACK UXTHEME_broadcast_msg (HWND hWnd, LPARAM msg)
 {
     if (hWnd == NULL)
     {
+        uxtheme_reset_dwm_settings();
 	EnumWindows (UXTHEME_broadcast_msg, msg);
     }
     else
@@ -522,6 +523,7 @@ void UXTHEME_CheckReload(void)
     if (theme_watch_event && WaitForSingleObject(theme_watch_event, 0) == WAIT_OBJECT_0)
     {
         RegNotifyChangeKeyValue(theme_watch_key, TRUE, REG_NOTIFY_CHANGE_LAST_SET, theme_watch_event, TRUE);
+        uxtheme_reset_dwm_settings();
         UXTHEME_LoadTheme(TRUE);
     }
 }

@@ -4868,6 +4868,7 @@ enum NONCLIENT_BUTTON_TYPE
 #define NCFRAME_ACTIVE     0x01
 #define NCFRAME_DOWN       0x02
 #define NCFRAME_GRAYED     0x04
+#define NCFRAME_DWM_FRAME_EFFECTS 0x80
 #define NCFRAME_PART_SHIFT 8   /* 0 = whole frame and caption, else NCFRAME_BTN_* */
 #define NCFRAME_BTN_CLOSE  1
 #define NCFRAME_BTN_MAX    2

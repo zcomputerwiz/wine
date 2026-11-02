@@ -121,7 +121,9 @@ LRESULT WINAPI UXTHEME_DefDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, BOO
         break;
     }
     case WM_THEMECHANGED:
+    case WM_SETTINGCHANGE:
     {
+        uxtheme_reset_dwm_settings();
         destroy_dialog_brush(hwnd);
         InvalidateRect(hwnd, NULL, TRUE);
         break;

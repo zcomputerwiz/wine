@@ -24,6 +24,8 @@
 #include "winbase.h"
 #include "wingdi.h"
 #include "winuser.h"
+#include "winreg.h"
+#include "dwmapi.h"
 #include "uxthemedll.h"
 #include "vssym32.h"
 #include "wexwayland.h"
@@ -243,8 +245,503 @@ static HICON nc_get_icon(HWND hwnd)
     return icon;
 }
 
+#ifndef DWMWA_COLOR_DEFAULT
+#define DWMWA_COLOR_DEFAULT 0xFFFFFFFF
+#endif
+#ifndef DWMWA_COLOR_NONE
+#define DWMWA_COLOR_NONE 0xFFFFFFFE
+#endif
+
+static int dwm_frame_effects = -1;
+static COLORREF dwm_accent_color = CLR_INVALID;
+static BOOL dwm_accent_color_cached = FALSE;
+
+void uxtheme_reset_dwm_settings(void)
+{
+    dwm_frame_effects = -1;
+    dwm_accent_color_cached = FALSE;
+}
+
+static BOOL get_dwm_frame_effects(void)
+{
+    if (dwm_frame_effects == -1)
+    {
+        HKEY hkey;
+        dwm_frame_effects = 0;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\WineExplorer\\Shell", 0, KEY_READ, &hkey) == ERROR_SUCCESS)
+        {
+            DWORD val = 0, size = sizeof(val), type;
+            if (RegQueryValueExW(hkey, L"DwmFrameEffects", NULL, &type, (BYTE *)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
+                dwm_frame_effects = (val != 0);
+            RegCloseKey(hkey);
+        }
+    }
+    return dwm_frame_effects != 0;
+}
+
+static COLORREF get_dwm_accent_color(void)
+{
+    if (!dwm_accent_color_cached)
+    {
+        HKEY hkey;
+        dwm_accent_color = CLR_INVALID;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM", 0, KEY_READ, &hkey) == ERROR_SUCCESS)
+        {
+            DWORD val = 0, size = sizeof(val), type;
+            if (RegQueryValueExW(hkey, L"ColorizationColor", NULL, &type, (BYTE *)&val, &size) == ERROR_SUCCESS && type == REG_DWORD && val != 0)
+            {
+                dwm_accent_color = RGB((val >> 16) & 0xFF, (val >> 8) & 0xFF, val & 0xFF);
+            }
+            else
+            {
+                size = sizeof(val);
+                if (RegQueryValueExW(hkey, L"AccentColor", NULL, &type, (BYTE *)&val, &size) == ERROR_SUCCESS && type == REG_DWORD && val != 0)
+                    dwm_accent_color = RGB((val >> 16) & 0xFF, (val >> 8) & 0xFF, val & 0xFF);
+            }
+            RegCloseKey(hkey);
+        }
+        dwm_accent_color_cached = TRUE;
+    }
+    return dwm_accent_color;
+}
+
+static HRESULT query_dwm_window_attribute(HWND hwnd, DWORD attribute, void *pv, DWORD size)
+{
+    static HRESULT (WINAPI *pDwmGetWindowAttribute)(HWND, DWORD, void *, DWORD);
+    static BOOL initialized = FALSE;
+
+    if (!initialized)
+    {
+        HMODULE hmod = GetModuleHandleW(L"dwmapi.dll");
+        if (!hmod) hmod = LoadLibraryW(L"dwmapi.dll");
+        if (hmod) pDwmGetWindowAttribute = (void *)GetProcAddress(hmod, "DwmGetWindowAttribute");
+        initialized = TRUE;
+    }
+    if (!pDwmGetWindowAttribute) return E_NOTIMPL;
+    return pDwmGetWindowAttribute(hwnd, attribute, pv, size);
+}
+
+static void draw_modern_button(HDC hdc, const struct nc_button *btn, BOOL dark_mode,
+                               COLORREF text_color, COLORREF bg_color, UINT dpi,
+                               BOOL maximized, BOOL disabled, BOOL pressed)
+{
+    int cx = (btn->rect.left + btn->rect.right) / 2;
+    int cy = (btn->rect.top + btn->rect.bottom) / 2;
+    int pen_w = MulDiv(1, dpi, 96);
+    COLORREF btn_bg, pen_color;
+    HBRUSH br;
+    HPEN pen, old_pen;
+
+    if (pen_w < 1) pen_w = 1;
+
+    if (btn->which == NCFRAME_BTN_CLOSE)
+    {
+        if (pressed)
+        {
+            btn_bg = RGB(232, 17, 35);
+            pen_color = RGB(255, 255, 255);
+        }
+        else
+        {
+            btn_bg = bg_color;
+            pen_color = disabled ? (dark_mode ? RGB(100, 100, 100) : RGB(160, 160, 160)) : text_color;
+        }
+    }
+    else
+    {
+        if (pressed)
+            btn_bg = dark_mode ? RGB(70, 70, 70) : RGB(200, 200, 200);
+        else
+            btn_bg = bg_color;
+        pen_color = disabled ? (dark_mode ? RGB(100, 100, 100) : RGB(160, 160, 160)) : text_color;
+    }
+
+    br = CreateSolidBrush(btn_bg);
+    FillRect(hdc, &btn->rect, br);
+    DeleteObject(br);
+
+    pen = CreatePen(PS_SOLID, pen_w, pen_color);
+    old_pen = SelectObject(hdc, pen);
+
+    switch (btn->which)
+    {
+    case NCFRAME_BTN_CLOSE:
+    {
+        int sz = MulDiv(10, dpi, 96);
+        MoveToEx(hdc, cx - sz / 2, cy - sz / 2, NULL);
+        LineTo(hdc, cx + sz / 2 + 1, cy + sz / 2 + 1);
+        MoveToEx(hdc, cx + sz / 2, cy - sz / 2, NULL);
+        LineTo(hdc, cx - sz / 2 - 1, cy + sz / 2 + 1);
+        break;
+    }
+    case NCFRAME_BTN_MAX:
+    {
+        if (maximized)
+        {
+            int sz = MulDiv(8, dpi, 96);
+            int off = MulDiv(2, dpi, 96);
+            HBRUSH hollow_br = GetStockObject(NULL_BRUSH);
+            HBRUSH fill_br;
+            RECT front_rect;
+
+            if (off < 2) off = 2;
+            SelectObject(hdc, hollow_br);
+            Rectangle(hdc, cx - sz / 2 + off, cy - sz / 2 - off, cx + sz / 2 + off + 1, cy + sz / 2 - off + 1);
+
+            SetRect(&front_rect, cx - sz / 2, cy - sz / 2 + off, cx + sz / 2 + 1, cy + sz / 2 + off + 1);
+            fill_br = CreateSolidBrush(btn_bg);
+            FillRect(hdc, &front_rect, fill_br);
+            DeleteObject(fill_br);
+
+            Rectangle(hdc, front_rect.left, front_rect.top, front_rect.right, front_rect.bottom);
+        }
+        else
+        {
+            int sz = MulDiv(10, dpi, 96);
+            HBRUSH hollow_br = GetStockObject(NULL_BRUSH);
+            SelectObject(hdc, hollow_br);
+            Rectangle(hdc, cx - sz / 2, cy - sz / 2, cx + sz / 2 + 1, cy + sz / 2 + 1);
+        }
+        break;
+    }
+    case NCFRAME_BTN_MIN:
+    {
+        int sz = MulDiv(10, dpi, 96);
+        MoveToEx(hdc, cx - sz / 2, cy, NULL);
+        LineTo(hdc, cx + sz / 2 + 1, cy);
+        break;
+    }
+    }
+
+    SelectObject(hdc, old_pen);
+    DeleteObject(pen);
+}
+
+static void nc_update_modern_region(HWND hwnd, int width, int height)
+{
+    BOOL owned = !!GetPropW(hwnd, theme_region_owned);
+    HRGN current, region;
+    int current_type;
+
+    if (GetPropW(hwnd, theme_region_updating) || GetPropW(hwnd, app_region_defined)) return;
+    current = CreateRectRgn(0, 0, 0, 0);
+    if (!current) return;
+    if (GetPropW(hwnd, WEX_WAYLAND_HOST_PROP))
+    {
+        HRGN outer = GetPropW(hwnd, WEX_WAYLAND_FRAME_OUTER_PROP);
+        current_type = outer ? CombineRgn(current, outer, NULL, RGN_COPY) : ERROR;
+    }
+    else current_type = GetWindowRgn(hwnd, current);
+    if (current_type != ERROR && !owned)
+    {
+        SetPropW(hwnd, app_region_defined, (HANDLE)1);
+        DeleteObject(current);
+        return;
+    }
+
+    /* Like a themed frame, the flat frame needs the whole window surface.
+     * Without a region win32u may crop off native decorations, including all
+     * of the non-client pixels that we are about to paint. */
+    region = CreateRectRgn(0, 0, width, height);
+    if (region)
+    {
+        if (EqualRgn(current, region)) DeleteObject(region);
+        else
+        {
+            SetPropW(hwnd, theme_region_updating, (HANDLE)1);
+            SetPropW(hwnd, theme_region_owned, (HANDLE)1);
+            if (!user_api.pSetWindowRgn(hwnd, region, FALSE))
+            {
+                if (!owned) RemovePropW(hwnd, theme_region_owned);
+                DeleteObject(region);
+            }
+            RemovePropW(hwnd, theme_region_updating);
+        }
+    }
+    DeleteObject(current);
+}
+
+static BOOL draw_modern_nc_frame(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex_style, UINT flags)
+{
+    UINT target = flags >> NCFRAME_PART_SHIFT;
+    BOOL active = !!(flags & NCFRAME_ACTIVE);
+    BOOL tool = !!(ex_style & WS_EX_TOOLWINDOW);
+    BOOL max = !!(style & WS_MAXIMIZE);
+    BOOL rtl = !!(ex_style & WS_EX_LAYOUTRTL);
+    int w = rect.right - rect.left, h = rect.bottom - rect.top;
+    UINT dpi;
+    int bw, bh, cap_h, top_h, btn_w;
+    int nbtn = 0, i;
+    struct nc_button btn[3];
+    BOOL dark_mode = FALSE;
+    DWORD attr_val = 0;
+    COLORREF caption_attr = DWMWA_COLOR_DEFAULT;
+    COLORREF text_attr = DWMWA_COLOR_DEFAULT;
+    COLORREF border_attr = DWMWA_COLOR_DEFAULT;
+    COLORREF caption_bg, text_color, border_color;
+    RECT rc_win, rc_client;
+
+    if ((style & WS_CAPTION) != WS_CAPTION) return FALSE;
+    if (style & WS_MINIMIZE) return FALSE;
+
+    /* Custom NC (0 client inset): leave alone */
+    if (GetWindowRect(hwnd, &rc_win) && GetClientRect(hwnd, &rc_client))
+    {
+        if ((rc_win.right - rc_win.left == rc_client.right - rc_client.left) &&
+            (rc_win.bottom - rc_win.top == rc_client.bottom - rc_client.top))
+            return FALSE;
+    }
+
+    dpi = GetDpiForWindow(hwnd);
+    if (!dpi) dpi = 96;
+
+    bw = max ? 0 : GetSystemMetricsForDpi((style & WS_THICKFRAME) ? SM_CXFRAME : SM_CXDLGFRAME, dpi);
+    bh = max ? 0 : GetSystemMetricsForDpi((style & WS_THICKFRAME) ? SM_CYFRAME : SM_CYDLGFRAME, dpi);
+    cap_h = GetSystemMetricsForDpi(tool ? SM_CYSMCAPTION : SM_CYCAPTION, dpi);
+    top_h = bh + cap_h;
+    btn_w = GetSystemMetricsForDpi(SM_CXSIZE, dpi);
+
+    if (!target)
+        nc_update_modern_region(hwnd, w, h);
+
+    /* Read DWM window attributes */
+    if (SUCCEEDED(query_dwm_window_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &attr_val, sizeof(attr_val))) && attr_val)
+        dark_mode = TRUE;
+    if (SUCCEEDED(query_dwm_window_attribute(hwnd, DWMWA_CAPTION_COLOR, &attr_val, sizeof(attr_val))))
+        caption_attr = (COLORREF)attr_val;
+    if (SUCCEEDED(query_dwm_window_attribute(hwnd, DWMWA_TEXT_COLOR, &attr_val, sizeof(attr_val))))
+        text_attr = (COLORREF)attr_val;
+    if (SUCCEEDED(query_dwm_window_attribute(hwnd, DWMWA_BORDER_COLOR, &attr_val, sizeof(attr_val))))
+        border_attr = (COLORREF)attr_val;
+
+    /* Determine caption background */
+    if (caption_attr != DWMWA_COLOR_DEFAULT && caption_attr != DWMWA_COLOR_NONE)
+    {
+        caption_bg = caption_attr;
+    }
+    else
+    {
+        COLORREF accent = get_dwm_accent_color();
+        if (accent != CLR_INVALID && active)
+        {
+            caption_bg = accent;
+        }
+        else if (dark_mode)
+        {
+            caption_bg = active ? RGB(32, 32, 32) : RGB(45, 45, 45);
+        }
+        else
+        {
+            caption_bg = active ? RGB(240, 240, 240) : RGB(245, 245, 245);
+        }
+    }
+
+    /* Determine text color */
+    if (text_attr != DWMWA_COLOR_DEFAULT && text_attr != DWMWA_COLOR_NONE)
+    {
+        text_color = text_attr;
+    }
+    else if (dark_mode)
+    {
+        text_color = active ? RGB(255, 255, 255) : RGB(160, 160, 160);
+    }
+    else
+    {
+        int lum = (GetRValue(caption_bg) * 299 + GetGValue(caption_bg) * 587 + GetBValue(caption_bg) * 114) / 1000;
+        if (lum < 128)
+            text_color = active ? RGB(255, 255, 255) : RGB(180, 180, 180);
+        else
+            text_color = active ? RGB(0, 0, 0) : RGB(128, 128, 128);
+    }
+
+    /* Determine border color */
+    if (border_attr != DWMWA_COLOR_DEFAULT && border_attr != DWMWA_COLOR_NONE)
+    {
+        border_color = border_attr;
+    }
+    else
+    {
+        COLORREF accent = get_dwm_accent_color();
+        if (accent != CLR_INVALID && active)
+            border_color = accent;
+        else if (dark_mode)
+            border_color = active ? RGB(80, 80, 80) : RGB(60, 60, 60);
+        else
+            border_color = active ? RGB(180, 180, 180) : RGB(210, 210, 210);
+    }
+
+    /* Setup buttons */
+    if (style & WS_SYSMENU)
+    {
+        if (rtl)
+        {
+            btn[nbtn].which = NCFRAME_BTN_CLOSE;
+            SetRect(&btn[nbtn].rect, 0, 0, btn_w, top_h);
+            nbtn++;
+            if (!tool && (style & (WS_MINIMIZEBOX | WS_MAXIMIZEBOX)))
+            {
+                btn[nbtn].which = NCFRAME_BTN_MAX;
+                SetRect(&btn[nbtn].rect, btn_w, 0, 2 * btn_w, top_h);
+                nbtn++;
+                btn[nbtn].which = NCFRAME_BTN_MIN;
+                SetRect(&btn[nbtn].rect, 2 * btn_w, 0, 3 * btn_w, top_h);
+                nbtn++;
+            }
+        }
+        else
+        {
+            btn[nbtn].which = NCFRAME_BTN_CLOSE;
+            SetRect(&btn[nbtn].rect, w - btn_w, 0, w, top_h);
+            nbtn++;
+            if (!tool && (style & (WS_MINIMIZEBOX | WS_MAXIMIZEBOX)))
+            {
+                btn[nbtn].which = NCFRAME_BTN_MAX;
+                SetRect(&btn[nbtn].rect, w - 2 * btn_w, 0, w - btn_w, top_h);
+                nbtn++;
+                btn[nbtn].which = NCFRAME_BTN_MIN;
+                SetRect(&btn[nbtn].rect, w - 3 * btn_w, 0, w - 2 * btn_w, top_h);
+                nbtn++;
+            }
+        }
+    }
+
+    if (target)
+    {
+        for (i = 0; i < nbtn; i++)
+        {
+            if (btn[i].which == target)
+            {
+                BOOL disabled = FALSE;
+                if (btn[i].which == NCFRAME_BTN_MAX && !(style & WS_MAXIMIZEBOX)) disabled = TRUE;
+                if (btn[i].which == NCFRAME_BTN_MIN && !(style & WS_MINIMIZEBOX)) disabled = TRUE;
+                if (btn[i].which == NCFRAME_BTN_CLOSE && (flags & NCFRAME_GRAYED)) disabled = TRUE;
+                draw_modern_button(hdc, &btn[i], dark_mode, text_color, caption_bg, dpi, max, disabled, !!(flags & NCFRAME_DOWN));
+                return TRUE;
+            }
+        }
+        return TRUE;
+    }
+
+    /* 1. Caption background */
+    {
+        RECT r_cap = {0, 0, w, top_h};
+        HBRUSH br_cap = CreateSolidBrush(caption_bg);
+        FillRect(hdc, &r_cap, br_cap);
+        DeleteObject(br_cap);
+    }
+
+    /* 2. Side and bottom borders (restored only) */
+    if (!max && (bw > 0 || bh > 0))
+    {
+        COLORREF frame_bg = dark_mode ? (active ? RGB(32, 32, 32) : RGB(45, 45, 45))
+                                      : (active ? RGB(240, 240, 240) : RGB(245, 245, 245));
+        HBRUSH br_frame = CreateSolidBrush(frame_bg);
+        RECT r_side;
+        if (bw > 0)
+        {
+            SetRect(&r_side, 0, top_h, bw, h - bh);
+            FillRect(hdc, &r_side, br_frame);
+            SetRect(&r_side, w - bw, top_h, w, h - bh);
+            FillRect(hdc, &r_side, br_frame);
+        }
+        if (bh > 0)
+        {
+            SetRect(&r_side, 0, h - bh, w, h);
+            FillRect(hdc, &r_side, br_frame);
+        }
+        DeleteObject(br_frame);
+    }
+
+    /* 3. 1px outer frame (restored only, unless DWMWA_COLOR_NONE) */
+    if (!max && border_attr != DWMWA_COLOR_NONE)
+    {
+        HBRUSH br_border = CreateSolidBrush(border_color);
+        RECT r_edge;
+        SetRect(&r_edge, 0, 0, w, 1);
+        FillRect(hdc, &r_edge, br_border);
+        SetRect(&r_edge, 0, 0, 1, h);
+        FillRect(hdc, &r_edge, br_border);
+        SetRect(&r_edge, w - 1, 0, w, h);
+        FillRect(hdc, &r_edge, br_border);
+        SetRect(&r_edge, 0, h - 1, w, h);
+        FillRect(hdc, &r_edge, br_border);
+        DeleteObject(br_border);
+    }
+
+    /* 4. Icon and window title */
+    {
+        int text_left = bw + 6;
+        int text_right = w - bw;
+
+        if (rtl)
+        {
+            text_left = nbtn ? btn[nbtn - 1].rect.right + 6 : bw + 6;
+            text_right = w - bw - 6;
+            if ((style & WS_SYSMENU) && !tool)
+            {
+                HICON icon = nc_get_icon(hwnd);
+                int isz = GetSystemMetricsForDpi(SM_CXSMICON, dpi);
+                if (icon)
+                {
+                    DrawIconEx(hdc, text_right - isz, (top_h - isz) / 2, icon, isz, isz, 0, NULL, DI_NORMAL);
+                    text_right -= isz + 4;
+                }
+            }
+        }
+        else
+        {
+            if ((style & WS_SYSMENU) && !tool)
+            {
+                HICON icon = nc_get_icon(hwnd);
+                int isz = GetSystemMetricsForDpi(SM_CXSMICON, dpi);
+                if (icon)
+                {
+                    DrawIconEx(hdc, text_left, (top_h - isz) / 2, icon, isz, isz, 0, NULL, DI_NORMAL);
+                    text_left += isz + 6;
+                }
+            }
+            if (nbtn > 0)
+                text_right = btn[nbtn - 1].rect.left - 6;
+        }
+
+        if (text_right > text_left)
+        {
+            NONCLIENTMETRICSW ncm = {.cbSize = sizeof(ncm)};
+            WCHAR text[256];
+            if (GetWindowTextW(hwnd, text, ARRAY_SIZE(text)) &&
+                SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0))
+            {
+                HFONT font = CreateFontIndirectW(tool ? &ncm.lfSmCaptionFont : &ncm.lfCaptionFont);
+                HFONT old_font = SelectObject(hdc, font);
+                RECT r_text;
+                SetRect(&r_text, text_left, 0, text_right, top_h);
+                SetBkMode(hdc, TRANSPARENT);
+                SetTextColor(hdc, text_color);
+                DrawTextW(hdc, text, -1, &r_text, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS | DT_LEFT);
+                SelectObject(hdc, old_font);
+                DeleteObject(font);
+            }
+        }
+    }
+
+    /* 5. Caption buttons */
+    for (i = 0; i < nbtn; i++)
+    {
+        BOOL disabled = FALSE;
+        if (btn[i].which == NCFRAME_BTN_MAX && !(style & WS_MAXIMIZEBOX)) disabled = TRUE;
+        if (btn[i].which == NCFRAME_BTN_MIN && !(style & WS_MINIMIZEBOX)) disabled = TRUE;
+        if (btn[i].which == NCFRAME_BTN_CLOSE && (flags & NCFRAME_GRAYED)) disabled = TRUE;
+        draw_modern_button(hdc, &btn[i], dark_mode, text_color, caption_bg, dpi, max, disabled, FALSE);
+    }
+
+    return TRUE;
+}
+
 BOOL WINAPI UXTHEME_NonClientFrameDraw(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex_style, UINT flags)
 {
+    if ((flags & NCFRAME_DWM_FRAME_EFFECTS) || get_dwm_frame_effects())
+        return draw_modern_nc_frame(hwnd, hdc, rect, style, ex_style, flags);
+
     UINT target = flags >> NCFRAME_PART_SHIFT;
     BOOL active = flags & NCFRAME_ACTIVE, tool = ex_style & WS_EX_TOOLWINDOW, thick = style & WS_THICKFRAME;
     int w = rect.right - rect.left, h = rect.bottom - rect.top;

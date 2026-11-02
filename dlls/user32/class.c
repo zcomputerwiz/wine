@@ -260,6 +260,20 @@ void get_class_version( UNICODE_STRING *name, UNICODE_STRING *version, BOOL load
 }
 
 
+static BOOL is_dwm_frame_effects(void)
+{
+    HKEY hkey;
+    DWORD val = 0, size = sizeof(val), type;
+    BOOL ret = FALSE;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\WineExplorer\\Shell", 0, KEY_READ, &hkey) == ERROR_SUCCESS)
+    {
+        if (RegQueryValueExW(hkey, L"DwmFrameEffects", NULL, &type, (BYTE *)&val, &size) == ERROR_SUCCESS && type == REG_DWORD)
+            ret = (val != 0);
+        RegCloseKey(hkey);
+    }
+    return ret;
+}
+
 static void load_uxtheme(void)
 {
     BOOL (WINAPI * pIsThemeActive)(void);
@@ -269,7 +283,7 @@ static void load_uxtheme(void)
     if (uxtheme)
     {
         pIsThemeActive = (void *)GetProcAddress(uxtheme, "IsThemeActive");
-        if (!pIsThemeActive || !pIsThemeActive())
+        if ((!pIsThemeActive || !pIsThemeActive()) && !is_dwm_frame_effects())
             FreeLibrary(uxtheme);
     }
 }

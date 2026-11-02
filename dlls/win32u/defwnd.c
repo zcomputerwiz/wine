@@ -1471,6 +1471,7 @@ BOOL draw_frame_menu( HDC dc, RECT *r, UINT flags )
 
 static BOOL draw_themed_nc_frame( HWND hwnd, HDC hdc, const RECT *rect, DWORD style, DWORD ex_style,
                                   UINT flags );
+static BOOL get_dwm_frame_effects(void);
 
 /* draw a caption button through the visual style, if there is one */
 static BOOL draw_themed_nc_button( HWND hwnd, HDC hdc, UINT button, BOOL down, BOOL grayed )
@@ -1484,6 +1485,7 @@ static BOOL draw_themed_nc_button( HWND hwnd, HDC hdc, UINT button, BOOL down, B
     release_win_ptr( win );
     if (down) flags |= NCFRAME_DOWN;
     if (grayed) flags |= NCFRAME_GRAYED;
+    if (get_dwm_frame_effects()) flags |= NCFRAME_DWM_FRAME_EFFECTS;
     get_window_rect_rel( hwnd, COORDS_WINDOW, &rect, get_thread_dpi() );
     return draw_themed_nc_frame( hwnd, hdc, &rect, get_window_long( hwnd, GWL_STYLE ),
                                  get_window_long( hwnd, GWL_EXSTYLE ), flags );
@@ -1773,6 +1775,7 @@ static void nc_paint( HWND hwnd, HRGN clip )
     WORD flags;
     HRGN hrgn;
     RECT rectClient;
+    UINT nc_flags;
 
     if (!(win = get_win_ptr( hwnd )) || win == WND_OTHER_PROCESS) return;
     style = win->dwStyle;
@@ -1809,7 +1812,10 @@ static void nc_paint( HWND hwnd, HRGN clip )
 
     NtGdiSelectPen( hdc, get_sys_color_pen( COLOR_WINDOWFRAME ));
 
-    if ((style & WS_CAPTION) == WS_CAPTION && draw_themed_nc_frame( hwnd, hdc, &rect, style, ex_style, active ? NCFRAME_ACTIVE : 0 ))
+    nc_flags = active ? NCFRAME_ACTIVE : 0;
+    if (get_dwm_frame_effects()) nc_flags |= NCFRAME_DWM_FRAME_EFFECTS;
+
+    if ((style & WS_CAPTION) == WS_CAPTION && draw_themed_nc_frame( hwnd, hdc, &rect, style, ex_style, nc_flags ))
     {
         /* the visual style drew the frame and the caption; only advance the rectangle */
         if (style & WS_THICKFRAME)
@@ -1981,6 +1987,165 @@ static void handle_nc_calc_size( HWND hwnd, WPARAM wparam, RECT *win_rect )
     }
 }
 
+static int dwm_frame_effects = -1;
+
+static BOOL get_dwm_frame_effects(void)
+{
+    if (dwm_frame_effects == -1)
+    {
+        HKEY hkey = reg_open_hkcu_key( "Software\\WineExplorer\\Shell" );
+        dwm_frame_effects = 0;
+        if (hkey)
+        {
+            char buf[offsetof(KEY_VALUE_PARTIAL_INFORMATION, Data[sizeof(DWORD)])];
+            KEY_VALUE_PARTIAL_INFORMATION *info = (void *)buf;
+            if (query_reg_ascii_value( hkey, "DwmFrameEffects", info, sizeof(buf) ) && info->Type == REG_DWORD)
+                dwm_frame_effects = (*(const DWORD *)info->Data != 0);
+            NtClose( hkey );
+        }
+    }
+    return dwm_frame_effects != 0;
+}
+
+static LRESULT handle_modern_nc_hit_test( HWND hwnd, POINT pt, const struct window_rects *rects,
+                                          DWORD style, DWORD ex_style )
+{
+    int w = rects->window.right - rects->window.left;
+    int h = rects->window.bottom - rects->window.top;
+    int x = pt.x - rects->window.left;
+    int y = pt.y - rects->window.top;
+    BOOL tool = !!(ex_style & WS_EX_TOOLWINDOW);
+    BOOL max = !!(style & WS_MAXIMIZE);
+    BOOL rtl = !!(ex_style & WS_EX_LAYOUTRTL);
+    int bh = max ? 0 : get_system_metrics( (style & WS_THICKFRAME) ? SM_CYFRAME : SM_CYDLGFRAME );
+    int bw = max ? 0 : get_system_metrics( (style & WS_THICKFRAME) ? SM_CXFRAME : SM_CXDLGFRAME );
+    int cap_h = get_system_metrics( tool ? SM_CYSMCAPTION : SM_CYCAPTION );
+    int top_h = bh + cap_h;
+    int btn_w = get_system_metrics( SM_CXSIZE );
+
+    /* 1. Caption buttons take priority */
+    if (y >= 0 && y < top_h)
+    {
+        if (style & WS_SYSMENU)
+        {
+            if (rtl)
+            {
+                if (x >= 0 && x < btn_w) return HTCLOSE;
+                if (!tool && (style & (WS_MINIMIZEBOX | WS_MAXIMIZEBOX)))
+                {
+                    if (x >= btn_w && x < 2 * btn_w) return HTMAXBUTTON;
+                    if (x >= 2 * btn_w && x < 3 * btn_w) return HTMINBUTTON;
+                }
+            }
+            else
+            {
+                if (x >= w - btn_w && x < w) return HTCLOSE;
+                if (!tool && (style & (WS_MINIMIZEBOX | WS_MAXIMIZEBOX)))
+                {
+                    if (x >= w - 2 * btn_w && x < w - btn_w) return HTMAXBUTTON;
+                    if (x >= w - 3 * btn_w && x < w - 2 * btn_w) return HTMINBUTTON;
+                }
+            }
+        }
+    }
+
+    /* 2. Sizing borders (only when restored with thick frame) */
+    if (!max && has_thick_frame( style, ex_style ))
+    {
+        if (y < bh)
+        {
+            if (x < bw) return HTTOPLEFT;
+            if (x >= w - bw) return HTTOPRIGHT;
+            return HTTOP;
+        }
+        if (y >= h - bh)
+        {
+            if (x < bw) return HTBOTTOMLEFT;
+            if (x >= w - bw) return HTBOTTOMRIGHT;
+            return HTBOTTOM;
+        }
+        if (x < bw)
+        {
+            if (y < top_h) return HTTOPLEFT;
+            return HTLEFT;
+        }
+        if (x >= w - bw)
+        {
+            if (y < top_h) return HTTOPRIGHT;
+            return HTRIGHT;
+        }
+    }
+    else if (!max)
+    {
+        if (has_dialog_frame( style, ex_style ) || has_thin_frame( style ))
+        {
+            if (x < bw || x >= w - bw || y >= h - bh || y < bh)
+                return HTBORDER;
+        }
+    }
+
+    /* 3. Caption area */
+    if (y < top_h)
+    {
+        if ((style & WS_SYSMENU) && !tool && get_nc_icon_for_window( hwnd ))
+        {
+            int isz = get_system_metrics( SM_CXSMICON );
+            if (rtl)
+            {
+                int icon_x = max ? w - 8 - isz : (bw > 0 ? w - bw - 6 - isz : w - 8 - isz);
+                if (x >= icon_x && x < icon_x + isz) return HTSYSMENU;
+            }
+            else
+            {
+                int icon_x = max ? 8 : (bw > 0 ? bw + 6 : 8);
+                if (x >= icon_x && x < icon_x + isz) return HTSYSMENU;
+            }
+        }
+        return HTCAPTION;
+    }
+
+    /* 4. Menu bar */
+    if (has_menu( hwnd, style ))
+    {
+        int menu_h = get_system_metrics( SM_CYMENU );
+        if (y >= top_h && y < top_h + menu_h &&
+            x >= rects->client.left - rects->window.left &&
+            x < rects->client.right - rects->window.left)
+            return HTMENU;
+    }
+
+    /* 5. Vertical scrollbar */
+    if (style & WS_VSCROLL)
+    {
+        int sb_w = get_system_metrics( SM_CXVSCROLL );
+        int eff_ex = ex_style;
+        if (rtl) eff_ex ^= WS_EX_LEFTSCROLLBAR;
+        if (eff_ex & WS_EX_LEFTSCROLLBAR)
+        {
+            if (x < rects->client.left - rects->window.left &&
+                x >= rects->client.left - rects->window.left - sb_w)
+                return HTVSCROLL;
+        }
+        else
+        {
+            if (x >= rects->client.right - rects->window.left &&
+                x < rects->client.right - rects->window.left + sb_w)
+                return HTVSCROLL;
+        }
+    }
+
+    /* 6. Horizontal scrollbar */
+    if (style & WS_HSCROLL)
+    {
+        int sb_h = get_system_metrics( SM_CYHSCROLL );
+        if (y >= rects->client.bottom - rects->window.top &&
+            y < rects->client.bottom - rects->window.top + sb_h)
+            return HTHSCROLL;
+    }
+
+    return HTCLIENT;
+}
+
 LRESULT handle_nc_hit_test( HWND hwnd, POINT pt )
 {
     struct window_rects rects;
@@ -1995,6 +2160,12 @@ LRESULT handle_nc_hit_test( HWND hwnd, POINT pt )
     ex_style = get_window_long( hwnd, GWL_EXSTYLE );
 
     if (PtInRect( &rects.client, pt )) return HTCLIENT;
+
+    if (get_dwm_frame_effects() && (style & WS_CAPTION) == WS_CAPTION &&
+        !EqualRect( &rects.window, &rects.client ))
+    {
+        return handle_modern_nc_hit_test( hwnd, pt, &rects, style, ex_style );
+    }
 
     /* Check borders */
     if (has_thick_frame( style, ex_style ))
@@ -3066,6 +3237,11 @@ LRESULT default_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, 
                 result = NtUserMessageCall( ime_hwnd, msg, wparam, lparam,
                                             0, NtUserSendMessage, ansi );
         }
+        break;
+
+    case WM_SETTINGCHANGE:
+    case WM_THEMECHANGED:
+        dwm_frame_effects = -1;
         break;
     }
 

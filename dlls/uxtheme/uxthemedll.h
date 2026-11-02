@@ -128,5 +128,6 @@ LRESULT WINAPI UXTHEME_ScrollbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 #define ALPHABLEND_FULL             2
 
 HTHEME UXTHEME_OpenNonClientTheme(UINT dpi);
+void uxtheme_reset_dwm_settings(void);
 
 #endif /* __WINE_UXTHEMEDLL_H */
