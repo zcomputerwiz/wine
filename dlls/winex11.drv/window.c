@@ -2628,6 +2628,56 @@ void set_window_visual( struct x11drv_win_data *data, const XVisualInfo *vis, BO
 }
 
 
+/**********************************************************************
+ *		sync_window_dwm_margins
+ *
+ * Publish the DWM glass margins (set by DwmExtendFrameIntoClientArea) on the
+ * whole window for the compositor, or delete the property when there are none.
+ */
+static const WCHAR dwm_alpha_prop[] =
+    {'_','_','w','i','n','e','_','d','w','m','_','a','l','p','h','a',0};
+
+/* set by dwmapi's DwmExtendFrameIntoClientArea (DwmAlpha gate): the window uses an ARGB visual */
+BOOL window_dwm_alpha( HWND hwnd )
+{
+    return NtUserGetProp( hwnd, dwm_alpha_prop ) != 0;
+}
+
+void sync_window_dwm_margins( struct x11drv_win_data *data )
+{
+    static const WCHAR margin_props[4][32] =
+    {
+        {'_','_','w','i','n','e','_','d','w','m','_','m','a','r','g','i','n','_','l','e','f','t',0},
+        {'_','_','w','i','n','e','_','d','w','m','_','m','a','r','g','i','n','_','r','i','g','h','t',0},
+        {'_','_','w','i','n','e','_','d','w','m','_','m','a','r','g','i','n','_','t','o','p',0},
+        {'_','_','w','i','n','e','_','d','w','m','_','m','a','r','g','i','n','_','b','o','t','t','o','m',0}
+    };
+    unsigned long values[8];
+    LONG_PTR stored;
+    int i;
+
+    if (!data->whole_window) return;
+    if (!(stored = (LONG_PTR)NtUserGetProp( data->hwnd, dwm_alpha_prop )))
+    {
+        XDeleteProperty( data->display, data->whole_window, x11drv_atom( _WEX_DWM_MARGINS ) );
+        return;
+    }
+
+    values[0] = data->rects.client.left - data->rects.visible.left;
+    values[1] = data->rects.client.top - data->rects.visible.top;
+    values[2] = data->rects.client.right - data->rects.client.left;
+    values[3] = data->rects.client.bottom - data->rects.client.top;
+    for (i = 0; i < 4; i++)
+    {
+        /* -1 (sheet of glass) is stored as 0x10000 by dwmapi; publish it as 0xffffffff. */
+        stored = (LONG_PTR)NtUserGetProp( data->hwnd, margin_props[i] );
+        values[4 + i] = (stored == 0x10000) ? 0xffffffff : (unsigned long)((int)stored - 1);
+    }
+    XChangeProperty( data->display, data->whole_window, x11drv_atom( _WEX_DWM_MARGINS ),
+                     XA_CARDINAL, 32, PropModeReplace, (unsigned char *)values, 8 );
+}
+
+
 /*****************************************************************
  *		SetWindowText   (X11DRV.@)
  */
@@ -3398,6 +3448,7 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
     /* if window was fullscreen and is being hidden, release cursor clipping */
     was_fullscreen &= data->desired_state.wm_state != NormalState;
 
+    sync_window_dwm_margins( data );  /* keep the client rectangle current on a resize */
     XFlush( data->display );  /* make sure changes are done before we start painting again */
     release_win_data( data );
 

@@ -153,12 +153,78 @@ HRESULT WINAPI DwmEnableComposition(UINT uCompositionAction)
     return S_OK;
 }
 
+/* The DwmAlpha development gate (docs/DWM_ARCHITECTURE.md): read once per process. */
+static BOOL dwm_alpha_cached;
+static BOOL dwm_alpha_enabled;
+
+static BOOL dwm_alpha_is_enabled(void)
+{
+    DWORD value = 0, type, cb = sizeof(value);
+    if (!dwm_alpha_cached)
+    {
+        dwm_alpha_enabled = RegGetValueW(HKEY_CURRENT_USER, L"Software\\WineExplorer\\Shell",
+                                        L"DwmAlpha", RRF_RT_REG_DWORD, &type, &value, &cb) == ERROR_SUCCESS &&
+                            value != 0;
+        dwm_alpha_cached = TRUE;
+    }
+    return dwm_alpha_enabled;
+}
+
 /**********************************************************************
  *           DwmExtendFrameIntoClientArea    (DWMAPI.@)
  */
 HRESULT WINAPI DwmExtendFrameIntoClientArea(HWND hwnd, const MARGINS* margins)
 {
-    FIXME("(%p, %p) stub\n", hwnd, margins);
+    TRACE("(%p, %p)\n", hwnd, margins);
+
+    if (dwm_alpha_is_enabled() && margins && IsWindow(hwnd) &&
+        !(GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD))
+    {
+        static const WCHAR margin_props[4][32] =
+        {
+            L"__wine_dwm_margin_left",
+            L"__wine_dwm_margin_right",
+            L"__wine_dwm_margin_top",
+            L"__wine_dwm_margin_bottom"
+        };
+        int values[4] = { margins->cxLeftWidth, margins->cxRightWidth,
+                          margins->cyTopHeight, margins->cyBottomHeight };
+        DWORD pid;
+        BOOL any = FALSE;
+        int i;
+
+        GetWindowThreadProcessId(hwnd, &pid);
+        if (pid != GetCurrentProcessId())
+            return S_OK;
+
+        for (i = 0; i < 4; i++)
+        {
+            if (values[i] < -1) values[i] = -1;
+            if (values[i] > 32767) values[i] = 32767;
+            if (values[i] != 0) any = TRUE;
+        }
+
+        if (any)
+        {
+            for (i = 0; i < 4; i++)
+            {
+                /* -1 (sheet of glass) would store as 0, which reads as absent, so it is stored as 0x10000. */
+                LONG_PTR stored = (values[i] == -1) ? 0x10000 : (values[i] + 1);
+                SetPropW(hwnd, margin_props[i], (HANDLE)(LONG_PTR)stored);
+            }
+            SetPropW(hwnd, L"__wine_dwm_alpha", (HANDLE)1);
+        }
+        else
+        {
+            for (i = 0; i < 4; i++)
+                RemovePropW(hwnd, margin_props[i]);
+            RemovePropW(hwnd, L"__wine_dwm_alpha");
+        }
+
+        /* Repaint the client: the previous opaque surface may have forced its alpha bits to 0xff. */
+        SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                     SWP_FRAMECHANGED | SWP_NOCOPYBITS | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
 
     return S_OK;
 }

@@ -1616,6 +1616,7 @@ struct x11drv_window_surface
     GC                    gc;
     struct x11drv_image  *image;
     BOOL                  byteswap;
+    BOOL                  keep_alpha;  /* DWM glass (DwmAlpha): the pixels' alpha reaches the compositor */
 };
 
 static struct x11drv_window_surface *get_x11_surface( struct window_surface *surface )
@@ -1827,7 +1828,7 @@ static BOOL x11drv_surface_flush( struct window_surface *window_surface, const R
 
     if (alpha_bits == -1)
     {
-        if (alpha_mask || color_info->bmiHeader.biBitCount != 32) alpha_bits = 0;
+        if (alpha_mask || surface->keep_alpha || color_info->bmiHeader.biBitCount != 32) alpha_bits = 0;
         else if (color_info->bmiHeader.biCompression == BI_RGB) alpha_bits = 0xff000000;
         else
         {
@@ -1999,14 +2000,18 @@ BOOL X11DRV_CreateWindowSurface( HWND hwnd, BOOL layered, const RECT *surface_re
 {
     struct window_surface *previous;
     struct x11drv_win_data *data;
+    BOOL dwm_alpha;
 
     TRACE( "hwnd %p, layered %u, surface_rect %s, surface %p\n", hwnd, layered, wine_dbgstr_rect( surface_rect ), surface );
 
     if (!(data = get_win_data( hwnd ))) return TRUE; /* use default surface */
+    dwm_alpha = window_dwm_alpha( hwnd );
     if ((previous = *surface) && previous->funcs == &x11drv_surface_funcs)
     {
         Window window = get_x11_surface(previous)->window;
-        if (data->whole_window == window && !enable_direct_drawing( data, layered )) goto done; /* use default surface */
+        /* a changed glass margin state must not keep a stale surface */
+        if (data->whole_window == window && !enable_direct_drawing( data, layered ) &&
+            (layered || dwm_alpha == data->use_alpha)) goto done; /* use default surface */
         /* re-create window surface is window has changed, which can happen when changing visual */
         TRACE( "re-creating hwnd %p surface with new window %lx\n", data->hwnd, data->whole_window );
     }
@@ -2017,6 +2022,14 @@ BOOL X11DRV_CreateWindowSurface( HWND hwnd, BOOL layered, const RECT *surface_re
         data->layered = TRUE;
         if (!data->embedded && argb_visual.visualid) set_window_visual( data, &argb_visual, TRUE );
     }
+    else if (dwm_alpha && !data->embedded && argb_visual.visualid)
+    {
+        set_window_visual( data, &argb_visual, TRUE );
+    }
+    else if (!dwm_alpha && !layered && data->use_alpha)
+    {
+        set_window_visual( data, &default_visual, FALSE );
+    }
     else if (enable_direct_drawing( data, layered ))
     {
         *surface = NULL;  /* indicate that we want to draw directly to the window */
@@ -2024,7 +2037,9 @@ BOOL X11DRV_CreateWindowSurface( HWND hwnd, BOOL layered, const RECT *surface_re
     }
 
     *surface = create_surface( data->hwnd, data->whole_window, &data->vis, surface_rect,
-                               layered ? data->use_alpha : FALSE );
+                               (layered || dwm_alpha) ? data->use_alpha : FALSE );
+    if (*surface && dwm_alpha && !layered && data->use_alpha) get_x11_surface( *surface )->keep_alpha = TRUE;
+    sync_window_dwm_margins( data );
 
 done:
     release_win_data( data );

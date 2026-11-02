@@ -593,6 +593,7 @@ enum x11drv_atoms
     XATOM_text_rtf,
     XATOM_text_richtext,
     XATOM_text_uri_list,
+    XATOM__WEX_DWM_MARGINS,
     NB_XATOMS
 };
 
@@ -750,6 +751,8 @@ extern void detach_client_window( struct x11drv_win_data *data, Window client_wi
 extern void attach_client_window( struct x11drv_win_data *data, Window client_window );
 extern void destroy_client_window( HWND hwnd, Window client_window );
 extern void set_window_visual( struct x11drv_win_data *data, const XVisualInfo *vis, BOOL use_alpha );
+extern void sync_window_dwm_margins( struct x11drv_win_data *data );
+extern BOOL window_dwm_alpha( HWND hwnd );
 extern void change_systray_owner( Display *display, Window systray_window );
 extern BOOL update_clipboard( HWND hwnd );
 extern void init_win_context(void);
