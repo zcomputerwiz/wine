@@ -1333,6 +1333,8 @@ void manage_desktop( WCHAR *arg )
         }
     }
 
+    start_dwm_broker();
+
     /* if we have a command line, execute it */
     if (cmdline)
     {
@@ -1368,6 +1370,7 @@ void manage_desktop( WCHAR *arg )
         TRACE( "desktop message loop exiting for hwnd %p\n", hwnd );
     }
 
+    stop_dwm_broker();
     if (plugin_started) stop();
     if (pShellDDEInit) pShellDDEInit( FALSE );
 

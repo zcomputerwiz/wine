@@ -10,6 +10,7 @@ VER_PRODUCTVERSION      = 6,1,7601,17567
 SOURCES = \
 	appbar.c \
 	desktop.c \
+	dwmhost.c \
 	explorer.c \
 	explorer.rc \
 	startmenu.c \
