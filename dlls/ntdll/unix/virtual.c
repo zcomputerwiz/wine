@@ -2780,6 +2780,9 @@ static BOOL pe_has_unaligned_sections( const IMAGE_SECTION_HEADER *sec, unsigned
 #define WEXPF_MAGIC         0x31465058u
 #define WEXPF_VERSION       1u
 #define WEXPF_OP_GET_IMAGE  1u
+#define WEXPF_OP_GET_TRACE  2u
+#define WEXPF_HINT_TRACE    0x01u
+#define WEXPF_MAX_TRACE     60000u
 #define WEXPF_LAYOUT_FLAT   1u
 #define WEXPF_MAX_IMAGE     (1ull << 30)
 
@@ -2795,8 +2798,70 @@ struct wexpf_reply
     UINT32 layout;
     UINT64 image_size;
     char   sha256[65];
-    char   pad[7];
+    UINT8  hints;
+    char   pad[6];
 };
+
+
+/***********************************************************************
+ *           fetch_prefetch_trace
+ *
+ * The service warms the files of this program's earlier runs that it can read; the ones it could not open (a
+ * private home directory) it hands to us once.  Open them with our own rights and ask the kernel to read them
+ * ahead.  A hint only: any failure is ignored.
+ */
+static void fetch_prefetch_trace( const char *sock_path )
+{
+    struct wexpf_request req = { WEXPF_MAGIC, WEXPF_VERSION, WEXPF_OP_GET_TRACE, 0 };
+    struct { struct wexpf_reply r; char list[WEXPF_MAX_TRACE]; } *buf;
+    struct sockaddr_un addr;
+    struct timeval timeout = { 5, 0 };
+    UINT64 budget = 512ull << 20;
+    unsigned int files = 0;
+    char *p, *end;
+    ssize_t n;
+    int sock;
+
+    if (strlen( sock_path ) >= sizeof(addr.sun_path) || !(buf = malloc( sizeof(*buf) ))) return;
+    if ((sock = socket( AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0 )) == -1) goto done;
+    fcntl( sock, F_SETFD, FD_CLOEXEC );
+    setsockopt( sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout) );
+    setsockopt( sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout) );
+    memset( &addr, 0, sizeof(addr) );
+    addr.sun_family = AF_UNIX;
+    strcpy( addr.sun_path, sock_path );
+    while (connect( sock, (struct sockaddr *)&addr, sizeof(addr) ) == -1) if (errno != EINTR) goto close_sock;
+    do n = send( sock, &req, sizeof(req), MSG_NOSIGNAL ); while (n == -1 && errno == EINTR);
+    if (n != sizeof(req)) goto close_sock;
+    do n = recv( sock, buf, sizeof(*buf), 0 ); while (n == -1 && errno == EINTR);
+    if (n < (ssize_t)sizeof(buf->r) || buf->r.magic != WEXPF_MAGIC || buf->r.version != WEXPF_VERSION ||
+        buf->r.status != 0 || buf->r.image_size != (UINT64)(n - sizeof(buf->r)))
+        goto close_sock;
+
+    for (p = buf->list, end = p + buf->r.image_size; p < end && files < 64; p += strlen( p ) + 1)
+    {
+        struct stat st;
+        int fd;
+
+        if (memchr( p, 0, end - p ) == NULL) break;
+        if (p[0] != '/' || (fd = open( p, O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC )) == -1) continue;
+        if (!fstat( fd, &st ) && S_ISREG( st.st_mode ) && st.st_size > 0 && (UINT64)st.st_size <= budget)
+        {
+#ifdef POSIX_FADV_WILLNEED
+            posix_fadvise( fd, 0, st.st_size, POSIX_FADV_WILLNEED );
+#endif
+            budget -= st.st_size;
+            files++;
+        }
+        close( fd );
+    }
+    TRACE_(module)( "asked the kernel to read ahead %u files of the previous run\n", files );
+
+close_sock:
+    close( sock );
+done:
+    free( buf );
+}
 
 
 /***********************************************************************
@@ -2826,6 +2891,7 @@ static BOOL fd_maps_exec( int fd )
 static int open_prefetch_image( int fd, UINT64 *image_size )
 {
     static BOOL unavailable;  /* protected by virtual_mutex: ask at most once per process when there is no service */
+    static BOOL trace_fetched;  /* ... and fetch the trace at most once */
     struct wexpf_request req = { WEXPF_MAGIC, WEXPF_VERSION, WEXPF_OP_GET_IMAGE, 0 };
     struct wexpf_reply reply;
     struct sockaddr_un addr;
@@ -2921,6 +2987,11 @@ static int open_prefetch_image( int fd, UINT64 *image_size )
 done:
     while (nfds > 0) close( fds[--nfds] );
     close( sock );
+    if (flat_fd != -1 && (reply.hints & WEXPF_HINT_TRACE) && !trace_fetched)
+    {
+        trace_fetched = TRUE;
+        fetch_prefetch_trace( path );
+    }
     return flat_fd;
 }
 
