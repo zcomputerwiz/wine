@@ -2633,9 +2633,12 @@ void set_window_visual( struct x11drv_win_data *data, const XVisualInfo *vis, BO
  *
  * Publish the DWM glass margins (set by DwmExtendFrameIntoClientArea) on the
  * whole window for the compositor, or delete the property when there are none.
+ * The 9th value is a flags word: bit 0 means the frame is glass too.
  */
 static const WCHAR dwm_alpha_prop[] =
     {'_','_','w','i','n','e','_','d','w','m','_','a','l','p','h','a',0};
+static const WCHAR dwm_frame_prop[] =
+    {'_','_','w','i','n','e','_','d','w','m','_','f','r','a','m','e',0};
 
 /* set by dwmapi's DwmExtendFrameIntoClientArea (DwmAlpha gate): the window uses an ARGB visual */
 BOOL window_dwm_alpha( HWND hwnd )
@@ -2652,7 +2655,7 @@ void sync_window_dwm_margins( struct x11drv_win_data *data )
         {'_','_','w','i','n','e','_','d','w','m','_','m','a','r','g','i','n','_','t','o','p',0},
         {'_','_','w','i','n','e','_','d','w','m','_','m','a','r','g','i','n','_','b','o','t','t','o','m',0}
     };
-    unsigned long values[8];
+    unsigned long values[9];
     LONG_PTR stored;
     int i;
 
@@ -2673,8 +2676,9 @@ void sync_window_dwm_margins( struct x11drv_win_data *data )
         stored = (LONG_PTR)NtUserGetProp( data->hwnd, margin_props[i] );
         values[4 + i] = (stored == 0x10000) ? 0xffffffff : (unsigned long)((int)stored - 1);
     }
+    values[8] = NtUserGetProp( data->hwnd, dwm_frame_prop ) ? 1 : 0;
     XChangeProperty( data->display, data->whole_window, x11drv_atom( _WEX_DWM_MARGINS ),
-                     XA_CARDINAL, 32, PropModeReplace, (unsigned char *)values, 8 );
+                     XA_CARDINAL, 32, PropModeReplace, (unsigned char *)values, 9 );
 }
 
 

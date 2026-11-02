@@ -356,9 +356,13 @@ static void draw_modern_button(HDC hdc, const struct nc_button *btn, BOOL dark_m
         pen_color = disabled ? (dark_mode ? RGB(100, 100, 100) : RGB(160, 160, 160)) : text_color;
     }
 
-    br = CreateSolidBrush(btn_bg);
-    FillRect(hdc, &btn->rect, br);
-    DeleteObject(br);
+    /* CLR_INVALID: a glass caption, nothing behind the glyph */
+    if (btn_bg != CLR_INVALID)
+    {
+        br = CreateSolidBrush(btn_bg);
+        FillRect(hdc, &btn->rect, br);
+        DeleteObject(br);
+    }
 
     pen = CreatePen(PS_SOLID, pen_w, pen_color);
     old_pen = SelectObject(hdc, pen);
@@ -389,9 +393,12 @@ static void draw_modern_button(HDC hdc, const struct nc_button *btn, BOOL dark_m
             Rectangle(hdc, cx - sz / 2 + off, cy - sz / 2 - off, cx + sz / 2 + off + 1, cy + sz / 2 - off + 1);
 
             SetRect(&front_rect, cx - sz / 2, cy - sz / 2 + off, cx + sz / 2 + 1, cy + sz / 2 + off + 1);
-            fill_br = CreateSolidBrush(btn_bg);
-            FillRect(hdc, &front_rect, fill_br);
-            DeleteObject(fill_br);
+            if (btn_bg != CLR_INVALID)
+            {
+                fill_br = CreateSolidBrush(btn_bg);
+                FillRect(hdc, &front_rect, fill_br);
+                DeleteObject(fill_br);
+            }
 
             Rectangle(hdc, front_rect.left, front_rect.top, front_rect.right, front_rect.bottom);
         }
@@ -461,7 +468,10 @@ static void nc_update_modern_region(HWND hwnd, int width, int height)
     DeleteObject(current);
 }
 
-static BOOL draw_modern_nc_frame(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex_style, UINT flags)
+/* glass: the caption and borders keep the backdrop (no background fill) unless the app or the accent colors them;
+ * pressed: the button drawn pressed in a full repaint, for glass frames that cannot repaint a single button */
+static BOOL paint_modern_nc(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex_style, UINT flags,
+                            BOOL glass, UINT pressed)
 {
     UINT target = flags >> NCFRAME_PART_SHIFT;
     BOOL active = !!(flags & NCFRAME_ACTIVE);
@@ -478,7 +488,8 @@ static BOOL draw_modern_nc_frame(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWO
     COLORREF caption_attr = DWMWA_COLOR_DEFAULT;
     COLORREF text_attr = DWMWA_COLOR_DEFAULT;
     COLORREF border_attr = DWMWA_COLOR_DEFAULT;
-    COLORREF caption_bg, text_color, border_color;
+    COLORREF caption_bg, text_color, border_color, button_bg;
+    BOOL clear_caption = FALSE;
     RECT rc_win, rc_client;
 
     if ((style & WS_CAPTION) != WS_CAPTION) return FALSE;
@@ -529,12 +540,15 @@ static BOOL draw_modern_nc_frame(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWO
         else if (dark_mode)
         {
             caption_bg = active ? RGB(32, 32, 32) : RGB(45, 45, 45);
+            clear_caption = glass;
         }
         else
         {
             caption_bg = active ? RGB(240, 240, 240) : RGB(245, 245, 245);
+            clear_caption = glass;
         }
     }
+    button_bg = clear_caption ? CLR_INVALID : caption_bg;
 
     /* Determine text color */
     if (text_attr != DWMWA_COLOR_DEFAULT && text_attr != DWMWA_COLOR_NONE)
@@ -615,7 +629,7 @@ static BOOL draw_modern_nc_frame(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWO
                 if (btn[i].which == NCFRAME_BTN_MAX && !(style & WS_MAXIMIZEBOX)) disabled = TRUE;
                 if (btn[i].which == NCFRAME_BTN_MIN && !(style & WS_MINIMIZEBOX)) disabled = TRUE;
                 if (btn[i].which == NCFRAME_BTN_CLOSE && (flags & NCFRAME_GRAYED)) disabled = TRUE;
-                draw_modern_button(hdc, &btn[i], dark_mode, text_color, caption_bg, dpi, max, disabled, !!(flags & NCFRAME_DOWN));
+                draw_modern_button(hdc, &btn[i], dark_mode, text_color, button_bg, dpi, max, disabled, !!(flags & NCFRAME_DOWN));
                 return TRUE;
             }
         }
@@ -623,6 +637,7 @@ static BOOL draw_modern_nc_frame(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWO
     }
 
     /* 1. Caption background */
+    if (!clear_caption)
     {
         RECT r_cap = {0, 0, w, top_h};
         HBRUSH br_cap = CreateSolidBrush(caption_bg);
@@ -631,7 +646,7 @@ static BOOL draw_modern_nc_frame(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWO
     }
 
     /* 2. Side and bottom borders (restored only) */
-    if (!max && (bw > 0 || bh > 0))
+    if (!max && !clear_caption && (bw > 0 || bh > 0))
     {
         COLORREF frame_bg = dark_mode ? (active ? RGB(32, 32, 32) : RGB(45, 45, 45))
                                       : (active ? RGB(240, 240, 240) : RGB(245, 245, 245));
@@ -731,10 +746,78 @@ static BOOL draw_modern_nc_frame(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWO
         if (btn[i].which == NCFRAME_BTN_MAX && !(style & WS_MAXIMIZEBOX)) disabled = TRUE;
         if (btn[i].which == NCFRAME_BTN_MIN && !(style & WS_MINIMIZEBOX)) disabled = TRUE;
         if (btn[i].which == NCFRAME_BTN_CLOSE && (flags & NCFRAME_GRAYED)) disabled = TRUE;
-        draw_modern_button(hdc, &btn[i], dark_mode, text_color, caption_bg, dpi, max, disabled, FALSE);
+        draw_modern_button(hdc, &btn[i], dark_mode, text_color, button_bg, dpi, max, disabled,
+                           pressed && btn[i].which == pressed);
     }
 
     return TRUE;
+}
+
+/* Glass frame (DWM P10b; dwmapi sets __wine_dwm_frame when DwmAlpha and DwmFrameEffects are on): the surface keeps
+ * per-pixel alpha and the compositor blends the whole frame. The frame is painted twice, over black and over white;
+ * the difference is each pixel's coverage and the black pass its premultiplied color, so antialiased text and icons
+ * keep their edges over the backdrop. A pressed button repaints the whole frame. */
+static BOOL draw_glass_nc_frame(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex_style, UINT flags)
+{
+    int w = rect.right - rect.left, h = rect.bottom - rect.top, i, n;
+    BITMAPINFO info = {{ sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB }};
+    UINT pressed = (flags & NCFRAME_DOWN) ? flags >> NCFRAME_PART_SHIFT : 0;
+    RECT local = { 0, 0, w, h }, client;
+    HBITMAP bmp[2] = { 0 };
+    HDC dc[2] = { 0 };
+    DWORD *bits[2];
+    BOOL ret = FALSE;
+
+    if (w <= 0 || h <= 0) return FALSE;
+    for (i = 0; i < 2; i++)
+    {
+        if (!(dc[i] = CreateCompatibleDC(hdc)) ||
+            !(bmp[i] = CreateDIBSection(dc[i], &info, DIB_RGB_COLORS, (void **)&bits[i], NULL, 0)))
+            goto done;
+        SelectObject(dc[i], bmp[i]);
+        FillRect(dc[i], &local, GetStockObject(i ? WHITE_BRUSH : BLACK_BRUSH));
+        if (!paint_modern_nc(hwnd, dc[i], local, style, ex_style, flags & ((1u << NCFRAME_PART_SHIFT) - 1),
+                             TRUE, pressed))
+            goto done;
+    }
+    GdiFlush();
+    for (n = 0; n < w * h; n++)
+    {
+        DWORD black = bits[0][n], white = bits[1][n];
+        int alpha = 255 - (int)((white >> 8) & 0xff) + (int)((black >> 8) & 0xff);
+        DWORD r = black >> 16 & 0xff, g = black >> 8 & 0xff, b = black & 0xff;
+
+        alpha = max(0, min(255, alpha));
+        r = min(r, (DWORD)alpha);
+        g = min(g, (DWORD)alpha);
+        b = min(b, (DWORD)alpha);
+        bits[0][n] = (DWORD)alpha << 24 | r << 16 | g << 8 | b;
+    }
+    /* only the frame: the client keeps what the application painted */
+    GetClientRect(hwnd, &client);
+    MapWindowPoints(hwnd, 0, (POINT *)&client, 2);
+    GetWindowRect(hwnd, &local);
+    OffsetRect(&client, rect.left - local.left, rect.top - local.top);
+    SaveDC(hdc);
+    ExcludeClipRect(hdc, client.left, client.top, client.right, client.bottom);
+    ret = BitBlt(hdc, rect.left, rect.top, w, h, dc[0], 0, 0, SRCCOPY);
+    RestoreDC(hdc, -1);
+
+done:
+    for (i = 0; i < 2; i++)
+    {
+        if (dc[i]) DeleteDC(dc[i]);
+        if (bmp[i]) DeleteObject(bmp[i]);
+    }
+    return ret;
+}
+
+static BOOL draw_modern_nc_frame(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex_style, UINT flags)
+{
+    if (GetPropW(hwnd, L"__wine_dwm_frame") && (style & WS_CAPTION) == WS_CAPTION && !(style & WS_MINIMIZE) &&
+        draw_glass_nc_frame(hwnd, hdc, rect, style, ex_style, flags))
+        return TRUE;
+    return paint_modern_nc(hwnd, hdc, rect, style, ex_style, flags, FALSE, 0);
 }
 
 BOOL WINAPI UXTHEME_NonClientFrameDraw(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex_style, UINT flags)
