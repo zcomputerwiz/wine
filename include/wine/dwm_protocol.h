@@ -44,7 +44,7 @@ enum dwm_opcode
     DWM_OP_LAST     = DWM_OP_THUMB_LIST,
 };
 
-/* live thumbnails (P8). A thumbnail is keyed by the registering connection's epoch and its HTHUMBNAIL value;
+/* live thumbnails (P8). A thumbnail is keyed by the server-stamped sender process and its HTHUMBNAIL value;
  * rectangles are left, top, right, bottom. dest is relative to the destination window (window rectangle, as
  * on Windows), source to the source window (or its client area with DWM_THUMB_CLIENT_ONLY). */
 #define DWM_THUMB_VISIBLE     0x1u
