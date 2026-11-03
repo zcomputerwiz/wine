@@ -1716,9 +1716,14 @@ void wayland_surface_set_opaque_region(struct wayland_surface *surface, HRGN opa
             RECT *end = r + rgndata->rdh.nCount;
             for (; r < end; r++)
             {
-                if (r->right > r->left && r->bottom > r->top)
-                    wl_region_add(region, r->left, r->top,
-                                  r->right - r->left, r->bottom - r->top);
+            {
+                /* The region is in buffer pixels, wl_surface wants surface units:
+                 * divide by the window scale and round inward so no translucent pixel is claimed opaque. */
+                int left = ceil(r->left / surface->window.scale), top = ceil(r->top / surface->window.scale);
+                int right = floor(r->right / surface->window.scale), bottom = floor(r->bottom / surface->window.scale);
+                if (right > left && bottom > top)
+                    wl_region_add(region, left, top, right - left, bottom - top);
+            }
             }
         }
         free(rgndata);

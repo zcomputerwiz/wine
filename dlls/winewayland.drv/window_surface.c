@@ -443,7 +443,7 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
         copy_from_window_region = shm_buffer->damage_region;
     }
 
-    if (dwm_alpha && !wws->layered)
+    if (dwm_alpha && !wws->layered && !shape_bits)  /* a shape zeroes pixels outside it: no opaque claim */
         dwm_opaque_region = wayland_window_get_dwm_opaque_region(window_surface->hwnd, &surface_rect);
 
     wayland_shm_buffer_copy_data(shm_buffer, color_bits, &surface_rect, copy_from_window_region,
