@@ -1005,7 +1005,8 @@ void set_client_surface(HWND hwnd, struct wayland_client_surface *new_client)
     wayland_win_data_release(data);
 }
 
-BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffer, HRGN damage_region)
+BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffer,
+                                 HRGN damage_region, HRGN opaque_region)
 {
     struct wayland_surface *wayland_surface;
     struct wayland_win_data *data;
@@ -1034,6 +1035,10 @@ BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffe
             if (wayland_surface->wex_group == WEX_WINDOW_V1_GROUP_STATUS_ACTIVE)
                 wayland_wex_update_hosting(wayland_surface);
             wayland_surface_attach_shm(wayland_surface, shm_buffer, damage_region);
+            if (opaque_region)
+                wayland_surface_set_opaque_region(wayland_surface, opaque_region);
+            else if (wayland_surface->has_opaque_region)
+                wayland_surface_set_opaque_region(wayland_surface, NULL);
             wl_surface_commit(wayland_surface->wl_surface);
             wayland_wex_flush_activation(wayland_surface);
             committed = TRUE;
@@ -1076,4 +1081,122 @@ void wayland_window_init(void)
     pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
     pthread_mutex_init(&win_data_mutex, &attr);
     pthread_mutexattr_destroy(&attr);
+}
+
+static const WCHAR dwm_alpha_prop[] =
+    {'_','_','w','i','n','e','_','d','w','m','_','a','l','p','h','a',0};
+static const WCHAR dwm_frame_prop[] =
+    {'_','_','w','i','n','e','_','d','w','m','_','f','r','a','m','e',0};
+static const WCHAR margin_props[4][32] =
+{
+    {'_','_','w','i','n','e','_','d','w','m','_','m','a','r','g','i','n','_','l','e','f','t',0},
+    {'_','_','w','i','n','e','_','d','w','m','_','m','a','r','g','i','n','_','r','i','g','h','t',0},
+    {'_','_','w','i','n','e','_','d','w','m','_','m','a','r','g','i','n','_','t','o','p',0},
+    {'_','_','w','i','n','e','_','d','w','m','_','m','a','r','g','i','n','_','b','o','t','t','o','m',0}
+};
+
+BOOL wayland_window_dwm_alpha(HWND hwnd)
+{
+    return NtUserGetProp(hwnd, dwm_alpha_prop) != NULL;
+}
+
+HRGN wayland_window_get_dwm_opaque_region(HWND hwnd, const RECT *surface_rect)
+{
+    struct wayland_win_data *data;
+    RECT client_rect = {0};
+    RECT inner;
+    int margins[4];
+    BOOL full_client_glass = FALSE;
+    BOOL frame_is_glass = FALSE;
+    int i;
+    HRGN opaque_rgn;
+
+    if ((data = wayland_win_data_get(hwnd)))
+    {
+        client_rect.left = data->rects.client.left - data->rects.visible.left;
+        client_rect.top = data->rects.client.top - data->rects.visible.top;
+        client_rect.right = client_rect.left + (data->rects.client.right - data->rects.client.left);
+        client_rect.bottom = client_rect.top + (data->rects.client.bottom - data->rects.client.top);
+        wayland_win_data_release(data);
+    }
+    else
+    {
+        NtUserGetClientRect(hwnd, &client_rect, NtUserGetDpiForWindow(hwnd));
+    }
+    intersect_rect(&client_rect, &client_rect, surface_rect);
+
+    for (i = 0; i < 4; i++)
+    {
+        LONG_PTR stored = (LONG_PTR)NtUserGetProp(hwnd, margin_props[i]);
+        if (stored == 0x10000)
+        {
+            margins[i] = -1;
+            full_client_glass = TRUE;
+        }
+        else if (stored > 0)
+        {
+            margins[i] = (int)(stored - 1);
+            if (margins[i] < 0) full_client_glass = TRUE;
+        }
+        else
+        {
+            margins[i] = 0;
+        }
+    }
+
+    if (NtUserGetProp(hwnd, dwm_frame_prop))
+        frame_is_glass = TRUE;
+
+    if (!full_client_glass)
+    {
+        inner.left = client_rect.left + margins[0];
+        inner.top = client_rect.top + margins[2];
+        inner.right = client_rect.right - margins[1];
+        inner.bottom = client_rect.bottom - margins[3];
+
+        if (inner.left < client_rect.left) inner.left = client_rect.left;
+        if (inner.top < client_rect.top) inner.top = client_rect.top;
+        if (inner.right > client_rect.right) inner.right = client_rect.right;
+        if (inner.bottom > client_rect.bottom) inner.bottom = client_rect.bottom;
+        if (inner.left >= inner.right || inner.top >= inner.bottom)
+            SetRectEmpty(&inner);
+    }
+    else
+    {
+        SetRectEmpty(&inner);
+    }
+
+    if (frame_is_glass)
+    {
+        if (full_client_glass || IsRectEmpty(&inner))
+            opaque_rgn = NtGdiCreateRectRgn(0, 0, 0, 0);
+        else
+            opaque_rgn = NtGdiCreateRectRgn(inner.left, inner.top, inner.right, inner.bottom);
+    }
+    else
+    {
+        HRGN glass_rgn;
+        opaque_rgn = NtGdiCreateRectRgn(surface_rect->left, surface_rect->top,
+                                        surface_rect->right, surface_rect->bottom);
+        if (full_client_glass || IsRectEmpty(&inner))
+        {
+            glass_rgn = NtGdiCreateRectRgn(client_rect.left, client_rect.top,
+                                           client_rect.right, client_rect.bottom);
+        }
+        else
+        {
+            HRGN client_rgn = NtGdiCreateRectRgn(client_rect.left, client_rect.top,
+                                                 client_rect.right, client_rect.bottom);
+            HRGN inner_rgn = NtGdiCreateRectRgn(inner.left, inner.top,
+                                                inner.right, inner.bottom);
+            glass_rgn = NtGdiCreateRectRgn(0, 0, 0, 0);
+            NtGdiCombineRgn(glass_rgn, client_rgn, inner_rgn, RGN_DIFF);
+            NtGdiDeleteObjectApp(client_rgn);
+            NtGdiDeleteObjectApp(inner_rgn);
+        }
+        NtGdiCombineRgn(opaque_rgn, opaque_rgn, glass_rgn, RGN_DIFF);
+        NtGdiDeleteObjectApp(glass_rgn);
+    }
+
+    return opaque_rgn;
 }

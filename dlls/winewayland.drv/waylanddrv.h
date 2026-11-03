@@ -343,6 +343,7 @@ struct wayland_surface
     BOOL resizing;
     struct wayland_window_config window;
     int content_width, content_height;
+    BOOL has_opaque_region;
     HCURSOR hcursor;
 };
 
@@ -403,6 +404,7 @@ void wayland_surface_set_title(struct wayland_surface *surface, LPCWSTR title);
 void wayland_surface_assign_icon(struct wayland_surface *surface);
 void wayland_surface_set_icon_buffer(struct wayland_surface *surface, UINT type, const ICONINFO *ii);
 void wayland_surface_set_opacity(struct wayland_surface *surface, BYTE alpha, UINT flags);
+void wayland_surface_set_opaque_region(struct wayland_surface *surface, HRGN opaque_region);
 
 static inline BOOL wayland_surface_is_toplevel(struct wayland_surface *surface)
 {
@@ -449,9 +451,11 @@ void wayland_win_data_release(struct wayland_win_data *data);
 
 struct wayland_client_surface *get_client_surface(HWND hwnd);
 void set_client_surface(HWND hwnd, struct wayland_client_surface *client);
-BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffer, HRGN damage_region);
+BOOL set_window_surface_contents(HWND hwnd, struct wayland_shm_buffer *shm_buffer, HRGN damage_region, HRGN opaque_region);
 struct wayland_shm_buffer *get_window_surface_contents(HWND hwnd);
 void wayland_window_init(void);
+BOOL wayland_window_dwm_alpha(HWND hwnd);
+HRGN wayland_window_get_dwm_opaque_region(HWND hwnd, const RECT *surface_rect);
 
 /**********************************************************************
  *          Wayland Keyboard

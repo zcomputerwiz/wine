@@ -46,6 +46,7 @@ struct wayland_window_surface
     struct window_surface header;
     struct wayland_buffer_queue *wayland_buffer_queue;
     BOOL layered;
+    BOOL dwm_alpha;
 };
 
 static struct wayland_window_surface *wayland_window_surface_cast(
@@ -378,7 +379,9 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
     BOOL flushed = FALSE;
     HRGN surface_damage_region = NULL;
     HRGN copy_from_window_region;
+    HRGN dwm_opaque_region = NULL;
     uint32_t buffer_format;
+    BOOL dwm_alpha = wws->dwm_alpha || wayland_window_dwm_alpha(window_surface->hwnd);
 
     surface_damage_region = NtGdiCreateRectRgn(rect->left + dirty->left, rect->top + dirty->top,
                                                rect->left + dirty->right, rect->top + dirty->bottom);
@@ -388,7 +391,7 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
         goto done;
     }
 
-    buffer_format = (shape_bits || wws->layered) ? WL_SHM_FORMAT_ARGB8888 : WL_SHM_FORMAT_XRGB8888;
+    buffer_format = (shape_bits || wws->layered || dwm_alpha) ? WL_SHM_FORMAT_ARGB8888 : WL_SHM_FORMAT_XRGB8888;
     if (wws->wayland_buffer_queue->format != buffer_format)
     {
         int width = wws->wayland_buffer_queue->width;
@@ -396,6 +399,7 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
         TRACE("recreating buffer queue with format %d\n", buffer_format);
         wayland_buffer_queue_destroy(wws->wayland_buffer_queue);
         wws->wayland_buffer_queue = wayland_buffer_queue_create(width, height, buffer_format);
+        wws->dwm_alpha = dwm_alpha;
     }
 
     wayland_buffer_queue_add_damage(wws->wayland_buffer_queue, surface_damage_region);
@@ -439,16 +443,55 @@ static BOOL wayland_window_surface_flush(struct window_surface *window_surface, 
         copy_from_window_region = shm_buffer->damage_region;
     }
 
+    if (dwm_alpha && !wws->layered)
+        dwm_opaque_region = wayland_window_get_dwm_opaque_region(window_surface->hwnd, &surface_rect);
+
     wayland_shm_buffer_copy_data(shm_buffer, color_bits, &surface_rect, copy_from_window_region,
-                                 shape_bits && !wws->layered);
+                                 shape_bits && !wws->layered && !dwm_alpha);
+
+    if (dwm_opaque_region)
+    {
+        HRGN dirty_opaque = NtGdiCreateRectRgn(0, 0, 0, 0);
+        if (dirty_opaque)
+        {
+            RGNDATA *rgndata;
+            NtGdiCombineRgn(dirty_opaque, copy_from_window_region, dwm_opaque_region, RGN_AND);
+            if ((rgndata = get_region_data(dirty_opaque)))
+            {
+                RECT *r = (RECT *)rgndata->Buffer;
+                RECT *end = r + rgndata->rdh.nCount;
+                int stride = shm_buffer->width;
+                for (; r < end; r++)
+                {
+                    int top = max(0, r->top);
+                    int bottom = min(shm_buffer->height, r->bottom);
+                    int left = max(0, r->left);
+                    int right = min(shm_buffer->width, r->right);
+                    int count = right - left;
+                    int y, x;
+                    if (count <= 0 || top >= bottom) continue;
+                    for (y = top; y < bottom; y++)
+                    {
+                        UINT32 *pixel = (UINT32 *)shm_buffer->map_data + y * stride + left;
+                        for (x = 0; x < count; x++)
+                            pixel[x] |= 0xff000000;
+                    }
+                }
+                free(rgndata);
+            }
+            NtGdiDeleteObjectApp(dirty_opaque);
+        }
+    }
+
     if (shape_bits) wayland_shm_buffer_copy_shape(shm_buffer, rect, shape_info, shape_bits);
 
     NtGdiSetRectRgn(shm_buffer->damage_region, 0, 0, 0, 0);
 
-    flushed = set_window_surface_contents(window_surface->hwnd, shm_buffer, surface_damage_region);
+    flushed = set_window_surface_contents(window_surface->hwnd, shm_buffer, surface_damage_region, dwm_opaque_region);
     wl_display_flush(process_wayland.wl_display);
 
 done:
+    if (dwm_opaque_region) NtGdiDeleteObjectApp(dwm_opaque_region);
     if (surface_damage_region) NtGdiDeleteObjectApp(surface_damage_region);
     return flushed;
 }
@@ -477,7 +520,7 @@ static const struct window_surface_funcs wayland_window_surface_funcs =
  *           wayland_window_surface_create
  */
 static struct window_surface *wayland_window_surface_create(HWND hwnd, const RECT *rect,
-                                                            BOOL layered)
+                                                            BOOL layered, BOOL dwm_alpha)
 {
     char buffer[FIELD_OFFSET(BITMAPINFO, bmiColors[256])];
     BITMAPINFO *info = (BITMAPINFO *)buffer;
@@ -485,7 +528,7 @@ static struct window_surface *wayland_window_surface_create(HWND hwnd, const REC
     int height = rect->bottom - rect->top;
     struct window_surface *window_surface;
 
-    TRACE("hwnd %p rect %s\n", hwnd, wine_dbgstr_rect(rect));
+    TRACE("hwnd %p rect %s layered %d dwm_alpha %d\n", hwnd, wine_dbgstr_rect(rect), layered, dwm_alpha);
 
     memset(info, 0, sizeof(*info));
     info->bmiHeader.biSize        = sizeof(info->bmiHeader);
@@ -501,9 +544,10 @@ static struct window_surface *wayland_window_surface_create(HWND hwnd, const REC
         struct wayland_window_surface *wws = wayland_window_surface_cast(window_surface);
         wws->wayland_buffer_queue =
             wayland_buffer_queue_create(width, height,
-                                        layered ? WL_SHM_FORMAT_ARGB8888 :
-                                                  WL_SHM_FORMAT_XRGB8888);
+                                        (layered || dwm_alpha) ? WL_SHM_FORMAT_ARGB8888 :
+                                                                 WL_SHM_FORMAT_XRGB8888);
         wws->layered = layered;
+        wws->dwm_alpha = dwm_alpha;
     }
 
     return window_surface;
@@ -516,15 +560,22 @@ BOOL WAYLAND_CreateWindowSurface(HWND hwnd, BOOL layered, const RECT *surface_re
 {
     struct window_surface *previous;
     struct wayland_win_data *data;
+    BOOL dwm_alpha = wayland_window_dwm_alpha(hwnd);
 
-    TRACE("hwnd %p, layered %u, surface_rect %s, surface %p\n", hwnd, layered, wine_dbgstr_rect(surface_rect), surface);
+    TRACE("hwnd %p, layered %u, dwm_alpha %u, surface_rect %s, surface %p\n",
+          hwnd, layered, dwm_alpha, wine_dbgstr_rect(surface_rect), surface);
 
-    if ((previous = *surface) && previous->funcs == &wayland_window_surface_funcs) return TRUE;
+    if ((previous = *surface) && previous->funcs == &wayland_window_surface_funcs)
+    {
+        struct wayland_window_surface *prev_wws = wayland_window_surface_cast(previous);
+        if (prev_wws->layered == layered && prev_wws->dwm_alpha == dwm_alpha)
+            return TRUE;
+    }
     if (!(data = wayland_win_data_get(hwnd))) return TRUE; /* use default surface */
     if (previous) window_surface_release(previous);
 
     if (layered) data->layered_attribs_set = TRUE;
-    *surface = wayland_window_surface_create(data->hwnd, surface_rect, layered);
+    *surface = wayland_window_surface_create(data->hwnd, surface_rect, layered, dwm_alpha);
 
     wayland_win_data_release(data);
     return TRUE;

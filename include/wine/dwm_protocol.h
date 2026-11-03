@@ -84,7 +84,10 @@ struct dwm_attr_reply { uint32_t found; uint32_t value; };
 #define DWM_ATTR_WINE_TINT     0x80000002u
 #define DWM_ATTR_WINE_RGN_LT   0x80000003u
 #define DWM_ATTR_WINE_RGN_RB   0x80000004u
-#define DWM_ATTR_WINE_LAST     DWM_ATTR_WINE_RGN_RB
+/* The kind of glass frame the window has (0 none, 1 Windows 10/11, 2 Aero), for compositors that cannot see the
+ * window properties (Wayland: the shell tells the compositor to round and shadow the frame). */
+#define DWM_ATTR_WINE_FRAME    0x80000005u
+#define DWM_ATTR_WINE_LAST     DWM_ATTR_WINE_FRAME
 
 /* Iconic bitmaps (P9): DwmSetIconicThumbnail and DwmSetIconicLivePreviewBitmap copy the bitmap into a section named
  * DWM_ICONIC_NAME or DWM_ICONIC_LIVE_NAME followed by the window handle in hex, held open by the window's process;

@@ -1701,3 +1701,30 @@ void wayland_surface_set_opacity(struct wayland_surface *surface, BYTE alpha, UI
         wl_display_flush(process_wayland.wl_display);
     }
 }
+
+void wayland_surface_set_opaque_region(struct wayland_surface *surface, HRGN opaque_region)
+{
+    struct wl_region *region = NULL;
+    RGNDATA *rgndata = NULL;
+
+    if (opaque_region && (rgndata = get_region_data(opaque_region)))
+    {
+        if (rgndata->rdh.nCount > 0 &&
+            (region = wl_compositor_create_region(process_wayland.wl_compositor)))
+        {
+            RECT *r = (RECT *)rgndata->Buffer;
+            RECT *end = r + rgndata->rdh.nCount;
+            for (; r < end; r++)
+            {
+                if (r->right > r->left && r->bottom > r->top)
+                    wl_region_add(region, r->left, r->top,
+                                  r->right - r->left, r->bottom - r->top);
+            }
+        }
+        free(rgndata);
+    }
+
+    wl_surface_set_opaque_region(surface->wl_surface, region);
+    if (region) wl_region_destroy(region);
+    surface->has_opaque_region = (region != NULL);
+}

@@ -243,6 +243,7 @@ static void set_glass(HWND hwnd, const MARGINS *margins)
     /* Repaint the client: the previous opaque surface may have forced its alpha bits to 0xff. */
     SetWindowPos(hwnd, 0, 0, 0, 0, 0,
                  SWP_FRAMECHANGED | SWP_NOCOPYBITS | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    dwm_client_set_attr(hwnd, DWM_ATTR_WINE_FRAME, (DWORD)(ULONG_PTR)GetPropW(hwnd, L"__wine_dwm_frame"));
 
     /* Aero glass is blurred and tinted with the colorization color (again, for a new color), unless the window chose
      * its own blur, or is choosing it now (__wine_dwm_blur_glass: DwmSetWindowAttribute made the glass) */
@@ -297,6 +298,7 @@ void WINAPI WexDwmpRefreshFrame(HWND hwnd)
         for (i = 0; i < 4; i++) RemovePropW(hwnd, margin_props[i]);
         RemovePropW(hwnd, L"__wine_dwm_alpha");
         RemovePropW(hwnd, L"__wine_dwm_frame");
+        dwm_client_set_attr(hwnd, DWM_ATTR_WINE_FRAME, 0);
         clear_auto_blur(hwnd);
         SetWindowPos(hwnd, 0, 0, 0, 0, 0,
                      SWP_FRAMECHANGED | SWP_NOCOPYBITS | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
