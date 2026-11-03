@@ -32,6 +32,7 @@
 #include "winbase.h"
 #include "wingdi.h"
 #include "winuser.h"
+#include "uxtheme.h"
 #include "objidl.h"
 #include "dxgi.h"
 struct wined3d_resource;
@@ -1323,6 +1324,22 @@ static HRESULT dcomp_target_create(struct dcomp_device *device, HWND hwnd, BOOL 
         return E_OUTOFMEMORY;
     }
     ReleaseSRWLockExclusive(&target_registration_lock);
+
+    /* A top-level window without a redirection bitmap shows only its composition content, transparent where the
+     * content is: make it a sheet of glass, as WineExplorer's DwmAlpha gate in dwmapi allows (P7b). */
+    if ((GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_NOREDIRECTIONBITMAP) && !(GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD))
+    {
+        static const MARGINS sheet = { -1, -1, -1, -1 };
+        HRESULT (WINAPI *extend_frame)(HWND, const MARGINS *);
+        HMODULE dwmapi;
+
+        if ((dwmapi = LoadLibraryW(L"dwmapi.dll")))
+        {
+            if ((extend_frame = (void *)GetProcAddress(dwmapi, "DwmExtendFrameIntoClientArea")))
+                extend_frame(hwnd, &sheet);
+            FreeLibrary(dwmapi);
+        }
+    }
 
     target->IDCompositionTarget_iface.lpVtbl = &dcomp_target_vtbl;
     target->refcount = 1;

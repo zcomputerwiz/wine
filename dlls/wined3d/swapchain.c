@@ -1465,6 +1465,37 @@ static BOOL swapchain_gl_composite_opaque(struct wined3d_swapchain *swapchain,
     return TRUE;
 }
 
+/* A target window with per-pixel alpha (WineExplorer's DwmAlpha, set by dcomp for windows without a redirection
+ * bitmap): the GL drawable is opaque, so the CPU composition, premultiplied, goes to the window's ARGB surface
+ * through GDI. Only without an underlay, which would otherwise read this output back. */
+static BOOL dcomp_alpha_window(const struct wined3d_swapchain *swapchain)
+{
+    return !swapchain->dcomp_background && GetPropW(swapchain->win_handle, L"__wine_dwm_alpha");
+}
+
+static BOOL swapchain_dcomp_present_gdi(struct wined3d_swapchain *swapchain, struct wined3d_context *context)
+{
+    BITMAPINFO info = {{ sizeof(BITMAPINFOHEADER) }};
+    unsigned int pitch, slice_pitch, width, height;
+    BOOL ret;
+    HDC dc;
+
+    if (!swapchain_composite_layers(swapchain, context)) return FALSE;
+    width = swapchain->composite_texture->resource.width;
+    height = swapchain->composite_texture->resource.height;
+    wined3d_texture_get_pitch(swapchain->composite_texture, 0, &pitch, &slice_pitch);
+    info.bmiHeader.biWidth = pitch / 4;
+    info.bmiHeader.biHeight = -(int)height;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    if (!(dc = GetDC(swapchain->win_handle))) return FALSE;
+    ret = SetDIBitsToDevice(dc, 0, 0, width, height, 0, 0, 0, height,
+            swapchain->composite_texture->resource.heap_memory, &info, DIB_RGB_COLORS) == height;
+    ReleaseDC(swapchain->win_handle, dc);
+    return ret;
+}
+
 static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
         const RECT *src_rect, const RECT *dst_rect, unsigned int swap_interval, uint32_t flags)
 {
@@ -1498,6 +1529,11 @@ static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
         /* CPU reference composition, followed by Wine's normal drawable blit.
          * The drawable belongs to the real swapchain, NOT the scratch texture. */
         if (!(flags & WINED3D_PRESENT_CLEAR_ONLY)) swapchain_capture_frame(swapchain, context, FALSE);
+        if (dcomp_alpha_window(swapchain))
+        {
+            if (!swapchain_dcomp_present_gdi(swapchain, context)) ERR("Failed to present transparent composition.\n");
+            goto frame_done;
+        }
         if (swapchain_gl_composite_opaque(swapchain, context_gl))
         {
             swapchain_gl_set_swap_interval(swapchain, context_gl, swap_interval);
