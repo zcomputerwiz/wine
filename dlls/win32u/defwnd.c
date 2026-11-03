@@ -3316,6 +3316,9 @@ LRESULT default_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, 
     case WM_SETTINGCHANGE:
     case WM_THEMECHANGED:
         dwm_frame_effects = dwm_aero_frames = -1;
+        /* the frame follows the new style (uxtheme switches a glass frame between Aero and Windows 10/11) */
+        if (msg == WM_THEMECHANGED && get_dwm_frame_effects())
+            NtUserRedrawWindow( hwnd, NULL, 0, RDW_FRAME | RDW_INVALIDATE );
         break;
     }
 

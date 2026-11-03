@@ -1024,6 +1024,24 @@ static BOOL draw_modern_nc_frame(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWO
 
 BOOL WINAPI UXTHEME_NonClientFrameDraw(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex_style, UINT flags)
 {
+    if ((flags & NCFRAME_DWM_FRAME_EFFECTS) || get_dwm_frame_effects())
+    {
+        /* the theme switched frame styles while the window lived: dwmapi marks it again (or drops Aero glass) */
+        static void (WINAPI *refresh)(HWND);
+        static BOOL loaded;
+        HANDLE frame = GetPropW(hwnd, L"__wine_dwm_frame");
+
+        if (frame && frame != (HANDLE)(ULONG_PTR)(get_dwm_aero_frames() ? 2 : 1))
+        {
+            if (!loaded)
+            {
+                HMODULE dwmapi = LoadLibraryW(L"dwmapi.dll");   /* kept loaded: the pointer is cached */
+                if (dwmapi) refresh = (void *)GetProcAddress(dwmapi, "WexDwmpRefreshFrame");
+                loaded = TRUE;
+            }
+            if (refresh) refresh(hwnd);
+        }
+    }
     if (((flags & NCFRAME_DWM_FRAME_EFFECTS) || get_dwm_frame_effects()) && !get_dwm_aero_frames())
         return draw_modern_nc_frame(hwnd, hdc, rect, style, ex_style, flags);
     if (((flags & NCFRAME_DWM_FRAME_EFFECTS) || get_dwm_frame_effects()))

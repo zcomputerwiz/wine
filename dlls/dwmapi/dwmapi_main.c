@@ -192,15 +192,16 @@ static BOOL dwm_aero_frames(void)
 
 /* Set or clear the glass props on a same-process window and force a repaint. With the DwmFrameEffects gate on,
  * the window stays glass (and the frame is glass too) even with all-zero margins. */
+static const WCHAR margin_props[4][32] =
+{
+    L"__wine_dwm_margin_left",
+    L"__wine_dwm_margin_right",
+    L"__wine_dwm_margin_top",
+    L"__wine_dwm_margin_bottom"
+};
+
 static void set_glass(HWND hwnd, const MARGINS *margins)
 {
-    static const WCHAR margin_props[4][32] =
-    {
-        L"__wine_dwm_margin_left",
-        L"__wine_dwm_margin_right",
-        L"__wine_dwm_margin_top",
-        L"__wine_dwm_margin_bottom"
-    };
     int values[4] = { margins->cxLeftWidth, margins->cxRightWidth,
                       margins->cyTopHeight, margins->cyBottomHeight };
     DWORD pid;
@@ -254,8 +255,54 @@ static void set_glass(HWND hwnd, const MARGINS *margins)
             blur = DWM_WINE_BLUR_BEHIND | DWM_WINE_BLUR_TINTED;
             DwmSetWindowAttribute(hwnd, DWM_ATTR_WINE_TINT, &tint, sizeof(tint));
             DwmSetWindowAttribute(hwnd, DWM_ATTR_WINE_BLUR, &blur, sizeof(blur));
+            SetPropW(hwnd, L"__wine_dwm_blur_auto", (HANDLE)1);
         }
     }
+    else if (RemovePropW(hwnd, L"__wine_dwm_blur_auto"))   /* no longer Aero: the blur set above goes */
+    {
+        DWORD none = DWM_WINE_BLUR_NONE;
+        DwmSetWindowAttribute(hwnd, DWM_ATTR_WINE_BLUR, &none, sizeof(none));
+    }
+}
+
+/***********************************************************************
+ *           WexDwmpRefreshFrame         (DWMAPI.@)
+ *
+ * The theme switched frame styles (DwmFrameStyle): a glass frame that uxtheme asked for only for Aero goes away
+ * under the Windows 10/11 style; any other glass frame is marked again with its margins, gaining or losing the
+ * Aero blur. uxtheme calls it for a window whose frame no longer matches the style.
+ */
+void WINAPI WexDwmpRefreshFrame(HWND hwnd)
+{
+    MARGINS margins;
+    int values[4], i;
+
+    if (!IsWindow(hwnd) || !GetPropW(hwnd, L"__wine_dwm_frame")) return;
+    for (i = 0; i < 4; i++)
+    {
+        LONG_PTR stored = (LONG_PTR)GetPropW(hwnd, margin_props[i]);
+        values[i] = stored == 0x10000 ? -1 : stored ? (int)stored - 1 : 0;
+    }
+    if (!dwm_aero_frames() && RemovePropW(hwnd, L"__wine_aero_asked") &&
+        !values[0] && !values[1] && !values[2] && !values[3])
+    {
+        for (i = 0; i < 4; i++) RemovePropW(hwnd, margin_props[i]);
+        RemovePropW(hwnd, L"__wine_dwm_alpha");
+        RemovePropW(hwnd, L"__wine_dwm_frame");
+        if (RemovePropW(hwnd, L"__wine_dwm_blur_auto"))
+        {
+            DWORD none = DWM_WINE_BLUR_NONE;
+            DwmSetWindowAttribute(hwnd, DWM_ATTR_WINE_BLUR, &none, sizeof(none));
+        }
+        SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                     SWP_FRAMECHANGED | SWP_NOCOPYBITS | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        return;
+    }
+    margins.cxLeftWidth = values[0];
+    margins.cxRightWidth = values[1];
+    margins.cyTopHeight = values[2];
+    margins.cyBottomHeight = values[3];
+    set_glass(hwnd, &margins);
 }
 
 /**********************************************************************
@@ -346,6 +393,7 @@ HRESULT WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD attributenum, LPCVOID attr
         return E_INVALIDARG;
 
     dwm_client_set_attr(hwnd, attributenum, value);  /* best effort: the local table is the mirror */
+    if (attributenum == DWM_ATTR_WINE_BLUR) RemovePropW(hwnd, L"__wine_dwm_blur_auto");   /* the app's blur now */
 
     /* Blur behind (P12b) needs an alpha surface: the whole window becomes glass, unless the app already chose
      * margins; it is cleared again only if it was set here. */
