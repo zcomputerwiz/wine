@@ -153,38 +153,34 @@ HRESULT WINAPI DwmEnableComposition(UINT uCompositionAction)
     return S_OK;
 }
 
-/* The DwmAlpha development gate (docs/DWM_ARCHITECTURE.md): read once per process. */
-static BOOL dwm_alpha_cached;
-static BOOL dwm_alpha_enabled;
+/* The development gates (docs/DWM_ARCHITECTURE.md), read once per process: DwmAlpha (glass), DwmFrameEffects (the
+ * non-client frame is glass too) and DwmMaterials (blur and accents; without it they make nothing glass). */
+static BOOL read_gate(const WCHAR *name)
+{
+    DWORD value = 0, cb = sizeof(value);
+    return RegGetValueW(HKEY_CURRENT_USER, L"Software\\WineExplorer\\Shell", name, RRF_RT_REG_DWORD, NULL,
+                        &value, &cb) == ERROR_SUCCESS && value != 0;
+}
 
 static BOOL dwm_alpha_is_enabled(void)
 {
-    DWORD value = 0, type, cb = sizeof(value);
-    if (!dwm_alpha_cached)
-    {
-        dwm_alpha_enabled = RegGetValueW(HKEY_CURRENT_USER, L"Software\\WineExplorer\\Shell",
-                                        L"DwmAlpha", RRF_RT_REG_DWORD, &type, &value, &cb) == ERROR_SUCCESS &&
-                            value != 0;
-        dwm_alpha_cached = TRUE;
-    }
-    return dwm_alpha_enabled;
+    static int enabled = -1;
+    if (enabled < 0) enabled = read_gate(L"DwmAlpha");
+    return enabled;
 }
-
-/* The DwmFrameEffects development gate (docs/DWM_ARCHITECTURE.md): the non-client frame is glass too. */
-static BOOL dwm_frame_cached;
-static BOOL dwm_frame_enabled;
 
 static BOOL dwm_frame_is_enabled(void)
 {
-    DWORD value = 0, type, cb = sizeof(value);
-    if (!dwm_frame_cached)
-    {
-        dwm_frame_enabled = RegGetValueW(HKEY_CURRENT_USER, L"Software\\WineExplorer\\Shell",
-                                        L"DwmFrameEffects", RRF_RT_REG_DWORD, &type, &value, &cb) == ERROR_SUCCESS &&
-                            value != 0;
-        dwm_frame_cached = TRUE;
-    }
-    return dwm_frame_enabled;
+    static int enabled = -1;
+    if (enabled < 0) enabled = read_gate(L"DwmFrameEffects");
+    return enabled;
+}
+
+static BOOL dwm_materials_is_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) enabled = read_gate(L"DwmMaterials");
+    return enabled;
 }
 
 /* Set or clear the glass props on a same-process window and force a repaint. With the DwmFrameEffects gate on,
@@ -232,8 +228,6 @@ static void set_glass(HWND hwnd, const MARGINS *margins)
         for (i = 0; i < 4; i++)
             RemovePropW(hwnd, margin_props[i]);
         RemovePropW(hwnd, L"__wine_dwm_alpha");
-        if (dwm_frame_is_enabled())
-            RemovePropW(hwnd, L"__wine_dwm_frame");
     }
 
     /* Repaint the client: the previous opaque surface may have forced its alpha bits to 0xff. */
@@ -250,7 +244,10 @@ HRESULT WINAPI DwmExtendFrameIntoClientArea(HWND hwnd, const MARGINS* margins)
 
     if (dwm_alpha_is_enabled() && margins && IsWindow(hwnd) &&
         !(GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD))
+    {
+        RemovePropW(hwnd, L"__wine_dwm_blur_glass");   /* the app's margins now; turning the blur off keeps them */
         set_glass(hwnd, margins);
+    }
 
     return S_OK;
 }
@@ -329,7 +326,7 @@ HRESULT WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD attributenum, LPCVOID attr
 
     /* Blur behind (P12b) needs an alpha surface: the whole window becomes glass, unless the app already chose
      * margins; it is cleared again only if it was set here. */
-    if (attributenum == DWM_ATTR_WINE_BLUR && dwm_alpha_is_enabled() &&
+    if (attributenum == DWM_ATTR_WINE_BLUR && dwm_alpha_is_enabled() && dwm_materials_is_enabled() &&
         !(GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD))
     {
         static const MARGINS sheet = { -1, -1, -1, -1 }, zero_margins = { 0, 0, 0, 0 };
@@ -1035,8 +1032,8 @@ HRESULT WINAPI DwmSetPresentParameters(HWND hwnd, DWM_PRESENT_PARAMETERS *params
 };
 
 /* Iconic bitmaps (P9): two sections per window (thumbnail, live preview), see include/wine/dwm_protocol.h. Kept
- * open while the window lives, so the shell finds the last picture; a dead window's slot is reused. A section is
- * made again when a larger picture comes (the shell may hold the old one a moment; then this one fails). */
+ * open while the window lives, so the shell finds the last picture; a dead window's slot is reused, and all are
+ * closed when dwmapi is unloaded. A section is made again when a larger picture comes. */
 #define ICONIC_TABLE_SIZE 32
 static struct
 {
@@ -1080,7 +1077,9 @@ static HANDLE iconic_section(HWND hwnd, int kind, SIZE_T size)
     if (!(iconic_table[slot].section[kind] = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
                                                                 0, size, name)))
         return NULL;
-    iconic_table[slot].size[kind] = size;
+    /* an existing section (still held by the shell, or made by someone else) has an unknown size: mapping it fails
+     * when it is too small, and the next picture makes it again */
+    iconic_table[slot].size[kind] = GetLastError() == ERROR_ALREADY_EXISTS ? 0 : size;
     return iconic_table[slot].section[kind];
 }
 
@@ -1161,6 +1160,18 @@ static void invalidate_iconic(HWND hwnd)
                 UnmapViewOfFile(header);
             }
     LeaveCriticalSection(&thumbnail_cs);
+}
+
+BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
+{
+    int i;
+
+    if (reason == DLL_PROCESS_ATTACH)
+        DisableThreadLibraryCalls(instance);
+    else if (reason == DLL_PROCESS_DETACH && !reserved)   /* FreeLibrary: the iconic sections go with it */
+        for (i = 0; i < ICONIC_TABLE_SIZE * 2; i++)
+            if (iconic_table[i / 2].section[i % 2]) CloseHandle(iconic_table[i / 2].section[i % 2]);
+    return TRUE;
 }
 
 /**********************************************************************

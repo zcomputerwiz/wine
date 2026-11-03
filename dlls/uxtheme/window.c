@@ -312,8 +312,7 @@ static HRESULT query_dwm_window_attribute(HWND hwnd, DWORD attribute, void *pv, 
 
     if (!initialized)
     {
-        HMODULE hmod = GetModuleHandleW(L"dwmapi.dll");
-        if (!hmod) hmod = LoadLibraryW(L"dwmapi.dll");
+        HMODULE hmod = LoadLibraryW(L"dwmapi.dll");   /* kept loaded: the pointer is cached */
         if (hmod) pDwmGetWindowAttribute = (void *)GetProcAddress(hmod, "DwmGetWindowAttribute");
         initialized = TRUE;
     }
