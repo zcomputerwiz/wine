@@ -1035,6 +1035,74 @@ HRESULT WINAPI DwmSetIconicLivePreviewBitmap(HWND hwnd, HBITMAP hbmp, POINT *pos
     return S_OK;
 }
 
+/* Iconic thumbnails (P9): one section per window, see include/wine/dwm_protocol.h. Kept open while the window
+ * lives, so the shell finds the last picture; a dead window's slot is reused. */
+#define ICONIC_TABLE_SIZE 32
+static struct { HWND hwnd; HANDLE section; } iconic_table[ICONIC_TABLE_SIZE];
+static DWORD iconic_serial;
+
+static HANDLE iconic_section(HWND hwnd)
+{
+    WCHAR name[64];
+    HANDLE section = NULL;
+    int i, free_slot = -1;
+
+    for (i = 0; i < ICONIC_TABLE_SIZE; i++)
+    {
+        if (iconic_table[i].hwnd == hwnd) return iconic_table[i].section;
+        if (free_slot < 0 && (!iconic_table[i].hwnd || !IsWindow(iconic_table[i].hwnd))) free_slot = i;
+    }
+    if (free_slot < 0) return NULL;
+    swprintf(name, ARRAY_SIZE(name), L"%s%lx", DWM_ICONIC_NAME, HandleToUlong(hwnd));
+    if (!(section = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, DWM_ICONIC_SIZE, name)))
+        return NULL;
+    if (iconic_table[free_slot].section) CloseHandle(iconic_table[free_slot].section);
+    iconic_table[free_slot].hwnd = hwnd;
+    iconic_table[free_slot].section = section;
+    return section;
+}
+
+/* Copy the bitmap as premultiplied top-down BGRA before returning, so the caller may delete it at once. */
+static HRESULT store_iconic(HWND hwnd, HBITMAP hbmp, DWORD flags)
+{
+    BITMAPINFO info = {{ sizeof(BITMAPINFOHEADER) }};
+    struct dwm_iconic *header;
+    HANDLE section;
+    BITMAP bm;
+    HDC dc;
+    HRESULT hr = E_INVALIDARG;
+
+    if (!GetObjectW(hbmp, sizeof(bm), &bm) || bm.bmWidth <= 0 || bm.bmHeight <= 0 ||
+        bm.bmWidth > DWM_ICONIC_MAX || bm.bmHeight > DWM_ICONIC_MAX)
+        return E_INVALIDARG;
+    EnterCriticalSection(&thumbnail_cs);
+    if (!(section = iconic_section(hwnd)) ||
+        !(header = MapViewOfFile(section, FILE_MAP_WRITE, 0, 0, DWM_ICONIC_SIZE)))
+    {
+        LeaveCriticalSection(&thumbnail_cs);
+        return E_OUTOFMEMORY;
+    }
+    info.bmiHeader.biWidth = bm.bmWidth;
+    info.bmiHeader.biHeight = -bm.bmHeight;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    header->width = header->height = 0;   /* readers skip a picture that is being written */
+    dc = GetDC(0);
+    if (GetDIBits(dc, hbmp, 0, bm.bmHeight, header + 1, &info, DIB_RGB_COLORS) == bm.bmHeight)
+    {
+        header->flags = flags;
+        header->serial = ++iconic_serial;
+        header->height = bm.bmHeight;
+        header->width = bm.bmWidth;
+        hr = S_OK;
+    }
+    ReleaseDC(0, dc);
+    UnmapViewOfFile(header);
+    LeaveCriticalSection(&thumbnail_cs);
+    return hr;
+}
+
 /**********************************************************************
  *           DwmSetIconicThumbnail         (DWMAPI.@)
  */
@@ -1055,7 +1123,7 @@ HRESULT WINAPI DwmSetIconicThumbnail(HWND hwnd, HBITMAP hbmp, DWORD flags)
     if (flags & ~DWM_SIT_DISPLAYFRAME)
         return E_INVALIDARG;
 
-    return S_OK;
+    return store_iconic(hwnd, hbmp, flags);
 }
 
 /**********************************************************************

@@ -529,6 +529,17 @@ static void test_iconic(void)
     hr = pDwmSetIconicLivePreviewBitmap(hwnd, hbmp, NULL, 0);
     ok(hr == E_INVALIDARG, "Got hr %#lx.\n", hr);
 
+    /* a window that asked for iconic representation may supply its picture */
+    enabled = TRUE;
+    hr = DwmSetWindowAttribute(hwnd, DWMWA_FORCE_ICONIC_REPRESENTATION, &enabled, sizeof(enabled));
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    hr = DwmSetWindowAttribute(hwnd, DWMWA_HAS_ICONIC_BITMAP, &enabled, sizeof(enabled));
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    hr = pDwmSetIconicThumbnail(hwnd, hbmp, 0);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    hr = pDwmSetIconicThumbnail(hwnd, hbmp, 2);
+    ok(hr == E_INVALIDARG, "Got hr %#lx.\n", hr);
+
     pDeleteObject(hbmp);
     DestroyWindow(hwnd);
 }

@@ -380,6 +380,22 @@ HRESULT WINAPI WexDwmpPoll( UINT64 since_revision, DWORD cursor, void *out, DWOR
 }
 
 /***********************************************************************
+ *           WexDwmpGetAttr   (DWMAPI.@)
+ *
+ * Private: the shell reads a window's attribute as the broker holds it, whichever process set it
+ * (DWMWA_HAS_ICONIC_BITMAP for P9). S_FALSE when the broker holds no value.
+ */
+HRESULT WINAPI WexDwmpGetAttr( HWND hwnd, DWORD attribute, DWORD *value )
+{
+    BOOL found = FALSE;
+    NTSTATUS status;
+
+    if (!value) return E_INVALIDARG;
+    if ((status = dwm_client_get_attr( hwnd, attribute, &found, value ))) return HRESULT_FROM_NT( status );
+    return found ? S_OK : S_FALSE;
+}
+
+/***********************************************************************
  *           WexDwmpThumbList   (DWMAPI.@)
  *
  * Private: the compositor bridge asks the broker for the live thumbnails after a revision.

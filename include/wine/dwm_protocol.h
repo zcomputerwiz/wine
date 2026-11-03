@@ -76,6 +76,17 @@ struct dwm_attr_reply { uint32_t found; uint32_t value; };
 #define DWM_WINE_BLUR_BEHIND   1u   /* DwmEnableBlurBehindWindow, ACCENT_ENABLE_BLURBEHIND */
 #define DWM_WINE_BLUR_ACRYLIC  2u   /* ACCENT_ENABLE_ACRYLICBLURBEHIND */
 
+/* Iconic thumbnails (P9): DwmSetIconicThumbnail copies the bitmap into a section named DWM_ICONIC_NAME followed by
+ * the window handle in hex, held open by the window's process; the shell asks for it with WM_DWMSENDICONICTHUMBNAIL
+ * and copies it out. The header comes first, then width * height premultiplied BGRA pixels, top-down. The section
+ * has room for DWM_ICONIC_MAX x DWM_ICONIC_MAX; readers validate the header against that before copying. */
+#define DWM_ICONIC_NAME  L"Local\\__wex_dwm_iconic_"
+#define DWM_ICONIC_MAX   1024u
+struct dwm_iconic { uint32_t width; uint32_t height; uint32_t flags; uint32_t serial; };
+#define DWM_ICONIC_SIZE  (sizeof(struct dwm_iconic) + DWM_ICONIC_MAX * DWM_ICONIC_MAX * 4)
+
+C_ASSERT( sizeof(struct dwm_iconic) == 16 );
+
 C_ASSERT( sizeof(struct dwm_attr_set) == 8 );
 C_ASSERT( sizeof(struct dwm_attr_get) == 4 );
 C_ASSERT( sizeof(struct dwm_attr_reply) == 8 );
