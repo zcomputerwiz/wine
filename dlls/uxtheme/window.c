@@ -255,11 +255,13 @@ static HICON nc_get_icon(HWND hwnd)
 static int dwm_frame_effects = -1, dwm_aero_frames = -1;
 static COLORREF dwm_accent_color = CLR_INVALID;
 static BOOL dwm_accent_color_cached = FALSE;
+static UINT theme_generation = 1;   /* counts theme changes; glass frames refresh once per change */
 
 void uxtheme_reset_dwm_settings(void)
 {
     dwm_frame_effects = dwm_aero_frames = -1;
     dwm_accent_color_cached = FALSE;
+    theme_generation++;
 }
 
 /* DwmFrameStyle 1 (P13): Vista/7 Aero glass frames instead of the Windows 10/11 frame */
@@ -285,14 +287,15 @@ static void aero_glass(HWND hwnd, DWORD style)
     if ((style & WS_CHILD) || (style & WS_CAPTION) != WS_CAPTION || GetPropW(hwnd, L"__wine_dwm_frame") ||
         GetPropW(hwnd, L"__wine_aero_asked"))
         return;
-    SetPropW(hwnd, L"__wine_aero_asked", (HANDLE)1);
     if (!loaded)
     {
         HMODULE dwmapi = LoadLibraryW(L"dwmapi.dll");   /* kept loaded: the pointer is cached */
         if (dwmapi) extend = (void *)GetProcAddress(dwmapi, "DwmExtendFrameIntoClientArea");
         loaded = TRUE;
     }
+    /* marked after the call: dwmapi drops the mark when the application extends the frame itself */
     if (extend) extend(hwnd, &none);
+    SetPropW(hwnd, L"__wine_aero_asked", (HANDLE)1);
 }
 
 static BOOL get_dwm_frame_effects(void)
@@ -846,7 +849,12 @@ static BOOL paint_aero_nc(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex_s
         return FALSE;
     }
     nc_update_modern_region(hwnd, w, h);
-    if (right < 0) right = 0;
+    /* within what __wine_nc_buttons holds, so painting and hit testing agree */
+    right = max(0, min(right, 63));
+    top = min(top, 31);
+    close_w = min(close_w, 255);
+    btn_w = min(btn_w, 127);
+    btn_h = min(btn_h, 63);
     while (glyph < 3 && dpi >= (UINT)glyph_dpi[glyph + 1]) glyph++;
 
     /* 1. The frame pieces: highlights and edges with alpha over the glass */
@@ -897,8 +905,7 @@ static BOOL paint_aero_nc(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex_s
             x -= bwidth;
         }
         SetPropW(hwnd, L"__wine_nc_buttons",
-                 ULongToHandle(NCFRAME_BUTTONS(min(close_w, 127), min(btn_w, 127), min(right, 63), min(top, 31),
-                                               min(btn_h, 127))));
+                 ULongToHandle(NCFRAME_BUTTONS(close_w, btn_w, right, top, btn_h)));
         text_right = x - MulDiv(6, dpi, 96);
     }
     else
@@ -1026,12 +1033,14 @@ BOOL WINAPI UXTHEME_NonClientFrameDraw(HWND hwnd, HDC hdc, RECT rect, DWORD styl
 {
     if ((flags & NCFRAME_DWM_FRAME_EFFECTS) || get_dwm_frame_effects())
     {
-        /* the theme switched frame styles while the window lived: dwmapi marks it again (or drops Aero glass) */
         static void (WINAPI *refresh)(HWND);
         static BOOL loaded;
-        HANDLE frame = GetPropW(hwnd, L"__wine_dwm_frame");
+        BOOL aero = get_dwm_aero_frames();
+        HANDLE frame = GetPropW(hwnd, L"__wine_dwm_frame"), seen = GetPropW(hwnd, L"__wine_dwm_theme_gen");
 
-        if (frame && frame != (HANDLE)(ULONG_PTR)(get_dwm_aero_frames() ? 2 : 1))
+        /* the theme changed while the window lived (another frame style or colorization): dwmapi marks the glass
+         * again, or drops Aero glass uxtheme asked for */
+        if (frame && (frame != (HANDLE)(ULONG_PTR)(aero ? 2 : 1) || (seen && seen != ULongToHandle(theme_generation))))
         {
             if (!loaded)
             {
@@ -1041,11 +1050,12 @@ BOOL WINAPI UXTHEME_NonClientFrameDraw(HWND hwnd, HDC hdc, RECT rect, DWORD styl
             }
             if (refresh) refresh(hwnd);
         }
-    }
-    if (((flags & NCFRAME_DWM_FRAME_EFFECTS) || get_dwm_frame_effects()) && !get_dwm_aero_frames())
-        return draw_modern_nc_frame(hwnd, hdc, rect, style, ex_style, flags);
-    if (((flags & NCFRAME_DWM_FRAME_EFFECTS) || get_dwm_frame_effects()))
-    {
+        SetPropW(hwnd, L"__wine_dwm_theme_gen", ULongToHandle(theme_generation));
+        if (!aero)
+        {
+            RemovePropW(hwnd, L"__wine_nc_buttons");
+            return draw_modern_nc_frame(hwnd, hdc, rect, style, ex_style, flags);
+        }
         /* Aero: a glass frame, else (no glass, or no DWMWindow parts) the themed frame below, as Vista Basic */
         aero_glass(hwnd, style);
         if (GetPropW(hwnd, L"__wine_dwm_frame") == (HANDLE)2 && (style & WS_CAPTION) == WS_CAPTION &&

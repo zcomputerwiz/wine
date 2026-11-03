@@ -200,6 +200,8 @@ static const WCHAR margin_props[4][32] =
     L"__wine_dwm_margin_bottom"
 };
 
+static void clear_auto_blur(HWND hwnd);
+
 static void set_glass(HWND hwnd, const MARGINS *margins)
 {
     int values[4] = { margins->cxLeftWidth, margins->cxRightWidth,
@@ -242,14 +244,16 @@ static void set_glass(HWND hwnd, const MARGINS *margins)
     SetWindowPos(hwnd, 0, 0, 0, 0, 0,
                  SWP_FRAMECHANGED | SWP_NOCOPYBITS | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 
-    /* Aero glass is blurred and tinted with the colorization color, unless the window chose its own blur */
+    /* Aero glass is blurred and tinted with the colorization color (again, for a new color), unless the window chose
+     * its own blur, or is choosing it now (__wine_dwm_blur_glass: DwmSetWindowAttribute made the glass) */
     if (GetPropW(hwnd, L"__wine_dwm_frame") == (HANDLE)2 && dwm_materials_is_enabled())
     {
         DWORD blur = DWM_WINE_BLUR_NONE, color, tint;
         BOOL opaque;
 
         get_stored_attribute(hwnd, DWM_ATTR_WINE_BLUR, &blur);
-        if (!(blur & DWM_WINE_BLUR_MODE) && SUCCEEDED(DwmGetColorizationColor(&color, &opaque)))
+        if ((!(blur & DWM_WINE_BLUR_MODE) || GetPropW(hwnd, L"__wine_dwm_blur_auto")) &&
+            !GetPropW(hwnd, L"__wine_dwm_blur_glass") && SUCCEEDED(DwmGetColorizationColor(&color, &opaque)))
         {
             tint = (color & 0xff00ff00) | (color >> 16 & 0xff) | (color & 0xff) << 16;   /* ARGB to ABGR */
             blur = DWM_WINE_BLUR_BEHIND | DWM_WINE_BLUR_TINTED;
@@ -258,11 +262,15 @@ static void set_glass(HWND hwnd, const MARGINS *margins)
             SetPropW(hwnd, L"__wine_dwm_blur_auto", (HANDLE)1);
         }
     }
-    else if (RemovePropW(hwnd, L"__wine_dwm_blur_auto"))   /* no longer Aero: the blur set above goes */
-    {
-        DWORD none = DWM_WINE_BLUR_NONE;
+    else clear_auto_blur(hwnd);   /* no longer Aero */
+}
+
+/* the Aero blur set_glass added, if it is still the window's */
+static void clear_auto_blur(HWND hwnd)
+{
+    DWORD none = DWM_WINE_BLUR_NONE;
+    if (RemovePropW(hwnd, L"__wine_dwm_blur_auto"))
         DwmSetWindowAttribute(hwnd, DWM_ATTR_WINE_BLUR, &none, sizeof(none));
-    }
 }
 
 /***********************************************************************
@@ -289,11 +297,7 @@ void WINAPI WexDwmpRefreshFrame(HWND hwnd)
         for (i = 0; i < 4; i++) RemovePropW(hwnd, margin_props[i]);
         RemovePropW(hwnd, L"__wine_dwm_alpha");
         RemovePropW(hwnd, L"__wine_dwm_frame");
-        if (RemovePropW(hwnd, L"__wine_dwm_blur_auto"))
-        {
-            DWORD none = DWM_WINE_BLUR_NONE;
-            DwmSetWindowAttribute(hwnd, DWM_ATTR_WINE_BLUR, &none, sizeof(none));
-        }
+        clear_auto_blur(hwnd);
         SetWindowPos(hwnd, 0, 0, 0, 0, 0,
                      SWP_FRAMECHANGED | SWP_NOCOPYBITS | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         return;
@@ -316,6 +320,7 @@ HRESULT WINAPI DwmExtendFrameIntoClientArea(HWND hwnd, const MARGINS* margins)
         !(GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD))
     {
         RemovePropW(hwnd, L"__wine_dwm_blur_glass");   /* the app's margins now; turning the blur off keeps them */
+        RemovePropW(hwnd, L"__wine_aero_asked");        /* nor does a frame style switch take the glass away */
         set_glass(hwnd, margins);
     }
 
@@ -404,8 +409,8 @@ HRESULT WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD attributenum, LPCVOID attr
         BOOL on = (value & DWM_WINE_BLUR_MODE) != DWM_WINE_BLUR_NONE;
         if (on && !GetPropW(hwnd, L"__wine_dwm_alpha"))
         {
+            SetPropW(hwnd, L"__wine_dwm_blur_glass", (HANDLE)1);   /* first: set_glass adds no Aero blur then */
             set_glass(hwnd, &sheet);
-            SetPropW(hwnd, L"__wine_dwm_blur_glass", (HANDLE)1);
         }
         else if (!on && RemovePropW(hwnd, L"__wine_dwm_blur_glass"))
             set_glass(hwnd, &zero_margins);
