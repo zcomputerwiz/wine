@@ -316,11 +316,13 @@ HRESULT WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD attributenum, LPCVOID attr
     if (size != 4)
         return E_INVALIDARG;
     if (attributenum == 0 || (attributenum >= DWMWA_LAST && attributenum != DWMWA_MICA_EFFECT &&
-                              attributenum != DWM_ATTR_WINE_BLUR))
+                              (attributenum < DWM_ATTR_WINE_BLUR || attributenum > DWM_ATTR_WINE_LAST)))
         return E_INVALIDARG;
 
     value = *(const DWORD *)attribute;
-    if (attributenum == DWM_ATTR_WINE_BLUR && value > DWM_WINE_BLUR_ACRYLIC)
+    if (attributenum == DWM_ATTR_WINE_BLUR &&
+        ((value & DWM_WINE_BLUR_MODE) > DWM_WINE_BLUR_GRADIENT ||
+         (value & ~(DWM_WINE_BLUR_MODE | DWM_WINE_BLUR_TINTED | DWM_WINE_BLUR_REGION))))
         return E_INVALIDARG;
 
     dwm_client_set_attr(hwnd, attributenum, value);  /* best effort: the local table is the mirror */
@@ -331,12 +333,13 @@ HRESULT WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD attributenum, LPCVOID attr
         !(GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD))
     {
         static const MARGINS sheet = { -1, -1, -1, -1 }, zero_margins = { 0, 0, 0, 0 };
-        if (value && !GetPropW(hwnd, L"__wine_dwm_alpha"))
+        BOOL on = (value & DWM_WINE_BLUR_MODE) != DWM_WINE_BLUR_NONE;
+        if (on && !GetPropW(hwnd, L"__wine_dwm_alpha"))
         {
             set_glass(hwnd, &sheet);
             SetPropW(hwnd, L"__wine_dwm_blur_glass", (HANDLE)1);
         }
-        else if (!value && RemovePropW(hwnd, L"__wine_dwm_blur_glass"))
+        else if (!on && RemovePropW(hwnd, L"__wine_dwm_blur_glass"))
             set_glass(hwnd, &zero_margins);
     }
 
@@ -463,10 +466,26 @@ HRESULT WINAPI DwmEnableBlurBehindWindow(HWND hWnd, const DWM_BLURBEHIND *pBlurB
     if (!pBlurBuf)
         return E_INVALIDARG;
 
-    /* ponytail: hRgnBlur is ignored, the blur covers the whole glass area */
-    if (pBlurBuf->dwFlags & DWM_BB_ENABLE)
+    if (pBlurBuf->dwFlags & (DWM_BB_ENABLE | DWM_BB_BLURREGION))
     {
-        DWORD value = pBlurBuf->fEnable ? DWM_WINE_BLUR_BEHIND : DWM_WINE_BLUR_NONE;
+        DWORD value = DWM_WINE_BLUR_NONE;
+
+        get_stored_attribute(hWnd, DWM_ATTR_WINE_BLUR, &value);
+        if (pBlurBuf->dwFlags & DWM_BB_ENABLE)   /* the region stays until replaced, as on Windows */
+            value = (value & DWM_WINE_BLUR_REGION) | (pBlurBuf->fEnable ? DWM_WINE_BLUR_BEHIND : DWM_WINE_BLUR_NONE);
+        if (pBlurBuf->dwFlags & DWM_BB_BLURREGION)
+        {
+            /* ponytail: the region's bounding box; a region of several rectangles is blurred as one */
+            RECT box;
+            value &= ~DWM_WINE_BLUR_REGION;
+            if (pBlurBuf->hRgnBlur && GetRgnBox(pBlurBuf->hRgnBlur, &box) != ERROR)
+            {
+                DWORD lt = MAKELONG((SHORT)box.left, (SHORT)box.top), rb = MAKELONG((SHORT)box.right, (SHORT)box.bottom);
+                DwmSetWindowAttribute(hWnd, DWM_ATTR_WINE_RGN_LT, &lt, sizeof(lt));
+                DwmSetWindowAttribute(hWnd, DWM_ATTR_WINE_RGN_RB, &rb, sizeof(rb));
+                value |= DWM_WINE_BLUR_REGION;
+            }
+        }
         DwmSetWindowAttribute(hWnd, DWM_ATTR_WINE_BLUR, &value, sizeof(value));
     }
     return S_OK;

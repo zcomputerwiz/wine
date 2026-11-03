@@ -25,6 +25,7 @@
 #include "wine/asm.h"
 #include "wine/exception.h"
 #include "wine/debug.h"
+#include "wine/dwm_protocol.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(win);
 
@@ -1667,7 +1668,7 @@ BOOL WINAPI SetWindowCompositionAttribute(HWND hwnd, void *data)
     struct { DWORD state; DWORD flags; DWORD gradient; DWORD animation; } *accent;
     HRESULT (WINAPI *set_attribute)(HWND, DWORD, const void *, DWORD);
     HMODULE dwmapi;
-    DWORD blur;
+    DWORD blur, tint;
 
     if (!attr || attr->attrib != 19 /* WCA_ACCENT_POLICY */)
     {
@@ -1687,13 +1688,24 @@ BOOL WINAPI SetWindowCompositionAttribute(HWND hwnd, void *data)
         return FALSE;
     }
     accent = attr->data;
-    /* ponytail: only the blurred states are drawn; the gradients and GradientColor come later. The private broker
-     * attribute (include/wine/dwm_protocol.h) carries the state through dwmapi. */
-    blur = accent->state == 3 ? 1 : accent->state == 4 ? 2 : 0;
+    /* The private broker attributes carry the state and GradientColor (0xAABBGGRR) through dwmapi: the gradients
+     * are the tint alone (ACCENT_ENABLE_GRADIENT opaque), the blur takes the tint with flag 2, Acrylic always. */
+    tint = accent->gradient;
+    switch (accent->state)
+    {
+    case 1: blur = DWM_WINE_BLUR_GRADIENT | DWM_WINE_BLUR_TINTED; tint |= 0xff000000; break;
+    case 2: blur = DWM_WINE_BLUR_GRADIENT | DWM_WINE_BLUR_TINTED; break;
+    case 3: blur = DWM_WINE_BLUR_BEHIND | (accent->flags & 2 ? DWM_WINE_BLUR_TINTED : 0); break;
+    case 4: blur = DWM_WINE_BLUR_ACRYLIC | DWM_WINE_BLUR_TINTED; break;
+    default: blur = DWM_WINE_BLUR_NONE; break;
+    }
     if ((dwmapi = LoadLibraryW(L"dwmapi.dll")))
     {
         if ((set_attribute = (void *)GetProcAddress(dwmapi, "DwmSetWindowAttribute")))
-            set_attribute(hwnd, 0x80000001 /* DWM_ATTR_WINE_BLUR */, &blur, sizeof(blur));
+        {
+            if (blur & DWM_WINE_BLUR_TINTED) set_attribute(hwnd, DWM_ATTR_WINE_TINT, &tint, sizeof(tint));
+            set_attribute(hwnd, DWM_ATTR_WINE_BLUR, &blur, sizeof(blur));
+        }
         FreeLibrary(dwmapi);
     }
     return TRUE;

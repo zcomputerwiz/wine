@@ -75,6 +75,16 @@ struct dwm_attr_reply { uint32_t found; uint32_t value; };
 #define DWM_WINE_BLUR_NONE     0u
 #define DWM_WINE_BLUR_BEHIND   1u   /* DwmEnableBlurBehindWindow, ACCENT_ENABLE_BLURBEHIND */
 #define DWM_WINE_BLUR_ACRYLIC  2u   /* ACCENT_ENABLE_ACRYLICBLURBEHIND */
+#define DWM_WINE_BLUR_GRADIENT 3u   /* ACCENT_ENABLE_GRADIENT and _TRANSPARENTGRADIENT: the tint alone, no blur */
+#define DWM_WINE_BLUR_MODE     0xffu
+#define DWM_WINE_BLUR_TINTED   0x100u   /* DWM_ATTR_WINE_TINT applies */
+#define DWM_WINE_BLUR_REGION   0x200u   /* the blur covers DWM_ATTR_WINE_RGN_* only */
+/* Set before DWM_ATTR_WINE_BLUR: the tint (ACCENT_POLICY's GradientColor, 0xAABBGGRR) and the bounding box of
+ * DwmEnableBlurBehindWindow's hRgnBlur in client coordinates (left | top << 16 and right | bottom << 16, int16). */
+#define DWM_ATTR_WINE_TINT     0x80000002u
+#define DWM_ATTR_WINE_RGN_LT   0x80000003u
+#define DWM_ATTR_WINE_RGN_RB   0x80000004u
+#define DWM_ATTR_WINE_LAST     DWM_ATTR_WINE_RGN_RB
 
 /* Iconic bitmaps (P9): DwmSetIconicThumbnail and DwmSetIconicLivePreviewBitmap copy the bitmap into a section named
  * DWM_ICONIC_NAME or DWM_ICONIC_LIVE_NAME followed by the window handle in hex, held open by the window's process;

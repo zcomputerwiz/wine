@@ -364,6 +364,18 @@ static void test_blur_behind(void)
     hr = DwmEnableBlurBehindWindow(hwnd, &bb);
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
 
+    bb.dwFlags = DWM_BB_ENABLE | DWM_BB_BLURREGION;
+    bb.hRgnBlur = CreateRectRgn(0, 0, 50, 50);
+    hr = DwmEnableBlurBehindWindow(hwnd, &bb);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    DeleteObject(bb.hRgnBlur);
+
+    bb.dwFlags = DWM_BB_BLURREGION;
+    bb.hRgnBlur = NULL;
+    hr = DwmEnableBlurBehindWindow(hwnd, &bb);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+
+    bb.dwFlags = DWM_BB_ENABLE;
     bb.fEnable = FALSE;
     hr = DwmEnableBlurBehindWindow(hwnd, &bb);
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
