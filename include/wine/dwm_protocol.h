@@ -76,16 +76,24 @@ struct dwm_attr_reply { uint32_t found; uint32_t value; };
 #define DWM_WINE_BLUR_BEHIND   1u   /* DwmEnableBlurBehindWindow, ACCENT_ENABLE_BLURBEHIND */
 #define DWM_WINE_BLUR_ACRYLIC  2u   /* ACCENT_ENABLE_ACRYLICBLURBEHIND */
 
-/* Iconic thumbnails (P9): DwmSetIconicThumbnail copies the bitmap into a section named DWM_ICONIC_NAME followed by
- * the window handle in hex, held open by the window's process; the shell asks for it with WM_DWMSENDICONICTHUMBNAIL
- * and copies it out. The header comes first, then width * height premultiplied BGRA pixels, top-down. The section
- * has room for DWM_ICONIC_MAX x DWM_ICONIC_MAX; readers validate the header against that before copying. */
-#define DWM_ICONIC_NAME  L"Local\\__wex_dwm_iconic_"
-#define DWM_ICONIC_MAX   1024u
-struct dwm_iconic { uint32_t width; uint32_t height; uint32_t flags; uint32_t serial; };
-#define DWM_ICONIC_SIZE  (sizeof(struct dwm_iconic) + DWM_ICONIC_MAX * DWM_ICONIC_MAX * 4)
+/* Iconic bitmaps (P9): DwmSetIconicThumbnail and DwmSetIconicLivePreviewBitmap copy the bitmap into a section named
+ * DWM_ICONIC_NAME or DWM_ICONIC_LIVE_NAME followed by the window handle in hex, held open by the window's process;
+ * the shell asks for it with WM_DWMSENDICONICTHUMBNAIL / WM_DWMSENDICONICLIVEPREVIEWBITMAP and copies it out. The
+ * header comes first, then width * height premultiplied BGRA pixels, top-down; the section is at least that large.
+ * Readers map the header, check width and height against DWM_ICONIC_MAX, then map the pixels (which fails if the
+ * section is smaller), and drop the copy when serial, width or height changed meanwhile. width 0: no picture
+ * (none yet, being written, or invalidated by DwmInvalidateIconicBitmaps). */
+#define DWM_ICONIC_NAME       L"Local\\__wex_dwm_iconic_"
+#define DWM_ICONIC_LIVE_NAME  L"Local\\__wex_dwm_iconic_live_"
+#define DWM_ICONIC_MAX        4096u
+#define DWM_ICONIC_SIT_FLAGS  0x0000ffffu   /* DWM_SIT_* as passed */
+#define DWM_ICONIC_HAS_POS    0x00010000u   /* live preview: x, y is the bitmap's offset from the client area */
+/* window: the window's restored rectangle in screen coordinates when the picture was stored (another process cannot
+ * read it while the window is minimized) */
+struct dwm_iconic { uint32_t width; uint32_t height; uint32_t flags; uint32_t serial; int32_t x; int32_t y;
+                    int32_t window[4]; };
 
-C_ASSERT( sizeof(struct dwm_iconic) == 16 );
+C_ASSERT( sizeof(struct dwm_iconic) == 40 );
 
 C_ASSERT( sizeof(struct dwm_attr_set) == 8 );
 C_ASSERT( sizeof(struct dwm_attr_get) == 4 );

@@ -539,6 +539,10 @@ static void test_iconic(void)
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
     hr = pDwmSetIconicThumbnail(hwnd, hbmp, 2);
     ok(hr == E_INVALIDARG, "Got hr %#lx.\n", hr);
+    hr = pDwmSetIconicLivePreviewBitmap(hwnd, hbmp, NULL, DWM_SIT_DISPLAYFRAME);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    hr = pDwmInvalidateIconicBitmaps(hwnd);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
 
     pDeleteObject(hbmp);
     DestroyWindow(hwnd);
