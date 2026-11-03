@@ -374,7 +374,8 @@ static void draw_modern_button(HDC hdc, const struct nc_button *btn, BOOL dark_m
     {
         if (pressed || hot)
         {
-            btn_bg = pressed ? RGB(241, 112, 122) : RGB(232, 17, 35);
+            /* Windows 11: #C42B1C measured on hover (docs/CAPTION_BUTTONS.md); pressed is a lighter estimate */
+            btn_bg = pressed ? RGB(205, 84, 72) : RGB(196, 43, 28);
             pen_color = RGB(255, 255, 255);
         }
         else
@@ -579,12 +580,12 @@ static BOOL paint_modern_nc(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex
         }
         else if (dark_mode)
         {
-            caption_bg = active ? RGB(32, 32, 32) : RGB(45, 45, 45);
+            caption_bg = RGB(32, 32, 32);   /* Windows 11 dark: #202020 active (Mica aside) and inactive */
             clear_caption = glass;
         }
         else
         {
-            caption_bg = active ? RGB(240, 240, 240) : RGB(245, 245, 245);
+            caption_bg = RGB(243, 243, 243);   /* Windows 11 light: inactive #F3F3F3 measured; active is Mica over it */
             clear_caption = glass;
         }
     }
@@ -605,7 +606,7 @@ static BOOL paint_modern_nc(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex
         if (lum < 128)
             text_color = active ? RGB(255, 255, 255) : RGB(180, 180, 180);
         else
-            text_color = active ? RGB(0, 0, 0) : RGB(128, 128, 128);
+            text_color = active ? RGB(0, 0, 0) : RGB(146, 146, 146);   /* inactive glyph measured #929292-#9B9B9B */
     }
 
     /* Determine border color */
@@ -689,8 +690,7 @@ static BOOL paint_modern_nc(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex
     /* 2. Side and bottom borders (restored only) */
     if (!max && !clear_caption && (bw > 0 || bh > 0))
     {
-        COLORREF frame_bg = dark_mode ? (active ? RGB(32, 32, 32) : RGB(45, 45, 45))
-                                      : (active ? RGB(240, 240, 240) : RGB(245, 245, 245));
+        COLORREF frame_bg = dark_mode ? RGB(32, 32, 32) : RGB(243, 243, 243);
         HBRUSH br_frame = CreateSolidBrush(frame_bg);
         RECT r_side;
         if (bw > 0)
@@ -849,6 +849,16 @@ static BOOL paint_aero_nc(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex_s
         return FALSE;
     }
     nc_update_modern_region(hwnd, w, h);
+    {
+        /* the style's own button sizes (a Windows 7 style: 28x20 and 46x20 at 96 dpi), else the estimates above */
+        SIZE size;
+        if (SUCCEEDED(GetThemePartSize(theme, hdc, DWMW_BUTTONACTIVECLOSE, 1, NULL, TS_TRUE, &size)) &&
+            size.cx >= 16 && size.cy >= 12)
+            close_w = size.cx, btn_h = size.cy;
+        if (SUCCEEDED(GetThemePartSize(theme, hdc, DWMW_BUTTONACTIVECAPTION, 1, NULL, TS_TRUE, &size)) &&
+            size.cx >= 16)
+            btn_w = size.cx;
+    }
     /* within what __wine_nc_buttons holds, so painting and hit testing agree */
     right = max(0, min(right, 63));
     top = min(top, 31);
