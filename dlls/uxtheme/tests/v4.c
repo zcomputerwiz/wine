@@ -30,6 +30,69 @@ static HRESULT (WINAPI *pApplyTheme)(HANDLE, char *, HWND);
 static HTHEME (WINAPI *pOpenThemeDataForDpi)(HWND, LPCWSTR, UINT);
 static HRESULT (WINAPI *pGetThemeIntList)(HTHEME, int, int, int, INTLIST *);
 
+/* Share an ID between a class-level atlas stream and a regular image. Also
+ * exercise a part-level state strip alongside an explicit state rectangle. */
+static BOOL prepare_atlas_fixture(const WCHAR *filename, DWORD *variant_offset)
+{
+    HMODULE module;
+    HRSRC resource;
+    HANDLE update;
+    BYTE *variant = NULL, *atlas = NULL;
+    DWORD variant_size, atlas_size, offset;
+    BOOL ret = FALSE;
+
+    module = LoadLibraryExW(filename, NULL, LOAD_LIBRARY_AS_DATAFILE);
+    if (!module) return FALSE;
+    resource = FindResourceW(module, L"NORMAL", L"VARIANT");
+    if (!resource) goto done;
+    variant_size = SizeofResource(module, resource);
+    *variant_offset = (const BYTE *)LockResource(LoadResource(module, resource)) -
+                      (const BYTE *)((ULONG_PTR)module & ~(ULONG_PTR)3);
+    if (!(variant = malloc(variant_size))) goto done;
+    memcpy(variant, LockResource(LoadResource(module, resource)), variant_size);
+
+    resource = FindResourceW(module, MAKEINTRESOURCEW(1), L"STREAM");
+    if (!resource) goto done;
+    atlas_size = SizeofResource(module, resource);
+    if (!(atlas = malloc(atlas_size))) goto done;
+    memcpy(atlas, LockResource(LoadResource(module, resource)), atlas_size);
+
+    for (offset = 0; offset + 32 <= variant_size;)
+    {
+        DWORD *header = (DWORD *)(variant + offset);
+        offset += 32;
+        if (header[0] == TMT_ATLASIMAGE && header[1] == TMT_DISKSTREAM)
+        {
+            header[0] = TMT_DISKSTREAM;
+            header[3] = header[4] = 0;
+            header[5] = 104;
+        }
+        if (header[2] == 1 && header[0] == TMT_SIZINGTYPE)
+        {
+            header[0] = TMT_IMAGECOUNT;
+            *(DWORD *)(variant + offset) = 2;
+        }
+        if (header[2] == 1 && header[0] == TMT_ATLASRECT && header[4] == 1)
+            header[4] = 0;
+        if (!header[5]) offset += (header[7] + 7) & ~7;
+    }
+
+    FreeLibrary(module);
+    module = NULL;
+    if (!(update = BeginUpdateResourceW(filename, FALSE))) goto done;
+    ret = UpdateResourceW(update, L"STREAM", MAKEINTRESOURCEW(104),
+                          MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US), atlas, atlas_size) &&
+          UpdateResourceW(update, L"VARIANT", L"NORMAL",
+                          MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US), variant, variant_size);
+    if (!EndUpdateResourceW(update, !ret)) ret = FALSE;
+
+done:
+    if (module) FreeLibrary(module);
+    free(atlas);
+    free(variant);
+    return ret;
+}
+
 static void test_msstyles_v4(void)
 {
     WCHAR temp_path[MAX_PATH], temp_file[MAX_PATH];
@@ -50,7 +113,6 @@ static void test_msstyles_v4(void)
     WCHAR str_val[64];
     RECT rect_val;
     HRSRC resource;
-    HMODULE module;
     const BYTE *fixture;
     BYTE *corrupted;
     DWORD fixture_size, variant_offset;
@@ -76,6 +138,14 @@ static void test_msstyles_v4(void)
        "Failed to write style resource, error %lu.\n", GetLastError());
     CloseHandle(hFile);
 
+    if (!prepare_atlas_fixture(temp_file, &variant_offset))
+    {
+        ok(0, "Failed to prepare atlas resource collision, error %lu.\n", GetLastError());
+        DeleteFileW(temp_file);
+        return;
+    }
+    ok(variant_offset + 32 <= fixture_size, "Invalid VARIANT offset %lu.\n", variant_offset);
+
     /* Open the style without assuming platform-specific scheme names. */
     hr = pOpenThemeFile(temp_file, NULL, NULL, &htf, 0);
     /* Windows can reject unsigned or unsupported visual style formats. */
@@ -87,21 +157,6 @@ static void test_msstyles_v4(void)
     }
     ok(htf != NULL, "Expected non-NULL htf\n");
     if (!htf) { DeleteFileW(temp_file); return; }
-
-    module = LoadLibraryExW(temp_file, NULL, LOAD_LIBRARY_AS_DATAFILE);
-    resource = FindResourceW(module, L"NORMAL", L"VARIANT");
-    ok(module && resource, "Failed to locate VARIANT, error %lu.\n", GetLastError());
-    if (!module || !resource)
-    {
-        if (module) FreeLibrary(module);
-        pCloseThemeFile(htf);
-        DeleteFileW(temp_file);
-        return;
-    }
-    variant_offset = (const BYTE *)LockResource(LoadResource(module, resource)) -
-                     (const BYTE *)((ULONG_PTR)module & ~(ULONG_PTR)3);
-    FreeLibrary(module);
-    ok(variant_offset + 32 <= fixture_size, "Invalid VARIANT offset %lu.\n", variant_offset);
 
     /* Test 4: Apply theme and verify properties */
     if (FAILED(GetCurrentThemeName(old_theme, ARRAY_SIZE(old_theme), old_color, ARRAY_SIZE(old_color),
@@ -241,6 +296,7 @@ static void test_msstyles_v4(void)
             HGDIOBJ old_bmp;
             RECT rc = {0, 0, 16, 16};
             COLORREF px;
+            SIZE size = {0};
 
             bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
             bi.bmiHeader.biWidth = 64;
@@ -251,12 +307,22 @@ static void test_msstyles_v4(void)
             hbmp = CreateDIBSection(hdc_mem, &bi, DIB_RGB_COLORS, (void**)&bits, NULL, 0);
             old_bmp = SelectObject(hdc_mem, hbmp);
 
+            /* The part-level rectangle is a vertical strip with two states. */
+            hr = GetThemePartSize(hWindow, hdc_mem, 1, 1, NULL, TS_TRUE, &size);
+            ok(hr == S_OK, "GetThemePartSize(Window state 1) failed: %#lx.\n", hr);
+            ok(size.cx == 16 && size.cy == 8, "Expected 16x8, got %ldx%ld.\n", size.cx, size.cy);
+
             /* Window Part 1 State 1 (Active caption) -> Atlas Green tile */
             memset(bits, 0, 64 * 64 * sizeof(DWORD));
             hr = DrawThemeBackground(hWindow, hdc_mem, 1, 1, &rc, NULL);
             ok(hr == S_OK, "DrawThemeBackground(Window state 1) failed: 0x%08lx\n", hr);
             px = GetPixel(hdc_mem, 8, 8);
             ok(px == RGB(50, 200, 80), "Expected Green RGB(50, 200, 80), got 0x%08lx\n", px);
+
+            /* An explicit state rectangle must not be divided by IMAGECOUNT. */
+            hr = GetThemePartSize(hWindow, hdc_mem, 1, 2, NULL, TS_TRUE, &size);
+            ok(hr == S_OK, "GetThemePartSize(Window state 2) failed: %#lx.\n", hr);
+            ok(size.cx == 16 && size.cy == 16, "Expected 16x16, got %ldx%ld.\n", size.cx, size.cy);
 
             /* Window Part 1 State 2 (Inactive caption) -> Atlas Gray tile */
             memset(bits, 0, 64 * 64 * sizeof(DWORD));

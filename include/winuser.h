@@ -4873,6 +4873,16 @@ enum NONCLIENT_BUTTON_TYPE
 #define NCFRAME_BTN_CLOSE  1
 #define NCFRAME_BTN_MAX    2
 #define NCFRAME_BTN_MIN    3
+/* A frame that places its caption buttons itself (the Aero glass frame) keeps their geometry, packed, in the window
+ * property "__wine_nc_buttons" for hit testing: the close and the other buttons' widths, the distance of the close
+ * button from the window's right edge, the buttons' top and height, in window pixels. */
+#define NCFRAME_BUTTONS(close_w, btn_w, right, top, height) \
+    ((close_w) | (btn_w) << 7 | (right) << 14 | (top) << 20 | (height) << 25)
+#define NCFRAME_BUTTONS_CLOSE_W(v)  ((v) & 0x7f)
+#define NCFRAME_BUTTONS_BTN_W(v)    ((v) >> 7 & 0x7f)
+#define NCFRAME_BUTTONS_RIGHT(v)    ((v) >> 14 & 0x3f)
+#define NCFRAME_BUTTONS_TOP(v)      ((v) >> 20 & 0x1f)
+#define NCFRAME_BUTTONS_HEIGHT(v)   ((v) >> 25 & 0x7f)
 
 struct user_api_hook
 {

@@ -2007,6 +2007,34 @@ static BOOL get_dwm_frame_effects(void)
     return dwm_frame_effects != 0;
 }
 
+/* DwmFrameStyle 1: Vista/7 Aero glass frames */
+static int dwm_aero_frames = -1;
+
+static BOOL get_dwm_aero_frames(void)
+{
+    if (dwm_aero_frames == -1)
+    {
+        HKEY hkey = reg_open_hkcu_key( "Software\\WineExplorer\\Shell" );
+        dwm_aero_frames = 0;
+        if (hkey)
+        {
+            char buf[offsetof(KEY_VALUE_PARTIAL_INFORMATION, Data[sizeof(DWORD)])];
+            KEY_VALUE_PARTIAL_INFORMATION *info = (void *)buf;
+            if (query_reg_ascii_value( hkey, "DwmFrameStyle", info, sizeof(buf) ) && info->Type == REG_DWORD)
+                dwm_aero_frames = (*(const DWORD *)info->Data != 0);
+            NtClose( hkey );
+        }
+    }
+    return dwm_aero_frames != 0;
+}
+
+static BOOL has_glass_frame( HWND hwnd )
+{
+    static const WCHAR wine_dwm_frameW[] =
+        {'_','_','w','i','n','e','_','d','w','m','_','f','r','a','m','e',0};
+    return NtUserGetProp( hwnd, wine_dwm_frameW ) != NULL;
+}
+
 static LRESULT handle_modern_nc_hit_test( HWND hwnd, POINT pt, const struct window_rects *rects,
                                           DWORD style, DWORD ex_style )
 {
@@ -2024,12 +2052,31 @@ static LRESULT handle_modern_nc_hit_test( HWND hwnd, POINT pt, const struct wind
     int cap_h = get_system_metrics( tool ? SM_CYSMCAPTION : SM_CYCAPTION );
     int top_h = bh + cap_h;
     int btn_w = get_system_metrics( SM_CXSIZE );
+    static const WCHAR wine_nc_buttonsW[] =
+        {'_','_','w','i','n','e','_','n','c','_','b','u','t','t','o','n','s',0};
     /* Glass frames keep the outer bands as an invisible resize area; the caption buttons are inset to match. */
     BOOL glass = !max && NtUserGetProp( hwnd, wine_dwm_frameW ) != NULL;
     int btn_off = glass ? bw : 0;
+    UINT placed = HandleToUlong( NtUserGetProp( hwnd, wine_nc_buttonsW ) );
 
-    /* 1. Caption buttons take priority */
-    if (y >= 0 && y < top_h)
+    /* 1. Caption buttons take priority; a frame that placed them itself says where */
+    if (placed && (style & WS_SYSMENU))
+    {
+        int close_w = NCFRAME_BUTTONS_CLOSE_W( placed ), btn_w2 = NCFRAME_BUTTONS_BTN_W( placed );
+        int right = w - NCFRAME_BUTTONS_RIGHT( placed ), top = NCFRAME_BUTTONS_TOP( placed );
+        int bx = rtl ? w - 1 - x : x;
+
+        if (y >= top && y < top + NCFRAME_BUTTONS_HEIGHT( placed ) && bx < right)
+        {
+            if (bx >= right - close_w) return HTCLOSE;
+            if (!tool && (style & (WS_MINIMIZEBOX | WS_MAXIMIZEBOX)))
+            {
+                if (bx >= right - close_w - btn_w2) return HTMAXBUTTON;
+                if (bx >= right - close_w - 2 * btn_w2) return HTMINBUTTON;
+            }
+        }
+    }
+    else if (y >= 0 && y < top_h)
     {
         if (style & WS_SYSMENU)
         {
@@ -2166,8 +2213,9 @@ LRESULT handle_nc_hit_test( HWND hwnd, POINT pt )
 
     if (PtInRect( &rects.client, pt )) return HTCLIENT;
 
+    /* the modern frame's geometry, unless an Aero style frame is not glass (then the themed frame is drawn) */
     if (get_dwm_frame_effects() && (style & WS_CAPTION) == WS_CAPTION &&
-        !EqualRect( &rects.window, &rects.client ))
+        !EqualRect( &rects.window, &rects.client ) && (!get_dwm_aero_frames() || has_glass_frame( hwnd )))
     {
         return handle_modern_nc_hit_test( hwnd, pt, &rects, style, ex_style );
     }
@@ -3246,7 +3294,7 @@ LRESULT default_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, 
 
     case WM_SETTINGCHANGE:
     case WM_THEMECHANGED:
-        dwm_frame_effects = -1;
+        dwm_frame_effects = dwm_aero_frames = -1;
         break;
     }
 

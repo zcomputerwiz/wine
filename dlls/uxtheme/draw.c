@@ -259,7 +259,7 @@ static PTHEME_PROPERTY UXTHEME_SelectImage(HTHEME hTheme, int iPartId, int iStat
                 BOOL hasAlpha;
 
                 lstrcpynW(szPath, fileProp->lpValue, min(fileProp->dwValueLen+1, ARRAY_SIZE(szPath)));
-                hBmp = MSSTYLES_LoadBitmap(hTheme, szPath, &hasAlpha, NULL);
+                hBmp = MSSTYLES_LoadBitmap(hTheme, szPath, FALSE, &hasAlpha, NULL);
                 if(!hBmp) continue;
 
                 GetThemeEnumValue(hTheme, iPartId, iStateId, TMT_IMAGELAYOUT, &imagelayout);
@@ -322,30 +322,45 @@ static HRESULT UXTHEME_LoadImage(HTHEME hTheme, int iPartId, int iStateId, const
         if (atlasProp)
         {
             lstrcpynW(szPath, atlasProp->lpValue, min(atlasProp->dwValueLen + 1, ARRAY_SIZE(szPath)));
-            *hBmp = MSSTYLES_LoadBitmap(hTheme, szPath, hasImageAlpha, hasDefaultTransparentColour);
+            *hBmp = MSSTYLES_LoadBitmap(hTheme, szPath,
+                                      atlasProp->iPrimitiveType == TMT_DISKSTREAM ||
+                                      atlasProp->iPrimitiveType == TMT_STREAM,
+                                      hasImageAlpha, hasDefaultTransparentColour);
             if (*hBmp)
             {
-                GetThemeEnumValue(hTheme, iPartId, iStateId, TMT_IMAGELAYOUT, &imagelayout);
-                GetThemeInt(hTheme, iPartId, iStateId, TMT_IMAGECOUNT, &imagecount);
-                if (imagecount < 1) imagecount = 1;
+                PTHEME_PROPERTY rectProp = MSSTYLES_FindProperty(hTheme, iPartId, iStateId, TMT_RECT, TMT_ATLASRECT);
 
-                imagenum = max(min(imagecount, iStateId), 1) - 1;
-
-                if (imagelayout == IL_VERTICAL)
+                if (rectProp && rectProp->origin == PO_STATE)
                 {
-                    int height = (atlasRect.bottom - atlasRect.top) / imagecount;
-                    bmpRect->left = atlasRect.left;
-                    bmpRect->right = atlasRect.right;
-                    bmpRect->top = atlasRect.top + imagenum * height;
-                    bmpRect->bottom = bmpRect->top + height;
+                    *bmpRect = atlasRect;
                 }
                 else
                 {
-                    int width = (atlasRect.right - atlasRect.left) / imagecount;
-                    bmpRect->left = atlasRect.left + imagenum * width;
-                    bmpRect->right = bmpRect->left + width;
-                    bmpRect->top = atlasRect.top;
-                    bmpRect->bottom = atlasRect.bottom;
+                    /* Part-level atlas rectangles contain a vertical state strip
+                     * unless the style explicitly supplies another layout. */
+                    imagelayout = IL_VERTICAL;
+                    GetThemeEnumValue(hTheme, iPartId, iStateId, TMT_IMAGELAYOUT, &imagelayout);
+                    GetThemeInt(hTheme, iPartId, iStateId, TMT_IMAGECOUNT, &imagecount);
+                    if (imagecount < 1) imagecount = 1;
+
+                    imagenum = max(min(imagecount, iStateId), 1) - 1;
+
+                    if (imagelayout == IL_VERTICAL)
+                    {
+                        int height = (atlasRect.bottom - atlasRect.top) / imagecount;
+                        bmpRect->left = atlasRect.left;
+                        bmpRect->right = atlasRect.right;
+                        bmpRect->top = atlasRect.top + imagenum * height;
+                        bmpRect->bottom = bmpRect->top + height;
+                    }
+                    else
+                    {
+                        int width = (atlasRect.right - atlasRect.left) / imagecount;
+                        bmpRect->left = atlasRect.left + imagenum * width;
+                        bmpRect->right = bmpRect->left + width;
+                        bmpRect->top = atlasRect.top;
+                        bmpRect->bottom = atlasRect.bottom;
+                    }
                 }
 
                 if (imageDpi)
@@ -361,7 +376,7 @@ static HRESULT UXTHEME_LoadImage(HTHEME hTheme, int iPartId, int iStateId, const
         return E_PROP_ID_UNSUPPORTED;
     }
     lstrcpynW(szPath, tp->lpValue, min(tp->dwValueLen+1, ARRAY_SIZE(szPath)));
-    *hBmp = MSSTYLES_LoadBitmap(hTheme, szPath, hasImageAlpha, hasDefaultTransparentColour);
+    *hBmp = MSSTYLES_LoadBitmap(hTheme, szPath, FALSE, hasImageAlpha, hasDefaultTransparentColour);
     if(!*hBmp) {
         TRACE("Failed to load bitmap %s\n", debugstr_w(szPath));
         return HRESULT_FROM_WIN32(GetLastError());
@@ -1914,6 +1929,8 @@ HRESULT WINAPI GetThemeBackgroundContentRect(HTHEME hTheme, HDC hdc, int iPartId
         *pContentRect = *pBoundingRect;
 
         GetThemeEnumValue(hTheme, iPartId, iStateId, TMT_BGTYPE, &bgtype);
+        if (bgtype == BT_BORDERFILL && MSSTYLES_FindProperty(hTheme, iPartId, iStateId, TMT_RECT, TMT_ATLASRECT))
+            bgtype = BT_IMAGEFILE;
         if(bgtype == BT_BORDERFILL) {
             int bordersize = 1;
 
@@ -1962,6 +1979,8 @@ HRESULT WINAPI GetThemeBackgroundExtent(HTHEME hTheme, HDC hdc, int iPartId,
         *pExtentRect = *pContentRect;
 
         GetThemeEnumValue(hTheme, iPartId, iStateId, TMT_BGTYPE, &bgtype);
+        if (bgtype == BT_BORDERFILL && MSSTYLES_FindProperty(hTheme, iPartId, iStateId, TMT_RECT, TMT_ATLASRECT))
+            bgtype = BT_IMAGEFILE;
         if(bgtype == BT_BORDERFILL) {
             int bordersize = 1;
 
@@ -2117,6 +2136,8 @@ HRESULT WINAPI GetThemeBackgroundRegion(HTHEME hTheme, HDC hdc, int iPartId,
         return E_POINTER;
 
     GetThemeEnumValue(hTheme, iPartId, iStateId, TMT_BGTYPE, &bgtype);
+    if (bgtype == BT_BORDERFILL && MSSTYLES_FindProperty(hTheme, iPartId, iStateId, TMT_RECT, TMT_ATLASRECT))
+        bgtype = BT_IMAGEFILE;
     if(bgtype == BT_IMAGEFILE) {
         hr = create_image_bg_region(hTheme, iPartId, iStateId, pRect, pRegion);
     }
@@ -2194,6 +2215,8 @@ HRESULT WINAPI GetThemePartSize(HTHEME hTheme, HDC hdc, int iPartId,
         return E_HANDLE;
 
     GetThemeEnumValue(hTheme, iPartId, iStateId, TMT_BGTYPE, &bgtype);
+    if (bgtype == BT_BORDERFILL && MSSTYLES_FindProperty(hTheme, iPartId, iStateId, TMT_RECT, TMT_ATLASRECT))
+        bgtype = BT_IMAGEFILE;
     if (bgtype == BT_NONE)
         /* do nothing */;
     else if(bgtype == BT_IMAGEFILE)

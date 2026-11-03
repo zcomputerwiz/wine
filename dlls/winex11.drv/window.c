@@ -2676,7 +2676,9 @@ void sync_window_dwm_margins( struct x11drv_win_data *data )
         stored = (LONG_PTR)NtUserGetProp( data->hwnd, margin_props[i] );
         values[4 + i] = (stored == 0x10000) ? 0xffffffff : (unsigned long)((int)stored - 1);
     }
-    values[8] = NtUserGetProp( data->hwnd, dwm_frame_prop ) ? 1 : 0;
+    /* flags: 1 the frame is glass, 2 an Aero frame (dwmapi stores 2), visible to its edges */
+    stored = (LONG_PTR)NtUserGetProp( data->hwnd, dwm_frame_prop );
+    values[8] = stored == 2 ? 3 : stored ? 1 : 0;
     XChangeProperty( data->display, data->whole_window, x11drv_atom( _WEX_DWM_MARGINS ),
                      XA_CARDINAL, 32, PropModeReplace, (unsigned char *)values, 9 );
 }

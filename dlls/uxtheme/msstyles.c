@@ -1456,7 +1456,8 @@ static HBITMAP decode_png_wic(const void *buf, DWORD size, BOOL *hasAlpha, BOOL 
     return hbmp;
 }
 
-HBITMAP MSSTYLES_LoadBitmap (PTHEME_CLASS tc, LPCWSTR lpFilename, BOOL* hasAlpha, BOOL *hasDefaultTransparentColour)
+HBITMAP MSSTYLES_LoadBitmap (PTHEME_CLASS tc, LPCWSTR lpFilename, BOOL is_stream,
+                           BOOL *hasAlpha, BOOL *hasDefaultTransparentColour)
 {
     WCHAR szFile[MAX_PATH];
     LPWSTR tmp;
@@ -1477,9 +1478,9 @@ HBITMAP MSSTYLES_LoadBitmap (PTHEME_CLASS tc, LPCWSTR lpFilename, BOOL* hasAlpha
     img = tc->tf->images;
     while (img)
     {
-        if (lstrcmpiW (szFile, img->name) == 0)
+        if (img->is_stream == is_stream && !lstrcmpiW(szFile, img->name))
         {
-            TRACE ("found %p %s: %p\n", img, debugstr_w (img->name), img->image);
+            TRACE("found %p %s (stream=%d): %p\n", img, debugstr_w(img->name), is_stream, img->image);
             *hasAlpha = img->hasAlpha;
             if (hasDefaultTransparentColour)
                 *hasDefaultTransparentColour = img->hasDefaultTransparentColour;
@@ -1488,7 +1489,7 @@ HBITMAP MSSTYLES_LoadBitmap (PTHEME_CLASS tc, LPCWSTR lpFilename, BOOL* hasAlpha
         img = img->next;
     }
     /* Not found? Try loading as standard bitmap first (XP format) */
-    hbmp = LoadImageW(tc->hTheme, szFile, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
+    hbmp = is_stream ? NULL : LoadImageW(tc->hTheme, szFile, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
     if (hbmp)
     {
         prepare_alpha(hbmp, &alpha, &has_default);
@@ -1511,11 +1512,18 @@ HBITMAP MSSTYLES_LoadBitmap (PTHEME_CLASS tc, LPCWSTR lpFilename, BOOL* hasAlpha
             res_name = MAKEINTRESOURCEW(res_id);
         }
 
-        hrsc = FindResourceW(tc->hTheme, res_name, L"IMAGE");
-        if (!hrsc)
+        /* Resource IDs are local to their type. A disk stream must not resolve
+         * to an unrelated IMAGE resource with the same numeric ID. */
+        if (is_stream)
             hrsc = FindResourceW(tc->hTheme, res_name, L"STREAM");
-        if (!hrsc)
-            hrsc = FindResourceW(tc->hTheme, res_name, (LPCWSTR)RT_RCDATA);
+        else
+        {
+            hrsc = FindResourceW(tc->hTheme, res_name, L"IMAGE");
+            if (!hrsc)
+                hrsc = FindResourceW(tc->hTheme, res_name, L"STREAM");
+            if (!hrsc)
+                hrsc = FindResourceW(tc->hTheme, res_name, (LPCWSTR)RT_RCDATA);
+        }
 
         if (hrsc)
         {
@@ -1540,6 +1548,7 @@ HBITMAP MSSTYLES_LoadBitmap (PTHEME_CLASS tc, LPCWSTR lpFilename, BOOL* hasAlpha
         return NULL;
     }
     img->image = hbmp;
+    img->is_stream = is_stream;
     img->hasAlpha = alpha;
     img->hasDefaultTransparentColour = has_default;
     *hasAlpha = alpha;
@@ -1550,7 +1559,8 @@ HBITMAP MSSTYLES_LoadBitmap (PTHEME_CLASS tc, LPCWSTR lpFilename, BOOL* hasAlpha
     lstrcpyW(img->name, szFile);
     img->next = tc->tf->images;
     tc->tf->images = img;
-    TRACE("new %p %s: %p (hasAlpha=%d)\n", img, debugstr_w(img->name), img->image, alpha);
+    TRACE("new %p %s (stream=%d): %p (hasAlpha=%d)\n",
+          img, debugstr_w(img->name), is_stream, img->image, alpha);
     return img->image;
 }
 

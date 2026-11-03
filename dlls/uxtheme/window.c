@@ -252,14 +252,47 @@ static HICON nc_get_icon(HWND hwnd)
 #define DWMWA_COLOR_NONE 0xFFFFFFFE
 #endif
 
-static int dwm_frame_effects = -1;
+static int dwm_frame_effects = -1, dwm_aero_frames = -1;
 static COLORREF dwm_accent_color = CLR_INVALID;
 static BOOL dwm_accent_color_cached = FALSE;
 
 void uxtheme_reset_dwm_settings(void)
 {
-    dwm_frame_effects = -1;
+    dwm_frame_effects = dwm_aero_frames = -1;
     dwm_accent_color_cached = FALSE;
+}
+
+/* DwmFrameStyle 1 (P13): Vista/7 Aero glass frames instead of the Windows 10/11 frame */
+static BOOL get_dwm_aero_frames(void)
+{
+    if (dwm_aero_frames == -1)
+    {
+        DWORD val = 0, size = sizeof(val);
+        dwm_aero_frames = !RegGetValueW(HKEY_CURRENT_USER, L"Software\\WineExplorer\\Shell", L"DwmFrameStyle",
+                                        RRF_RT_REG_DWORD, NULL, &val, &size) && val;
+    }
+    return dwm_aero_frames;
+}
+
+/* Every captioned top-level window has an Aero glass frame, as with Vista/7's DWM: ask dwmapi once (it makes the
+ * frame glass only with DwmAlpha and DwmFrameEffects on) */
+static void aero_glass(HWND hwnd, DWORD style)
+{
+    static HRESULT (WINAPI *extend)(HWND, const MARGINS *);
+    static BOOL loaded;
+    static const MARGINS none;
+
+    if ((style & WS_CHILD) || (style & WS_CAPTION) != WS_CAPTION || GetPropW(hwnd, L"__wine_dwm_frame") ||
+        GetPropW(hwnd, L"__wine_aero_asked"))
+        return;
+    SetPropW(hwnd, L"__wine_aero_asked", (HANDLE)1);
+    if (!loaded)
+    {
+        HMODULE dwmapi = LoadLibraryW(L"dwmapi.dll");   /* kept loaded: the pointer is cached */
+        if (dwmapi) extend = (void *)GetProcAddress(dwmapi, "DwmExtendFrameIntoClientArea");
+        loaded = TRUE;
+    }
+    if (extend) extend(hwnd, &none);
 }
 
 static BOOL get_dwm_frame_effects(void)
@@ -768,6 +801,149 @@ static BOOL paint_modern_nc(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex
     return TRUE;
 }
 
+/* DWMWindow parts as Windows 7 numbers them; the glyphs come in 96, 120, 144 and 192 dpi variants in a row */
+enum
+{
+    DWMW_BOTTOMFRAME = 1, DWMW_BUTTONACTIVECAPTION = 3, DWMW_BUTTONINACTIVECAPTION = 4,
+    DWMW_BUTTONACTIVECLOSE = 7, DWMW_BUTTONINACTIVECLOSE = 8, DWMW_BUTTONACTIVECLOSEALONE = 9,
+    DWMW_BUTTONINACTIVECLOSEALONE = 10, DWMW_BUTTONCLOSEGLYPH96 = 12, DWMW_BUTTONMAXGLYPH96 = 21,
+    DWMW_BUTTONMINGLYPH96 = 25, DWMW_BUTTONRESTOREGLYPH96 = 29, DWMW_LEFTFRAME = 33, DWMW_RIGHTFRAME = 41,
+    DWMW_TEXTGLOW = 55, DWMW_TOPFRAME = 56,
+};
+
+/* Vista/7 Aero glass frame (DwmFrameStyle 1): the theme's DWMWindow frame pieces over the glass, the title over its
+ * glow and the caption buttons hanging from the top edge. Their geometry goes to the "__wine_nc_buttons" property
+ * for hit testing. ponytail: button sizes and places are Windows 7's at 96 dpi as estimated, unmeasured; no hot
+ * state (the frame is not repainted on hover). Returns FALSE without DWMWindow parts. */
+static BOOL paint_aero_nc(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex_style, UINT flags, UINT pressed)
+{
+    static const int glyph_dpi[4] = { 96, 120, 144, 192 };
+    BOOL active = !!(flags & NCFRAME_ACTIVE), tool = !!(ex_style & WS_EX_TOOLWINDOW);
+    BOOL max = !!(style & WS_MAXIMIZE), rtl = !!(ex_style & WS_EX_LAYOUTRTL);
+    int w = rect.right - rect.left, h = rect.bottom - rect.top, state = active ? 1 : 2, i, glyph = 0;
+    UINT dpi = GetDpiForWindow(hwnd) ? GetDpiForWindow(hwnd) : 96;
+    int bw = max ? 0 : GetSystemMetricsForDpi((style & WS_THICKFRAME) ? SM_CXFRAME : SM_CXDLGFRAME, dpi);
+    int bh = max ? 0 : GetSystemMetricsForDpi((style & WS_THICKFRAME) ? SM_CYFRAME : SM_CYDLGFRAME, dpi);
+    int top_h = bh + GetSystemMetricsForDpi(tool ? SM_CYSMCAPTION : SM_CYCAPTION, dpi);
+    int close_w = MulDiv(43, dpi, 96), btn_w = MulDiv(26, dpi, 96), btn_h = MulDiv(19, dpi, 96);
+    int right = max ? MulDiv(2, dpi, 96) : bw - MulDiv(2, dpi, 96), top = max ? GetSystemMetricsForDpi(SM_CYFRAME, dpi) : 0;
+    BOOL boxes = !tool && (style & (WS_MINIMIZEBOX | WS_MAXIMIZEBOX));
+    int text_left, text_right;
+    HTHEME theme;
+    RECT r;
+
+    if ((style & WS_CAPTION) != WS_CAPTION || (style & WS_MINIMIZE)) return FALSE;
+    if (!(theme = OpenThemeDataForDpi(NULL, L"DWMWindow", dpi))) return FALSE;
+    if (!IsThemePartDefined(theme, DWMW_BUTTONACTIVECLOSE, 0))
+    {
+        CloseThemeData(theme);
+        return FALSE;
+    }
+    nc_update_modern_region(hwnd, w, h);
+    if (right < 0) right = 0;
+    while (glyph < 3 && dpi >= (UINT)glyph_dpi[glyph + 1]) glyph++;
+
+    /* 1. The frame pieces: highlights and edges with alpha over the glass */
+    SetRect(&r, 0, 0, w, top_h);
+    DrawThemeBackground(theme, hdc, DWMW_TOPFRAME, state, &r, NULL);
+    if (!max)
+    {
+        SetRect(&r, 0, top_h, bw, h - bh);
+        DrawThemeBackground(theme, hdc, DWMW_LEFTFRAME, state, &r, NULL);
+        SetRect(&r, w - bw, top_h, w, h - bh);
+        DrawThemeBackground(theme, hdc, DWMW_RIGHTFRAME, state, &r, NULL);
+        SetRect(&r, 0, h - bh, w, h);
+        DrawThemeBackground(theme, hdc, DWMW_BOTTOMFRAME, state, &r, NULL);
+    }
+
+    /* 2. The caption buttons, right to left: close, maximize or restore, minimize */
+    if (style & WS_SYSMENU)
+    {
+        static const struct { UINT which; int glyph; } order[] =
+            { { NCFRAME_BTN_CLOSE, DWMW_BUTTONCLOSEGLYPH96 }, { NCFRAME_BTN_MAX, DWMW_BUTTONMAXGLYPH96 },
+              { NCFRAME_BTN_MIN, DWMW_BUTTONMINGLYPH96 } };
+        int x = w - right;
+
+        for (i = 0; i < (boxes ? 3 : 1); i++)
+        {
+            int bwidth = i ? btn_w : close_w, part, bstate, glyph_part = order[i].glyph;
+            BOOL disabled = (order[i].which == NCFRAME_BTN_MAX && !(style & WS_MAXIMIZEBOX)) ||
+                            (order[i].which == NCFRAME_BTN_MIN && !(style & WS_MINIMIZEBOX)) ||
+                            (order[i].which == NCFRAME_BTN_CLOSE && (flags & NCFRAME_GRAYED));
+            SIZE size;
+            RECT g;
+
+            if (!i) part = boxes ? (active ? DWMW_BUTTONACTIVECLOSE : DWMW_BUTTONINACTIVECLOSE)
+                                 : (active ? DWMW_BUTTONACTIVECLOSEALONE : DWMW_BUTTONINACTIVECLOSEALONE);
+            else part = active ? DWMW_BUTTONACTIVECAPTION : DWMW_BUTTONINACTIVECAPTION;
+            if (order[i].which == NCFRAME_BTN_MAX && max) glyph_part = DWMW_BUTTONRESTOREGLYPH96;
+            bstate = disabled ? 4 : pressed == order[i].which ? 3 : 1;
+            SetRect(&r, x - bwidth, top, x, top + btn_h);
+            if (rtl) SetRect(&r, w - r.right, r.top, w - r.left, r.bottom);
+            DrawThemeBackground(theme, hdc, part, bstate, &r, NULL);
+            if (SUCCEEDED(GetThemePartSize(theme, hdc, glyph_part + glyph, bstate, NULL, TS_TRUE, &size)))
+            {
+                SetRect(&g, (r.left + r.right - size.cx) / 2, (r.top + r.bottom - size.cy) / 2, 0, 0);
+                g.right = g.left + size.cx;
+                g.bottom = g.top + size.cy;
+                DrawThemeBackground(theme, hdc, glyph_part + glyph, bstate, &g, NULL);
+            }
+            x -= bwidth;
+        }
+        SetPropW(hwnd, L"__wine_nc_buttons",
+                 ULongToHandle(NCFRAME_BUTTONS(min(close_w, 127), min(btn_w, 127), min(right, 63), min(top, 31),
+                                               min(btn_h, 127))));
+        text_right = x - MulDiv(6, dpi, 96);
+    }
+    else
+    {
+        RemovePropW(hwnd, L"__wine_nc_buttons");
+        text_right = w - bw;
+    }
+
+    /* 3. Icon and title over the glow */
+    text_left = bw + MulDiv(6, dpi, 96);
+    if ((style & WS_SYSMENU) && !tool)
+    {
+        HICON icon = nc_get_icon(hwnd);
+        int isz = GetSystemMetricsForDpi(SM_CXSMICON, dpi);
+        if (icon)
+        {
+            DrawIconEx(hdc, text_left, max(bh, (top_h + bh - isz) / 2), icon, isz, isz, 0, NULL, DI_NORMAL);
+            text_left += isz + MulDiv(6, dpi, 96);
+        }
+    }
+    if (text_right > text_left)
+    {
+        NONCLIENTMETRICSW ncm = { .cbSize = sizeof(ncm) };
+        WCHAR text[256];
+        if (GetWindowTextW(hwnd, text, ARRAY_SIZE(text)) &&
+            SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0))
+        {
+            HFONT font = CreateFontIndirectW(tool ? &ncm.lfSmCaptionFont : &ncm.lfCaptionFont);
+            HFONT old_font = SelectObject(hdc, font);
+            RECT glow, text_rect;
+            SetRect(&text_rect, text_left, bh, text_right, top_h);
+            if (rtl) SetRect(&text_rect, w - text_right, bh, w - text_left, top_h);
+            glow = text_rect;
+            DrawTextW(hdc, text, -1, &glow, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS |
+                      DT_CALCRECT | (rtl ? DT_RIGHT : DT_LEFT));
+            glow.right = min(glow.right, text_rect.right);
+            OffsetRect(&glow, 0, (text_rect.bottom - text_rect.top - (glow.bottom - glow.top)) / 2);
+            InflateRect(&glow, MulDiv(10, dpi, 96), MulDiv(4, dpi, 96));
+            DrawThemeBackground(theme, hdc, DWMW_TEXTGLOW, 1, &glow, NULL);
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, RGB(0, 0, 0));
+            DrawTextW(hdc, text, -1, &text_rect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS |
+                      (rtl ? DT_RIGHT : DT_LEFT));
+            SelectObject(hdc, old_font);
+            DeleteObject(font);
+        }
+    }
+    CloseThemeData(theme);
+    return TRUE;
+}
+
 /* Glass frame (DWM P10b; dwmapi sets __wine_dwm_frame when DwmAlpha and DwmFrameEffects are on): the surface keeps
  * per-pixel alpha and the compositor blends the whole frame. The frame is painted twice, over black and over white;
  * the difference is each pixel's coverage and the black pass its premultiplied color, so antialiased text and icons
@@ -791,6 +967,11 @@ static BOOL draw_glass_nc_frame(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWOR
             goto done;
         SelectObject(dc[i], bmp[i]);
         FillRect(dc[i], &local, GetStockObject(i ? WHITE_BRUSH : BLACK_BRUSH));
+        /* an Aero frame without DWMWindow parts falls back to the modern one */
+        if (GetPropW(hwnd, L"__wine_dwm_frame") == (HANDLE)2 &&
+            paint_aero_nc(hwnd, dc[i], local, style, ex_style, flags & ((1u << NCFRAME_PART_SHIFT) - 1), pressed))
+            continue;
+        RemovePropW(hwnd, L"__wine_nc_buttons");
         if (!paint_modern_nc(hwnd, dc[i], local, style, ex_style, flags & ((1u << NCFRAME_PART_SHIFT) - 1),
                              TRUE, pressed))
             goto done;
@@ -837,8 +1018,17 @@ static BOOL draw_modern_nc_frame(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWO
 
 BOOL WINAPI UXTHEME_NonClientFrameDraw(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex_style, UINT flags)
 {
-    if ((flags & NCFRAME_DWM_FRAME_EFFECTS) || get_dwm_frame_effects())
+    if (((flags & NCFRAME_DWM_FRAME_EFFECTS) || get_dwm_frame_effects()) && !get_dwm_aero_frames())
         return draw_modern_nc_frame(hwnd, hdc, rect, style, ex_style, flags);
+    if (((flags & NCFRAME_DWM_FRAME_EFFECTS) || get_dwm_frame_effects()))
+    {
+        /* Aero: a glass frame, else (no glass, or no DWMWindow parts) the themed frame below, as Vista Basic */
+        aero_glass(hwnd, style);
+        if (GetPropW(hwnd, L"__wine_dwm_frame") == (HANDLE)2 && (style & WS_CAPTION) == WS_CAPTION &&
+            !(style & WS_MINIMIZE) && draw_glass_nc_frame(hwnd, hdc, rect, style, ex_style, flags))
+            return TRUE;
+        RemovePropW(hwnd, L"__wine_nc_buttons");
+    }
 
     UINT target = flags >> NCFRAME_PART_SHIFT;
     BOOL active = flags & NCFRAME_ACTIVE, tool = ex_style & WS_EX_TOOLWINDOW, thick = style & WS_THICKFRAME;

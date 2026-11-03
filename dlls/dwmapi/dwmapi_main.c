@@ -183,6 +183,13 @@ static BOOL dwm_materials_is_enabled(void)
     return enabled;
 }
 
+/* DwmFrameStyle (P13): 0 the Windows 10/11 frame, 1 the Vista/7 Aero frame (every captioned window glass, blurred).
+ * Read each time: the theme changes it while windows live. */
+static BOOL dwm_aero_frames(void)
+{
+    return read_gate(L"DwmFrameStyle");
+}
+
 /* Set or clear the glass props on a same-process window and force a repaint. With the DwmFrameEffects gate on,
  * the window stays glass (and the frame is glass too) even with all-zero margins. */
 static void set_glass(HWND hwnd, const MARGINS *margins)
@@ -221,7 +228,7 @@ static void set_glass(HWND hwnd, const MARGINS *margins)
         }
         SetPropW(hwnd, L"__wine_dwm_alpha", (HANDLE)1);
         if (dwm_frame_is_enabled())
-            SetPropW(hwnd, L"__wine_dwm_frame", (HANDLE)1);
+            SetPropW(hwnd, L"__wine_dwm_frame", (HANDLE)(ULONG_PTR)(dwm_aero_frames() ? 2 : 1));
     }
     else
     {
@@ -233,6 +240,22 @@ static void set_glass(HWND hwnd, const MARGINS *margins)
     /* Repaint the client: the previous opaque surface may have forced its alpha bits to 0xff. */
     SetWindowPos(hwnd, 0, 0, 0, 0, 0,
                  SWP_FRAMECHANGED | SWP_NOCOPYBITS | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+
+    /* Aero glass is blurred and tinted with the colorization color, unless the window chose its own blur */
+    if (GetPropW(hwnd, L"__wine_dwm_frame") == (HANDLE)2 && dwm_materials_is_enabled())
+    {
+        DWORD blur = DWM_WINE_BLUR_NONE, color, tint;
+        BOOL opaque;
+
+        get_stored_attribute(hwnd, DWM_ATTR_WINE_BLUR, &blur);
+        if (!(blur & DWM_WINE_BLUR_MODE) && SUCCEEDED(DwmGetColorizationColor(&color, &opaque)))
+        {
+            tint = (color & 0xff00ff00) | (color >> 16 & 0xff) | (color & 0xff) << 16;   /* ARGB to ABGR */
+            blur = DWM_WINE_BLUR_BEHIND | DWM_WINE_BLUR_TINTED;
+            DwmSetWindowAttribute(hwnd, DWM_ATTR_WINE_TINT, &tint, sizeof(tint));
+            DwmSetWindowAttribute(hwnd, DWM_ATTR_WINE_BLUR, &blur, sizeof(blur));
+        }
+    }
 }
 
 /**********************************************************************
@@ -534,8 +557,9 @@ HRESULT WINAPI DwmGetWindowAttribute(HWND hwnd, DWORD attribute, PVOID pv_attrib
 
         SetThreadDpiAwarenessContext(context);
 
-        /* Glass frames keep the outer bands as an invisible resize area; report the visible frame. */
-        if (hr == S_OK && GetPropW(hwnd, L"__wine_dwm_frame"))
+        /* Windows 10/11 glass frames keep the outer bands as an invisible resize area; report the visible frame.
+         * An Aero frame (2) is visible to its edges. */
+        if (hr == S_OK && GetPropW(hwnd, L"__wine_dwm_frame") == (HANDLE)1)
         {
             DWORD style = GetWindowLongW(hwnd, GWL_STYLE);
             if (!(style & (WS_MAXIMIZE | WS_MINIMIZE)))
