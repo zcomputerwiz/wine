@@ -1408,11 +1408,52 @@ static const MSSTYLES_CLASS_MAP classWindow[] = {
     {0, 0, L""}
 };
 
+/* DWMWindow as Windows 7 numbers its parts (the glass frame of uxtheme/window.c), for INI styles too; frame pieces
+ * are ACTIVE (1) or INACTIVE (2), buttons and glyphs NORMAL, HOT, PRESSED, DISABLED (1-4) */
+static const MSSTYLES_CLASS_MAP classDwmwindow[] = {
+    {1, 0, L"BOTTOMFRAME"},
+    {3, 0, L"BUTTONACTIVECAPTION"},
+    {4, 0, L"BUTTONINACTIVECAPTION"},
+    {7, 0, L"BUTTONACTIVECLOSE"},
+    {8, 0, L"BUTTONINACTIVECLOSE"},
+    {9, 0, L"BUTTONACTIVECLOSEALONE"},
+    {10, 0, L"BUTTONINACTIVECLOSEALONE"},
+    {12, 0, L"BUTTONCLOSEGLYPH96"},
+    {13, 0, L"BUTTONCLOSEGLYPH120"},
+    {14, 0, L"BUTTONCLOSEGLYPH144"},
+    {15, 0, L"BUTTONCLOSEGLYPH192"},
+    {21, 0, L"BUTTONMAXGLYPH96"},
+    {22, 0, L"BUTTONMAXGLYPH120"},
+    {23, 0, L"BUTTONMAXGLYPH144"},
+    {24, 0, L"BUTTONMAXGLYPH192"},
+    {25, 0, L"BUTTONMINGLYPH96"},
+    {26, 0, L"BUTTONMINGLYPH120"},
+    {27, 0, L"BUTTONMINGLYPH144"},
+    {28, 0, L"BUTTONMINGLYPH192"},
+    {29, 0, L"BUTTONRESTOREGLYPH96"},
+    {30, 0, L"BUTTONRESTOREGLYPH120"},
+    {31, 0, L"BUTTONRESTOREGLYPH144"},
+    {32, 0, L"BUTTONRESTOREGLYPH192"},
+    {33, 0, L"LEFTFRAME"},
+    {41, 0, L"RIGHTFRAME"},
+    {55, 0, L"TEXTGLOW"},
+    {56, 0, L"TOPFRAME"},
+    /* states for every part (part 0: see MSSTYLES_LookupPartState) */
+    {0, 1, L"ACTIVE"},
+    {0, 2, L"INACTIVE"},
+    {0, 1, L"NORMAL"},
+    {0, 2, L"HOT"},
+    {0, 3, L"PRESSED"},
+    {0, 4, L"DISABLED"},
+    {0, 0, L""}
+};
+
 /* Map class names to part/state maps */
 static const MSSTYLES_CLASS_NAME mapClass[] = {
     {classButton, L"BUTTON"},
     {classClock, L"CLOCK"},
     {classCombobox, L"COMBOBOX"},
+    {classDwmwindow, L"DWMWINDOW"},
     {classEdit, L"EDIT"},
     {classExplorerbar, L"EXPLORERBAR"},
     {classHeader, L"HEADER"},
@@ -1475,6 +1516,10 @@ BOOL MSSTYLES_LookupPartState(LPCWSTR pszClass, LPCWSTR pszPart, LPCWSTR pszStat
                         }
                     }
                 } while(*((++map)->szName));
+                /* states a class lists once for all its parts (part 0) */
+                for (map = mapClass[i].lpMap; !*iStateId && *map->szName; map++)
+                    if (!map->dwPartID && map->dwStateID && !lstrcmpiW(map->szName, pszState))
+                        *iStateId = map->dwStateID;
             }
             break;
         }
