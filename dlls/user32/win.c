@@ -1662,9 +1662,41 @@ BOOL WINAPI SetWindowDisplayAffinity(HWND hwnd, DWORD affinity)
  */
 BOOL WINAPI SetWindowCompositionAttribute(HWND hwnd, void *data)
 {
-    FIXME("(%p, %p): stub\n", hwnd, data);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    /* undocumented: WINDOWCOMPOSITIONATTRIBDATA and ACCENT_POLICY */
+    struct { DWORD attrib; void *data; SIZE_T size; } *attr = data;
+    struct { DWORD state; DWORD flags; DWORD gradient; DWORD animation; } *accent;
+    HRESULT (WINAPI *set_attribute)(HWND, DWORD, const void *, DWORD);
+    HMODULE dwmapi;
+    DWORD blur;
+
+    if (!attr || attr->attrib != 19 /* WCA_ACCENT_POLICY */)
+    {
+        FIXME("(%p, %p): stub\n", hwnd, data);
+        SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+        return FALSE;
+    }
+    TRACE("(%p, %p) accent policy\n", hwnd, data);
+    if (!IsWindow(hwnd))
+    {
+        SetLastError(ERROR_INVALID_WINDOW_HANDLE);
+        return FALSE;
+    }
+    if (!attr->data || attr->size < sizeof(*accent))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    accent = attr->data;
+    /* ponytail: only the blurred states are drawn; the gradients and GradientColor come later. The private broker
+     * attribute (include/wine/dwm_protocol.h) carries the state through dwmapi. */
+    blur = accent->state == 3 ? 1 : accent->state == 4 ? 2 : 0;
+    if ((dwmapi = LoadLibraryW(L"dwmapi.dll")))
+    {
+        if ((set_attribute = (void *)GetProcAddress(dwmapi, "DwmSetWindowAttribute")))
+            set_attribute(hwnd, 0x80000001 /* DWM_ATTR_WINE_BLUR */, &blur, sizeof(blur));
+        FreeLibrary(dwmapi);
+    }
+    return TRUE;
 }
 
 /**********************************************************************

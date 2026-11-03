@@ -69,6 +69,13 @@ struct dwm_attr_set   { uint32_t attribute; uint32_t value; };
 struct dwm_attr_get   { uint32_t attribute; };
 struct dwm_attr_reply { uint32_t found; uint32_t value; };
 
+/* Private attribute: the live blur a window asked for through DwmEnableBlurBehindWindow or the ACCENT_POLICY of
+ * SetWindowCompositionAttribute (both go through dwmapi's DwmSetWindowAttribute). Not a public DWMWA value. */
+#define DWM_ATTR_WINE_BLUR     0x80000001u
+#define DWM_WINE_BLUR_NONE     0u
+#define DWM_WINE_BLUR_BEHIND   1u   /* DwmEnableBlurBehindWindow, ACCENT_ENABLE_BLURBEHIND */
+#define DWM_WINE_BLUR_ACRYLIC  2u   /* ACCENT_ENABLE_ACRYLICBLURBEHIND */
+
 C_ASSERT( sizeof(struct dwm_attr_set) == 8 );
 C_ASSERT( sizeof(struct dwm_attr_get) == 4 );
 C_ASSERT( sizeof(struct dwm_attr_reply) == 8 );

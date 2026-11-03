@@ -312,12 +312,30 @@ HRESULT WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD attributenum, LPCVOID attr
         return E_INVALIDARG;
     if (size != 4)
         return E_INVALIDARG;
-    if (attributenum == 0 || (attributenum >= DWMWA_LAST && attributenum != DWMWA_MICA_EFFECT))
+    if (attributenum == 0 || (attributenum >= DWMWA_LAST && attributenum != DWMWA_MICA_EFFECT &&
+                              attributenum != DWM_ATTR_WINE_BLUR))
         return E_INVALIDARG;
 
     value = *(const DWORD *)attribute;
+    if (attributenum == DWM_ATTR_WINE_BLUR && value > DWM_WINE_BLUR_ACRYLIC)
+        return E_INVALIDARG;
 
     dwm_client_set_attr(hwnd, attributenum, value);  /* best effort: the local table is the mirror */
+
+    /* Blur behind (P12b) needs an alpha surface: the whole window becomes glass, unless the app already chose
+     * margins; it is cleared again only if it was set here. */
+    if (attributenum == DWM_ATTR_WINE_BLUR && dwm_alpha_is_enabled() &&
+        !(GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD))
+    {
+        static const MARGINS sheet = { -1, -1, -1, -1 }, zero_margins = { 0, 0, 0, 0 };
+        if (value && !GetPropW(hwnd, L"__wine_dwm_alpha"))
+        {
+            set_glass(hwnd, &sheet);
+            SetPropW(hwnd, L"__wine_dwm_blur_glass", (HANDLE)1);
+        }
+        else if (!value && RemovePropW(hwnd, L"__wine_dwm_blur_glass"))
+            set_glass(hwnd, &zero_margins);
+    }
 
     /* Windows 11 draws the backdrop behind the caption without any extended margins. */
     if ((attributenum == DWMWA_SYSTEMBACKDROP_TYPE && (value == 2 || value == 3 || value == 4)) ||
@@ -442,6 +460,12 @@ HRESULT WINAPI DwmEnableBlurBehindWindow(HWND hWnd, const DWM_BLURBEHIND *pBlurB
     if (!pBlurBuf)
         return E_INVALIDARG;
 
+    /* ponytail: hRgnBlur is ignored, the blur covers the whole glass area */
+    if (pBlurBuf->dwFlags & DWM_BB_ENABLE)
+    {
+        DWORD value = pBlurBuf->fEnable ? DWM_WINE_BLUR_BEHIND : DWM_WINE_BLUR_NONE;
+        DwmSetWindowAttribute(hWnd, DWM_ATTR_WINE_BLUR, &value, sizeof(value));
+    }
     return S_OK;
 }
 
