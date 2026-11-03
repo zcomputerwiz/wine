@@ -2647,6 +2647,25 @@ static HBRUSH handle_control_color( HDC hdc, UINT type )
     return get_sys_color_brush( COLOR_WINDOW );
 }
 
+/* The caption button under the pointer (NCFRAME_BTN_*, 0 for none) of a DwmFrameEffects frame, kept in the window
+ * property "__wine_nc_hot" for uxtheme to draw it hot; the frame is repainted when it changes. */
+static void track_nc_hot( HWND hwnd, WPARAM hit )
+{
+    static const WCHAR wine_nc_hotW[] = {'_','_','w','i','n','e','_','n','c','_','h','o','t',0};
+    UINT hot = hit == HTCLOSE ? NCFRAME_BTN_CLOSE : hit == HTMAXBUTTON ? NCFRAME_BTN_MAX :
+               hit == HTMINBUTTON ? NCFRAME_BTN_MIN : 0;
+
+    if (!get_dwm_frame_effects() || HandleToUlong( NtUserGetProp( hwnd, wine_nc_hotW ) ) == hot) return;
+    if (hot)
+    {
+        TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE | TME_NONCLIENT, hwnd, 0 };
+        NtUserSetProp( hwnd, wine_nc_hotW, ULongToHandle( hot ) );
+        NtUserTrackMouseEvent( &tme );
+    }
+    else NtUserRemoveProp( hwnd, wine_nc_hotW );
+    NtUserRedrawWindow( hwnd, NULL, 0, RDW_FRAME | RDW_INVALIDATE );
+}
+
 static LRESULT handle_nc_mouse_move( HWND hwnd, WPARAM wparam, LPARAM lparam )
 {
     RECT rect;
@@ -2654,6 +2673,7 @@ static LRESULT handle_nc_mouse_move( HWND hwnd, WPARAM wparam, LPARAM lparam )
 
     TRACE( "hwnd=%p wparam=%#lx lparam=%#lx\n", hwnd, (long)wparam, lparam );
 
+    track_nc_hot( hwnd, wparam );
     if (wparam != HTHSCROLL && wparam != HTVSCROLL)
         return 0;
 
@@ -2675,6 +2695,7 @@ static LRESULT handle_nc_mouse_leave( HWND hwnd )
 
     TRACE( "hwnd=%p\n", hwnd );
 
+    track_nc_hot( hwnd, HTNOWHERE );
     if (style & WS_HSCROLL)
         handle_scroll_event( hwnd, SB_HORZ, WM_NCMOUSELEAVE, pt );
     if (style & WS_VSCROLL)

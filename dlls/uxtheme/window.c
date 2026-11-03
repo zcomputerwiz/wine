@@ -355,7 +355,7 @@ static HRESULT query_dwm_window_attribute(HWND hwnd, DWORD attribute, void *pv, 
 
 static void draw_modern_button(HDC hdc, const struct nc_button *btn, BOOL dark_mode,
                                COLORREF text_color, COLORREF bg_color, UINT dpi,
-                               BOOL maximized, BOOL disabled, BOOL pressed)
+                               BOOL maximized, BOOL disabled, BOOL pressed, BOOL hot)
 {
     int cx = (btn->rect.left + btn->rect.right) / 2;
     int cy = (btn->rect.top + btn->rect.bottom) / 2;
@@ -366,11 +366,12 @@ static void draw_modern_button(HDC hdc, const struct nc_button *btn, BOOL dark_m
 
     if (pen_w < 1) pen_w = 1;
 
+    hot = hot && !disabled;
     if (btn->which == NCFRAME_BTN_CLOSE)
     {
-        if (pressed)
+        if (pressed || hot)
         {
-            btn_bg = RGB(232, 17, 35);
+            btn_bg = pressed ? RGB(241, 112, 122) : RGB(232, 17, 35);
             pen_color = RGB(255, 255, 255);
         }
         else
@@ -382,7 +383,9 @@ static void draw_modern_button(HDC hdc, const struct nc_button *btn, BOOL dark_m
     else
     {
         if (pressed)
-            btn_bg = dark_mode ? RGB(70, 70, 70) : RGB(200, 200, 200);
+            btn_bg = dark_mode ? RGB(70, 70, 70) : RGB(204, 204, 204);
+        else if (hot)
+            btn_bg = dark_mode ? RGB(51, 51, 51) : RGB(229, 229, 229);
         else
             btn_bg = bg_color;
         pen_color = disabled ? (dark_mode ? RGB(100, 100, 100) : RGB(160, 160, 160)) : text_color;
@@ -663,7 +666,8 @@ static BOOL paint_modern_nc(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex
                 if (btn[i].which == NCFRAME_BTN_MAX && !(style & WS_MAXIMIZEBOX)) disabled = TRUE;
                 if (btn[i].which == NCFRAME_BTN_MIN && !(style & WS_MINIMIZEBOX)) disabled = TRUE;
                 if (btn[i].which == NCFRAME_BTN_CLOSE && (flags & NCFRAME_GRAYED)) disabled = TRUE;
-                draw_modern_button(hdc, &btn[i], dark_mode, text_color, button_bg, dpi, max, disabled, !!(flags & NCFRAME_DOWN));
+                draw_modern_button(hdc, &btn[i], dark_mode, text_color, button_bg, dpi, max, disabled,
+                                   !!(flags & NCFRAME_DOWN), FALSE);
                 return TRUE;
             }
         }
@@ -795,7 +799,8 @@ static BOOL paint_modern_nc(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex
         if (btn[i].which == NCFRAME_BTN_MIN && !(style & WS_MINIMIZEBOX)) disabled = TRUE;
         if (btn[i].which == NCFRAME_BTN_CLOSE && (flags & NCFRAME_GRAYED)) disabled = TRUE;
         draw_modern_button(hdc, &btn[i], dark_mode, text_color, button_bg, dpi, max, disabled,
-                           pressed && btn[i].which == pressed);
+                           pressed && btn[i].which == pressed,
+                           btn[i].which == HandleToUlong(GetPropW(hwnd, L"__wine_nc_hot")));
     }
 
     return TRUE;
@@ -813,8 +818,8 @@ enum
 
 /* Vista/7 Aero glass frame (DwmFrameStyle 1): the theme's DWMWindow frame pieces over the glass, the title over its
  * glow and the caption buttons hanging from the top edge. Their geometry goes to the "__wine_nc_buttons" property
- * for hit testing. ponytail: button sizes and places are Windows 7's at 96 dpi as estimated, unmeasured; no hot
- * state (the frame is not repainted on hover). Returns FALSE without DWMWindow parts. */
+ * for hit testing. ponytail: button sizes and places are Windows 7's at 96 dpi as estimated, unmeasured. Returns
+ * FALSE without DWMWindow parts. */
 static BOOL paint_aero_nc(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex_style, UINT flags, UINT pressed)
 {
     static const int glyph_dpi[4] = { 96, 120, 144, 192 };
@@ -828,6 +833,7 @@ static BOOL paint_aero_nc(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex_s
     int close_w = MulDiv(43, dpi, 96), btn_w = MulDiv(26, dpi, 96), btn_h = MulDiv(19, dpi, 96);
     int right = max ? MulDiv(2, dpi, 96) : bw - MulDiv(2, dpi, 96), top = max ? GetSystemMetricsForDpi(SM_CYFRAME, dpi) : 0;
     BOOL boxes = !tool && (style & (WS_MINIMIZEBOX | WS_MAXIMIZEBOX));
+    UINT hot = HandleToUlong(GetPropW(hwnd, L"__wine_nc_hot"));   /* win32u: the button under the pointer */
     int text_left, text_right;
     HTHEME theme;
     RECT r;
@@ -877,7 +883,7 @@ static BOOL paint_aero_nc(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex_s
                                  : (active ? DWMW_BUTTONACTIVECLOSEALONE : DWMW_BUTTONINACTIVECLOSEALONE);
             else part = active ? DWMW_BUTTONACTIVECAPTION : DWMW_BUTTONINACTIVECAPTION;
             if (order[i].which == NCFRAME_BTN_MAX && max) glyph_part = DWMW_BUTTONRESTOREGLYPH96;
-            bstate = disabled ? 4 : pressed == order[i].which ? 3 : 1;
+            bstate = disabled ? 4 : pressed == order[i].which ? 3 : hot == order[i].which ? 2 : 1;
             SetRect(&r, x - bwidth, top, x, top + btn_h);
             if (rtl) SetRect(&r, w - r.right, r.top, w - r.left, r.bottom);
             DrawThemeBackground(theme, hdc, part, bstate, &r, NULL);
