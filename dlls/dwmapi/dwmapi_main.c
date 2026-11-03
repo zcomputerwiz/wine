@@ -490,6 +490,21 @@ HRESULT WINAPI DwmGetWindowAttribute(HWND hwnd, DWORD attribute, PVOID pv_attrib
             hr = HRESULT_FROM_WIN32(GetLastError());
 
         SetThreadDpiAwarenessContext(context);
+
+        /* Glass frames keep the outer bands as an invisible resize area; report the visible frame. */
+        if (hr == S_OK && GetPropW(hwnd, L"__wine_dwm_frame"))
+        {
+            DWORD style = GetWindowLongW(hwnd, GWL_STYLE);
+            if (!(style & (WS_MAXIMIZE | WS_MINIMIZE)))
+            {
+                UINT dpi = GetDpiForWindow(hwnd);
+                int bw = GetSystemMetricsForDpi((style & WS_THICKFRAME) ? SM_CXFRAME : SM_CXDLGFRAME, dpi);
+                int bh = GetSystemMetricsForDpi((style & WS_THICKFRAME) ? SM_CYFRAME : SM_CYDLGFRAME, dpi);
+                rect->left += bw - 1;
+                rect->right -= bw - 1;
+                rect->bottom -= bh - 1;
+            }
+        }
         break;
     }
     case DWMWA_NCRENDERING_ENABLED:

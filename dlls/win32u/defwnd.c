@@ -2010,6 +2010,8 @@ static BOOL get_dwm_frame_effects(void)
 static LRESULT handle_modern_nc_hit_test( HWND hwnd, POINT pt, const struct window_rects *rects,
                                           DWORD style, DWORD ex_style )
 {
+    static const WCHAR wine_dwm_frameW[] =
+        {'_','_','w','i','n','e','_','d','w','m','_','f','r','a','m','e',0};
     int w = rects->window.right - rects->window.left;
     int h = rects->window.bottom - rects->window.top;
     int x = pt.x - rects->window.left;
@@ -2022,6 +2024,9 @@ static LRESULT handle_modern_nc_hit_test( HWND hwnd, POINT pt, const struct wind
     int cap_h = get_system_metrics( tool ? SM_CYSMCAPTION : SM_CYCAPTION );
     int top_h = bh + cap_h;
     int btn_w = get_system_metrics( SM_CXSIZE );
+    /* Glass frames keep the outer bands as an invisible resize area; the caption buttons are inset to match. */
+    BOOL glass = !max && NtUserGetProp( hwnd, wine_dwm_frameW ) != NULL;
+    int btn_off = glass ? bw : 0;
 
     /* 1. Caption buttons take priority */
     if (y >= 0 && y < top_h)
@@ -2030,20 +2035,20 @@ static LRESULT handle_modern_nc_hit_test( HWND hwnd, POINT pt, const struct wind
         {
             if (rtl)
             {
-                if (x >= 0 && x < btn_w) return HTCLOSE;
+                if (x >= btn_off && x < btn_off + btn_w) return HTCLOSE;
                 if (!tool && (style & (WS_MINIMIZEBOX | WS_MAXIMIZEBOX)))
                 {
-                    if (x >= btn_w && x < 2 * btn_w) return HTMAXBUTTON;
-                    if (x >= 2 * btn_w && x < 3 * btn_w) return HTMINBUTTON;
+                    if (x >= btn_off + btn_w && x < btn_off + 2 * btn_w) return HTMAXBUTTON;
+                    if (x >= btn_off + 2 * btn_w && x < btn_off + 3 * btn_w) return HTMINBUTTON;
                 }
             }
             else
             {
-                if (x >= w - btn_w && x < w) return HTCLOSE;
+                if (x >= w - btn_off - btn_w && x < w - btn_off) return HTCLOSE;
                 if (!tool && (style & (WS_MINIMIZEBOX | WS_MAXIMIZEBOX)))
                 {
-                    if (x >= w - 2 * btn_w && x < w - btn_w) return HTMAXBUTTON;
-                    if (x >= w - 3 * btn_w && x < w - 2 * btn_w) return HTMINBUTTON;
+                    if (x >= w - btn_off - 2 * btn_w && x < w - btn_off - btn_w) return HTMAXBUTTON;
+                    if (x >= w - btn_off - 3 * btn_w && x < w - btn_off - 2 * btn_w) return HTMINBUTTON;
                 }
             }
         }

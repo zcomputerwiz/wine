@@ -480,7 +480,7 @@ static BOOL paint_modern_nc(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex
     BOOL rtl = !!(ex_style & WS_EX_LAYOUTRTL);
     int w = rect.right - rect.left, h = rect.bottom - rect.top;
     UINT dpi;
-    int bw, bh, cap_h, top_h, btn_w;
+    int bw, bh, cap_h, top_h, btn_w, btn_off;
     int nbtn = 0, i;
     struct nc_button btn[3];
     BOOL dark_mode = FALSE;
@@ -511,6 +511,8 @@ static BOOL paint_modern_nc(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex
     cap_h = GetSystemMetricsForDpi(tool ? SM_CYSMCAPTION : SM_CYCAPTION, dpi);
     top_h = bh + cap_h;
     btn_w = GetSystemMetricsForDpi(SM_CXSIZE, dpi);
+    /* Glass frames keep the outer bands as an invisible resize area; the visible frame and its buttons are inset. */
+    btn_off = (glass && !max) ? bw : 0;
 
     if (!target)
         nc_update_modern_region(hwnd, w, h);
@@ -590,30 +592,30 @@ static BOOL paint_modern_nc(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex
         if (rtl)
         {
             btn[nbtn].which = NCFRAME_BTN_CLOSE;
-            SetRect(&btn[nbtn].rect, 0, 0, btn_w, top_h);
+            SetRect(&btn[nbtn].rect, btn_off, 0, btn_off + btn_w, top_h);
             nbtn++;
             if (!tool && (style & (WS_MINIMIZEBOX | WS_MAXIMIZEBOX)))
             {
                 btn[nbtn].which = NCFRAME_BTN_MAX;
-                SetRect(&btn[nbtn].rect, btn_w, 0, 2 * btn_w, top_h);
+                SetRect(&btn[nbtn].rect, btn_off + btn_w, 0, btn_off + 2 * btn_w, top_h);
                 nbtn++;
                 btn[nbtn].which = NCFRAME_BTN_MIN;
-                SetRect(&btn[nbtn].rect, 2 * btn_w, 0, 3 * btn_w, top_h);
+                SetRect(&btn[nbtn].rect, btn_off + 2 * btn_w, 0, btn_off + 3 * btn_w, top_h);
                 nbtn++;
             }
         }
         else
         {
             btn[nbtn].which = NCFRAME_BTN_CLOSE;
-            SetRect(&btn[nbtn].rect, w - btn_w, 0, w, top_h);
+            SetRect(&btn[nbtn].rect, w - btn_off - btn_w, 0, w - btn_off, top_h);
             nbtn++;
             if (!tool && (style & (WS_MINIMIZEBOX | WS_MAXIMIZEBOX)))
             {
                 btn[nbtn].which = NCFRAME_BTN_MAX;
-                SetRect(&btn[nbtn].rect, w - 2 * btn_w, 0, w - btn_w, top_h);
+                SetRect(&btn[nbtn].rect, w - btn_off - 2 * btn_w, 0, w - btn_off - btn_w, top_h);
                 nbtn++;
                 btn[nbtn].which = NCFRAME_BTN_MIN;
-                SetRect(&btn[nbtn].rect, w - 3 * btn_w, 0, w - 2 * btn_w, top_h);
+                SetRect(&btn[nbtn].rect, w - btn_off - 3 * btn_w, 0, w - btn_off - 2 * btn_w, top_h);
                 nbtn++;
             }
         }
@@ -667,19 +669,33 @@ static BOOL paint_modern_nc(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex
         DeleteObject(br_frame);
     }
 
-    /* 3. 1px outer frame (restored only, unless DWMWA_COLOR_NONE) */
+    /* 3. 1px outer frame (restored only, unless DWMWA_COLOR_NONE); glass frames draw it along the visible frame */
     if (!max && border_attr != DWMWA_COLOR_NONE)
     {
         HBRUSH br_border = CreateSolidBrush(border_color);
         RECT r_edge;
-        SetRect(&r_edge, 0, 0, w, 1);
-        FillRect(hdc, &r_edge, br_border);
-        SetRect(&r_edge, 0, 0, 1, h);
-        FillRect(hdc, &r_edge, br_border);
-        SetRect(&r_edge, w - 1, 0, w, h);
-        FillRect(hdc, &r_edge, br_border);
-        SetRect(&r_edge, 0, h - 1, w, h);
-        FillRect(hdc, &r_edge, br_border);
+        if (glass)
+        {
+            SetRect(&r_edge, bw - 1, 0, w - bw + 1, 1);
+            FillRect(hdc, &r_edge, br_border);
+            SetRect(&r_edge, bw - 1, 0, bw, h - bh + 1);
+            FillRect(hdc, &r_edge, br_border);
+            SetRect(&r_edge, w - bw, 0, w - bw + 1, h - bh + 1);
+            FillRect(hdc, &r_edge, br_border);
+            SetRect(&r_edge, bw - 1, h - bh, w - bw + 1, h - bh + 1);
+            FillRect(hdc, &r_edge, br_border);
+        }
+        else
+        {
+            SetRect(&r_edge, 0, 0, w, 1);
+            FillRect(hdc, &r_edge, br_border);
+            SetRect(&r_edge, 0, 0, 1, h);
+            FillRect(hdc, &r_edge, br_border);
+            SetRect(&r_edge, w - 1, 0, w, h);
+            FillRect(hdc, &r_edge, br_border);
+            SetRect(&r_edge, 0, h - 1, w, h);
+            FillRect(hdc, &r_edge, br_border);
+        }
         DeleteObject(br_border);
     }
 
