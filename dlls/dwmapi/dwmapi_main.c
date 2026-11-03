@@ -123,22 +123,52 @@ static BOOL get_attribute_value(HWND hwnd, DWORD attribute, DWORD *value)
 }
 
 
+/* The development gates (docs/DWM_ARCHITECTURE.md), read once per process: DwmAlpha (glass), DwmFrameEffects (the
+ * non-client frame is glass too) and DwmMaterials (blur and accents; without it they make nothing glass). */
+static BOOL read_gate(const WCHAR *name)
+{
+    DWORD value = 0, cb = sizeof(value);
+    return RegGetValueW(HKEY_CURRENT_USER, L"Software\\WineExplorer\\Shell", name, RRF_RT_REG_DWORD, NULL,
+                        &value, &cb) == ERROR_SUCCESS && value != 0;
+}
+
+static BOOL dwm_composition_is_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0)
+    {
+        DWORD dwm_srv = 0, comp = 0, cb = sizeof(DWORD);
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\WineExplorer\\Shell", L"DwmService",
+                         RRF_RT_REG_DWORD, NULL, &dwm_srv, &cb) == ERROR_SUCCESS &&
+            RegGetValueW(HKEY_CURRENT_USER, L"Software\\WineExplorer\\Shell", L"Composition",
+                         RRF_RT_REG_DWORD, NULL, &comp, &cb) == ERROR_SUCCESS)
+        {
+            enabled = (dwm_srv != 0 && comp != 0);
+        }
+        else
+        {
+            RTL_OSVERSIONINFOEXW version;
+            version.dwOSVersionInfoSize = sizeof(version);
+            if (!RtlGetVersion(&version))
+                enabled = (version.dwMajorVersion > 6 || (version.dwMajorVersion == 6 && version.dwMinorVersion >= 3));
+            else
+                enabled = 0;
+        }
+    }
+    return enabled != 0;
+}
+
 /**********************************************************************
  *           DwmIsCompositionEnabled         (DWMAPI.@)
  */
 HRESULT WINAPI DwmIsCompositionEnabled(BOOL *enabled)
 {
-    RTL_OSVERSIONINFOEXW version;
-
     TRACE("%p\n", enabled);
 
     if (!enabled)
         return E_INVALIDARG;
 
-    *enabled = FALSE;
-    version.dwOSVersionInfoSize = sizeof(version);
-    if (!RtlGetVersion(&version))
-        *enabled = (version.dwMajorVersion > 6 || (version.dwMajorVersion == 6 && version.dwMinorVersion >= 3));
+    *enabled = dwm_composition_is_enabled();
 
     return S_OK;
 }
@@ -149,17 +179,9 @@ HRESULT WINAPI DwmIsCompositionEnabled(BOOL *enabled)
 HRESULT WINAPI DwmEnableComposition(UINT uCompositionAction)
 {
     FIXME("(%d) stub\n", uCompositionAction);
+    SendNotifyMessageW(HWND_BROADCAST, WM_DWMCOMPOSITIONCHANGED, 0, 0);
 
     return S_OK;
-}
-
-/* The development gates (docs/DWM_ARCHITECTURE.md), read once per process: DwmAlpha (glass), DwmFrameEffects (the
- * non-client frame is glass too) and DwmMaterials (blur and accents; without it they make nothing glass). */
-static BOOL read_gate(const WCHAR *name)
-{
-    DWORD value = 0, cb = sizeof(value);
-    return RegGetValueW(HKEY_CURRENT_USER, L"Software\\WineExplorer\\Shell", name, RRF_RT_REG_DWORD, NULL,
-                        &value, &cb) == ERROR_SUCCESS && value != 0;
 }
 
 static BOOL dwm_alpha_is_enabled(void)
@@ -699,13 +721,13 @@ HRESULT WINAPI DwmGetWindowAttribute(HWND hwnd, DWORD attribute, PVOID pv_attrib
     case DWMWA_NCRENDERING_POLICY:
     case DWMWA_ALLOW_NCPAINT:
     case DWMWA_FORCE_ICONIC_REPRESENTATION:
-    case DWMWA_FLIP3D_POLICY:
     case DWMWA_DISALLOW_PEEK:
-    case DWMWA_EXCLUDED_FROM_PEEK:
     case DWMWA_FREEZE_REPRESENTATION:
     case DWMWA_PASSIVE_UPDATE_MODE:
         hr = E_INVALIDARG;
         break;
+    case DWMWA_FLIP3D_POLICY:
+    case DWMWA_EXCLUDED_FROM_PEEK:
     case DWMWA_USE_IMMERSIVE_DARK_MODE:
     case DWMWA_WINDOW_CORNER_PREFERENCE:
     case DWMWA_BORDER_COLOR:
@@ -1299,13 +1321,114 @@ HRESULT WINAPI DwmSetIconicThumbnail(HWND hwnd, HBITMAP hbmp, DWORD flags)
     return store_iconic(hwnd, 0, hbmp, NULL, flags);
 }
 
+typedef struct _DWMCOLORIZATIONPARAMS
+{
+    COLORREF clrColor;
+    COLORREF clrAfterGlow;
+    UINT nIntensity;
+    UINT clrAfterGlowBalance;
+    UINT clrBlurBalance;
+    UINT clrGlassReflectionIntensity;
+    BOOL fOpaque;
+} DWMCOLORIZATIONPARAMS;
+
 /**********************************************************************
  *           DwmpGetColorizationParameters         (DWMAPI.@)
  */
 HRESULT WINAPI DwmpGetColorizationParameters(void *params)
 {
-    FIXME("(%p) stub\n", params);
-    return E_NOTIMPL;
+    DWMCOLORIZATIONPARAMS *p = params;
+    DWORD type, value, cbData;
+
+    TRACE("(%p)\n", params);
+
+    if (!p)
+        return E_INVALIDARG;
+
+    p->clrColor = 0xC40078D7;
+    p->clrAfterGlow = 0xC40078D7;
+    p->nIntensity = 54;
+    p->clrAfterGlowBalance = 43;
+    p->clrBlurBalance = 49;
+    p->clrGlassReflectionIntensity = 50;
+    p->fOpaque = FALSE;
+
+    cbData = sizeof(value);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM",
+                     L"ColorizationColor", RRF_RT_REG_DWORD, &type, &value, &cbData) == ERROR_SUCCESS)
+        p->clrColor = value;
+
+    cbData = sizeof(value);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM",
+                     L"ColorizationAfterglow", RRF_RT_REG_DWORD, &type, &value, &cbData) == ERROR_SUCCESS)
+        p->clrAfterGlow = value;
+
+    cbData = sizeof(value);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM",
+                     L"ColorizationColorBalance", RRF_RT_REG_DWORD, &type, &value, &cbData) == ERROR_SUCCESS)
+        p->nIntensity = value;
+
+    cbData = sizeof(value);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM",
+                     L"ColorizationAfterglowBalance", RRF_RT_REG_DWORD, &type, &value, &cbData) == ERROR_SUCCESS)
+        p->clrAfterGlowBalance = value;
+
+    cbData = sizeof(value);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM",
+                     L"ColorizationBlurBalance", RRF_RT_REG_DWORD, &type, &value, &cbData) == ERROR_SUCCESS)
+        p->clrBlurBalance = value;
+
+    cbData = sizeof(value);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM",
+                     L"ColorizationGlassReflectionIntensity", RRF_RT_REG_DWORD, &type, &value, &cbData) == ERROR_SUCCESS)
+        p->clrGlassReflectionIntensity = value;
+
+    cbData = sizeof(value);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM",
+                     L"ColorizationOpaqueBlend", RRF_RT_REG_DWORD, &type, &value, &cbData) == ERROR_SUCCESS)
+        p->fOpaque = (value != 0);
+
+    return S_OK;
+}
+
+HRESULT WINAPI DwmGetColorizationParameters(DWMCOLORIZATIONPARAMS *params)
+{
+    return DwmpGetColorizationParameters(params);
+}
+
+/**********************************************************************
+ *           DwmpSetColorizationParameters         (DWMAPI.@)
+ */
+HRESULT WINAPI DwmpSetColorizationParameters(DWMCOLORIZATIONPARAMS *params, UINT unknown)
+{
+    HKEY hkey;
+
+    TRACE("(%p, %u)\n", params, unknown);
+
+    if (!params)
+        return E_INVALIDARG;
+
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM",
+                        0, NULL, 0, KEY_SET_VALUE, NULL, &hkey, NULL) == ERROR_SUCCESS)
+    {
+        DWORD opaque = params->fOpaque ? 1 : 0;
+        RegSetValueExW(hkey, L"ColorizationColor", 0, REG_DWORD, (const BYTE *)&params->clrColor, sizeof(DWORD));
+        RegSetValueExW(hkey, L"ColorizationAfterglow", 0, REG_DWORD, (const BYTE *)&params->clrAfterGlow, sizeof(DWORD));
+        RegSetValueExW(hkey, L"ColorizationColorBalance", 0, REG_DWORD, (const BYTE *)&params->nIntensity, sizeof(DWORD));
+        RegSetValueExW(hkey, L"ColorizationAfterglowBalance", 0, REG_DWORD, (const BYTE *)&params->clrAfterGlowBalance, sizeof(DWORD));
+        RegSetValueExW(hkey, L"ColorizationBlurBalance", 0, REG_DWORD, (const BYTE *)&params->clrBlurBalance, sizeof(DWORD));
+        RegSetValueExW(hkey, L"ColorizationGlassReflectionIntensity", 0, REG_DWORD, (const BYTE *)&params->clrGlassReflectionIntensity, sizeof(DWORD));
+        RegSetValueExW(hkey, L"ColorizationOpaqueBlend", 0, REG_DWORD, (const BYTE *)&opaque, sizeof(DWORD));
+        RegCloseKey(hkey);
+    }
+
+    SendNotifyMessageW(HWND_BROADCAST, WM_DWMCOLORIZATIONCOLORCHANGED, params->clrColor, params->fOpaque ? 1 : 0);
+    return S_OK;
+}
+
+HRESULT WINAPI DwmSetColorizationParameters(DWMCOLORIZATIONPARAMS *params, UINT unknown)
+{
+    return DwmpSetColorizationParameters(params, unknown);
 }
 
 /**********************************************************************

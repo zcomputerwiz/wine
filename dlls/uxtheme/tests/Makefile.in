@@ -2,6 +2,7 @@ TESTDLL   = uxtheme.dll
 IMPORTS   = advapi32 user32 gdi32 uxtheme
 
 SOURCES = \
+	glass.c \
 	ncframe.c \
 	system.c \
 	v4.c \

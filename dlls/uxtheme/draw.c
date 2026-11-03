@@ -1843,6 +1843,18 @@ HRESULT WINAPI DrawThemeText(HTHEME hTheme, HDC hdc, int iPartId, int iStateId,
     return DrawThemeTextEx(hTheme, hdc, iPartId, iStateId, pszText, iCharCount, flags, &rt, &opts);
 }
 
+static inline DWORD blend_pixel_argb(DWORD dst, DWORD src)
+{
+    BYTE b = (BYTE)src;
+    BYTE g = (BYTE)(src >> 8);
+    BYTE r = (BYTE)(src >> 16);
+    DWORD alpha = (BYTE)(src >> 24);
+    return ((b     + ((BYTE)dst         * (255 - alpha) + 127) / 255) |
+            (g     + ((BYTE)(dst >> 8)  * (255 - alpha) + 127) / 255) << 8 |
+            (r     + ((BYTE)(dst >> 16) * (255 - alpha) + 127) / 255) << 16 |
+            (alpha + ((BYTE)(dst >> 24) * (255 - alpha) + 127) / 255) << 24);
+}
+
 /***********************************************************************
  *      DrawThemeTextEx                                     (UXTHEME.@)
  */
@@ -1857,28 +1869,59 @@ HRESULT WINAPI DrawThemeTextEx(HTHEME hTheme, HDC hdc, int iPartId, int iStateId
     COLORREF oldTextColor;
     int oldBkMode;
     int fontProp = TMT_FONT;
+    int stateId = iStateId;
+    BOOL hasTextColor = FALSE;
+    BOOL composited = FALSE;
+    BOOL calcRect = FALSE;
+    int glowSize = 0;
+    int borderSize = 0;
+    COLORREF borderColor = RGB(0, 0, 0);
+    COLORREF shadowColor = RGB(0, 0, 0);
+    POINT shadowOffset = { 0, 0 };
 
     TRACE("%p %p %d %d %s:%d 0x%08lx %p %p\n", hTheme, hdc, iPartId, iStateId,
         debugstr_wn(pszText, iCharCount), iCharCount, flags, rect, options);
 
     if(!hTheme)
         return E_HANDLE;
+    if(!rect)
+        return E_POINTER;
 
     if(options) {
-        if(options->dwFlags & ~(DTT_TEXTCOLOR | DTT_FONTPROP))
-            FIXME("unsupported flags 0x%08lx\n", options->dwFlags);
         if(options->dwFlags & DTT_FONTPROP)
             fontProp = options->iFontPropId;
-        if(options->dwFlags & DTT_TEXTCOLOR)
+        if(options->dwFlags & DTT_STATEID)
+            stateId = options->iStateId;
+        if(options->dwFlags & DTT_TEXTCOLOR) {
             textColor = options->crText;
+            hasTextColor = TRUE;
+        } else if(options->dwFlags & DTT_COLORPROP) {
+            if(FAILED(GetThemeColor(hTheme, iPartId, stateId, options->iColorPropId, &textColor)))
+                textColor = GetThemeSysColor(hTheme, options->iColorPropId);
+            hasTextColor = TRUE;
+        }
+        if(options->dwFlags & DTT_GLOWSIZE)
+            glowSize = options->iGlowSize;
+        if(options->dwFlags & DTT_COMPOSITED)
+            composited = TRUE;
+        if(options->dwFlags & DTT_CALCRECT)
+            calcRect = TRUE;
+        if(options->dwFlags & DTT_BORDERCOLOR)
+            borderColor = options->crBorder;
+        if(options->dwFlags & DTT_BORDERSIZE)
+            borderSize = options->iBorderSize;
+        if(options->dwFlags & DTT_SHADOWCOLOR)
+            shadowColor = options->crShadow;
+        if(options->dwFlags & DTT_SHADOWOFFSET)
+            shadowOffset = options->ptShadowOffset;
     }
 
-    if(!options || !(options->dwFlags & DTT_TEXTCOLOR)) {
-        if(FAILED(GetThemeColor(hTheme, iPartId, iStateId, TMT_TEXTCOLOR, &textColor)))
+    if(!hasTextColor) {
+        if(FAILED(GetThemeColor(hTheme, iPartId, stateId, TMT_TEXTCOLOR, &textColor)))
             textColor = GetTextColor(hdc);
     }
 
-    hr = GetThemeFont(hTheme, hdc, iPartId, iStateId, fontProp, &logfont);
+    hr = GetThemeFont(hTheme, hdc, iPartId, stateId, fontProp, &logfont);
     if(SUCCEEDED(hr)) {
         hFont = CreateFontIndirectW(&logfont);
         if(!hFont)
@@ -1888,11 +1931,204 @@ HRESULT WINAPI DrawThemeTextEx(HTHEME hTheme, HDC hdc, int iPartId, int iStateId
     if(hFont)
         oldFont = SelectObject(hdc, hFont);
 
-    oldTextColor = SetTextColor(hdc, textColor);
-    oldBkMode = SetBkMode(hdc, TRANSPARENT);
-    DrawTextW(hdc, pszText, iCharCount, rect, flags);
-    SetBkMode(hdc, oldBkMode);
-    SetTextColor(hdc, oldTextColor);
+    if(calcRect || (flags & DT_CALCRECT)) {
+        DrawTextW(hdc, pszText, iCharCount, rect, flags | DT_CALCRECT);
+        if(hFont) {
+            SelectObject(hdc, oldFont);
+            DeleteObject(hFont);
+        }
+        return S_OK;
+    }
+
+    if(!composited) {
+        if((options && (options->dwFlags & DTT_SHADOWCOLOR)) && (shadowOffset.x || shadowOffset.y)) {
+            RECT rc_shadow = *rect;
+            OffsetRect(&rc_shadow, shadowOffset.x, shadowOffset.y);
+            oldTextColor = SetTextColor(hdc, shadowColor);
+            oldBkMode = SetBkMode(hdc, TRANSPARENT);
+            DrawTextW(hdc, pszText, iCharCount, &rc_shadow, flags);
+            SetBkMode(hdc, oldBkMode);
+            SetTextColor(hdc, oldTextColor);
+        }
+
+        if(borderSize > 0) {
+            int bx, by;
+            oldTextColor = SetTextColor(hdc, borderColor);
+            oldBkMode = SetBkMode(hdc, TRANSPARENT);
+            for(by = -borderSize; by <= borderSize; by++) {
+                for(bx = -borderSize; bx <= borderSize; bx++) {
+                    if(bx == 0 && by == 0) continue;
+                    RECT rc_b = *rect;
+                    OffsetRect(&rc_b, bx, by);
+                    DrawTextW(hdc, pszText, iCharCount, &rc_b, flags);
+                }
+            }
+            SetBkMode(hdc, oldBkMode);
+            SetTextColor(hdc, oldTextColor);
+        }
+
+        oldTextColor = SetTextColor(hdc, textColor);
+        oldBkMode = SetBkMode(hdc, TRANSPARENT);
+        DrawTextW(hdc, pszText, iCharCount, rect, flags);
+        SetBkMode(hdc, oldBkMode);
+        SetTextColor(hdc, oldTextColor);
+
+        if(hFont) {
+            SelectObject(hdc, oldFont);
+            DeleteObject(hFont);
+        }
+        return S_OK;
+    }
+
+    /* DTT_COMPOSITED path */
+    {
+        int w = rect->right - rect->left;
+        int h = rect->bottom - rect->top;
+        BITMAPINFO info = {{ sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB }};
+        HDC dcMem[2] = { 0 };
+        HBITMAP bmpMem[2] = { 0 };
+        DWORD *bitsMem[2] = { 0 };
+        RECT local_rect = { 0, 0, w, h };
+        BYTE *text_alpha = NULL;
+        BYTE *glow_alpha = NULL;
+        int i, n;
+
+        if(w <= 0 || h <= 0) {
+            if(hFont) {
+                SelectObject(hdc, oldFont);
+                DeleteObject(hFont);
+            }
+            return S_OK;
+        }
+
+        for(i = 0; i < 2; i++) {
+            dcMem[i] = CreateCompatibleDC(hdc);
+            if(!dcMem[i]) goto cleanup_composited;
+            bmpMem[i] = CreateDIBSection(dcMem[i], &info, DIB_RGB_COLORS, (void **)&bitsMem[i], NULL, 0);
+            if(!bmpMem[i]) goto cleanup_composited;
+            SelectObject(dcMem[i], bmpMem[i]);
+            FillRect(dcMem[i], &local_rect, GetStockObject(i ? WHITE_BRUSH : BLACK_BRUSH));
+
+            if(hFont)
+                SelectObject(dcMem[i], hFont);
+            else {
+                HFONT curFont = (HFONT)GetCurrentObject(hdc, OBJ_FONT);
+                if(curFont) SelectObject(dcMem[i], curFont);
+            }
+
+            SetBkMode(dcMem[i], TRANSPARENT);
+            SetTextColor(dcMem[i], textColor);
+
+            if(options && (options->dwFlags & DTT_CALLBACK) && options->pfnDrawTextCallback) {
+                RECT rc_cb = local_rect;
+                options->pfnDrawTextCallback(dcMem[i], (LPWSTR)pszText, iCharCount, &rc_cb, flags, options->lParam);
+            } else {
+                RECT rc_dt = local_rect;
+                DrawTextW(dcMem[i], pszText, iCharCount, &rc_dt, flags);
+            }
+        }
+        GdiFlush();
+
+        text_alpha = malloc(w * h);
+        if(!text_alpha) goto cleanup_composited;
+
+        for(n = 0; n < w * h; n++) {
+            DWORD black = bitsMem[0][n], white = bitsMem[1][n];
+            int dr = 255 - (int)((white >> 16) & 0xff) + (int)((black >> 16) & 0xff);
+            int dg = 255 - (int)((white >> 8) & 0xff) + (int)((black >> 8) & 0xff);
+            int db = 255 - (int)(white & 0xff) + (int)(black & 0xff);
+            int a = max(dr, max(dg, db));
+            a = max(0, min(255, a));
+            text_alpha[n] = (BYTE)a;
+        }
+
+        if(glowSize > 0) {
+            BYTE *tmp_h = malloc(w * h);
+            glow_alpha = malloc(w * h);
+            if(tmp_h && glow_alpha) {
+                int R = glowSize;
+                int x, y;
+                for(y = 0; y < h; y++) {
+                    int row = y * w;
+                    for(x = 0; x < w; x++) {
+                        int sum = 0;
+                        int k0 = max(0, x - R);
+                        int k1 = min(w - 1, x + R);
+                        int k;
+                        for(k = k0; k <= k1; k++)
+                            sum += text_alpha[row + k];
+                        tmp_h[row + x] = (BYTE)(sum / (2 * R + 1));
+                    }
+                }
+                for(x = 0; x < w; x++) {
+                    for(y = 0; y < h; y++) {
+                        int sum = 0;
+                        int k0 = max(0, y - R);
+                        int k1 = min(h - 1, y + R);
+                        int k;
+                        for(k = k0; k <= k1; k++)
+                            sum += tmp_h[k * w + x];
+                        int val = (sum / (2 * R + 1)) * 4;
+                        if(val > 255) val = 255;
+                        glow_alpha[y * w + x] = (BYTE)val;
+                    }
+                }
+            }
+            free(tmp_h);
+        }
+
+        {
+            COLORREF glowColor = textColor;
+            int r_text = GetRValue(textColor), g_text = GetGValue(textColor), b_text = GetBValue(textColor);
+            int r_glow, g_glow, b_glow;
+
+            if(glowSize > 0) {
+                if(FAILED(GetThemeColor(hTheme, iPartId, stateId, TMT_GLOWCOLOR, &glowColor)))
+                    glowColor = textColor;
+            }
+            r_glow = GetRValue(glowColor);
+            g_glow = GetGValue(glowColor);
+            b_glow = GetBValue(glowColor);
+
+            for(n = 0; n < w * h; n++) {
+                int ta = text_alpha[n];
+                int ga = (glow_alpha && glowSize > 0) ? glow_alpha[n] : 0;
+
+                int tr = (r_text * ta + 127) / 255;
+                int tg = (g_text * ta + 127) / 255;
+                int tb = (b_text * ta + 127) / 255;
+
+                int gr = (r_glow * ga + 127) / 255;
+                int gg = (g_glow * ga + 127) / 255;
+                int gb = (b_glow * ga + 127) / 255;
+
+                int out_a = ta + (ga * (255 - ta) + 127) / 255;
+                int out_r = tr + (gr * (255 - ta) + 127) / 255;
+                int out_g = tg + (gg * (255 - ta) + 127) / 255;
+                int out_b = tb + (gb * (255 - ta) + 127) / 255;
+
+                out_a = max(0, min(255, out_a));
+                out_r = max(0, min(255, out_r));
+                out_g = max(0, min(255, out_g));
+                out_b = max(0, min(255, out_b));
+
+                bitsMem[0][n] = ((DWORD)out_a << 24) | (out_r << 16) | (out_g << 8) | out_b;
+            }
+        }
+
+        {
+            BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+            GdiAlphaBlend(hdc, rect->left, rect->top, w, h, dcMem[0], 0, 0, w, h, bf);
+        }
+
+cleanup_composited:
+        free(text_alpha);
+        free(glow_alpha);
+        for(i = 0; i < 2; i++) {
+            if(dcMem[i]) DeleteDC(dcMem[i]);
+            if(bmpMem[i]) DeleteObject(bmpMem[i]);
+        }
+    }
 
     if(hFont) {
         SelectObject(hdc, oldFont);

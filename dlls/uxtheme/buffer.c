@@ -28,6 +28,7 @@
 #include "wingdi.h"
 #include "vfwmsgs.h"
 #include "uxtheme.h"
+#include "uxthemedll.h"
 
 #include "wine/debug.h"
 
@@ -40,6 +41,9 @@ struct paintbuffer
     HBITMAP bitmap;
     RECT rect;
     void *bits;
+    BP_BUFFERFORMAT format;
+    BP_PAINTPARAMS params;
+    BOOL has_params;
 };
 
 static void free_paintbuffer(struct paintbuffer *buffer)
@@ -91,13 +95,19 @@ HPAINTBUFFER WINAPI BeginBufferedPaint(HDC targetdc, const RECT *rect,
     if (!targetdc || IsRectEmpty(rect))
         return NULL;
 
-    if (params)
-        FIXME("painting parameters are ignored\n");
+    buffer = calloc(1, sizeof(*buffer));
+    if (!buffer)
+        return NULL;
 
-    buffer = malloc(sizeof(*buffer));
     buffer->targetdc = targetdc;
     buffer->rect = *rect;
+    buffer->format = format;
     buffer->memorydc = CreateCompatibleDC(targetdc);
+    if (params)
+    {
+        buffer->params = *params;
+        buffer->has_params = TRUE;
+    }
 
     switch (format)
     {
@@ -134,8 +144,44 @@ HPAINTBUFFER WINAPI BeginBufferedPaint(HDC targetdc, const RECT *rect,
     }
 
     SetWindowOrgEx(buffer->memorydc, rect->left, rect->top, NULL);
+    if (!params || !(params->dwFlags & BPPF_NOCLIP))
+    {
+        HRGN hrgn = CreateRectRgn(0, 0, 0, 0);
+        if (hrgn)
+        {
+            if (GetClipRgn(targetdc, hrgn) > 0 || GetRandomRgn(targetdc, hrgn, SYSRGN) > 0)
+            {
+                POINT org;
+                GetWindowOrgEx(targetdc, &org);
+                OffsetRgn(hrgn, rect->left - org.x, rect->top - org.y);
+                ExtSelectClipRgn(buffer->memorydc, hrgn, RGN_AND);
+            }
+            DeleteObject(hrgn);
+        }
+    }
     IntersectClipRect(buffer->memorydc, rect->left, rect->top, rect->right, rect->bottom);
+    if (params && params->prcExclude && !IsRectEmpty(params->prcExclude))
+    {
+        ExcludeClipRect(buffer->memorydc, params->prcExclude->left, params->prcExclude->top,
+                        params->prcExclude->right, params->prcExclude->bottom);
+    }
     DeleteObject(SelectObject(buffer->memorydc, buffer->bitmap));
+
+    if (params && (params->dwFlags & BPPF_ERASE))
+    {
+        int w = rect->right - rect->left;
+        int h = rect->bottom - rect->top;
+        if (buffer->bits)
+        {
+            int bpp = (format == BPBF_TOPDOWNMONODIB) ? 1 : 32;
+            int stride = ((w * bpp + 31) & ~31) / 8;
+            memset(buffer->bits, 0, stride * h);
+        }
+        else
+        {
+            PatBlt(buffer->memorydc, rect->left, rect->top, w, h, BLACKNESS);
+        }
+    }
 
     *retdc = buffer->memorydc;
 
@@ -156,11 +202,44 @@ HRESULT WINAPI EndBufferedPaint(HPAINTBUFFER bufferhandle, BOOL update)
 
     if (update)
     {
-        if (!BitBlt(buffer->targetdc, buffer->rect.left, buffer->rect.top,
-                buffer->rect.right - buffer->rect.left, buffer->rect.bottom - buffer->rect.top,
-                buffer->memorydc, buffer->rect.left, buffer->rect.top, SRCCOPY))
+        int w = buffer->rect.right - buffer->rect.left;
+        int h = buffer->rect.bottom - buffer->rect.top;
+        HWND hwnd = WindowFromDC(buffer->targetdc);
+        BOOL is_glass = hwnd && (GetPropW(hwnd, L"__wine_dwm_alpha") != NULL);
+        HBITMAP target_bmp = GetCurrentObject(buffer->targetdc, OBJ_BITMAP);
+        DIBSECTION ds;
+        BOOL is_32bit_target = (GetObjectW(target_bmp, sizeof(ds), &ds) == sizeof(ds) && ds.dsBm.bmBitsPixel == 32);
+        BOOL use_alpha = FALSE;
+
+        if (buffer->has_params && buffer->params.pBlendFunction)
+            use_alpha = TRUE;
+        else if (is_glass)
+            use_alpha = TRUE;
+
+        if (use_alpha)
         {
-            WARN("BitBlt() failed\n");
+            BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+            if (buffer->has_params && buffer->params.pBlendFunction)
+                bf = *buffer->params.pBlendFunction;
+
+            if (!GdiAlphaBlend(buffer->targetdc, buffer->rect.left, buffer->rect.top, w, h,
+                               buffer->memorydc, buffer->rect.left, buffer->rect.top, w, h, bf))
+            {
+                WARN("GdiAlphaBlend() failed\n");
+            }
+        }
+        else if (is_32bit_target && buffer->bits)
+        {
+            BitBlt(buffer->targetdc, buffer->rect.left, buffer->rect.top, w, h,
+                   buffer->memorydc, buffer->rect.left, buffer->rect.top, SRCCOPY);
+        }
+        else
+        {
+            if (!BitBlt(buffer->targetdc, buffer->rect.left, buffer->rect.top, w, h,
+                        buffer->memorydc, buffer->rect.left, buffer->rect.top, SRCCOPY))
+            {
+                WARN("BitBlt() failed\n");
+            }
         }
     }
 
@@ -173,8 +252,56 @@ HRESULT WINAPI EndBufferedPaint(HPAINTBUFFER bufferhandle, BOOL update)
  */
 HRESULT WINAPI BufferedPaintClear(HPAINTBUFFER hBufferedPaint, const RECT *prc)
 {
-    FIXME("Stub (%p %p)\n", hBufferedPaint, prc);
-    return E_NOTIMPL;
+    struct paintbuffer *buffer = get_buffer_obj(hBufferedPaint);
+    int w, h, x0, x1, y0, y1, y;
+    RGBQUAD *pixels;
+
+    TRACE("(%p %p)\n", hBufferedPaint, prc);
+
+    if (!buffer)
+        return E_INVALIDARG;
+
+    if (!buffer->bits)
+        return S_OK;
+
+    w = buffer->rect.right - buffer->rect.left;
+    h = buffer->rect.bottom - buffer->rect.top;
+    if (w <= 0 || h <= 0)
+        return S_OK;
+
+    pixels = (RGBQUAD *)buffer->bits;
+
+    if (!prc)
+    {
+        memset(buffer->bits, 0, w * h * sizeof(RGBQUAD));
+        return S_OK;
+    }
+
+    if (prc->left >= buffer->rect.left && prc->top >= buffer->rect.top)
+    {
+        x0 = max(0, prc->left - buffer->rect.left);
+        x1 = min(w, prc->right - buffer->rect.left);
+        y0 = max(0, prc->top - buffer->rect.top);
+        y1 = min(h, prc->bottom - buffer->rect.top);
+    }
+    else
+    {
+        x0 = max(0, prc->left);
+        x1 = min(w, prc->right);
+        y0 = max(0, prc->top);
+        y1 = min(h, prc->bottom);
+    }
+
+    if (x1 <= x0 || y1 <= y0)
+        return S_OK;
+
+    for (y = y0; y < y1; y++)
+    {
+        int row = (buffer->format == BPBF_DIB) ? (h - 1 - y) : y;
+        memset(&pixels[row * w + x0], 0, (x1 - x0) * sizeof(RGBQUAD));
+    }
+
+    return S_OK;
 }
 
 /***********************************************************************
@@ -182,8 +309,58 @@ HRESULT WINAPI BufferedPaintClear(HPAINTBUFFER hBufferedPaint, const RECT *prc)
  */
 HRESULT WINAPI BufferedPaintSetAlpha(HPAINTBUFFER hBufferedPaint, const RECT *prc, BYTE alpha)
 {
-    FIXME("Stub (%p %p %u)\n", hBufferedPaint, prc, alpha);
-    return E_NOTIMPL;
+    struct paintbuffer *buffer = get_buffer_obj(hBufferedPaint);
+    int w, h, x0, x1, y0, y1, x, y;
+    RGBQUAD *pixels;
+
+    TRACE("(%p %p %u)\n", hBufferedPaint, prc, alpha);
+
+    if (!buffer)
+        return E_INVALIDARG;
+
+    if (!buffer->bits)
+        return E_FAIL;
+
+    w = buffer->rect.right - buffer->rect.left;
+    h = buffer->rect.bottom - buffer->rect.top;
+    if (w <= 0 || h <= 0)
+        return S_OK;
+
+    pixels = (RGBQUAD *)buffer->bits;
+
+    if (!prc)
+    {
+        for (x = 0; x < w * h; x++)
+            pixels[x].rgbReserved = alpha;
+        return S_OK;
+    }
+
+    if (prc->left >= buffer->rect.left && prc->top >= buffer->rect.top)
+    {
+        x0 = max(0, prc->left - buffer->rect.left);
+        x1 = min(w, prc->right - buffer->rect.left);
+        y0 = max(0, prc->top - buffer->rect.top);
+        y1 = min(h, prc->bottom - buffer->rect.top);
+    }
+    else
+    {
+        x0 = max(0, prc->left);
+        x1 = min(w, prc->right);
+        y0 = max(0, prc->top);
+        y1 = min(h, prc->bottom);
+    }
+
+    if (x1 <= x0 || y1 <= y0)
+        return S_OK;
+
+    for (y = y0; y < y1; y++)
+    {
+        int row = (buffer->format == BPBF_DIB) ? (h - 1 - y) : y;
+        for (x = x0; x < x1; x++)
+            pixels[row * w + x].rgbReserved = alpha;
+    }
+
+    return S_OK;
 }
 
 /***********************************************************************

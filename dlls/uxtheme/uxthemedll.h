@@ -127,6 +127,16 @@ LRESULT WINAPI UXTHEME_ScrollbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 /* Full alpha blending */
 #define ALPHABLEND_FULL             2
 
+#ifndef BPPF_ERASE
+#define BPPF_ERASE      0x0001
+#endif
+#ifndef BPPF_NOCLIP
+#define BPPF_NOCLIP     0x0002
+#endif
+#ifndef BPPF_NONCLIENT
+#define BPPF_NONCLIENT  0x0004
+#endif
+
 HTHEME UXTHEME_OpenNonClientTheme(UINT dpi);
 void uxtheme_reset_dwm_settings(void);
 

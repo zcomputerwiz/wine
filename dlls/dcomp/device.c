@@ -112,6 +112,7 @@ struct dcomp_visual
     struct dcomp_visual *pending_parent;
     struct dcomp_visual *pending_children;
     struct dcomp_visual *pending_next_sibling;
+    BOOL is_root;
 
     /* Active state (applied atomically on Commit) */
     struct dcomp_visual_state active;
@@ -139,6 +140,7 @@ struct dcomp_device
     IDCompositionDevice2 IDCompositionDevice2_iface;
     IDCompositionDevice3 IDCompositionDevice3_iface;
     IDCompositionDesktopDevice IDCompositionDesktopDevice_iface;
+    int version;
     LONG refcount;
     struct list targets;
     CRITICAL_SECTION cs;
@@ -505,7 +507,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_QueryInterface(IDCompositionVisual
 
     if (IsEqualGUID(iid, &IID_IUnknown) ||
         IsEqualGUID(iid, &IID_IDCompositionVisual) ||
-        IsEqualGUID(iid, &IID_IDCompositionVisual2))
+        (visual->device->version >= 2 && IsEqualGUID(iid, &IID_IDCompositionVisual2)))
     {
         *out = &visual->IDCompositionVisual2_iface;
         IDCompositionVisual2_AddRef(iface);
@@ -546,13 +548,23 @@ static ULONG STDMETHODCALLTYPE dcomp_visual_Release(IDCompositionVisual2 *iface)
         dcomp_visual_state_cleanup(&visual->pending);
         dcomp_visual_state_cleanup(&visual->active);
 
+        if (visual->pending_parent)
+        {
+            struct dcomp_visual **p = &visual->pending_parent->pending_children;
+            while (*p && *p != visual)
+                p = &(*p)->pending_next_sibling;
+            if (*p)
+                *p = visual->pending_next_sibling;
+            visual->pending_parent = NULL;
+            visual->pending_next_sibling = NULL;
+        }
+
         while (visual->pending_children)
         {
             struct dcomp_visual *child = visual->pending_children;
             visual->pending_children = child->pending_next_sibling;
             child->pending_parent = NULL;
             child->pending_next_sibling = NULL;
-            IDCompositionVisual2_Release(&child->IDCompositionVisual2_iface);
         }
 
         while (visual->active_children)
@@ -583,7 +595,6 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetOffsetX_locked(IDCompositionVis
 {
     struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
     TRACE("iface %p, offset_x %f.\n", iface, offset_x);
-    if (!isfinite(offset_x) || fabsf(offset_x) > 1048576) return E_INVALIDARG;
     visual->pending.offset_x = offset_x;
     return S_OK;
 }
@@ -610,7 +621,6 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetOffsetY_locked(IDCompositionVis
 {
     struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
     TRACE("iface %p, offset_y %f.\n", iface, offset_y);
-    if (!isfinite(offset_y) || fabsf(offset_y) > 1048576) return E_INVALIDARG;
     visual->pending.offset_y = offset_y;
     return S_OK;
 }
@@ -886,6 +896,18 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetContent_locked(IDCompositionVis
     TRACE("iface %p, content %p.\n", iface, content);
 
     if (content)
+    {
+        void *dummy;
+        if (FAILED(IUnknown_QueryInterface(content, &IID_IDXGISwapChain1, &dummy))
+                && FAILED(IUnknown_QueryInterface(content, &IID_IDCompositionSurface, &dummy))
+                && FAILED(IUnknown_QueryInterface(content, &IID_IWineDCompSwapChain, &dummy)))
+        {
+            return E_INVALIDARG;
+        }
+        IUnknown_Release((IUnknown *)dummy);
+    }
+
+    if (content)
         IUnknown_AddRef(content);
     if (visual->pending.content)
         IUnknown_Release(visual->pending.content);
@@ -923,6 +945,9 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_AddVisual_locked(IDCompositionVisu
     child = impl_from_IDCompositionVisual(visual);
     if (child->device != parent->device) return E_INVALIDARG;
 
+    if (child->is_root || child->pending_parent)
+        return E_INVALIDARG;
+
     /* Cycle detection: parent cannot be child or any descendant of child */
     for (cur = parent; cur; cur = cur->pending_parent)
     {
@@ -941,24 +966,6 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_AddVisual_locked(IDCompositionVisu
             p = &(*p)->pending_next_sibling;
         if (!*p)
             return E_INVALIDARG;
-    }
-
-    /* Keep the child alive while its old parent drops its owning reference. */
-    IDCompositionVisual2_AddRef(&child->IDCompositionVisual2_iface);
-    /* If child is already in a parent's pending list, reparent it */
-    if (child->pending_parent)
-    {
-        struct dcomp_visual *old_parent = child->pending_parent;
-        p = &old_parent->pending_children;
-        while (*p && *p != child)
-            p = &(*p)->pending_next_sibling;
-        if (*p)
-        {
-            *p = child->pending_next_sibling;
-            child->pending_parent = NULL;
-            child->pending_next_sibling = NULL;
-            IDCompositionVisual2_Release(&child->IDCompositionVisual2_iface);
-        }
     }
 
     child->pending_parent = parent;
@@ -1033,7 +1040,6 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_RemoveVisual_locked(IDCompositionV
         *p = child->pending_next_sibling;
         child->pending_parent = NULL;
         child->pending_next_sibling = NULL;
-        IDCompositionVisual2_Release(&child->IDCompositionVisual2_iface);
         return S_OK;
     }
 
@@ -1064,7 +1070,6 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_RemoveAllVisuals_locked(IDComposit
         parent->pending_children = child->pending_next_sibling;
         child->pending_parent = NULL;
         child->pending_next_sibling = NULL;
-        IDCompositionVisual2_Release(&child->IDCompositionVisual2_iface);
     }
 
     return S_OK;
@@ -1124,6 +1129,12 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetBackFaceVisibility(IDCompositio
         enum DCOMPOSITION_BACKFACE_VISIBILITY visibility)
 {
     TRACE("iface %p, visibility %d.\n", iface, visibility);
+
+    if (visibility != DCOMPOSITION_BACKFACE_VISIBILITY_VISIBLE
+            && visibility != DCOMPOSITION_BACKFACE_VISIBILITY_HIDDEN
+            && visibility != DCOMPOSITION_BACKFACE_VISIBILITY_INHERIT)
+        return E_INVALIDARG;
+
     return S_OK;
 }
 
@@ -1156,6 +1167,9 @@ static const struct IDCompositionVisual2Vtbl dcomp_visual_vtbl =
 static HRESULT dcomp_visual_create(struct dcomp_device *device, struct dcomp_visual **out)
 {
     struct dcomp_visual *visual;
+
+    if (!out)
+        return E_INVALIDARG;
 
     if (!(visual = calloc(1, sizeof(*visual))))
         return E_OUTOFMEMORY;
@@ -1225,7 +1239,10 @@ static ULONG STDMETHODCALLTYPE dcomp_target_Release(IDCompositionTarget *iface)
         EnterCriticalSection(&device->cs);
         if (target->active_root) dcomp_visual_unbind_tree(target->active_root);
         if (target->pending_root)
+        {
+            target->pending_root->is_root = FALSE;
             IDCompositionVisual2_Release(&target->pending_root->IDCompositionVisual2_iface);
+        }
         if (target->active_root)
             IDCompositionVisual2_Release(&target->active_root->IDCompositionVisual2_iface);
 
@@ -1234,9 +1251,12 @@ static ULONG STDMETHODCALLTYPE dcomp_target_Release(IDCompositionTarget *iface)
 
         AcquireSRWLockExclusive(&target_registration_lock);
         if (GetPropW(target->hwnd, target->topmost ? WINE_DCOMP_UNDERLAY_TOP_PROP
-                : WINE_DCOMP_UNDERLAY_BOTTOM_PROP) == target)
+                : WINE_DCOMP_UNDERLAY_BOTTOM_PROP) == (HANDLE)1)
             RemovePropW(target->hwnd, target->topmost ? WINE_DCOMP_UNDERLAY_TOP_PROP
                     : WINE_DCOMP_UNDERLAY_BOTTOM_PROP);
+        if (!GetPropW(target->hwnd, WINE_DCOMP_UNDERLAY_TOP_PROP)
+                && !GetPropW(target->hwnd, WINE_DCOMP_UNDERLAY_BOTTOM_PROP))
+            RemovePropW(target->hwnd, WINE_DCOMP_UNDERLAY_PROP);
         ReleaseSRWLockExclusive(&target_registration_lock);
         free(target);
         IDCompositionDevice_Release(&device->IDCompositionDevice_iface);
@@ -1258,11 +1278,16 @@ static HRESULT STDMETHODCALLTYPE dcomp_target_SetRoot_locked(IDCompositionTarget
         if ((const void *)visual->lpVtbl != &dcomp_visual_vtbl) return E_NOTIMPL;
         new_root = impl_from_IDCompositionVisual(visual);
         if (new_root->device != target->device) return E_INVALIDARG;
+        if (new_root->is_root) return E_INVALIDARG;
+        new_root->is_root = TRUE;
         IDCompositionVisual2_AddRef(&new_root->IDCompositionVisual2_iface);
     }
 
     if (target->pending_root)
+    {
+        target->pending_root->is_root = FALSE;
         IDCompositionVisual2_Release(&target->pending_root->IDCompositionVisual2_iface);
+    }
 
     target->pending_root = new_root;
     return S_OK;
@@ -1295,6 +1320,7 @@ static HRESULT dcomp_target_create(struct dcomp_device *device, HWND hwnd, BOOL 
     const WCHAR *property = topmost ? WINE_DCOMP_UNDERLAY_TOP_PROP : WINE_DCOMP_UNDERLAY_BOTTOM_PROP;
     DWORD process;
 
+    if (!hwnd || hwnd == GetDesktopWindow() || !out) return E_INVALIDARG;
     if (!GetWindowThreadProcessId(hwnd, &process)) return E_INVALIDARG;
     if (process != GetCurrentProcessId()) return E_ACCESSDENIED;
 
@@ -1308,7 +1334,7 @@ static HRESULT dcomp_target_create(struct dcomp_device *device, HWND hwnd, BOOL 
         free(target);
         return DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED;
     }
-    if (!SetPropW(hwnd, property, target))
+    if (!SetPropW(hwnd, property, (HANDLE)1))
     {
         HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
         ReleaseSRWLockExclusive(&target_registration_lock);
@@ -1794,21 +1820,21 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_QueryInterface(IDCompositionDevice
         IDCompositionDevice_AddRef(iface);
         return S_OK;
     }
-    else if (IsEqualGUID(iid, &IID_IDCompositionDevice2))
+    else if (dev->version >= 2 && IsEqualGUID(iid, &IID_IDCompositionDevice2))
     {
         *out = &dev->IDCompositionDevice2_iface;
         IDCompositionDevice_AddRef(iface);
         return S_OK;
     }
-    else if (IsEqualGUID(iid, &IID_IDCompositionDevice3))
+    else if (dev->version >= 2 && IsEqualGUID(iid, &IID_IDCompositionDesktopDevice))
     {
-        *out = &dev->IDCompositionDevice3_iface;
+        *out = &dev->IDCompositionDesktopDevice_iface;
         IDCompositionDevice_AddRef(iface);
         return S_OK;
     }
-    else if (IsEqualGUID(iid, &IID_IDCompositionDesktopDevice))
+    else if (dev->version >= 3 && IsEqualGUID(iid, &IID_IDCompositionDevice3))
     {
-        *out = &dev->IDCompositionDesktopDevice_iface;
+        *out = &dev->IDCompositionDevice3_iface;
         IDCompositionDevice_AddRef(iface);
         return S_OK;
     }
@@ -1877,8 +1903,8 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_CreateTargetForHwnd(IDCompositionD
 
     TRACE("iface %p, hwnd %p, topmost %d, target %p.\n", iface, hwnd, topmost, target);
 
-    if (!target)
-        return E_POINTER;
+    if (!target || !hwnd || hwnd == GetDesktopWindow())
+        return E_INVALIDARG;
 
     if (SUCCEEDED(hr = dcomp_target_create(dev, hwnd, topmost, &obj)))
         *target = &obj->IDCompositionTarget_iface;
@@ -1896,7 +1922,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_CreateVisual(IDCompositionDevice *
     TRACE("iface %p, visual %p.\n", iface, visual);
 
     if (!visual)
-        return E_POINTER;
+        return E_INVALIDARG;
 
     if (SUCCEEDED(hr = dcomp_visual_create(dev, &obj)))
         *visual = (IDCompositionVisual *)&obj->IDCompositionVisual2_iface;
@@ -2134,7 +2160,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateVisual(IDCompositionDevice2
     TRACE("iface %p, visual %p.\n", iface, visual);
 
     if (!visual)
-        return E_POINTER;
+        return E_INVALIDARG;
 
     if (SUCCEEDED(hr = dcomp_visual_create(dev, &obj)))
         *visual = &obj->IDCompositionVisual2_iface;
@@ -2790,8 +2816,8 @@ static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateTargetForHwnd(IDComp
 
     TRACE("iface %p, hwnd %p, topmost %d, target %p.\n", iface, hwnd, topmost, target);
 
-    if (!target)
-        return E_POINTER;
+    if (!target || !hwnd || hwnd == GetDesktopWindow())
+        return E_INVALIDARG;
 
     if (SUCCEEDED(hr = dcomp_target_create(dev, hwnd, topmost, &obj)))
         *target = &obj->IDCompositionTarget_iface;
@@ -2844,13 +2870,13 @@ static const struct IDCompositionDesktopDeviceVtbl dcomp_desktop_device_vtbl =
     dcomp_desktop_device_CreateSurfaceFromHwnd,
 };
 
-static HRESULT dcomp_device_create(REFIID iid, void **device)
+static HRESULT dcomp_device_create(int version, REFIID iid, void **device)
 {
     struct dcomp_device *dev;
     HRESULT hr;
 
     if (!device)
-        return E_POINTER;
+        return E_INVALIDARG;
 
     if (!(dev = calloc(1, sizeof(*dev))))
         return E_OUTOFMEMORY;
@@ -2859,6 +2885,7 @@ static HRESULT dcomp_device_create(REFIID iid, void **device)
     dev->IDCompositionDevice2_iface.lpVtbl = &dcomp_device2_vtbl;
     dev->IDCompositionDevice3_iface.lpVtbl = &dcomp_device3_vtbl;
     dev->IDCompositionDesktopDevice_iface.lpVtbl = &dcomp_desktop_device_vtbl;
+    dev->version = version;
     dev->refcount = 1;
     list_init(&dev->targets);
     InitializeCriticalSection(&dev->cs);
@@ -2875,17 +2902,40 @@ static HRESULT dcomp_device_create(REFIID iid, void **device)
 HRESULT WINAPI DCompositionCreateDevice(IDXGIDevice *dxgi_device, REFIID iid, void **device)
 {
     TRACE("dxgi_device %p, iid %s, device %p.\n", dxgi_device, debugstr_guid(iid), device);
-    return dcomp_device_create(iid, device);
+
+    if (!device)
+        return E_INVALIDARG;
+
+    if (!IsEqualIID(iid, &IID_IDCompositionDevice))
+        return E_NOINTERFACE;
+
+    return dcomp_device_create(1, iid, device);
 }
 
 HRESULT WINAPI DCompositionCreateDevice2(IUnknown *rendering_device, REFIID iid, void **device)
 {
     TRACE("rendering_device %p, iid %s, device %p.\n", rendering_device, debugstr_guid(iid), device);
-    return dcomp_device_create(iid, device);
+
+    if (!device)
+        return E_INVALIDARG;
+
+    if (!IsEqualIID(iid, &IID_IDCompositionDevice)
+            && !IsEqualIID(iid, &IID_IDCompositionDesktopDevice))
+        return E_NOINTERFACE;
+
+    return dcomp_device_create(2, iid, device);
 }
 
 HRESULT WINAPI DCompositionCreateDevice3(IUnknown *rendering_device, REFIID iid, void **device)
 {
     TRACE("rendering_device %p, iid %s, device %p.\n", rendering_device, debugstr_guid(iid), device);
-    return dcomp_device_create(iid, device);
+
+    if (!device)
+        return E_INVALIDARG;
+
+    if (!IsEqualIID(iid, &IID_IDCompositionDevice)
+            && !IsEqualIID(iid, &IID_IDCompositionDesktopDevice))
+        return E_NOINTERFACE;
+
+    return dcomp_device_create(3, iid, device);
 }
