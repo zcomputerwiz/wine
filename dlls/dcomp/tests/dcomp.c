@@ -1083,6 +1083,8 @@ static void test_surface_composition(void)
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
     hr = IDCompositionDesktopDevice_WaitForCommitCompletion(desktop_device);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    /* todo_wine: the composition reaches the screen (checked with X screen grabs), but winex11 presents GL to a
+     * child drawable that GDI GetPixel on the window DC does not read. */
     todo_wine expect_rendered_color(hwnd, 50, 50, RGB(0, 0xff, 0x00));
 
     /* Render the surface yellow. */
