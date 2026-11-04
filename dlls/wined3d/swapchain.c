@@ -1043,6 +1043,48 @@ static BOOL dcomp_read_texture(struct wined3d_dcomp_frame *frame,
     return TRUE;
 }
 
+/* Snapshot an externally owned texture (e.g. a DirectComposition surface's
+ * physical texture) into a retained composition frame. The returned frame is
+ * refcounted; the caller owns the initial reference and releases it with
+ * wined3d_dcomp_frame_release. Pixels are BGRA premultiplied, matching the
+ * producer swapchain frames. */
+struct wined3d_dcomp_frame * CDECL wined3d_dcomp_frame_create_from_texture(struct wined3d_texture *texture)
+{
+    struct wined3d_dcomp_frame *frame;
+    struct wined3d_context *context;
+    BOOL success;
+
+    TRACE("texture %p.\n", texture);
+    if (!texture)
+        return NULL;
+
+    wined3d_mutex_lock();
+    if (!(frame = calloc(1, sizeof(*frame))))
+    {
+        wined3d_mutex_unlock();
+        return NULL;
+    }
+    frame->refcount = 1;
+    wined3d_cs_finish(texture->resource.device->cs, WINED3D_CS_QUEUE_DEFAULT);
+    context = context_acquire(texture->resource.device, texture, 0);
+    success = dcomp_read_texture(frame, texture, context);
+    context_release(context);
+    wined3d_mutex_unlock();
+
+    if (!success)
+    {
+        dcomp_frame_release(frame);
+        return NULL;
+    }
+    return frame;
+}
+
+void CDECL wined3d_dcomp_frame_release(struct wined3d_dcomp_frame *frame)
+{
+    TRACE("frame %p.\n", frame);
+    dcomp_frame_release(frame);
+}
+
 static BOOL swapchain_capture_frame(struct wined3d_swapchain *swapchain, struct wined3d_context *context, BOOL unbound)
 {
     struct wined3d_texture *texture = swapchain->back_buffers[0];

@@ -496,23 +496,49 @@ static HRESULT dcomp_binding_target_scene(IWineDCompSwapChain *iface,
         struct wined3d_dcomp_layer *dst_layer = &wined3d_scene.layers[i];
         IWineDCompSwapChain *layer_binding = NULL;
 
-        if (src_layer->content && SUCCEEDED(IUnknown_QueryInterface(src_layer->content,
-                &IID_IWineDCompSwapChain, (void **)&layer_binding)))
+        if (src_layer->content)
         {
-            struct d3d11_swapchain *layer_sc = impl_from_IWineDCompSwapChain(layer_binding);
-            if (layer_sc->device != swapchain->device)
+            IWineDCompSurface *surface;
+            if (SUCCEEDED(IUnknown_QueryInterface(src_layer->content,
+                    &IID_IWineDCompSwapChain, (void **)&layer_binding)))
             {
+                struct d3d11_swapchain *layer_sc = impl_from_IWineDCompSwapChain(layer_binding);
+                if (layer_sc->device != swapchain->device)
+                {
+                    IWineDCompSwapChain_Release(layer_binding);
+                    ReleaseSRWLockExclusive(&dcomp_binding_lock);
+                    return E_NOTIMPL;
+                }
+                dst_layer->swapchain = layer_sc->wined3d_swapchain;
                 IWineDCompSwapChain_Release(layer_binding);
+            }
+            else if (SUCCEEDED(IUnknown_QueryInterface(src_layer->content,
+                    &IID_IWineDCompSurface, (void **)&surface)))
+            {
+                ID3D11Texture2D *texture;
+                BOOL content_valid = FALSE;
+                IWineDCompSurface_get_content_valid(surface, &content_valid);
+                if (content_valid && SUCCEEDED(IWineDCompSurface_get_physical_texture(surface, &texture)))
+                {
+                    IWineD3D11Texture *wined3d_texture_iface;
+                    struct wined3d_texture *wined3d_texture;
+                    if (SUCCEEDED(IUnknown_QueryInterface((IUnknown *)texture,
+                            &IID_IWineD3D11Texture, (void **)&wined3d_texture_iface)))
+                    {
+                        if (SUCCEEDED(IWineD3D11Texture_get_wined3d_texture(wined3d_texture_iface,
+                                &wined3d_texture)))
+                            dst_layer->frame = wined3d_dcomp_frame_create_from_texture(wined3d_texture);
+                        IWineD3D11Texture_Release(wined3d_texture_iface);
+                    }
+                    ID3D11Texture2D_Release(texture);
+                }
+                IWineDCompSurface_Release(surface);
+            }
+            if (src_layer->content && !dst_layer->swapchain && !dst_layer->frame)
+            {
                 ReleaseSRWLockExclusive(&dcomp_binding_lock);
                 return E_NOTIMPL;
             }
-            dst_layer->swapchain = layer_sc->wined3d_swapchain;
-            IWineDCompSwapChain_Release(layer_binding);
-        }
-        if (src_layer->content && !dst_layer->swapchain)
-        {
-            ReleaseSRWLockExclusive(&dcomp_binding_lock);
-            return E_NOTIMPL;
         }
 
         dst_layer->subtree_end = src_layer->subtree_end;

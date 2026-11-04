@@ -164,6 +164,7 @@ struct dcomp_surface_factory
 struct dcomp_surface
 {
     IDCompositionSurface IDCompositionSurface_iface;
+    IWineDCompSurface IWineDCompSurface_iface;
     IDCompositionDevice *device;
     IUnknown *rendering_device;
     GUID rendering_device_iid;
@@ -174,6 +175,10 @@ struct dcomp_surface
     DXGI_ALPHA_MODE alpha_mode;
     RECT draw_rect;
     BOOL drawn;
+    /* TRUE once a BeginDraw/EndDraw pair has completed; the composed content
+     * is the last ended draw. A never-drawn surface (or one with a draw in
+     * progress) composes as fully transparent. */
+    BOOL content_valid;
     LONG refcount;
 };
 
@@ -309,6 +314,12 @@ static HRESULT STDMETHODCALLTYPE dcomp_surface_QueryInterface(IDCompositionSurfa
         IDCompositionSurface_AddRef(iface);
         return S_OK;
     }
+    else if (IsEqualGUID(iid, &IID_IWineDCompSurface))
+    {
+        *out = &surface->IWineDCompSurface_iface;
+        IDCompositionSurface_AddRef(iface);
+        return S_OK;
+    }
 
     WARN("Unsupported interface %s.\n", debugstr_guid(iid));
     *out = NULL;
@@ -417,6 +428,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_surface_BeginDraw(IDCompositionSurface *i
     }
     device->drawing_surface = &surface->IDCompositionSurface_iface;
     surface->drawn = TRUE;
+    surface->content_valid = FALSE;
     surface->draw_rect = *rect;
     LeaveCriticalSection(&device->cs);
 
@@ -439,6 +451,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_surface_EndDraw(IDCompositionSurface *ifa
         return DCOMPOSITION_ERROR_SURFACE_NOT_BEING_RENDERED;
     }
     device->drawing_surface = NULL;
+    surface->content_valid = TRUE;
     LeaveCriticalSection(&device->cs);
 
     SetRectEmpty(&surface->draw_rect);
@@ -464,6 +477,61 @@ static HRESULT STDMETHODCALLTYPE dcomp_surface_Scroll(IDCompositionSurface *ifac
             wine_dbgstr_rect(scroll), wine_dbgstr_rect(clip), offset_x, offset_y);
     return E_NOTIMPL;
 }
+
+/* =====================================================================
+ * IWineDCompSurface
+ * ===================================================================== */
+
+static inline struct dcomp_surface *impl_from_IWineDCompSurface(IWineDCompSurface *iface)
+{
+    return CONTAINING_RECORD(iface, struct dcomp_surface, IWineDCompSurface_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_wine_surface_QueryInterface(IWineDCompSurface *iface,
+        REFIID riid, void **out)
+{
+    struct dcomp_surface *surface = impl_from_IWineDCompSurface(iface);
+    return IDCompositionSurface_QueryInterface(&surface->IDCompositionSurface_iface, riid, out);
+}
+
+static ULONG STDMETHODCALLTYPE dcomp_wine_surface_AddRef(IWineDCompSurface *iface)
+{
+    struct dcomp_surface *surface = impl_from_IWineDCompSurface(iface);
+    return IDCompositionSurface_AddRef(&surface->IDCompositionSurface_iface);
+}
+
+static ULONG STDMETHODCALLTYPE dcomp_wine_surface_Release(IWineDCompSurface *iface)
+{
+    struct dcomp_surface *surface = impl_from_IWineDCompSurface(iface);
+    return IDCompositionSurface_Release(&surface->IDCompositionSurface_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_wine_surface_get_physical_texture(IWineDCompSurface *iface,
+        ID3D11Texture2D **texture)
+{
+    struct dcomp_surface *surface = impl_from_IWineDCompSurface(iface);
+    *texture = surface->physical_surface;
+    ID3D11Texture2D_AddRef(*texture);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_wine_surface_get_content_valid(IWineDCompSurface *iface, BOOL *valid)
+{
+    struct dcomp_surface *surface = impl_from_IWineDCompSurface(iface);
+    *valid = surface->content_valid;
+    return S_OK;
+}
+
+static const struct IWineDCompSurfaceVtbl dcomp_wine_surface_vtbl =
+{
+    /* IUnknown methods */
+    dcomp_wine_surface_QueryInterface,
+    dcomp_wine_surface_AddRef,
+    dcomp_wine_surface_Release,
+    /* IWineDCompSurface methods */
+    dcomp_wine_surface_get_physical_texture,
+    dcomp_wine_surface_get_content_valid,
+};
 
 static const struct IDCompositionSurfaceVtbl dcomp_surface_vtbl =
 {
@@ -538,6 +606,7 @@ static HRESULT dcomp_surface_create(IDCompositionDevice *device, IUnknown *rende
     }
 
     obj->IDCompositionSurface_iface.lpVtbl = &dcomp_surface_vtbl;
+    obj->IWineDCompSurface_iface.lpVtbl = &dcomp_wine_surface_vtbl;
     obj->refcount = 1;
     obj->device = device;
     IDCompositionDevice_AddRef(device);
@@ -550,6 +619,7 @@ static HRESULT dcomp_surface_create(IDCompositionDevice *device, IUnknown *rende
     obj->pixel_format = pixel_format;
     obj->alpha_mode = alpha_mode;
     obj->drawn = FALSE;
+    obj->content_valid = FALSE;
 
     *surface = &obj->IDCompositionSurface_iface;
     return S_OK;
@@ -2013,35 +2083,50 @@ static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int 
 
     if (visual->pending.content)
     {
-        IDXGISwapChain1 *swapchain;
-        IUnknown *device;
-        DXGI_SWAP_CHAIN_DESC1 desc;
+        IDCompositionSurface *surface;
         if (++*contents > WINE_DCOMP_MAX_CONTENTS) return E_NOTIMPL;
-        if (FAILED(hr = IUnknown_QueryInterface(visual->pending.content,
-                &IID_IWineDCompSwapChain, (void **)&binding))) return E_NOTIMPL;
-        IWineDCompSwapChain_Release(binding);
-        if (FAILED(IUnknown_QueryInterface(visual->pending.content, &IID_IDXGISwapChain1,
-                (void **)&swapchain))) return E_NOTIMPL;
-        hr = IDXGISwapChain1_GetDesc1(swapchain, &desc);
-        if (SUCCEEDED(hr))
+        if (SUCCEEDED(IUnknown_QueryInterface(visual->pending.content,
+                &IID_IDCompositionSurface, (void **)&surface)))
         {
-            hr = IDXGISwapChain1_GetDevice(swapchain, &IID_IUnknown, (void **)&device);
+            struct dcomp_surface *impl = impl_from_IDCompositionSurface(surface);
+            IDCompositionSurface_Release(surface);
+            /* Only B8G8R8A8 and R8G8B8A8 are composed; R16G16B16A16_FLOAT
+             * stays rejected with E_NOTIMPL. */
+            if (impl->pixel_format != DXGI_FORMAT_B8G8R8A8_UNORM
+                    && impl->pixel_format != DXGI_FORMAT_R8G8B8A8_UNORM)
+                return E_NOTIMPL;
+        }
+        else
+        {
+            IDXGISwapChain1 *swapchain;
+            IUnknown *device;
+            DXGI_SWAP_CHAIN_DESC1 desc;
+            if (FAILED(hr = IUnknown_QueryInterface(visual->pending.content,
+                    &IID_IWineDCompSwapChain, (void **)&binding))) return E_NOTIMPL;
+            IWineDCompSwapChain_Release(binding);
+            if (FAILED(IUnknown_QueryInterface(visual->pending.content, &IID_IDXGISwapChain1,
+                    (void **)&swapchain))) return E_NOTIMPL;
+            hr = IDXGISwapChain1_GetDesc1(swapchain, &desc);
             if (SUCCEEDED(hr))
             {
-                if (!*content_device) *content_device = device;
-                else
+                hr = IDXGISwapChain1_GetDevice(swapchain, &IID_IUnknown, (void **)&device);
+                if (SUCCEEDED(hr))
                 {
-                    if (*content_device != device) hr = E_NOTIMPL;
-                    IUnknown_Release(device);
+                    if (!*content_device) *content_device = device;
+                    else
+                    {
+                        if (*content_device != device) hr = E_NOTIMPL;
+                        IUnknown_Release(device);
+                    }
                 }
             }
+            IDXGISwapChain1_Release(swapchain);
+            if (FAILED(hr)) return hr;
+            if (desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM && desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM)
+                return E_NOTIMPL;
+            if (desc.AlphaMode != DXGI_ALPHA_MODE_PREMULTIPLIED && desc.AlphaMode != DXGI_ALPHA_MODE_IGNORE)
+                return E_NOTIMPL;
         }
-        IDXGISwapChain1_Release(swapchain);
-        if (FAILED(hr)) return hr;
-        if (desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM && desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM)
-            return E_NOTIMPL;
-        if (desc.AlphaMode != DXGI_ALPHA_MODE_PREMULTIPLIED && desc.AlphaMode != DXGI_ALPHA_MODE_IGNORE)
-            return E_NOTIMPL;
     }
 
     for (child = visual->pending_children; child; child = child->pending_next_sibling)
@@ -2108,15 +2193,27 @@ static void dcomp_collect_pending(struct dcomp_visual *visual,
         layer->m11 = matrix._11; layer->m12 = matrix._12;
         layer->m21 = matrix._21; layer->m22 = matrix._22;
         layer->m31 = matrix._31; layer->m32 = matrix._32;
-        if (state.content && SUCCEEDED(IUnknown_QueryInterface(state.content, &IID_IDXGISwapChain1, (void **)&sc)))
+        if (state.content)
         {
-            if (SUCCEEDED(IDXGISwapChain1_GetDesc1(sc, &desc)))
+            IDCompositionSurface *surface;
+            if (SUCCEEDED(IUnknown_QueryInterface(state.content, &IID_IDCompositionSurface, (void **)&surface)))
             {
-                layer->width = desc.Width;
-                layer->height = desc.Height;
-                layer->ignore_alpha = desc.AlphaMode == DXGI_ALPHA_MODE_IGNORE;
+                struct dcomp_surface *impl = impl_from_IDCompositionSurface(surface);
+                layer->width = impl->width;
+                layer->height = impl->height;
+                layer->ignore_alpha = impl->alpha_mode == DXGI_ALPHA_MODE_IGNORE;
+                IDCompositionSurface_Release(surface);
             }
-            IDXGISwapChain1_Release(sc);
+            else if (SUCCEEDED(IUnknown_QueryInterface(state.content, &IID_IDXGISwapChain1, (void **)&sc)))
+            {
+                if (SUCCEEDED(IDXGISwapChain1_GetDesc1(sc, &desc)))
+                {
+                    layer->width = desc.Width;
+                    layer->height = desc.Height;
+                    layer->ignore_alpha = desc.AlphaMode == DXGI_ALPHA_MODE_IGNORE;
+                }
+                IDXGISwapChain1_Release(sc);
+            }
         }
         layer->has_clip = state.has_clip;
         layer->clip_rect = (struct wine_dcomp_clip_rect){state.clip.left, state.clip.top,
