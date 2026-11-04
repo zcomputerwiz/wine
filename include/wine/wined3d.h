@@ -2992,7 +2992,8 @@ void __cdecl wined3d_swapchain_get_dcomp_stats(struct wined3d_swapchain *swapcha
 
 /* Snapshot an externally owned texture into a retained composition frame. The
  * returned frame is refcounted; release it with wined3d_dcomp_frame_release. */
-struct wined3d_dcomp_frame * __cdecl wined3d_dcomp_frame_create_from_texture(struct wined3d_texture *texture);
+struct wined3d_dcomp_frame * __cdecl wined3d_dcomp_frame_create_from_pixels(const void *data, unsigned int pitch,
+        unsigned int width, unsigned int height, BOOL rgba);
 void __cdecl wined3d_dcomp_frame_release(struct wined3d_dcomp_frame *frame);
 
 HRESULT __cdecl wined3d_swapchain_state_create(const struct wined3d_swapchain_desc *desc,

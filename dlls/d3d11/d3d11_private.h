@@ -140,7 +140,6 @@ struct d3d_texture2d
 {
     ID3D11Texture2D ID3D11Texture2D_iface;
     ID3D10Texture2D ID3D10Texture2D_iface;
-    IWineD3D11Texture IWineD3D11Texture_iface;
     LONG refcount;
 
     IUnknown *dxgi_resource;

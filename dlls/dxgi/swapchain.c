@@ -454,6 +454,45 @@ static HRESULT STDMETHODCALLTYPE dcomp_binding_set_target(IWineDCompSwapChain *i
     return S_OK;
 }
 
+/* CPU copy of a composition surface's texture as a retained frame. Runs on the committing thread through the
+ * surface device's immediate context; WineD3D's CS thread owns all GL work. */
+static struct wined3d_dcomp_frame *dcomp_surface_frame(ID3D11Texture2D *texture)
+{
+    struct wined3d_dcomp_frame *frame = NULL;
+    D3D11_MAPPED_SUBRESOURCE map;
+    ID3D11DeviceContext *context;
+    D3D11_TEXTURE2D_DESC desc;
+    ID3D11Texture2D *staging;
+    ID3D11Device *device;
+
+    ID3D11Texture2D_GetDesc(texture, &desc);
+    if (desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM && desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM)
+        return NULL;
+    ID3D11Texture2D_GetDevice(texture, &device);
+    desc.MipLevels = desc.ArraySize = 1;
+    desc.SampleDesc.Count = 1;
+    desc.SampleDesc.Quality = 0;
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    desc.MiscFlags = 0;
+    if (SUCCEEDED(ID3D11Device_CreateTexture2D(device, &desc, NULL, &staging)))
+    {
+        ID3D11Device_GetImmediateContext(device, &context);
+        ID3D11DeviceContext_CopyResource(context, (ID3D11Resource *)staging, (ID3D11Resource *)texture);
+        if (SUCCEEDED(ID3D11DeviceContext_Map(context, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &map)))
+        {
+            frame = wined3d_dcomp_frame_create_from_pixels(map.pData, map.RowPitch, desc.Width, desc.Height,
+                    desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM);
+            ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)staging, 0);
+        }
+        ID3D11DeviceContext_Release(context);
+        ID3D11Texture2D_Release(staging);
+    }
+    ID3D11Device_Release(device);
+    return frame;
+}
+
 static HRESULT dcomp_binding_target_scene(IWineDCompSwapChain *iface,
         HWND target, const void *scene, BOOL prepare)
 {
@@ -461,7 +500,7 @@ static HRESULT dcomp_binding_target_scene(IWineDCompSwapChain *iface,
     const struct wine_dcomp_target_scene *dcomp_scene = (const struct wine_dcomp_target_scene *)scene;
     struct wined3d_dcomp_target_scene wined3d_scene;
     unsigned int i;
-    HRESULT hr;
+    HRESULT hr = S_OK;
 
     if (dcomp_scene && (dcomp_scene->layer_count > WINED3D_DCOMP_MAX_LAYERS
             || dcomp_scene->target_hwnd != target)) return E_INVALIDARG;
@@ -495,6 +534,7 @@ static HRESULT dcomp_binding_target_scene(IWineDCompSwapChain *iface,
         const struct wine_dcomp_layer_desc *src_layer = &dcomp_scene->layers[i];
         struct wined3d_dcomp_layer *dst_layer = &wined3d_scene.layers[i];
         IWineDCompSwapChain *layer_binding = NULL;
+        BOOL surface_layer = FALSE;
 
         if (src_layer->content)
         {
@@ -506,8 +546,8 @@ static HRESULT dcomp_binding_target_scene(IWineDCompSwapChain *iface,
                 if (layer_sc->device != swapchain->device)
                 {
                     IWineDCompSwapChain_Release(layer_binding);
-                    ReleaseSRWLockExclusive(&dcomp_binding_lock);
-                    return E_NOTIMPL;
+                    hr = E_NOTIMPL;
+                    break;
                 }
                 dst_layer->swapchain = layer_sc->wined3d_swapchain;
                 IWineDCompSwapChain_Release(layer_binding);
@@ -518,26 +558,19 @@ static HRESULT dcomp_binding_target_scene(IWineDCompSwapChain *iface,
                 ID3D11Texture2D *texture;
                 BOOL content_valid = FALSE;
                 IWineDCompSurface_get_content_valid(surface, &content_valid);
+                /* A surface without a finished draw composes as fully transparent (no content). */
+                surface_layer = !content_valid;
                 if (content_valid && SUCCEEDED(IWineDCompSurface_get_physical_texture(surface, &texture)))
                 {
-                    IWineD3D11Texture *wined3d_texture_iface;
-                    struct wined3d_texture *wined3d_texture;
-                    if (SUCCEEDED(IUnknown_QueryInterface((IUnknown *)texture,
-                            &IID_IWineD3D11Texture, (void **)&wined3d_texture_iface)))
-                    {
-                        if (SUCCEEDED(IWineD3D11Texture_get_wined3d_texture(wined3d_texture_iface,
-                                &wined3d_texture)))
-                            dst_layer->frame = wined3d_dcomp_frame_create_from_texture(wined3d_texture);
-                        IWineD3D11Texture_Release(wined3d_texture_iface);
-                    }
+                    dst_layer->frame = dcomp_surface_frame(texture);
                     ID3D11Texture2D_Release(texture);
                 }
                 IWineDCompSurface_Release(surface);
             }
-            if (src_layer->content && !dst_layer->swapchain && !dst_layer->frame)
+            if (!surface_layer && !dst_layer->swapchain && !dst_layer->frame)
             {
-                ReleaseSRWLockExclusive(&dcomp_binding_lock);
-                return E_NOTIMPL;
+                hr = E_NOTIMPL;
+                break;
             }
         }
 
@@ -568,7 +601,11 @@ static HRESULT dcomp_binding_target_scene(IWineDCompSwapChain *iface,
         dst_layer->ignore_alpha = src_layer->ignore_alpha;
     }
 
-    hr = wined3d_swapchain_set_target_scene(swapchain->wined3d_swapchain, &wined3d_scene, prepare);
+    if (SUCCEEDED(hr))
+        hr = wined3d_swapchain_set_target_scene(swapchain->wined3d_swapchain, &wined3d_scene, prepare);
+    /* WineD3D took its own references on the surface frames. */
+    for (i = 0; i < dcomp_scene->layer_count; ++i)
+        if (wined3d_scene.layers[i].frame) wined3d_dcomp_frame_release(wined3d_scene.layers[i].frame);
     if (SUCCEEDED(hr) && !prepare)
     {
         RECT empty = {0};

@@ -533,12 +533,6 @@ static HRESULT STDMETHODCALLTYPE d3d11_texture2d_QueryInterface(ID3D11Texture2D 
         IUnknown_AddRef((IUnknown *)*object);
         return S_OK;
     }
-    else if (IsEqualGUID(riid, &IID_IWineD3D11Texture))
-    {
-        *object = &texture->IWineD3D11Texture_iface;
-        IUnknown_AddRef((IUnknown *)*object);
-        return S_OK;
-    }
 
     TRACE("Forwarding to dxgi resource.\n");
 
@@ -701,50 +695,6 @@ static void STDMETHODCALLTYPE d3d11_texture2d_GetDesc(ID3D11Texture2D *iface, D3
         ? 1 : wined3d_desc.multisample_type;
     desc->SampleDesc.Quality = wined3d_desc.multisample_quality;
 }
-
-/* IWineD3D11Texture methods */
-
-static inline struct d3d_texture2d *texture2d_from_wine_d3d11_texture(IWineD3D11Texture *iface)
-{
-    return CONTAINING_RECORD(iface, struct d3d_texture2d, IWineD3D11Texture_iface);
-}
-
-static HRESULT STDMETHODCALLTYPE wine_d3d11_texture_QueryInterface(IWineD3D11Texture *iface,
-        REFIID riid, void **object)
-{
-    struct d3d_texture2d *texture = texture2d_from_wine_d3d11_texture(iface);
-    return d3d11_texture2d_QueryInterface(&texture->ID3D11Texture2D_iface, riid, object);
-}
-
-static ULONG STDMETHODCALLTYPE wine_d3d11_texture_AddRef(IWineD3D11Texture *iface)
-{
-    struct d3d_texture2d *texture = texture2d_from_wine_d3d11_texture(iface);
-    return d3d11_texture2d_AddRef(&texture->ID3D11Texture2D_iface);
-}
-
-static ULONG STDMETHODCALLTYPE wine_d3d11_texture_Release(IWineD3D11Texture *iface)
-{
-    struct d3d_texture2d *texture = texture2d_from_wine_d3d11_texture(iface);
-    return d3d11_texture2d_Release(&texture->ID3D11Texture2D_iface);
-}
-
-static HRESULT STDMETHODCALLTYPE wine_d3d11_texture_get_wined3d_texture(IWineD3D11Texture *iface,
-        struct wined3d_texture **out)
-{
-    struct d3d_texture2d *texture = texture2d_from_wine_d3d11_texture(iface);
-    *out = texture->wined3d_texture;
-    return S_OK;
-}
-
-static const struct IWineD3D11TextureVtbl wine_d3d11_texture_vtbl =
-{
-    /* IUnknown methods */
-    wine_d3d11_texture_QueryInterface,
-    wine_d3d11_texture_AddRef,
-    wine_d3d11_texture_Release,
-    /* IWineD3D11Texture methods */
-    wine_d3d11_texture_get_wined3d_texture,
-};
 
 static const struct ID3D11Texture2DVtbl d3d11_texture2d_vtbl =
 {
@@ -1030,7 +980,6 @@ HRESULT d3d_texture2d_create(struct d3d_device *device, const D3D11_TEXTURE2D_DE
 
     texture->ID3D11Texture2D_iface.lpVtbl = &d3d11_texture2d_vtbl;
     texture->ID3D10Texture2D_iface.lpVtbl = &d3d10_texture2d_vtbl;
-    texture->IWineD3D11Texture_iface.lpVtbl = &wine_d3d11_texture_vtbl;
     texture->refcount = 1;
     wined3d_mutex_lock();
     texture->desc = *desc;

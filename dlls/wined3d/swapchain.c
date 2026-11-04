@@ -435,6 +435,12 @@ HRESULT CDECL wined3d_swapchain_set_target_scene(struct wined3d_swapchain *swapc
         for (i = 0; i < snapshot.layer_count; ++i)
         {
             struct wined3d_swapchain *source = snapshot.layers[i].swapchain;
+            if (snapshot.layers[i].frame)
+            {
+                /* Caller-supplied frame (a composition surface): the snapshot keeps its own reference. */
+                ++snapshot.layers[i].frame->refcount;
+                continue;
+            }
             if (!source) continue; /* Contentless retained visual. */
             if (source->device != swapchain->device)
             {
@@ -1043,39 +1049,40 @@ static BOOL dcomp_read_texture(struct wined3d_dcomp_frame *frame,
     return TRUE;
 }
 
-/* Snapshot an externally owned texture (e.g. a DirectComposition surface's
- * physical texture) into a retained composition frame. The returned frame is
- * refcounted; the caller owns the initial reference and releases it with
- * wined3d_dcomp_frame_release. Pixels are BGRA premultiplied, matching the
- * producer swapchain frames. */
-struct wined3d_dcomp_frame * CDECL wined3d_dcomp_frame_create_from_texture(struct wined3d_texture *texture)
+/* A retained composition frame from CPU pixels (e.g. a mapped copy of a DirectComposition surface), so callers never
+ * touch a GL context outside the CS thread. 32-bit premultiplied pixels, BGRA unless rgba is set. The caller owns the
+ * initial reference and releases it with wined3d_dcomp_frame_release. */
+struct wined3d_dcomp_frame * CDECL wined3d_dcomp_frame_create_from_pixels(const void *data, unsigned int pitch,
+        unsigned int width, unsigned int height, BOOL rgba)
 {
     struct wined3d_dcomp_frame *frame;
-    struct wined3d_context *context;
-    BOOL success;
+    unsigned int x, y;
 
-    TRACE("texture %p.\n", texture);
-    if (!texture)
+    TRACE("data %p, pitch %u, width %u, height %u, rgba %#x.\n", data, pitch, width, height, rgba);
+    if (!data || !width || !height || width > SIZE_MAX / sizeof(*frame->pixels) / height)
         return NULL;
-
-    wined3d_mutex_lock();
     if (!(frame = calloc(1, sizeof(*frame))))
-    {
-        wined3d_mutex_unlock();
         return NULL;
+    if (!(frame->pixels = malloc((size_t)width * height * sizeof(*frame->pixels))))
+    {
+        free(frame);
+        return NULL;
+    }
+    for (y = 0; y < height; ++y)
+    {
+        const uint32_t *row = (const uint32_t *)((const BYTE *)data + (size_t)y * pitch);
+        for (x = 0; x < width; ++x)
+        {
+            uint32_t p = row[x];
+            if (rgba)
+                p = (p & 0xff00ff00) | ((p & 0xff) << 16) | ((p >> 16) & 0xff);
+            frame->pixels[y * width + x] = p;
+        }
     }
     frame->refcount = 1;
-    wined3d_cs_finish(texture->resource.device->cs, WINED3D_CS_QUEUE_DEFAULT);
-    context = context_acquire(texture->resource.device, texture, 0);
-    success = dcomp_read_texture(frame, texture, context);
-    context_release(context);
-    wined3d_mutex_unlock();
-
-    if (!success)
-    {
-        dcomp_frame_release(frame);
-        return NULL;
-    }
+    frame->width = width;
+    frame->height = height;
+    ++frame->cpu_readbacks;
     return frame;
 }
 

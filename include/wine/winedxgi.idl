@@ -83,19 +83,6 @@ interface IWineDXGIDeviceParent : IUnknown
             unsigned int texture_flags, IDXGISurface **ret_surface);
 }
 
-/* Exposed by builtin d3d11 textures so a consumer (DirectComposition) can
- * snapshot the underlying WineD3D texture without going through the public
- * D3D11 API. */
-[
-    object,
-    local,
-    uuid(7a8b9c0d-1e2f-4a3b-8c5d-6e7f8a9b0c1d)
-]
-interface IWineD3D11Texture : IUnknown
-{
-    HRESULT get_wined3d_texture([out] struct wined3d_texture **texture);
-}
-
 /* Exposed by DirectComposition surfaces: the physical texture and whether an EndDraw has completed. */
 [
     object,

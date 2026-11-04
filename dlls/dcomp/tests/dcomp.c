@@ -953,6 +953,162 @@ static void test_surface_begin_end_Draw(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+#define expect_rendered_color(a, b, c, d) _expect_rendered_color(__LINE__, a, b, c, d)
+static void _expect_rendered_color(int line, HWND hwnd, int x, int y, COLORREF expected_color)
+{
+    COLORREF color = CLR_INVALID;
+    DWORD start = GetTickCount();
+    HDC hdc;
+
+    hdc = GetDC(hwnd);
+    while (GetTickCount() - start < 1000)
+    {
+        color = GetPixel(hdc, x, y);
+        if (color == expected_color)
+            break;
+        Sleep(20);
+    }
+    ReleaseDC(hwnd, hdc);
+    ok_(__FILE__, line)(color == expected_color, "Expected color %#06lx at (%d, %d), got %#06lx.\n",
+            expected_color, x, y, color);
+}
+
+static void render_surface_color(ID3D11Device *d3d11_device, IDCompositionSurface *surface,
+        float r, float g, float b)
+{
+    ID3D11DeviceContext *context;
+    ID3D11RenderTargetView *rtv;
+    ID3D11Texture2D *texture;
+    D3D11_RENDER_TARGET_VIEW_DESC rtv_desc;
+    D3D11_TEXTURE2D_DESC texture_desc;
+    float clear_color[4];
+    POINT offset;
+    HRESULT hr;
+
+    hr = IDCompositionSurface_BeginDraw(surface, NULL, &IID_ID3D11Texture2D,
+            (void **)&texture, &offset);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr))
+        return;
+
+    ID3D11Texture2D_GetDesc(texture, &texture_desc);
+    rtv_desc.Format = texture_desc.Format;
+    rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+    rtv_desc.Texture2D.MipSlice = 0;
+    hr = ID3D11Device_CreateRenderTargetView(d3d11_device, (ID3D11Resource *)texture,
+            &rtv_desc, &rtv);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        ID3D11Device_GetImmediateContext(d3d11_device, &context);
+        clear_color[0] = r;
+        clear_color[1] = g;
+        clear_color[2] = b;
+        clear_color[3] = 1.0f;
+        ID3D11DeviceContext_ClearRenderTargetView(context, rtv, clear_color);
+        ID3D11DeviceContext_Release(context);
+        ID3D11RenderTargetView_Release(rtv);
+    }
+    ID3D11Texture2D_Release(texture);
+    hr = IDCompositionSurface_EndDraw(surface);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+}
+
+static void test_surface_composition(void)
+{
+    static const unsigned int window_size = 200, surface_size = 100;
+    IDCompositionSurfaceFactory *surface_factory;
+    IDCompositionDesktopDevice *desktop_device;
+    IDCompositionDevice *dcomp_device;
+    IDCompositionSurface *surface;
+    ID3D11Device *d3d11_device;
+    IDCompositionTarget *target;
+    IDCompositionVisual *visual;
+    D3D_FEATURE_LEVEL feature_level;
+    ULONG refcount;
+    HRESULT hr;
+    HWND hwnd;
+
+    /* Visible 200x200 window. */
+    hwnd = CreateWindowW(L"static", L"dcomp_surface_composition", WS_OVERLAPPED | WS_VISIBLE,
+            0, 0, window_size, window_size, NULL, NULL, NULL, NULL);
+    ok(hwnd != NULL, "Failed to create window.\n");
+    if (!hwnd)
+        return;
+
+    hr = D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, NULL, 0,
+            D3D11_SDK_VERSION, &d3d11_device, &feature_level, NULL);
+    if (FAILED(hr))
+        hr = D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_WARP, NULL, 0, NULL, 0,
+                D3D11_SDK_VERSION, &d3d11_device, &feature_level, NULL);
+    ok(hr == S_OK, "Failed to create D3D11 device, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        DestroyWindow(hwnd);
+        return;
+    }
+
+    hr = pDCompositionCreateDevice2((IUnknown *)d3d11_device, &IID_IDCompositionDesktopDevice,
+            (void **)&desktop_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = IDCompositionDesktopDevice_CreateTargetForHwnd(desktop_device, hwnd, TRUE, &target);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = IDCompositionDesktopDevice_QueryInterface(desktop_device, &IID_IDCompositionDevice,
+            (void **)&dcomp_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice_CreateVisual(dcomp_device, &visual);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = IDCompositionDesktopDevice_CreateSurfaceFactory(desktop_device, (IUnknown *)d3d11_device,
+            &surface_factory);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = IDCompositionSurfaceFactory_CreateSurface(surface_factory, surface_size, surface_size,
+            DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED, &surface);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* Render the surface green and commit: a surface-only scene is presented
+     * through the target's auxiliary producer. */
+    render_surface_color(d3d11_device, surface, 0.0f, 1.0f, 0.0f);
+
+    hr = IDCompositionVisual_SetContent(visual, (IUnknown *)surface);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = IDCompositionTarget_SetRoot(target, visual);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = IDCompositionDesktopDevice_Commit(desktop_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_WaitForCommitCompletion(desktop_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    todo_wine expect_rendered_color(hwnd, 50, 50, RGB(0, 0xff, 0x00));
+
+    /* Render the surface yellow. */
+    render_surface_color(d3d11_device, surface, 1.0f, 1.0f, 0.0f);
+
+    /* Remains green before calling Commit(). */
+    todo_wine expect_rendered_color(hwnd, 50, 50, RGB(0, 0xff, 0x00));
+
+    hr = IDCompositionDesktopDevice_Commit(desktop_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_WaitForCommitCompletion(desktop_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    todo_wine expect_rendered_color(hwnd, 50, 50, RGB(0xff, 0xff, 0x00));
+
+    IDCompositionVisual_SetContent(visual, NULL);
+    IDCompositionSurface_Release(surface);
+    IDCompositionSurfaceFactory_Release(surface_factory);
+    IDCompositionTarget_Release(target);
+    IDCompositionVisual_Release(visual);
+    IDCompositionDevice_Release(dcomp_device);
+    IDCompositionDesktopDevice_Release(desktop_device);
+    refcount = ID3D11Device_Release(d3d11_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+    DestroyWindow(hwnd);
+}
+
 static void test_target_SetRoot(void)
 {
     IDCompositionTarget *target, *target2;
@@ -1388,6 +1544,7 @@ START_TEST(dcomp)
     test_device_CreateSurfaceFactory();
     test_surface_factory_CreateSurface();
     test_surface_begin_end_Draw();
+    test_surface_composition();
     test_target_SetRoot();
     test_visual_SetContent();
     test_visual_SetBitmapInterpolationMode();

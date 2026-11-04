@@ -319,7 +319,7 @@
 @ cdecl wined3d_swapchain_set_window(ptr ptr)
 @ cdecl wined3d_swapchain_set_target_scene(ptr ptr long)
 @ cdecl wined3d_swapchain_get_dcomp_stats(ptr ptr)
-@ cdecl wined3d_dcomp_frame_create_from_texture(ptr)
+@ cdecl wined3d_dcomp_frame_create_from_pixels(ptr long long long long)
 @ cdecl wined3d_dcomp_frame_release(ptr)
 
 @ cdecl wined3d_swapchain_state_create(ptr ptr ptr ptr ptr)

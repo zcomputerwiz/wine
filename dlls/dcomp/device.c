@@ -135,6 +135,12 @@ struct dcomp_target
     BOOL topmost;
     struct dcomp_visual *pending_root;
     struct dcomp_visual *active_root;
+    /* Lazily created auxiliary producer for scenes whose content is only
+     * IDCompositionSurface layers (which have no IWineDCompSwapChain binding
+     * of their own). Created from the first surface layer's rendering device. */
+    IDXGISwapChain1 *aux_swapchain;
+    IWineDCompSwapChain *aux_binding;
+    ID3D11Device *aux_device;
 };
 
 struct dcomp_device
@@ -237,6 +243,10 @@ static inline struct dcomp_surface *impl_from_IDCompositionSurface(IDComposition
     return CONTAINING_RECORD(iface, struct dcomp_surface, IDCompositionSurface_iface);
 }
 
+static HRESULT dcomp_target_ensure_aux_producer(struct dcomp_target *target,
+        IUnknown *rendering_device, const GUID *rendering_device_iid);
+static void dcomp_target_release_aux_producer(struct dcomp_target *target);
+
 /* =====================================================================
  * Surface helpers
  * ===================================================================== */
@@ -291,6 +301,91 @@ static HRESULT dcomp_get_d3d11_device(IUnknown *rendering_device, const GUID *re
     }
 
     return IUnknown_QueryInterface(rendering_device, &IID_ID3D11Device, (void **)d3d11_device);
+}
+
+/* =====================================================================
+ * Auxiliary producer (surface-only scenes)
+ * ===================================================================== */
+
+static HRESULT dcomp_target_ensure_aux_producer(struct dcomp_target *target,
+        IUnknown *rendering_device, const GUID *rendering_device_iid)
+{
+    ID3D11Device *d3d11_device;
+    IDXGIDevice *dxgi_device = NULL;
+    IDXGIAdapter *adapter = NULL;
+    IDXGIFactory2 *factory = NULL;
+    DXGI_SWAP_CHAIN_DESC1 desc;
+    HRESULT hr;
+
+    if (target->aux_binding)
+        return S_OK;
+
+    if (FAILED(hr = dcomp_get_d3d11_device(rendering_device, rendering_device_iid, &d3d11_device)))
+        return hr;
+
+    hr = IUnknown_QueryInterface((IUnknown *)d3d11_device, &IID_IDXGIDevice, (void **)&dxgi_device);
+    if (SUCCEEDED(hr))
+        hr = IDXGIDevice_GetAdapter(dxgi_device, &adapter);
+    if (SUCCEEDED(hr))
+        hr = IDXGIAdapter_GetParent(adapter, &IID_IDXGIFactory2, (void **)&factory);
+
+    if (SUCCEEDED(hr))
+    {
+        memset(&desc, 0, sizeof(desc));
+        desc.Width = 1;
+        desc.Height = 1;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        desc.BufferCount = 2;
+        desc.Scaling = DXGI_SCALING_STRETCH;
+        desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+        desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+        hr = IDXGIFactory2_CreateSwapChainForComposition(factory, (IUnknown *)d3d11_device,
+                &desc, NULL, &target->aux_swapchain);
+    }
+    if (SUCCEEDED(hr))
+        hr = IUnknown_QueryInterface((IUnknown *)target->aux_swapchain, &IID_IWineDCompSwapChain,
+                (void **)&target->aux_binding);
+    if (SUCCEEDED(hr))
+        target->aux_device = d3d11_device;
+    else
+    {
+        if (target->aux_swapchain)
+        {
+            IDXGISwapChain1_Release(target->aux_swapchain);
+            target->aux_swapchain = NULL;
+        }
+        target->aux_binding = NULL;
+        ID3D11Device_Release(d3d11_device);
+    }
+    if (factory)
+        IDXGIFactory2_Release(factory);
+    if (adapter)
+        IDXGIAdapter_Release(adapter);
+    if (dxgi_device)
+        IDXGIDevice_Release(dxgi_device);
+    return hr;
+}
+
+static void dcomp_target_release_aux_producer(struct dcomp_target *target)
+{
+    if (target->aux_binding)
+    {
+        IWineDCompSwapChain_set_target_scene(target->aux_binding, NULL, NULL);
+        IWineDCompSwapChain_Release(target->aux_binding);
+        target->aux_binding = NULL;
+    }
+    if (target->aux_swapchain)
+    {
+        IDXGISwapChain1_Release(target->aux_swapchain);
+        target->aux_swapchain = NULL;
+    }
+    if (target->aux_device)
+    {
+        ID3D11Device_Release(target->aux_device);
+        target->aux_device = NULL;
+    }
 }
 
 /* =====================================================================
@@ -1792,6 +1887,7 @@ static ULONG STDMETHODCALLTYPE dcomp_target_Release(IDCompositionTarget *iface)
         struct dcomp_device *device = target->device;
         EnterCriticalSection(&device->cs);
         if (target->active_root) dcomp_visual_unbind_tree(target->active_root);
+        dcomp_target_release_aux_producer(target);
         if (target->pending_root)
         {
             target->pending_root->is_root = FALSE;
@@ -2138,6 +2234,7 @@ static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int 
 
 struct dcomp_collect_context
 {
+    struct dcomp_target *target;
     struct wine_dcomp_target_scene scene;
 };
 
@@ -2297,6 +2394,7 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
                 &content_device, DCOMPOSITION_OPACITY_MODE_LAYER, &ident, 0))) goto done;
         if (content_device) IUnknown_Release(content_device);
         content_device = NULL;
+        contexts[c].target = target;
         contexts[c].scene.target_hwnd = target->hwnd;
         dcomp_collect_pending(target->pending_root, &ident, 1, DCOMPOSITION_OPACITY_MODE_LAYER,
                 DCOMPOSITION_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, DCOMPOSITION_BORDER_MODE_HARD, &contexts[c]);
@@ -2304,16 +2402,34 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
     }
     /* Prepare ALL targets before changing active state. Keep one prepared scene
      * per producer, and reject ambiguous cross-target producer routing before
-     * any active edits are applied (the current backend has one output HWND). */
+     * any active edits are applied (the current backend has one output HWND).
+     * Surface layers carry no IWineDCompSwapChain of their own; a scene made up
+     * only of them is presented through the target's auxiliary producer. */
     for (c = 0; c < targets; ++c)
     {
         const struct wine_dcomp_target_scene *scene = &contexts[c].scene;
+        struct dcomp_target *target = contexts[c].target;
+        struct dcomp_surface *first_surface = NULL;
+        BOOL has_surface = FALSE, has_swapchain = FALSE;
+
         for (i = 0; i < scene->layer_count; ++i)
         {
             IWineDCompSwapChain *binding;
+            IDCompositionSurface *surface;
             if (!scene->layers[i].content) continue;
+            if (SUCCEEDED(IUnknown_QueryInterface(scene->layers[i].content,
+                    &IID_IDCompositionSurface, (void **)&surface)))
+            {
+                struct dcomp_surface *impl = impl_from_IDCompositionSurface(surface);
+                IDCompositionSurface_Release(surface);
+                has_surface = TRUE;
+                if (!first_surface)
+                    first_surface = impl;
+                continue;
+            }
             if (FAILED(hr = IUnknown_QueryInterface(scene->layers[i].content,
                     &IID_IWineDCompSwapChain, (void **)&binding))) goto done;
+            has_swapchain = TRUE;
             for (j = 0; j < count && bindings[j] != binding; ++j) {}
             if (j < count)
             {
@@ -2326,7 +2442,58 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
             if (FAILED(hr = IWineDCompSwapChain_prepare_target_scene(binding, scene->target_hwnd, scene)))
                 goto done;
         }
+
+        if (has_surface && !has_swapchain)
+        {
+            ID3D11Device *layer_device;
+            if (FAILED(hr = dcomp_target_ensure_aux_producer(target,
+                    first_surface->rendering_device, &first_surface->rendering_device_iid)))
+                goto done;
+            /* dxgi rejects cross-device content: every surface layer must share
+             * the auxiliary producer's device. */
+            for (i = 0; i < scene->layer_count; ++i)
+            {
+                IDCompositionSurface *surface;
+                if (!scene->layers[i].content) continue;
+                if (FAILED(IUnknown_QueryInterface(scene->layers[i].content,
+                        &IID_IDCompositionSurface, (void **)&surface)))
+                    continue;
+                {
+                    struct dcomp_surface *impl = impl_from_IDCompositionSurface(surface);
+                    IDCompositionSurface_Release(surface);
+                    if (FAILED(hr = dcomp_get_d3d11_device(impl->rendering_device,
+                            &impl->rendering_device_iid, &layer_device)))
+                        goto done;
+                    if (layer_device != target->aux_device)
+                    {
+                        ID3D11Device_Release(layer_device);
+                        hr = E_NOTIMPL;
+                        goto done;
+                    }
+                    ID3D11Device_Release(layer_device);
+                }
+            }
+            /* Present the scene through the auxiliary producer exactly like an
+             * ordinary binding. */
+            binding_context[count] = c;
+            bindings[count] = target->aux_binding;
+            IWineDCompSwapChain_AddRef(target->aux_binding);
+            ++count;
+            if (FAILED(hr = IWineDCompSwapChain_prepare_target_scene(target->aux_binding,
+                    scene->target_hwnd, scene)))
+                goto done;
+        }
+        else if (target->aux_binding)
+        {
+            /* The scene has a real producer (or no content): revoke and release
+             * the auxiliary producer. */
+            dcomp_target_release_aux_producer(target);
+        }
     }
+    /* A target whose scene went away keeps no auxiliary producer. */
+    LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
+        if (!target->pending_root && target->aux_binding)
+            dcomp_target_release_aux_producer(target);
     /* Reparenting must not reuse active sibling links while a different old
      * parent still traverses them. Retain every old node, remove ALL old edges,
      * then build the new graph. Pending ownership alone cannot retain detached
