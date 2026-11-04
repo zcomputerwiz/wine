@@ -1,5 +1,5 @@
 MODULE    = dcomp.dll
-IMPORTS   = user32 gdi32
+IMPORTS   = user32 gdi32 d3d11 dxgi d2d1
 
 VER_PRODUCTVERSION = 10,0,14393,0
 

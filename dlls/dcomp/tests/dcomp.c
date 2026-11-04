@@ -20,7 +20,9 @@
 
 #define COBJMACROS
 #include "initguid.h"
+#include <d2d1_1.h>
 #include <d3d10_1.h>
+#include <d3d11.h>
 #include <dxgi.h>
 #include "dcomp.h"
 #include "wine/test.h"
@@ -480,6 +482,477 @@ static void test_device_CreateVisual(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+static void test_device_CreateSurfaceFactory(void)
+{
+    IDCompositionSurfaceFactory *surface_factory;
+    IDCompositionDevice2 *dcomp_device2;
+    IDCompositionDevice *dcomp_device;
+    IDXGIDevice *dxgi_device;
+    ID2D1Device *d2d_device;
+    ULONG refcount;
+    HRESULT hr;
+
+    if (!(dxgi_device = create_device(D3D10_CREATE_DEVICE_BGRA_SUPPORT)))
+    {
+        skip("Failed to create device.\n");
+        return;
+    }
+
+    hr = pDCompositionCreateDevice2((IUnknown *)dxgi_device, &IID_IDCompositionDevice,
+            (void **)&dcomp_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice_QueryInterface(dcomp_device, &IID_IDCompositionDevice2, (void *)&dcomp_device2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* NULL rendering device pointer */
+    hr = IDCompositionDevice2_CreateSurfaceFactory(dcomp_device2, NULL, &surface_factory);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    /* Rendering device pointer is not an IDXGIDevice, ID3D11Device or ID2D1Device */
+    hr = IDCompositionDevice2_CreateSurfaceFactory(dcomp_device2, (IUnknown *)dcomp_device, &surface_factory);
+    ok(hr == E_NOINTERFACE, "Got unexpected hr %#lx.\n", hr);
+
+    /* Rendering device pointer is an IDXGIDevice */
+    hr = IDCompositionDevice2_CreateSurfaceFactory(dcomp_device2, (IUnknown *)dxgi_device, &surface_factory);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (hr == S_OK)
+        IDCompositionSurfaceFactory_Release(surface_factory);
+
+    /* Rendering device pointer is an ID2D1Device */
+    hr = D2D1CreateDevice(dxgi_device, NULL, &d2d_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice2_CreateSurfaceFactory(dcomp_device2, (IUnknown *)d2d_device, &surface_factory);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (hr == S_OK)
+        IDCompositionSurfaceFactory_Release(surface_factory);
+    ID2D1Device_Release(d2d_device);
+
+    IDCompositionDevice2_Release(dcomp_device2);
+    IDCompositionDevice_Release(dcomp_device);
+    refcount = IDXGIDevice_Release(dxgi_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+}
+
+static void test_surface_factory_CreateSurface(void)
+{
+    IDCompositionSurfaceFactory *surface_factories[2];
+    IDCompositionDevice2 *dcomp_device2;
+    IDCompositionDevice *dcomp_device;
+    IDCompositionSurface *surface;
+    IDXGIDevice *dxgi_device;
+    ID2D1Device *d2d_device;
+    ULONG refcount;
+    unsigned int i, j;
+    HRESULT hr;
+
+    static const struct
+    {
+        UINT width;
+        UINT height;
+        DXGI_FORMAT pixel_format;
+        DXGI_ALPHA_MODE alpha_mode;
+        HRESULT hr;
+    }
+    tests[] =
+    {
+        /* Invalid width */
+        {0, 1, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_ALPHA_MODE_IGNORE, E_INVALIDARG},
+        /* Invalid height */
+        {1, 0, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_ALPHA_MODE_IGNORE, E_INVALIDARG},
+        /* Invalid pixel format */
+        {1, 1, DXGI_FORMAT_UNKNOWN, DXGI_ALPHA_MODE_IGNORE, E_INVALIDARG},
+        /* Invalid alpha mode */
+        {1, 1, DXGI_FORMAT_UNKNOWN, DXGI_ALPHA_MODE_STRAIGHT, E_INVALIDARG},
+        /* Valid pixel formats */
+        {1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_IGNORE, S_OK},
+        {1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_ALPHA_MODE_IGNORE, S_OK},
+        {1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_ALPHA_MODE_IGNORE, S_OK},
+        /* Valid alpha modes */
+        {1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_UNSPECIFIED, S_OK},
+        {1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED, S_OK},
+        {1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_IGNORE, S_OK},
+    };
+
+    if (!(dxgi_device = create_device(D3D10_CREATE_DEVICE_BGRA_SUPPORT)))
+    {
+        skip("Failed to create device.\n");
+        return;
+    }
+
+    hr = pDCompositionCreateDevice2((IUnknown *)dxgi_device, &IID_IDCompositionDevice,
+            (void **)&dcomp_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice_QueryInterface(dcomp_device, &IID_IDCompositionDevice2, (void *)&dcomp_device2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* Rendering device pointer is an IDXGIDevice */
+    hr = IDCompositionDevice2_CreateSurfaceFactory(dcomp_device2, (IUnknown *)dxgi_device, &surface_factories[0]);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* Rendering device pointer is an ID2D1Device */
+    hr = D2D1CreateDevice(dxgi_device, NULL, &d2d_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice2_CreateSurfaceFactory(dcomp_device2, (IUnknown *)d2d_device, &surface_factories[1]);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1Device_Release(d2d_device);
+
+    for (i = 0; i < ARRAY_SIZE(surface_factories); i++)
+    {
+        winetest_push_context("%d", i);
+
+        for (j = 0; j < ARRAY_SIZE(tests); j++)
+        {
+            winetest_push_context("%d", j);
+
+            hr = IDCompositionSurfaceFactory_CreateSurface(surface_factories[i], tests[j].width,
+                    tests[j].height, tests[j].pixel_format, tests[j].alpha_mode, &surface);
+            ok(hr == tests[j].hr, "Got unexpected hr %#lx.\n", hr);
+            if (hr == S_OK)
+                IDCompositionSurface_Release(surface);
+            winetest_pop_context();
+        }
+
+        IDCompositionSurfaceFactory_Release(surface_factories[i]);
+        winetest_pop_context();
+    }
+
+    IDCompositionDevice2_Release(dcomp_device2);
+    IDCompositionDevice_Release(dcomp_device);
+    refcount = IDXGIDevice_Release(dxgi_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+}
+
+static void test_surface_begin_end_Draw(void)
+{
+    static const unsigned int width = 640, height = 480;
+    IDCompositionSurfaceFactory *surface_factories[2];
+    IDXGISurface *dxgi_surface, *dxgi_surface2;
+    IDCompositionSurface *surface, *surface2;
+    ID2D1DeviceContext *d2d_device_context;
+    IDCompositionDevice2 *dcomp_device2;
+    IDCompositionDevice *dcomp_device;
+    ID3D10Texture2D *d3d10_texture;
+    ID3D11Texture2D *d3d11_texture;
+    IDXGIDevice *dxgi_device;
+    ID2D1Device *d2d_device;
+    DXGI_SURFACE_DESC dxgi_surface_desc;
+    D3D11_TEXTURE2D_DESC d3d11_texture_desc;
+    D3D10_TEXTURE2D_DESC d3d10_texture_desc;
+    unsigned int i, j;
+    ULONG refcount;
+    POINT offset;
+    HRESULT hr;
+    RECT rect;
+
+    static const struct
+    {
+        DXGI_FORMAT pixel_format;
+        DXGI_ALPHA_MODE alpha_mode;
+    }
+    formats[] =
+    {
+        {DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_IGNORE},
+        {DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED},
+        {DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_ALPHA_MODE_IGNORE},
+        {DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED},
+        {DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_ALPHA_MODE_IGNORE},
+        {DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_ALPHA_MODE_PREMULTIPLIED},
+    };
+
+    if (!(dxgi_device = create_device(D3D10_CREATE_DEVICE_BGRA_SUPPORT)))
+    {
+        skip("Failed to create device.\n");
+        return;
+    }
+
+    hr = pDCompositionCreateDevice2((IUnknown *)dxgi_device, &IID_IDCompositionDevice,
+            (void **)&dcomp_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice_QueryInterface(dcomp_device, &IID_IDCompositionDevice2, (void *)&dcomp_device2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* Rendering device pointer is an IDXGIDevice */
+    hr = IDCompositionDevice2_CreateSurfaceFactory(dcomp_device2, (IUnknown *)dxgi_device, &surface_factories[0]);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* Rendering device pointer is an ID2D1Device */
+    hr = D2D1CreateDevice(dxgi_device, NULL, &d2d_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice2_CreateSurfaceFactory(dcomp_device2, (IUnknown *)d2d_device, &surface_factories[1]);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1Device_Release(d2d_device);
+
+    for (i = 0; i < ARRAY_SIZE(surface_factories); i++)
+    {
+        winetest_push_context("%d", i);
+
+        for (j = 0; j < ARRAY_SIZE(formats); j++)
+        {
+            winetest_push_context("%d", j);
+
+            hr = IDCompositionSurfaceFactory_CreateSurface(surface_factories[i], width, height,
+                    formats[j].pixel_format, formats[j].alpha_mode, &surface);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            if (hr != S_OK)
+            {
+                winetest_pop_context();
+                continue;
+            }
+
+            hr = IDCompositionSurfaceFactory_CreateSurface(surface_factories[i], width, height,
+                    formats[j].pixel_format, formats[j].alpha_mode, &surface2);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+            /* Width out of range */
+            SetRect(&rect, 0, 0, width + 1, height);
+            hr = IDCompositionSurface_BeginDraw(surface, &rect, &IID_IDXGISurface,
+                    (void **)&dxgi_surface, &offset);
+            ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+            /* Height out of range */
+            SetRect(&rect, 0, 0, width, height + 1);
+            hr = IDCompositionSurface_BeginDraw(surface, &rect, &IID_IDXGISurface,
+                    (void **)&dxgi_surface, &offset);
+            ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+            /* Not full width for the first BeginDraw() */
+            SetRect(&rect, 0, 0, width - 1, height);
+            hr = IDCompositionSurface_BeginDraw(surface, &rect, &IID_IDXGISurface,
+                    (void **)&dxgi_surface, &offset);
+            ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+            /* Not full height for the first BeginDraw() */
+            SetRect(&rect, 0, 0, width, height - 1);
+            hr = IDCompositionSurface_BeginDraw(surface, &rect, &IID_IDXGISurface,
+                    (void **)&dxgi_surface, &offset);
+            ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+            /* NULL object pointer */
+            SetRect(&rect, 0, 0, width, height);
+            hr = IDCompositionSurface_BeginDraw(surface, &rect, &IID_IDXGISurface, NULL, &offset);
+            ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+            /* NULL offset pointer */
+            hr = IDCompositionSurface_BeginDraw(surface, &rect, &IID_IDXGISurface,
+                    (void **)&dxgi_surface, NULL);
+            ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+            /* Normal call with NULL rect pointer */
+            dxgi_surface = NULL;
+            hr = IDCompositionSurface_BeginDraw(surface, NULL, &IID_IDXGISurface,
+                    (void **)&dxgi_surface, &offset);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            if (hr == S_OK)
+            {
+                hr = IDXGISurface_GetDesc(dxgi_surface, &dxgi_surface_desc);
+                ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                ok(dxgi_surface_desc.Width >= width, "Got width %d < %d.\n",
+                        dxgi_surface_desc.Width, width);
+                ok(dxgi_surface_desc.Height >= height, "Got height %d < %d.\n",
+                        dxgi_surface_desc.Height, height);
+                ok(dxgi_surface_desc.Format == formats[j].pixel_format, "Expected format %d, got %d.\n",
+                        formats[j].pixel_format, dxgi_surface_desc.Format);
+                ok(dxgi_surface_desc.SampleDesc.Count == 1, "Got unexpected sample count %d.\n",
+                        dxgi_surface_desc.SampleDesc.Count);
+                ok(dxgi_surface_desc.SampleDesc.Quality == 0, "Got unexpected sample quality %d.\n",
+                        dxgi_surface_desc.SampleDesc.Quality);
+            }
+
+            /* Second BeginDraw() for the same surface without EndDraw(). This is supposed to fail
+             * according to MSDN */
+            hr = IDCompositionSurface_BeginDraw(surface, NULL, &IID_IDXGISurface,
+                    (void **)&dxgi_surface2, &offset);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            if (hr == S_OK)
+            {
+                ok(dxgi_surface2 == dxgi_surface, "Got unexpected surface.\n");
+                IDXGISurface_Release(dxgi_surface2);
+            }
+
+            /* Second BeginDraw() for the same surface without EndDraw() with a different rectangle.
+             * This is supposed to fail according to MSDN */
+            SetRect(&rect, 10, 10, width, height);
+            hr = IDCompositionSurface_BeginDraw(surface, &rect, &IID_IDXGISurface,
+                    (void **)&dxgi_surface2, &offset);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            if (hr == S_OK)
+            {
+                ok(dxgi_surface2 == dxgi_surface, "Got unexpected surface.\n");
+                IDXGISurface_Release(dxgi_surface2);
+            }
+
+            if (dxgi_surface)
+                IDXGISurface_Release(dxgi_surface);
+
+            /* Second BeginDraw() for the another surface without EndDraw() */
+            hr = IDCompositionSurface_BeginDraw(surface2, &rect, &IID_IDXGISurface,
+                    (void **)&dxgi_surface2, &offset);
+            ok(hr == DCOMPOSITION_ERROR_SURFACE_BEING_RENDERED, "Got unexpected hr %#lx.\n", hr);
+            if (hr == S_OK)
+                IDXGISurface_Release(dxgi_surface2);
+
+            hr = IDCompositionSurface_EndDraw(surface);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+            /* Second BeginDraw() for the same surface with overlapping rectangles */
+            dxgi_surface = NULL;
+            SetRect(&rect, 0, 0, 100, 100);
+            hr = IDCompositionSurface_BeginDraw(surface, &rect, &IID_IDXGISurface,
+                    (void **)&dxgi_surface, &offset);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+            SetRect(&rect, 50, 50, 150, 150);
+            hr = IDCompositionSurface_BeginDraw(surface, &rect, &IID_IDXGISurface,
+                    (void **)&dxgi_surface2, &offset);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            if (hr == S_OK)
+            {
+                ok(dxgi_surface2 == dxgi_surface, "Got unexpected surface.\n");
+                IDXGISurface_Release(dxgi_surface2);
+            }
+
+            if (dxgi_surface)
+                IDXGISurface_Release(dxgi_surface);
+
+            hr = IDCompositionSurface_EndDraw(surface);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+            /* Normal call with IID_ID3D10Texture2D */
+            hr = IDCompositionSurface_BeginDraw(surface, &rect, &IID_ID3D10Texture2D,
+                    (void **)&d3d10_texture, &offset);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            if (hr == S_OK)
+            {
+                ID3D10Texture2D_GetDesc(d3d10_texture, &d3d10_texture_desc);
+
+                ok(d3d10_texture_desc.Width >= width, "Got width %d < %d.\n",
+                        d3d10_texture_desc.Width, width);
+                ok(d3d10_texture_desc.Height >= height, "Got height %d < %d.\n",
+                        d3d10_texture_desc.Height, height);
+                ok(d3d10_texture_desc.MipLevels == 1, "Got mipmap levels %d.\n",
+                        d3d10_texture_desc.MipLevels);
+                ok(d3d10_texture_desc.ArraySize == 1, "Got array size %d.\n",
+                        d3d10_texture_desc.ArraySize);
+                ok(d3d10_texture_desc.Format == formats[j].pixel_format,
+                        "Expected format %d, got %d.\n", formats[j].pixel_format,
+                        d3d10_texture_desc.Format);
+                ok(d3d10_texture_desc.SampleDesc.Count == 1, "Got sample count %d.\n",
+                        d3d10_texture_desc.SampleDesc.Count);
+                ok(d3d10_texture_desc.SampleDesc.Quality == 0, "Got sample quality %d.\n",
+                        d3d10_texture_desc.SampleDesc.Quality);
+                ok(d3d10_texture_desc.Usage == D3D10_USAGE_DEFAULT, "Got usage %d.\n",
+                        d3d10_texture_desc.Usage);
+                ok(d3d10_texture_desc.BindFlags == (D3D10_BIND_SHADER_RESOURCE | D3D10_BIND_RENDER_TARGET),
+                        "Got bind flags %#x.\n", d3d10_texture_desc.BindFlags);
+                ok(d3d10_texture_desc.CPUAccessFlags == 0, "Got CPU access flags %#x.\n",
+                        d3d10_texture_desc.CPUAccessFlags);
+                if (formats[j].pixel_format == DXGI_FORMAT_B8G8R8A8_UNORM)
+                    ok(d3d10_texture_desc.MiscFlags == D3D10_RESOURCE_MISC_GDI_COMPATIBLE,
+                            "Got misc flags %#x.\n", d3d10_texture_desc.MiscFlags);
+                else
+                    ok(d3d10_texture_desc.MiscFlags == 0, "Got misc flags %#x.\n",
+                            d3d10_texture_desc.MiscFlags);
+
+                ID3D10Texture2D_Release(d3d10_texture);
+                hr = IDCompositionSurface_EndDraw(surface);
+                ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            }
+
+            /* Normal call with IID_ID3D11Texture2D */
+            hr = IDCompositionSurface_BeginDraw(surface, &rect, &IID_ID3D11Texture2D,
+                    (void **)&d3d11_texture, &offset);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            if (hr == S_OK)
+            {
+                ID3D11Texture2D_GetDesc(d3d11_texture, &d3d11_texture_desc);
+
+                ok(d3d11_texture_desc.Width >= width, "Got width %d < %d.\n",
+                        d3d11_texture_desc.Width, width);
+                ok(d3d11_texture_desc.Height >= height, "Got height %d < %d.\n",
+                        d3d11_texture_desc.Height, height);
+                ok(d3d11_texture_desc.MipLevels == 1, "Got mipmap levels %d.\n",
+                        d3d11_texture_desc.MipLevels);
+                ok(d3d11_texture_desc.ArraySize == 1, "Got array size %d.\n",
+                        d3d11_texture_desc.ArraySize);
+                ok(d3d11_texture_desc.Format == formats[j].pixel_format,
+                        "Expected format %d, got %d.\n", formats[j].pixel_format,
+                        d3d11_texture_desc.Format);
+                ok(d3d11_texture_desc.SampleDesc.Count == 1, "Got sample count %d.\n",
+                        d3d11_texture_desc.SampleDesc.Count);
+                ok(d3d11_texture_desc.SampleDesc.Quality == 0, "Got sample quality %d.\n",
+                        d3d11_texture_desc.SampleDesc.Quality);
+                ok(d3d11_texture_desc.Usage == D3D11_USAGE_DEFAULT, "Got usage %d.\n",
+                        d3d11_texture_desc.Usage);
+                ok(d3d11_texture_desc.BindFlags == (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET),
+                        "Got bind flags %#x.\n", d3d11_texture_desc.BindFlags);
+                ok(d3d11_texture_desc.CPUAccessFlags == 0, "Got CPU access flags %#x.\n",
+                        d3d11_texture_desc.CPUAccessFlags);
+                if (formats[j].pixel_format == DXGI_FORMAT_B8G8R8A8_UNORM)
+                    ok(d3d11_texture_desc.MiscFlags == D3D11_RESOURCE_MISC_GDI_COMPATIBLE,
+                            "Got misc flags %#x.\n", d3d11_texture_desc.MiscFlags);
+                else
+                    ok(d3d11_texture_desc.MiscFlags == 0, "Got misc flags %#x.\n",
+                            d3d11_texture_desc.MiscFlags);
+
+                ID3D11Texture2D_Release(d3d11_texture);
+                hr = IDCompositionSurface_EndDraw(surface);
+                ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            }
+
+            /* Normal call with ID2D1DeviceContext */
+            hr = IDCompositionSurface_BeginDraw(surface, &rect, &IID_ID2D1DeviceContext,
+                    (void **)&d2d_device_context, &offset);
+            if (i == 0)
+            {
+                ok(hr == E_NOINTERFACE, "Got unexpected hr %#lx.\n", hr);
+            }
+            else
+            {
+                ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                if (hr == S_OK)
+                {
+                    ID2D1DeviceContext_Release(d2d_device_context);
+                    hr = IDCompositionSurface_EndDraw(surface);
+                    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                }
+            }
+
+            /* Call EndDraw() without BeginDraw() */
+            hr = IDCompositionSurface_EndDraw(surface);
+            ok(hr == DCOMPOSITION_ERROR_SURFACE_NOT_BEING_RENDERED, "Got unexpected hr %#lx.\n", hr);
+
+            /* Call EndDraw() twice after BeginDraw() twice for the same surface */
+            hr = IDCompositionSurface_BeginDraw(surface, NULL, &IID_IDXGISurface,
+                    (void **)&dxgi_surface, &offset);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            if (hr == S_OK)
+            {
+                hr = IDCompositionSurface_BeginDraw(surface, NULL, &IID_IDXGISurface,
+                        (void **)&dxgi_surface2, &offset);
+                ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                IDXGISurface_Release(dxgi_surface2);
+                IDXGISurface_Release(dxgi_surface);
+                hr = IDCompositionSurface_EndDraw(surface);
+                ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                hr = IDCompositionSurface_EndDraw(surface);
+                ok(hr == DCOMPOSITION_ERROR_SURFACE_NOT_BEING_RENDERED, "Got unexpected hr %#lx.\n", hr);
+            }
+
+            IDCompositionSurface_Release(surface2);
+            IDCompositionSurface_Release(surface);
+            winetest_pop_context();
+        }
+
+        IDCompositionSurfaceFactory_Release(surface_factories[i]);
+        winetest_pop_context();
+    }
+
+    IDCompositionDevice2_Release(dcomp_device2);
+    IDCompositionDevice_Release(dcomp_device);
+    refcount = IDXGIDevice_Release(dxgi_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+}
+
 static void test_target_SetRoot(void)
 {
     IDCompositionTarget *target, *target2;
@@ -912,6 +1385,9 @@ START_TEST(dcomp)
     test_DCompositionCreateDevice3();
     test_device_CreateTargetForHwnd();
     test_device_CreateVisual();
+    test_device_CreateSurfaceFactory();
+    test_surface_factory_CreateSurface();
+    test_surface_begin_end_Draw();
     test_target_SetRoot();
     test_visual_SetContent();
     test_visual_SetBitmapInterpolationMode();

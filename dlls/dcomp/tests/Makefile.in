@@ -1,5 +1,5 @@
 TESTDLL = dcomp.dll
-IMPORTS = d3d10_1 user32
+IMPORTS = d3d10_1 d3d11 dxgi d2d1 user32
 
 SOURCES = \
 	dcomp.c
