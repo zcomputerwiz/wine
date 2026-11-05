@@ -74,7 +74,8 @@ enum IWidget_dispids
     DISPID_TM_COCLASS,
     DISPID_TM_COCLASS_PTR,
     DISPID_TM_COCLASS_NOPTR,
-    DISPID_TM_NOINOUT
+    DISPID_TM_NOINOUT,
+    DISPID_TM_STRING_ARGS
 };
 
 static const int DISPID_TM_NEG_RESTRICTED = -26;
@@ -389,6 +390,9 @@ cpp_quote("struct Coclass3 { ICoclass1 *iface; };")
 
         [id(DISPID_TM_NOINOUT)]
         HRESULT no_in_out(BSTR str, int i);
+
+        [id(DISPID_TM_STRING_ARGS)]
+        HRESULT string_args([in] int a, [in] LPWSTR ws, [in] int b, [in] LPSTR cs, [in] int c, [out, retval] int *result);
     }
 
     [

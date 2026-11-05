@@ -45,6 +45,12 @@ static const WCHAR test_bstr2[] = {'t','e','s','t',0};
 static const WCHAR test_bstr3[] = {'q','u','x',0};
 static const WCHAR test_bstr4[] = {'a','b','c',0};
 
+static const WCHAR test_wstr_nonempty[] = { 'h','e','l','l','o', 0 };
+static const WCHAR test_wstr_nonascii[] = { 0x03c9, 0x03b1, 0 };
+static const WCHAR test_wstr_empty[] = { 0 };
+static const char test_cstr_nonempty[] = { 'h','e','l','l','o', 0 };
+static const char test_cstr_empty[] = { 0 };
+
 static const MYSTRUCT test_mystruct1 = {0x12345678, 0xdeadbeef98765432ull, {0,1,2,3,4,5,6,7}};
 static const MYSTRUCT test_mystruct2 = {0x91827364, 0x8877665544332211ull, {3,6,1,4,0,1,3,0}};
 static const MYSTRUCT test_mystruct3 = {0x1a1b1c1d, 0x1e1f101112131415ull, {9,2,4,5,6,5,1,3}};
@@ -1632,6 +1638,36 @@ static HRESULT WINAPI Widget_no_in_out(IWidget *iface, BSTR str, int i)
     return S_OK;
 }
 
+static HRESULT WINAPI Widget_string_args(IWidget *iface, int a, WCHAR *ws, int b, CHAR *cs, int c, int *result)
+{
+    if (testmode == 0)
+    {
+        ok(a == 1, "Got a %d.\n", a);
+        ok(!lstrcmpW(ws, test_wstr_nonempty), "Got ws %s.\n", wine_dbgstr_w(ws));
+        ok(b == 2, "Got b %d.\n", b);
+        ok(!lstrcmpA(cs, test_cstr_nonempty), "Got cs %s.\n", wine_dbgstr_a(cs));
+        ok(c == 3, "Got c %d.\n", c);
+    }
+    else if (testmode == 1)
+    {
+        ok(a == 1, "Got a %d.\n", a);
+        ok(!ws[0], "Got ws %s.\n", wine_dbgstr_w(ws));
+        ok(b == 2, "Got b %d.\n", b);
+        ok(!cs[0], "Got cs %s.\n", wine_dbgstr_a(cs));
+        ok(c == 3, "Got c %d.\n", c);
+    }
+    else if (testmode == 2)
+    {
+        ok(a == 1, "Got a %d.\n", a);
+        ok(!lstrcmpW(ws, test_wstr_nonascii), "Got ws %s.\n", wine_dbgstr_w(ws));
+        ok(b == 2, "Got b %d.\n", b);
+        ok(!lstrcmpA(cs, test_cstr_nonempty), "Got cs %s.\n", wine_dbgstr_a(cs));
+        ok(c == 3, "Got c %d.\n", c);
+    }
+    *result = a + b + c + lstrlenW(ws) + lstrlenA(cs);
+    return S_OK;
+}
+
 static const struct IWidgetVtbl Widget_VTable =
 {
     Widget_QueryInterface,
@@ -1693,6 +1729,7 @@ static const struct IWidgetVtbl Widget_VTable =
     Widget_Coclass_ptr,
     Widget_Coclass_noptr,
     Widget_no_in_out,
+    Widget_string_args,
 };
 
 static HRESULT WINAPI StaticWidget_QueryInterface(IStaticWidget *iface, REFIID riid, void **ppvObject)
@@ -2523,6 +2560,34 @@ static void test_marshal_bstr(IWidget *widget, IDispatch *disp)
     in = SysAllocString(L"test");
     hr = IWidget_no_in_out(widget, in, 5);
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
+}
+
+static void test_marshal_string_args(IWidget *widget, IDispatch *disp)
+{
+    int result;
+    HRESULT hr;
+
+    /* [in] LPWSTR and [in] LPSTR parameters surrounded by scalar arguments,
+     * marshalled through the apartment proxy. The server checks the string
+     * content; the result folds in the scalars and string lengths so that any
+     * stack corruption of the surrounding arguments is detected here. */
+    testmode = 0;
+    result = 0;
+    hr = IWidget_string_args(widget, 1, (WCHAR *)test_wstr_nonempty, 2, (CHAR *)test_cstr_nonempty, 3, &result);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    ok(result == 16, "Got result %d.\n", result);
+
+    testmode = 1;
+    result = 0;
+    hr = IWidget_string_args(widget, 1, (WCHAR *)test_wstr_empty, 2, (CHAR *)test_cstr_empty, 3, &result);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    ok(result == 6, "Got result %d.\n", result);
+
+    testmode = 2;
+    result = 0;
+    hr = IWidget_string_args(widget, 1, (WCHAR *)test_wstr_nonascii, 2, (CHAR *)test_cstr_nonempty, 3, &result);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    ok(result == 13, "Got result %d.\n", result);
 }
 
 static void test_marshal_variant(IWidget *widget, IDispatch *disp)
@@ -3534,6 +3599,7 @@ static void test_typelibmarshal(void)
     test_marshal_pointer(pWidget, pDispatch);
     test_marshal_iface(pWidget, pDispatch);
     test_marshal_bstr(pWidget, pDispatch);
+    test_marshal_string_args(pWidget, pDispatch);
     test_marshal_variant(pWidget, pDispatch);
     test_marshal_safearray(pWidget, pDispatch);
     test_marshal_struct(pWidget, pDispatch);
