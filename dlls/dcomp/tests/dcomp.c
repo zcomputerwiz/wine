@@ -2203,6 +2203,42 @@ done:
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+static void test_visual_SetTransform_scale(void)
+{
+    IDCompositionDesktopDevice *dcomp_device;
+    IDCompositionVisual2 *visual;
+    D2D_MATRIX_3X2_F matrix = {{{1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f}}};
+    IDXGIDevice *dxgi_device;
+    ULONG refcount;
+    HRESULT hr;
+
+    if (!(dxgi_device = create_device(D3D10_CREATE_DEVICE_BGRA_SUPPORT)))
+    {
+        skip("Failed to create device.\n");
+        return;
+    }
+
+    hr = pDCompositionCreateDevice2((IUnknown *)dxgi_device, &IID_IDCompositionDesktopDevice, (void **)&dcomp_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_CreateVisual(dcomp_device, &visual);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* Chromium scales a 1x1 solid-colour surface up to the layer size. */
+    matrix._11 = 1920.0f;
+    matrix._22 = 1080.0f;
+    matrix._31 = 4000000.0f;
+    hr = IDCompositionVisual2_SetTransform(visual, &matrix);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_Commit(dcomp_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    IDCompositionVisual2_Release(visual);
+    refcount = IDCompositionDesktopDevice_Release(dcomp_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+    refcount = IDXGIDevice_Release(dxgi_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+}
+
 static void test_visual_SetTransformObject(void)
 {
     IDCompositionDevice *dcomp_device, *dcomp_device2;
@@ -2314,6 +2350,7 @@ START_TEST(dcomp)
     test_effect_group_opacity();
     test_transforms();
     test_visual_SetTransformObject();
+    test_visual_SetTransform_scale();
     test_visual_AddVisual();
 
     FreeLibrary(module);

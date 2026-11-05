@@ -3048,10 +3048,6 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetTransform_locked(IDCompositionV
         if (!isfinite(matrix->_11) || !isfinite(matrix->_12) || !isfinite(matrix->_21)
                 || !isfinite(matrix->_22) || !isfinite(matrix->_31) || !isfinite(matrix->_32))
             return E_INVALIDARG;
-        if (fabsf(matrix->_11) > 64.0f || fabsf(matrix->_12) > 64.0f || fabsf(matrix->_21) > 64.0f
-                || fabsf(matrix->_22) > 64.0f || fabsf(matrix->_31) > 1048576.0f
-                || fabsf(matrix->_32) > 1048576.0f)
-            return E_INVALIDARG;
         visual->pending.has_transform = TRUE;
         visual->pending.transform = *matrix;
         /* A plain matrix replaces an attached transform object. */
@@ -3920,10 +3916,7 @@ static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int 
 
     if (!isfinite(cur_mat._11) || !isfinite(cur_mat._12) ||
         !isfinite(cur_mat._21) || !isfinite(cur_mat._22) ||
-        !isfinite(cur_mat._31) || !isfinite(cur_mat._32) ||
-        fabsf(cur_mat._11) > 64 || fabsf(cur_mat._12) > 64 ||
-        fabsf(cur_mat._21) > 64 || fabsf(cur_mat._22) > 64 ||
-        fabsf(cur_mat._31) > 1048576.0f || fabsf(cur_mat._32) > 1048576.0f)
+        !isfinite(cur_mat._31) || !isfinite(cur_mat._32))
         return E_INVALIDARG;
 
 
