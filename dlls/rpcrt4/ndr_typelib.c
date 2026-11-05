@@ -102,6 +102,8 @@ static unsigned short write_oleaut_tfs(VARTYPE vt)
     case VT_DISPATCH:   return get_tfs_offset( 2 );
     case VT_VARIANT:    return get_tfs_offset( 3 );
     case VT_SAFEARRAY:  return get_tfs_offset( 4 );
+    case VT_LPWSTR:     return get_tfs_offset( 5 );
+    case VT_LPSTR:      return get_tfs_offset( 6 );
     }
     return 0;
 }
@@ -181,6 +183,8 @@ static unsigned int type_memsize(ITypeInfo *typeinfo, TYPEDESC *desc, unsigned i
     case VT_PTR:
     case VT_UNKNOWN:
     case VT_DISPATCH:
+    case VT_LPWSTR:
+    case VT_LPSTR:
         size = align = sizeof(void *);
         break;
     case VT_VARIANT:
@@ -872,6 +876,8 @@ static unsigned int get_stack_size(ITypeInfo *typeinfo, TYPEDESC *desc, unsigned
     case VT_UNKNOWN:
     case VT_DISPATCH:
     case VT_CARRAY:
+    case VT_LPWSTR:
+    case VT_LPSTR:
         byval = 0;
         break;
     case VT_VARIANT:
@@ -1011,6 +1017,8 @@ static HRESULT get_param_info(ITypeInfo *typeinfo, TYPEDESC *tdesc, int is_in,
     case VT_BSTR:
     case VT_SAFEARRAY:
     case VT_CY:
+    case VT_LPWSTR:
+    case VT_LPSTR:
         *flags |= (by_val ? IsByValue : IsSimpleRef) | MustFree;
         break;
     case VT_UNKNOWN:

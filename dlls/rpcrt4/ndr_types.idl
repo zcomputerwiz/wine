@@ -26,5 +26,6 @@ import "oaidl.idl";
 ]
 interface dummy : IUnknown
 {
-    void dummy( BSTR a, IUnknown *b, IDispatch *c, VARIANT d, LPSAFEARRAY e, BSTR *last );
+    void dummy( BSTR a, IUnknown *b, IDispatch *c, VARIANT d, LPSAFEARRAY e,
+                [in, string] wchar_t *ws, [in, string] char *cs, BSTR *last );
 }
