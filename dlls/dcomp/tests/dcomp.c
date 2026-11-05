@@ -134,6 +134,7 @@ static IDXGISwapChain *create_swapchain_(unsigned int line, IDXGIDevice *device,
     return swapchain;
 }
 
+/* Based on Wine-Staging patch 0002 by Zhiyi Zhang */
 static void test_DCompositionCreateDevice(void)
 {
     IDCompositionDevice *dcomp_device;
@@ -196,6 +197,7 @@ static void test_DCompositionCreateDevice(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+/* Based on Wine-Staging patch 0004 by Zhiyi Zhang */
 static void test_DCompositionCreateDevice2(void)
 {
     IDCompositionDesktopDevice *desktop_device;
@@ -334,6 +336,7 @@ static void test_DCompositionCreateDevice3(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+/* Based on Wine-Staging patch 0007 by Zhiyi Zhang */
 static void test_device_CreateTargetForHwnd(void)
 {
     IDCompositionTarget *target, *target2, *target3;
@@ -417,6 +420,7 @@ static void test_device_CreateTargetForHwnd(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+/* Based on Wine-Staging patch 0009 by Zhiyi Zhang */
 static void test_device_CreateVisual(void)
 {
     IDCompositionDesktopDevice *desktop_device;
@@ -1212,6 +1216,7 @@ static void test_surface_composition(void)
     DestroyWindow(hwnd);
 }
 
+/* Based on Wine-Staging patch 0014 by Zhiyi Zhang */
 static void test_target_SetRoot(void)
 {
     IDCompositionTarget *target, *target2;
@@ -1271,6 +1276,7 @@ static void test_target_SetRoot(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+/* Based on Wine-Staging patch 0050 by Zhiyi Zhang */
 static void test_visual_SetContent(void)
 {
     IDCompositionDevice *dcomp_device;
@@ -1314,6 +1320,7 @@ static void test_visual_SetContent(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+/* Based on Wine-Staging patch 0039 by Zhiyi Zhang */
 static void test_visual_SetBitmapInterpolationMode(void)
 {
     static const struct
@@ -1365,6 +1372,7 @@ static void test_visual_SetBitmapInterpolationMode(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+/* Based on Wine-Staging patch 0039 by Zhiyi Zhang */
 static void test_visual_SetBorderMode(void)
 {
     static const struct
@@ -1416,6 +1424,7 @@ static void test_visual_SetBorderMode(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+/* Based on Wine-Staging patch 0039 by Zhiyi Zhang */
 static void test_visual_SetBackFaceVisibility(void)
 {
     static const struct
@@ -1467,6 +1476,7 @@ static void test_visual_SetBackFaceVisibility(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+/* Based on Wine-Staging patch 0045 by Zhiyi Zhang */
 static void test_visual_SetOffsetX(void)
 {
     IDCompositionDevice *dcomp_device;
@@ -1508,6 +1518,7 @@ static void test_visual_SetOffsetX(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+/* Based on Wine-Staging patch 0039 by Zhiyi Zhang */
 static void test_visual_AddVisual(void)
 {
     IDCompositionVisual *parent_visual, *parent_visual2, *child_visual, *ref_visual;
