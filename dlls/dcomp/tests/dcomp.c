@@ -681,6 +681,14 @@ static void test_surface_interface(void)
     HRESULT hr;
     RECT rect;
 
+    /* IDCompositionSurfaceUnknown is undocumented and its layout changed on current Windows builds (the call below
+     * crashes on Windows 11 build 26300): only Wine implements the layout from Wine-Staging patch 0063. */
+    if (!GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version"))
+    {
+        skip("IDCompositionSurfaceUnknown layout is not stable across Windows builds.\n");
+        return;
+    }
+
     if (!(dxgi_device = create_device(D3D10_CREATE_DEVICE_BGRA_SUPPORT)))
     {
         skip("Failed to create device.\n");
@@ -1899,6 +1907,368 @@ static void test_visual_AddVisual(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+static void test_clip_animation(void)
+{
+    IDCompositionAnimation *animation;
+    IDCompositionDevice *dcomp_device;
+    IDCompositionRectangleClip *clip;
+    IDXGIDevice *dxgi_device;
+    ULONG refcount;
+    HRESULT hr;
+
+    if (!(dxgi_device = create_device(D3D10_CREATE_DEVICE_BGRA_SUPPORT)))
+    {
+        skip("Failed to create device.\n");
+        return;
+    }
+
+    hr = pDCompositionCreateDevice(dxgi_device, &IID_IDCompositionDevice, (void **)&dcomp_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice_CreateRectangleClip(dcomp_device, &clip);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice_CreateAnimation(dcomp_device, &animation);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+
+    /* NULL animation pointer */
+    hr = IDCompositionRectangleClip_SetLeftAnimation(clip, NULL);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionRectangleClip_SetTopLeftRadiusXAnimation(clip, NULL);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    /* An animation which didn't end */
+    hr = IDCompositionRectangleClip_SetLeftAnimation(clip, animation);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionRectangleClip_SetTopLeftRadiusXAnimation(clip, animation);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    /* Normal (ended) animation accepted on every property */
+    hr = IDCompositionAnimation_End(animation, 1, 1);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionRectangleClip_SetLeftAnimation(clip, animation);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionRectangleClip_SetTopAnimation(clip, animation);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionRectangleClip_SetRightAnimation(clip, animation);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionRectangleClip_SetBottomAnimation(clip, animation);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionRectangleClip_SetTopLeftRadiusXAnimation(clip, animation);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionRectangleClip_SetTopLeftRadiusYAnimation(clip, animation);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionRectangleClip_SetTopRightRadiusXAnimation(clip, animation);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionRectangleClip_SetTopRightRadiusYAnimation(clip, animation);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionRectangleClip_SetBottomLeftRadiusXAnimation(clip, animation);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionRectangleClip_SetBottomLeftRadiusYAnimation(clip, animation);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionRectangleClip_SetBottomRightRadiusXAnimation(clip, animation);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionRectangleClip_SetBottomRightRadiusYAnimation(clip, animation);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* Plain setters: only finiteness is validated (no range, negative radii ok) */
+    hr = IDCompositionRectangleClip_SetLeft(clip, NAN);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionRectangleClip_SetLeft(clip, 2000000.0f);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionRectangleClip_SetLeft(clip, -2000000.0f);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionRectangleClip_SetTopLeftRadiusX(clip, -1.0f);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    IDCompositionAnimation_Release(animation);
+    IDCompositionRectangleClip_Release(clip);
+done:
+    refcount = IDCompositionDevice_Release(dcomp_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+    refcount = IDXGIDevice_Release(dxgi_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+}
+
+static void test_effect_group_opacity(void)
+{
+    IDCompositionAnimation *animation;
+    IDCompositionDevice *dcomp_device;
+    IDCompositionEffectGroup *group;
+    IDXGIDevice *dxgi_device;
+    ULONG refcount;
+    HRESULT hr;
+
+    if (!(dxgi_device = create_device(D3D10_CREATE_DEVICE_BGRA_SUPPORT)))
+    {
+        skip("Failed to create device.\n");
+        return;
+    }
+
+    hr = pDCompositionCreateDevice(dxgi_device, &IID_IDCompositionDevice, (void **)&dcomp_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice_CreateEffectGroup(dcomp_device, &group);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice_CreateAnimation(dcomp_device, &animation);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+
+    /* NULL animation pointer */
+    hr = IDCompositionEffectGroup_SetOpacityAnimation(group, NULL);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    /* An animation which didn't end */
+    hr = IDCompositionEffectGroup_SetOpacityAnimation(group, animation);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    /* Normal (ended) animation */
+    hr = IDCompositionAnimation_End(animation, 1, 1);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionEffectGroup_SetOpacityAnimation(group, animation);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* Plain opacity: only finiteness is validated (values outside [0,1] accepted) */
+    hr = IDCompositionEffectGroup_SetOpacity(group, NAN);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionEffectGroup_SetOpacity(group, 2.0f);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionEffectGroup_SetOpacity(group, -1.0f);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    IDCompositionAnimation_Release(animation);
+    IDCompositionEffectGroup_Release(group);
+done:
+    refcount = IDCompositionDevice_Release(dcomp_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+    refcount = IDXGIDevice_Release(dxgi_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+}
+
+static void test_transforms(void)
+{
+    IDCompositionAnimation *animation;
+    IDCompositionDevice *dcomp_device;
+    IDCompositionTranslateTransform *translate;
+    IDCompositionScaleTransform *scale;
+    IDCompositionRotateTransform *rotate;
+    IDCompositionSkewTransform *skew;
+    IDCompositionMatrixTransform *matrix;
+    IDXGIDevice *dxgi_device;
+    ULONG refcount;
+    HRESULT hr;
+
+    if (!(dxgi_device = create_device(D3D10_CREATE_DEVICE_BGRA_SUPPORT)))
+    {
+        skip("Failed to create device.\n");
+        return;
+    }
+
+    hr = pDCompositionCreateDevice(dxgi_device, &IID_IDCompositionDevice, (void **)&dcomp_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice_CreateAnimation(dcomp_device, &animation);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+
+    /* NULL out pointer */
+    hr = IDCompositionDevice_CreateTranslateTransform(dcomp_device, NULL);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    /* Translate transform */
+    hr = IDCompositionDevice_CreateTranslateTransform(dcomp_device, &translate);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        void *p1, *p2;
+        expect_ref(translate, 1);
+        check_interface(translate, &IID_IUnknown, TRUE);
+        check_interface(translate, &IID_IDCompositionEffect, TRUE);
+        check_interface(translate, &IID_IDCompositionTransform3D, TRUE);
+        check_interface(translate, &IID_IDCompositionTransform, TRUE);
+        check_interface(translate, &IID_IDCompositionTranslateTransform, TRUE);
+        check_interface(translate, &IID_IDCompositionScaleTransform, FALSE);
+        check_interface(translate, &IID_IDCompositionVisual, FALSE);
+        /* All transform interfaces resolve to the same pointer */
+        hr = IUnknown_QueryInterface((IUnknown *)translate, &IID_IDCompositionTransform, &p1);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IUnknown_QueryInterface((IUnknown *)translate, &IID_IDCompositionTranslateTransform, &p2);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ok(p1 == p2, "Expected the same pointer, got %p and %p.\n", p1, p2);
+        IUnknown_Release((IUnknown *)p1);
+        IUnknown_Release((IUnknown *)p2);
+
+        /* Plain setters: only finiteness is validated */
+        hr = IDCompositionTranslateTransform_SetOffsetX(translate, NAN);
+        ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionTranslateTransform_SetOffsetX(translate, 2000000.0f);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionTranslateTransform_SetOffsetY(translate, -2000000.0f);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+        /* Animation setters */
+        hr = IDCompositionTranslateTransform_SetOffsetXAnimation(translate, NULL);
+        ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionTranslateTransform_SetOffsetXAnimation(translate, animation);
+        ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionAnimation_End(animation, 1, 1);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionTranslateTransform_SetOffsetXAnimation(translate, animation);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+        IDCompositionTranslateTransform_Release(translate);
+    }
+
+    /* Scale transform */
+    hr = IDCompositionDevice_CreateScaleTransform(dcomp_device, &scale);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        expect_ref(scale, 1);
+        check_interface(scale, &IID_IDCompositionScaleTransform, TRUE);
+        check_interface(scale, &IID_IDCompositionTranslateTransform, FALSE);
+        hr = IDCompositionScaleTransform_SetScaleX(scale, NAN);
+        ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionScaleTransform_SetScaleX(scale, 0.0f);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionScaleTransform_SetCenterX(scale, -1.0f);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        IDCompositionScaleTransform_Release(scale);
+    }
+
+    /* Rotate transform */
+    hr = IDCompositionDevice_CreateRotateTransform(dcomp_device, &rotate);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        expect_ref(rotate, 1);
+        check_interface(rotate, &IID_IDCompositionRotateTransform, TRUE);
+        hr = IDCompositionRotateTransform_SetAngle(rotate, NAN);
+        ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionRotateTransform_SetAngle(rotate, 360.0f);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        IDCompositionRotateTransform_Release(rotate);
+    }
+
+    /* Skew transform */
+    hr = IDCompositionDevice_CreateSkewTransform(dcomp_device, &skew);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        expect_ref(skew, 1);
+        check_interface(skew, &IID_IDCompositionSkewTransform, TRUE);
+        hr = IDCompositionSkewTransform_SetAngleX(skew, NAN);
+        ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionSkewTransform_SetAngleX(skew, 45.0f);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        IDCompositionSkewTransform_Release(skew);
+    }
+
+    /* Matrix transform */
+    hr = IDCompositionDevice_CreateMatrixTransform(dcomp_device, &matrix);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        D2D1_MATRIX_3X2_F m;
+        expect_ref(matrix, 1);
+        check_interface(matrix, &IID_IDCompositionMatrixTransform, TRUE);
+        /* SetMatrix: no validation (NaN accepted) */
+        m._11 = NAN; m._12 = 0.0f; m._21 = 0.0f; m._22 = 1.0f; m._31 = 0.0f; m._32 = 0.0f;
+        hr = IDCompositionMatrixTransform_SetMatrix(matrix, &m);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        /* SetMatrixElement: row in [0,2], col in [0,1], value finite */
+        hr = IDCompositionMatrixTransform_SetMatrixElement(matrix, 0, 0, NAN);
+        ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionMatrixTransform_SetMatrixElement(matrix, 2, 1, 1.0f);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionMatrixTransform_SetMatrixElement(matrix, 3, 0, 1.0f);
+        ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionMatrixTransform_SetMatrixElement(matrix, 0, 2, 1.0f);
+        ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+        /* SetMatrixElementAnimation: same bounds plus animation validation */
+        hr = IDCompositionMatrixTransform_SetMatrixElementAnimation(matrix, 0, 0, NULL);
+        ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionMatrixTransform_SetMatrixElementAnimation(matrix, 3, 0, animation);
+        ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionMatrixTransform_SetMatrixElementAnimation(matrix, 0, 0, animation);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        IDCompositionMatrixTransform_Release(matrix);
+    }
+
+    IDCompositionAnimation_Release(animation);
+done:
+    refcount = IDCompositionDevice_Release(dcomp_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+    refcount = IDXGIDevice_Release(dxgi_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+}
+
+static void test_visual_SetTransformObject(void)
+{
+    IDCompositionDevice *dcomp_device, *dcomp_device2;
+    IDCompositionVisual *visual;
+    IDCompositionTranslateTransform *translate, *foreign;
+    IDXGIDevice *dxgi_device, *dxgi_device2;
+    ULONG refcount;
+    HRESULT hr;
+
+    if (!(dxgi_device = create_device(D3D10_CREATE_DEVICE_BGRA_SUPPORT)))
+    {
+        skip("Failed to create device.\n");
+        return;
+    }
+
+    hr = pDCompositionCreateDevice(dxgi_device, &IID_IDCompositionDevice, (void **)&dcomp_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice_CreateVisual(dcomp_device, &visual);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice_CreateTranslateTransform(dcomp_device, &translate);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+
+    /* NULL transform */
+    hr = IDCompositionVisual_SetTransformObject(visual, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* Same-device transform: accepted, and no reference is taken */
+    hr = IDCompositionVisual_SetTransformObject(visual, (IDCompositionTransform *)translate);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    expect_ref(translate, 1);
+
+    /* Clearing with NULL keeps the reference count unchanged */
+    hr = IDCompositionVisual_SetTransformObject(visual, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    expect_ref(translate, 1);
+
+    /* Foreign-device transform is rejected */
+    if ((dxgi_device2 = create_device(D3D10_CREATE_DEVICE_BGRA_SUPPORT)))
+    {
+        hr = pDCompositionCreateDevice(dxgi_device2, &IID_IDCompositionDevice, (void **)&dcomp_device2);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionDevice_CreateTranslateTransform(dcomp_device2, &foreign);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            hr = IDCompositionVisual_SetTransformObject(visual, (IDCompositionTransform *)foreign);
+            ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+            IDCompositionTranslateTransform_Release(foreign);
+        }
+        refcount = IDCompositionDevice_Release(dcomp_device2);
+        ok(!refcount, "Device has %lu references left.\n", refcount);
+        refcount = IDXGIDevice_Release(dxgi_device2);
+        ok(!refcount, "Device has %lu references left.\n", refcount);
+    }
+
+    IDCompositionTranslateTransform_Release(translate);
+    IDCompositionVisual_Release(visual);
+done:
+    refcount = IDCompositionDevice_Release(dcomp_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+    refcount = IDXGIDevice_Release(dxgi_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+}
+
 START_TEST(dcomp)
 {
     HMODULE module;
@@ -1940,6 +2310,10 @@ START_TEST(dcomp)
     test_visual_SetOffsetX();
     test_visual_SetOffsetXAnimation();
     test_animation();
+    test_clip_animation();
+    test_effect_group_opacity();
+    test_transforms();
+    test_visual_SetTransformObject();
     test_visual_AddVisual();
 
     FreeLibrary(module);
