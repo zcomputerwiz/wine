@@ -170,6 +170,7 @@ struct dcomp_surface_factory
 struct dcomp_surface
 {
     IDCompositionSurface IDCompositionSurface_iface;
+    IDCompositionVirtualSurface IDCompositionVirtualSurface_iface;
     IWineDCompSurface IWineDCompSurface_iface;
     IDCompositionDevice *device;
     IUnknown *rendering_device;
@@ -181,6 +182,8 @@ struct dcomp_surface
     DXGI_ALPHA_MODE alpha_mode;
     RECT draw_rect;
     BOOL drawn;
+    BOOL virtual_surface;
+    BOOL suspended;
     /* TRUE once a BeginDraw/EndDraw pair has completed; the composed content
      * is the last ended draw. A never-drawn surface (or one with a draw in
      * progress) composes as fully transparent. */
@@ -243,9 +246,16 @@ static inline struct dcomp_surface *impl_from_IDCompositionSurface(IDComposition
     return CONTAINING_RECORD(iface, struct dcomp_surface, IDCompositionSurface_iface);
 }
 
+static inline struct dcomp_surface *impl_from_IDCompositionVirtualSurface(IDCompositionVirtualSurface *iface)
+{
+    return CONTAINING_RECORD(iface, struct dcomp_surface, IDCompositionVirtualSurface_iface);
+}
+
 static HRESULT dcomp_target_ensure_aux_producer(struct dcomp_target *target,
         IUnknown *rendering_device, const GUID *rendering_device_iid);
 static void dcomp_target_release_aux_producer(struct dcomp_target *target);
+
+static const struct IDCompositionVirtualSurfaceVtbl dcomp_virtual_surface_vtbl;
 
 /* =====================================================================
  * Surface helpers
@@ -415,6 +425,12 @@ static HRESULT STDMETHODCALLTYPE dcomp_surface_QueryInterface(IDCompositionSurfa
         IDCompositionSurface_AddRef(iface);
         return S_OK;
     }
+    else if (IsEqualGUID(iid, &IID_IDCompositionVirtualSurface) && surface->virtual_surface)
+    {
+        *out = &surface->IDCompositionVirtualSurface_iface;
+        IDCompositionSurface_AddRef(iface);
+        return S_OK;
+    }
 
     WARN("Unsupported interface %s.\n", debugstr_guid(iid));
     *out = NULL;
@@ -485,7 +501,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_surface_BeginDraw(IDCompositionSurface *i
     }
 
     /* The first BeginDraw of a non-virtual surface must cover the whole surface */
-    if (!surface->drawn && !(rect->left == 0 && rect->top == 0
+    if (!surface->virtual_surface && !surface->drawn && !(rect->left == 0 && rect->top == 0
             && rect->right == surface->width && rect->bottom == surface->height))
         return E_INVALIDARG;
 
@@ -523,6 +539,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_surface_BeginDraw(IDCompositionSurface *i
     }
     device->drawing_surface = &surface->IDCompositionSurface_iface;
     surface->drawn = TRUE;
+    surface->suspended = FALSE;
     surface->content_valid = FALSE;
     surface->draw_rect = *rect;
     LeaveCriticalSection(&device->cs);
@@ -547,6 +564,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_surface_EndDraw(IDCompositionSurface *ifa
     }
     device->drawing_surface = NULL;
     surface->content_valid = TRUE;
+    surface->suspended = FALSE;
     LeaveCriticalSection(&device->cs);
 
     SetRectEmpty(&surface->draw_rect);
@@ -555,22 +573,136 @@ static HRESULT STDMETHODCALLTYPE dcomp_surface_EndDraw(IDCompositionSurface *ifa
 
 static HRESULT STDMETHODCALLTYPE dcomp_surface_SuspendDraw(IDCompositionSurface *iface)
 {
-    FIXME("iface %p stub!\n", iface);
-    return E_NOTIMPL;
+    struct dcomp_surface *surface = impl_from_IDCompositionSurface(iface);
+    struct dcomp_device *device = impl_from_IDCompositionDevice(surface->device);
+
+    TRACE("iface %p.\n", iface);
+
+    EnterCriticalSection(&device->cs);
+    if (device->drawing_surface != iface)
+    {
+        LeaveCriticalSection(&device->cs);
+        return DCOMPOSITION_ERROR_SURFACE_NOT_BEING_RENDERED;
+    }
+    device->drawing_surface = NULL;
+    surface->suspended = TRUE;
+    LeaveCriticalSection(&device->cs);
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE dcomp_surface_ResumeDraw(IDCompositionSurface *iface)
 {
-    FIXME("iface %p stub!\n", iface);
-    return E_NOTIMPL;
+    struct dcomp_surface *surface = impl_from_IDCompositionSurface(iface);
+    struct dcomp_device *device = impl_from_IDCompositionDevice(surface->device);
+
+    TRACE("iface %p.\n", iface);
+
+    EnterCriticalSection(&device->cs);
+    if (!surface->suspended)
+    {
+        LeaveCriticalSection(&device->cs);
+        return DCOMPOSITION_ERROR_SURFACE_NOT_BEING_RENDERED;
+    }
+    if (device->drawing_surface)
+    {
+        LeaveCriticalSection(&device->cs);
+        return DCOMPOSITION_ERROR_SURFACE_BEING_RENDERED;
+    }
+    device->drawing_surface = iface;
+    surface->suspended = FALSE;
+    LeaveCriticalSection(&device->cs);
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE dcomp_surface_Scroll(IDCompositionSurface *iface, const RECT *scroll,
         const RECT *clip, int offset_x, int offset_y)
 {
-    FIXME("iface %p, scroll %s, clip %s, offset_x %d, offset_y %d stub!\n", iface,
+    struct dcomp_surface *surface = impl_from_IDCompositionSurface(iface);
+    struct dcomp_device *device = impl_from_IDCompositionDevice(surface->device);
+    ID3D11DeviceContext *context;
+    ID3D11Device *d3d11_device;
+    ID3D11Resource *source_resource = NULL, *destination_resource = NULL, *temporary_resource = NULL;
+    ID3D11Texture2D *temporary;
+    D3D11_TEXTURE2D_DESC desc;
+    D3D11_BOX source_box;
+    RECT whole, source, destination;
+    HRESULT hr;
+
+    TRACE("iface %p, scroll %s, clip %s, offset_x %d, offset_y %d.\n", iface,
             wine_dbgstr_rect(scroll), wine_dbgstr_rect(clip), offset_x, offset_y);
-    return E_NOTIMPL;
+
+    EnterCriticalSection(&device->cs);
+    if (device->drawing_surface == iface)
+    {
+        LeaveCriticalSection(&device->cs);
+        return DCOMPOSITION_ERROR_SURFACE_BEING_RENDERED;
+    }
+    LeaveCriticalSection(&device->cs);
+
+    SetRect(&whole, 0, 0, surface->width, surface->height);
+    if (!scroll)
+        scroll = &whole;
+    if (!clip)
+        clip = &whole;
+    if (scroll->left < 0 || scroll->top < 0 || scroll->right > (LONG)surface->width
+            || scroll->bottom > (LONG)surface->height || scroll->left >= scroll->right
+            || scroll->top >= scroll->bottom || clip->left < 0 || clip->top < 0
+            || clip->right > (LONG)surface->width || clip->bottom > (LONG)surface->height
+            || clip->left >= clip->right || clip->top >= clip->bottom)
+        return E_INVALIDARG;
+
+    destination = *scroll;
+    OffsetRect(&destination, offset_x, offset_y);
+    if (!IntersectRect(&destination, &destination, clip)
+            || !IntersectRect(&destination, &destination, &whole))
+        return S_OK;
+    source = destination;
+    OffsetRect(&source, -offset_x, -offset_y);
+    if (!IntersectRect(&source, &source, scroll))
+        return S_OK;
+
+    if (FAILED(hr = dcomp_get_d3d11_device(surface->rendering_device,
+            &surface->rendering_device_iid, &d3d11_device)))
+        return hr;
+    ID3D11Texture2D_GetDesc(surface->physical_surface, &desc);
+    hr = ID3D11Device_CreateTexture2D(d3d11_device, &desc, NULL, &temporary);
+    if (SUCCEEDED(hr))
+    {
+        hr = ID3D11Texture2D_QueryInterface(surface->physical_surface, &IID_ID3D11Resource,
+                (void **)&source_resource);
+        if (SUCCEEDED(hr))
+            hr = ID3D11Texture2D_QueryInterface(surface->physical_surface, &IID_ID3D11Resource,
+                    (void **)&destination_resource);
+        if (SUCCEEDED(hr))
+            hr = ID3D11Texture2D_QueryInterface(temporary, &IID_ID3D11Resource,
+                    (void **)&temporary_resource);
+        if (FAILED(hr))
+        {
+            if (destination_resource) ID3D11Resource_Release(destination_resource);
+            if (source_resource) ID3D11Resource_Release(source_resource);
+            ID3D11Texture2D_Release(temporary);
+            ID3D11Device_Release(d3d11_device);
+            return hr;
+        }
+        ID3D11Device_GetImmediateContext(d3d11_device, &context);
+        ID3D11DeviceContext_CopyResource(context, temporary_resource, source_resource);
+        source_box.left = source.left;
+        source_box.top = source.top;
+        source_box.front = 0;
+        source_box.right = source.right;
+        source_box.bottom = source.bottom;
+        source_box.back = 1;
+        ID3D11DeviceContext_CopySubresourceRegion(context, destination_resource, 0,
+                destination.left, destination.top, 0, temporary_resource, 0, &source_box);
+        ID3D11DeviceContext_Release(context);
+        ID3D11Resource_Release(temporary_resource);
+        ID3D11Resource_Release(destination_resource);
+        ID3D11Resource_Release(source_resource);
+        ID3D11Texture2D_Release(temporary);
+        surface->content_valid = TRUE;
+    }
+    ID3D11Device_Release(d3d11_device);
+    return hr;
 }
 
 /* =====================================================================
@@ -642,6 +774,163 @@ static const struct IDCompositionSurfaceVtbl dcomp_surface_vtbl =
     dcomp_surface_Scroll,
 };
 
+static HRESULT STDMETHODCALLTYPE dcomp_virtual_surface_Resize(IDCompositionVirtualSurface *iface,
+        UINT width, UINT height)
+{
+    struct dcomp_surface *surface = impl_from_IDCompositionVirtualSurface(iface);
+    struct dcomp_device *device = impl_from_IDCompositionDevice(surface->device);
+    ID3D11Texture2D *texture;
+    ID3D11Resource *source_resource = NULL, *destination_resource = NULL;
+    ID3D11DeviceContext *context;
+    ID3D11Device *d3d11_device;
+    D3D11_TEXTURE2D_DESC desc;
+    D3D11_BOX box;
+    UINT copy_width, copy_height;
+    HRESULT hr;
+
+    TRACE("iface %p, width %u, height %u.\n", iface, width, height);
+
+    if (!width || !height || width > 16384 || height > 16384)
+        return E_INVALIDARG;
+    EnterCriticalSection(&device->cs);
+    if (device->drawing_surface == &surface->IDCompositionSurface_iface)
+    {
+        LeaveCriticalSection(&device->cs);
+        return DCOMPOSITION_ERROR_SURFACE_BEING_RENDERED;
+    }
+    LeaveCriticalSection(&device->cs);
+
+    if (FAILED(hr = dcomp_get_d3d11_device(surface->rendering_device,
+            &surface->rendering_device_iid, &d3d11_device)))
+        return hr;
+    ID3D11Texture2D_GetDesc(surface->physical_surface, &desc);
+    desc.Width = width;
+    desc.Height = height;
+    hr = ID3D11Device_CreateTexture2D(d3d11_device, &desc, NULL, &texture);
+    if (SUCCEEDED(hr))
+    {
+        hr = ID3D11Texture2D_QueryInterface(texture, &IID_ID3D11Resource,
+                (void **)&destination_resource);
+        if (SUCCEEDED(hr))
+            hr = ID3D11Texture2D_QueryInterface(surface->physical_surface, &IID_ID3D11Resource,
+                    (void **)&source_resource);
+        if (FAILED(hr))
+        {
+            if (source_resource) ID3D11Resource_Release(source_resource);
+            if (destination_resource) ID3D11Resource_Release(destination_resource);
+            ID3D11Texture2D_Release(texture);
+            ID3D11Device_Release(d3d11_device);
+            return hr;
+        }
+        copy_width = min(surface->width, width);
+        copy_height = min(surface->height, height);
+        ID3D11Device_GetImmediateContext(d3d11_device, &context);
+        box.left = 0;
+        box.top = 0;
+        box.front = 0;
+        box.right = copy_width;
+        box.bottom = copy_height;
+        box.back = 1;
+        ID3D11DeviceContext_CopySubresourceRegion(context, destination_resource, 0,
+                0, 0, 0, source_resource, 0, &box);
+        ID3D11DeviceContext_Release(context);
+        ID3D11Resource_Release(source_resource);
+        ID3D11Resource_Release(destination_resource);
+        ID3D11Texture2D_Release(surface->physical_surface);
+        surface->physical_surface = texture;
+        surface->width = width;
+        surface->height = height;
+    }
+    ID3D11Device_Release(d3d11_device);
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_virtual_surface_Trim(IDCompositionVirtualSurface *iface,
+        const RECT *rectangles, UINT count)
+{
+    struct dcomp_surface *surface = impl_from_IDCompositionVirtualSurface(iface);
+    UINT i;
+
+    TRACE("iface %p, rectangles %p, count %u.\n", iface, rectangles, count);
+
+    if (count && !rectangles)
+        return E_INVALIDARG;
+    for (i = 0; i < count; ++i)
+    {
+        const RECT *rect = &rectangles[i];
+        if (rect->left < 0 || rect->top < 0 || rect->right > (LONG)surface->width
+                || rect->bottom > (LONG)surface->height || rect->left >= rect->right
+                || rect->top >= rect->bottom)
+            return E_INVALIDARG;
+    }
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_virtual_surface_QueryInterface(IDCompositionVirtualSurface *iface,
+        REFIID iid, void **out)
+{
+    struct dcomp_surface *surface = impl_from_IDCompositionVirtualSurface(iface);
+    return dcomp_surface_QueryInterface(&surface->IDCompositionSurface_iface, iid, out);
+}
+
+static ULONG STDMETHODCALLTYPE dcomp_virtual_surface_AddRef(IDCompositionVirtualSurface *iface)
+{
+    struct dcomp_surface *surface = impl_from_IDCompositionVirtualSurface(iface);
+    return dcomp_surface_AddRef(&surface->IDCompositionSurface_iface);
+}
+
+static ULONG STDMETHODCALLTYPE dcomp_virtual_surface_Release(IDCompositionVirtualSurface *iface)
+{
+    struct dcomp_surface *surface = impl_from_IDCompositionVirtualSurface(iface);
+    return dcomp_surface_Release(&surface->IDCompositionSurface_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_virtual_surface_BeginDraw(IDCompositionVirtualSurface *iface,
+        const RECT *rect, REFIID iid, void **object, POINT *offset)
+{
+    struct dcomp_surface *surface = impl_from_IDCompositionVirtualSurface(iface);
+    return dcomp_surface_BeginDraw(&surface->IDCompositionSurface_iface, rect, iid, object, offset);
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_virtual_surface_EndDraw(IDCompositionVirtualSurface *iface)
+{
+    struct dcomp_surface *surface = impl_from_IDCompositionVirtualSurface(iface);
+    return dcomp_surface_EndDraw(&surface->IDCompositionSurface_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_virtual_surface_SuspendDraw(IDCompositionVirtualSurface *iface)
+{
+    struct dcomp_surface *surface = impl_from_IDCompositionVirtualSurface(iface);
+    return dcomp_surface_SuspendDraw(&surface->IDCompositionSurface_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_virtual_surface_ResumeDraw(IDCompositionVirtualSurface *iface)
+{
+    struct dcomp_surface *surface = impl_from_IDCompositionVirtualSurface(iface);
+    return dcomp_surface_ResumeDraw(&surface->IDCompositionSurface_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_virtual_surface_Scroll(IDCompositionVirtualSurface *iface,
+        const RECT *scroll, const RECT *clip, int offset_x, int offset_y)
+{
+    struct dcomp_surface *surface = impl_from_IDCompositionVirtualSurface(iface);
+    return dcomp_surface_Scroll(&surface->IDCompositionSurface_iface, scroll, clip, offset_x, offset_y);
+}
+
+static const struct IDCompositionVirtualSurfaceVtbl dcomp_virtual_surface_vtbl =
+{
+    dcomp_virtual_surface_QueryInterface,
+    dcomp_virtual_surface_AddRef,
+    dcomp_virtual_surface_Release,
+    dcomp_virtual_surface_BeginDraw,
+    dcomp_virtual_surface_EndDraw,
+    dcomp_virtual_surface_SuspendDraw,
+    dcomp_virtual_surface_ResumeDraw,
+    dcomp_virtual_surface_Scroll,
+    dcomp_virtual_surface_Resize,
+    dcomp_virtual_surface_Trim,
+};
+
 static HRESULT dcomp_surface_create(IDCompositionDevice *device, IUnknown *rendering_device,
         const GUID *rendering_device_iid, UINT width, UINT height, DXGI_FORMAT pixel_format,
         DXGI_ALPHA_MODE alpha_mode, IDCompositionSurface **surface)
@@ -701,6 +990,7 @@ static HRESULT dcomp_surface_create(IDCompositionDevice *device, IUnknown *rende
     }
 
     obj->IDCompositionSurface_iface.lpVtbl = &dcomp_surface_vtbl;
+    obj->IDCompositionVirtualSurface_iface.lpVtbl = &dcomp_virtual_surface_vtbl;
     obj->IWineDCompSurface_iface.lpVtbl = &dcomp_wine_surface_vtbl;
     obj->refcount = 1;
     obj->device = device;
@@ -714,10 +1004,46 @@ static HRESULT dcomp_surface_create(IDCompositionDevice *device, IUnknown *rende
     obj->pixel_format = pixel_format;
     obj->alpha_mode = alpha_mode;
     obj->drawn = FALSE;
+    obj->virtual_surface = FALSE;
     obj->content_valid = FALSE;
 
     *surface = &obj->IDCompositionSurface_iface;
     return S_OK;
+}
+
+static HRESULT dcomp_virtual_surface_create(IDCompositionDevice *device, IUnknown *rendering_device,
+        const GUID *rendering_device_iid, UINT width, UINT height, DXGI_FORMAT pixel_format,
+        DXGI_ALPHA_MODE alpha_mode, IDCompositionVirtualSurface **surface)
+{
+    IDCompositionSurface *base_surface;
+    struct dcomp_surface *obj;
+    HRESULT hr;
+
+    if (!surface)
+        return E_INVALIDARG;
+    if (width > 16384 || height > 16384)
+        return E_NOTIMPL;
+    if (FAILED(hr = dcomp_surface_create(device, rendering_device, rendering_device_iid,
+            width, height, pixel_format, alpha_mode, &base_surface)))
+        return hr;
+
+    obj = impl_from_IDCompositionSurface(base_surface);
+    obj->virtual_surface = TRUE;
+    hr = IDCompositionSurface_QueryInterface(base_surface, &IID_IDCompositionVirtualSurface,
+            (void **)surface);
+    IDCompositionSurface_Release(base_surface);
+    return hr;
+}
+
+static HRESULT dcomp_device_create_virtual_surface(struct dcomp_device *device, UINT width, UINT height,
+        DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode, IDCompositionVirtualSurface **surface)
+{
+    TRACE("device %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n",
+            device, width, height, pixel_format, alpha_mode, surface);
+
+    return dcomp_virtual_surface_create(&device->IDCompositionDevice_iface,
+            device->rendering_device, &device->rendering_device_iid, width, height,
+            pixel_format, alpha_mode, surface);
 }
 
 /* =====================================================================
@@ -790,9 +1116,13 @@ static HRESULT STDMETHODCALLTYPE dcomp_surface_factory_CreateVirtualSurface(IDCo
         UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
         IDCompositionVirtualSurface **surface)
 {
-    FIXME("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p stub!\n",
+    struct dcomp_surface_factory *factory = impl_from_IDCompositionSurfaceFactory(iface);
+
+    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n",
             iface, width, height, pixel_format, alpha_mode, surface);
-    return E_NOTIMPL;
+
+    return dcomp_virtual_surface_create(factory->device, factory->rendering_device,
+            &factory->rendering_device_iid, width, height, pixel_format, alpha_mode, surface);
 }
 
 static const struct IDCompositionSurfaceFactoryVtbl dcomp_surface_factory_vtbl =
@@ -2720,8 +3050,11 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_CreateVirtualSurface(IDComposition
         UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
         IDCompositionVirtualSurface **surface)
 {
-    FIXME("iface %p, surface %p stub!\n", iface, surface);
-    return E_NOTIMPL;
+    struct dcomp_device *dev = impl_from_IDCompositionDevice(iface);
+
+    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n",
+            iface, width, height, pixel_format, alpha_mode, surface);
+    return dcomp_device_create_virtual_surface(dev, width, height, pixel_format, alpha_mode, surface);
 }
 
 static HRESULT STDMETHODCALLTYPE dcomp_device_CreateSurfaceFromHandle(IDCompositionDevice *iface,
@@ -2974,8 +3307,11 @@ static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateVirtualSurface(IDCompositio
         UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
         IDCompositionVirtualSurface **surface)
 {
-    FIXME("iface %p, surface %p stub!\n", iface, surface);
-    return E_NOTIMPL;
+    struct dcomp_device *dev = impl_from_IDCompositionDevice2(iface);
+
+    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n",
+            iface, width, height, pixel_format, alpha_mode, surface);
+    return dcomp_device_create_virtual_surface(dev, width, height, pixel_format, alpha_mode, surface);
 }
 
 static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateTranslateTransform(IDCompositionDevice2 *iface,
@@ -3190,8 +3526,11 @@ static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateVirtualSurface(IDCompositio
         UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
         IDCompositionVirtualSurface **surface)
 {
-    FIXME("iface %p, surface %p stub!\n", iface, surface);
-    return E_NOTIMPL;
+    struct dcomp_device *dev = impl_from_IDCompositionDevice3(iface);
+
+    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n",
+            iface, width, height, pixel_format, alpha_mode, surface);
+    return dcomp_device_create_virtual_surface(dev, width, height, pixel_format, alpha_mode, surface);
 }
 
 static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateTranslateTransform(IDCompositionDevice3 *iface,
@@ -3508,8 +3847,11 @@ static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateVirtualSurface(IDCom
         UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
         IDCompositionVirtualSurface **surface)
 {
-    FIXME("iface %p, surface %p stub!\n", iface, surface);
-    return E_NOTIMPL;
+    struct dcomp_device *dev = impl_from_IDCompositionDesktopDevice(iface);
+
+    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n",
+            iface, width, height, pixel_format, alpha_mode, surface);
+    return dcomp_device_create_virtual_surface(dev, width, height, pixel_format, alpha_mode, surface);
 }
 
 static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateTranslateTransform(IDCompositionDesktopDevice *iface,
