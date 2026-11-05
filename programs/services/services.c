@@ -1422,6 +1422,16 @@ int __cdecl main(int argc, char *argv[])
 
     started_event = CreateEventW(NULL, TRUE, FALSE, svcctl_started_event);
 
+    /* A WoW64 prefix runs a 64-bit and a 32-bit wineboot --init, which can start two services.exe within milliseconds
+     * of each other, before either sets the started event. Each would keep its own service database, so a service
+     * created through one could not be opened by a service process talking to the other. Only the first one serves;
+     * a duplicate waits until it is up (so its wineboot sees the event) and leaves. */
+    if (CreateMutexW(NULL, FALSE, L"__wine_SvcctlInstance") && GetLastError() == ERROR_ALREADY_EXISTS)
+    {
+        WaitForSingleObject(started_event, 30000);
+        return 0;
+    }
+
     err = RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\ServiceCurrent", 0,
         NULL, REG_OPTION_VOLATILE, KEY_SET_VALUE | KEY_QUERY_VALUE, NULL,
         &service_current_key, NULL);
