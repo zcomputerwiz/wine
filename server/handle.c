@@ -712,6 +712,30 @@ DECL_HANDLER(get_object_name)
     release_object( obj );
 }
 
+/* Windows does not look at the access of a registry key handle for SetSecurityInfo and GetSecurityInfo: a handle
+ * created with KEY_WRITE only (Chromium's updater, CreateClientStateMedium) or even KEY_SET_VALUE can read and change
+ * the descriptor. What counts is the right of the caller's token on the key (the owner has READ_CONTROL and
+ * WRITE_DAC), so for a registry key the descriptor right is checked against the token. Other objects keep the
+ * handle access check. */
+static struct object *get_security_handle_obj( obj_handle_t handle, unsigned int access )
+{
+    struct object *obj;
+    unsigned int needed = access;
+
+    if (!(obj = get_handle_obj( current->process, handle, 0, NULL ))) return NULL;
+    if (!object_is_registry_key( obj ))
+    {
+        release_object( obj );
+        return get_handle_obj( current->process, handle, access, NULL );
+    }
+    if (!check_object_access( NULL, obj, &needed ))
+    {
+        release_object( obj );
+        return NULL;
+    }
+    return obj;
+}
+
 DECL_HANDLER(set_security_object)
 {
     data_size_t sd_size = get_req_data_size();
@@ -734,7 +758,7 @@ DECL_HANDLER(set_security_object)
     if (req->security_info & DACL_SECURITY_INFORMATION)
         access |= WRITE_DAC;
 
-    if (!(obj = get_handle_obj( current->process, req->handle, access, NULL ))) return;
+    if (!(obj = get_security_handle_obj( req->handle, access ))) return;
 
     if (obj->ops->set_sd) obj->ops->set_sd( obj, sd, req->security_info );
     else default_set_sd( obj, sd, req->security_info );
@@ -756,7 +780,7 @@ DECL_HANDLER(get_security_object)
     if (req->security_info & SACL_SECURITY_INFORMATION)
         access |= ACCESS_SYSTEM_SECURITY;
 
-    if (!(obj = get_handle_obj( current->process, req->handle, access, NULL ))) return;
+    if (!(obj = get_security_handle_obj( req->handle, access ))) return;
 
     sd = obj->ops->get_sd ? obj->ops->get_sd( obj ) : obj->sd;
     if (sd)

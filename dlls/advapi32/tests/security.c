@@ -9800,6 +9800,52 @@ static void test_linked_token_routes(void)
     RegCloseKey( key );
 }
 
+static void test_regkey_descriptor_handle_access(void)
+{
+    static const WCHAR pathW[] = L"Software\\WineTestKeyWriteDacl";
+    static const REGSAM sams[] = { KEY_WRITE, KEY_READ, KEY_SET_VALUE, KEY_READ | KEY_WRITE, WRITE_DAC };
+    PSECURITY_DESCRIPTOR sd;
+    PACL dacl;
+    HKEY key, key2;
+    DWORD disp;
+    unsigned int i;
+    LONG res;
+
+    /* Chromium's updater creates a key with KEY_WRITE and then changes its DACL through the handle. */
+    res = RegCreateKeyExW( HKEY_CURRENT_USER, pathW, 0, NULL, 0, KEY_WRITE, NULL, &key, &disp );
+    ok( !res, "got %ld\n", res );
+    if (res) return;
+
+    res = GetSecurityInfo( key, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, &dacl, NULL, &sd );
+    ok( !res, "got %ld\n", res );
+    if (!res)
+    {
+        res = SetSecurityInfo( key, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, dacl, NULL );
+        ok( !res, "got %ld\n", res );
+        LocalFree( sd );
+    }
+    RegCloseKey( key );
+
+    /* the access of the handle does not matter for the descriptor of a registry key */
+    for (i = 0; i < ARRAY_SIZE(sams); i++)
+    {
+        res = RegOpenKeyExW( HKEY_CURRENT_USER, pathW, 0, sams[i], &key2 );
+        ok( !res, "access %#lx: got %ld\n", sams[i], res );
+        if (res) continue;
+        res = GetSecurityInfo( key2, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, &dacl, NULL, &sd );
+        ok( !res, "access %#lx: got %ld\n", sams[i], res );
+        if (!res)
+        {
+            res = SetSecurityInfo( key2, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, dacl, NULL );
+            ok( !res, "access %#lx: got %ld\n", sams[i], res );
+            LocalFree( sd );
+        }
+        RegCloseKey( key2 );
+    }
+
+    RegDeleteKeyW( HKEY_CURRENT_USER, pathW );
+}
+
 START_TEST(security)
 {
     init();
@@ -9818,6 +9864,7 @@ START_TEST(security)
         return;
     }
     test_kernel_objects_security();
+    test_regkey_descriptor_handle_access();
     test_ConvertStringSidToSid();
     test_trustee();
     test_allocateLuid();
