@@ -20,6 +20,7 @@
 
 #define COBJMACROS
 #include "initguid.h"
+#include <math.h>
 #include <d2d1_1.h>
 #include <d3d10_1.h>
 #include <d3d11.h>
@@ -1518,6 +1519,140 @@ static void test_visual_SetOffsetX(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+/* Based on Wine-Staging patch 0044 by Zhiyi Zhang */
+static void test_visual_SetOffsetXAnimation(void)
+{
+    IDCompositionAnimation *animation;
+    IDCompositionDevice *dcomp_device;
+    IDCompositionVisual *visual;
+    IDXGISwapChain *swapchain;
+    IDXGIDevice *dxgi_device;
+    ULONG refcount;
+    HRESULT hr;
+    HWND hwnd;
+
+    if (!(dxgi_device = create_device(D3D10_CREATE_DEVICE_BGRA_SUPPORT)))
+    {
+        skip("Failed to create device.\n");
+        return;
+    }
+
+    hwnd = create_window();
+    swapchain = create_swapchain(dxgi_device, hwnd);
+    hr = pDCompositionCreateDevice(dxgi_device, &IID_IDCompositionDevice, (void **)&dcomp_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice_CreateVisual(dcomp_device, &visual);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice_CreateAnimation(dcomp_device, &animation);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+
+    /* NULL animation pointer */
+    hr = IDCompositionVisual_SetOffsetXAnimation(visual, NULL);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    /* An animation which didn't end */
+    hr = IDCompositionVisual_SetOffsetXAnimation(visual, animation);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    /* Normal animation */
+    hr = IDCompositionAnimation_End(animation, 1, 1);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = IDCompositionVisual_SetOffsetXAnimation(visual, animation);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    IDCompositionAnimation_Release(animation);
+done:
+    IDCompositionVisual_Release(visual);
+    refcount = IDCompositionDevice_Release(dcomp_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+    IDXGISwapChain_Release(swapchain);
+    DestroyWindow(hwnd);
+    refcount = IDXGIDevice_Release(dxgi_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+}
+
+static void test_animation(void)
+{
+    IDCompositionAnimation *animation;
+    IDCompositionDevice *dcomp_device;
+    IDXGIDevice *dxgi_device;
+    ULONG refcount;
+    HRESULT hr;
+
+    if (!(dxgi_device = create_device(D3D10_CREATE_DEVICE_BGRA_SUPPORT)))
+    {
+        skip("Failed to create device.\n");
+        return;
+    }
+
+    hr = pDCompositionCreateDevice(dxgi_device, &IID_IDCompositionDevice, (void **)&dcomp_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice_CreateAnimation(dcomp_device, &animation);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+
+    /* AddRepeat before any segment */
+    hr = IDCompositionAnimation_AddRepeat(animation, 0, 1);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    /* AddCubic: valid */
+    hr = IDCompositionAnimation_AddCubic(animation, 0, 0, 1, 0, 0);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* AddCubic: offset earlier than the last end */
+    hr = IDCompositionAnimation_AddCubic(animation, -1, 0, 1, 0, 0);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    /* AddCubic: NaN offset */
+    hr = IDCompositionAnimation_AddCubic(animation, NAN, 0, 1, 0, 0);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    /* AddCubic: NaN coefficient */
+    hr = IDCompositionAnimation_AddCubic(animation, 0, NAN, 1, 0, 0);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    /* AddRepeat: valid */
+    hr = IDCompositionAnimation_AddRepeat(animation, 0, 1);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* AddRepeat: negative duration */
+    hr = IDCompositionAnimation_AddRepeat(animation, 1, -1);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    /* AddSinusoidal: valid */
+    hr = IDCompositionAnimation_AddSinusoidal(animation, 1, 0, 1, 1, 0);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* AddSinusoidal: offset earlier than the last end */
+    hr = IDCompositionAnimation_AddSinusoidal(animation, 0, 0, 1, 1, 0);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    /* End: valid */
+    hr = IDCompositionAnimation_End(animation, 2, 1);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* AddCubic after End */
+    hr = IDCompositionAnimation_AddCubic(animation, 3, 0, 1, 0, 0);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    /* Reset, then End before any segment */
+    hr = IDCompositionAnimation_Reset(animation);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionAnimation_End(animation, 1, 1);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    IDCompositionAnimation_Release(animation);
+done:
+    refcount = IDCompositionDevice_Release(dcomp_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+    refcount = IDXGIDevice_Release(dxgi_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+}
+
 /* Based on Wine-Staging patch 0039 by Zhiyi Zhang */
 static void test_visual_AddVisual(void)
 {
@@ -1666,6 +1801,8 @@ START_TEST(dcomp)
     test_visual_SetBorderMode();
     test_visual_SetBackFaceVisibility();
     test_visual_SetOffsetX();
+    test_visual_SetOffsetXAnimation();
+    test_animation();
     test_visual_AddVisual();
 
     FreeLibrary(module);
