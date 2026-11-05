@@ -432,6 +432,9 @@ HRESULT CDECL wined3d_swapchain_set_target_scene(struct wined3d_swapchain *swapc
         if (surface && FAILED(hr = dcomp_background_for_window(swapchain, scene->target_hwnd,
                 surface->resource.width, surface->resource.height, &background))) goto failed;
         snapshot = *scene;
+        /* Track how many layers had a reference acquired so a failure releases
+         * exactly those, rather than relying on truncating layer_count. */
+        unsigned int acquired = 0;
         for (i = 0; i < snapshot.layer_count; ++i)
         {
             struct wined3d_swapchain *source = snapshot.layers[i].swapchain;
@@ -439,13 +442,14 @@ HRESULT CDECL wined3d_swapchain_set_target_scene(struct wined3d_swapchain *swapc
             {
                 /* Caller-supplied frame (a composition surface): the snapshot keeps its own reference. */
                 ++snapshot.layers[i].frame->refcount;
+                ++acquired;
                 continue;
             }
-            if (!source) continue; /* Contentless retained visual. */
+            if (!source) { ++acquired; continue; } /* Contentless retained visual. */
             if (source->device != swapchain->device)
             {
                 hr = E_NOTIMPL;
-                snapshot.layer_count = i;
+                snapshot.layer_count = acquired;
                 goto failed;
             }
             if (!source->dcomp_frame)
@@ -453,7 +457,7 @@ HRESULT CDECL wined3d_swapchain_set_target_scene(struct wined3d_swapchain *swapc
                 if (!(source->dcomp_frame = calloc(1, sizeof(*source->dcomp_frame))))
                 {
                     hr = E_OUTOFMEMORY;
-                    snapshot.layer_count = i;
+                    snapshot.layer_count = acquired;
                     goto failed;
                 }
                 source->dcomp_frame->refcount = 1;
@@ -461,6 +465,7 @@ HRESULT CDECL wined3d_swapchain_set_target_scene(struct wined3d_swapchain *swapc
             snapshot.layers[i].frame = source->dcomp_frame;
             ++snapshot.layers[i].frame->refcount;
             snapshot.layers[i].swapchain = NULL;
+            ++acquired;
         }
     }
     if (prepare)

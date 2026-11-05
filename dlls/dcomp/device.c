@@ -2362,6 +2362,13 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
     struct dcomp_collect_context *contexts = NULL;
     IWineDCompSwapChain *bindings[WINE_DCOMP_MAX_CONTENTS];
     unsigned int binding_context[WINE_DCOMP_MAX_CONTENTS];
+    /* Content IUnknown each binding was prepared from (no ref held); used to
+     * dedupe duplicate producers by the underlying object, not the interface. */
+    IUnknown *binding_content[WINE_DCOMP_MAX_CONTENTS];
+    /* Targets whose auxiliary producer must be revoked, deferred until the
+     * commit is known to succeed so a failed transaction keeps it intact. */
+    struct dcomp_target *aux_release[WINE_DCOMP_MAX_CONTENTS];
+    unsigned int aux_release_count = 0;
     struct dcomp_visual *pending_nodes[WINE_DCOMP_MAX_LAYERS], *old_nodes[WINE_DCOMP_MAX_LAYERS];
     unsigned int old_count = 0;
     unsigned int contents = 0, visuals = 0, targets = 0, count = 0, i, j, c = 0;
@@ -2430,7 +2437,7 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
             if (FAILED(hr = IUnknown_QueryInterface(scene->layers[i].content,
                     &IID_IWineDCompSwapChain, (void **)&binding))) goto done;
             has_swapchain = TRUE;
-            for (j = 0; j < count && bindings[j] != binding; ++j) {}
+            for (j = 0; j < count && binding_content[j] != scene->layers[i].content; ++j) {}
             if (j < count)
             {
                 IWineDCompSwapChain_Release(binding);
@@ -2438,6 +2445,7 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
                 continue;
             }
             binding_context[count] = c;
+            binding_content[count] = scene->layers[i].content;
             bindings[count++] = binding;
             if (FAILED(hr = IWineDCompSwapChain_prepare_target_scene(binding, scene->target_hwnd, scene)))
                 goto done;
@@ -2476,6 +2484,7 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
             /* Present the scene through the auxiliary producer exactly like an
              * ordinary binding. */
             binding_context[count] = c;
+            binding_content[count] = NULL; /* The aux producer has no content IUnknown. */
             bindings[count] = target->aux_binding;
             IWineDCompSwapChain_AddRef(target->aux_binding);
             ++count;
@@ -2485,54 +2494,72 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
         }
         else if (target->aux_binding)
         {
-            /* The scene has a real producer (or no content): revoke and release
-             * the auxiliary producer. */
-            dcomp_target_release_aux_producer(target);
+            /* The scene has a real producer (or no content): the auxiliary
+             * producer is revoked, but only once the commit is known to succeed. */
+            aux_release[aux_release_count++] = target;
         }
     }
-    /* A target whose scene went away keeps no auxiliary producer. */
+    /* A target whose scene went away keeps no auxiliary producer (deferred). */
     LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
         if (!target->pending_root && target->aux_binding)
-            dcomp_target_release_aux_producer(target);
-    /* Reparenting must not reuse active sibling links while a different old
-     * parent still traverses them. Retain every old node, remove ALL old edges,
-     * then build the new graph. Pending ownership alone cannot retain detached
-     * old-only nodes until their bindings have been revoked. */
+            aux_release[aux_release_count++] = target;
+    /* Retain the old active tree before any activation so its nodes stay alive
+     * while the new graph is built; a failed commit releases these extra refs
+     * and leaves the old tree untouched. */
     LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
         if (FAILED(hr = dcomp_retain_active_tree(target->active_root, old_nodes, &old_count))) goto done;
-    for (i = 0; i < old_count; ++i)
-    {
-        struct dcomp_visual *visual = old_nodes[i];
-        for (j = 0; j < visuals && pending_nodes[j] != visual; ++j) {}
-        if (j == visuals) dcomp_bind_content(visual->active.content, NULL, NULL, NULL);
-        while (visual->active_children)
-        {
-            struct dcomp_visual *child = visual->active_children;
-            visual->active_children = child->active_next_sibling;
-            child->active_parent = NULL;
-            child->active_next_sibling = NULL;
-            IDCompositionVisual2_Release(&child->IDCompositionVisual2_iface);
-        }
-    }
-    LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
-    {
-        if (target->active_root != target->pending_root)
-        {
-            if (target->pending_root) IDCompositionVisual2_AddRef(&target->pending_root->IDCompositionVisual2_iface);
-            if (target->active_root)
-            {
-                dcomp_visual_unbind_tree(target->active_root);
-                IDCompositionVisual2_Release(&target->active_root->IDCompositionVisual2_iface);
-            }
-            target->active_root = target->pending_root;
-        }
-        if (target->active_root) dcomp_visual_apply_commit(target->active_root);
-    }
+    /* Activate every producer before switching the visual tree, so a failure
+     * leaves the previous scene and tree intact. */
     for (i = 0; i < count; ++i)
     {
         const struct wine_dcomp_target_scene *scene = &contexts[binding_context[i]].scene;
         if (FAILED(hr = IWineDCompSwapChain_set_target_scene(bindings[i], scene->target_hwnd, scene)))
+        {
+            /* Keep the commit all-or-nothing: revoke the bindings already
+             * activated so none of the new scenes are published. */
+            for (j = 0; j < i; ++j)
+                IWineDCompSwapChain_set_target_scene(bindings[j], NULL, NULL);
             break;
+        }
+    }
+    if (SUCCEEDED(hr))
+    {
+        /* Reparenting must not reuse active sibling links while a different old
+         * parent still traverses them. Remove ALL old edges, then build the new
+         * graph. Pending ownership alone cannot retain detached old-only nodes
+         * until their bindings have been revoked. */
+        for (i = 0; i < old_count; ++i)
+        {
+            struct dcomp_visual *visual = old_nodes[i];
+            for (j = 0; j < visuals && pending_nodes[j] != visual; ++j) {}
+            if (j == visuals) dcomp_bind_content(visual->active.content, NULL, NULL, NULL);
+            while (visual->active_children)
+            {
+                struct dcomp_visual *child = visual->active_children;
+                visual->active_children = child->active_next_sibling;
+                child->active_parent = NULL;
+                child->active_next_sibling = NULL;
+                IDCompositionVisual2_Release(&child->IDCompositionVisual2_iface);
+            }
+        }
+        LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
+        {
+            if (target->active_root != target->pending_root)
+            {
+                if (target->pending_root) IDCompositionVisual2_AddRef(&target->pending_root->IDCompositionVisual2_iface);
+                if (target->active_root)
+                {
+                    dcomp_visual_unbind_tree(target->active_root);
+                    IDCompositionVisual2_Release(&target->active_root->IDCompositionVisual2_iface);
+                }
+                target->active_root = target->pending_root;
+            }
+            if (target->active_root) dcomp_visual_apply_commit(target->active_root);
+        }
+        /* The commit succeeded: now revoke the auxiliary producers that are no
+         * longer needed. */
+        for (i = 0; i < aux_release_count; ++i)
+            dcomp_target_release_aux_producer(aux_release[i]);
     }
 done:
     for (i = 0; i < old_count; ++i) IDCompositionVisual2_Release(&old_nodes[i]->IDCompositionVisual2_iface);

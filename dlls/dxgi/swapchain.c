@@ -455,19 +455,24 @@ static HRESULT STDMETHODCALLTYPE dcomp_binding_set_target(IWineDCompSwapChain *i
 }
 
 /* CPU copy of a composition surface's texture as a retained frame. Runs on the committing thread through the
- * surface device's immediate context; WineD3D's CS thread owns all GL work. */
-static struct wined3d_dcomp_frame *dcomp_surface_frame(ID3D11Texture2D *texture)
+ * surface device's immediate context; WineD3D's CS thread owns all GL work. The immediate context is shared with
+ * the app thread (which draws and calls EndDraw on it), so the copy is serialized with ID3D11Multithread, the same
+ * lock the app's D3D11 calls take. Returns E_NOTIMPL for an unsupported format and the D3D11 HRESULT (typically
+ * E_OUTOFMEMORY) for a staging/Map failure. */
+static HRESULT dcomp_surface_frame(ID3D11Texture2D *texture, struct wined3d_dcomp_frame **out)
 {
-    struct wined3d_dcomp_frame *frame = NULL;
     D3D11_MAPPED_SUBRESOURCE map;
     ID3D11DeviceContext *context;
     D3D11_TEXTURE2D_DESC desc;
-    ID3D11Texture2D *staging;
+    ID3D11Texture2D *staging = NULL;
     ID3D11Device *device;
+    ID3D11Multithread *multithread = NULL;
+    HRESULT hr;
 
+    *out = NULL;
     ID3D11Texture2D_GetDesc(texture, &desc);
     if (desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM && desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM)
-        return NULL;
+        return E_NOTIMPL;
     ID3D11Texture2D_GetDevice(texture, &device);
     desc.MipLevels = desc.ArraySize = 1;
     desc.SampleDesc.Count = 1;
@@ -476,21 +481,32 @@ static struct wined3d_dcomp_frame *dcomp_surface_frame(ID3D11Texture2D *texture)
     desc.BindFlags = 0;
     desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     desc.MiscFlags = 0;
-    if (SUCCEEDED(ID3D11Device_CreateTexture2D(device, &desc, NULL, &staging)))
+    if (FAILED(hr = ID3D11Device_CreateTexture2D(device, &desc, NULL, &staging)))
     {
-        ID3D11Device_GetImmediateContext(device, &context);
-        ID3D11DeviceContext_CopyResource(context, (ID3D11Resource *)staging, (ID3D11Resource *)texture);
-        if (SUCCEEDED(ID3D11DeviceContext_Map(context, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &map)))
-        {
-            frame = wined3d_dcomp_frame_create_from_pixels(map.pData, map.RowPitch, desc.Width, desc.Height,
-                    desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM);
-            ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)staging, 0);
-        }
-        ID3D11DeviceContext_Release(context);
-        ID3D11Texture2D_Release(staging);
+        ID3D11Device_Release(device);
+        return hr;
     }
+    ID3D11Device_GetImmediateContext(device, &context);
+    if (SUCCEEDED(IUnknown_QueryInterface((IUnknown *)context, &IID_ID3D11Multithread, (void **)&multithread)))
+        ID3D11Multithread_Enter(multithread);
+    ID3D11DeviceContext_CopyResource(context, (ID3D11Resource *)staging, (ID3D11Resource *)texture);
+    hr = ID3D11DeviceContext_Map(context, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &map);
+    if (SUCCEEDED(hr))
+    {
+        *out = wined3d_dcomp_frame_create_from_pixels(map.pData, map.RowPitch, desc.Width, desc.Height,
+                desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM);
+        if (!*out) hr = E_OUTOFMEMORY;
+        ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)staging, 0);
+    }
+    if (multithread)
+    {
+        ID3D11Multithread_Leave(multithread);
+        ID3D11Multithread_Release(multithread);
+    }
+    ID3D11DeviceContext_Release(context);
+    ID3D11Texture2D_Release(staging);
     ID3D11Device_Release(device);
-    return frame;
+    return hr;
 }
 
 static HRESULT dcomp_binding_target_scene(IWineDCompSwapChain *iface,
@@ -562,7 +578,12 @@ static HRESULT dcomp_binding_target_scene(IWineDCompSwapChain *iface,
                 surface_layer = !content_valid;
                 if (content_valid && SUCCEEDED(IWineDCompSurface_get_physical_texture(surface, &texture)))
                 {
-                    dst_layer->frame = dcomp_surface_frame(texture);
+                    if (FAILED(hr = dcomp_surface_frame(texture, &dst_layer->frame)))
+                    {
+                        ID3D11Texture2D_Release(texture);
+                        IWineDCompSurface_Release(surface);
+                        break;
+                    }
                     ID3D11Texture2D_Release(texture);
                 }
                 IWineDCompSurface_Release(surface);
