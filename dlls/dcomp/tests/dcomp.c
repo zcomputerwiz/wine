@@ -847,7 +847,7 @@ static void test_surface_begin_end_Draw(void)
                         d3d10_texture_desc.SampleDesc.Quality);
                 ok(d3d10_texture_desc.Usage == D3D10_USAGE_DEFAULT, "Got usage %d.\n",
                         d3d10_texture_desc.Usage);
-                ok(d3d10_texture_desc.BindFlags == (D3D10_BIND_SHADER_RESOURCE | D3D10_BIND_RENDER_TARGET),
+                ok(d3d10_texture_desc.BindFlags == D3D10_BIND_RENDER_TARGET,
                         "Got bind flags %#x.\n", d3d10_texture_desc.BindFlags);
                 ok(d3d10_texture_desc.CPUAccessFlags == 0, "Got CPU access flags %#x.\n",
                         d3d10_texture_desc.CPUAccessFlags);
@@ -888,16 +888,19 @@ static void test_surface_begin_end_Draw(void)
                         d3d11_texture_desc.SampleDesc.Quality);
                 ok(d3d11_texture_desc.Usage == D3D11_USAGE_DEFAULT, "Got usage %d.\n",
                         d3d11_texture_desc.Usage);
-                ok(d3d11_texture_desc.BindFlags == (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET),
+                ok(d3d11_texture_desc.BindFlags == D3D11_BIND_RENDER_TARGET,
                         "Got bind flags %#x.\n", d3d11_texture_desc.BindFlags);
                 ok(d3d11_texture_desc.CPUAccessFlags == 0, "Got CPU access flags %#x.\n",
                         d3d11_texture_desc.CPUAccessFlags);
                 if (formats[j].pixel_format == DXGI_FORMAT_B8G8R8A8_UNORM)
-                    ok(d3d11_texture_desc.MiscFlags == D3D11_RESOURCE_MISC_GDI_COMPATIBLE,
+                    /* native Windows returns GDI_COMPATIBLE | SHARED_NTHANDLE */
+                    todo_wine(d3d11_texture_desc.MiscFlags == (D3D11_RESOURCE_MISC_GDI_COMPATIBLE |
+                                    D3D11_RESOURCE_MISC_SHARED_NTHANDLE),
                             "Got misc flags %#x.\n", d3d11_texture_desc.MiscFlags);
                 else
-                    ok(d3d11_texture_desc.MiscFlags == 0, "Got misc flags %#x.\n",
-                            d3d11_texture_desc.MiscFlags);
+                    /* native Windows returns SHARED_NTHANDLE */
+                    todo_wine(d3d11_texture_desc.MiscFlags == D3D11_RESOURCE_MISC_SHARED_NTHANDLE,
+                            "Got misc flags %#x.\n", d3d11_texture_desc.MiscFlags);
 
                 ID3D11Texture2D_Release(d3d11_texture);
                 hr = IDCompositionSurface_EndDraw(surface);
@@ -964,16 +967,22 @@ static void _expect_rendered_color(int line, HWND hwnd, int x, int y, COLORREF e
     COLORREF color = CLR_INVALID;
     DWORD start = GetTickCount();
     HDC hdc;
+    POINT point;
 
-    hdc = GetDC(hwnd);
+    /* DWM composites the surface to the screen, not to the window DC, so read the screen DC at the
+     * window's client position converted to screen coordinates. */
+    point.x = x;
+    point.y = y;
+    ClientToScreen(hwnd, &point);
+    hdc = GetDC(NULL);
     while (GetTickCount() - start < 1000)
     {
-        color = GetPixel(hdc, x, y);
+        color = GetPixel(hdc, point.x, point.y);
         if (color == expected_color)
             break;
         Sleep(20);
     }
-    ReleaseDC(hwnd, hdc);
+    ReleaseDC(NULL, hdc);
     ok_(__FILE__, line)(color == expected_color, "Expected color %#06lx at (%d, %d), got %#06lx.\n",
             expected_color, x, y, color);
 }
@@ -1135,12 +1144,14 @@ static void test_surface_composition(void)
     HRESULT hr;
     HWND hwnd;
 
-    /* Visible 200x200 window. */
-    hwnd = CreateWindowW(L"static", L"dcomp_surface_composition", WS_OVERLAPPED | WS_VISIBLE,
-            0, 0, window_size, window_size, NULL, NULL, NULL, NULL);
+    /* Visible 200x200 topmost window at the top-left of the primary monitor, so the composited surface
+     * is not covered by other windows when the screen is read. */
+    hwnd = CreateWindowExW(WS_EX_TOPMOST, L"static", L"dcomp_surface_composition",
+            WS_OVERLAPPED | WS_VISIBLE, 0, 0, window_size, window_size, NULL, NULL, NULL, NULL);
     ok(hwnd != NULL, "Failed to create window.\n");
     if (!hwnd)
         return;
+    MoveWindow(hwnd, 0, 0, window_size, window_size, TRUE);
 
     hr = D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, NULL, 0,
             D3D11_SDK_VERSION, &d3d11_device, &feature_level, NULL);
@@ -1189,21 +1200,19 @@ static void test_surface_composition(void)
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
     hr = IDCompositionDesktopDevice_WaitForCommitCompletion(desktop_device);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    /* todo_wine: the composition reaches the screen (checked with X screen grabs), but winex11 presents GL to a
-     * child drawable that GDI GetPixel on the window DC does not read. */
-    todo_wine expect_rendered_color(hwnd, 50, 50, RGB(0, 0xff, 0x00));
+    expect_rendered_color(hwnd, 50, 50, RGB(0, 0xff, 0x00));
 
     /* Render the surface yellow. */
     render_surface_color(d3d11_device, surface, 1.0f, 1.0f, 0.0f);
 
     /* Remains green before calling Commit(). */
-    todo_wine expect_rendered_color(hwnd, 50, 50, RGB(0, 0xff, 0x00));
+    expect_rendered_color(hwnd, 50, 50, RGB(0, 0xff, 0x00));
 
     hr = IDCompositionDesktopDevice_Commit(desktop_device);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
     hr = IDCompositionDesktopDevice_WaitForCommitCompletion(desktop_device);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    todo_wine expect_rendered_color(hwnd, 50, 50, RGB(0xff, 0xff, 0x00));
+    expect_rendered_color(hwnd, 50, 50, RGB(0xff, 0xff, 0x00));
 
     IDCompositionVisual_SetContent(visual, NULL);
     IDCompositionSurface_Release(surface);
@@ -1615,12 +1624,20 @@ static void test_animation(void)
     hr = IDCompositionAnimation_AddCubic(animation, 0, NAN, 1, 0, 0);
     ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
 
-    /* AddRepeat: valid */
+    /* AddRepeat: offset not after the previous segment */
     hr = IDCompositionAnimation_AddRepeat(animation, 0, 1);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    /* AddRepeat: valid */
+    hr = IDCompositionAnimation_AddRepeat(animation, 1, 1);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
 
     /* AddRepeat: negative duration */
     hr = IDCompositionAnimation_AddRepeat(animation, 1, -1);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    /* AddRepeat: duration longer than the offset */
+    hr = IDCompositionAnimation_AddRepeat(animation, 2, 3);
     ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
 
     /* AddSinusoidal: valid */

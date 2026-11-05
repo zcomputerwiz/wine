@@ -1157,12 +1157,61 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetContainingOutput(IDXGISwapCh
     return dxgi_get_output_from_window(swapchain->factory, window, output);
 }
 
+static int dxgi_get_display_frequency(void)
+{
+    DEVMODEW mode;
+
+    memset(&mode, 0, sizeof(mode));
+    mode.dmSize = sizeof(mode);
+    if (EnumDisplaySettingsExW(NULL, ENUM_CURRENT_SETTINGS, &mode, 0)
+            && (mode.dmFields & DM_DISPLAYFREQUENCY) && mode.dmDisplayFrequency)
+        return mode.dmDisplayFrequency;
+
+    WARN("Failed to query display frequency, using 60 Hz.\n");
+    return 60;
+}
+
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetFrameStatistics(IDXGISwapChain4 *iface,
         DXGI_FRAME_STATISTICS *stats)
 {
-    FIXME("iface %p, stats %p stub!\n", iface, stats);
+    struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
+    struct wined3d_swapchain_desc desc;
+    LARGE_INTEGER frequency, qpc;
+    ULONGLONG period, refresh_count;
+    int display_frequency;
 
-    return E_NOTIMPL;
+    TRACE("iface %p, stats %p.\n", iface, stats);
+
+    if (!stats)
+        return E_INVALIDARG;
+
+    memset(stats, 0, sizeof(*stats));
+    stats->PresentCount = swapchain->present_count;
+    if (!stats->PresentCount)
+        return DXGI_ERROR_FRAME_STATISTICS_DISJOINT;
+
+    wined3d_mutex_lock();
+    wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &desc);
+    wined3d_mutex_unlock();
+    if (desc.windowed && desc.swap_effect != WINED3D_SWAP_EFFECT_FLIP_DISCARD
+            && desc.swap_effect != WINED3D_SWAP_EFFECT_FLIP_SEQUENTIAL)
+        return DXGI_ERROR_FRAME_STATISTICS_DISJOINT;
+
+    QueryPerformanceFrequency(&frequency);
+    display_frequency = dxgi_get_display_frequency();
+    period = frequency.QuadPart / display_frequency;
+    if (!period)
+        return DXGI_ERROR_FRAME_STATISTICS_DISJOINT;
+
+    QueryPerformanceCounter(&qpc);
+    refresh_count = qpc.QuadPart / period;
+    stats->SyncRefreshCount = refresh_count;
+    stats->PresentRefreshCount = refresh_count;
+    stats->SyncQPCTime.QuadPart = refresh_count * period;
+    /* Based on Wine-Staging patch dxgi_getFrameStatistics: report no GPU timestamp. */
+    stats->SyncGPUTime.QuadPart = 0;
+
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetLastPresentCount(IDXGISwapChain4 *iface,

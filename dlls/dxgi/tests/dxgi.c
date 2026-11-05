@@ -8466,6 +8466,7 @@ static void test_swapchain_present_count(IUnknown *device, BOOL is_d3d12)
         {DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, DXGI_SWAP_EFFECT_FLIP_DISCARD},
     };
 
+    DXGI_FRAME_STATISTICS stats;
     UINT present_count, expected;
     ID3D12Device *d3d12_device;
     ID3D12CommandQueue *queue;
@@ -8504,6 +8505,22 @@ static void test_swapchain_present_count(IUnknown *device, BOOL is_d3d12)
 
         hr = IDXGISwapChain_Present(swapchain, 0, 0);
         ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        /* Based on Wine-Staging patch dxgi_getFrameStatistics. */
+        if (!is_d3d12)
+        {
+            memset(&stats, 0xcc, sizeof(stats));
+            hr = IDXGISwapChain_GetFrameStatistics(swapchain, &stats);
+            ok(hr == (is_flip_model(swap_effect) ? S_OK : DXGI_ERROR_FRAME_STATISTICS_DISJOINT),
+                    "Got unexpected frame statistics hr %#lx.\n", hr);
+            if (is_flip_model(swap_effect))
+            {
+                ok(stats.PresentCount == 1, "Got unexpected statistics present count %u.\n", stats.PresentCount);
+                ok(stats.PresentRefreshCount == stats.SyncRefreshCount,
+                        "Got unexpected refresh counts %u, %u.\n", stats.PresentRefreshCount, stats.SyncRefreshCount);
+                ok(stats.SyncQPCTime.QuadPart != 0, "Got empty sync QPC time.\n");
+                ok(!stats.SyncGPUTime.QuadPart, "Got unexpected sync GPU time %I64d.\n", stats.SyncGPUTime.QuadPart);
+            }
+        }
         expected = present_count + 1;
         hr = IDXGISwapChain_GetLastPresentCount(swapchain, &present_count);
         ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);

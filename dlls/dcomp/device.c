@@ -979,7 +979,9 @@ static HRESULT dcomp_surface_create(IDCompositionDevice *device, IUnknown *rende
     desc.SampleDesc.Count = 1;
     desc.SampleDesc.Quality = 0;
     desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    /* Native Windows exposes the surface texture as a render target only; the CPU composition copy uses
+     * ID3D11DeviceContext_CopyResource, which does not require the shader resource bind flag. */
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET;
     desc.CPUAccessFlags = 0;
     desc.MiscFlags = (pixel_format == DXGI_FORMAT_B8G8R8A8_UNORM) ? D3D11_RESOURCE_MISC_GDI_COMPATIBLE : 0;
 
@@ -1526,7 +1528,9 @@ struct dcomp_animation
     struct dcomp_animation_segment *segments;
     unsigned int segment_count;
     unsigned int segment_capacity;
-    double last_end;
+    /* Offset of the last added segment (0 if none). Segments must be added in
+     * non-decreasing offset order; a repeat must start strictly after it. */
+    double last_offset;
     BOOL ended;
 };
 
@@ -1551,24 +1555,24 @@ static HRESULT dcomp_animation_reserve(struct dcomp_animation *anim)
     return S_OK;
 }
 
-/* Caller holds the device lock. Appends a segment starting at `offset`;
- * `end_offset` is the earliest time the next segment may start. */
+/* Caller holds the device lock. Appends a segment starting at `offset`.
+ * Segments must be added in non-decreasing offset order. */
 static HRESULT dcomp_animation_begin_segment_locked(struct dcomp_animation *anim,
-        enum dcomp_animation_segment_type type, double offset, double end_offset)
+        enum dcomp_animation_segment_type type, double offset)
 {
     struct dcomp_animation_segment *seg;
     HRESULT hr;
 
     if (anim->ended)
         return E_INVALIDARG;
-    if (!isfinite(offset) || offset < anim->last_end)
+    if (!isfinite(offset) || offset < anim->last_offset)
         return E_INVALIDARG;
     if (FAILED(hr = dcomp_animation_reserve(anim)))
         return hr;
     seg = &anim->segments[anim->segment_count++];
     seg->type = type;
     seg->begin_offset = offset;
-    anim->last_end = end_offset;
+    anim->last_offset = offset;
     return S_OK;
 }
 
@@ -1730,7 +1734,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_animation_Reset(IDCompositionAnimation *i
     anim->segments = NULL;
     anim->segment_count = 0;
     anim->segment_capacity = 0;
-    anim->last_end = 0.0;
+    anim->last_offset = 0.0;
     anim->ended = FALSE;
     anim->begin_time.QuadPart = 0;
     LeaveCriticalSection(&device->cs);
@@ -1765,7 +1769,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_animation_AddCubic(IDCompositionAnimation
         return E_INVALIDARG;
 
     EnterCriticalSection(&device->cs);
-    if (FAILED(hr = dcomp_animation_begin_segment_locked(anim, DCOMP_ANIM_SEGMENT_CUBIC, offset, offset)))
+    if (FAILED(hr = dcomp_animation_begin_segment_locked(anim, DCOMP_ANIM_SEGMENT_CUBIC, offset)))
     {
         LeaveCriticalSection(&device->cs);
         return hr;
@@ -1795,8 +1799,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_animation_AddSinusoidal(IDCompositionAnim
         return E_INVALIDARG;
 
     EnterCriticalSection(&device->cs);
-    if (FAILED(hr = dcomp_animation_begin_segment_locked(anim, DCOMP_ANIM_SEGMENT_SINUSOIDAL,
-            offset, offset)))
+    if (FAILED(hr = dcomp_animation_begin_segment_locked(anim, DCOMP_ANIM_SEGMENT_SINUSOIDAL, offset)))
     {
         LeaveCriticalSection(&device->cs);
         return hr;
@@ -1820,17 +1823,18 @@ static HRESULT STDMETHODCALLTYPE dcomp_animation_AddRepeat(IDCompositionAnimatio
 
     TRACE("iface %p, offset %f, duration %f.\n", iface, offset, duration);
 
-    if (!isfinite(offset) || !isfinite(duration) || duration < 0.0)
+    /* A repeat must start strictly after the previous segment, have a positive
+     * duration, and may not last longer than its start offset. */
+    if (!isfinite(offset) || !isfinite(duration) || duration <= 0.0 || duration > offset)
         return E_INVALIDARG;
 
     EnterCriticalSection(&device->cs);
-    if (!anim->segment_count)
+    if (!anim->segment_count || offset <= anim->last_offset)
     {
         LeaveCriticalSection(&device->cs);
         return E_INVALIDARG;
     }
-    if (FAILED(hr = dcomp_animation_begin_segment_locked(anim, DCOMP_ANIM_SEGMENT_REPEAT,
-            offset, offset + duration)))
+    if (FAILED(hr = dcomp_animation_begin_segment_locked(anim, DCOMP_ANIM_SEGMENT_REPEAT, offset)))
     {
         LeaveCriticalSection(&device->cs);
         return hr;
@@ -1856,7 +1860,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_animation_End(IDCompositionAnimation *ifa
         return E_INVALIDARG;
 
     EnterCriticalSection(&device->cs);
-    if (FAILED(hr = dcomp_animation_begin_segment_locked(anim, DCOMP_ANIM_SEGMENT_END, offset, offset)))
+    if (FAILED(hr = dcomp_animation_begin_segment_locked(anim, DCOMP_ANIM_SEGMENT_END, offset)))
     {
         LeaveCriticalSection(&device->cs);
         return hr;
@@ -1896,7 +1900,7 @@ static HRESULT dcomp_animation_create(struct dcomp_device *device, IDComposition
     anim->device = device;
     IDCompositionDevice_AddRef(&device->IDCompositionDevice_iface);
     anim->begin_time.QuadPart = 0;
-    anim->last_end = 0.0;
+    anim->last_offset = 0.0;
     anim->ended = FALSE;
 
     *out = &anim->IDCompositionAnimation_iface;

@@ -354,27 +354,32 @@ HRESULT WINAPI DwmExtendFrameIntoClientArea(HWND hwnd, const MARGINS* margins)
 /**********************************************************************
  *           DwmGetColorizationColor      (DWMAPI.@)
  */
-HRESULT WINAPI DwmGetColorizationColor(DWORD *colorization, BOOL *opaque_blend)
+static void dwm_read_colorization_color(DWORD *color, BOOL *opaque)
 {
     DWORD type, value, cbData;
 
+    *color = 0xC40078D7; /* ARGB, as returned by Windows; compositor conversion is separate. */
+    *opaque = FALSE;
+
+    cbData = sizeof(value);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM",
+            L"ColorizationColor", RRF_RT_REG_DWORD, &type, &value, &cbData) == ERROR_SUCCESS)
+        *color = value;
+
+    cbData = sizeof(value);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM",
+            L"ColorizationOpaqueBlend", RRF_RT_REG_DWORD, &type, &value, &cbData) == ERROR_SUCCESS)
+        *opaque = value != 0;
+}
+
+HRESULT WINAPI DwmGetColorizationColor(DWORD *colorization, BOOL *opaque_blend)
+{
     TRACE("(%p, %p)\n", colorization, opaque_blend);
 
     if (!colorization || !opaque_blend)
         return E_INVALIDARG;
 
-    *colorization = 0xC40078D7;
-    *opaque_blend = TRUE;
-
-    cbData = sizeof(value);
-    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM",
-                    L"ColorizationColor", RRF_RT_REG_DWORD, &type, &value, &cbData) == ERROR_SUCCESS)
-        *colorization = value;
-
-    cbData = sizeof(value);
-    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM",
-                    L"ColorizationOpaqueBlend", RRF_RT_REG_DWORD, &type, &value, &cbData) == ERROR_SUCCESS)
-        *opaque_blend = (value != 0);
+    dwm_read_colorization_color(colorization, opaque_blend);
 
     return S_OK;
 }
@@ -1345,19 +1350,12 @@ HRESULT WINAPI DwmpGetColorizationParameters(void *params)
     if (!p)
         return E_INVALIDARG;
 
-    p->clrColor = 0xC40078D7;
-    p->clrAfterGlow = 0xC40078D7;
+    dwm_read_colorization_color(&p->clrColor, &p->fOpaque);
+    p->clrAfterGlow = p->clrColor;
     p->nIntensity = 54;
     p->clrAfterGlowBalance = 43;
     p->clrBlurBalance = 49;
     p->clrGlassReflectionIntensity = 50;
-    p->fOpaque = FALSE;
-
-    cbData = sizeof(value);
-    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM",
-                     L"ColorizationColor", RRF_RT_REG_DWORD, &type, &value, &cbData) == ERROR_SUCCESS)
-        p->clrColor = value;
-
     cbData = sizeof(value);
     if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM",
                      L"ColorizationAfterglow", RRF_RT_REG_DWORD, &type, &value, &cbData) == ERROR_SUCCESS)
@@ -1382,11 +1380,6 @@ HRESULT WINAPI DwmpGetColorizationParameters(void *params)
     if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM",
                      L"ColorizationGlassReflectionIntensity", RRF_RT_REG_DWORD, &type, &value, &cbData) == ERROR_SUCCESS)
         p->clrGlassReflectionIntensity = value;
-
-    cbData = sizeof(value);
-    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM",
-                     L"ColorizationOpaqueBlend", RRF_RT_REG_DWORD, &type, &value, &cbData) == ERROR_SUCCESS)
-        p->fOpaque = (value != 0);
 
     return S_OK;
 }

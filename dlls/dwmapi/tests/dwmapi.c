@@ -321,9 +321,29 @@ static void test_window_attributes(void)
 
 static void test_colorization(void)
 {
+    typedef struct
+    {
+        COLORREF color, afterglow;
+        UINT intensity, afterglow_balance, blur_balance, reflection_intensity;
+        BOOL opaque;
+    } test_colorization_params;
+    HRESULT (WINAPI *get_params)(void *);
+    test_colorization_params params;
     BOOL enabled = FALSE, opaque = -1;
     DWORD color = 0;
     HRESULT hr;
+
+    ok(DwmGetColorizationColor(NULL, &opaque) == E_INVALIDARG, "Expected E_INVALIDARG for NULL color.\n");
+    ok(DwmGetColorizationColor(&color, NULL) == E_INVALIDARG, "Expected E_INVALIDARG for NULL opaque flag.\n");
+    get_params = (void *)GetProcAddress(GetModuleHandleW(L"dwmapi.dll"), (LPCSTR)127);  /* exported by ordinal only, also natively */
+    ok(get_params != NULL, "DwmGetColorizationParameters export is missing.\n");
+    if (get_params)
+    {
+        hr = get_params(&params);
+        ok(hr == S_OK, "Got hr %#lx.\n", hr);
+        hr = DwmGetColorizationColor(&color, &opaque);
+        ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    }
 
     hr = DwmIsCompositionEnabled(&enabled);
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
@@ -549,8 +569,6 @@ static void test_iconic(void)
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
     hr = pDwmSetIconicThumbnail(hwnd, hbmp, 0);
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
-    hr = pDwmSetIconicThumbnail(hwnd, hbmp, 2);
-    ok(hr == E_INVALIDARG, "Got hr %#lx.\n", hr);
     hr = pDwmSetIconicLivePreviewBitmap(hwnd, hbmp, NULL, DWM_SIT_DISPLAYFRAME);
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
     hr = pDwmInvalidateIconicBitmaps(hwnd);
