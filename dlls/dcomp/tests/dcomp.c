@@ -32,6 +32,27 @@ static HRESULT (WINAPI *pDCompositionCreateDevice)(IDXGIDevice *dxgi_device, REF
 static HRESULT (WINAPI *pDCompositionCreateDevice2)(IUnknown *rendering_device, REFIID iid, void **device);
 static HRESULT (WINAPI *pDCompositionCreateDevice3)(IUnknown *rendering_device, REFIID iid, void **device);
 
+typedef struct IDCompositionSurfaceUnknown IDCompositionSurfaceUnknown;
+typedef struct IDCompositionSurfaceUnknownVtbl IDCompositionSurfaceUnknownVtbl;
+struct IDCompositionSurfaceUnknown { const IDCompositionSurfaceUnknownVtbl *lpVtbl; };
+struct IDCompositionSurfaceUnknownVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(IDCompositionSurfaceUnknown *, REFIID, void **);
+    ULONG (STDMETHODCALLTYPE *AddRef)(IDCompositionSurfaceUnknown *);
+    ULONG (STDMETHODCALLTYPE *Release)(IDCompositionSurfaceUnknown *);
+    HRESULT (STDMETHODCALLTYPE *BeginDraw)(IDCompositionSurfaceUnknown *, const RECT *, REFIID, void **, POINT *);
+    HRESULT (STDMETHODCALLTYPE *EndDraw)(IDCompositionSurfaceUnknown *);
+    HRESULT (STDMETHODCALLTYPE *SuspendDraw)(IDCompositionSurfaceUnknown *);
+    HRESULT (STDMETHODCALLTYPE *ResumeDraw)(IDCompositionSurfaceUnknown *);
+    HRESULT (STDMETHODCALLTYPE *Scroll)(IDCompositionSurfaceUnknown *, const RECT *, const RECT *, int, int);
+    HRESULT (STDMETHODCALLTYPE *Unknown[99])();
+};
+static const GUID IID_IDCompositionSurfaceUnknown =
+        {0x5680c979, 0x14c8, 0x48b5, {0x8b, 0x92, 0x32, 0x47, 0x37, 0x9f, 0xd9, 0x07}};
+#define IDCompositionSurfaceUnknown_Unknown3(iface, width, height) \
+    ((iface)->lpVtbl->Unknown[2]((iface), (width), (height)))
+
+
 #define expect_ref(obj,ref) _expect_ref((IUnknown *)obj, ref, __LINE__)
 static void _expect_ref(IUnknown *obj, ULONG ref, int line)
 {
@@ -53,6 +74,23 @@ static void check_interface_(unsigned int line, void *iface_ptr, REFIID iid, BOO
     ok_(__FILE__, line)(hr == expected, "got hr %#lx, expected %#lx.\n", hr, expected);
     if (SUCCEEDED(hr))
         IUnknown_Release(unk);
+}
+
+#define check_inherited_interface(a, b, c) _check_inherited_interface(__LINE__, a, b, c)
+static void _check_inherited_interface(unsigned int line, void *iface, REFIID inherited_iid, REFIID iid)
+{
+    IUnknown *unknown, *unknown2;
+    HRESULT hr, hr2;
+
+    hr = IUnknown_QueryInterface((IUnknown *)iface, inherited_iid, (void **)&unknown);
+    ok_(__FILE__, line)(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+        IUnknown_Release(unknown);
+    hr2 = IUnknown_QueryInterface((IUnknown *)iface, iid, (void **)&unknown2);
+    ok_(__FILE__, line)(hr2 == S_OK, "Got unexpected hr %#lx.\n", hr2);
+    if (SUCCEEDED(hr2))
+        IUnknown_Release(unknown2);
+    ok_(__FILE__, line)(unknown2 == unknown, "Interface is not inherited.\n");
 }
 
 static HWND create_window(void)
@@ -621,6 +659,87 @@ static void test_surface_factory_CreateSurface(void)
         winetest_pop_context();
     }
 
+    IDCompositionDevice2_Release(dcomp_device2);
+    IDCompositionDevice_Release(dcomp_device);
+    refcount = IDXGIDevice_Release(dxgi_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+}
+
+/* Based on Wine-Staging patch 0064 by Zhiyi Zhang */
+static void test_surface_interface(void)
+{
+    static const unsigned int width = 640, height = 480;
+    IDCompositionSurfaceFactory *surface_factory;
+    IDCompositionSurfaceUnknown *surface_unknown;
+    IDCompositionDevice2 *dcomp_device2;
+    IDCompositionDevice *dcomp_device;
+    IDCompositionSurface *surface;
+    IDXGISurface *dxgi_surface;
+    IDXGIDevice *dxgi_device;
+    ULONG refcount;
+    POINT offset;
+    HRESULT hr;
+    RECT rect;
+
+    if (!(dxgi_device = create_device(D3D10_CREATE_DEVICE_BGRA_SUPPORT)))
+    {
+        skip("Failed to create device.\n");
+        return;
+    }
+
+    hr = pDCompositionCreateDevice2((IUnknown *)dxgi_device, &IID_IDCompositionDevice,
+            (void **)&dcomp_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice_QueryInterface(dcomp_device, &IID_IDCompositionDevice2, (void *)&dcomp_device2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice2_CreateSurfaceFactory(dcomp_device2, (IUnknown *)dxgi_device, &surface_factory);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionSurfaceFactory_CreateSurface(surface_factory, width, height,
+            DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_IGNORE, &surface);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    check_interface(surface, &IID_IDCompositionSurface, TRUE);
+    check_interface(surface, &IID_IDCompositionSurfaceUnknown, TRUE);
+    check_inherited_interface(surface, &IID_IDCompositionSurfaceUnknown, &IID_IDCompositionSurface);
+
+    /* Test IDCompositionSurfaceUnknown. */
+    hr = IDCompositionSurface_QueryInterface(surface, &IID_IDCompositionSurfaceUnknown,
+            (void **)&surface_unknown);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* Test IDCompositionSurfaceUnknown::Unknown3. */
+    hr = IDCompositionSurfaceUnknown_Unknown3(surface_unknown, 0, 0);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    hr = IDCompositionSurfaceUnknown_Unknown3(surface_unknown, 0, 1);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionSurfaceUnknown_Unknown3(surface_unknown, 1, 0);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionSurfaceUnknown_Unknown3(surface_unknown, 1, 1);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* Test resize while a draw is active. */
+    SetRect(&rect, 0, 0, 1, 1);
+    hr = IDCompositionSurface_BeginDraw(surface, &rect, &IID_IDXGISurface, (void **)&dxgi_surface,
+            &offset);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionSurfaceUnknown_Unknown3(surface_unknown, 2, 2);
+    ok(hr == DCOMPOSITION_ERROR_SURFACE_BEING_RENDERED, "Got unexpected hr %#lx.\n", hr);
+    IDXGISurface_Release(dxgi_surface);
+    hr = IDCompositionSurface_EndDraw(surface);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* Unknown3 resizes the physical surface and invalidates the old bounds. */
+    hr = IDCompositionSurfaceUnknown_Unknown3(surface_unknown, 100, 100);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    SetRect(&rect, 0, 0, 100, 101);
+    hr = IDCompositionSurface_BeginDraw(surface, &rect, &IID_IDXGISurface, (void **)&dxgi_surface,
+            &offset);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+
+    IUnknown_Release((IUnknown *)surface_unknown);
+    IDCompositionSurface_Release(surface);
+    IDCompositionSurfaceFactory_Release(surface_factory);
     IDCompositionDevice2_Release(dcomp_device2);
     IDCompositionDevice_Release(dcomp_device);
     refcount = IDXGIDevice_Release(dxgi_device);
@@ -1809,6 +1928,7 @@ START_TEST(dcomp)
     test_device_CreateVisual();
     test_device_CreateSurfaceFactory();
     test_surface_factory_CreateSurface();
+    test_surface_interface();
     test_surface_begin_end_Draw();
     test_surface_suspend_scroll_virtual();
     test_surface_composition();
