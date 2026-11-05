@@ -487,6 +487,18 @@ BOOL WINAPI GetPointerDevices(UINT32 *device_count, POINTER_DEVICE_INFO *devices
 }
 
 /**********************************************************************
+ * GetPointerDevice [USER32.@]
+ */
+BOOL WINAPI GetPointerDevice(HANDLE device, POINTER_DEVICE_INFO *info)
+{
+    FIXME("(%p %p): partial stub\n", device, info);
+
+    /* No pointer devices are reported (see GetPointerDevices), so no handle is valid. */
+    SetLastError(device ? ERROR_INVALID_HANDLE : ERROR_INVALID_PARAMETER);
+    return FALSE;
+}
+
+/**********************************************************************
  * RegisterTouchHitTestingWindow [USER32.@]
  */
 BOOL WINAPI RegisterTouchHitTestingWindow(HWND hwnd, ULONG value)

@@ -429,6 +429,7 @@ static BOOL (WINAPI *pGetCurrentInputMessageSource)( INPUT_MESSAGE_SOURCE *sourc
 static BOOL (WINAPI *pGetPointerType)(UINT32, POINTER_INPUT_TYPE*);
 static BOOL (WINAPI *pGetPointerInfo)(UINT32, POINTER_INFO*);
 static BOOL (WINAPI *pGetPointerInfoHistory)(UINT32, UINT32*, POINTER_INFO*);
+static BOOL (WINAPI *pGetPointerDevice)(HANDLE, POINTER_DEVICE_INFO*);
 static BOOL (WINAPI *pGetPointerFrameInfo)(UINT32, UINT32*, POINTER_INFO*);
 static BOOL (WINAPI *pGetPointerFrameInfoHistory)(UINT32, UINT32*, UINT32*, POINTER_INFO*);
 static int (WINAPI *pGetMouseMovePointsEx) (UINT, LPMOUSEMOVEPOINT, LPMOUSEMOVEPOINT, int, DWORD);
@@ -462,6 +463,7 @@ static void init_function_pointers(void)
     GET_PROC(GetMouseMovePointsEx);
     GET_PROC(GetPointerInfo);
     GET_PROC(GetPointerInfoHistory);
+    GET_PROC(GetPointerDevice);
     GET_PROC(GetPointerFrameInfo);
     GET_PROC(GetPointerFrameInfoHistory);
     GET_PROC(GetPointerType);
@@ -5836,6 +5838,23 @@ static BOOL accept_pointer_messages( UINT msg )
     return msg >= WM_TOUCH && msg <= WM_POINTERROUTEDRELEASED;
 }
 
+static void test_GetPointerDevice(void)
+{
+    POINTER_DEVICE_INFO info;
+    BOOL ret;
+
+    /* Chromium delay-loads this export at start-up. */
+    SetLastError( 0xdeadbeef );
+    ret = pGetPointerDevice( INVALID_HANDLE_VALUE, &info );
+    ok( !ret, "GetPointerDevice succeeded for an invalid handle\n" );
+    ok( GetLastError() == ERROR_INVALID_HANDLE, "got error %lu\n", GetLastError() );
+
+    SetLastError( 0xdeadbeef );
+    ret = pGetPointerDevice( NULL, &info );
+    ok( !ret, "GetPointerDevice succeeded for a NULL handle\n" );
+    ok( GetLastError() == ERROR_INVALID_PARAMETER, "got error %lu\n", GetLastError() );
+}
+
 static void test_GetPointerInfo( BOOL mouse_in_pointer_enabled )
 {
 #define WIN_MSG(m, h, w, l, ...) {.func = MSG_TEST_WIN, .message = {.msg = m, .hwnd = h, .wparam = w, .lparam = l}, ## __VA_ARGS__}
@@ -6956,6 +6975,11 @@ START_TEST(input)
         test_GetPointerInfo( FALSE );
     else
         win_skip( "GetPointerType is not available\n" );
+
+    if (pGetPointerDevice)
+        test_GetPointerDevice();
+    else
+        win_skip( "GetPointerDevice is not available\n" );
 
     test_UnregisterDeviceNotification();
 
