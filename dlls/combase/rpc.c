@@ -424,13 +424,10 @@ static DWORD start_local_service(const WCHAR *name, DWORD num, LPCWSTR *params)
 static HRESULT create_local_service(REFCLSID rclsid)
 {
     HRESULT hr;
-    WCHAR buf[CHARS_IN_GUID];
+    WCHAR buf[257]; /* service names are up to 256 characters, a GUID-sized buffer cut longer ones off */
     HKEY hkey;
     LONG r;
     DWORD type, sz;
-    int arch = (sizeof(void *) > sizeof(int)) ? 64 : 32;
-    REGSAM opposite = (arch == 64) ? KEY_WOW64_32KEY : KEY_WOW64_64KEY;
-    BOOL is_wow64 = FALSE;
 
     TRACE("Attempting to start Local service for %s\n", debugstr_guid(rclsid));
 
@@ -441,20 +438,6 @@ static HRESULT create_local_service(REFCLSID rclsid)
     /* read the LocalService and ServiceParameters values from the AppID key */
     sz = sizeof buf;
     r = RegQueryValueExW(hkey, L"LocalService", NULL, &type, (LPBYTE)buf, &sz);
-    if ((r != ERROR_SUCCESS || type != REG_SZ) &&
-        (arch == 64 || (IsWow64Process(GetCurrentProcess(), &is_wow64) && is_wow64)))
-    {
-        RegCloseKey(hkey);
-        hkey = NULL;
-
-        /* Windows resolves LocalService activation through the native view: the class stays in this process's view,
-         * only its AppID key is looked up in the opposite one. */
-        if (SUCCEEDED(open_appidkey_from_clsid_views(rclsid, KEY_READ, opposite | KEY_READ, &hkey)))
-        {
-            sz = sizeof buf;
-            r = RegQueryValueExW(hkey, L"LocalService", NULL, &type, (LPBYTE)buf, &sz);
-        }
-    }
     if (r == ERROR_SUCCESS && type == REG_SZ)
     {
         DWORD num_args = 0;
@@ -464,10 +447,11 @@ static HRESULT create_local_service(REFCLSID rclsid)
          * FIXME: I'm not really sure how to deal with the service parameters.
          *        I suspect that the string returned from RegQueryValueExW
          *        should be split into a number of arguments by spaces.
-         *        It would make more sense if ServiceParameters contained a
+         *        It would make more sense if ServiceParams contained a
          *        REG_MULTI_SZ here, but it's a REG_SZ for the services
          *        that I'm interested in for the moment.
          */
+        /* Windows names the value ServiceParameters; keep Wine's older ServiceParams as a fallback. */
         r = RegQueryValueExW(hkey, L"ServiceParameters", NULL, &type, NULL, &sz);
         if (r != ERROR_SUCCESS)
             r = RegQueryValueExW(hkey, L"ServiceParams", NULL, &type, NULL, &sz);
@@ -489,8 +473,7 @@ static HRESULT create_local_service(REFCLSID rclsid)
         WARN("No LocalService value\n");
         hr = REGDB_E_CLASSNOTREG; /* FIXME: check retval */
     }
-    if (hkey)
-        RegCloseKey(hkey);
+    RegCloseKey(hkey);
 
     return hr;
 }
