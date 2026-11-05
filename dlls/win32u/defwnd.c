@@ -2007,10 +2007,10 @@ static BOOL get_dwm_frame_effects(void)
     return dwm_frame_effects != 0;
 }
 
-/* DwmFrameStyle 1: Vista/7 Aero glass frames */
+/* DwmFrameStyle: 0 modern, 1 Vista/7 Aero, 2 Windows 8 flat8. */
 static int dwm_aero_frames = -1;
 
-static BOOL get_dwm_aero_frames(void)
+static int get_dwm_frame_style(void)
 {
     if (dwm_aero_frames == -1)
     {
@@ -2021,11 +2021,11 @@ static BOOL get_dwm_aero_frames(void)
             char buf[offsetof(KEY_VALUE_PARTIAL_INFORMATION, Data[sizeof(DWORD)])];
             KEY_VALUE_PARTIAL_INFORMATION *info = (void *)buf;
             if (query_reg_ascii_value( hkey, "DwmFrameStyle", info, sizeof(buf) ) && info->Type == REG_DWORD)
-                dwm_aero_frames = (*(const DWORD *)info->Data != 0);
+                dwm_aero_frames = *(const DWORD *)info->Data <= 2 ? *(const DWORD *)info->Data : 0;
             NtClose( hkey );
         }
     }
-    return dwm_aero_frames != 0;
+    return dwm_aero_frames;
 }
 
 static BOOL has_glass_frame( HWND hwnd )
@@ -2055,7 +2055,7 @@ static LRESULT handle_modern_nc_hit_test( HWND hwnd, POINT pt, const struct wind
     static const WCHAR wine_nc_buttonsW[] =
         {'_','_','w','i','n','e','_','n','c','_','b','u','t','t','o','n','s',0};
     /* Glass frames keep the outer bands as an invisible resize area; the caption buttons are inset to match. */
-    BOOL glass = !max && NtUserGetProp( hwnd, wine_dwm_frameW ) != NULL;
+    BOOL glass = !max && HandleToUlong( NtUserGetProp( hwnd, wine_dwm_frameW ) ) == 2;
     int btn_off = glass ? bw : 0;
     UINT placed = HandleToUlong( NtUserGetProp( hwnd, wine_nc_buttonsW ) );
 
@@ -2215,7 +2215,7 @@ LRESULT handle_nc_hit_test( HWND hwnd, POINT pt )
 
     /* the modern frame's geometry, unless an Aero style frame is not glass (then the themed frame is drawn) */
     if (get_dwm_frame_effects() && (style & WS_CAPTION) == WS_CAPTION &&
-        !EqualRect( &rects.window, &rects.client ) && (!get_dwm_aero_frames() || has_glass_frame( hwnd )))
+        !EqualRect( &rects.window, &rects.client ) && (get_dwm_frame_style() != 1 || has_glass_frame( hwnd )))
     {
         return handle_modern_nc_hit_test( hwnd, pt, &rects, style, ex_style );
     }

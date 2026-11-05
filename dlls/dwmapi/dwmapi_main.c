@@ -207,9 +207,13 @@ static BOOL dwm_materials_is_enabled(void)
 
 /* DwmFrameStyle (P13): 0 the Windows 10/11 frame, 1 the Vista/7 Aero frame (every captioned window glass, blurred).
  * Read each time: the theme changes it while windows live. */
-static BOOL dwm_aero_frames(void)
+static DWORD dwm_frame_style(void)
 {
-    return read_gate(L"DwmFrameStyle");
+    DWORD value = 0, cb = sizeof(value);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\WineExplorer\\Shell", L"DwmFrameStyle",
+                     RRF_RT_REG_DWORD, NULL, &value, &cb) != ERROR_SUCCESS || value > 2)
+        return 0;
+    return value;
 }
 
 /* Set or clear the glass props on a same-process window and force a repaint. With the DwmFrameEffects gate on,
@@ -243,7 +247,14 @@ static void set_glass(HWND hwnd, const MARGINS *margins)
         if (values[i] != 0) any = TRUE;
     }
 
-    if (any || dwm_frame_is_enabled())
+    if (dwm_frame_is_enabled() && dwm_frame_style() == 2)
+    {
+        /* flat8 is opaque: publish its compositor kind without making the surface a glass sheet. */
+        for (i = 0; i < 4; i++) RemovePropW(hwnd, margin_props[i]);
+        RemovePropW(hwnd, L"__wine_dwm_alpha");
+        SetPropW(hwnd, L"__wine_dwm_frame", (HANDLE)3);
+    }
+    else if (any || dwm_frame_is_enabled())
     {
         for (i = 0; i < 4; i++)
         {
@@ -253,7 +264,7 @@ static void set_glass(HWND hwnd, const MARGINS *margins)
         }
         SetPropW(hwnd, L"__wine_dwm_alpha", (HANDLE)1);
         if (dwm_frame_is_enabled())
-            SetPropW(hwnd, L"__wine_dwm_frame", (HANDLE)(ULONG_PTR)(dwm_aero_frames() ? 2 : 1));
+            SetPropW(hwnd, L"__wine_dwm_frame", (HANDLE)(ULONG_PTR)(dwm_frame_style() == 1 ? 2 : 1));
     }
     else
     {
@@ -314,7 +325,7 @@ void WINAPI WexDwmpRefreshFrame(HWND hwnd)
         LONG_PTR stored = (LONG_PTR)GetPropW(hwnd, margin_props[i]);
         values[i] = stored == 0x10000 ? -1 : stored ? (int)stored - 1 : 0;
     }
-    if (!dwm_aero_frames() && RemovePropW(hwnd, L"__wine_aero_asked") &&
+    if (!dwm_frame_style() && RemovePropW(hwnd, L"__wine_aero_asked") &&
         !values[0] && !values[1] && !values[2] && !values[3])
     {
         for (i = 0; i < 4; i++) RemovePropW(hwnd, margin_props[i]);

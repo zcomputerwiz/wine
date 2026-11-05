@@ -264,14 +264,16 @@ void uxtheme_reset_dwm_settings(void)
     theme_generation++;
 }
 
-/* DwmFrameStyle 1 (P13): Vista/7 Aero glass frames instead of the Windows 10/11 frame */
-static BOOL get_dwm_aero_frames(void)
+/* DwmFrameStyle: 0 modern, 1 Vista/7 Aero, 2 Windows 8 flat opaque accent. */
+static DWORD get_dwm_frame_style(void)
 {
     if (dwm_aero_frames == -1)
     {
         DWORD val = 0, size = sizeof(val);
-        dwm_aero_frames = !RegGetValueW(HKEY_CURRENT_USER, L"Software\\WineExplorer\\Shell", L"DwmFrameStyle",
-                                        RRF_RT_REG_DWORD, NULL, &val, &size) && val;
+        if (!RegGetValueW(HKEY_CURRENT_USER, L"Software\\WineExplorer\\Shell", L"DwmFrameStyle",
+                          RRF_RT_REG_DWORD, NULL, &val, &size) && val <= 2)
+            dwm_aero_frames = val;
+        else dwm_aero_frames = 0;
     }
     return dwm_aero_frames;
 }
@@ -339,6 +341,42 @@ static COLORREF get_dwm_accent_color(void)
         dwm_accent_color_cached = TRUE;
     }
     return dwm_accent_color;
+}
+
+/* Flat8 metrics, scaled from 96 DPI. Every number is unverified: Windows 8. */
+static const struct flat8_metrics
+{
+    int dpi;          /* unverified: Windows 8 */
+    int border;       /* unverified: Windows 8 */
+    int caption;      /* unverified: Windows 8 */
+    int button_w;     /* unverified: Windows 8 */
+    int button_h;     /* unverified: Windows 8 */
+    int glyph;        /* unverified: Windows 8 */
+    int inactive_white_divisor; /* unverified: Windows 8 */
+    int luma_r, luma_g, luma_b, luma_threshold; /* unverified: Windows 8 */
+    BYTE hot_overlay, pressed_overlay; /* unverified: Windows 8 */
+    COLORREF close_hover; /* unverified: Windows 8 */
+} flat8 = { 96, 1, 30, 46, 30, 10, 4, 299, 587, 114, 128000, 24, 48, RGB(196, 43, 28) };
+
+static COLORREF flat8_lighten(COLORREF color)
+{
+    return RGB(GetRValue(color) + (255 - GetRValue(color)) / flat8.inactive_white_divisor,
+               GetGValue(color) + (255 - GetGValue(color)) / flat8.inactive_white_divisor,
+               GetBValue(color) + (255 - GetBValue(color)) / flat8.inactive_white_divisor);
+}
+
+/* Contrast uses integer sRGB luma; black is selected at luma >= 128, white below it. */
+static COLORREF flat8_text_color(COLORREF color)
+{
+    return flat8.luma_r * GetRValue(color) + flat8.luma_g * GetGValue(color) + flat8.luma_b * GetBValue(color) >= flat8.luma_threshold
+           ? RGB(0, 0, 0) : RGB(255, 255, 255);
+}
+
+static COLORREF flat8_overlay(COLORREF base, COLORREF overlay, BYTE alpha)
+{
+    return RGB((GetRValue(base) * (255 - alpha) + GetRValue(overlay) * alpha) / 255,
+               (GetGValue(base) * (255 - alpha) + GetGValue(overlay) * alpha) / 255,
+               (GetBValue(base) * (255 - alpha) + GetBValue(overlay) * alpha) / 255);
 }
 
 static HRESULT query_dwm_window_attribute(HWND hwnd, DWORD attribute, void *pv, DWORD size)
@@ -819,6 +857,101 @@ enum
     DWMW_TEXTGLOW = 55, DWMW_TOPFRAME = 56,
 };
 
+/* Windows 8 flat opaque accent frame (DwmFrameStyle 2). The frame is square and opaque; button hover/press uses a
+ * translucent black overlay, except close hover which is red. Geometry is packed for win32u hit testing. */
+static BOOL paint_flat8_nc(HWND hwnd, HDC hdc, RECT rect, DWORD style, DWORD ex_style, UINT flags, UINT pressed)
+{
+    BOOL active = !!(flags & NCFRAME_ACTIVE), tool = !!(ex_style & WS_EX_TOOLWINDOW);
+    BOOL rtl = !!(ex_style & WS_EX_LAYOUTRTL);
+    UINT dpi = GetDpiForWindow(hwnd) ? GetDpiForWindow(hwnd) : 96;
+    int w = rect.right - rect.left, h = rect.bottom - rect.top;
+    int border = MulDiv(flat8.border, dpi, flat8.dpi), cap_h = MulDiv(flat8.caption, dpi, flat8.dpi);
+    int button_w = MulDiv(flat8.button_w, dpi, flat8.dpi), button_h = MulDiv(flat8.button_h, dpi, flat8.dpi);
+    int glyph = MulDiv(flat8.glyph, dpi, flat8.dpi), right = border, x, i, text_left, text_right;
+    COLORREF frame, accent, text, button;
+    UINT hot = HandleToUlong(GetPropW(hwnd, L"__wine_nc_hot"));
+    struct { UINT which; } order[] = {{ NCFRAME_BTN_CLOSE }, { NCFRAME_BTN_MAX }, { NCFRAME_BTN_MIN }};
+    RECT r;
+
+    if ((style & WS_CAPTION) != WS_CAPTION || (style & WS_MINIMIZE)) return FALSE;
+    nc_update_modern_region(hwnd, w, h);
+    accent = get_dwm_accent_color();
+    if (accent == CLR_INVALID) accent = RGB(0, 120, 215);
+    frame = active ? accent : flat8_lighten(accent);
+    text = flat8_text_color(frame);
+    button = frame;
+
+    SetRect(&r, border, 0, w - border, cap_h);
+    { HBRUSH brush = CreateSolidBrush(frame); FillRect(hdc, &r, brush); DeleteObject(brush); }
+    SetRect(&r, 0, cap_h, border, h);
+    { HBRUSH brush = CreateSolidBrush(accent); FillRect(hdc, &r, brush); DeleteObject(brush); }
+    SetRect(&r, w - border, cap_h, w, h);
+    { HBRUSH brush = CreateSolidBrush(accent); FillRect(hdc, &r, brush); DeleteObject(brush); }
+    SetRect(&r, 0, h - border, w, h);
+    { HBRUSH brush = CreateSolidBrush(accent); FillRect(hdc, &r, brush); DeleteObject(brush); }
+
+    if (style & WS_SYSMENU)
+    {
+        int count = !tool && (style & (WS_MINIMIZEBOX | WS_MAXIMIZEBOX)) ? 3 : 1;
+        x = w - right;
+        for (i = 0; i < count; i++)
+        {
+            RECT button_rect, glyph_rect;
+            BOOL is_hot = hot == order[i].which, is_pressed = pressed == order[i].which;
+            COLORREF glyph_color = text;
+            SetRect(&button_rect, x - button_w, border, x, border + button_h);
+            if (rtl) SetRect(&button_rect, w - button_rect.right, button_rect.top, w - button_rect.left, button_rect.bottom);
+            button = frame;
+            if (order[i].which == NCFRAME_BTN_CLOSE && is_hot) button = flat8.close_hover;
+            else if (is_pressed) button = flat8_overlay(frame, RGB(0, 0, 0), flat8.pressed_overlay);
+            else if (is_hot) button = flat8_overlay(frame, RGB(0, 0, 0), flat8.hot_overlay);
+            SetRect(&r, button_rect.left, button_rect.top, button_rect.right, button_rect.bottom);
+            { HBRUSH brush = CreateSolidBrush(button); FillRect(hdc, &r, brush); DeleteObject(brush); }
+            if (order[i].which == NCFRAME_BTN_CLOSE && is_hot) glyph_color = RGB(255, 255, 255);
+            { HPEN pen = CreatePen(PS_SOLID, max(1, MulDiv(1, dpi, 96)), glyph_color), old_pen;
+              HBRUSH old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+              old_pen = SelectObject(hdc, pen);
+              glyph_rect.left = (button_rect.left + button_rect.right - glyph) / 2;
+              glyph_rect.top = (button_rect.top + button_rect.bottom - glyph) / 2;
+              glyph_rect.right = glyph_rect.left + glyph; glyph_rect.bottom = glyph_rect.top + glyph;
+              if (order[i].which == NCFRAME_BTN_CLOSE)
+              { MoveToEx(hdc, glyph_rect.left, glyph_rect.top, NULL); LineTo(hdc, glyph_rect.right, glyph_rect.bottom);
+                MoveToEx(hdc, glyph_rect.right, glyph_rect.top, NULL); LineTo(hdc, glyph_rect.left, glyph_rect.bottom); }
+              else if (order[i].which == NCFRAME_BTN_MIN)
+              { MoveToEx(hdc, glyph_rect.left, glyph_rect.bottom - 1, NULL); LineTo(hdc, glyph_rect.right, glyph_rect.bottom - 1); }
+              else Rectangle(hdc, glyph_rect.left, glyph_rect.top, glyph_rect.right, glyph_rect.bottom);
+              SelectObject(hdc, old_pen); SelectObject(hdc, old_brush); DeleteObject(pen); }
+            x -= button_w;
+        }
+        SetPropW(hwnd, L"__wine_nc_buttons", ULongToHandle(NCFRAME_BUTTONS(button_w, button_w, right, border, button_h)));
+        text_right = x - MulDiv(6, dpi, 96);
+    }
+    else
+    {
+        RemovePropW(hwnd, L"__wine_nc_buttons");
+        text_right = w - border;
+    }
+
+    text_left = border + MulDiv(6, dpi, 96);
+    if ((style & WS_SYSMENU) && !tool)
+    {
+        HICON icon = nc_get_icon(hwnd);
+        int isz = GetSystemMetricsForDpi(SM_CXSMICON, dpi);
+        if (icon) { DrawIconEx(hdc, text_left, (cap_h - isz) / 2, icon, isz, isz, 0, NULL, DI_NORMAL); text_left += isz + MulDiv(6, dpi, 96); }
+    }
+    if (text_right > text_left)
+    {
+        NONCLIENTMETRICSW ncm = { .cbSize = sizeof(ncm) }; WCHAR title[256];
+        if (GetWindowTextW(hwnd, title, ARRAY_SIZE(title)) &&
+            SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0))
+        { HFONT font = CreateFontIndirectW(tool ? &ncm.lfSmCaptionFont : &ncm.lfCaptionFont), old_font = SelectObject(hdc, font);
+          SetBkMode(hdc, TRANSPARENT); SetTextColor(hdc, text); SetRect(&r, text_left, 0, text_right, cap_h);
+          DrawTextW(hdc, title, -1, &r, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS | (rtl ? DT_RIGHT : DT_LEFT));
+          SelectObject(hdc, old_font); DeleteObject(font); }
+    }
+    return TRUE;
+}
+
 /* Vista/7 Aero glass frame (DwmFrameStyle 1): the theme's DWMWindow frame pieces over the glass, the title over its
  * glow and the caption buttons hanging from the top edge. Their geometry goes to the "__wine_nc_buttons" property
  * for hit testing. ponytail: button sizes and places are Windows 7's at 96 dpi as estimated, unmeasured. Returns
@@ -1045,12 +1178,13 @@ BOOL WINAPI UXTHEME_NonClientFrameDraw(HWND hwnd, HDC hdc, RECT rect, DWORD styl
     {
         static void (WINAPI *refresh)(HWND);
         static BOOL loaded;
-        BOOL aero = get_dwm_aero_frames();
+        DWORD frame_style = get_dwm_frame_style();
+        DWORD expected_frame = frame_style == 1 ? 2 : frame_style == 2 ? 3 : 1;
         HANDLE frame = GetPropW(hwnd, L"__wine_dwm_frame"), seen = GetPropW(hwnd, L"__wine_dwm_theme_gen");
 
         /* the theme changed while the window lived (another frame style or colorization): dwmapi marks the glass
          * again, or drops Aero glass uxtheme asked for */
-        if (frame && (frame != (HANDLE)(ULONG_PTR)(aero ? 2 : 1) || (seen && seen != ULongToHandle(theme_generation))))
+        if (frame && (frame != (HANDLE)(ULONG_PTR)expected_frame || (seen && seen != ULongToHandle(theme_generation))))
         {
             if (!loaded)
             {
@@ -1061,7 +1195,12 @@ BOOL WINAPI UXTHEME_NonClientFrameDraw(HWND hwnd, HDC hdc, RECT rect, DWORD styl
             if (refresh) refresh(hwnd);
         }
         SetPropW(hwnd, L"__wine_dwm_theme_gen", ULongToHandle(theme_generation));
-        if (!aero)
+        if (frame_style == 2)
+        {
+            aero_glass(hwnd, style); /* dwmapi publishes frame kind 3 without enabling alpha or blur. */
+            return paint_flat8_nc(hwnd, hdc, rect, style, ex_style, flags, flags & NCFRAME_DOWN ? flags >> NCFRAME_PART_SHIFT : 0);
+        }
+        if (!frame_style)
         {
             RemovePropW(hwnd, L"__wine_nc_buttons");
             return draw_modern_nc_frame(hwnd, hdc, rect, style, ex_style, flags);
