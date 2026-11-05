@@ -428,6 +428,9 @@ static HRESULT create_local_service(REFCLSID rclsid)
     HKEY hkey;
     LONG r;
     DWORD type, sz;
+    int arch = (sizeof(void *) > sizeof(int)) ? 64 : 32;
+    REGSAM opposite = (arch == 64) ? KEY_WOW64_32KEY : KEY_WOW64_64KEY;
+    BOOL is_wow64 = FALSE;
 
     TRACE("Attempting to start Local service for %s\n", debugstr_guid(rclsid));
 
@@ -438,6 +441,19 @@ static HRESULT create_local_service(REFCLSID rclsid)
     /* read the LocalService and ServiceParameters values from the AppID key */
     sz = sizeof buf;
     r = RegQueryValueExW(hkey, L"LocalService", NULL, &type, (LPBYTE)buf, &sz);
+    if ((r != ERROR_SUCCESS || type != REG_SZ) &&
+        (arch == 64 || (IsWow64Process(GetCurrentProcess(), &is_wow64) && is_wow64)))
+    {
+        RegCloseKey(hkey);
+        hkey = NULL;
+
+        /* Windows resolves LocalService activation through the native view. */
+        if (SUCCEEDED(open_appidkey_from_clsid(rclsid, opposite | KEY_READ, &hkey)))
+        {
+            sz = sizeof buf;
+            r = RegQueryValueExW(hkey, L"LocalService", NULL, &type, (LPBYTE)buf, &sz);
+        }
+    }
     if (r == ERROR_SUCCESS && type == REG_SZ)
     {
         DWORD num_args = 0;
@@ -447,16 +463,20 @@ static HRESULT create_local_service(REFCLSID rclsid)
          * FIXME: I'm not really sure how to deal with the service parameters.
          *        I suspect that the string returned from RegQueryValueExW
          *        should be split into a number of arguments by spaces.
-         *        It would make more sense if ServiceParams contained a
+         *        It would make more sense if ServiceParameters contained a
          *        REG_MULTI_SZ here, but it's a REG_SZ for the services
          *        that I'm interested in for the moment.
          */
-        r = RegQueryValueExW(hkey, L"ServiceParams", NULL, &type, NULL, &sz);
+        r = RegQueryValueExW(hkey, L"ServiceParameters", NULL, &type, NULL, &sz);
+        if (r != ERROR_SUCCESS)
+            r = RegQueryValueExW(hkey, L"ServiceParams", NULL, &type, NULL, &sz);
         if (r == ERROR_SUCCESS && type == REG_SZ && sz)
         {
             args[0] = calloc(1, sz);
             num_args++;
-            RegQueryValueExW(hkey, L"ServiceParams", NULL, &type, (LPBYTE)args[0], &sz);
+            r = RegQueryValueExW(hkey, L"ServiceParameters", NULL, &type, (LPBYTE)args[0], &sz);
+            if (r != ERROR_SUCCESS)
+                RegQueryValueExW(hkey, L"ServiceParams", NULL, &type, (LPBYTE)args[0], &sz);
         }
         r = start_local_service(buf, num_args, (LPCWSTR *)args);
         if (r != ERROR_SUCCESS)
@@ -468,7 +488,8 @@ static HRESULT create_local_service(REFCLSID rclsid)
         WARN("No LocalService value\n");
         hr = REGDB_E_CLASSNOTREG; /* FIXME: check retval */
     }
-    RegCloseKey(hkey);
+    if (hkey)
+        RegCloseKey(hkey);
 
     return hr;
 }
