@@ -447,8 +447,9 @@ static HRESULT create_local_service(REFCLSID rclsid)
         RegCloseKey(hkey);
         hkey = NULL;
 
-        /* Windows resolves LocalService activation through the native view. */
-        if (SUCCEEDED(open_appidkey_from_clsid(rclsid, opposite | KEY_READ, &hkey)))
+        /* Windows resolves LocalService activation through the native view: the class stays in this process's view,
+         * only its AppID key is looked up in the opposite one. */
+        if (SUCCEEDED(open_appidkey_from_clsid_views(rclsid, KEY_READ, opposite | KEY_READ, &hkey)))
         {
             sz = sizeof buf;
             r = RegQueryValueExW(hkey, L"LocalService", NULL, &type, (LPBYTE)buf, &sz);

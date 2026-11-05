@@ -335,7 +335,9 @@ HRESULT open_key_for_clsid(REFCLSID clsid, const WCHAR *keyname, REGSAM access, 
 }
 
 /* open HKCR\\AppId\\{string form of appid clsid} key */
-HRESULT open_appidkey_from_clsid(REFCLSID clsid, REGSAM access, HKEY *subkey)
+/* The class key is read with clsid_access, the AppID key with appid_access: a 32-bit client's class may sit in the
+ * 32-bit view while its AppID was registered in the native view. */
+HRESULT open_appidkey_from_clsid_views(REFCLSID clsid, REGSAM clsid_access, REGSAM appid_access, HKEY *subkey)
 {
     static const WCHAR appidkeyW[] = L"AppId\\";
     DWORD res;
@@ -347,7 +349,7 @@ HRESULT open_appidkey_from_clsid(REFCLSID clsid, REGSAM access, HKEY *subkey)
     HRESULT hr;
 
     /* read the AppID value under the class's key */
-    hr = open_key_for_clsid(clsid, NULL, access, &hkey);
+    hr = open_key_for_clsid(clsid, NULL, clsid_access, &hkey);
     if (FAILED(hr))
         return hr;
 
@@ -361,13 +363,18 @@ HRESULT open_appidkey_from_clsid(REFCLSID clsid, REGSAM access, HKEY *subkey)
 
     lstrcpyW(keyname, appidkeyW);
     lstrcatW(keyname, buf);
-    res = open_classes_key(HKEY_CLASSES_ROOT, keyname, access, subkey);
+    res = open_classes_key(HKEY_CLASSES_ROOT, keyname, appid_access, subkey);
     if (res == ERROR_FILE_NOT_FOUND)
         return REGDB_E_KEYMISSING;
     else if (res != ERROR_SUCCESS)
         return REGDB_E_READREGDB;
 
     return S_OK;
+}
+
+HRESULT open_appidkey_from_clsid(REFCLSID clsid, REGSAM access, HKEY *subkey)
+{
+    return open_appidkey_from_clsid_views(clsid, access, access, subkey);
 }
 
 /***********************************************************************

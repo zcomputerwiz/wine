@@ -55,6 +55,7 @@ struct apartment
 
 HRESULT open_key_for_clsid(REFCLSID clsid, const WCHAR *keyname, REGSAM access, HKEY *subkey);
 HRESULT open_appidkey_from_clsid(REFCLSID clsid, REGSAM access, HKEY *subkey);
+HRESULT open_appidkey_from_clsid_views(REFCLSID clsid, REGSAM clsid_access, REGSAM appid_access, HKEY *subkey);
 
 /* DCOM messages used by the apartment window (not compatible with native) */
 #define DM_EXECUTERPC   (WM_USER + 0) /* WPARAM = 0, LPARAM = (struct dispatch_params *) */
