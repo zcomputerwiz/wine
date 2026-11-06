@@ -2683,6 +2683,20 @@ enum message_type
     unsigned int   flags;
 @END
 
+/* WineExplorer private: opener binding only; per-message writer provenance is a later step. */
+@REQ(get_pipe_caller_binding)
+    obj_handle_t   pipe;          /* server end */
+@REPLY
+    obj_handle_t   process;       /* query/synchronize handle to the retained opener */
+    obj_handle_t   token;         /* TOKEN_QUERY handle to its original primary token */
+    process_id_t   pid;
+    timeout_t      start_time;
+    struct luid    token_id;
+    struct luid    modified_id;
+    int            impersonated; /* opener had a thread token */
+    int            token_current; /* same primary token object and ModifiedId */
+@END
+
 /* Create a window */
 @REQ(create_window)
     user_handle_t  parent;      /* parent window */

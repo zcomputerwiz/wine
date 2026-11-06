@@ -3571,6 +3571,26 @@ struct set_named_pipe_info_reply
 };
 
 
+struct get_pipe_caller_binding_request
+{
+    struct request_header __header;
+    obj_handle_t   pipe;
+};
+struct get_pipe_caller_binding_reply
+{
+    struct reply_header __header;
+    obj_handle_t   process;
+    obj_handle_t   token;
+    process_id_t   pid;
+    char __pad_20[4];
+    timeout_t      start_time;
+    struct luid    token_id;
+    struct luid    modified_id;
+    int            impersonated;
+    int            token_current;
+};
+
+
 struct create_window_request
 {
     struct request_header __header;
@@ -6625,6 +6645,7 @@ enum request
     REQ_set_irp_result,
     REQ_create_named_pipe,
     REQ_set_named_pipe_info,
+    REQ_get_pipe_caller_binding,
     REQ_create_window,
     REQ_destroy_window,
     REQ_get_desktop_window,
@@ -6955,6 +6976,7 @@ union generic_request
     struct set_irp_result_request set_irp_result_request;
     struct create_named_pipe_request create_named_pipe_request;
     struct set_named_pipe_info_request set_named_pipe_info_request;
+    struct get_pipe_caller_binding_request get_pipe_caller_binding_request;
     struct create_window_request create_window_request;
     struct destroy_window_request destroy_window_request;
     struct get_desktop_window_request get_desktop_window_request;
@@ -7283,6 +7305,7 @@ union generic_reply
     struct set_irp_result_reply set_irp_result_reply;
     struct create_named_pipe_reply create_named_pipe_reply;
     struct set_named_pipe_info_reply set_named_pipe_info_reply;
+    struct get_pipe_caller_binding_reply get_pipe_caller_binding_reply;
     struct create_window_reply create_window_reply;
     struct destroy_window_reply destroy_window_reply;
     struct get_desktop_window_reply get_desktop_window_reply;
@@ -7462,6 +7485,6 @@ union generic_reply
     struct dwm_reply_reply dwm_reply_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 974
+#define SERVER_PROTOCOL_VERSION 975
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

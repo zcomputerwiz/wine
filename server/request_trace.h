@@ -1721,6 +1721,23 @@ static void dump_set_named_pipe_info_request( const struct set_named_pipe_info_r
     fprintf( stderr, ", flags=%08x", req->flags );
 }
 
+static void dump_get_pipe_caller_binding_request( const struct get_pipe_caller_binding_request *req )
+{
+    fprintf( stderr, " pipe=%04x", req->pipe );
+}
+
+static void dump_get_pipe_caller_binding_reply( const struct get_pipe_caller_binding_reply *req )
+{
+    fprintf( stderr, " process=%04x", req->process );
+    fprintf( stderr, ", token=%04x", req->token );
+    fprintf( stderr, ", pid=%04x", req->pid );
+    dump_timeout( ", start_time=", &req->start_time );
+    dump_luid( ", token_id=", &req->token_id );
+    dump_luid( ", modified_id=", &req->modified_id );
+    fprintf( stderr, ", impersonated=%d", req->impersonated );
+    fprintf( stderr, ", token_current=%d", req->token_current );
+}
+
 static void dump_create_window_request( const struct create_window_request *req )
 {
     fprintf( stderr, " parent=%08x", req->parent );
@@ -3846,6 +3863,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_set_irp_result_request,
     (dump_func)dump_create_named_pipe_request,
     (dump_func)dump_set_named_pipe_info_request,
+    (dump_func)dump_get_pipe_caller_binding_request,
     (dump_func)dump_create_window_request,
     (dump_func)dump_destroy_window_request,
     (dump_func)dump_get_desktop_window_request,
@@ -4173,6 +4191,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     NULL,
     (dump_func)dump_create_named_pipe_reply,
     NULL,
+    (dump_func)dump_get_pipe_caller_binding_reply,
     (dump_func)dump_create_window_reply,
     NULL,
     (dump_func)dump_get_desktop_window_reply,
@@ -4500,6 +4519,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "set_irp_result",
     "create_named_pipe",
     "set_named_pipe_info",
+    "get_pipe_caller_binding",
     "create_window",
     "destroy_window",
     "get_desktop_window",
@@ -4753,6 +4773,7 @@ static const struct
     { "INVALID_LOCK_SEQUENCE",       STATUS_INVALID_LOCK_SEQUENCE },
     { "INVALID_OWNER",               STATUS_INVALID_OWNER },
     { "INVALID_PARAMETER",           STATUS_INVALID_PARAMETER },
+    { "INVALID_PARAMETER_1",         STATUS_INVALID_PARAMETER_1 },
     { "INVALID_PARAMETER_2",         STATUS_INVALID_PARAMETER_2 },
     { "INVALID_PIPE_STATE",          STATUS_INVALID_PIPE_STATE },
     { "INVALID_READ_MODE",           STATUS_INVALID_READ_MODE },

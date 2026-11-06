@@ -33,9 +33,55 @@
 #include "ddk/ntddk.h"
 #include "symcrypt.h"
 #include "wine/exception.h"
+#include "wine/server.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(ntdll);
+
+/***********************************************************************
+ *             NtQueryWexPipeCallerBinding  (NTDLL.@)
+ *
+ * WineExplorer private, opener-only binding; no per-message writer provenance yet.
+ * Use the existing wine_server_call transport, including its WoW64 marshalling.
+ * All output pointers are required; the caller owns both handles on success.
+ */
+NTSTATUS WINAPI NtQueryWexPipeCallerBinding( HANDLE pipe, HANDLE *process, HANDLE *token, ULONG *pid,
+                                            LARGE_INTEGER *start_time, LUID *token_id, LUID *modified_id,
+                                            BOOL *impersonated, BOOL *token_current )
+{
+    NTSTATUS status;
+
+    if (process) *process = NULL;
+    if (token) *token = NULL;
+    if (!process || !token || !pid || !start_time || !token_id || !modified_id ||
+        !impersonated || !token_current)
+        return STATUS_INVALID_PARAMETER;
+    *pid = 0;
+    start_time->QuadPart = 0;
+    memset( token_id, 0, sizeof(*token_id) );
+    memset( modified_id, 0, sizeof(*modified_id) );
+    *impersonated = *token_current = FALSE;
+
+    SERVER_START_REQ( get_pipe_caller_binding )
+    {
+        req->pipe = wine_server_obj_handle( pipe );
+        if (!(status = wine_server_call( req )))
+        {
+            *process = wine_server_ptr_handle( reply->process );
+            *token = wine_server_ptr_handle( reply->token );
+            *pid = reply->pid;
+            start_time->QuadPart = reply->start_time;
+            token_id->LowPart = reply->token_id.low_part;
+            token_id->HighPart = reply->token_id.high_part;
+            modified_id->LowPart = reply->modified_id.low_part;
+            modified_id->HighPart = reply->modified_id.high_part;
+            *impersonated = reply->impersonated;
+            *token_current = reply->token_current;
+        }
+    }
+    SERVER_END_REQ;
+    return status;
+}
 
 /* wrappers for symcrypt */
 SYMCRYPT_CPU_FEATURES SYMCRYPT_CALL SymCryptCpuFeaturesNeverPresent(void) { return 0; }

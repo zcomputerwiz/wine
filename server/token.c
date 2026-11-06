@@ -1586,6 +1586,12 @@ unsigned int token_get_session_id( struct token *token )
     return token->session_id;
 }
 
+void token_get_ids( const struct token *token, struct luid *token_id, struct luid *modified_id )
+{
+    *token_id = token->token_id;
+    *modified_id = token->modified_id;
+}
+
 int check_object_access(struct token *token, struct object *obj, unsigned int *access)
 {
     struct generic_map mapping;

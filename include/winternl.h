@@ -5659,6 +5659,9 @@ static inline PLIST_ENTRY RemoveTailList(PLIST_ENTRY le)
 
 /* Wine internal functions */
 
+/* WineExplorer private: open-time binding only, without message writer provenance. */
+NTSYSAPI NTSTATUS WINAPI NtQueryWexPipeCallerBinding(HANDLE,HANDLE*,HANDLE*,ULONG*,LARGE_INTEGER*,LUID*,LUID*,BOOL*,BOOL*);
+
 NTSYSAPI NTSTATUS WINAPI __wine_unix_spawnvp( char * const argv[], int wait );
 
 #define RTL_IMAGE_MAX_DOS_HEADER (256u * 1024 * 1024)

@@ -40,6 +40,7 @@
 #include "request.h"
 #include "security.h"
 #include "process.h"
+#include "sysrun.h"
 
 struct named_pipe;
 
@@ -62,6 +63,11 @@ struct pipe_end
     process_id_t         client_pid; /* process that created the client */
     process_id_t         server_pid; /* process that created the server */
     struct token        *client_token; /* token of the thread that opened the client end (elevation enforced) */
+    struct process      *client_process; /* retained opener, not a later PID lookup */
+    struct token        *client_primary; /* primary token at open */
+    struct luid          client_token_id;
+    struct luid          client_modified_id;
+    int                  client_impersonated; /* opener had an explicit thread token */
     data_size_t          buffer_size;/* size of buffered data that doesn't block caller */
     struct list          message_queue;
     struct async_queue   read_q;     /* read queue */
@@ -404,10 +410,14 @@ static void pipe_end_disconnect( struct pipe_end *pipe_end, unsigned int status 
     struct async *async;
 
     pipe_end->connection = NULL;
+    if (pipe_end->client_primary) release_object( pipe_end->client_primary );
+    if (pipe_end->client_process) release_object( pipe_end->client_process );
+    pipe_end->client_primary = NULL;
+    pipe_end->client_process = NULL;
 
     pipe_end->state = status == STATUS_PIPE_DISCONNECTED
         ? FILE_PIPE_DISCONNECTED_STATE : FILE_PIPE_CLOSING_STATE;
-    fd_async_wake_up( pipe_end->fd, ASYNC_TYPE_WAIT, status );
+    if (pipe_end->fd) fd_async_wake_up( pipe_end->fd, ASYNC_TYPE_WAIT, status );
     async_wake_up( &pipe_end->read_q, status );
     LIST_FOR_EACH_ENTRY_SAFE( message, next, &pipe_end->message_queue, struct pipe_message, entry )
     {
@@ -417,7 +427,7 @@ static void pipe_end_disconnect( struct pipe_end *pipe_end, unsigned int status 
         async_terminate( async, status );
         release_object( async );
     }
-    if (status == STATUS_PIPE_DISCONNECTED) set_fd_signaled( pipe_end->fd, 0 );
+    if (pipe_end->fd && status == STATUS_PIPE_DISCONNECTED) set_fd_signaled( pipe_end->fd, 0 );
 
     if (connection)
     {
@@ -1368,6 +1378,11 @@ static void init_pipe_end( struct pipe_end *pipe_end, struct named_pipe *pipe,
     pipe_end->flags = pipe_flags;
     pipe_end->connection = NULL;
     pipe_end->client_token = NULL;
+    pipe_end->client_process = NULL;
+    pipe_end->client_primary = NULL;
+    memset( &pipe_end->client_token_id, 0, sizeof(pipe_end->client_token_id) );
+    memset( &pipe_end->client_modified_id, 0, sizeof(pipe_end->client_modified_id) );
+    pipe_end->client_impersonated = 0;
     pipe_end->buffer_size = buffer_size;
     init_async_queue( &pipe_end->read_q );
     init_async_queue( &pipe_end->write_q );
@@ -1412,6 +1427,13 @@ static struct pipe_end *create_pipe_client( struct named_pipe *pipe, data_size_t
     init_pipe_end( client, pipe, 0, buffer_size );
     client->state = FILE_PIPE_CONNECTED_STATE;
     client->client_pid = get_process_id( current->process );
+    client->client_process = (struct process *)grab_object( current->process );
+    client->client_impersonated = (current->token != NULL);
+    if (current->process->token)
+    {
+        client->client_primary = (struct token *)grab_object( current->process->token );
+        token_get_ids( client->client_primary, &client->client_token_id, &client->client_modified_id );
+    }
     if (elevation_enforced())
     {
         struct token *token = current->token ? current->token : current->process->token;
@@ -1476,7 +1498,7 @@ static struct object *named_pipe_open_file( struct object *obj, unsigned int acc
         client->server_pid = server->pipe_end.server_pid;
         list_remove( &server->entry );
     }
-    return &client->obj;
+    return client ? &client->obj : NULL;
 }
 
 static void named_pipe_device_ioctl( struct fd *fd, ioctl_code_t code, struct async *async )
@@ -1661,4 +1683,65 @@ DECL_HANDLER(set_named_pipe_info)
     }
 
     release_object( pipe_end );
+}
+
+/* WineExplorer private: this binds the opener only. Per-message writer provenance is a later step. */
+DECL_HANDLER(get_pipe_caller_binding)
+{
+    struct pipe_end *server, *client;
+    struct luid token_id, modified_id;
+    obj_handle_t process, token;
+
+    /* Keep the same system-role / SeTcbPrivilege gate as create_linked_token. */
+    if (!elevation_enforced() || token_service_account( current->process->token ) != SERVICE_ACCOUNT_SYSTEM ||
+        !sysrun_process_privileged( current->process ) || !token_has_privilege( current->process->token, SeTcbPrivilege ))
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
+
+    server = (struct pipe_end *)get_handle_obj( current->process, req->pipe,
+                                               FILE_READ_ATTRIBUTES, &pipe_server_ops );
+    if (!server)
+    {
+        if (get_error() == STATUS_INVALID_HANDLE || get_error() == STATUS_OBJECT_TYPE_MISMATCH)
+            set_error( STATUS_INVALID_PARAMETER_1 );
+        return;
+    }
+
+    if (server->state != FILE_PIPE_CONNECTED_STATE || !(client = server->connection))
+    {
+        set_error( STATUS_PIPE_DISCONNECTED );
+        goto done;
+    }
+    if (!client->client_process || !client->client_primary)
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        goto done;
+    }
+
+    process = alloc_handle( current->process, client->client_process,
+                            SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_QUERY_INFORMATION, 0 );
+    if (!process) goto done;
+    token = alloc_handle( current->process, client->client_primary, TOKEN_QUERY, 0 );
+    if (!token)
+    {
+        close_handle( current->process, process );
+        goto done;
+    }
+
+    token_get_ids( client->client_primary, &token_id, &modified_id );
+    reply->process = process;
+    reply->token = token;
+    reply->pid = client->client_pid;
+    reply->start_time = client->client_process->start_time;
+    reply->token_id = client->client_token_id;
+    reply->modified_id = client->client_modified_id;
+    reply->impersonated = client->client_impersonated;
+    reply->token_current = client->client_primary == client->client_process->token &&
+                           modified_id.low_part == client->client_modified_id.low_part &&
+                           modified_id.high_part == client->client_modified_id.high_part;
+
+done:
+    release_object( server );
 }
