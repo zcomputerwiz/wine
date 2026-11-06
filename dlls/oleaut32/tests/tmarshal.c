@@ -1822,6 +1822,8 @@ static inline KindaEnum *impl_from_IKindaEnumWidget(IKindaEnumWidget *iface)
     return CONTAINING_RECORD(iface, KindaEnum, IKindaEnumWidget_iface);
 }
 
+static BOOL registered_for_user;
+
 static HRESULT register_current_module_typelib(void)
 {
     WCHAR path[MAX_PATH];
@@ -1836,9 +1838,21 @@ static HRESULT register_current_module_typelib(void)
     if (SUCCEEDED(hr))
     {
         hr = RegisterTypeLib(typelib, path, NULL);
+        if (hr == TYPE_E_REGISTRYACCESS)
+        {
+            /* Not elevated: register for the current user instead. */
+            hr = RegisterTypeLibForUser(typelib, path, NULL);
+            if (SUCCEEDED(hr)) registered_for_user = TRUE;
+        }
         ITypeLib_Release(typelib);
     }
     return hr;
+}
+
+static void unregister_current_module_typelib(void)
+{
+    if (registered_for_user)
+        UnRegisterTypeLibForUser(&LIBID_TestTypelib, 2, 5, LOCALE_NEUTRAL, sizeof(void *) == 8 ? SYS_WIN64 : SYS_WIN32);
 }
 
 static ITypeInfo *get_type_info(REFIID riid)
@@ -3877,9 +3891,14 @@ START_TEST(tmarshal)
     test_external_connection();
     test_marshal_dispinterface();
 
-    hr = UnRegisterTypeLib(&LIBID_TestTypelib, 2, 5, LOCALE_NEUTRAL,
-                           sizeof(void*) == 8 ? SYS_WIN64 : SYS_WIN32);
-    ok_ole_success(hr, UnRegisterTypeLib);
+    if (registered_for_user)
+        unregister_current_module_typelib();
+    else
+    {
+        hr = UnRegisterTypeLib(&LIBID_TestTypelib, 2, 5, LOCALE_NEUTRAL,
+                               sizeof(void*) == 8 ? SYS_WIN64 : SYS_WIN32);
+        ok_ole_success(hr, UnRegisterTypeLib);
+    }
 
     CoUninitialize();
 }
