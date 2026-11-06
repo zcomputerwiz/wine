@@ -74,6 +74,8 @@ struct proxy_manager
     HANDLE remoting_mutex;    /* mutex used for synchronizing access to IRemUnknown */
     MSHCTX dest_context;      /* context used for activating optimisations (LOCK) */
     void *dest_context_data;  /* reserved context value (LOCK) */
+    BOOL blanket_set;         /* IClientSecurity::SetBlanket was called (CS cs) */
+    DWORD blanket_authn_svc, blanket_authz_svc, blanket_authn_level, blanket_imp_level, blanket_caps; /* (CS cs) */
 };
 
 static inline struct proxy_manager *impl_from_IMultiQI(IMultiQI *iface)
@@ -1361,26 +1363,45 @@ static HRESULT WINAPI ProxyCliSec_QueryBlanket(IClientSecurity *iface,
                                                void **pAuthInfo,
                                                DWORD *pCapabilities)
 {
-    FIXME("(%p, %p, %p, %p, %p, %p, %p, %p): stub\n", pProxy, pAuthnSvc,
+    struct proxy_manager *This = impl_from_IClientSecurity( iface );
+
+    TRACE("(%p, %p, %p, %p, %p, %p, %p, %p)\n", pProxy, pAuthnSvc,
           pAuthzSvc, ppServerPrincName, pAuthnLevel, pImpLevel, pAuthInfo,
           pCapabilities);
 
+    /* The blanket is only recorded, not enforced: report what the caller set. */
+    EnterCriticalSection(&This->cs);
+    if (This->blanket_set)
+    {
+        if (pAuthnSvc) *pAuthnSvc = This->blanket_authn_svc;
+        if (pAuthzSvc) *pAuthzSvc = This->blanket_authz_svc;
+        if (ppServerPrincName) *ppServerPrincName = NULL;
+        if (pAuthnLevel) *pAuthnLevel = This->blanket_authn_level;
+        if (pImpLevel) *pImpLevel = This->blanket_imp_level;
+        if (pAuthInfo) *pAuthInfo = NULL;
+        if (pCapabilities) *pCapabilities = This->blanket_caps;
+        LeaveCriticalSection(&This->cs);
+        return S_OK;
+    }
+    LeaveCriticalSection(&This->cs);
+
+    /* Defaults measured on Windows 11 for a standard-marshal proxy that has not been given a blanket. */
     if (pAuthnSvc)
-        *pAuthnSvc = 0;
+        *pAuthnSvc = RPC_C_AUTHN_WINNT;
     if (pAuthzSvc)
-        *pAuthzSvc = 0;
+        *pAuthzSvc = RPC_C_AUTHZ_NONE;
     if (ppServerPrincName)
         *ppServerPrincName = NULL;
     if (pAuthnLevel)
-        *pAuthnLevel = RPC_C_AUTHN_LEVEL_DEFAULT;
+        *pAuthnLevel = RPC_C_AUTHN_LEVEL_PKT_PRIVACY;
     if (pImpLevel)
-        *pImpLevel = RPC_C_IMP_LEVEL_DEFAULT;
+        *pImpLevel = RPC_C_IMP_LEVEL_IDENTIFY;
     if (pAuthInfo)
         *pAuthInfo = NULL;
     if (pCapabilities)
         *pCapabilities = EOAC_NONE;
 
-    return E_NOTIMPL;
+    return S_OK;
 }
 
 static HRESULT WINAPI ProxyCliSec_SetBlanket(IClientSecurity *iface,
@@ -1391,10 +1412,23 @@ static HRESULT WINAPI ProxyCliSec_SetBlanket(IClientSecurity *iface,
                                              void *pAuthInfo,
                                              DWORD Capabilities)
 {
-    FIXME("%p, %ld, %ld, %s, %ld, %ld, %p, %#lx: stub\n", pProxy, AuthnSvc, AuthzSvc,
+    struct proxy_manager *This = impl_from_IClientSecurity( iface );
+
+    TRACE("%p, %ld, %ld, %s, %ld, %ld, %p, %#lx\n", pProxy, AuthnSvc, AuthzSvc,
           pServerPrincName == COLE_DEFAULT_PRINCIPAL ? "<default principal>" : debugstr_w(pServerPrincName),
           AuthnLevel, ImpLevel, pAuthInfo, Capabilities);
-    return E_NOTIMPL;
+
+    /* Security is not implemented for the local transport: accept and remember the blanket so that callers
+     * which treat a failure as fatal (installers, updaters) keep working. */
+    EnterCriticalSection(&This->cs);
+    This->blanket_set = TRUE;
+    This->blanket_authn_svc = AuthnSvc;
+    This->blanket_authz_svc = AuthzSvc;
+    This->blanket_authn_level = AuthnLevel;
+    This->blanket_imp_level = ImpLevel;
+    This->blanket_caps = Capabilities;
+    LeaveCriticalSection(&This->cs);
+    return S_OK;
 }
 
 static HRESULT WINAPI ProxyCliSec_CopyProxy(IClientSecurity *iface,
@@ -1578,6 +1612,7 @@ static HRESULT proxy_manager_construct(
     This->oid = oid;
 
     This->refs = 1;
+    This->blanket_set = FALSE;
 
     /* the DCOM draft specification states that the SORF_NOPING flag is
      * proxy manager specific, not ifproxy specific, so this implies that we

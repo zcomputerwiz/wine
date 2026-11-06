@@ -3898,16 +3898,16 @@ static void test_client_security(void)
     ok_ole_success(hr, "IUnknown_QueryInterface IID_IClientSecurity");
 
     hr = IClientSecurity_QueryBlanket(pCliSec, (IUnknown *)pProxy, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
-    todo_wine ok_ole_success(hr, "IClientSecurity_QueryBlanket (all NULLs)");
+    ok_ole_success(hr, "IClientSecurity_QueryBlanket (all NULLs)");
 
     hr = IClientSecurity_QueryBlanket(pCliSec, (IUnknown *)pMarshal, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
     todo_wine ok(hr == E_NOINTERFACE, "IClientSecurity_QueryBlanket with local interface should have returned E_NOINTERFACE instead of 0x%08lx\n", hr);
 
     hr = IClientSecurity_QueryBlanket(pCliSec, (IUnknown *)pProxy, &dwAuthnSvc, &dwAuthzSvc, &pServerPrincName, &dwAuthnLevel, &dwImpLevel, &pAuthInfo, &dwCapabilities);
-    todo_wine ok_ole_success(hr, "IClientSecurity_QueryBlanket");
+    ok_ole_success(hr, "IClientSecurity_QueryBlanket");
 
     hr = IClientSecurity_SetBlanket(pCliSec, (IUnknown *)pProxy, dwAuthnSvc, dwAuthzSvc, pServerPrincName, dwAuthnLevel, RPC_C_IMP_LEVEL_IMPERSONATE, pAuthInfo, dwCapabilities);
-    todo_wine ok_ole_success(hr, "IClientSecurity_SetBlanket");
+    ok_ole_success(hr, "IClientSecurity_SetBlanket");
 
     hr = IClassFactory_CreateInstance(pProxy, NULL, &IID_IWineTest, &pv);
     ok(hr == E_NOINTERFACE, "COM call should have succeeded instead of returning 0x%08lx\n", hr);
@@ -3921,7 +3921,7 @@ static void test_client_security(void)
     CoTaskMemFree(pServerPrincName);
 
     hr = IClientSecurity_QueryBlanket(pCliSec, pUnknown1, &dwAuthnSvc, &dwAuthzSvc, &pServerPrincName, &dwAuthnLevel, &dwImpLevel, &pAuthInfo, &dwCapabilities);
-    todo_wine ok_ole_success(hr, "IClientSecurity_QueryBlanket(IUnknown)");
+    ok_ole_success(hr, "IClientSecurity_QueryBlanket(IUnknown)");
 
     CoTaskMemFree(pServerPrincName);
 
@@ -3929,6 +3929,62 @@ static void test_client_security(void)
     IUnknown_Release(pUnknown1);
     IMarshal_Release(pMarshal);
     IClientSecurity_Release(pCliSec);
+
+    end_host_object(tid, thread);
+}
+
+/* tests CoSetProxyBlanket/CoQueryProxyBlanket on a standard-marshal proxy */
+static void test_proxy_blanket(void)
+{
+    HRESULT hr;
+    IStream *pStream = NULL;
+    IClassFactory *pProxy = NULL;
+    DWORD tid;
+    HANDLE thread;
+    DWORD dwAuthnSvc, dwAuthzSvc, dwAuthnLevel, dwImpLevel, dwCapabilities;
+    OLECHAR *pServerPrincName;
+    void *pAuthInfo;
+
+    cLocks = 0;
+    external_connections = 0;
+
+    hr = CreateStreamOnHGlobal(NULL, TRUE, &pStream);
+    ok_ole_success(hr, CreateStreamOnHGlobal);
+    tid = start_host_object(pStream, &IID_IClassFactory, (IUnknown*)&Test_ClassFactory, MSHLFLAGS_NORMAL, &thread);
+
+    IStream_Seek(pStream, ullZero, STREAM_SEEK_SET, NULL);
+    hr = CoUnmarshalInterface(pStream, &IID_IClassFactory, (void **)&pProxy);
+    ok_ole_success(hr, CoUnmarshalInterface);
+    IStream_Release(pStream);
+
+    /* query the blanket before setting it: no hard assertion, just make
+     * sure it does not crash and record the result */
+    pServerPrincName = NULL;
+    pAuthInfo = NULL;
+    hr = CoQueryProxyBlanket((IUnknown *)pProxy, &dwAuthnSvc, &dwAuthzSvc, &pServerPrincName,
+            &dwAuthnLevel, &dwImpLevel, &pAuthInfo, &dwCapabilities);
+    trace("CoQueryProxyBlanket before set: hr %#08lx, authn_svc %#lx, authz_svc %#lx, "
+            "authn_level %lu, imp_level %lu, capabilities %#lx\n",
+            hr, dwAuthnSvc, dwAuthzSvc, dwAuthnLevel, dwImpLevel, dwCapabilities);
+    if (pServerPrincName)
+        CoTaskMemFree(pServerPrincName);
+
+    hr = CoSetProxyBlanket((IUnknown *)pProxy, RPC_C_AUTHN_DEFAULT, RPC_C_AUTHZ_DEFAULT,
+            COLE_DEFAULT_PRINCIPAL, RPC_C_AUTHN_LEVEL_PKT_PRIVACY, RPC_C_IMP_LEVEL_IMPERSONATE,
+            NULL, EOAC_NONE);
+    ok(hr == S_OK, "CoSetProxyBlanket failed with error %#08lx\n", hr);
+
+    pServerPrincName = NULL;
+    pAuthInfo = NULL;
+    hr = CoQueryProxyBlanket((IUnknown *)pProxy, &dwAuthnSvc, &dwAuthzSvc, &pServerPrincName,
+            &dwAuthnLevel, &dwImpLevel, &pAuthInfo, &dwCapabilities);
+    ok(hr == S_OK, "CoQueryProxyBlanket failed with error %#08lx\n", hr);
+    ok(dwAuthnLevel == RPC_C_AUTHN_LEVEL_PKT_PRIVACY, "authn level %lu\n", dwAuthnLevel);
+    ok(dwImpLevel == RPC_C_IMP_LEVEL_IMPERSONATE, "imp level %lu\n", dwImpLevel);
+    if (pServerPrincName)
+        CoTaskMemFree(pServerPrincName);
+
+    IClassFactory_Release(pProxy);
 
     end_host_object(tid, thread);
 }
@@ -4963,6 +5019,7 @@ START_TEST(marshal)
     test_inproc_handler();
     test_handler_marshaling();
     test_client_security();
+    test_proxy_blanket();
 
     test_local_server();
 
