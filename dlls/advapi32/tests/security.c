@@ -8438,6 +8438,31 @@ static void test_elevation(void)
     }
     ok(ret, "got error %lu\n", GetLastError());
 
+    /* The authentication (logon) id must be non-zero and shared by duplicates */
+    {
+        TOKEN_STATISTICS stats, dup_stats;
+        HANDLE dup_token = NULL;
+
+        ret = GetTokenInformation(token, TokenStatistics, &stats, sizeof(stats), &size);
+        ok(ret, "got error %lu\n", GetLastError());
+        ok(stats.AuthenticationId.LowPart || stats.AuthenticationId.HighPart,
+           "expected a non-zero authentication id\n");
+
+        ret = DuplicateTokenEx(token, TOKEN_QUERY, NULL, SecurityImpersonation,
+                               TokenImpersonation, &dup_token);
+        ok(ret, "got error %lu\n", GetLastError());
+        if (ret)
+        {
+            ret = GetTokenInformation(dup_token, TokenStatistics, &dup_stats, sizeof(dup_stats), &size);
+            ok(ret, "got error %lu\n", GetLastError());
+            ok(!memcmp(&stats.AuthenticationId, &dup_stats.AuthenticationId, sizeof(LUID)),
+               "duplicate has a different authentication id\n");
+            CloseHandle(dup_token);
+        }
+
+        /* the linked token is deliberately not compared: on native Windows it has its own logon session */
+    }
+
     if (type == TokenElevationTypeDefault)
     {
         ok(elevation.TokenIsElevated == FALSE, "got elevation %#lx\n", elevation.TokenIsElevated);

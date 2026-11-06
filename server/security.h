@@ -66,6 +66,10 @@ extern struct token *token_create_admin( unsigned primary, int impersonation_lev
 /* accounts of the system role (docs/ELEVATION_SYSTEM_ROLE_WORKORDER.md, C3); the numbers are in the protocol */
 enum { SERVICE_ACCOUNT_SYSTEM, SERVICE_ACCOUNT_LOCAL_SERVICE, SERVICE_ACCOUNT_NETWORK_SERVICE };
 extern struct token *token_create_service( unsigned int account, unsigned int session_id );
+/* the first interactive user token of the server; gets a new logon (authentication) id */
+extern struct token *token_create_first_interactive( unsigned int session_id );
+/* copy the authentication (logon) id from src to dst */
+extern void token_copy_auth_id( struct token *dst, const struct token *src );
 extern int token_service_account( const struct token *token );
 extern int token_is_elevated( const struct token *token );
 extern int token_protect_elevated( struct token *token );

@@ -122,6 +122,7 @@ struct token
     struct luid    token_id;        /* system-unique id of token */
     struct luid    modified_id;     /* new id allocated every time token is modified */
     struct luid    lineage_id;      /* token_id of the first token of the chain of duplicates and filtered copies */
+    struct luid    auth_id;         /* authentication (logon) id, shared by all tokens of the same logon */
     struct list    privileges;      /* privileges available to the token */
     struct list    groups;          /* groups that the user of this token belongs to (sid_and_attributes) */
     struct sid    *user;            /* SID of user this token represents */
@@ -416,6 +417,12 @@ static inline void allocate_luid( struct luid *luid )
     *luid = prev_luid_value;
 }
 
+/* allocate a new authentication (logon) id from the same allocator as token ids */
+static void alloc_logon_luid( struct luid *luid )
+{
+    allocate_luid( luid );
+}
+
 DECL_HANDLER( allocate_locally_unique_id )
 {
     allocate_luid( &reply->luid );
@@ -517,6 +524,9 @@ static struct token *create_token( unsigned int primary, unsigned int session_id
             token->modified_id = *modified_id;
         else
             allocate_luid( &token->modified_id );
+        /* the caller sets the authentication (logon) id; zero is the unassigned stub */
+        token->auth_id.low_part = 0;
+        token->auth_id.high_part = 0;
         list_init( &token->privileges );
         list_init( &token->groups );
         list_init( &token->restricted_sids );
@@ -660,6 +670,7 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
                           modified_id, impersonation_level, src_token->elevation );
     if (!token) return token;
     token->lineage_id = src_token->lineage_id;
+    token->auth_id = src_token->auth_id;
 
     /* copy groups */
     LIST_FOR_EACH_ENTRY( group, &src_token->groups, struct group, entry )
@@ -945,6 +956,21 @@ struct token *token_create_admin( unsigned primary, int impersonation_level, int
     return token;
 }
 
+/* create the first interactive user token of the server; it gets a new logon (authentication) id */
+struct token *token_create_first_interactive( unsigned int session_id )
+{
+    struct token *token = token_create_admin( TRUE, -1, TokenElevationTypeLimited, session_id );
+    if (token)
+        alloc_logon_luid( &token->auth_id );
+    return token;
+}
+
+/* copy the authentication (logon) id from src to dst */
+void token_copy_auth_id( struct token *dst, const struct token *src )
+{
+    dst->auth_id = src->auth_id;
+}
+
 /* Tokens of the system role (docs/ELEVATION_SYSTEM_ROLE_WORKORDER.md, C3): LocalSystem, LocalService and
  * NetworkService, all primary, Default elevation, no linked token, System integrity.
  * Privileges and groups follow the native tokens measured in docs/ELEVATION_LOCAL_VALIDATION_WORKORDER.md
@@ -1030,6 +1056,9 @@ struct token *token_create_service( unsigned int account, unsigned int session_i
                           default_dacl, NULL, -1, TokenElevationTypeDefault );
     free( default_dacl );
     if (!token) return NULL;
+    /* service (SYSTEM) logons use a fixed authentication id */
+    token->auth_id.low_part = 0x3e7;
+    token->auth_id.high_part = 0;
     if (!token_assign_label( token, &system_label_sid ))
     {
         release_object( token );
@@ -1755,6 +1784,8 @@ DECL_HANDLER(create_token)
                           req->impersonation_level, TokenElevationTypeFull );
     if (token)
     {
+        /* honor the authentication id supplied by the privileged caller */
+        token->auth_id = req->auth_id;
         reply->token = alloc_handle( current->process, token, req->access, params.attr );
         release_object( token );
     }
@@ -2317,6 +2348,7 @@ DECL_HANDLER(get_token_info)
     {
         reply->token_id = token->token_id;
         reply->modified_id = token->modified_id;
+        reply->auth_id = token->auth_id;
         reply->session_id = token->session_id;
         reply->primary = token->primary;
         reply->impersonation_level = token->impersonation_level;
@@ -2439,8 +2471,10 @@ DECL_HANDLER(create_linked_token)
                   sysrun_process_privileged( current->process ) && token_has_privilege( current->process->token, SeTcbPrivilege );
         if ((linked = token_create_admin( primary, primary ? -1 : SecurityIdentification, elevation, token->session_id )))
         {
-            /* a Medium caller cannot get the write rights of a High token (mandatory label) */
             unsigned int access = MAXIMUM_ALLOWED;
+            /* the linked token belongs to the same logon as its source */
+            linked->auth_id = token->auth_id;
+            /* a Medium caller cannot get the write rights of a High token (mandatory label) */
             if (check_object_access( NULL, &linked->obj, &access ))
                 reply->linked = alloc_handle_no_access_check( current->process, linked, access & TOKEN_ALL_ACCESS, 0 );
             release_object( linked );

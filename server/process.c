@@ -684,7 +684,7 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     if (!parent)
     {
         process->handles = alloc_handle_table( process, 0 );
-        process->token = token_create_admin( TRUE, -1, TokenElevationTypeLimited, default_session_id );
+        process->token = token_create_first_interactive( default_session_id );
         /* the registry is loaded before the first client connects, so the helper setting is known here */
         if (process->token && elevation_enforced())
         {
@@ -1865,6 +1865,8 @@ DECL_HANDLER(grant_process_admin_token)
     if ((token = token_create_admin( TRUE, SecurityIdentification,
                                      TokenElevationTypeDefault, default_session_id )))
     {
+        /* the granted token belongs to the same logon as the process's current token */
+        token_copy_auth_id( token, process->token );
         release_object( process->token );
         process->token = token;
     }

@@ -66,7 +66,7 @@ struct reply_header
 /* this is used to construct the generic_request union */
 struct request_max_size
 {
-    int pad[16]; /* the max request size is 16 ints */
+    int pad[18]; /* the max request size is 18 ints */
 };
 
 #define FIRST_USER_HANDLE 0x0020  /* first possible value for low word of user handle */
@@ -3953,6 +3953,7 @@ struct handle_info
 @REPLY
     struct luid    token_id;      /* locally-unique identifier of the token */
     struct luid    modified_id;   /* locally-unique identifier of the modified version of the token */
+    struct luid    auth_id;       /* authentication (logon) id of the token */
     unsigned int   session_id;    /* token session id */
     int            primary;       /* is the token primary or impersonation? */
     int            impersonation_level; /* level of impersonation */

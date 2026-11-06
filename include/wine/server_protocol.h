@@ -50,7 +50,7 @@ struct reply_header
 
 struct request_max_size
 {
-    int pad[16];
+    int pad[18];
 };
 
 #define FIRST_USER_HANDLE 0x0020
@@ -5607,6 +5607,7 @@ struct get_token_info_reply
     struct reply_header __header;
     struct luid    token_id;
     struct luid    modified_id;
+    struct luid    auth_id;
     unsigned int   session_id;
     int            primary;
     int            impersonation_level;
@@ -7461,6 +7462,6 @@ union generic_reply
     struct dwm_reply_reply dwm_reply_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 973
+#define SERVER_PROTOCOL_VERSION 974
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
