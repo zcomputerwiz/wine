@@ -44,12 +44,23 @@
 
 struct named_pipe;
 
+/* WineExplorer private: immutable identity at client message submission. */
+struct pipe_writer
+{
+    struct process *process;
+    struct token   *primary;
+    struct luid     token_id;
+    struct luid     modified_id;
+    int             impersonated;
+};
+
 struct pipe_message
 {
     struct list          entry;      /* entry in message queue */
     data_size_t          read_pos;   /* already read bytes */
     struct iosb         *iosb;       /* message iosb */
     struct async        *async;      /* async of pending write */
+    struct pipe_writer   writer;
 };
 
 struct pipe_end
@@ -68,6 +79,9 @@ struct pipe_end
     struct luid          client_token_id;
     struct luid          client_modified_id;
     int                  client_impersonated; /* opener had an explicit thread token */
+    struct pipe_writer   consumed_writer; /* retained before freeing the consumed message */
+    unsigned int         binding_reads; /* E1 supports one request read per connection */
+    int                  consumed_valid;
     data_size_t          buffer_size;/* size of buffered data that doesn't block caller */
     struct list          message_queue;
     struct async_queue   read_q;     /* read queue */
@@ -373,6 +387,13 @@ static struct fd *pipe_end_get_fd( struct object *obj )
     return (struct fd *) grab_object( pipe_end->fd );
 }
 
+static void clear_pipe_writer( struct pipe_writer *writer )
+{
+    if (writer->primary) release_object( writer->primary );
+    if (writer->process) release_object( writer->process );
+    memset( writer, 0, sizeof(*writer) );
+}
+
 static struct pipe_message *queue_message( struct pipe_end *pipe_end, struct iosb *iosb )
 {
     struct pipe_message *message;
@@ -381,6 +402,19 @@ static struct pipe_message *queue_message( struct pipe_end *pipe_end, struct ios
     message->iosb = (struct iosb *)grab_object( iosb );
     message->async = NULL;
     message->read_pos = 0;
+    memset( &message->writer, 0, sizeof(message->writer) );
+    /* Both write and transceive submit here, while current is still the writer.
+     * Only client-to-server messages on connections with opener retention need this. */
+    if (pipe_end->connection && pipe_end->connection->client_process)
+    {
+        message->writer.process = (struct process *)grab_object( current->process );
+        message->writer.impersonated = (current->token != NULL);
+        if (current->process->token)
+        {
+            message->writer.primary = (struct token *)grab_object( current->process->token );
+            token_get_ids( message->writer.primary, &message->writer.token_id, &message->writer.modified_id );
+        }
+    }
     list_add_tail( &pipe_end->message_queue, &message->entry );
     return message;
 }
@@ -400,6 +434,7 @@ static void free_message( struct pipe_message *message )
 {
     list_remove( &message->entry );
     if (message->iosb) release_object( message->iosb );
+    clear_pipe_writer( &message->writer );
     free( message );
 }
 
@@ -410,6 +445,9 @@ static void pipe_end_disconnect( struct pipe_end *pipe_end, unsigned int status 
     struct async *async;
 
     pipe_end->connection = NULL;
+    clear_pipe_writer( &pipe_end->consumed_writer );
+    pipe_end->consumed_valid = 0;
+    pipe_end->binding_reads = 0;
     if (pipe_end->client_primary) release_object( pipe_end->client_primary );
     if (pipe_end->client_process) release_object( pipe_end->client_process );
     pipe_end->client_primary = NULL;
@@ -422,6 +460,7 @@ static void pipe_end_disconnect( struct pipe_end *pipe_end, unsigned int status 
     LIST_FOR_EACH_ENTRY_SAFE( message, next, &pipe_end->message_queue, struct pipe_message, entry )
     {
         async = message->async;
+        clear_pipe_writer( &message->writer );
         if (async || status == STATUS_PIPE_DISCONNECTED) free_message( message );
         if (!async) continue;
         async_terminate( async, status );
@@ -904,6 +943,28 @@ static void pipe_end_get_volume_info( struct fd *fd, struct async *async, unsign
     }
 }
 
+/* A subsequent read supersedes this record even if it is cancelled or fails.
+ * Partial/mixed reads cannot be repaired by reading the remaining bytes later. */
+static void begin_binding_read( struct pipe_end *pipe_end )
+{
+    if (!pipe_end->connection || !pipe_end->connection->client_process) return;
+    clear_pipe_writer( &pipe_end->consumed_writer );
+    pipe_end->consumed_valid = 0;
+    if (pipe_end->binding_reads < 2) pipe_end->binding_reads++;
+}
+
+static void retain_consumed_writer( struct pipe_end *pipe_end, struct pipe_message *message,
+                                    unsigned int status, data_size_t size )
+{
+    if (pipe_end->binding_reads != 1 || status != STATUS_SUCCESS ||
+        !(pipe_end->flags & NAMED_PIPE_MESSAGE_STREAM_READ) || message->read_pos ||
+        size != message->iosb->in_size || !message->writer.process || !message->writer.primary) return;
+
+    pipe_end->consumed_writer = message->writer;
+    memset( &message->writer, 0, sizeof(message->writer) );
+    pipe_end->consumed_valid = 1;
+}
+
 static void message_queue_read( struct pipe_end *pipe_end, struct async *async )
 {
     struct iosb *iosb = async_get_iosb( async );
@@ -933,6 +994,7 @@ static void message_queue_read( struct pipe_end *pipe_end, struct async *async )
     message = LIST_ENTRY( list_head(&pipe_end->message_queue), struct pipe_message, entry );
     if (!message->read_pos && message->iosb->in_size == iosb->out_size) /* fast path */
     {
+        retain_consumed_writer( pipe_end, message, status, out_size );
         async_request_complete( async, status, out_size, out_size, message->iosb->in_data );
         message->iosb->in_data = NULL;
         wake_message( message, message->iosb->in_size );
@@ -953,6 +1015,7 @@ static void message_queue_read( struct pipe_end *pipe_end, struct async *async )
         do
         {
             message = LIST_ENTRY( list_head(&pipe_end->message_queue), struct pipe_message, entry );
+            if (!write_pos) retain_consumed_writer( pipe_end, message, status, out_size );
             writing = min( out_size - write_pos, message->iosb->in_size - message->read_pos );
             if (writing) memcpy( buf + write_pos, (const char *)message->iosb->in_data + message->read_pos, writing );
             write_pos += writing;
@@ -1060,6 +1123,7 @@ static void pipe_end_read( struct fd *fd, struct async *async, file_pos_t pos )
         return;
     }
 
+    begin_binding_read( pipe_end );
     queue_async( &pipe_end->read_q, async );
     reselect_read_queue( pipe_end, 0 );
     set_error( STATUS_PENDING );
@@ -1209,6 +1273,7 @@ static void pipe_end_transceive( struct pipe_end *pipe_end, struct async *async 
     if (!message) return;
     reselect_read_queue( pipe_end->connection, 0 );
 
+    begin_binding_read( pipe_end );
     queue_async( &pipe_end->read_q, async );
     reselect_read_queue( pipe_end, 0 );
     set_error( STATUS_PENDING );
@@ -1383,6 +1448,9 @@ static void init_pipe_end( struct pipe_end *pipe_end, struct named_pipe *pipe,
     memset( &pipe_end->client_token_id, 0, sizeof(pipe_end->client_token_id) );
     memset( &pipe_end->client_modified_id, 0, sizeof(pipe_end->client_modified_id) );
     pipe_end->client_impersonated = 0;
+    memset( &pipe_end->consumed_writer, 0, sizeof(pipe_end->consumed_writer) );
+    pipe_end->binding_reads = 0;
+    pipe_end->consumed_valid = 0;
     pipe_end->buffer_size = buffer_size;
     init_async_queue( &pipe_end->read_q );
     init_async_queue( &pipe_end->write_q );
@@ -1685,12 +1753,13 @@ DECL_HANDLER(set_named_pipe_info)
     release_object( pipe_end );
 }
 
-/* WineExplorer private: this binds the opener only. Per-message writer provenance is a later step. */
+/* WineExplorer private: opener and the single complete request message consumed by this server end. */
 DECL_HANDLER(get_pipe_caller_binding)
 {
     struct pipe_end *server, *client;
+    struct pipe_writer *writer;
     struct luid token_id, modified_id;
-    obj_handle_t process, token;
+    obj_handle_t process = 0, token = 0, writer_process = 0, writer_token = 0;
 
     /* Keep the same system-role / SeTcbPrivilege gate as create_linked_token. */
     if (!elevation_enforced() || token_service_account( current->process->token ) != SERVICE_ACCOUNT_SYSTEM ||
@@ -1714,7 +1783,9 @@ DECL_HANDLER(get_pipe_caller_binding)
         set_error( STATUS_PIPE_DISCONNECTED );
         goto done;
     }
-    if (!client->client_process || !client->client_primary)
+    writer = &server->consumed_writer;
+    if (!client->client_process || !client->client_primary || !server->consumed_valid ||
+        !writer->process || !writer->primary)
     {
         set_error( STATUS_ACCESS_DENIED );
         goto done;
@@ -1724,11 +1795,12 @@ DECL_HANDLER(get_pipe_caller_binding)
                             SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_QUERY_INFORMATION, 0 );
     if (!process) goto done;
     token = alloc_handle( current->process, client->client_primary, TOKEN_QUERY, 0 );
-    if (!token)
-    {
-        close_handle( current->process, process );
-        goto done;
-    }
+    if (!token) goto done;
+    writer_process = alloc_handle( current->process, writer->process,
+                                   SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_QUERY_INFORMATION, 0 );
+    if (!writer_process) goto done;
+    writer_token = alloc_handle( current->process, writer->primary, TOKEN_QUERY, 0 );
+    if (!writer_token) goto done;
 
     token_get_ids( client->client_primary, &token_id, &modified_id );
     reply->process = process;
@@ -1739,9 +1811,30 @@ DECL_HANDLER(get_pipe_caller_binding)
     reply->modified_id = client->client_modified_id;
     reply->impersonated = client->client_impersonated;
     reply->token_current = client->client_primary == client->client_process->token &&
+                           token_id.low_part == client->client_token_id.low_part &&
+                           token_id.high_part == client->client_token_id.high_part &&
                            modified_id.low_part == client->client_modified_id.low_part &&
                            modified_id.high_part == client->client_modified_id.high_part;
+    reply->writer_process = writer_process;
+    reply->writer_token = writer_token;
+    reply->writer_token_id = writer->token_id;
+    reply->writer_modified_id = writer->modified_id;
+    reply->version = PIPE_CALLER_BINDING_VERSION;
+    reply->writer_flags = PIPE_WRITER_VALID;
+    if (writer->impersonated) reply->writer_flags |= PIPE_WRITER_IMPERSONATED;
+    token_get_ids( writer->primary, &token_id, &modified_id );
+    if (writer->primary == writer->process->token &&
+        token_id.low_part == writer->token_id.low_part && token_id.high_part == writer->token_id.high_part &&
+        modified_id.low_part == writer->modified_id.low_part && modified_id.high_part == writer->modified_id.high_part)
+        reply->writer_flags |= PIPE_WRITER_TOKEN_CURRENT;
 
 done:
+    if (get_error())
+    {
+        if (writer_token) close_handle( current->process, writer_token );
+        if (writer_process) close_handle( current->process, writer_process );
+        if (token) close_handle( current->process, token );
+        if (process) close_handle( current->process, process );
+    }
     release_object( server );
 }

@@ -41,7 +41,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(ntdll);
 /***********************************************************************
  *             NtQueryWexPipeCallerBinding  (NTDLL.@)
  *
- * WineExplorer private, opener-only binding; no per-message writer provenance yet.
+ * WineExplorer private legacy ABI. New callers must use the versioned Ex query.
  * Use the existing wine_server_call transport, including its WoW64 marshalling.
  * All output pointers are required; the caller owns both handles on success.
  */
@@ -49,6 +49,7 @@ NTSTATUS WINAPI NtQueryWexPipeCallerBinding( HANDLE pipe, HANDLE *process, HANDL
                                             LARGE_INTEGER *start_time, LUID *token_id, LUID *modified_id,
                                             BOOL *impersonated, BOOL *token_current )
 {
+    WEX_PIPE_CALLER_BINDING binding = { .Size = sizeof(binding) };
     NTSTATUS status;
 
     if (process) *process = NULL;
@@ -62,24 +63,72 @@ NTSTATUS WINAPI NtQueryWexPipeCallerBinding( HANDLE pipe, HANDLE *process, HANDL
     memset( modified_id, 0, sizeof(*modified_id) );
     *impersonated = *token_current = FALSE;
 
+    if (!(status = NtQueryWexPipeCallerBindingEx( pipe, &binding )))
+    {
+        *process = binding.Process;
+        *token = binding.Token;
+        *pid = binding.Pid;
+        *start_time = binding.StartTime;
+        *token_id = binding.TokenId;
+        *modified_id = binding.ModifiedId;
+        *impersonated = binding.Impersonated;
+        *token_current = binding.TokenCurrent;
+        NtClose( binding.WriterProcess );
+        NtClose( binding.WriterToken );
+    }
+    return status;
+}
+
+/***********************************************************************
+ *             NtQueryWexPipeCallerBindingEx  (NTDLL.@)
+ *
+ * WineExplorer private, native-layout output (not the E1-S1 wire record).
+ * Size must be initialized by the caller. All four handles belong to it on
+ * success. The existing server transport handles WoW64; no pointer crosses it.
+ */
+NTSTATUS WINAPI NtQueryWexPipeCallerBindingEx( HANDLE pipe, WEX_PIPE_CALLER_BINDING *binding )
+{
+    NTSTATUS status;
+
+    if (!binding || binding->Size != sizeof(*binding)) return STATUS_INVALID_PARAMETER;
+    memset( binding, 0, sizeof(*binding) );
     SERVER_START_REQ( get_pipe_caller_binding )
     {
         req->pipe = wine_server_obj_handle( pipe );
         if (!(status = wine_server_call( req )))
         {
-            *process = wine_server_ptr_handle( reply->process );
-            *token = wine_server_ptr_handle( reply->token );
-            *pid = reply->pid;
-            start_time->QuadPart = reply->start_time;
-            token_id->LowPart = reply->token_id.low_part;
-            token_id->HighPart = reply->token_id.high_part;
-            modified_id->LowPart = reply->modified_id.low_part;
-            modified_id->HighPart = reply->modified_id.high_part;
-            *impersonated = reply->impersonated;
-            *token_current = reply->token_current;
+            binding->Size = sizeof(*binding);
+            binding->Version = reply->version;
+            binding->Process = wine_server_ptr_handle( reply->process );
+            binding->Token = wine_server_ptr_handle( reply->token );
+            binding->WriterProcess = wine_server_ptr_handle( reply->writer_process );
+            binding->WriterToken = wine_server_ptr_handle( reply->writer_token );
+            binding->Pid = reply->pid;
+            binding->StartTime.QuadPart = reply->start_time;
+            binding->TokenId.LowPart = reply->token_id.low_part;
+            binding->TokenId.HighPart = reply->token_id.high_part;
+            binding->ModifiedId.LowPart = reply->modified_id.low_part;
+            binding->ModifiedId.HighPart = reply->modified_id.high_part;
+            binding->WriterTokenId.LowPart = reply->writer_token_id.low_part;
+            binding->WriterTokenId.HighPart = reply->writer_token_id.high_part;
+            binding->WriterModifiedId.LowPart = reply->writer_modified_id.low_part;
+            binding->WriterModifiedId.HighPart = reply->writer_modified_id.high_part;
+            binding->Impersonated = reply->impersonated;
+            binding->TokenCurrent = reply->token_current;
+            binding->WriterFlags = reply->writer_flags;
         }
     }
     SERVER_END_REQ;
+    if (!status && (binding->Version != WEX_PIPE_CALLER_BINDING_VERSION || !binding->Process ||
+                    !binding->Token || !binding->WriterProcess || !binding->WriterToken))
+    {
+        if (binding->Process) NtClose( binding->Process );
+        if (binding->Token) NtClose( binding->Token );
+        if (binding->WriterProcess) NtClose( binding->WriterProcess );
+        if (binding->WriterToken) NtClose( binding->WriterToken );
+        memset( binding, 0, sizeof(*binding) );
+        status = STATUS_NOT_SUPPORTED;
+    }
     return status;
 }
 

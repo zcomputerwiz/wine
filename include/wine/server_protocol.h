@@ -50,7 +50,7 @@ struct reply_header
 
 struct request_max_size
 {
-    int pad[18];
+    int pad[22];
 };
 
 #define FIRST_USER_HANDLE 0x0020
@@ -3571,6 +3571,11 @@ struct set_named_pipe_info_reply
 };
 
 
+#define PIPE_CALLER_BINDING_VERSION 1
+#define PIPE_WRITER_VALID          0x0001
+#define PIPE_WRITER_IMPERSONATED   0x0002
+#define PIPE_WRITER_TOKEN_CURRENT  0x0004
+
 struct get_pipe_caller_binding_request
 {
     struct request_header __header;
@@ -3588,6 +3593,12 @@ struct get_pipe_caller_binding_reply
     struct luid    modified_id;
     int            impersonated;
     int            token_current;
+    obj_handle_t   writer_process;
+    obj_handle_t   writer_token;
+    struct luid    writer_token_id;
+    struct luid    writer_modified_id;
+    unsigned int   version;
+    unsigned int   writer_flags;
 };
 
 
@@ -7485,6 +7496,6 @@ union generic_reply
     struct dwm_reply_reply dwm_reply_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 975
+#define SERVER_PROTOCOL_VERSION 976
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

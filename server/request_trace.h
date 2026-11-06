@@ -1736,6 +1736,12 @@ static void dump_get_pipe_caller_binding_reply( const struct get_pipe_caller_bin
     dump_luid( ", modified_id=", &req->modified_id );
     fprintf( stderr, ", impersonated=%d", req->impersonated );
     fprintf( stderr, ", token_current=%d", req->token_current );
+    fprintf( stderr, ", writer_process=%04x", req->writer_process );
+    fprintf( stderr, ", writer_token=%04x", req->writer_token );
+    dump_luid( ", writer_token_id=", &req->writer_token_id );
+    dump_luid( ", writer_modified_id=", &req->writer_modified_id );
+    fprintf( stderr, ", version=%08x", req->version );
+    fprintf( stderr, ", writer_flags=%08x", req->writer_flags );
 }
 
 static void dump_create_window_request( const struct create_window_request *req )

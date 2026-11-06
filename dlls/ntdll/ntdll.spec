@@ -356,6 +356,7 @@
 @ stdcall -syscall=0x0023 NtQueryVirtualMemory(long ptr long ptr long ptr)
 @ stdcall -syscall=0x0049 NtQueryVolumeInformationFile(long ptr ptr long long)
 @ stdcall -private NtQueryWexPipeCallerBinding(ptr ptr ptr ptr ptr ptr ptr ptr ptr)
+@ stdcall -private NtQueryWexPipeCallerBindingEx(ptr ptr)
 @ stdcall -syscall=0x0045 NtQueueApcThread(long ptr long long long)
 @ stdcall -syscall NtQueueApcThreadEx(long long ptr long long long)
 @ stdcall -syscall NtQueueApcThreadEx2(long long long ptr long long long)

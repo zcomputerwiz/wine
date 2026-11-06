@@ -162,6 +162,7 @@ static int token_set_sd( struct object *obj, const struct security_descriptor *s
                          unsigned int set_info );
 static struct list *token_get_kernel_obj_list( struct object *obj );
 static struct security_descriptor *create_security_label_sd( struct token *token, const struct sid *label_sid );
+static inline void allocate_luid( struct luid *luid );
 
 static const struct object_ops token_ops =
 {
@@ -184,7 +185,10 @@ static void token_dump( struct object *obj, int verbose )
 static int token_set_sd( struct object *obj, const struct security_descriptor *sd,
                          unsigned int set_info )
 {
-    return default_set_sd( obj, sd, set_info & ~LABEL_SECURITY_INFORMATION );
+    int ret = default_set_sd( obj, sd, set_info & ~LABEL_SECURITY_INFORMATION );
+
+    if (ret) allocate_luid( &((struct token *)obj)->modified_id );
+    return ret;
 }
 
 static struct list *token_get_kernel_obj_list( struct object *obj )
@@ -413,7 +417,7 @@ static inline int is_equal_luid( struct luid luid1, struct luid luid2 )
 
 static inline void allocate_luid( struct luid *luid )
 {
-    prev_luid_value.low_part++;
+    if (!++prev_luid_value.low_part) ++prev_luid_value.high_part;
     *luid = prev_luid_value;
 }
 
@@ -807,6 +811,8 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
         }
     }
 
+    /* Copying an unchanged security context into a new object preserves its version. */
+    if (modified_id) token->modified_id = *modified_id;
     return token;
 }
 
@@ -879,8 +885,11 @@ int token_assign_label( struct token *token, const struct sid *label )
     if ((sd = create_security_label_sd( token, label )))
     {
         ret = set_sd_defaults_from_token( &token->obj, sd, LABEL_SECURITY_INFORMATION, token );
-        if (ret && label->sub_count > 0)
-            token->integrity_rid = label->sub_auth[label->sub_count - 1];
+        if (ret)
+        {
+            if (label->sub_count > 0) token->integrity_rid = label->sub_auth[label->sub_count - 1];
+            allocate_luid( &token->modified_id );
+        }
         free( sd );
     }
 
@@ -969,6 +978,7 @@ struct token *token_create_first_interactive( unsigned int session_id )
 void token_copy_auth_id( struct token *dst, const struct token *src )
 {
     dst->auth_id = src->auth_id;
+    allocate_luid( &dst->modified_id );
 }
 
 /* Tokens of the system role (docs/ELEVATION_SYSTEM_ROLE_WORKORDER.md, C3): LocalSystem, LocalService and
@@ -1946,6 +1956,7 @@ DECL_HANDLER(duplicate_token)
 /* native filter_token: DISABLE_MAX_PRIVILEGE keeps only SeChangeNotify; LUA_TOKEN: Administrators deny-only, Limited, Medium label */
 static void token_apply_filter( struct token *token, unsigned int flags )
 {
+    if (flags & (DISABLE_MAX_PRIVILEGE | LUA_TOKEN)) allocate_luid( &token->modified_id );
     if (flags & DISABLE_MAX_PRIVILEGE)
     {
         struct list *cursor, *cursor_next;
@@ -1996,6 +2007,7 @@ void token_make_filtered( struct token *token )
     }
     privilege_add( token, SeIncreaseWorkingSetPrivilege, FALSE );
     privilege_add( token, SeTimeZonePrivilege, FALSE );
+    allocate_luid( &token->modified_id );
 }
 
 /* set when this server gave its user a standard token: tokens derived from it (a filtered copy is Limited
@@ -2017,6 +2029,7 @@ void token_make_standard( struct token *token )
         free( group );
     }
     token->elevation = TokenElevationTypeDefault;
+    allocate_luid( &token->modified_id );
 }
 
 /* creates a restricted version of a token */
@@ -2420,6 +2433,7 @@ DECL_HANDLER(get_token_default_dacl)
 DECL_HANDLER(set_token_default_dacl)
 {
     struct token *token;
+    struct acl *new_dacl = NULL;
     const struct acl *acl = get_req_data();
     unsigned int acl_size = get_req_data_size();
 
@@ -2433,11 +2447,15 @@ DECL_HANDLER(set_token_default_dacl)
                                                  TOKEN_ADJUST_DEFAULT,
                                                  &token_ops )))
     {
+        /* Allocate before replacing the old DACL: failure must not silently mutate it. */
+        if (acl_size && !(new_dacl = memdup( acl, acl_size )))
+        {
+            release_object( token );
+            return;
+        }
         free( token->default_dacl );
-        token->default_dacl = NULL;
-
-        if (acl_size)
-            token->default_dacl = memdup( acl, acl_size );
+        token->default_dacl = new_dacl;
+        allocate_luid( &token->modified_id );
 
         release_object( token );
     }

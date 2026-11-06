@@ -5659,7 +5659,33 @@ static inline PLIST_ENTRY RemoveTailList(PLIST_ENTRY le)
 
 /* Wine internal functions */
 
-/* WineExplorer private: open-time binding only, without message writer provenance. */
+/* WineExplorer private. Handles are non-inheritable; close all four on success. */
+#define WEX_PIPE_CALLER_BINDING_VERSION 1
+#define WEX_PIPE_WRITER_VALID          0x0001
+#define WEX_PIPE_WRITER_IMPERSONATED   0x0002
+#define WEX_PIPE_WRITER_TOKEN_CURRENT  0x0004
+
+typedef struct _WEX_PIPE_CALLER_BINDING
+{
+    ULONG Size;
+    ULONG Version;
+    HANDLE Process;
+    HANDLE Token;
+    HANDLE WriterProcess;
+    HANDLE WriterToken;
+    ULONG Pid;
+    LARGE_INTEGER StartTime;
+    LUID TokenId;
+    LUID ModifiedId;
+    LUID WriterTokenId;
+    LUID WriterModifiedId;
+    BOOL Impersonated;
+    BOOL TokenCurrent;
+    ULONG WriterFlags;
+} WEX_PIPE_CALLER_BINDING;
+
+NTSYSAPI NTSTATUS WINAPI NtQueryWexPipeCallerBindingEx(HANDLE,WEX_PIPE_CALLER_BINDING*);
+/* Legacy ABI retained for opener-only callers. */
 NTSYSAPI NTSTATUS WINAPI NtQueryWexPipeCallerBinding(HANDLE,HANDLE*,HANDLE*,ULONG*,LARGE_INTEGER*,LUID*,LUID*,BOOL*,BOOL*);
 
 NTSYSAPI NTSTATUS WINAPI __wine_unix_spawnvp( char * const argv[], int wait );
