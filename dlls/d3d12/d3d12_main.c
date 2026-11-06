@@ -28,6 +28,10 @@
 
 #include <vkd3d.h>
 
+/* winedxgi.h pulls in the D3D11 headers: include them before initguid.h so their IIDs are not defined here and do not
+ * collide with the ones in libdxguid. */
+#include "d3d11_4.h"
+
 #include "initguid.h"
 #include "dxcore.h"
 #include "wine/wined3d.h"
