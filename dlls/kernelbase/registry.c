@@ -871,49 +871,17 @@ LSTATUS WINAPI DECLSPEC_HOTPATCH RegOpenKeyExA( HKEY hkey, LPCSTR name, DWORD op
  * RETURNS
  *  Success: ERROR_SUCCESS
  *  Failure: nonzero error code from Winerror.h
- *
- * FIXME
- *  This function is supposed to retrieve a handle to the
- *  HKEY_CURRENT_USER for the user the current thread is impersonating.
- *  Since Wine does not currently allow threads to impersonate other users,
- *  this stub should work fine.
  */
 LSTATUS WINAPI RegOpenCurrentUser( REGSAM access, PHKEY retkey )
 {
-    void *data[20];
-    TOKEN_USER *info = (TOKEN_USER *)data;
-    HANDLE token;
-    DWORD len = 0;
-
-    /* get current user SID */
-    if (OpenThreadToken( GetCurrentThread(), TOKEN_QUERY, FALSE, &token ))
-    {
-        len = sizeof(data);
-        if (!GetTokenInformation( token, TokenUser, info, len, &len )) len = 0;
-        CloseHandle( token );
-    }
-    if (!len)
-    {
-        ImpersonateSelf(SecurityIdentification);
-        if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, FALSE, &token))
-        {
-            len = sizeof(data);
-            if (!GetTokenInformation( token, TokenUser, info, len, &len )) len = 0;
-            CloseHandle( token );
-        }
-        RevertToSelf();
-    }
-
-    if (len)
-    {
-        WCHAR buffer[200];
-        UNICODE_STRING string = { 0, sizeof(buffer), buffer };
-
-        RtlConvertSidToUnicodeString( &string, info->User.Sid, FALSE );
-        return RegOpenKeyExW( HKEY_USERS, string.Buffer, 0, access, retkey );
-    }
-
-    return RegOpenKeyExA( HKEY_CURRENT_USER, "", 0, access, retkey );
+    if (!retkey) return ERROR_INVALID_PARAMETER;
+    *retkey = NULL;
+    /* Resolve the effective identity without changing thread impersonation.
+     * Self-impersonation at Identification level cannot open objects under
+     * enforced security; falling back to an empty predefined-key open would
+     * then report success with the HKEY_CURRENT_USER pseudo-handle. The RTL
+     * path returns a real handle and also enforces the lab's managed gate. */
+    return RtlNtStatusToDosError( RtlOpenCurrentUser( access, (HANDLE *)retkey ) );
 }
 
 

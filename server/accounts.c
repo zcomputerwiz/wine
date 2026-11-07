@@ -111,30 +111,60 @@ static int no_access_acl( int fd )
 #endif
 }
 
+/* Root provisioning diagnostics only. The server keeps status-only replies;
+ * no map contents or account records are emitted. */
+#ifdef WEX_ACCOUNTS_TOOL
+static void protection_error( const char *name, const char *reason, int fd, gid_t expected_gid )
+{
+    struct stat st;
+    int saved_errno = errno;
+    fprintf( stderr, "wex-accounts: protection: %s: %s", name ? name : "(null)", reason );
+    if (fd >= 0 && !fstat( fd, &st ))
+        fprintf( stderr, " uid=%lu gid=%lu mode=%04lo links=%lu", (unsigned long)st.st_uid,
+                 (unsigned long)st.st_gid, (unsigned long)(st.st_mode & 07777), (unsigned long)st.st_nlink );
+    if (expected_gid != (gid_t)-1) fprintf( stderr, " expected_gid=%lu", (unsigned long)expected_gid );
+    fputc( '\n', stderr );
+    errno = saved_errno;
+}
+#else
+#define protection_error(name, reason, fd, gid) ((void)(name))
+#endif
+
 /* Walk from / with openat: no symlink component, writable ancestor or path
  * re-resolution after checking. Even sticky /tmp is deliberately rejected. */
 static int protected_directory( const char *path, enum wex_account_status *status )
 {
     char copy[PATH_MAX], *p, *next;
+    const char *component = "/";
     struct stat st;
     int fd, child;
 
     *status = WEX_ACCOUNT_MAP_UNPROTECTED;
-    if (!path || path[0] != '/' || strlen( path ) >= sizeof(copy)) return -1;
+    if (!path || path[0] != '/' || strlen( path ) >= sizeof(copy))
+    { protection_error( path, "invalid directory path", -1, (gid_t)-1 ); return -1; }
     strcpy( copy, path + 1 );
     while (*copy && copy[strlen(copy) - 1] == '/') copy[strlen(copy) - 1] = 0;
-    if ((fd = open( "/", O_RDONLY | O_DIRECTORY | O_CLOEXEC )) == -1) return -1;
+    if ((fd = open( "/", O_RDONLY | O_DIRECTORY | O_CLOEXEC )) == -1)
+    { protection_error( "/", strerror(errno), -1, (gid_t)-1 ); return -1; }
     p = copy;
     for (;;)
     {
-        if (fstat( fd, &st ) || !S_ISDIR( st.st_mode ) || st.st_uid || (st.st_mode & 0022) || !no_access_acl( fd )) break;
+        if (fstat( fd, &st ))
+        { protection_error( component, "directory stat failed", fd, (gid_t)-1 ); break; }
+        if (!S_ISDIR( st.st_mode ) || st.st_uid || (st.st_mode & 0022))
+        { protection_error( component, "unsafe directory type/owner/mode", fd, (gid_t)-1 ); break; }
+        if (!no_access_acl( fd ))
+        { protection_error( component, "extended access ACL or ACL query failure", fd, (gid_t)-1 ); break; }
         if (!*p) { *status = WEX_ACCOUNT_OK; return fd; }
         if ((next = strchr( p, '/' ))) *next++ = 0;
-        if (!*p || !strcmp( p, "." ) || !strcmp( p, ".." ) || (next && !*next)) break;
+        if (!*p || !strcmp( p, "." ) || !strcmp( p, ".." ) || (next && !*next))
+        { protection_error( path, "invalid directory component", fd, (gid_t)-1 ); break; }
         child = openat( fd, p, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC );
-        if (child == -1) break;
+        if (child == -1)
+        { protection_error( p, strerror(errno), -1, (gid_t)-1 ); break; }
         close( fd );
         fd = child;
+        component = p;
         if (!next) p += strlen( p );
         else p = next;
     }
@@ -154,11 +184,26 @@ static enum wex_account_status read_protected( int dir, const char *name, gid_t 
 
     *text = NULL;
     if ((fd = openat( dir, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC )) == -1)
-        return errno == ELOOP ? WEX_ACCOUNT_MAP_UNPROTECTED : status;
-    if (fstat( fd, &before )) goto done;
+    {
+        int error = errno;
+        protection_error( name, strerror(error), -1, gid );
+        return error == ELOOP ? WEX_ACCOUNT_MAP_UNPROTECTED : status;
+    }
+    if (fstat( fd, &before ))
+    { protection_error( name, "file stat failed", fd, gid ); goto done; }
     status = WEX_ACCOUNT_MAP_UNPROTECTED;
-    if (!S_ISREG( before.st_mode ) || before.st_uid || (before.st_mode & 0022) ||
-        before.st_nlink != 1 || !no_access_acl( fd ) || (gid != (gid_t)-1 && before.st_gid != gid)) goto done;
+    if (!S_ISREG( before.st_mode ))
+    { protection_error( name, "not a regular file", fd, gid ); goto done; }
+    if (before.st_uid)
+    { protection_error( name, "owner is not root", fd, gid ); goto done; }
+    if (before.st_mode & 0022)
+    { protection_error( name, "group/other writable", fd, gid ); goto done; }
+    if (before.st_nlink != 1)
+    { protection_error( name, "link count is not one", fd, gid ); goto done; }
+    if (!no_access_acl( fd ))
+    { protection_error( name, "extended access ACL or ACL query failure", fd, gid ); goto done; }
+    if (gid != (gid_t)-1 && before.st_gid != gid)
+    { protection_error( name, "group mismatch", fd, gid ); goto done; }
     status = WEX_ACCOUNT_MAP_INVALID;
     if (before.st_size <= 0 || before.st_size > MAP_LIMIT) goto done;
     status = WEX_ACCOUNT_MAP_UNREADABLE;

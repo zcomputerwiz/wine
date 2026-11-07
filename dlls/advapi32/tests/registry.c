@@ -4038,6 +4038,9 @@ static void test_delete_key_value(void)
 
 static void test_RegOpenCurrentUser(void)
 {
+    char buffer[512];
+    DWORD size;
+    NTSTATUS status;
     HKEY key;
     LONG ret;
 
@@ -4045,6 +4048,11 @@ static void test_RegOpenCurrentUser(void)
     ret = RegOpenCurrentUser(KEY_READ, &key);
     ok(!ret, "got %ld, error %ld\n", ret, GetLastError());
     ok(key != HKEY_CURRENT_USER, "got %p\n", key);
+    if (!ret)
+    {
+        status = NtQueryKey(key, KeyNameInformation, buffer, sizeof(buffer), &size);
+        ok(!status, "NtQueryKey(%p) returned %#lx\n", key, status);
+    }
     RegCloseKey(key);
 }
 
