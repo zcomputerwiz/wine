@@ -53,7 +53,7 @@ NTSTATUS WINAPI NtLoadWexProfile( ULONG operation, HANDLE context, HANDLE token,
     if (!key || !managed || length > sizeof(input) || (length && !record)) return STATUS_INVALID_PARAMETER;
     if (!token)
     {
-        status = NtOpenThreadToken( NtCurrentThread(), TOKEN_QUERY, TRUE, &effective );
+        status = NtOpenThreadToken( NtCurrentThread(), TOKEN_QUERY, FALSE, &effective );
         if (status == STATUS_NO_TOKEN) status = NtOpenProcessToken( NtCurrentProcess(), TOKEN_QUERY, &effective );
         if (status) return status;
         token = effective;
@@ -70,7 +70,7 @@ NTSTATUS WINAPI NtLoadWexProfile( ULONG operation, HANDLE context, HANDLE token,
         result = wine_server_ptr_handle( reply->hkey );
         flag = reply->managed;
         if (!status && (wine_server_reply_size( reply ) || flag > 1 ||
-            (operation == WEX_HKU_QUERY ? !!result : !result))) status = STATUS_NOT_SUPPORTED;
+            (operation == WEX_HKU_QUERY ? !!result : (!result || flag != 1)))) status = STATUS_NOT_SUPPORTED;
     }
     SERVER_END_REQ;
     if (effective) NtClose( effective );

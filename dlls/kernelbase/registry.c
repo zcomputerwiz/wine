@@ -104,13 +104,13 @@ static HKEY e1s_special_root( BOOL classes )
     ULONG size;
     NTSTATUS status;
     ULONG managed;
-    status = NtOpenThreadToken( GetCurrentThread(), TOKEN_QUERY, TRUE, &token );
+    status = NtOpenThreadToken( GetCurrentThread(), TOKEN_QUERY, FALSE, &token );
     if (status == STATUS_NO_TOKEN) status = NtOpenProcessToken( GetCurrentProcess(), TOKEN_QUERY, &token );
     if (status) return NULL;
     status = NtQueryInformationToken( token, TokenStatistics, &stats, sizeof(stats), &size );
     if (status) { NtClose( token ); return NULL; }
     if (RtlFormatCurrentUserKeyPath( &path )) { NtClose( token ); return NULL; }
-    AcquireSRWLockExclusive( &e1s_root_lock );
+    RtlAcquireSRWLockExclusive( &e1s_root_lock );
     for (entry = e1s_roots; entry; entry = entry->next)
         if (!wcscmp( entry->sid_path, path.Buffer ) &&
             !memcmp( &entry->token_id, &stats.TokenId, sizeof(LUID) ) &&
@@ -131,7 +131,7 @@ static HKEY e1s_special_root( BOOL classes )
                                       NULL, token, MAXIMUM_ALLOWED, NULL, 0, slot, &managed );
         result = *slot;
     }
-    ReleaseSRWLockExclusive( &e1s_root_lock );
+    RtlReleaseSRWLockExclusive( &e1s_root_lock );
     RtlFreeUnicodeString( &path );
     NtClose( token );
     return result;

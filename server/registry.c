@@ -146,7 +146,9 @@ struct e1s_hive
     int refreshing;
 };
 static struct e1s_hive *e1s_hives;
+#if defined(WEX_E1S13_HKU_TEST) && defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
 static unsigned int e1s_hive_count;
+#endif
 static int e1s_strict_loading;
 static int e1s_refresh_view( struct key * );
 static struct key *e1s_view_user( struct key *, int create );

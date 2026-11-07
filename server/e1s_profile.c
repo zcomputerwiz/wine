@@ -13,6 +13,7 @@
 #include "winnt.h"
 #include "file.h"
 #include "thread.h"
+#include "process.h"
 #include "security.h"
 #include "e1s_profile.h"
 #include "e1s_token.h"
