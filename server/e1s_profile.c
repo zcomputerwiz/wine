@@ -37,6 +37,16 @@ struct secured_inode
 struct e1s_file_security { struct secured_inode *first; unsigned int count; };
 static struct secured_inode *secured;
 static unsigned int secured_count;
+/* One negative ancestry cache, bounded to the old 128-edge walk plus its
+ * starting directory. Pins prevent inode reuse; every edge is rechecked on a
+ * hit, including mount identity, so renames/bind aliases cannot reuse a proof
+ * from a different ancestry. No pathname or permanent unmanaged verdict. */
+static struct
+{
+    int fd;
+    struct statx identity;
+} parent_cache[129];
+static unsigned int parent_cache_count;
 static const char sd_xattr[] = "user.WEX_E1S13_SD";
 static struct
 {
@@ -61,6 +71,51 @@ static int same_mount( int left, int right )
     return !syscall( SYS_statx, left, "", AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW, STATX_MNT_ID, &a ) &&
            !syscall( SYS_statx, right, "", AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW, STATX_MNT_ID, &b ) &&
            (a.stx_mask & STATX_MNT_ID) && (b.stx_mask & STATX_MNT_ID) && a.stx_mnt_id == b.stx_mnt_id;
+}
+
+static void clear_parent_cache(void)
+{
+    while (parent_cache_count) close( parent_cache[--parent_cache_count].fd );
+}
+
+static int parent_identity( int fd, const char *name, struct statx *st )
+{
+    const unsigned int mask = STATX_INO | STATX_MNT_ID;
+    return !syscall( SYS_statx, fd, name, AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW, mask, st ) &&
+           (st->stx_mask & mask) == mask;
+}
+
+static int same_parent_identity( const struct statx *a, const struct statx *b )
+{
+    return a->stx_dev_major == b->stx_dev_major && a->stx_dev_minor == b->stx_dev_minor &&
+           a->stx_ino == b->stx_ino && a->stx_mnt_id == b->stx_mnt_id;
+}
+
+static int unregistered_parent( int fd )
+{
+    struct secured_inode *e;
+    struct stat st;
+    /* file_sd's NULL/managed=0 also covers fstat failure. Never cache that
+     * indeterminate result as a negative identity proof. */
+    if (fstat( fd, &st )) return 0;
+    for (e = secured; e; e = e->next)
+        if (e->st.st_dev == st.st_dev && e->st.st_ino == st.st_ino) return 0;
+    return 1;
+}
+
+static int cached_unmanaged_parent( int fd )
+{
+    struct statx st;
+    unsigned int i, next;
+    if (!parent_cache_count || !parent_identity( fd, "", &st ) ||
+        !same_parent_identity( &st, &parent_cache[0].identity )) return 0;
+    for (i = 0; i < parent_cache_count; i++)
+    {
+        next = i + 1 < parent_cache_count ? i + 1 : i;
+        if (!parent_identity( parent_cache[i].fd, "..", &st ) ||
+            !same_parent_identity( &st, &parent_cache[next].identity )) return 0;
+    }
+    return 1;
 }
 
 /* Explicit Windows owner/group, protected DACL and High mandatory label.
@@ -168,6 +223,8 @@ void e1s_profile_security_abort( struct e1s_file_security *batch )
 void e1s_profile_security_commit( struct e1s_file_security *batch )
 {
     struct secured_inode *e;
+    /* New registrations (including inherited trees) invalidate negative proofs. */
+    clear_parent_cache();
     while ((e = batch->first)) { batch->first = e->next; e->next = secured; secured = e; secured_count++; }
     free( batch );
 }
@@ -211,13 +268,15 @@ struct security_descriptor *e1s_profile_file_sd( int fd, int *managed )
 
 /* Normal paths do no extra I/O until this lab server has a registered tree.
  * Resolve only to identify an already pinned parent; its inode/SD is authority.
+ * Cache a verified unmanaged ancestry to avoid reopening/scanning every ancestor
+ * on repeated opens. Hits still stat each edge; uncertainty fails closed.
  * Never adopt a native-inserted unregistered directory below a managed root. */
 int e1s_profile_check_parent( const char *name, unsigned int access, int create, mode_t *mode,
                               struct e1s_profile_parent *parent )
 {
     char *copy, *slash;
     int fd, walk, up, managed, i;
-    struct stat before, after;
+    struct statx above;
     parent->fd = -1; parent->leaf = NULL;
     if (!secured) return 1;
     if (!(copy = strdup( name ))) { set_error( STATUS_NO_MEMORY ); return 0; }
@@ -237,21 +296,37 @@ int e1s_profile_check_parent( const char *name, unsigned int access, int create,
         if (create) *mode = (*mode & S_IFDIR) ? 0700 : 0600;
         return 1;
     }
-    walk = fd;
-    for (i = 0; i < 128; i++)
+    if (cached_unmanaged_parent( fd ))
     {
-        if (fstat( walk, &before )) break;
-        up = openat( walk, "..", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC );
-        if (up < 0) break;
-        if (fstat( up, &after )) { close( up ); break; }
-        e1s_profile_file_sd( up, &managed );
-        close( walk ); walk = up;
-        if (managed || (before.st_dev == after.st_dev && before.st_ino == after.st_ino)) break;
+        close( fd );
+        e1s_profile_close_parent( parent );
+        return 1;
     }
+    clear_parent_cache();
+    walk = fd;
+    while (parent_cache_count < ARRAY_SIZE(parent_cache))
+    {
+        unsigned int index = parent_cache_count++;
+        parent_cache[index].fd = walk;
+        if (!parent_identity( walk, "", &parent_cache[index].identity ) ||
+            !unregistered_parent( walk )) goto cache_denied;
+        up = openat( walk, "..", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC );
+        if (up < 0) goto cache_denied;
+        if (!parent_identity( up, "", &above )) { close( up ); goto cache_denied; }
+        if (same_parent_identity( &parent_cache[index].identity, &above ))
+        {
+            close( up );
+            if (!cached_unmanaged_parent( fd )) goto cache_denied;
+            e1s_profile_close_parent( parent );
+            return 1;
+        }
+        walk = up;
+    }
+    /* The last parent is not in the full cache. Neither exhaustion nor I/O
+     * failure is proof that no registered ancestor exists. */
     close( walk );
-    if (managed) goto denied;
-    e1s_profile_close_parent( parent );
-    return 1;
+cache_denied:
+    clear_parent_cache();
 denied:
     e1s_profile_close_parent( parent );
     set_error( STATUS_ACCESS_DENIED ); return 0;

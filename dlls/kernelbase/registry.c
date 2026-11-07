@@ -63,9 +63,12 @@ static const WCHAR * const root_key_names[] =
 static HKEY special_root_keys[ARRAY_SIZE(root_key_names)];
 static BOOL cache_disabled[ARRAY_SIZE(root_key_names)];
 
+#ifdef WEX_E1S13_HKU_TEST
 /* Managed roots never share the legacy predefined-handle cache. These roots
  * stay loaded until server exit in S13, so per-SID process caches cannot outlive
- * their registration. S14 must add generation invalidation before unloading. */
+ * their registration. Raw cached handles and entries stay until process exit:
+ * an unexpected close/reuse is not detected. S14 must add handle-lifetime and
+ * generation invalidation before unloading; token IDs alone do not provide it. */
 struct e1s_root_cache
 {
     struct e1s_root_cache *next;
@@ -82,16 +85,24 @@ static NTSTATUS e1s_load_profile( ULONG op, HANDLE context, HANDLE token, ACCESS
 {
     typedef NTSTATUS (WINAPI *load_fn)(ULONG,HANDLE,HANDLE,ACCESS_MASK,const void*,ULONG,HANDLE*,ULONG*);
     load_fn load = (load_fn)GetProcAddress( GetModuleHandleW( L"ntdll.dll" ), "NtLoadWexProfile" );
-    if (!load) { *key = NULL; *managed = 0; return STATUS_NOT_SUPPORTED; }
+    if (!load) { *key = NULL; *managed = 0; return STATUS_PROCEDURE_NOT_FOUND; }
     return load( op, context, token, access, record, length, key, managed );
 }
 
-static BOOL e1s_managed_effective(void)
+static NTSTATUS e1s_query_effective( ULONG *managed )
 {
     HANDLE unused;
+    return e1s_load_profile( WEX_HKU_QUERY, NULL, NULL, 0, NULL, 0, &unused, managed );
+}
+
+/* Only success with managed=0 (or the disabled-server path) proves an unmanaged token; anything else
+ * must not take the predefined-handle shortcut. */
+static BOOL e1s_managed_effective(void)
+{
     ULONG managed;
-    NTSTATUS status = e1s_load_profile( WEX_HKU_QUERY, NULL, NULL, 0, NULL, 0, &unused, &managed );
-    return status != STATUS_NOT_SUPPORTED && (status || managed);
+    NTSTATUS status = e1s_query_effective( &managed );
+    if (status == STATUS_NOT_SUPPORTED) return FALSE;
+    return status || managed;
 }
 
 static HKEY e1s_special_root( BOOL classes )
@@ -127,8 +138,15 @@ static HKEY e1s_special_root( BOOL classes )
     if (entry)
     {
         slot = classes ? &entry->classes : &entry->user;
-        if (!*slot) e1s_load_profile( classes ? WEX_HKU_CLASSES : WEX_HKU_CURRENT,
-                                      NULL, token, MAXIMUM_ALLOWED, NULL, 0, slot, &managed );
+        if (!*slot)
+        {
+            ULONG op = classes ? WEX_HKU_CLASSES : WEX_HKU_CURRENT;
+            /* Explicit rights go through both DACL and MIC checks. Below High,
+             * keep read access without obtaining implicit write-up rights. */
+            status = e1s_load_profile( op, NULL, token, KEY_ALL_ACCESS, NULL, 0, slot, &managed );
+            if (status == STATUS_ACCESS_DENIED)
+                e1s_load_profile( op, NULL, token, KEY_READ, NULL, 0, slot, &managed );
+        }
         result = *slot;
     }
     RtlReleaseSRWLockExclusive( &e1s_root_lock );
@@ -136,6 +154,9 @@ static HKEY e1s_special_root( BOOL classes )
     NtClose( token );
     return result;
 }
+#else
+static inline BOOL e1s_managed_effective(void) { return FALSE; }
+#endif
 
 static CRITICAL_SECTION reg_mui_cs;
 static CRITICAL_SECTION_DEBUG reg_mui_cs_debug =
@@ -355,22 +376,34 @@ static NTSTATUS open_wow6432node_parent( HKEY *retkey, HKEY root, DWORD options,
         return status;
     }
 
+#ifdef WEX_E1S13_HKU_TEST
     /* S13's unnamed union cache has no absolute namespace path to reopen.
      * Classes are shared between ABIs; retain the exact view (including a
      * subkey view), rather than resolving its diagnostic name as a real key. */
-    if (e1s_managed_effective())
     {
-        static const WCHAR marker[] = L"_E1S13View";
-        DWORD i, chars = info->NameLength / sizeof(WCHAR);
-        for (i = 0; i + ARRAY_SIZE(marker) - 1 <= chars; i++)
-            if (!wcsnicmp( info->Name + i, marker, ARRAY_SIZE(marker) - 1 ))
-            {
-                status = NtDuplicateObject( GetCurrentProcess(), root, GetCurrentProcess(),
-                                             (HANDLE *)retkey, 0, 0, DUPLICATE_SAME_ACCESS );
-                if (buf_ptr != buffer) HeapFree( GetProcessHeap(), 0, buf_ptr );
-                return status;
-            }
+        ULONG managed;
+        status = e1s_query_effective( &managed );
+        if (status && status != STATUS_NOT_SUPPORTED)
+        {
+            if (buf_ptr != buffer) HeapFree( GetProcessHeap(), 0, buf_ptr );
+            return status;
+        }
+        if (!status && managed)
+        {
+            static const WCHAR marker[] = L"_E1S13View";
+            DWORD i, chars = info->NameLength / sizeof(WCHAR);
+            for (i = 0; i + ARRAY_SIZE(marker) - 1 <= chars; i++)
+                if (!wcsnicmp( info->Name + i, marker, ARRAY_SIZE(marker) - 1 ))
+                {
+                    status = NtDuplicateObject( GetCurrentProcess(), root, GetCurrentProcess(),
+                                                 (HANDLE *)retkey, 0, 0, DUPLICATE_SAME_ACCESS );
+                    if (buf_ptr != buffer) HeapFree( GetProcessHeap(), 0, buf_ptr );
+                    return status;
+                }
+        }
+        status = STATUS_SUCCESS;
     }
+#endif
 
     name.Buffer = info->Name;
     name.Length = info->NameLength;
@@ -573,9 +606,20 @@ static inline HKEY get_special_root_hkey( HKEY hkey )
 {
     unsigned int index = HandleToUlong(hkey) - HandleToUlong(HKEY_SPECIAL_ROOT_FIRST);
 
-    if ((HandleToUlong(hkey) == HandleToUlong(HKEY_CURRENT_USER) ||
-         HandleToUlong(hkey) == HandleToUlong(HKEY_CLASSES_ROOT)) && e1s_managed_effective())
-        return e1s_special_root( HandleToUlong(hkey) == HandleToUlong(HKEY_CLASSES_ROOT) );
+#ifdef WEX_E1S13_HKU_TEST
+    if (HandleToUlong(hkey) == HandleToUlong(HKEY_CURRENT_USER) ||
+        HandleToUlong(hkey) == HandleToUlong(HKEY_CLASSES_ROOT))
+    {
+        ULONG managed;
+        NTSTATUS status = e1s_query_effective( &managed );
+        /* Only success/managed=0 proves an unmanaged token. Token-open/query
+         * failures cannot authorize fallback to Bob's cached roots. Unsupported
+         * is the disabled-server path, where managed issuance is unavailable. */
+        if (status && status != STATUS_NOT_SUPPORTED) return NULL;
+        if (!status && managed)
+            return e1s_special_root( HandleToUlong(hkey) == HandleToUlong(HKEY_CLASSES_ROOT) );
+    }
+#endif
 
     switch (HandleToUlong(hkey))
     {
@@ -2845,6 +2889,7 @@ LSTATUS WINAPI RegNotifyChangeKeyValue( HKEY hkey, BOOL fWatchSubTree,
  */
 LSTATUS WINAPI RegOpenUserClassesRoot( HANDLE hToken, DWORD dwOptions, REGSAM samDesired, PHKEY phkResult )
 {
+#ifdef WEX_E1S13_HKU_TEST
     HANDLE key;
     ULONG managed;
     NTSTATUS status = e1s_load_profile( WEX_HKU_QUERY, NULL, hToken, 0, NULL, 0, &key, &managed );
@@ -2856,6 +2901,7 @@ LSTATUS WINAPI RegOpenUserClassesRoot( HANDLE hToken, DWORD dwOptions, REGSAM sa
         return RtlNtStatusToDosError( status );
     }
     if (status && status != STATUS_NOT_SUPPORTED) return RtlNtStatusToDosError( status );
+#endif
     FIXME("(%p, 0x%lx, 0x%lx, %p) semi-stub\n", hToken, dwOptions, samDesired, phkResult);
 
     *phkResult = HKEY_CLASSES_ROOT;

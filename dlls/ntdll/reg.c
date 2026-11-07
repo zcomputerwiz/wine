@@ -69,8 +69,10 @@ NTSTATUS WINAPI NtLoadWexProfile( ULONG operation, HANDLE context, HANDLE token,
         status = wine_server_call( req );
         result = wine_server_ptr_handle( reply->hkey );
         flag = reply->managed;
+        /* A malformed success is not evidence that the server disabled S13:
+         * automatic callers may fall back to stock roots only on that status. */
         if (!status && (wine_server_reply_size( reply ) || flag > 1 ||
-            (operation == WEX_HKU_QUERY ? !!result : (!result || flag != 1)))) status = STATUS_NOT_SUPPORTED;
+            (operation == WEX_HKU_QUERY ? !!result : (!result || flag != 1)))) status = STATUS_DATA_ERROR;
     }
     SERVER_END_REQ;
     if (effective) NtClose( effective );
@@ -273,14 +275,17 @@ NTSTATUS WINAPI RtlOpenCurrentUser(
 
 	TRACE("(0x%08lx, %p)\n",DesiredAccess, KeyHandle);
 
+#ifdef WEX_E1S13_HKU_TEST
         {
             HANDLE unused;
             ULONG managed;
+            if (KeyHandle) *KeyHandle = NULL;
             ret = NtLoadWexProfile( WEX_HKU_QUERY, NULL, NULL, 0, NULL, 0, &unused, &managed );
             if (!ret && managed)
                 return NtLoadWexProfile( WEX_HKU_CURRENT, NULL, NULL, DesiredAccess, NULL, 0, KeyHandle, &managed );
             if (ret && ret != STATUS_NOT_SUPPORTED) return ret;
         }
+#endif
 
         if ((ret = RtlFormatCurrentUserKeyPath(&ObjectName))) return ret;
 	InitializeObjectAttributes(&ObjectAttributes,&ObjectName,OBJ_CASE_INSENSITIVE,0, NULL);
