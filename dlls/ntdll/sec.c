@@ -34,6 +34,7 @@
 #include "symcrypt.h"
 #include "wine/exception.h"
 #include "wine/server.h"
+#include "wine/wex_token.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(ntdll);
@@ -128,6 +129,100 @@ NTSTATUS WINAPI NtQueryWexPipeCallerBindingEx( HANDLE pipe, WEX_PIPE_CALLER_BIND
         if (binding->WriterToken) NtClose( binding->WriterToken );
         memset( binding, 0, sizeof(*binding) );
         status = STATUS_NOT_SUPPORTED;
+    }
+    return status;
+}
+
+/* WineExplorer E1-S10 private export. Uses the same PE wine_server_call
+ * transport as H2b, so WoW64 carries byte records and 32-bit object handles,
+ * never native-layout structures or pointers. GPL-2.0-or-later addition. */
+NTSTATUS WINAPI NtCreateWexAccountToken( ULONG operation, HANDLE *context, HANDLE caller, ULONGLONG *caps,
+                                        const void *record, ULONG length, HANDLE *token,
+                                        void *response, ULONG *response_size )
+{
+    unsigned char input[WEX_TOKEN_FIXTURE_SIZE], output[WEX_TOKEN_RESPONSE_SIZE] = {0};
+    ULONG capacity = response_size ? *response_size : 0, received = 0;
+    HANDLE result = NULL, channel = NULL;
+    ULONGLONG negotiated = 0;
+    NTSTATUS status = STATUS_INVALID_PARAMETER;
+
+    if (token) *token = NULL;
+    if (response_size) *response_size = 0;
+    if (!context || !caps || !token || !response_size) goto done;
+    if (operation == WEX_TOKEN_NEGOTIATE)
+    {
+        if (*context || caller || length || record || capacity || response) goto done;
+    }
+    else if (operation == WEX_TOKEN_ISSUE)
+    {
+        if (!*context || caller || !record || length != WEX_TOKEN_INPUT_SIZE ||
+            !response || capacity != WEX_TOKEN_RESPONSE_SIZE) goto done;
+    }
+    else if (operation == WEX_TOKEN_TEST_INSTALL)
+    {
+        if (!*context || !caller || !record || length != WEX_TOKEN_FIXTURE_SIZE || capacity || response) goto done;
+    }
+    else goto done;
+    if (length) memcpy( input, record, length );
+    SERVER_START_REQ( create_e1s_account_token )
+    {
+        req->operation = operation;
+        req->context = wine_server_obj_handle( *context );
+        req->caller = wine_server_obj_handle( caller );
+        req->caps = *caps;
+        if (length) wine_server_add_data( req, input, length );
+        if (capacity) wine_server_set_reply( req, output, capacity );
+        status = wine_server_call( req );
+        received = wine_server_reply_size( reply );
+        result = wine_server_ptr_handle( reply->token );
+        channel = wine_server_ptr_handle( reply->context );
+        negotiated = reply->caps;
+    }
+    SERVER_END_REQ;
+    if (!status)
+    {
+        if (operation == WEX_TOKEN_NEGOTIATE)
+        {
+            if (!channel || result || negotiated != WEX_TOKEN_CAPS || received) status = STATUS_NOT_SUPPORTED;
+            else { *context = channel; *caps = negotiated; channel = NULL; }
+        }
+        else if (operation == WEX_TOKEN_ISSUE)
+        {
+            if (!result || channel || received != WEX_TOKEN_RESPONSE_SIZE ||
+                wex_token_u32( output ) != 0x00010005 ||
+                wex_token_u32( output + 4 ) != WEX_TOKEN_RESPONSE_SIZE ||
+                wex_token_u64( output + 8 ) != *caps || wex_token_u32( output + 32 ) ||
+                wex_token_u32( output + 36 ) || memcmp( output + 16, input + 16, 8 ) ||
+                memcmp( output + 24, input + 148, 8 ) || memcmp( output + 56, input + 124, 16 ) ||
+                wex_token_u32( output + 72 ) != 28 || wex_token_u32( output + 76 ) != 0x00000501 ||
+                wex_token_u32( output + 80 ) != 0x05000000 || wex_token_u32( output + 84 ) != 21 ||
+                !wex_token_u64( output + 104 ) || !wex_token_u64( output + 112 ) ||
+                memcmp( output + 40, output + 112, 8 ) || memcmp( output + 48, output + 104, 8 ) ||
+                wex_token_u32( output + 120 ) != wex_token_u32( input + 180 ) ||
+                wex_token_u32( output + 124 ) != TokenPrimary ||
+                wex_token_u32( output + 128 ) != TokenElevationTypeFull ||
+                wex_token_u32( output + 132 ) != SECURITY_MANDATORY_HIGH_RID)
+                status = STATUS_NOT_SUPPORTED;
+            else { *token = result; result = NULL; }
+        }
+        else if (result || channel || received) status = STATUS_NOT_SUPPORTED;
+    }
+done:
+    if (result) NtClose( result );
+    if (channel) NtClose( channel );
+    if (operation == WEX_TOKEN_NEGOTIATE && status && caps) *caps = 0;
+    if (operation == WEX_TOKEN_ISSUE && response && response_size && capacity == WEX_TOKEN_RESPONSE_SIZE)
+    {
+        if (status)
+        {
+            memset( output, 0, sizeof(output) );
+            wex_token_put32( output, 0x00010005 );
+            wex_token_put32( output + 4, WEX_TOKEN_FAILURE_SIZE );
+            wex_token_put32( output + 32, status );
+            received = WEX_TOKEN_FAILURE_SIZE;
+        }
+        memcpy( response, output, sizeof(output) );
+        *response_size = received;
     }
     return status;
 }

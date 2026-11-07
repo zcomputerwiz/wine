@@ -4508,3 +4508,21 @@ enum inproc_sync_type
     unsigned int        status;         /* reply NTSTATUS */
     VARARG(msg,bytes);                  /* reply message header + payload */
 @END
+
+
+/* WineExplorer private E1-S10. Caps are negotiated on the actual endorsed
+ * broker connection. Normal builds refuse all operations. Exact byte limits:
+ * negotiate 0, issue 204, lab-only install 268; kind-5 response 136/108.
+ * Fixed request/reply fit the existing 88-byte maximum. */
+@REQ(create_e1s_account_token)
+    unsigned int        operation;
+    obj_handle_t        context;
+    obj_handle_t        caller;        /* lab install only; zero for issue */
+    unsigned __int64    caps;
+    VARARG(record,e1s_token);           /* redacted S1 bytes plus evidence ref */
+@REPLY
+    obj_handle_t        context;       /* broker/connection-scoped negotiation */
+    obj_handle_t        token;         /* primary, assign/duplicate/query only */
+    unsigned __int64    caps;
+    VARARG(record,e1s_token);           /* canonical kind 5; no native pointers */
+@END

@@ -16,6 +16,7 @@ SOURCES = \
 	device.c \
 	directory.c \
 	dwm.c \
+	e1s_token.h \
 	event.c \
 	fd.c \
 	file.c \

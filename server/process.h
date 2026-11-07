@@ -96,6 +96,11 @@ struct process
     unsigned int         sysrun_protected:1; /* system role descriptor on the process and its threads (sysrun.c) */
     unsigned int         sysrun_account:2;   /* SERVICE_ACCOUNT_* of the descriptor */
     unsigned int         sysrun_pending:1;   /* system group root process: SYSTEM token once its main image is verified */
+    unsigned int         e1s6_broker_image:1; /* lab only: mapped machine-root wexelevate image */
+    unsigned int         e1s6_image_seen:1;
+    unsigned long long   e1s6_broker_generation; /* fresh for each registration; server-issued */
+    struct token        *e1s6_primary;
+    struct luid          e1s6_token_id, e1s6_modified_id;
 };
 
 /* process functions */

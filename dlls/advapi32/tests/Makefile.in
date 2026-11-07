@@ -14,4 +14,5 @@ SOURCES = \
 	registry.c \
 	rsrc.rc \
 	security.c \
-	service.c
+	service.c \
+	wex_token.c

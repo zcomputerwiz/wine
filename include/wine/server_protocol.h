@@ -6508,6 +6508,29 @@ struct dwm_reply_reply
 };
 
 
+/* WineExplorer private E1-S10. Caps are negotiated on the actual endorsed
+ * broker connection. Normal builds refuse all operations. Exact byte limits:
+ * negotiate 0, issue 204, lab-only install 268; kind-5 response 136/108.
+ * Fixed request/reply fit the existing 88-byte maximum. */
+struct create_e1s_account_token_request
+{
+    struct request_header __header;
+    unsigned int        operation;
+    obj_handle_t        context;
+    obj_handle_t        caller;
+    unsigned __int64    caps;
+    /* VARARG(record,e1s_token); */
+};
+struct create_e1s_account_token_reply
+{
+    struct reply_header __header;
+    obj_handle_t        context;
+    obj_handle_t        token;
+    unsigned __int64    caps;
+    /* VARARG(record,e1s_token); */
+};
+
+
 enum request
 {
     REQ_new_process,
@@ -6834,6 +6857,7 @@ enum request
     REQ_dwm_send,
     REQ_dwm_recv,
     REQ_dwm_reply,
+    REQ_create_e1s_account_token,
     REQ_NB_REQUESTS
 };
 
@@ -7165,6 +7189,7 @@ union generic_request
     struct dwm_send_request dwm_send_request;
     struct dwm_recv_request dwm_recv_request;
     struct dwm_reply_request dwm_reply_request;
+    struct create_e1s_account_token_request create_e1s_account_token_request;
 };
 union generic_reply
 {
@@ -7494,8 +7519,9 @@ union generic_reply
     struct dwm_send_reply dwm_send_reply;
     struct dwm_recv_reply dwm_recv_reply;
     struct dwm_reply_reply dwm_reply_reply;
+    struct create_e1s_account_token_reply create_e1s_account_token_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 976
+#define SERVER_PROTOCOL_VERSION 977
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

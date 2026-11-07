@@ -614,6 +614,10 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->machine         = native_machine;
     process->page_size       = get_page_size();
     process->unix_pid        = -1;
+    process->e1s6_broker_image = 0;
+    process->e1s6_image_seen = 0;
+    process->e1s6_broker_generation = 0;
+    process->e1s6_primary = NULL;
     process->exit_code       = STILL_ACTIVE;
     process->running_threads = 0;
     process->user_threads    = 0;
@@ -759,6 +763,7 @@ static void process_destroy( struct object *obj )
     if (process->idle_event) release_object( process->idle_event );
     if (process->id) free_ptid( process->id );
     if (process->token) release_object( process->token );
+    if (process->e1s6_primary) release_object( process->e1s6_primary );
     if (process->sync) release_object( process->sync );
     list_remove( &process->rawinput_entry );
     free( process->rawinput_devices );

@@ -331,6 +331,7 @@ DECL_HANDLER(dwm_broker_register);
 DECL_HANDLER(dwm_send);
 DECL_HANDLER(dwm_recv);
 DECL_HANDLER(dwm_reply);
+DECL_HANDLER(create_e1s_account_token);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -659,6 +660,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_dwm_send,
     (req_handler)req_dwm_recv,
     (req_handler)req_dwm_reply,
+    (req_handler)req_create_e1s_account_token,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -2519,3 +2521,12 @@ C_ASSERT( offsetof(struct dwm_reply_request, handle) == 12 );
 C_ASSERT( offsetof(struct dwm_reply_request, request_id) == 16 );
 C_ASSERT( offsetof(struct dwm_reply_request, status) == 20 );
 C_ASSERT( sizeof(struct dwm_reply_request) == 24 );
+C_ASSERT( offsetof(struct create_e1s_account_token_request, operation) == 12 );
+C_ASSERT( offsetof(struct create_e1s_account_token_request, context) == 16 );
+C_ASSERT( offsetof(struct create_e1s_account_token_request, caller) == 20 );
+C_ASSERT( offsetof(struct create_e1s_account_token_request, caps) == 24 );
+C_ASSERT( sizeof(struct create_e1s_account_token_request) == 32 );
+C_ASSERT( offsetof(struct create_e1s_account_token_reply, context) == 8 );
+C_ASSERT( offsetof(struct create_e1s_account_token_reply, token) == 12 );
+C_ASSERT( offsetof(struct create_e1s_account_token_reply, caps) == 16 );
+C_ASSERT( sizeof(struct create_e1s_account_token_reply) == 24 );

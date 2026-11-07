@@ -27,6 +27,7 @@ static void dump_varargs_contexts( const char *prefix, data_size_t size );
 static void dump_varargs_cursor_positions( const char *prefix, data_size_t size );
 static void dump_varargs_debug_event( const char *prefix, data_size_t size );
 static void dump_varargs_directory_entries( const char *prefix, data_size_t size );
+static void dump_varargs_e1s_token( const char *prefix, data_size_t size );
 static void dump_varargs_filesystem_event( const char *prefix, data_size_t size );
 static void dump_varargs_handle_infos( const char *prefix, data_size_t size );
 static void dump_varargs_ints( const char *prefix, data_size_t size );
@@ -3719,6 +3720,23 @@ static void dump_dwm_reply_request( const struct dwm_reply_request *req )
     dump_varargs_bytes( ", msg=", cur_size );
 }
 
+static void dump_create_e1s_account_token_request( const struct create_e1s_account_token_request *req )
+{
+    fprintf( stderr, " operation=%08x", req->operation );
+    fprintf( stderr, ", context=%04x", req->context );
+    fprintf( stderr, ", caller=%04x", req->caller );
+    dump_uint64( ", caps=", &req->caps );
+    dump_varargs_e1s_token( ", record=", cur_size );
+}
+
+static void dump_create_e1s_account_token_reply( const struct create_e1s_account_token_reply *req )
+{
+    fprintf( stderr, " context=%04x", req->context );
+    fprintf( stderr, ", token=%04x", req->token );
+    dump_uint64( ", caps=", &req->caps );
+    dump_varargs_e1s_token( ", record=", cur_size );
+}
+
 typedef void (*dump_func)( const void *req );
 
 static const dump_func req_dumpers[REQ_NB_REQUESTS] =
@@ -4047,6 +4065,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_dwm_send_request,
     (dump_func)dump_dwm_recv_request,
     (dump_func)dump_dwm_reply_request,
+    (dump_func)dump_create_e1s_account_token_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -4375,6 +4394,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_dwm_send_reply,
     (dump_func)dump_dwm_recv_reply,
     NULL,
+    (dump_func)dump_create_e1s_account_token_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -4703,6 +4723,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "dwm_send",
     "dwm_recv",
     "dwm_reply",
+    "create_e1s_account_token",
 };
 
 static const struct

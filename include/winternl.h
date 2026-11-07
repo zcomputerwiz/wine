@@ -5687,6 +5687,10 @@ typedef struct _WEX_PIPE_CALLER_BINDING
 NTSYSAPI NTSTATUS WINAPI NtQueryWexPipeCallerBindingEx(HANDLE,WEX_PIPE_CALLER_BINDING*);
 /* Legacy ABI retained for opener-only callers. */
 NTSYSAPI NTSTATUS WINAPI NtQueryWexPipeCallerBinding(HANDLE,HANDLE*,HANDLE*,ULONG*,LARGE_INTEGER*,LUID*,LUID*,BOOL*,BOOL*);
+/* E1-S10 private byte ABI; sizes/operations in wine/wex_token.h. On ISSUE,
+ * response capacity must be 136. Failure returns kind 5 with empty SID and no
+ * handle. Context belongs to this endorsed broker connection, never the caller. */
+NTSYSAPI NTSTATUS WINAPI NtCreateWexAccountToken(ULONG,HANDLE*,HANDLE,ULONGLONG*,const void*,ULONG,HANDLE*,void*,ULONG*);
 
 NTSYSAPI NTSTATUS WINAPI __wine_unix_spawnvp( char * const argv[], int wait );
 

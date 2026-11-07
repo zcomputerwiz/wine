@@ -1754,6 +1754,12 @@ DECL_HANDLER(set_named_pipe_info)
 }
 
 /* WineExplorer private: opener and the single complete request message consumed by this server end. */
+#ifdef WEX_E1S6_TRANSPORT_TEST
+#define E1S6_BINDING_AUDIT(site) fprintf( stderr, "E1S6_DENY pipe site=%s\n", site )
+#else
+#define E1S6_BINDING_AUDIT(site) do {} while (0)
+#endif
+
 DECL_HANDLER(get_pipe_caller_binding)
 {
     struct pipe_end *server, *client;
@@ -1765,6 +1771,7 @@ DECL_HANDLER(get_pipe_caller_binding)
     if (!elevation_enforced() || token_service_account( current->process->token ) != SERVICE_ACCOUNT_SYSTEM ||
         !sysrun_process_privileged( current->process ) || !token_has_privilege( current->process->token, SeTcbPrivilege ))
     {
+        E1S6_BINDING_AUDIT( "authority" );
         set_error( STATUS_ACCESS_DENIED );
         return;
     }
@@ -1773,6 +1780,7 @@ DECL_HANDLER(get_pipe_caller_binding)
                                                FILE_READ_ATTRIBUTES, &pipe_server_ops );
     if (!server)
     {
+        E1S6_BINDING_AUDIT( "server-handle" );
         if (get_error() == STATUS_INVALID_HANDLE || get_error() == STATUS_OBJECT_TYPE_MISMATCH)
             set_error( STATUS_INVALID_PARAMETER_1 );
         return;
@@ -1780,6 +1788,7 @@ DECL_HANDLER(get_pipe_caller_binding)
 
     if (server->state != FILE_PIPE_CONNECTED_STATE || !(client = server->connection))
     {
+        E1S6_BINDING_AUDIT( "connection" );
         set_error( STATUS_PIPE_DISCONNECTED );
         goto done;
     }
@@ -1787,20 +1796,41 @@ DECL_HANDLER(get_pipe_caller_binding)
     if (!client->client_process || !client->client_primary || !server->consumed_valid ||
         !writer->process || !writer->primary)
     {
+        E1S6_BINDING_AUDIT( "consumed-provenance" );
         set_error( STATUS_ACCESS_DENIED );
         goto done;
     }
 
+    if (get_req_data_size())
+    {
+        struct luid opener_id, opener_modified, writer_id, writer_modified;
+        token_get_ids( client->client_primary, &opener_id, &opener_modified );
+        token_get_ids( writer->primary, &writer_id, &writer_modified );
+#define CHECK_WRITER(c, site) do { if (!(c)) { E1S6_BINDING_AUDIT( site ); \
+    set_error( STATUS_ACCESS_DENIED ); goto done; } } while (0)
+        CHECK_WRITER( !client->client_impersonated, "opener-impersonated" );
+        CHECK_WRITER( !writer->impersonated, "writer-impersonated" );
+        CHECK_WRITER( writer->process == client->client_process, "writer-process" );
+        CHECK_WRITER( writer->primary == client->client_primary, "writer-primary" );
+        CHECK_WRITER( client->client_process->token == client->client_primary, "opener-primary-current" );
+        CHECK_WRITER( !memcmp( &opener_id, &client->client_token_id, sizeof(opener_id) ), "opener-token-id" );
+        CHECK_WRITER( !memcmp( &opener_modified, &client->client_modified_id, sizeof(opener_modified) ), "opener-modified-id" );
+        CHECK_WRITER( !memcmp( &writer_id, &writer->token_id, sizeof(writer_id) ), "writer-token-id" );
+        CHECK_WRITER( !memcmp( &writer_modified, &writer->modified_id, sizeof(writer_modified) ), "writer-modified-id" );
+#undef CHECK_WRITER
+        if (!sysrun_e1s6_endorse( get_req_data(), get_req_data_size() )) goto done;
+    }
+
     process = alloc_handle( current->process, client->client_process,
                             SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_QUERY_INFORMATION, 0 );
-    if (!process) goto done;
+    if (!process) { E1S6_BINDING_AUDIT( "allocate-opener-process" ); goto done; }
     token = alloc_handle( current->process, client->client_primary, TOKEN_QUERY, 0 );
-    if (!token) goto done;
+    if (!token) { E1S6_BINDING_AUDIT( "allocate-opener-token" ); goto done; }
     writer_process = alloc_handle( current->process, writer->process,
                                    SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_QUERY_INFORMATION, 0 );
-    if (!writer_process) goto done;
+    if (!writer_process) { E1S6_BINDING_AUDIT( "allocate-writer-process" ); goto done; }
     writer_token = alloc_handle( current->process, writer->primary, TOKEN_QUERY, 0 );
-    if (!writer_token) goto done;
+    if (!writer_token) { E1S6_BINDING_AUDIT( "allocate-writer-token" ); goto done; }
 
     token_get_ids( client->client_primary, &token_id, &modified_id );
     reply->process = process;

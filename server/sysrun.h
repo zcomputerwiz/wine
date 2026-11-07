@@ -55,6 +55,8 @@ extern int sysrun_thread_created( struct thread *thread );
 extern void sysrun_main_image( struct process *process, struct fd *fd );
 /* does the process have the system role (a SYSTEM token and the descriptor of a system process)? */
 extern int sysrun_process_is_system( struct process *process );
+/* S6 lab sideband, compiled out unless WEX_E1S6_TRANSPORT_TEST is defined. */
+extern int sysrun_e1s6_endorse( const void *data, unsigned int size );
 /* are the desktop rules of the secure desktop (reserved names, cross-desktop access) in force? */
 extern int sysrun_desktops_enforced(void);
 /* access check of a request that names another process or thread by id instead of by handle */

@@ -39,6 +39,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 #ifdef HAVE_SYS_PRCTL_H
 # include <sys/prctl.h>
@@ -55,6 +57,7 @@
 #include "sysrun.h"
 #include "security.h"
 #include "file.h"
+#include "handle.h"
 
 #define SYSRUN_CONF "/etc/wineexplorer/sysrun.conf"
 
@@ -310,6 +313,20 @@ void sysrun_main_image( struct process *process, struct fd *fd )
     unsigned int i;
     int unix_fd;
 
+#ifdef WEX_E1S6_TRANSPORT_TEST
+    /* The role follows the actual mapped file, never a client image string,
+     * SYSTEM SID alone, a parent claim or inherited socket credentials. */
+    if (!process->e1s6_image_seen && system_role_enabled() && fd && (unix_fd = get_unix_fd( fd )) != -1 &&
+        !fstat( unix_fd, &st ) && S_ISREG( st.st_mode ))
+    {
+        static const char *const brokers[] = { "wexelevate.exe", "wexelevate_test.exe" };
+        for (i = 0; i < ARRAY_SIZE(brokers); i++)
+            if ((unsigned int)snprintf( path, sizeof(path), "%s/drive_c/windows/system32/%s", machine_root, brokers[i] ) < sizeof(path) &&
+                !stat( path, &ref ) && ref.st_dev == st.st_dev && ref.st_ino == st.st_ino)
+                process->e1s6_broker_image = 1;
+    }
+    process->e1s6_image_seen = 1;
+#endif
     if (!process->sysrun_pending) return;
     process->sysrun_pending = 0;
     /* device and inode of the mapped file, never the NT path: that goes through the user's prefix links */
@@ -342,6 +359,137 @@ int sysrun_process_is_system( struct process *process )
 {
     return system_role_enabled() && process->sysrun_protected && !process->sysrun_pending &&
            process->sysrun_account == SERVICE_ACCOUNT_SYSTEM;
+}
+
+/* Direct kernel-authenticated endorsement to the verifier's private FD. The
+ * caller has already passed the S3 consumed-opener/writer comparisons. This
+ * operation neither issues tokens nor accepts authentication results. */
+#if defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
+#define E1S6_REQUIRE(c, site) do { if (!(c)) { \
+    fprintf( stderr, "E1S6_DENY server site=%s errno=%d\n", site, errno ); goto done; \
+} } while (0)
+
+static int e1s6_get_fd( const unsigned char *p, const char *role )
+{
+    obj_handle_t handle = p[0] | (unsigned int)p[1] << 8 | (unsigned int)p[2] << 16 | (unsigned int)p[3] << 24;
+    struct object *obj = get_handle_obj( current->process, handle, 0, NULL );
+    struct fd *fd;
+    int ret = -1;
+    if (!obj)
+    {
+        fprintf( stderr, "E1S6_DENY server site=endorse-%s-handle status=%08x\n", role, get_error() );
+        return -1;
+    }
+    if ((fd = get_obj_fd( obj )))
+    {
+        ret = fcntl( get_unix_fd( fd ), F_DUPFD_CLOEXEC, 0 );
+        if (ret < 0)
+            fprintf( stderr, "E1S6_DENY server site=endorse-%s-dup-fd errno=%d status=%08x\n",
+                     role, errno, get_error() );
+        release_object( fd );
+    }
+    else fprintf( stderr, "E1S6_DENY server site=endorse-%s-fd-object status=%08x\n", role, get_error() );
+    release_object( obj );
+    return ret;
+}
+#endif
+
+int sysrun_e1s6_endorse( const void *data, unsigned int size )
+{
+#if defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
+    const unsigned char *in = data;
+    unsigned char out[96];
+    struct ucred peer;
+    socklen_t len = sizeof(peer);
+    struct process *p = current->process;
+    static unsigned long long generation;
+    unsigned long long fresh, expected = 0;
+    int fd = -1, pin = -1, random = -1, raised, ret = 0, type;
+
+    /* Handles belong to this broker's handle table. The client closes its
+     * imported handles on every exit; duplicate native fds are local here. */
+    E1S6_REQUIRE( size == sizeof(out), "endorse-size" );
+    fd = e1s6_get_fd( in, "control" );
+    E1S6_REQUIRE( fd >= 0, "endorse-control-fd" );
+    pin = e1s6_get_fd( in + 4, "pin" );
+    E1S6_REQUIRE( pin >= 0, "endorse-pin-fd" );
+    E1S6_REQUIRE( !current->token, "endorse-thread-token" );
+    E1S6_REQUIRE( p->e1s6_broker_image, "endorse-broker-image" );
+    E1S6_REQUIRE( sysrun_process_is_system( p ), "endorse-system-role" );
+    E1S6_REQUIRE( sysrun_process_privileged( p ), "endorse-sysrun-connection" );
+    E1S6_REQUIRE( token_service_account( p->token ) == SERVICE_ACCOUNT_SYSTEM, "endorse-system-primary" );
+    E1S6_REQUIRE( token_has_privilege( p->token, SeTcbPrivilege ), "endorse-tcb" );
+    E1S6_REQUIRE( !getsockopt( pin, SOL_SOCKET, SO_PEERCRED, &peer, &len ) && len == sizeof(peer), "endorse-peercred" );
+    E1S6_REQUIRE( peer.uid == getuid(), "endorse-peer-uid" );
+    E1S6_REQUIRE( peer.pid > 0 && peer.pid == p->unix_pid, "endorse-peer-pid" );
+    len = sizeof(type);
+    E1S6_REQUIRE( !getsockopt( fd, SOL_SOCKET, SO_TYPE, &type, &len ) && type == SOCK_SEQPACKET, "endorse-socket-type" );
+    /* The verifier supplies root/verifier generations and connection nonce.
+     * The server supplies its own instance and broker-registration generations.
+     * No random value is accepted as a portable grant. */
+    E1S6_REQUIRE( (random = open( "/dev/urandom", O_RDONLY | O_CLOEXEC )) >= 0, "endorse-rng-open" );
+    if (!generation)
+    {
+        E1S6_REQUIRE( read( random, &fresh, sizeof(fresh) ) == (ssize_t)sizeof(fresh) && fresh, "endorse-server-generation" );
+        generation = fresh;
+    }
+    {
+        unsigned int i;
+        for (i = 0; i < 8; i++) expected |= (unsigned long long)in[8+i] << (8*i);
+    }
+    if (!expected)
+    {
+        E1S6_REQUIRE( read( random, &fresh, sizeof(fresh) ) == (ssize_t)sizeof(fresh) && fresh, "endorse-broker-generation" );
+        E1S6_REQUIRE( fresh != p->e1s6_broker_generation, "endorse-generation-collision" );
+        p->e1s6_broker_generation = fresh;
+        if (p->e1s6_primary) release_object( p->e1s6_primary );
+        p->e1s6_primary = (struct token *)grab_object( p->token );
+        token_get_ids( p->token, &p->e1s6_token_id, &p->e1s6_modified_id );
+    }
+    else
+    {
+        struct luid id, modified;
+        token_get_ids( p->token, &id, &modified );
+        E1S6_REQUIRE( expected == p->e1s6_broker_generation, "endorse-stale-generation" );
+        E1S6_REQUIRE( p->token == p->e1s6_primary, "endorse-primary-object" );
+        E1S6_REQUIRE( !memcmp( &id, &p->e1s6_token_id, sizeof(id) ), "endorse-token-id" );
+        E1S6_REQUIRE( !memcmp( &modified, &p->e1s6_modified_id, sizeof(modified) ), "endorse-modified-id" );
+    }
+    memcpy( out, in, sizeof(out) );
+    /* Local sideband encoding is explicitly LE, separate from S1 kind 7. */
+    {
+        unsigned int i;
+        for (i = 0; i < 8; i++) { out[i] = generation >> (8 * i); out[8+i] = p->e1s6_broker_generation >> (8 * i); }
+        for (i = 0; i < 4; i++) { out[16+i] = peer.pid >> (8 * i); out[20+i] = p->session_id >> (8 * i); }
+    }
+    raised = sysrun_raise();
+    if (!raised) fprintf( stderr, "E1S6_DENY server site=endorse-raise-group errno=%d\n", errno );
+    if (raised)
+    {
+        /* Automatic SCM_CREDENTIALS uses real IDs on Linux. Explicitly send
+         * the effective system gid; the kernel checks real/effective/saved
+         * membership, so an ordinary same-UID peer cannot forge wexsys. */
+        struct ucred sender = { getpid(), geteuid(), getegid() };
+        char ancillary[CMSG_SPACE(sizeof(sender))];
+        struct iovec io = { out, sizeof(out) };
+        struct msghdr msg = { 0 };
+        struct cmsghdr *cmsg;
+        msg.msg_iov = &io; msg.msg_iovlen = 1;
+        msg.msg_control = ancillary; msg.msg_controllen = sizeof(ancillary);
+        cmsg = CMSG_FIRSTHDR( &msg ); cmsg->cmsg_level = SOL_SOCKET; cmsg->cmsg_type = SCM_CREDENTIALS;
+        cmsg->cmsg_len = CMSG_LEN(sizeof(sender)); memcpy( CMSG_DATA(cmsg), &sender, sizeof(sender) );
+        ret = sendmsg( fd, &msg, MSG_DONTWAIT | MSG_NOSIGNAL ) == (ssize_t)sizeof(out);
+        if (!ret) fprintf( stderr, "E1S6_DENY server site=endorse-send errno=%d\n", errno );
+    }
+    sysrun_drop( raised );
+done:
+    if (fd >= 0) close( fd );
+    if (pin >= 0) close( pin );
+    if (random >= 0) close( random );
+    if (ret) return 1;
+#endif
+    set_error( STATUS_ACCESS_DENIED );
+    return 0;
 }
 
 int sysrun_check_process_access( struct process *target, unsigned int access )

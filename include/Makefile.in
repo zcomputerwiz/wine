@@ -1157,6 +1157,7 @@ SOURCES = \
 	wine/unixlib.h \
 	wine/vulkan.h \
 	wine/vulkan_driver.h \
+	wine/wex_token.h \
 	wine/wgl.h \
 	wine/winbase16.h \
 	wine/windef16.h \

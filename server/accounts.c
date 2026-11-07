@@ -18,14 +18,19 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sys/xattr.h>
+#endif
 
 #include "accounts.h"
 #ifndef WEX_ACCOUNTS_STANDALONE
 #include "sysrun.h"
 #endif
 
-#define ACCOUNT_LIMIT 4096
 #define MAP_LIMIT (1024 * 1024)
+/* Every serialized record exceeds 40 bytes, so this bounds all records that
+ * can fit in the map without imposing a smaller account-count ceiling. */
+#define ACCOUNT_LIMIT (MAP_LIMIT / 40)
 #define U32_MAX_VALUE UINT64_C(4294967295)
 
 struct account_record
@@ -72,7 +77,7 @@ static uid_t test_server_uid;
 static int valid_name( const char *s )
 {
     size_t i, len = strlen( s );
-    if (!len || len > 63) return 0;
+    if (!len || len > 63 || *s == '-' || !strcmp( s, "." ) || !strcmp( s, ".." )) return 0;
     for (i = 0; i < len; i++)
         if (!((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') ||
               (s[i] >= '0' && s[i] <= '9') || s[i] == '_' || s[i] == '-' || s[i] == '.' ||
@@ -87,11 +92,23 @@ static int parse_number( const char *s, uint64_t max, uint64_t *value )
     for (; *s; s++)
     {
         unsigned int digit = *s - '0';
-        if (digit > 9 || n > (max - digit) / 10) return 0;
+        if (digit > 9 || digit > max || n > (max - digit) / 10) return 0;
         n = n * 10 + digit;
     }
     *value = n;
     return 1;
+}
+
+/* Reject extended access ACLs altogether, including read-only ones.  An
+ * unsupported xattr facility has no POSIX ACLs; other errors fail closed. */
+static int no_access_acl( int fd )
+{
+#ifdef __linux__
+    ssize_t n = fgetxattr( fd, "system.posix_acl_access", NULL, 0 );
+    return n < 0 && (errno == ENODATA || errno == ENOTSUP || errno == EOPNOTSUPP);
+#else
+    return 0;
+#endif
 }
 
 /* Walk from / with openat: no symlink component, writable ancestor or path
@@ -105,11 +122,12 @@ static int protected_directory( const char *path, enum wex_account_status *statu
     *status = WEX_ACCOUNT_MAP_UNPROTECTED;
     if (!path || path[0] != '/' || strlen( path ) >= sizeof(copy)) return -1;
     strcpy( copy, path + 1 );
+    while (*copy && copy[strlen(copy) - 1] == '/') copy[strlen(copy) - 1] = 0;
     if ((fd = open( "/", O_RDONLY | O_DIRECTORY | O_CLOEXEC )) == -1) return -1;
     p = copy;
     for (;;)
     {
-        if (fstat( fd, &st ) || !S_ISDIR( st.st_mode ) || st.st_uid || (st.st_mode & 0022)) break;
+        if (fstat( fd, &st ) || !S_ISDIR( st.st_mode ) || st.st_uid || (st.st_mode & 0022) || !no_access_acl( fd )) break;
         if (!*p) { *status = WEX_ACCOUNT_OK; return fd; }
         if ((next = strchr( p, '/' ))) *next++ = 0;
         if (!*p || !strcmp( p, "." ) || !strcmp( p, ".." ) || (next && !*next)) break;
@@ -140,7 +158,7 @@ static enum wex_account_status read_protected( int dir, const char *name, gid_t 
     if (fstat( fd, &before )) goto done;
     status = WEX_ACCOUNT_MAP_UNPROTECTED;
     if (!S_ISREG( before.st_mode ) || before.st_uid || (before.st_mode & 0022) ||
-        before.st_nlink != 1 || (gid != (gid_t)-1 && before.st_gid != gid)) goto done;
+        before.st_nlink != 1 || !no_access_acl( fd ) || (gid != (gid_t)-1 && before.st_gid != gid)) goto done;
     status = WEX_ACCOUNT_MAP_INVALID;
     if (before.st_size <= 0 || before.st_size > MAP_LIMIT) goto done;
     status = WEX_ACCOUNT_MAP_UNREADABLE;
@@ -167,20 +185,35 @@ done:
     return status;
 }
 
-static struct group *native_group( const char *name )
+struct native_group_result { struct group gr; char *buffer; };
+
+static int native_group( const char *name, struct native_group_result *out )
 {
-#ifdef WEX_ACCOUNTS_TEST
-    if (test_group)
+    size_t size = 1024;
+    int err;
+    struct group *gr;
+    memset( out, 0, sizeof(*out) );
+    for (;;)
     {
-        FILE *f = fopen( test_group, "r" );
-        struct group *gr = NULL;
-        if (!f) return NULL;
-        while ((gr = fgetgrent( f ))) if (!strcmp( gr->gr_name, name )) break;
-        fclose( f );
-        return gr;
-    }
+        if (!(out->buffer = malloc( size ))) return 0;
+#ifdef WEX_ACCOUNTS_TEST
+        if (test_group)
+        {
+            FILE *f = fopen( test_group, "r" );
+            if (!f) { free( out->buffer ); out->buffer = NULL; return 0; }
+            do { err = fgetgrent_r( f, &out->gr, out->buffer, size, &gr ); }
+            while (!err && gr && strcmp( gr->gr_name, name ));
+            fclose( f );
+        }
+        else
 #endif
-    return getgrnam( name );
+            err = getgrnam_r( name, &out->gr, out->buffer, size, &gr );
+        if (!err && gr) return 1;
+        free( out->buffer );
+        out->buffer = NULL;
+        if (err != ERANGE || size >= 1024 * 1024) return 0;
+        size *= 2;
+    }
 }
 
 static enum wex_account_status read_policy( int dir, struct account_policy *policy )
@@ -188,7 +221,7 @@ static enum wex_account_status read_policy( int dir, struct account_policy *poli
     char *buf, *line, *next;
     size_t len;
     int seen_admin = 0, seen_group = 0;
-    struct group *gr;
+    struct native_group_result gr;
     enum wex_account_status status;
 
     strcpy( policy->admin_group, "sudo" );
@@ -211,10 +244,13 @@ static enum wex_account_status read_policy( int dir, struct account_policy *poli
         }
     }
     status = WEX_ACCOUNT_ADMIN_GROUP_MISSING;
-    if (!native_group( policy->admin_group )) goto done;
+    if (!native_group( policy->admin_group, &gr )) goto done;
+    free( gr.buffer );
     status = WEX_ACCOUNT_MAP_INVALID;
-    if (!(gr = native_group( policy->system_group )) || gr->gr_gid == (gid_t)-1) goto done;
-    policy->system_gid = gr->gr_gid;
+    if (!native_group( policy->system_group, &gr )) goto done;
+    policy->system_gid = gr.gr.gr_gid;
+    free( gr.buffer );
+    if (policy->system_gid == (gid_t)-1) goto done;
     status = WEX_ACCOUNT_OK;
 done:
     free( buf );
@@ -307,25 +343,57 @@ static enum wex_account_status parse_map( char *buf, struct account_map *map )
     return WEX_ACCOUNT_OK;
 }
 
-static struct passwd *native_passwd( const char *name, uid_t uid )
+static int native_passwd( const char *name, uid_t uid, struct account_native *out )
 {
-#ifdef WEX_ACCOUNTS_TEST
-    if (test_passwd)
+    size_t size = 1024;
+    struct passwd pw, *found;
+    char *buffer;
+    int err;
+    for (;;)
     {
-        FILE *f = fopen( test_passwd, "r" );
-        struct passwd *pw = NULL;
-        if (!f) return NULL;
-        while ((pw = fgetpwent( f )))
-            if (name ? !strcmp( pw->pw_name, name ) : pw->pw_uid == uid) break;
-        fclose( f );
-        return pw;
-    }
+        if (!(buffer = malloc( size ))) return 0;
+#ifdef WEX_ACCOUNTS_TEST
+        if (test_passwd)
+        {
+            FILE *f = fopen( test_passwd, "r" );
+            if (!f) { free( buffer ); return 0; }
+            do { err = fgetpwent_r( f, &pw, buffer, size, &found ); }
+            while (!err && found && (name ? strcmp( pw.pw_name, name ) : pw.pw_uid != uid));
+            fclose( f );
+        }
+        else
 #endif
-    return name ? getpwnam( name ) : getpwuid( uid );
+            err = name ? getpwnam_r( name, &pw, buffer, size, &found ) :
+                         getpwuid_r( uid, &pw, buffer, size, &found );
+        if (!err && found && valid_name( pw.pw_name ) && pw.pw_uid &&
+            pw.pw_uid != (uid_t)-1 && pw.pw_gid != (gid_t)-1)
+        {
+            strcpy( out->name, pw.pw_name );
+            out->uid = pw.pw_uid;
+            out->gid = pw.pw_gid;
+            out->supported = pw.pw_shell && pw.pw_shell[0] &&
+                strcmp( pw.pw_shell, "/usr/sbin/nologin" ) && strcmp( pw.pw_shell, "/sbin/nologin" ) &&
+                strcmp( pw.pw_shell, "/bin/false" ) && strcmp( pw.pw_shell, "/usr/bin/false" );
+            free( buffer );
+            return 1;
+        }
+        free( buffer );
+        if (err != ERANGE || size >= 1024 * 1024) return 0;
+        size *= 2;
+    }
+}
+
+static int native_match( const struct account_native *u )
+{
+    struct account_native v;
+    return native_passwd( u->name, 0, &v ) && v.uid == u->uid && v.gid == u->gid &&
+           !strcmp( v.name, u->name ) && native_passwd( NULL, u->uid, &v ) &&
+           v.uid == u->uid && v.gid == u->gid && !strcmp( v.name, u->name );
 }
 
 /* Enumerate only local passwd candidates, and require two-way NSS agreement.
  * Duplicate UIDs/names or enumeration/lookup errors deny the entire snapshot. */
+#ifdef WEX_ACCOUNTS_TOOL
 static enum wex_account_status native_accounts( struct account_native *users, unsigned int *count )
 {
     const char *path = "/etc/passwd";
@@ -357,9 +425,7 @@ static enum wex_account_status native_accounts( struct account_native *users, un
         u.supported = pw->pw_shell && pw->pw_shell[0] &&
             strcmp( pw->pw_shell, "/usr/sbin/nologin" ) && strcmp( pw->pw_shell, "/sbin/nologin" ) &&
             strcmp( pw->pw_shell, "/bin/false" ) && strcmp( pw->pw_shell, "/usr/bin/false" );
-        if (!(pw = native_passwd( u.name, 0 )) || pw->pw_uid != u.uid || pw->pw_gid != u.gid ||
-            strcmp( pw->pw_name, u.name )) goto done;
-        if (!(pw = native_passwd( NULL, u.uid )) || pw->pw_gid != u.gid || strcmp( pw->pw_name, u.name )) goto done;
+        if (!native_match( &u )) goto done;
         for (j = 0; j < *count; j++)
             if (users[j].uid == u.uid || !strcmp( users[j].name, u.name )) goto done;
         users[(*count)++] = u;
@@ -369,26 +435,29 @@ done:
     fclose( f );
     return status;
 }
+#endif
 
 static enum wex_account_status administrator_member( const struct account_native *user,
                                                      const char *group, int *member )
 {
-    struct group *gr = native_group( group );
+    struct native_group_result gr;
     gid_t target, *gids;
     int i, count = 32;
     *member = 0;
-    if (!gr) return WEX_ACCOUNT_ADMIN_GROUP_MISSING;
-    target = gr->gr_gid;
-    if (target == (gid_t)-1) return WEX_ACCOUNT_NSS_ERROR;
+    if (!native_group( group, &gr )) return WEX_ACCOUNT_ADMIN_GROUP_MISSING;
+    target = gr.gr.gr_gid;
+    if (target == (gid_t)-1) { free( gr.buffer ); return WEX_ACCOUNT_NSS_ERROR; }
 #ifdef WEX_ACCOUNTS_TEST
     if (test_group)
     {
         char **p;
         *member = user->gid == target;
-        for (p = gr->gr_mem; *p; p++) if (!strcmp( *p, user->name )) *member = 1;
+        for (p = gr.gr.gr_mem; *p; p++) if (!strcmp( *p, user->name )) *member = 1;
+        free( gr.buffer );
         return WEX_ACCOUNT_OK;
     }
 #endif
+    free( gr.buffer );
     for (;;)
     {
         int n = count;
@@ -410,14 +479,14 @@ enum wex_account_status lookup_account( const char *name, uid_t uid, uint64_t ca
                                         struct wex_account *result )
 {
     struct account_map *map = NULL;
-    struct account_native *users = NULL;
+    struct account_native user;
     struct account_policy policy;
     struct wex_account value;
     const struct account_record *r = NULL;
-    const struct account_native *u = NULL;
+    const struct account_native *u = &user;
     char *buf = NULL;
     size_t length;
-    unsigned int i, count;
+    unsigned int i;
     int dir = -1;
     enum wex_account_status status;
 #ifndef WEX_ACCOUNTS_STANDALONE
@@ -434,7 +503,7 @@ enum wex_account_status lookup_account( const char *name, uid_t uid, uint64_t ca
     if ((status = read_policy( dir, &policy ))) goto done;
     if ((status = read_protected( dir, "accounts.map", policy.system_gid, &buf, &length ))) goto done;
     status = WEX_ACCOUNT_MAP_UNREADABLE;
-    if (!(map = malloc( sizeof(*map) )) || !(users = malloc( ACCOUNT_LIMIT * sizeof(*users) ))) goto done;
+    if (!(map = malloc( sizeof(*map) ))) goto done;
     if ((status = parse_map( buf, map ))) goto done;
     status = WEX_ACCOUNT_UNKNOWN;
     for (i = 0; i < map->count; i++)
@@ -446,10 +515,8 @@ enum wex_account_status lookup_account( const char *name, uid_t uid, uint64_t ca
     if (!r) goto done;
     status = WEX_ACCOUNT_TOMBSTONED;
     if (!r->active) goto done;
-    if ((status = native_accounts( users, &count ))) goto done;
-    for (i = 0; i < count; i++) if (users[i].uid == r->uid && !strcmp( users[i].name, r->name )) u = &users[i];
     status = WEX_ACCOUNT_NSS_MISMATCH;
-    if (!u) goto done;
+    if (!native_passwd( r->name, 0, &user ) || user.uid != r->uid || !native_match( &user )) goto done;
     status = WEX_ACCOUNT_UNSUPPORTED;
     if (!u->supported) goto done;
     status = WEX_ACCOUNT_LEGACY_CONFLICT;
@@ -474,7 +541,6 @@ enum wex_account_status lookup_account( const char *name, uid_t uid, uint64_t ca
     *result = value;
     status = WEX_ACCOUNT_OK;
 done:
-    free( users );
     free( map );
     free( buf );
     if (dir != -1) close( dir );

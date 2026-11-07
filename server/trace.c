@@ -652,6 +652,14 @@ static void dump_varargs_user_handles( const char *prefix, data_size_t size )
     remove_data( size );
 }
 
+/* E1-S records contain nonces, evidence references and account identities.
+ * The generator preserves this redaction through VARARG(record,e1s_token). */
+static void dump_varargs_e1s_token( const char *prefix, data_size_t size )
+{
+    fprintf( stderr, "%s<redacted, %u bytes>", prefix, size );
+    remove_data( size );
+}
+
 static void dump_varargs_bytes( const char *prefix, data_size_t size )
 {
     const unsigned char *data = cur_data;
