@@ -3750,6 +3750,7 @@ static void dump_load_e1s_profile_reply( const struct load_e1s_profile_reply *re
 {
     fprintf( stderr, " hkey=%04x", req->hkey );
     fprintf( stderr, ", managed=%08x", req->managed );
+    dump_uint64( ", generation=", &req->generation );
 }
 
 typedef void (*dump_func)( const void *req );

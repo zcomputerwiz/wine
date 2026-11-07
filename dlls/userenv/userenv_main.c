@@ -725,9 +725,13 @@ BOOL WINAPI UnloadUserProfile( HANDLE hToken, HANDLE hProfile )
     NTSTATUS status = e1s_load_profile( WEX_HKU_QUERY, hToken, 0, &unused, &managed );
     if (!status && managed)
     {
-        status = e1s_load_profile( WEX_HKU_UNLOAD_S14, hToken, 0, &unused, &managed );
+        typedef NTSTATUS (WINAPI *unload_fn)(ULONG,HANDLE,HANDLE,ACCESS_MASK,const void*,ULONG,HANDLE*,ULONG*);
+        unload_fn unload = (unload_fn)GetProcAddress( GetModuleHandleW( L"ntdll.dll" ), "NtLoadWexProfile" );
+        if (!hProfile || !unload) { SetLastError( ERROR_INVALID_HANDLE ); return FALSE; }
+        status = unload( WEX_HKU_UNLOAD_S14, hProfile, hToken, 0, NULL, 0, &unused, &managed );
         SetLastError( RtlNtStatusToDosError( status ) );
-        return FALSE;
+        if (status) return FALSE;
+        return !NtClose( hProfile );
     }
     FIXME("(%p, %p): stub\n", hToken, hProfile);
     return FALSE;

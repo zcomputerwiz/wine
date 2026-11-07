@@ -59,6 +59,9 @@
 #include "wine/wex_profile.h"
 
 #include "winternl.h"
+#if defined(WEX_E1S13_HKU_TEST) && defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
+#include <sys/random.h>
+#endif
 
 struct notify
 {
@@ -104,6 +107,10 @@ struct key
     uint64_t          mod_seq;     /* modification sequence in session */
     struct security_descriptor *e1s_sd; /* borrowed managed default, SID-parametric */
     struct e1s_hive   *e1s_view;    /* private dynamic HKCR union cache */
+    struct list       e1s_entry;   /* all managed keys, even deleted/detached ones */
+    struct wex_account *e1s_proxy_account; /* cache proxy owns identity, no hive reference */
+    uint64_t          e1s_proxy_generation;
+    int               e1s_proxy_classes;
 };
 
 /* key flags */
@@ -114,6 +121,7 @@ struct key
 #define KEY_WOWSHARE 0x0010  /* key is a Wow64 shared key (used for Software\Classes) */
 #define KEY_PREDEF   0x0020  /* key is marked as predefined */
 #define KEY_E1S_ROOT 0x0040  /* S14 alone can unload/rename this root */
+#define KEY_E1S_PERSIST 0x0080 /* managed persistence, separate from synthetic volatility */
 
 #define OBJ_KEY_WOW64 0x100000 /* magic flag added to attributes for WoW64 redirection */
 
@@ -136,23 +144,38 @@ struct key_value
 
 /* the root of the registry tree */
 static struct key *root_key;
+static struct list e1s_keys = LIST_INIT(e1s_keys);
+struct e1s_sid_generation
+{
+    struct e1s_sid_generation *next;
+    unsigned int sid[5];
+    uint64_t generation;
+};
 struct e1s_hive
 {
     struct e1s_hive *next;
     struct wex_account account;
     struct wex_profile_storage storage;
     struct security_descriptor *sd;
-    struct key *user, *classes, *view, *machine_classes;
+    struct key *user, *classes, *view, *machine_classes, *alias;
+    struct e1s_sid_generation *generation;
+    enum { E1S_LOADING, E1S_LOADED, E1S_UNLOADING, E1S_POISONED } phase;
+    unsigned int idle_sweeps;
     int refreshing;
 };
 static struct e1s_hive *e1s_hives;
 #if defined(WEX_E1S13_HKU_TEST) && defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
 static unsigned int e1s_hive_count;
+static struct e1s_sid_generation *e1s_generations;
+static uint64_t e1s_server_generation;
+static unsigned char e1s_prefix_id[16];
 #endif
 static int e1s_strict_loading;
 static int e1s_refresh_view( struct key * );
 static struct key *e1s_view_user( struct key *, int create );
 static struct e1s_hive *e1s_find_hive( const struct wex_account * );
+static int e1s_save_hive( struct e1s_hive * );
+static int e1s_key_ready( const struct key * );
 
 static const timeout_t ticks_1601_to_1970 = (timeout_t)86400 * (369 * 365 + 89) * TICKS_PER_SEC;
 static const timeout_t save_period = 30 * -TICKS_PER_SEC;  /* delay between periodic saves */
@@ -195,10 +218,11 @@ struct save_branch_info
     bool            has_ephemeral_mods;
     bool            is_shared_machine;
     bool            sysrun;  /* machine hive of a system role server: fixed path, saved with the system group */
+    struct e1s_hive *managed; /* S14: descriptor-only save, never filename routing */
     struct list     tombstones;
 };
 
-#define MAX_SAVE_BRANCH_INFO 3
+#define MAX_SAVE_BRANCH_INFO 11 /* three startup branches and eight managed profiles */
 static int save_branch_count;
 static bool machine_hive_saved;  /* elevation enforced by the machine hive loaded at startup */
 static struct save_branch_info save_branch_info[MAX_SAVE_BRANCH_INFO];
@@ -882,6 +906,14 @@ static bool key_init( struct object *obj, const void *init_data )
     key->mod_seq     = 0;
     key->e1s_sd      = parent ? parent->e1s_sd : NULL;
     key->e1s_view    = parent ? parent->e1s_view : NULL;
+    list_init( &key->e1s_entry );
+    key->e1s_proxy_account = NULL;
+    key->e1s_proxy_generation = 0;
+    key->e1s_proxy_classes = 0;
+    if (key->e1s_sd)
+    {
+        if (!(data->options & REG_OPTION_VOLATILE)) key->flags |= KEY_E1S_PERSIST;
+    }
     list_init( &key->notify_list );
 
     if ((key->classlen = (data->classlen / sizeof(WCHAR)) * sizeof(WCHAR)) &&
@@ -915,6 +947,7 @@ static bool key_init( struct object *obj, const void *init_data )
         }
     }
 
+    if (key->e1s_sd) list_add_tail( &e1s_keys, &key->e1s_entry );
     return true;
 }
 
@@ -1176,6 +1209,7 @@ static struct object *key_lookup_name( struct object *obj, struct unicode_str *n
     assert( obj->ops == &key_ops );
 
     if (!name) return NULL;  /* open the key itself */
+    if (!e1s_key_ready( key )) return NULL;
     if (key->e1s_view && !e1s_refresh_view( key )) return NULL;
 
     if (key->flags & KEY_DELETED)
@@ -1356,6 +1390,8 @@ static void key_destroy( struct object *obj )
     assert( obj->ops == &key_ops );
 
     free( key->class );
+    list_remove( &key->e1s_entry );
+    free( key->e1s_proxy_account );
     for (i = 0; i <= key->last_value; i++)
     {
         free( key->values[i].name );
@@ -2021,6 +2057,23 @@ static struct key *get_hkey_obj( obj_handle_t hkey, unsigned int access )
 {
     struct key *key = (struct key *)get_handle_obj( current->process, hkey, access, &key_ops );
 
+    if (key && key->e1s_proxy_account)
+    {
+        struct e1s_hive *m = e1s_find_hive( key->e1s_proxy_account );
+        struct key *resolved = NULL;
+        if (m && m->phase == E1S_LOADED && m->generation->generation == key->e1s_proxy_generation)
+            resolved = (struct key *)grab_object( key->e1s_proxy_classes ? m->view : m->user );
+        else set_error( STATUS_KEY_DELETED );
+        release_object( key );
+        key = resolved;
+    }
+    if (key && key->e1s_sd)
+    {
+        struct e1s_hive *m;
+        for (m = e1s_hives; m && m->sd != key->e1s_sd; m = m->next) ;
+        if (!m || m->phase != E1S_LOADED)
+        { release_object( key ); key = NULL; set_error( STATUS_REGISTRY_CORRUPT ); }
+    }
     if (key && key->flags & KEY_DELETED)
     {
         set_error( STATUS_KEY_DELETED );
@@ -2450,7 +2503,10 @@ static void load_keys( struct key *key, const char *filename, FILE *f, int prefi
             else file_read_error( "Value without key", &info );
             break;
         case '#':   /* option */
-            if (e1s_strict_loading) { set_error( STATUS_NOT_REGISTRY_FILE ); goto done; }
+            /* Only class strings emitted by S14's serializer are accepted.
+             * No security/link/global directives can alter managed authority. */
+            if (e1s_strict_loading && (!subkey || strncmp( p, "#class=", 7 )))
+            { set_error( STATUS_NOT_REGISTRY_FILE ); goto done; }
             if (subkey) load_key_option( subkey, p, &info );
             else if (!load_global_option( p, &info )) goto done;
             break;
@@ -2484,6 +2540,43 @@ static struct e1s_hive *e1s_find_hive( const struct wex_account *a )
         if (!memcmp( a->sid, m->account.sid, sizeof(a->sid) ) &&
             !memcmp( a->incarnation, m->account.incarnation, 16 )) return m;
     return NULL;
+}
+
+static int e1s_key_ready( const struct key *key )
+{
+    struct e1s_hive *m;
+    if (!key->e1s_sd) return 1;
+    if (key->e1s_proxy_account)
+    {
+        m = e1s_find_hive( key->e1s_proxy_account );
+        if (m && m->phase == E1S_LOADED && m->generation->generation == key->e1s_proxy_generation) return 1;
+    }
+    else
+        for (m = e1s_hives; m; m = m->next)
+            if (m->sd == key->e1s_sd && (m->phase == E1S_LOADED || m->phase == E1S_LOADING)) return 1;
+    set_error( STATUS_REGISTRY_CORRUPT );
+    return 0;
+}
+
+int e1s_profile_process_started( struct token *token )
+{
+    struct e1s_hive *m = token ? e1s_find_hive( token_e1s_account( token ) ) : NULL;
+#if defined(WEX_E1S13_HKU_TEST) && defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
+    if (token && token_e1s_account( token ) && (!m || m->phase != E1S_LOADED))
+    { set_error( STATUS_OBJECT_PATH_NOT_FOUND ); return 0; }
+#endif
+    if (m && m->phase == E1S_LOADED) m->idle_sweeps = 0;
+    return 1;
+}
+
+int e1s_profile_commit_process( struct process *process, const unsigned char *lease_id, uint64_t request_id )
+{
+    struct e1s_hive *m = process && process->token ? e1s_find_hive( token_e1s_account( process->token ) ) : NULL;
+    if (!m || m->phase != E1S_LOADED || process->e1s_profile_dead ||
+        !lease_id || memcmp( lease_id, m->storage.reserved.lease_id, 16 ) ||
+        m->storage.reserved.request_id != request_id || m->storage.reserved.state != 1) return 0;
+    m->storage.reserved.state = 2; m->idle_sweeps = 0;
+    return 1;
 }
 
 static struct key *e1s_source_path( struct key *root, struct unicode_str path )
@@ -2602,6 +2695,7 @@ static int e1s_refresh_view( struct key *view )
 
 static obj_handle_t e1s_alloc_key_handle( struct key *key, unsigned int access, unsigned int attr )
 {
+    if (!e1s_key_ready( key )) return 0;
     /* Existing MIC checks examine explicit write bits. A managed MAXIMUM_ALLOWED
      * request must not acquire High write rights through that implicit mask. */
     if (key->e1s_sd && (access & MAXIMUM_ALLOWED) &&
@@ -2735,6 +2829,70 @@ static int load_init_registry_from_file( const char *filename, struct key *key, 
 }
 
 #if defined(WEX_E1S13_HKU_TEST) && defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
+static int e1s_deny( unsigned int status, const char *site )
+{
+    fprintf( stderr, "E1S14 deny=%s status=%08x\n", site, status );
+    set_error( status );
+    return 0;
+}
+
+static int e1s_random( void *data, size_t size )
+{
+    ssize_t n;
+    do n = getrandom( data, size, 0 ); while (n < 0 && errno == EINTR);
+    return n == (ssize_t)size;
+}
+
+static int e1s_acquire_lease( struct e1s_hive *m, struct token *token, obj_handle_t context )
+{
+    struct wex_profile_lease_reserved *lease = &m->storage.reserved;
+    struct e1s_sid_generation *g;
+    uint64_t request_id, server_gen;
+    unsigned int count = 0;
+    if (!token_e1s_profile_request( context, token, &request_id, &server_gen ))
+        return e1s_deny( STATUS_ACCESS_DENIED, "lease-request" );
+    if (!e1s_server_generation)
+    {
+        if (!e1s_random( e1s_prefix_id, sizeof(e1s_prefix_id) ) ||
+            !memcmp( e1s_prefix_id, (unsigned char[16]){0}, 16 ))
+        { e1s_server_generation = 0; return e1s_deny( STATUS_UNSUCCESSFUL, "lease-rng" ); }
+        e1s_server_generation = server_gen;
+    }
+    if (server_gen != e1s_server_generation) return e1s_deny( STATUS_ACCESS_DENIED, "lease-server-generation" );
+    for (g = e1s_generations; g; g = g->next)
+    {
+        count++;
+        if (!memcmp( g->sid, m->account.sid, sizeof(g->sid) )) break;
+    }
+    if (!g)
+    {
+        if (count >= 4096) return e1s_deny( STATUS_INSUFFICIENT_RESOURCES, "generation-limit" );
+        if (!(g = calloc( 1, sizeof(*g) ))) return e1s_deny( STATUS_NO_MEMORY, "generation-alloc" );
+        memcpy( g->sid, m->account.sid, sizeof(g->sid) );
+        g->generation = 1; g->next = e1s_generations; e1s_generations = g;
+    }
+    if (g->generation == UINT64_MAX) return e1s_deny( STATUS_INTEGER_OVERFLOW, "generation-exhausted" );
+    m->generation = g;
+    /* Generation is never reused, including setup failures. The 128-bit id is
+     * (server generation, global lease allocation sequence), so leases for
+     * different SIDs cannot collide. */
+    {
+        static uint64_t next_lease;
+        if (next_lease == UINT64_MAX) return e1s_deny( STATUS_INTEGER_OVERFLOW, "lease-exhausted" );
+        wex_token_put64( lease->lease_id, e1s_server_generation );
+        wex_token_put64( lease->lease_id + 8, ++next_lease );
+    }
+    lease->request_id = request_id;
+    lease->server_gen = e1s_server_generation;
+    memcpy( lease->prefix_id, e1s_prefix_id, 16 );
+    memcpy( lease->account_key, m->account.incarnation, 16 );
+    memcpy( lease->user_sid, token_get_user_sid( token ), sizeof(lease->user_sid) );
+    lease->map_gen = m->account.generation;
+    lease->profile_generation = m->storage.profile_generation;
+    lease->state = 1;
+    return 1;
+}
+
 /* A loaded managed root never falls through to the local SID default. */
 static int e1s_secure_keys( struct key *key, struct security_descriptor *sd, unsigned int depth, unsigned int *count )
 {
@@ -2745,7 +2903,8 @@ static int e1s_secure_keys( struct key *key, struct security_descriptor *sd, uns
     free( key->obj.sd );
     if (!(key->obj.sd = memdup( sd, size ))) return 0;
     key->e1s_sd = sd;
-    key->flags |= KEY_VOLATILE;
+    if (list_empty( &key->e1s_entry )) list_add_tail( &e1s_keys, &key->e1s_entry );
+    key->flags |= KEY_VOLATILE | KEY_E1S_PERSIST;
     for (i = 0; i <= key->last_subkey; i++)
         if (!e1s_secure_keys( key->subkeys[i], sd, depth + 1, count )) return 0;
     return 1;
@@ -2796,7 +2955,10 @@ static int e1s_read_hive( struct e1s_hive *m )
     e1s_strict_loading = 1;
     load_keys( m->user, NULL, stream, 0 ); /* fixed relative base, no autodetection */
     e1s_strict_loading = 0;
+    /* A saved hive lists parent keys that earlier sections already created: that is not a failure. */
+    if (get_error() == STATUS_OBJECT_NAME_EXISTS) clear_error();
     ret = !get_error();
+    if (ret) m->storage.hive_identity = after;
     fclose( stream );
 done:
     free( text );
@@ -2822,20 +2984,31 @@ static struct e1s_hive *e1s_load_hive( struct token *token, obj_handle_t context
     if (!token_claim_e1s_profile( context, token, record, size, &account )) return NULL;
     for (other = e1s_hives; other; other = other->next)
         if (!memcmp( other->account.sid, account.sid, sizeof(account.sid) ))
-        { set_error( STATUS_OBJECT_NAME_COLLISION ); return NULL; }
+        {
+            e1s_deny( other->phase == E1S_UNLOADING ? STATUS_DELETE_PENDING :
+                      other->phase == E1S_LOADING ? STATUS_DEVICE_NOT_READY :
+                      other->phase == E1S_POISONED ? STATUS_REGISTRY_CORRUPT : STATUS_OBJECT_NAME_COLLISION,
+                      "load-conflict" );
+            return NULL;
+        }
     if (equal_sid( token_get_user_sid( token ), &local_user_sid ) || e1s_hive_count >= 8)
     { set_error( STATUS_ACCESS_DENIED ); return NULL; }
     if (!(m = calloc( 1, sizeof(*m) ))) { set_error( STATUS_NO_MEMORY ); return NULL; }
-    m->account = account; m->storage.profile_fd = m->storage.hive_fd = -1;
+    m->account = account; m->storage.profile_fd = m->storage.hive_fd = m->storage.sid_lock_fd = -1;
+    m->phase = E1S_LOADING;
+    m->next = e1s_hives; e1s_hives = m; e1s_hive_count++;
     if (fstat( config_dir_fd, &prefix )) goto failed;
     storage_status = wex_profile_open_existing( config_dir_fd, prefix.st_dev, prefix.st_ino,
         getuid(), getgid(), &account, wex_token_u64( record + 32 ), &m->storage );
     if (storage_status)
     {
         set_error( storage_status == WEX_PROFILE_ABSENT ? STATUS_OBJECT_PATH_NOT_FOUND :
-                   storage_status == WEX_PROFILE_BUSY ? STATUS_SHARING_VIOLATION : STATUS_ACCESS_DENIED );
+                   storage_status == WEX_PROFILE_BUSY ? STATUS_SHARING_VIOLATION :
+                   storage_status == WEX_PROFILE_RECOVERY ? STATUS_REGISTRY_CORRUPT : STATUS_ACCESS_DENIED );
+        fprintf( stderr, "E1S14 deny=storage-open storage=%u status=%08x\n", storage_status, get_error() );
         goto failed;
     }
+    if (!e1s_acquire_lease( m, token, context )) goto failed;
     clear_error();
     if (!(m->sd = e1s_profile_alloc_sd( token_get_user_sid( token ), 0 ))) goto failed;
     snprintf( name, sizeof(name), "User\\%s", m->storage.path.sid );
@@ -2865,6 +3038,8 @@ static struct e1s_hive *e1s_load_hive( struct token *token, obj_handle_t context
     snprintf( name, sizeof(name), "\\Registry\\User\\%s\\Software\\Classes", m->storage.path.sid );
     buffer = ascii_to_unicode_str( name, &path );
     if (!buffer) goto failed;
+    /* A persisted hive already holds Software\Classes and Wow6432Node: NAME_EXISTS from the creates above is not an error. */
+    if (get_error() == STATUS_OBJECT_NAME_EXISTS) clear_error();
     set_value( alias, symlink_str, REG_LINK, path.str, path.len );
     free( buffer ); buffer = NULL;
     if (get_error()) goto failed;
@@ -2886,14 +3061,23 @@ static struct e1s_hive *e1s_load_hive( struct token *token, obj_handle_t context
     if (wex_profile_verify_existing( config_dir_fd, &account, &m->storage ) || !e1s_profile_security_verify( security ) ||
         !token_validate_e1s_profile( context, token, &account ))
     { set_error( STATUS_ACCESS_DENIED ); goto failed; }
+    if (save_branch_count < 3 || save_branch_count >= MAX_SAVE_BRANCH_INFO)
+    { e1s_deny( STATUS_INSUFFICIENT_RESOURCES, "save-registration" ); goto failed; }
     if (!(*result = e1s_alloc_key_handle( m->user, access, 0 ))) goto failed;
     m->user->flags |= KEY_E1S_ROOT;
     m->classes->flags |= KEY_E1S_ROOT;
     alias->flags |= KEY_E1S_ROOT;
     e1s_profile_security_commit( security );
     m->storage.acl_pending = 0;
-    m->next = e1s_hives; e1s_hives = m; e1s_hive_count++;
-    release_object( alias );
+    m->alias = alias;
+    {
+        struct save_branch_info *info = &save_branch_info[save_branch_count++];
+        memset( info, 0, sizeof(*info) ); list_init( &info->tombstones );
+        info->key = (struct key *)grab_object( m->user );
+        info->managed = m;
+        info->filename = "<managed-profile>"; /* diagnostics only, never opened */
+    }
+    m->phase = E1S_LOADED;
     clear_error();
     return m;
 failed:
@@ -2906,12 +3090,181 @@ failed:
     if (m->user) { delete_key( m->user, 1 ); release_object( m->user ); }
     if (m->machine_classes) release_object( m->machine_classes );
     e1s_profile_security_abort( security );
-    if (m->storage.profile_fd >= 0) close( m->storage.profile_fd );
-    if (m->storage.hive_fd >= 0) close( m->storage.hive_fd );
+    wex_profile_storage_close( &m->storage );
+    if (m->generation) m->generation->generation++;
+    m->storage.reserved.state = 3;
+    e1s_hives = m->next; e1s_hive_count--; /* synchronous reservation is list head */
     free( m->sd ); free( m );
     set_error( status );
     return NULL;
 }
+
+/* Cache keys are detached proxy objects: copied identity and generation, an
+ * owned SD, and no reference to the hive or its HKCR view. A real open using a
+ * proxy returns an ordinary handle, which participates in the busy check. */
+static obj_handle_t e1s_cache_root( struct e1s_hive *m, unsigned int access, int classes )
+{
+    struct key *proxy;
+    struct security_descriptor *sd = key_get_sd( &(classes ? m->view : m->user)->obj );
+    obj_handle_t result = 0;
+    unsigned int count = 0;
+    char name[160];
+    snprintf( name, sizeof(name), "User\\%s_E1S14Proxy", m->storage.path.sid );
+    if (!(proxy = e1s_create_new_root( name ))) return 0;
+    if (sd && e1s_secure_keys( proxy, sd, 0, &count ) &&
+        (proxy->e1s_proxy_account = memdup( &m->account, sizeof(m->account) )))
+    {
+        list_remove( &proxy->e1s_entry ); list_init( &proxy->e1s_entry );
+        proxy->e1s_sd = proxy->obj.sd;
+        proxy->e1s_proxy_generation = m->generation->generation;
+        proxy->e1s_proxy_classes = classes;
+        result = e1s_alloc_key_handle( proxy, access, 0 );
+    }
+    key_unlink_name( &proxy->obj, proxy->obj.name );
+    release_object( proxy );
+    return result;
+}
+
+/* The synthetic KEY_VOLATILE bit isolates this tree from Bob's startup save
+ * branches. KEY_E1S_PERSIST distinguishes actual persistent managed keys from
+ * keys explicitly created with REG_OPTION_VOLATILE. */
+static int e1s_write_keys( const struct key *key, const struct key *root, FILE *f,
+                           unsigned int depth, unsigned int *count )
+{
+    int i;
+    if (!(key->flags & KEY_E1S_PERSIST)) return 1;
+    if (depth > 64 || ++*count > 16384 || key->flags & (KEY_SYMLINK | KEY_PREDEF | KEY_DELETED)) return 0;
+    /* S13's supported hive format reestablishes the canonical descriptor on
+     * load. Never claim durability for a changed per-key SD that format cannot
+     * restore. Keep the hive/lease on this unsupported state. */
+    if (key->obj.sd)
+    {
+        const struct security_descriptor *sd = key->e1s_sd;
+        size_t size = sizeof(*sd) + sd->owner_len + sd->group_len + sd->sacl_len + sd->dacl_len;
+        if (key->obj.sd->owner_len != sd->owner_len || key->obj.sd->group_len != sd->group_len ||
+            key->obj.sd->sacl_len != sd->sacl_len || key->obj.sd->dacl_len != sd->dacl_len ||
+            memcmp( key->obj.sd, sd, size )) return 0;
+    }
+    fprintf( f, "\n[" );
+    if (key != root) dump_path( key, root, f );
+    fprintf( f, "] %u\n", (unsigned int)((key->modif - ticks_1601_to_1970) / TICKS_PER_SEC) );
+    if (key->class)
+    {
+        fputs( "#class=\"", f ); dump_strW( key->class, key->classlen, f, "\"\"" ); fputs( "\"\n", f );
+    }
+    if (ferror( f ) || ftello( f ) < 0 || ftello( f ) > 1024 * 1024) return 0;
+    for (i = 0; i <= key->last_value; i++)
+    {
+        if (key->values[i].len > 1024 * 1024) return 0;
+        dump_value( &key->values[i], f );
+        if (ftello( f ) > 1024 * 1024) return 0;
+    }
+    for (i = 0; i <= key->last_subkey; i++)
+        if (!e1s_write_keys( key->subkeys[i], root, f, depth + 1, count )) return 0;
+    return !ferror( f );
+}
+
+static int e1s_write_hive( int fd, void *arg )
+{
+    struct e1s_hive *m = arg;
+    FILE *f;
+    unsigned int count = 0;
+    int copy = dup( fd ), ret;
+    if (copy < 0) return 0;
+    if (!(f = fdopen( copy, "w" ))) { close( copy ); return 0; }
+    fputs( "WINE REGISTRY Version 2\n", f );
+    ret = e1s_write_keys( m->user, m->user, f, 0, &count );
+    if (fclose( f )) ret = 0;
+    return ret && e1s_profile_secure_hive( fd, &m->account );
+}
+
+static int e1s_save_hive( struct e1s_hive *m )
+{
+    enum wex_profile_status s;
+    if (m->phase != E1S_LOADED && m->phase != E1S_UNLOADING)
+        return e1s_deny( STATUS_REGISTRY_CORRUPT, "save-state" );
+    s = wex_profile_save( config_dir_fd, &m->account, &m->storage, e1s_write_hive, m );
+    if (!s) return 1;
+    if (s == WEX_PROFILE_BUSY)
+    {
+        m->phase = E1S_LOADED; /* prefix-lock conflict occurred before a save transaction */
+        return e1s_deny( STATUS_SHARING_VIOLATION, "save-prefix-lock" );
+    }
+    m->phase = E1S_POISONED; /* keep keys, lease, locks and all recovery data */
+    return e1s_deny( s == WEX_PROFILE_RECOVERY ? STATUS_REGISTRY_CORRUPT :
+                     s == WEX_PROFILE_IDENTITY || s == WEX_PROFILE_SUBSTITUTION ? STATUS_FILE_INVALID :
+                     STATUS_REGISTRY_IO_FAILED, "durable-save" );
+}
+
+static int e1s_unload_hive( struct e1s_hive *m )
+{
+    struct e1s_hive **link;
+    struct key *key, *next;
+    struct sid sid = { SID_REVISION, 5, SECURITY_NT_AUTHORITY, {0} };
+    unsigned int i;
+    if (m->phase == E1S_LOADING) return e1s_deny( STATUS_DEVICE_NOT_READY, "unload-loading" );
+    if (m->phase == E1S_UNLOADING) return e1s_deny( STATUS_DELETE_PENDING, "unload-unloading" );
+    if (m->phase != E1S_LOADED) return e1s_deny( STATUS_REGISTRY_CORRUPT, "unload-recovery" );
+    memcpy( sid.sub_auth, m->account.sid, sizeof(m->account.sid) );
+    if (process_e1s_profile_busy( &sid ))
+    {
+        return e1s_deny( STATUS_RESOURCE_IN_USE, "unload-live-user" );
+    }
+    LIST_FOR_EACH_ENTRY( key, &e1s_keys, struct key, e1s_entry )
+        if (key->e1s_sd == m->sd && (key->obj.handle_count || !list_empty( &key->notify_list ) ||
+                                    !list_empty( &key->obj.wait_queue )))
+            return e1s_deny( STATUS_CANNOT_DELETE, "unload-open-key" );
+    /* Check save registration before any I/O or destructive step. */
+    for (i = 3; i < save_branch_count; i++) if (save_branch_info[i].managed == m) break;
+    if (i == save_branch_count || save_branch_info[i].key != m->user || !list_empty( &save_branch_info[i].tombstones ))
+        return e1s_deny( STATUS_REGISTRY_CORRUPT, "unload-save-registration" );
+    m->phase = E1S_UNLOADING;
+    if (!e1s_save_hive( m )) return 0;
+    /* Synchronous server dispatch is the load/unload lock. No client request,
+     * token assignment or new-process publication interleaves this commit. */
+    m->generation->generation++;
+    LIST_FOR_EACH_ENTRY_SAFE( key, next, &e1s_keys, struct key, e1s_entry )
+        if (key->e1s_sd == m->sd)
+        {
+            key->e1s_sd = NULL; key->e1s_view = NULL; key->flags |= KEY_DELETED;
+            list_remove( &key->e1s_entry ); list_init( &key->e1s_entry );
+        }
+    release_object( save_branch_info[i].key );
+    if (i != --save_branch_count) save_branch_info[i] = save_branch_info[save_branch_count];
+    list_init( &save_branch_info[i].tombstones ); /* managed lists are always empty */
+    memset( &save_branch_info[save_branch_count], 0, sizeof(save_branch_info[0]) );
+    unlink_named_object( &m->alias->obj );
+    unlink_named_object( &m->user->obj );
+    release_object( m->alias ); release_object( m->classes ); release_object( m->user );
+    release_object( m->view ); release_object( m->machine_classes );
+    wex_profile_storage_close( &m->storage );
+    m->storage.reserved.state = 3;
+    for (link = &e1s_hives; *link != m; link = &(*link)->next) ;
+    *link = m->next; e1s_hive_count--;
+    free( m->sd ); free( m );
+    clear_error();
+    return 1;
+}
+
+/* Committed leases belong to server process tracking, not broker lifetime.
+ * Retry last-user draining on the existing 30-second registry timer; real key
+ * handles keep a hive loaded. Setup-only leases still require explicit rollback
+ * release (S18), so a loaded profile cannot disappear during child setup. */
+static void e1s_reap_hives(void)
+{
+    struct e1s_hive *m, *next;
+    for (m = e1s_hives; m; m = next)
+    {
+        struct sid sid = { SID_REVISION, 5, SECURITY_NT_AUTHORITY, {0} };
+        next = m->next;
+        memcpy( sid.sub_auth, m->account.sid, sizeof(m->account.sid) );
+        if (m->phase != E1S_LOADED || m->storage.reserved.state != 2) continue;
+        if (process_e1s_profile_busy( &sid )) m->idle_sweeps = 0;
+        else if (m->idle_sweeps++) e1s_unload_hive( m );
+    }
+}
+#else
+static int e1s_save_hive( struct e1s_hive *m ) { set_error( STATUS_NOT_SUPPORTED ); return 0; }
 #endif
 
 DECL_HANDLER(load_e1s_profile)
@@ -2930,7 +3283,12 @@ DECL_HANDLER(load_e1s_profile)
     }
     account = token_e1s_account( token );
     if (req->operation == WEX_HKU_QUERY && !req->context && !req->access && !get_req_data_size() && !get_reply_max_size())
-    { reply->managed = !!account; release_object( token ); return; }
+    {
+        reply->managed = !!account;
+        if ((m = e1s_find_hive( account )) && m->phase == E1S_LOADED)
+            reply->generation = m->generation->generation;
+        release_object( token ); return;
+    }
     set_error( STATUS_ACCESS_DENIED );
     if (req->operation == WEX_HKU_LOAD)
     {
@@ -2940,25 +3298,85 @@ DECL_HANDLER(load_e1s_profile)
         m = e1s_load_hive( token, req->context, get_req_data(), get_req_data_size(), req->access, &reply->hkey );
         if (!m) goto done;
         reply->managed = 1;
+        reply->generation = m->generation->generation;
+        /* Reloading a persisted hive reopens existing keys, which leaves the NAME_EXISTS warning set. */
+        if (get_error() == STATUS_OBJECT_NAME_EXISTS) clear_error();
         goto done;
     }
     else
     {
         if (!account || get_reply_max_size()) goto done;
-        if (req->context || get_req_data_size()) goto done;
-        if (req->operation == WEX_HKU_OPEN || req->operation == WEX_HKU_UNLOAD_S14)
+        if ((req->context && req->operation != WEX_HKU_UNLOAD_S14 && req->operation != WEX_HKU_TEST_TRANSFER) || get_req_data_size()) goto done;
+        if (req->operation == WEX_HKU_OPEN || req->operation == WEX_HKU_UNLOAD_S14 ||
+            req->operation == WEX_HKU_TEST_CRASH || req->operation == WEX_HKU_TEST_TRANSFER)
         { if (!token_e1s_broker()) goto done; }
-        else if (req->operation != WEX_HKU_CURRENT && req->operation != WEX_HKU_CLASSES) goto done;
+        else if (req->operation != WEX_HKU_CURRENT && req->operation != WEX_HKU_CLASSES &&
+                 req->operation != WEX_HKU_CACHE_CURRENT && req->operation != WEX_HKU_CACHE_CLASSES) goto done;
         else if (!token_e1s_broker() && (token_e1s_account( effective ) == NULL ||
                  memcmp( token_e1s_account( effective )->incarnation, account->incarnation, 16 ) ||
                  !equal_sid( token_get_user_sid( effective ), token_get_user_sid( token ) ))) goto done;
         if (!(m = e1s_find_hive( account ))) { set_error( STATUS_OBJECT_PATH_NOT_FOUND ); goto done; }
-        if (req->operation == WEX_HKU_UNLOAD_S14) { e1s_profile_unload_s14(); goto done; }
+        if (req->operation == WEX_HKU_UNLOAD_S14)
+        {
+            if (req->access) goto done;
+            if (m->phase != E1S_LOADED)
+            {
+                e1s_unload_hive( m ); /* state denial precedes any lease/cache dereference */
+                goto done;
+            }
+            if (req->context)
+            {
+                struct key *profile = (struct key *)get_handle_obj( current->process, req->context, 0, &key_ops );
+                int match = profile && profile->e1s_proxy_account && !profile->e1s_proxy_classes &&
+                    profile->e1s_proxy_generation == m->generation->generation &&
+                    e1s_find_hive( profile->e1s_proxy_account ) == m;
+                if (profile) release_object( profile );
+                if (!match) { e1s_deny( STATUS_INVALID_HANDLE, "unload-profile-handle" ); goto done; }
+            }
+            if (e1s_unload_hive( m )) reply->managed = 1;
+            goto done;
+        }
+        if (req->operation == WEX_HKU_TEST_CRASH)
+        {
+#ifdef WEX_E1S14_CRASH_TEST
+            if (m->phase == E1S_LOADED && req->access >= 1 && req->access <= 3)
+            { m->storage.test_crash_step = req->access; reply->managed = 1; clear_error(); }
+#else
+            set_error( STATUS_NOT_SUPPORTED );
+#endif
+            goto done;
+        }
+        if (req->operation == WEX_HKU_TEST_TRANSFER)
+        {
+#ifdef WEX_E1S14_CRASH_TEST
+            struct process *child = NULL;
+            if (!req->access && req->context &&
+                (child = get_process_from_handle( req->context, PROCESS_QUERY_LIMITED_INFORMATION )))
+            {
+                if (child->parent_id == current->process->id && child->token &&
+                    equal_sid( token_get_user_sid( child->token ), token_get_user_sid( token ) ) &&
+                    e1s_profile_commit_process( child, m->storage.reserved.lease_id, m->storage.reserved.request_id ))
+                { reply->managed = 1; clear_error(); }
+                release_object( child );
+            }
+#else
+            set_error( STATUS_NOT_SUPPORTED );
+#endif
+            goto done;
+        }
+    }
+    if (m->phase != E1S_LOADED)
+    {
+        e1s_deny( m->phase == E1S_LOADING ? STATUS_DEVICE_NOT_READY :
+                  m->phase == E1S_UNLOADING ? STATUS_DELETE_PENDING : STATUS_REGISTRY_CORRUPT, "open-state" );
+        goto done;
     }
     key = req->operation == WEX_HKU_CLASSES ? m->view : m->user;
     clear_error();
-    reply->hkey = e1s_alloc_key_handle( key, req->access, 0 );
-    if (reply->hkey) reply->managed = 1;
+    if (req->operation == WEX_HKU_OPEN || req->operation == WEX_HKU_CACHE_CURRENT || req->operation == WEX_HKU_CACHE_CLASSES)
+        reply->hkey = e1s_cache_root( m, req->access, req->operation == WEX_HKU_CACHE_CLASSES );
+    else reply->hkey = e1s_alloc_key_handle( key, req->access, 0 );
+    if (reply->hkey) { reply->managed = 1; reply->generation = m->generation->generation; }
 done:
     release_object( token );
 #else
@@ -3296,6 +3714,8 @@ static void save_registry( struct key *key, obj_handle_t handle )
     struct file *file;
     int fd;
 
+    if (key->e1s_sd) { set_error( STATUS_ACCESS_DENIED ); return; }
+
     if (!(file = get_file_obj( current->process, handle, FILE_WRITE_DATA ))) return;
     fd = dup( get_file_unix_fd( file ) );
     release_object( file );
@@ -3613,6 +4033,7 @@ done:
 
 static int save_branch( struct save_branch_info *info )
 {
+    if (info->managed) return e1s_save_hive( info->managed );
     /* The system group is raised for the save only if elevation was enforced by the on-disk hive at startup (the
      * access checks then decide which writes exist); otherwise a machine hive keeps the stock rule: it is saved if
      * the real user can write it. The live value is not used: a user could set the helper in memory. */
@@ -3632,6 +4053,9 @@ static void periodic_save( void *arg )
     save_timeout_user = NULL;
     for (i = 0; i < save_branch_count; i++)
         save_branch( &save_branch_info[i] );
+#if defined(WEX_E1S13_HKU_TEST) && defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
+    e1s_reap_hives();
+#endif
     if (fchdir( server_dir_fd ) == -1) fatal_error( "chdir to server dir: %s\n", strerror( errno ));
     set_periodic_save_timer();
 }
@@ -3653,6 +4077,11 @@ void flush_registry(void)
     {
         if (!save_branch( &save_branch_info[i] ))
         {
+            if (save_branch_info[i].managed)
+            {
+                fprintf( stderr, "wineserver: managed profile save failed status=%08x\n", get_error() );
+                continue;
+            }
             fprintf( stderr, "wineserver: could not save registry branch to %s",
                      save_branch_info[i].filename );
             perror( " " );
@@ -3793,7 +4222,13 @@ DECL_HANDLER(flush_key)
     struct key *key = get_hkey_obj( req->hkey, 0 );
     if (key)
     {
-        if (key->e1s_sd) e1s_profile_unload_s14(); /* no false durable-success */
+        if (key->e1s_sd)
+        {
+            struct e1s_hive *m;
+            for (m = e1s_hives; m && m->sd != key->e1s_sd; m = m->next) ;
+            if (!m) set_error( STATUS_REGISTRY_CORRUPT );
+            else e1s_save_hive( m );
+        }
         release_object( key );
     }
 }
@@ -3923,7 +4358,7 @@ DECL_HANDLER(unload_registry)
 
     if ((key = open_named_object( &params )))
     {
-        if (key->e1s_sd) e1s_profile_unload_s14();
+        if (key->e1s_sd) set_error( STATUS_ACCESS_DENIED ); /* only managed broker operation can unload */
         else if (key->obj.handle_count)
             set_error( STATUS_CANNOT_DELETE );
         else if (key->obj.is_permanent)

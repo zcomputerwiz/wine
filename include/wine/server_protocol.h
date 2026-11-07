@@ -6547,6 +6547,7 @@ struct load_e1s_profile_reply
     struct reply_header __header;
     obj_handle_t        hkey;
     unsigned int        managed;
+    unsigned __int64    generation;
 };
 
 
@@ -7544,6 +7545,6 @@ union generic_reply
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 978
+#define SERVER_PROTOCOL_VERSION 979
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

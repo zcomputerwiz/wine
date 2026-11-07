@@ -142,6 +142,9 @@ struct fd
     struct object       *sync;        /* sync object for wait/signal */
     struct inode        *inode;       /* inode that this fd belongs to */
     struct list          inode_entry; /* entry in inode fd list */
+#if defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
+    struct list          e1s_profile_entry; /* includes anonymous/imported files */
+#endif
     struct closed_fd    *closed;      /* structure to store the unix fd at destroy time */
     struct object       *user;        /* object using this file descriptor */
     struct list          locks;       /* list of locks on this fd */
@@ -169,6 +172,9 @@ struct fd
 static void fd_dump( struct object *obj, int verbose );
 static struct object *fd_get_sync( struct object *obj );
 static void fd_destroy( struct object *obj );
+#if defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
+static struct list e1s_profile_fds = LIST_INIT(e1s_profile_fds);
+#endif
 
 static const struct object_ops fd_ops =
 {
@@ -1151,6 +1157,40 @@ static struct inode *get_inode( dev_t dev, ino_t ino, int unix_fd )
     return inode;
 }
 
+/* S14 security pins for replaced hives may be retired only after every server
+ * file/mapping/lock reference is gone. A raw Unix descriptor held by the
+ * security manager does not create an inode object. Never create one here. */
+int e1s_profile_inode_busy( dev_t dev, ino_t ino )
+{
+    struct device *device = get_device( dev, -1 );
+    struct inode *inode;
+    int busy = 0;
+    if (device)
+    {
+        LIST_FOR_EACH_ENTRY( inode, &device->inode_hash[ino % INODE_HASH_SIZE], struct inode, entry )
+            if (inode->ino == ino) { busy = 1; break; }
+        release_object( device );
+    }
+    if (busy) return 1;
+#if defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
+    {
+        struct fd *fd;
+        struct stat st;
+        /* Imported descriptors have no inode object. Include them before
+         * retiring security state; an indeterminate fstat retains the pin. */
+        LIST_FOR_EACH_ENTRY( fd, &e1s_profile_fds, struct fd, e1s_profile_entry )
+            if (!fd->inode && fd->unix_fd >= 0)
+            {
+                if (fstat( fd->unix_fd, &st )) return 1;
+                if (st.st_dev == dev && st.st_ino == ino) return 1;
+            }
+    }
+    return 0;
+#else
+    return 1; /* absence of the complete lab inventory is not a negative proof */
+#endif
+}
+
 static int inode_has_pending_close( struct inode *inode, const char *path )
 {
     struct closed_fd *fd;
@@ -1544,6 +1584,9 @@ static struct object *fd_get_sync( struct object *obj )
 static void fd_destroy( struct object *obj )
 {
     struct fd *fd = (struct fd *)obj;
+#if defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
+    list_remove( &fd->e1s_profile_entry );
+#endif
 
     free_async_queue( &fd->read_q );
     free_async_queue( &fd->write_q );
@@ -1693,6 +1736,10 @@ static struct fd *alloc_fd_object(void)
     init_async_queue( &fd->wait_q );
     list_init( &fd->inode_entry );
     list_init( &fd->locks );
+#if defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
+    list_init( &fd->e1s_profile_entry );
+    list_add_tail( &e1s_profile_fds, &fd->e1s_profile_entry );
+#endif
 
     if (!(fd->sync = create_internal_sync( 1, 1 ))) goto error;
     if ((fd->poll_index = add_poll_user( fd )) == -1) goto error;
@@ -1736,6 +1783,10 @@ struct fd *alloc_pseudo_fd( const struct fd_ops *fd_user_ops, struct object *use
     init_async_queue( &fd->wait_q );
     list_init( &fd->inode_entry );
     list_init( &fd->locks );
+#if defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
+    list_init( &fd->e1s_profile_entry );
+    list_add_tail( &e1s_profile_fds, &fd->e1s_profile_entry );
+#endif
 
     if (!(fd->sync = create_internal_sync( 1, 1 )))
     {

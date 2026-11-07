@@ -2863,6 +2863,25 @@ int token_claim_e1s_profile( obj_handle_t context, struct token *token, const vo
 #endif
 }
 
+/* S14 obtains the request id from the retained consumed context, never from
+ * the storage reference, token's numeric handle or an unload caller. */
+int token_e1s_profile_request( obj_handle_t context, struct token *token, uint64_t *request_id, uint64_t *server_gen )
+{
+#if defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
+    struct e1s_token_context *c;
+    int ret = 0;
+    if (!token_validate_e1s_profile( context, token, token_e1s_account( token ) )) return 0;
+    if (!(c = (struct e1s_token_context *)get_handle_obj( current->process, context, 0, &e1s_context_ops ))) return 0;
+    *request_id = wex_token_u64( c->input + 16 );
+    *server_gen = wex_token_u64( c->input + 148 );
+    ret = *request_id && *server_gen;
+    release_object( c );
+    return ret;
+#else
+    return 0;
+#endif
+}
+
 int token_install_e1s_consumed( obj_handle_t context, const struct e1s_token_consumed *record )
 {
 #if defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)

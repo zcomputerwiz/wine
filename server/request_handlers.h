@@ -2539,4 +2539,5 @@ C_ASSERT( offsetof(struct load_e1s_profile_request, access) == 24 );
 C_ASSERT( sizeof(struct load_e1s_profile_request) == 32 );
 C_ASSERT( offsetof(struct load_e1s_profile_reply, hkey) == 8 );
 C_ASSERT( offsetof(struct load_e1s_profile_reply, managed) == 12 );
-C_ASSERT( sizeof(struct load_e1s_profile_reply) == 16 );
+C_ASSERT( offsetof(struct load_e1s_profile_reply, generation) == 16 );
+C_ASSERT( sizeof(struct load_e1s_profile_reply) == 24 );

@@ -5,6 +5,7 @@
 #define WEX_PROFILE_H
 
 #include "accounts.h"
+#include <sys/stat.h>
 
 enum wex_profile_status
 {
@@ -12,7 +13,8 @@ enum wex_profile_status
     WEX_PROFILE_MAPPING, WEX_PROFILE_SUBSTITUTION, WEX_PROFILE_OWNER,
     WEX_PROFILE_MODE, WEX_PROFILE_LEGACY, WEX_PROFILE_IDENTITY,
     WEX_PROFILE_BUSY, WEX_PROFILE_SEED, WEX_PROFILE_IO,
-    WEX_PROFILE_INCOMPLETE, WEX_PROFILE_LIMIT, WEX_PROFILE_FILESYSTEM, WEX_PROFILE_ABSENT
+    WEX_PROFILE_INCOMPLETE, WEX_PROFILE_LIMIT, WEX_PROFILE_FILESYSTEM, WEX_PROFILE_ABSENT,
+    WEX_PROFILE_RECOVERY
 };
 
 struct wex_profile_layout
@@ -38,6 +40,9 @@ struct wex_profile_storage
 {
     struct wex_profile_layout path;
     int profile_fd, hive_fd; /* owned by successful recipient; close both */
+    int sid_lock_fd; /* S14 stable SID lock, independent of replaceable hive inode */
+    struct stat hive_identity;
+    unsigned int test_crash_step; /* honored only by WEX_E1S14_CRASH_TEST */
     uint64_t profile_generation;
     int reused, acl_pending; /* acl_pending is ALWAYS 1, never launch readiness */
     char acl_intent[320];
@@ -68,4 +73,9 @@ enum wex_profile_status wex_profile_open_existing( int prefix_fd, dev_t, ino_t,
     uid_t, gid_t, const struct wex_account *, uint64_t, struct wex_profile_storage * );
 enum wex_profile_status wex_profile_verify_existing( int prefix_fd, const struct wex_account *,
                                                      const struct wex_profile_storage * );
+/* Writer owns neither fd nor storage. It must serialize and apply/query the
+ * managed file descriptor before returning success. No client path is used. */
+enum wex_profile_status wex_profile_save( int, const struct wex_account *, struct wex_profile_storage *,
+                                         int (*writer)(int, void *), void * );
+void wex_profile_storage_close( struct wex_profile_storage * );
 #endif

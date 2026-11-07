@@ -4538,4 +4538,5 @@ enum inproc_sync_type
 @REPLY
     obj_handle_t        hkey;
     unsigned int        managed;
+    unsigned __int64    generation;
 @END

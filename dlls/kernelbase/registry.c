@@ -64,19 +64,22 @@ static HKEY special_root_keys[ARRAY_SIZE(root_key_names)];
 static BOOL cache_disabled[ARRAY_SIZE(root_key_names)];
 
 #ifdef WEX_E1S13_HKU_TEST
-/* Managed roots never share the legacy predefined-handle cache. These roots
- * stay loaded until server exit in S13, so per-SID process caches cannot outlive
- * their registration. Raw cached handles and entries stay until process exit:
- * an unexpected close/reuse is not detected. S14 must add handle-lifetime and
- * generation invalidation before unloading; token IDs alone do not provide it. */
+/* S14 cache handles are revocable server proxies with no hive references.
+ * QUERY already runs on this path: its generation invalidates old entries.
+ * Retire rather than close old proxies, since another thread may be between
+ * root lookup and its registry request. The server checks generation again.
+ * No handle-number reuse race, remote close, extra validation IPC or hive pin.
+ * Bounded to 256 identity/generation entries, reclaimed at process teardown. */
 struct e1s_root_cache
 {
     struct e1s_root_cache *next;
     WCHAR *sid_path;
     HANDLE user, classes;
     LUID token_id, modified_id;
+    ULONGLONG generation;
 };
 static struct e1s_root_cache *e1s_roots;
+static unsigned int e1s_root_count;
 static SRWLOCK e1s_root_lock = SRWLOCK_INIT;
 
 /* Private ntdll exports are deliberately absent from import libraries. */
@@ -89,10 +92,20 @@ static NTSTATUS e1s_load_profile( ULONG op, HANDLE context, HANDLE token, ACCESS
     return load( op, context, token, access, record, length, key, managed );
 }
 
-static NTSTATUS e1s_query_effective( ULONG *managed )
+static NTSTATUS e1s_query_effective_generation( ULONG *managed, ULONGLONG *generation )
 {
     HANDLE unused;
-    return e1s_load_profile( WEX_HKU_QUERY, NULL, NULL, 0, NULL, 0, &unused, managed );
+    typedef NTSTATUS (WINAPI *query_fn)(ULONG,HANDLE,HANDLE,ACCESS_MASK,const void*,ULONG,HANDLE*,ULONG*,ULONGLONG*);
+    query_fn query = (query_fn)GetProcAddress( GetModuleHandleW( L"ntdll.dll" ), "NtLoadWexProfileEx" );
+    *managed = 0; *generation = 0;
+    if (!query) return STATUS_PROCEDURE_NOT_FOUND;
+    return query( WEX_HKU_QUERY, NULL, NULL, 0, NULL, 0, &unused, managed, generation );
+}
+
+static NTSTATUS e1s_query_effective( ULONG *managed )
+{
+    ULONGLONG generation;
+    return e1s_query_effective_generation( managed, &generation );
 }
 
 /* Only success with managed=0 (or the disabled-server path) proves an unmanaged token; anything else
@@ -105,7 +118,7 @@ static BOOL e1s_managed_effective(void)
     return status || managed;
 }
 
-static HKEY e1s_special_root( BOOL classes )
+static HKEY e1s_special_root( BOOL classes, ULONGLONG generation )
 {
     struct e1s_root_cache *entry;
     UNICODE_STRING path;
@@ -115,6 +128,7 @@ static HKEY e1s_special_root( BOOL classes )
     ULONG size;
     NTSTATUS status;
     ULONG managed;
+    if (!generation) return NULL; /* managed but unloaded/poisoned */
     status = NtOpenThreadToken( GetCurrentThread(), TOKEN_QUERY, FALSE, &token );
     if (status == STATUS_NO_TOKEN) status = NtOpenProcessToken( GetCurrentProcess(), TOKEN_QUERY, &token );
     if (status) return NULL;
@@ -123,16 +137,17 @@ static HKEY e1s_special_root( BOOL classes )
     if (RtlFormatCurrentUserKeyPath( &path )) { NtClose( token ); return NULL; }
     RtlAcquireSRWLockExclusive( &e1s_root_lock );
     for (entry = e1s_roots; entry; entry = entry->next)
-        if (!wcscmp( entry->sid_path, path.Buffer ) &&
+        if (entry->generation == generation && !wcscmp( entry->sid_path, path.Buffer ) &&
             !memcmp( &entry->token_id, &stats.TokenId, sizeof(LUID) ) &&
             !memcmp( &entry->modified_id, &stats.ModifiedId, sizeof(LUID) )) break;
-    if (!entry && (entry = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*entry) )))
+    if (!entry && e1s_root_count < 256 && (entry = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*entry) )))
     {
         if (!(entry->sid_path = HeapAlloc( GetProcessHeap(), 0, path.Length + sizeof(WCHAR) )))
         { HeapFree( GetProcessHeap(), 0, entry ); entry = NULL; }
         else
         { memcpy( entry->sid_path, path.Buffer, path.Length ); entry->sid_path[path.Length / sizeof(WCHAR)] = 0;
           entry->token_id = stats.TokenId; entry->modified_id = stats.ModifiedId;
+          entry->generation = generation; e1s_root_count++;
           entry->next = e1s_roots; e1s_roots = entry; }
     }
     if (entry)
@@ -140,7 +155,7 @@ static HKEY e1s_special_root( BOOL classes )
         slot = classes ? &entry->classes : &entry->user;
         if (!*slot)
         {
-            ULONG op = classes ? WEX_HKU_CLASSES : WEX_HKU_CURRENT;
+            ULONG op = classes ? WEX_HKU_CACHE_CLASSES : WEX_HKU_CACHE_CURRENT;
             /* Explicit rights go through both DACL and MIC checks. Below High,
              * keep read access without obtaining implicit write-up rights. */
             status = e1s_load_profile( op, NULL, token, KEY_ALL_ACCESS, NULL, 0, slot, &managed );
@@ -611,13 +626,14 @@ static inline HKEY get_special_root_hkey( HKEY hkey )
         HandleToUlong(hkey) == HandleToUlong(HKEY_CLASSES_ROOT))
     {
         ULONG managed;
-        NTSTATUS status = e1s_query_effective( &managed );
+        ULONGLONG generation;
+        NTSTATUS status = e1s_query_effective_generation( &managed, &generation );
         /* Only success/managed=0 proves an unmanaged token. Token-open/query
          * failures cannot authorize fallback to Bob's cached roots. Unsupported
          * is the disabled-server path, where managed issuance is unavailable. */
         if (status && status != STATUS_NOT_SUPPORTED) return NULL;
         if (!status && managed)
-            return e1s_special_root( HandleToUlong(hkey) == HandleToUlong(HKEY_CLASSES_ROOT) );
+            return e1s_special_root( HandleToUlong(hkey) == HandleToUlong(HKEY_CLASSES_ROOT), generation );
     }
 #endif
 

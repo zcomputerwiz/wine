@@ -44,6 +44,7 @@ extern int token_e1s_broker(void);
 extern int token_validate_e1s_profile( obj_handle_t, struct token *, const struct wex_account * );
 extern int token_claim_e1s_profile( obj_handle_t, struct token *, const void *, data_size_t,
                                     struct wex_account * );
+extern int token_e1s_profile_request( obj_handle_t, struct token *, uint64_t *, uint64_t * );
 extern const struct wex_account *token_e1s_account( struct token * );
 extern const struct sid *token_get_user_sid( struct token * );
 extern int token_e1s_profile_high( struct token * );

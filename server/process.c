@@ -63,11 +63,14 @@
 #include "request.h"
 #include "user.h"
 #include "security.h"
+#include "e1s_profile.h"
+#include "e1s_token.h"
 #include "sysrun.h"
 
 /* process object */
 
 static struct list process_list = LIST_INIT(process_list);
+static struct list e1s_profile_processes = LIST_INIT(e1s_profile_processes);
 static int running_processes, user_processes;
 static struct event *shutdown_event;           /* signaled when shutdown starts */
 static struct timeout_user *shutdown_timeout;  /* timeout for server shutdown */
@@ -549,6 +552,7 @@ void shutdown_master_socket(void)
 /* final cleanup once we are sure a process is really dead */
 static void process_died( struct process *process )
 {
+    process->e1s_profile_dead = 1;
     if (debug_level) fprintf( stderr, "%04x: *process killed*\n", process->id );
     if (!process->is_system)
     {
@@ -603,6 +607,8 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
         close( fd );
         goto error;
     }
+    list_init( &process->e1s_profile_entry );
+    process->e1s_profile_dead = 0;
     process->sync            = NULL;
     process->parent_id       = 0;
     process->debug_obj       = NULL;
@@ -719,6 +725,8 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->session_id = token_get_session_id( process->token );
     if (!sysrun_process_created( process, !parent )) goto error;
 
+    if (!e1s_profile_process_started( process->token )) goto error;
+    list_add_tail( &e1s_profile_processes, &process->e1s_profile_entry );
     set_fd_events( process->msg_fd, POLLIN );  /* start listening to events */
     return process;
 
@@ -742,6 +750,7 @@ data_size_t get_process_startup_info_size( struct process *process )
 static void process_destroy( struct object *obj )
 {
     struct process *process = (struct process *)obj;
+    list_remove( &process->e1s_profile_entry );
     assert( obj->ops == &process_ops );
 
     /* we can't have a thread remaining */
@@ -1104,6 +1113,24 @@ void enum_processes( int (*cb)(struct process*, void*), void *user )
         struct process *process = LIST_ENTRY( ptr, struct process, entry );
         if ((cb)(process, user)) break;
     }
+}
+
+/* Object refcounts include broker token handles and dead process handles and
+ * cannot count profile users. Every pending/live process retains its primary;
+ * its thread list retains impersonation tokens. Scan those exact references,
+ * including suspended children, descendants and pending native termination. */
+int process_e1s_profile_busy( const struct sid *sid )
+{
+    struct process *process;
+    struct thread *thread;
+    LIST_FOR_EACH_ENTRY( process, &e1s_profile_processes, struct process, e1s_profile_entry )
+    {
+        if (process->e1s_profile_dead) continue;
+        if (!process->token || equal_sid( token_get_user_sid( process->token ), sid )) return 1;
+        LIST_FOR_EACH_ENTRY( thread, &process->thread_list, struct thread, proc_entry )
+            if (thread->token && equal_sid( token_get_user_sid( thread->token ), sid )) return 1;
+    }
+    return 0;
 }
 
 /* set the debugged flag in the process PEB */
@@ -1752,6 +1779,7 @@ DECL_HANDLER(set_process_info)
                     set_error( status );
                     release_object( token );
                 }
+                else if (!e1s_profile_process_started( token )) release_object( token );
                 else
                 {
                     release_object( process->token );

@@ -19,6 +19,10 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#if defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
+static int hive_unchanged( const struct wex_profile_storage * );
+#endif
+
 static int valid_name( const char *name )
 {
     static const char * const reserved[] = {
@@ -184,6 +188,41 @@ static enum wex_profile_status same_edge( int parent, const char *name, int chil
         return WEX_PROFILE_SUBSTITUTION;
     return named.st_dev == opened.st_dev && named.st_ino == opened.st_ino &&
            (named.st_mode & S_IFMT) == (opened.st_mode & S_IFMT) ? WEX_PROFILE_OK : WEX_PROFILE_SUBSTITUTION;
+}
+
+/* Lock order: prefix provision flock -> stable SID flock -> hive inode flock.
+ * Saves hold the SID flock throughout, including replacement of user.reg.
+ * Provisioners take the same SID lock; a different incarnation cannot race a
+ * loaded SID. Never unlink the lock file, even after a failed load. */
+static enum wex_profile_status sid_lock( const struct chain *c, int create, int *result )
+{
+    int fd = openat( c->sid, ".hive.lock", O_RDWR | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC |
+                     (create ? O_CREAT : 0), 0600 );
+    enum wex_profile_status s;
+    *result = -1;
+    if (fd < 0) return !create && errno == ENOENT ? WEX_PROFILE_OK : WEX_PROFILE_SUBSTITUTION;
+    s = safe_fd( fd, c, 0, 1 );
+    if (!s) s = same_edge( c->sid, ".hive.lock", fd );
+    if (!s && flock( fd, LOCK_EX | LOCK_NB )) s = errno == EWOULDBLOCK ? WEX_PROFILE_BUSY : WEX_PROFILE_IO;
+    if (!s && create && fsync( c->sid )) s = WEX_PROFILE_IO;
+    if (s) close( fd );
+    else *result = fd;
+    return s;
+}
+
+/* Any interrupted save is retained for operator recovery, including unknown
+ * marker contents or a lone temporary file. Never select or delete either. */
+static enum wex_profile_status save_recovery( int fd )
+{
+    static const char * const names[] = { ".e1s14-state", ".e1s14-save" };
+    struct stat st;
+    unsigned int i;
+    for (i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+    {
+        if (!fstatat( fd, names[i], &st, AT_SYMLINK_NOFOLLOW )) return WEX_PROFILE_RECOVERY;
+        if (errno != ENOENT) return WEX_PROFILE_IO;
+    }
+    return WEX_PROFILE_OK;
 }
 
 /* A wrong-owner 0700/0600 object may be unopenable as Bob. Classify it from
@@ -563,7 +602,8 @@ static enum wex_profile_status discard_temp( int parent, const char *name, const
 
 /* Select stored label for a genuine S4 rename; never infer identity from name
  * or UID. More than one published label for the key is an identity conflict. */
-static enum wex_profile_status find_existing( const struct chain *c, struct wex_profile_layout *p, int *exists, int cleanup )
+static enum wex_profile_status find_existing( const struct chain *c, struct wex_profile_layout *p, int *exists,
+                                              int cleanup, int saving )
 {
     int scan = openat( c->sid, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC );
     DIR *dir;
@@ -579,6 +619,23 @@ static enum wex_profile_status find_existing( const struct chain *c, struct wex_
         entry = readdir( dir );
         if (!entry) { if (errno) s = WEX_PROFILE_IO; break; }
         if (++count > TREE_LIMIT) { s = WEX_PROFILE_LIMIT; break; }
+        /* Recovery is SID-wide, including a retired incarnation. A new key
+         * must not hide an interrupted save in an older published profile. */
+        if (strlen( entry->d_name ) > 33 && entry->d_name[32] == '-')
+        {
+            unsigned int i;
+            int fd = -1;
+            for (i = 0; i < 32; i++)
+                if (!((entry->d_name[i] >= '0' && entry->d_name[i] <= '9') ||
+                      (entry->d_name[i] >= 'a' && entry->d_name[i] <= 'f'))) break;
+            if (i == 32 && !(saving && !strncmp( entry->d_name, p->incarnation, 32 )))
+            {
+                s = open_dir( c->sid, entry->d_name, c, 1, 0, &fd );
+                if (!s) s = save_recovery( fd );
+                if (fd >= 0) close( fd );
+                if (s) break;
+            }
+        }
         if (temp_name( entry->d_name ))
         {
             s = cleanup ? discard_temp( c->sid, entry->d_name, c ) : WEX_PROFILE_BUSY;
@@ -598,7 +655,7 @@ static enum wex_profile_status find_existing( const struct chain *c, struct wex_
     return s;
 }
 
-static enum wex_profile_status validate_profile( const struct chain *c, struct wex_profile_storage *out )
+static enum wex_profile_status validate_profile( const struct chain *c, struct wex_profile_storage *out, int recovery )
 {
     char text[1024], expected[1024], header[24], *line, *end;
     int meta = -1;
@@ -607,6 +664,7 @@ static enum wex_profile_status validate_profile( const struct chain *c, struct w
     uint64_t gen;
     enum wex_profile_status s = open_dir( c->sid, out->path.leaf, c, 1, 0, &out->profile_fd );
     if (s) return s;
+    if (recovery && (s = save_recovery( out->profile_fd ))) return s;
     s = named_metadata( out->profile_fd, ".complete", c, 0, 1 );
     if (s) return s == WEX_PROFILE_MAPPING ? WEX_PROFILE_LEGACY : s;
     meta = openat( out->profile_fd, ".complete", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC );
@@ -646,7 +704,7 @@ static enum wex_profile_status open_existing( int prefix, dev_t dev, ino_t ino, 
 {
     if (!out) return WEX_PROFILE_COMPONENT;
     memset( out, 0, sizeof(*out) );
-    out->profile_fd = out->hive_fd = -1;
+    out->profile_fd = out->hive_fd = out->sid_lock_fd = -1;
 #if defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
     struct chain c = { prefix, -1, -1, -1, -1, -1, -1, bob, group, dev, ino, 0, NULL };
     struct stat st;
@@ -672,13 +730,25 @@ static enum wex_profile_status open_existing( int prefix, dev_t dev, ino_t ino, 
     if (c.lock < 0) { s = WEX_PROFILE_SUBSTITUTION; goto done; }
     if ((s = safe_fd( c.lock, &c, 0, 1 )) || (s = same_edge( c.base, ".profile.lock", c.lock ))) goto done;
     if (flock( c.lock, LOCK_EX | LOCK_NB )) { s = WEX_PROFILE_BUSY; goto done; }
-    if ((s = open_dir( c.base, c.sid_name, &c, 1, 0, &c.sid )) || (s = recheck( &c )) ||
-        (s = find_existing( &c, &out->path, &exists, 0 ))) goto done;
+    if ((s = open_dir( c.base, c.sid_name, &c, 1, 0, &c.sid )) || (s = recheck( &c ))) goto done;
+    if (lock_hive > 0)
+    {
+        if ((s = sid_lock( &c, 1, &out->sid_lock_fd ))) goto done;
+    }
+    else
+    {
+        out->sid_lock_fd = openat( c.sid, ".hive.lock", O_RDWR | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC );
+        if (out->sid_lock_fd < 0) { s = WEX_PROFILE_SUBSTITUTION; goto done; }
+        if ((s = safe_fd( out->sid_lock_fd, &c, 0, 1 )) ||
+            (s = same_edge( c.sid, ".hive.lock", out->sid_lock_fd ))) goto done;
+    }
+    if ((s = find_existing( &c, &out->path, &exists, 0, lock_hive < 0 ))) goto done;
     if (!exists) { s = WEX_PROFILE_ABSENT; goto done; }
-    if ((s = validate_profile( &c, out )) || (s = recheck( &c ))) goto done;
+    if ((s = validate_profile( &c, out, lock_hive >= 0 )) || (s = recheck( &c ))) goto done;
     if (out->profile_generation != generation) { s = WEX_PROFILE_IDENTITY; goto done; }
-    /* Provisional exact-inode exclusion until exit; not an S14 save/lease lock. */
-    if (lock_hive && flock( out->hive_fd, LOCK_EX | LOCK_NB )) { s = WEX_PROFILE_BUSY; goto done; }
+    /* Stable SID lock survives subsequent atomic replacement of this inode. */
+    if (lock_hive > 0 && flock( out->hive_fd, LOCK_EX | LOCK_NB )) { s = WEX_PROFILE_BUSY; goto done; }
+    if (fstat( out->hive_fd, &out->hive_identity )) { s = WEX_PROFILE_IO; goto done; }
     out->reused = 1;
 done:
     if (c.sid >= 0) close( c.sid );
@@ -691,8 +761,9 @@ done:
     {
         if (out->profile_fd >= 0) close( out->profile_fd );
         if (out->hive_fd >= 0) close( out->hive_fd );
+        if (out->sid_lock_fd >= 0) close( out->sid_lock_fd );
         memset( out, 0, sizeof(*out) );
-        out->profile_fd = out->hive_fd = -1;
+        out->profile_fd = out->hive_fd = out->sid_lock_fd = -1;
     }
     return s == WEX_PROFILE_MAPPING || s == WEX_PROFILE_INCOMPLETE ? WEX_PROFILE_ABSENT : s;
 #else
@@ -708,24 +779,124 @@ enum wex_profile_status wex_profile_open_existing( int prefix, dev_t dev, ino_t 
     return open_existing( prefix, dev, ino, bob, group, account, generation, out, 1 );
 }
 
-enum wex_profile_status wex_profile_verify_existing( int prefix, const struct wex_account *a,
-                                                     const struct wex_profile_storage *held )
+static enum wex_profile_status verify_existing( int prefix, const struct wex_account *a,
+                                                const struct wex_profile_storage *held, int saving )
 {
 #if defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
     struct stat p, h, reopened;
     struct wex_profile_storage check;
     enum wex_profile_status s;
     if (fstat( prefix, &p )) return WEX_PROFILE_IO;
-    s = open_existing( prefix, p.st_dev, p.st_ino, getuid(), getgid(), a, held->profile_generation, &check, 0 );
+    s = open_existing( prefix, p.st_dev, p.st_ino, getuid(), getgid(), a, held->profile_generation, &check, saving ? -1 : 0 );
     if (s) return s;
     if (fstat( held->profile_fd, &h ) || fstat( check.profile_fd, &reopened ) ||
         h.st_dev != reopened.st_dev || h.st_ino != reopened.st_ino ||
         fstat( held->hive_fd, &h ) || fstat( check.hive_fd, &reopened ) ||
+        h.st_dev != reopened.st_dev || h.st_ino != reopened.st_ino ||
+        fstat( held->sid_lock_fd, &h ) || fstat( check.sid_lock_fd, &reopened ) ||
         h.st_dev != reopened.st_dev || h.st_ino != reopened.st_ino) s = WEX_PROFILE_SUBSTITUTION;
-    close( check.profile_fd ); close( check.hive_fd );
+    close( check.profile_fd ); close( check.hive_fd ); close( check.sid_lock_fd );
     return s;
 #else
-    (void)prefix; (void)a; (void)held;
+    (void)prefix; (void)a; (void)held; (void)saving;
+    return WEX_PROFILE_DISABLED;
+#endif
+}
+
+enum wex_profile_status wex_profile_verify_existing( int prefix, const struct wex_account *a,
+                                                     const struct wex_profile_storage *held )
+{
+    enum wex_profile_status status = verify_existing( prefix, a, held, 0 );
+#if defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
+    if (!status && !hive_unchanged( held )) status = WEX_PROFILE_IDENTITY;
+#endif
+    return status;
+}
+
+void wex_profile_storage_close( struct wex_profile_storage *s )
+{
+#if defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
+    /* Security pins duplicate the hive's open description. Explicit unlock is
+     * necessary; closing just our descriptor would retain its flock. */
+    if (s->hive_fd >= 0) flock( s->hive_fd, LOCK_UN );
+#endif
+    if (s->hive_fd >= 0) close( s->hive_fd );
+    if (s->profile_fd >= 0) close( s->profile_fd );
+    if (s->sid_lock_fd >= 0) close( s->sid_lock_fd );
+    s->hive_fd = s->profile_fd = s->sid_lock_fd = -1;
+}
+
+#if defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
+static int hive_unchanged( const struct wex_profile_storage *s )
+{
+    struct stat st;
+    const struct stat *old = &s->hive_identity;
+    return !fstat( s->hive_fd, &st ) && !same_edge( s->profile_fd, "user.reg", s->hive_fd ) &&
+           st.st_dev == old->st_dev && st.st_ino == old->st_ino && st.st_size == old->st_size &&
+           st.st_mode == old->st_mode && st.st_uid == old->st_uid && st.st_gid == old->st_gid && st.st_nlink == 1 &&
+           st.st_mtim.tv_sec == old->st_mtim.tv_sec && st.st_mtim.tv_nsec == old->st_mtim.tv_nsec &&
+           st.st_ctim.tv_sec == old->st_ctim.tv_sec && st.st_ctim.tv_nsec == old->st_ctim.tv_nsec;
+}
+
+static void save_checkpoint( const struct wex_profile_storage *s, unsigned int step )
+{
+    (void)s; (void)step;
+#ifdef WEX_E1S14_CRASH_TEST
+    if (s->test_crash_step == step)
+    {
+        fprintf( stderr, "E1S14 save-crash=%u\n", step ); fflush( stderr );
+        _exit( 86 ); /* no signal handler/shutdown save */
+    }
+#endif
+}
+#endif
+
+enum wex_profile_status wex_profile_save( int prefix, const struct wex_account *a,
+    struct wex_profile_storage *s, int (*writer)(int, void *), void *arg )
+{
+#if defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
+    enum wex_profile_status status;
+    struct stat st;
+    int marker = -1, temp = -1;
+    /* Verification takes S12's prefix lock while our stable SID lock excludes
+     * provisioning. It does not reacquire our own flock or follow a path from
+     * a Wine client. The same directory and inode are checked again at commit. */
+    if (s->sid_lock_fd < 0 || (status = save_recovery( s->profile_fd )))
+        return s->sid_lock_fd < 0 ? WEX_PROFILE_IDENTITY : status;
+    if ((status = wex_profile_verify_existing( prefix, a, s ))) return status;
+    if (!hive_unchanged( s )) return WEX_PROFILE_IDENTITY;
+    marker = openat( s->profile_fd, ".e1s14-state", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600 );
+    if (marker < 0) return errno == EEXIST ? WEX_PROFILE_RECOVERY : WEX_PROFILE_IO;
+    status = WEX_PROFILE_IO;
+    if (fsync( marker ) || fsync( s->profile_fd )) goto done;
+    save_checkpoint( s, 1 );
+    temp = openat( s->profile_fd, ".e1s14-save", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600 );
+    if (temp < 0 || flock( temp, LOCK_EX | LOCK_NB ) || !writer( temp, arg ) || fsync( temp ) ||
+        fstat( temp, &st ) || !S_ISREG( st.st_mode ) || st.st_nlink != 1 || st.st_size > SEED_LIMIT ||
+        st.st_uid != getuid() || st.st_gid != getgid() || (st.st_mode & 07777) != 0600 ||
+        !no_reparse( temp ) || !no_posix_acl( temp ) || fsync( s->profile_fd )) goto done;
+    save_checkpoint( s, 2 );
+    if (verify_existing( prefix, a, s, 1 ) || !hive_unchanged( s ) || same_edge( s->profile_fd, ".e1s14-save", temp ) ||
+        same_edge( s->profile_fd, ".e1s14-state", marker )) { status = WEX_PROFILE_IDENTITY; goto done; }
+    if (renameat( s->profile_fd, ".e1s14-save", s->profile_fd, "user.reg" ) || fsync( s->profile_fd )) goto done;
+    save_checkpoint( s, 3 );
+    /* Do not remove the marker until the complete new hive and its directory
+     * entry are durable. Any failure retains all remaining recovery material. */
+    if (same_edge( s->profile_fd, "user.reg", temp ) ||
+        unlinkat( s->profile_fd, ".e1s14-state", 0 ) || fsync( s->profile_fd )) goto done;
+    flock( s->hive_fd, LOCK_UN );
+    close( s->hive_fd );
+    s->hive_fd = temp; temp = -1;
+    s->hive_identity = st;
+    /* rename can change ctime. Capture the authoritative post-publication stat. */
+    if (fstat( s->hive_fd, &s->hive_identity )) goto done;
+    status = WEX_PROFILE_OK;
+done:
+    if (temp >= 0) { flock( temp, LOCK_UN ); close( temp ); }
+    close( marker );
+    return status;
+#else
+    (void)prefix; (void)a; (void)s; (void)writer; (void)arg;
     return WEX_PROFILE_DISABLED;
 #endif
 }
@@ -735,14 +906,14 @@ enum wex_profile_status wex_profile_prepare( int prefix, dev_t dev, ino_t ino, u
 {
     if (!out) return WEX_PROFILE_COMPONENT;
     memset( out, 0, sizeof(*out) );
-    out->profile_fd = out->hive_fd = -1;
+    out->profile_fd = out->hive_fd = out->sid_lock_fd = -1;
 #ifndef WEX_E1S12_PROFILE_TEST
     (void)prefix; (void)dev; (void)ino; (void)bob; (void)group; (void)seed; (void)account;
     return WEX_PROFILE_DISABLED;
 #else
     struct chain c = { prefix, -1, -1, -1, -1, -1, -1, bob, group, dev, ino, 0, NULL };
     enum wex_profile_status s;
-    int exists = 0, temp = -1, published = 0;
+    int exists = 0, temp = -1, published = 0, held_sid = -1;
     char tempname[38] = {0}, text[1024];
     unsigned char random[16];
     unsigned int hide, i;
@@ -774,8 +945,9 @@ enum wex_profile_status wex_profile_prepare( int prefix, dev_t dev, ino_t ino, u
     if ((s = safe_fd( c.lock, &c, 0, 1 )) || (s = same_edge( c.base, ".profile.lock", c.lock ))) goto done;
     if (flock( c.lock, LOCK_EX | LOCK_NB )) { s = errno == EWOULDBLOCK ? WEX_PROFILE_BUSY : WEX_PROFILE_IO; goto done; }
     if ((s = open_dir( c.base, c.sid_name, &c, 1, 1, &c.sid )) || (s = recheck( &c ))) goto done;
+    if ((s = sid_lock( &c, 0, &held_sid ))) goto done;
     checkpoint( 1 );
-    if ((s = find_existing( &c, &out->path, &exists, 1 ))) goto done;
+    if ((s = find_existing( &c, &out->path, &exists, 1, 0 ))) goto done;
     if (!exists)
     {
         if ((s = seed_default( seed, &hide ))) goto done;
@@ -805,10 +977,11 @@ enum wex_profile_status wex_profile_prepare( int prefix, dev_t dev, ino_t ino, u
         if (fsync( c.sid ) || fsync( c.base ) || fsync( c.users ) || fsync( c.drive ) || fsync( prefix ))
         { s = WEX_PROFILE_IO; goto done; }
     }
-    s = validate_profile( &c, out );
+    s = validate_profile( &c, out, 1 );
     if (!s) s = recheck( &c );
     if (!s) out->reused = exists;
 done:
+    if (held_sid >= 0) close( held_sid );
     if (temp >= 0) close( temp );
     if (tempname[0] && !published)
     {
@@ -826,7 +999,7 @@ done:
         if (out->profile_fd >= 0) close( out->profile_fd );
         if (out->hive_fd >= 0) close( out->hive_fd );
         memset( out, 0, sizeof(*out) );
-        out->profile_fd = out->hive_fd = -1;
+        out->profile_fd = out->hive_fd = out->sid_lock_fd = -1;
     }
     return s;
 #endif

@@ -37,6 +37,22 @@ struct secured_inode
 struct e1s_file_security { struct secured_inode *first; unsigned int count; };
 static struct secured_inode *secured;
 static unsigned int secured_count;
+
+static void prune_unlinked_security(void)
+{
+    struct secured_inode **link = &secured, *entry;
+    struct stat st;
+    while ((entry = *link))
+    {
+        if (!fstat( entry->fd, &st ) && !st.st_nlink &&
+            !e1s_profile_inode_busy( st.st_dev, st.st_ino ))
+        {
+            *link = entry->next;
+            close( entry->fd ); free( entry->sd ); free( entry ); secured_count--;
+        }
+        else link = &entry->next;
+    }
+}
 /* One negative ancestry cache, bounded to the old 128-edge walk plus its
  * starting directory. Pins prevent inode reuse; every edge is rechecked on a
  * hit, including mount identity, so renames/bind aliases cannot reuse a proof
@@ -204,11 +220,25 @@ struct e1s_file_security *apply_e1s_profile_security( const struct wex_account *
 {
     struct e1s_file_security *batch = calloc( 1, sizeof(*batch) );
     struct sid user = { SID_REVISION, 5, SECURITY_NT_AUTHORITY, {0} };
+    prune_unlinked_security();
     if (!batch) return NULL;
     memcpy( user.sub_auth, a->sid, sizeof(a->sid) );
     if (!secure_tree( batch, storage->profile_fd, &user, 0 ))
     { e1s_profile_security_abort( batch ); return NULL; }
     return batch;
+}
+
+int e1s_profile_secure_hive( int fd, const struct wex_account *a )
+{
+    struct e1s_file_security *batch = calloc( 1, sizeof(*batch) );
+    struct sid user = { SID_REVISION, 5, SECURITY_NT_AUTHORITY, {0} };
+    prune_unlinked_security();
+    if (!batch) return 0;
+    memcpy( user.sub_auth, a->sid, sizeof(a->sid) );
+    if (!secure_tree( batch, fd, &user, 0 ) || !e1s_profile_security_verify( batch ))
+    { e1s_profile_security_abort( batch ); return 0; }
+    e1s_profile_security_commit( batch );
+    return 1;
 }
 
 void e1s_profile_security_abort( struct e1s_file_security *batch )
@@ -222,10 +252,17 @@ void e1s_profile_security_abort( struct e1s_file_security *batch )
 
 void e1s_profile_security_commit( struct e1s_file_security *batch )
 {
-    struct secured_inode *e;
+    struct secured_inode *e, *old;
     /* New registrations (including inherited trees) invalidate negative proofs. */
     clear_parent_cache();
-    while ((e = batch->first)) { batch->first = e->next; e->next = secured; secured = e; secured_count++; }
+    while ((e = batch->first))
+    {
+        batch->first = e->next;
+        for (old = secured; old; old = old->next)
+            if (old->st.st_dev == e->st.st_dev && old->st.st_ino == e->st.st_ino) break;
+        if (old) { close( e->fd ); free( e->sd ); free( e ); }
+        else { e->next = secured; secured = e; secured_count++; }
+    }
     free( batch );
 }
 
@@ -362,6 +399,7 @@ struct security_descriptor *e1s_profile_file_sd( int fd, int *managed ) { *manag
 int e1s_profile_check_parent( const char *name, unsigned int access, int create, mode_t *mode,
                               struct e1s_profile_parent *p ) { p->fd = -1; p->leaf = NULL; return 1; }
 int e1s_profile_inherit_fd( const struct e1s_profile_parent *p, int fd ) { return 1; }
+int e1s_profile_secure_hive( int fd, const struct wex_account *a ) { return 0; }
 #endif
 
 void e1s_profile_close_parent( struct e1s_profile_parent *p )
@@ -386,11 +424,4 @@ int e1s_profile_check_fd( int fd, unsigned int access )
     if (obj.sd == &denied_sd.sd) { set_error( STATUS_ACCESS_DENIED ); return 0; }
 #endif
     return check_object_access( NULL, &obj, &access );
-}
-
-void e1s_profile_unload_s14(void)
-{
-    /* TODO E1-S14: leases, descendant/key references, checked durable saving
-     * and recovery. No deletion, unlock or success until that contract exists. */
-    set_error( STATUS_NOT_SUPPORTED );
 }

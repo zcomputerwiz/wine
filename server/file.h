@@ -80,6 +80,7 @@ struct fd_ops
 };
 
 /* file descriptor functions */
+extern int e1s_profile_inode_busy( dev_t, ino_t );
 
 extern struct fd *alloc_pseudo_fd( const struct fd_ops *fd_user_ops, struct object *user,
                                    unsigned int options );

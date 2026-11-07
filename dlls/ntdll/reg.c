@@ -40,16 +40,19 @@ WINE_DEFAULT_DEBUG_CHANNEL(reg);
 
 /* GPL-2.0-or-later S13 addition. Pointer-free private PE server wrapper;
  * no Unix syscall table or separate WoW64 thunk. Outputs clear on denial. */
-NTSTATUS WINAPI NtLoadWexProfile( ULONG operation, HANDLE context, HANDLE token, ACCESS_MASK access,
-                                 const void *record, ULONG length, HANDLE *key, ULONG *managed )
+NTSTATUS WINAPI NtLoadWexProfileEx( ULONG operation, HANDLE context, HANDLE token, ACCESS_MASK access,
+                                   const void *record, ULONG length, HANDLE *key, ULONG *managed,
+                                   ULONGLONG *generation )
 {
     unsigned char input[WEX_HKU_RECORD_SIZE];
     HANDLE result = NULL;
     HANDLE effective = NULL;
     ULONG flag = 0;
+    ULONGLONG gen = 0;
     NTSTATUS status;
     if (key) *key = NULL;
     if (managed) *managed = 0;
+    if (generation) *generation = 0;
     if (!key || !managed || length > sizeof(input) || (length && !record)) return STATUS_INVALID_PARAMETER;
     if (!token)
     {
@@ -69,16 +72,26 @@ NTSTATUS WINAPI NtLoadWexProfile( ULONG operation, HANDLE context, HANDLE token,
         status = wine_server_call( req );
         result = wine_server_ptr_handle( reply->hkey );
         flag = reply->managed;
+        gen = reply->generation;
         /* A malformed success is not evidence that the server disabled S13:
          * automatic callers may fall back to stock roots only on that status. */
         if (!status && (wine_server_reply_size( reply ) || flag > 1 ||
-            (operation == WEX_HKU_QUERY ? !!result : (!result || flag != 1)))) status = STATUS_DATA_ERROR;
+            (operation == WEX_HKU_QUERY ? (!!result || (!flag && gen)) :
+             operation == WEX_HKU_UNLOAD_S14 || operation == WEX_HKU_TEST_CRASH ||
+             operation == WEX_HKU_TEST_TRANSFER ? (result || flag != 1 || gen) :
+             (!result || flag != 1 || !gen)))) status = STATUS_DATA_ERROR;
     }
     SERVER_END_REQ;
     if (effective) NtClose( effective );
     if (status) { if (result) NtClose( result ); }
-    else { *key = result; *managed = flag; }
+    else { *key = result; *managed = flag; if (generation) *generation = gen; }
     return status;
+}
+
+NTSTATUS WINAPI NtLoadWexProfile( ULONG operation, HANDLE context, HANDLE token, ACCESS_MASK access,
+                                 const void *record, ULONG length, HANDLE *key, ULONG *managed )
+{
+    return NtLoadWexProfileEx( operation, context, token, access, record, length, key, managed, NULL );
 }
 
 

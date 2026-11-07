@@ -38,6 +38,8 @@ struct process
     struct object        obj;             /* object header */
     struct object       *sync;            /* sync object for wait/signal */
     struct list          entry;           /* entry in system-wide process list */
+    struct list          e1s_profile_entry; /* includes pending children before their first thread */
+    int                  e1s_profile_dead;  /* final native death, not a retained process handle */
     process_id_t         parent_id;       /* parent process id (at the time of creation) */
     struct list          thread_list;     /* thread list */
     struct debug_obj    *debug_obj;       /* debug object debugging this process */
@@ -107,6 +109,7 @@ struct process
 
 extern unsigned int alloc_ptid( void *ptr );
 extern void free_ptid( unsigned int id );
+extern int process_e1s_profile_busy( const struct sid * );
 extern void *get_ptid_entry( unsigned int id );
 extern struct process *create_process( int fd, struct process *parent, unsigned int flags,
                                        const struct startup_info_data *info,

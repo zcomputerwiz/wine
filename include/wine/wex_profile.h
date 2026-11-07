@@ -14,4 +14,8 @@
 #define WEX_HKU_UNLOAD_S14 4
 #define WEX_HKU_CURRENT 5
 #define WEX_HKU_CLASSES 6
+#define WEX_HKU_CACHE_CURRENT 7
+#define WEX_HKU_CACHE_CLASSES 8
+#define WEX_HKU_TEST_CRASH 9 /* separate WEX_E1S14_CRASH_TEST, lab broker only */
+#define WEX_HKU_TEST_TRANSFER 10 /* test-only exercise of internal S18 ownership handoff */
 #endif
