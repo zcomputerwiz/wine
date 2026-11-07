@@ -54,6 +54,9 @@
 #include "unicode.h"
 #include "security.h"
 #include "sysrun.h"
+#include "e1s_token.h"
+#include "e1s_profile.h"
+#include "wine/wex_profile.h"
 
 #include "winternl.h"
 
@@ -99,6 +102,8 @@ struct key
     timeout_t         modif;       /* last modification time */
     struct list       notify_list; /* list of notifications */
     uint64_t          mod_seq;     /* modification sequence in session */
+    struct security_descriptor *e1s_sd; /* borrowed managed default, SID-parametric */
+    struct e1s_hive   *e1s_view;    /* private dynamic HKCR union cache */
 };
 
 /* key flags */
@@ -108,6 +113,7 @@ struct key
 #define KEY_SYMLINK  0x0008  /* key is a symbolic link */
 #define KEY_WOWSHARE 0x0010  /* key is a Wow64 shared key (used for Software\Classes) */
 #define KEY_PREDEF   0x0020  /* key is marked as predefined */
+#define KEY_E1S_ROOT 0x0040  /* S14 alone can unload/rename this root */
 
 #define OBJ_KEY_WOW64 0x100000 /* magic flag added to attributes for WoW64 redirection */
 
@@ -130,6 +136,21 @@ struct key_value
 
 /* the root of the registry tree */
 static struct key *root_key;
+struct e1s_hive
+{
+    struct e1s_hive *next;
+    struct wex_account account;
+    struct wex_profile_storage storage;
+    struct security_descriptor *sd;
+    struct key *user, *classes, *view, *machine_classes;
+    int refreshing;
+};
+static struct e1s_hive *e1s_hives;
+static unsigned int e1s_hive_count;
+static int e1s_strict_loading;
+static int e1s_refresh_view( struct key * );
+static struct key *e1s_view_user( struct key *, int create );
+static struct e1s_hive *e1s_find_hive( const struct wex_account * );
 
 static const timeout_t ticks_1601_to_1970 = (timeout_t)86400 * (369 * 365 + 89) * TICKS_PER_SEC;
 static const timeout_t save_period = 30 * -TICKS_PER_SEC;  /* delay between periodic saves */
@@ -857,6 +878,8 @@ static bool key_init( struct object *obj, const void *init_data )
     key->values      = NULL;
     key->modif       = data->modif;
     key->mod_seq     = 0;
+    key->e1s_sd      = parent ? parent->e1s_sd : NULL;
+    key->e1s_view    = parent ? parent->e1s_view : NULL;
     list_init( &key->notify_list );
 
     if ((key->classlen = (data->classlen / sizeof(WCHAR)) * sizeof(WCHAR)) &&
@@ -866,8 +889,12 @@ static bool key_init( struct object *obj, const void *init_data )
     if (data->options & REG_OPTION_VOLATILE) key->flags |= KEY_VOLATILE;
     else if (parent && parent->flags & KEY_VOLATILE)
     {
-        set_error( STATUS_CHILD_MUST_BE_VOLATILE );
-        return false;
+        if (key->e1s_sd) key->flags |= KEY_VOLATILE;
+        else
+        {
+            set_error( STATUS_CHILD_MUST_BE_VOLATILE );
+            return false;
+        }
     }
     else if (!registry_loaded || in_merge)
     {
@@ -1077,6 +1104,7 @@ static struct security_descriptor *key_get_sd( struct object *obj )
     static struct security_descriptor *key_default_sd, *key_user_sd, *key_display_sd;
 
     if (obj->sd) return obj->sd;
+    if (((struct key *)obj)->e1s_sd) return ((struct key *)obj)->e1s_sd;
 
     if (key_in_user_tree( (struct key *)obj ))
     {
@@ -1146,6 +1174,7 @@ static struct object *key_lookup_name( struct object *obj, struct unicode_str *n
     assert( obj->ops == &key_ops );
 
     if (!name) return NULL;  /* open the key itself */
+    if (key->e1s_view && !e1s_refresh_view( key )) return NULL;
 
     if (key->flags & KEY_DELETED)
     {
@@ -1508,6 +1537,8 @@ static void enum_key( struct key *key, int index, int info_class, struct enum_ke
         key = key->subkeys[index];
     }
 
+    if (key->e1s_view && !e1s_refresh_view( key )) return;
+
     namelen = key->obj.name->len;
     classlen = key->classlen;
 
@@ -1588,6 +1619,9 @@ static void rename_key( struct key *key, struct unicode_str new_name )
     int i, index, cur_index;
     bool ephemeral;
 
+    if (key->flags & KEY_E1S_ROOT || key->e1s_view)
+    { set_error( STATUS_ACCESS_DENIED ); return; }
+
     /* changing to a path is not allowed */
     len = get_path_element( new_name.str, new_name.len );
     if (!len || len != new_name.len || len > MAX_NAME_LEN * sizeof(WCHAR))
@@ -1655,6 +1689,8 @@ static int delete_key( struct key *key, int recurse )
 {
     struct key *parent;
     bool ephemeral;
+
+    if (key->flags & KEY_E1S_ROOT) { set_error( STATUS_ACCESS_DENIED ); return 0; }
 
     if (key->flags & KEY_DELETED) return 1;
 
@@ -1989,6 +2025,16 @@ static struct key *get_hkey_obj( obj_handle_t hkey, unsigned int access )
         release_object( key );
         key = NULL;
     }
+    if (key && key->e1s_view)
+    {
+        struct key *mapped;
+        if (access & (KEY_SET_VALUE | KEY_CREATE_SUB_KEY | DELETE))
+        {
+            mapped = e1s_view_user( key, !(access & DELETE) );
+            release_object( key ); key = mapped;
+        }
+        else if (!e1s_refresh_view( key )) { release_object( key ); key = NULL; }
+    }
     return key;
 }
 
@@ -2043,6 +2089,7 @@ static int get_file_tmp_space( struct file_load_info *info, size_t size )
 /* report an error while loading an input file */
 static void file_read_error( const char *err, struct file_load_info *info )
 {
+    if (e1s_strict_loading) { set_error( STATUS_NOT_REGISTRY_FILE ); return; }
     if (info->filename)
         fprintf( stderr, "%s:%d: %s '%s'\n", info->filename, info->line, err, info->buffer );
     else
@@ -2120,6 +2167,8 @@ static struct key *load_key( struct key *base, const char *buffer, int prefix_le
     }
     name.str = p;
     name.len = len - (p - info->tmp + 1) * sizeof(WCHAR);
+    if (e1s_strict_loading && *p == '\\')
+    { set_error( STATUS_NOT_REGISTRY_FILE ); return NULL; }
     return create_key_recursive( base, name, 0 );
 }
 
@@ -2378,6 +2427,7 @@ static void load_keys( struct key *key, const char *filename, FILE *f, int prefi
 
     while (read_next_line( &info ) == 1)
     {
+        if (e1s_strict_loading && get_error()) break;
         p = info.buffer;
         while (*p && isspace(*p)) p++;
         switch(*p)
@@ -2398,6 +2448,7 @@ static void load_keys( struct key *key, const char *filename, FILE *f, int prefi
             else file_read_error( "Value without key", &info );
             break;
         case '#':   /* option */
+            if (e1s_strict_loading) { set_error( STATUS_NOT_REGISTRY_FILE ); goto done; }
             if (subkey) load_key_option( subkey, p, &info );
             else if (!load_global_option( p, &info )) goto done;
             break;
@@ -2411,6 +2462,7 @@ static void load_keys( struct key *key, const char *filename, FILE *f, int prefi
     }
 
  done:
+    if (e1s_strict_loading && ferror( f )) set_error( STATUS_NOT_REGISTRY_FILE );
     if (subkey)
     {
         update_key_time( subkey, modif );
@@ -2418,6 +2470,142 @@ static void load_keys( struct key *key, const char *filename, FILE *f, int prefi
     }
     free( info.buffer );
     free( info.tmp );
+}
+
+/* GPL-2.0-or-later S13 additions. Sources remain live; cached union keys
+ * contain no authority and writes always select the private user source. */
+static struct e1s_hive *e1s_find_hive( const struct wex_account *a )
+{
+    struct e1s_hive *m;
+    if (!a) return NULL;
+    for (m = e1s_hives; m; m = m->next)
+        if (!memcmp( a->sid, m->account.sid, sizeof(a->sid) ) &&
+            !memcmp( a->incarnation, m->account.incarnation, 16 )) return m;
+    return NULL;
+}
+
+static struct key *e1s_source_path( struct key *root, struct unicode_str path )
+{
+    unsigned int len;
+    int index;
+    while (root && path.len)
+    {
+        struct unicode_str part = path;
+        len = get_path_element( path.str, path.len );
+        if (!len) return NULL;
+        part.len = len;
+        root = find_subkey( root, part, &index );
+        if (root && root->flags & (KEY_DELETED | KEY_SYMLINK)) return NULL;
+        if (len < path.len) len += sizeof(WCHAR);
+        path.str += len / sizeof(WCHAR); path.len -= len;
+    }
+    return root;
+}
+
+static struct key *e1s_view_user( struct key *view, int create )
+{
+    struct unicode_str path;
+    WCHAR *buffer = build_relative_key_path( view, view->e1s_view->view, &path.len );
+    struct key *key;
+    path.str = buffer;
+    if (view != view->e1s_view->view && !buffer)
+    { if (!get_error()) set_error( STATUS_KEY_DELETED ); return NULL; }
+    if (!create)
+    {
+        key = e1s_source_path( view->e1s_view->classes, path );
+        if (key) grab_object( key );
+        else set_error( STATUS_OBJECT_NAME_NOT_FOUND );
+    }
+    else key = path.len ? create_key_recursive( view->e1s_view->classes, path, current_time ) :
+                    (struct key *)grab_object( view->e1s_view->classes );
+    if (key && get_error() == STATUS_OBJECT_NAME_EXISTS) clear_error();
+    free( buffer );
+    return key;
+}
+
+static int e1s_refresh_view_inner( struct key *view )
+{
+    struct e1s_hive *m = view->e1s_view;
+    struct unicode_str path, name;
+    struct key *sources[2], *src, *child;
+    struct key_value *value;
+    WCHAR *buffer;
+    int pass, i, index, present;
+    unsigned int access;
+    if (!m) return 1;
+    buffer = build_relative_key_path( view, m->view, &path.len );
+    if (view != m->view && !buffer)
+    { if (!get_error()) set_error( STATUS_KEY_DELETED ); return 0; }
+    path.str = buffer;
+    sources[0] = e1s_source_path( m->machine_classes, path );
+    sources[1] = e1s_source_path( m->classes, path );
+    free( buffer );
+    if (!sources[0] && !sources[1]) { set_error( STATUS_KEY_DELETED ); return 0; }
+    for (pass = 0; pass < 2; pass++)
+    {
+        if (!(src = sources[pass])) continue;
+        access = KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS;
+        if (!check_object_access( NULL, &src->obj, &access )) return 0;
+    }
+    for (i = 0; i <= view->last_value; i++)
+    { free( view->values[i].name ); free( view->values[i].data ); }
+    view->last_value = -1;
+    /* Prune disappeared names. Existing handles retain their proxy and fail
+     * with KEY_DELETED when neither live source has that relative path. */
+    for (i = view->last_subkey; i >= 0; i--)
+    {
+        child = view->subkeys[i]; name.str = child->obj.name->name; name.len = child->obj.name->len;
+        present = (sources[0] && find_subkey( sources[0], name, &index )) ||
+                  (sources[1] && find_subkey( sources[1], name, &index ));
+        if (!present) { grab_object( child ); delete_key( child, 1 ); release_object( child ); }
+    }
+    for (pass = 0; pass < 2; pass++)
+    {
+        if (!(src = sources[pass])) continue;
+        if (src->last_subkey > 16383 || src->last_value > 16383)
+        { set_error( STATUS_INSUFFICIENT_RESOURCES ); return 0; }
+        for (i = 0; i <= src->last_value; i++)
+        {
+            name.str = src->values[i].name; name.len = src->values[i].namelen;
+            if (!(value = find_value( view, name, &index ))) value = insert_value( view, name, index );
+            if (!value) return 0;
+            free( value->data ); value->data = NULL;
+            if (src->values[i].len && !(value->data = memdup( src->values[i].data, src->values[i].len ))) return 0;
+            value->len = src->values[i].len; value->type = src->values[i].type;
+        }
+        for (i = 0; i <= src->last_subkey; i++)
+        {
+            name.str = src->subkeys[i]->obj.name->name; name.len = src->subkeys[i]->obj.name->len;
+            if (!find_subkey( view, name, &index ))
+            {
+                if (!(child = create_key_recursive( view, name, current_time ))) return 0;
+                child->flags |= src->subkeys[i]->flags & KEY_WOWSHARE;
+                release_object( child );
+            }
+        }
+    }
+    return 1;
+}
+
+static int e1s_refresh_view( struct key *view )
+{
+    struct e1s_hive *m = view->e1s_view;
+    int ret;
+    if (!m || m->refreshing) return 1;
+    m->refreshing = 1;
+    ret = e1s_refresh_view_inner( view );
+    m->refreshing = 0;
+    return ret;
+}
+
+static obj_handle_t e1s_alloc_key_handle( struct key *key, unsigned int access, unsigned int attr )
+{
+    /* Existing MIC checks examine explicit write bits. A managed MAXIMUM_ALLOWED
+     * request must not acquire High write rights through that implicit mask. */
+    if (key->e1s_sd && (access & MAXIMUM_ALLOWED) &&
+        !token_e1s_profile_high( current->token ? current->token : current->process->token ))
+    { set_error( STATUS_ACCESS_DENIED ); return 0; }
+    return alloc_handle( current->process, key, access, attr );
 }
 
 /* load a part of the registry from a file */
@@ -2542,6 +2730,238 @@ static int load_init_registry_from_file( const char *filename, struct key *key, 
     save_branch_count++;
     make_object_permanent( &key->obj );
     return (f != NULL);
+}
+
+#if defined(WEX_E1S13_HKU_TEST) && defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
+/* A loaded managed root never falls through to the local SID default. */
+static int e1s_secure_keys( struct key *key, struct security_descriptor *sd, unsigned int depth, unsigned int *count )
+{
+    int i;
+    size_t size = sizeof(*sd) + sd->owner_len + sd->group_len + sd->sacl_len + sd->dacl_len;
+    if (depth > 64 || ++*count > 16384 || key->flags & (KEY_SYMLINK | KEY_PREDEF))
+    { set_error( STATUS_NOT_REGISTRY_FILE ); return 0; }
+    free( key->obj.sd );
+    if (!(key->obj.sd = memdup( sd, size ))) return 0;
+    key->e1s_sd = sd;
+    key->flags |= KEY_VOLATILE;
+    for (i = 0; i <= key->last_subkey; i++)
+        if (!e1s_secure_keys( key->subkeys[i], sd, depth + 1, count )) return 0;
+    return 1;
+}
+
+static struct key *e1s_create_new_root( const char *ascii )
+{
+    struct unicode_str name;
+    WCHAR *buffer = ascii_to_unicode_str( ascii, &name );
+    struct key *key;
+    struct object_params params = { .ops = &key_ops, .root = &root_key->obj, .name = name,
+                                    .attr = OBJ_CASE_INSENSITIVE | OBJ_OPENLINK };
+    if (!buffer) return NULL;
+    key = open_named_object( &params );
+    if (key)
+    { release_object( key ); free( buffer ); set_error( STATUS_OBJECT_NAME_COLLISION ); return NULL; }
+    if (get_error() != STATUS_OBJECT_NAME_NOT_FOUND) { free( buffer ); return NULL; }
+    clear_error();
+    key = create_key_recursive( root_key, name, current_time );
+    free( buffer );
+    return key;
+}
+
+static int e1s_read_hive( struct e1s_hive *m )
+{
+    struct stat before, after;
+    FILE *stream;
+    char *text;
+    size_t used = 0;
+    ssize_t n;
+    int ret = 0;
+    if (fstat( m->storage.hive_fd, &before ) || before.st_size < 24 || before.st_size > 1024 * 1024)
+    { set_error( STATUS_NOT_REGISTRY_FILE ); return 0; }
+    if (!(text = mem_alloc( before.st_size + 1 ))) return 0;
+    while (used < before.st_size)
+    {
+        n = pread( m->storage.hive_fd, text + used, before.st_size - used, used );
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) goto done;
+        used += n;
+    }
+    text[used] = 0;
+    if (memchr( text, 0, used ) || text[used - 1] != '\n' || fstat( m->storage.hive_fd, &after ) ||
+        before.st_size != after.st_size || before.st_mtim.tv_sec != after.st_mtim.tv_sec ||
+        before.st_mtim.tv_nsec != after.st_mtim.tv_nsec || before.st_ctim.tv_sec != after.st_ctim.tv_sec ||
+        before.st_ctim.tv_nsec != after.st_ctim.tv_nsec) goto done;
+    if (!(stream = fmemopen( text, used, "r" ))) goto done;
+    e1s_strict_loading = 1;
+    load_keys( m->user, NULL, stream, 0 ); /* fixed relative base, no autodetection */
+    e1s_strict_loading = 0;
+    ret = !get_error();
+    fclose( stream );
+done:
+    free( text );
+    if (!ret && !get_error()) set_error( STATUS_NOT_REGISTRY_FILE );
+    return ret;
+}
+
+static struct e1s_hive *e1s_load_hive( struct token *token, obj_handle_t context,
+                                     const unsigned char *record, data_size_t size,
+                                     unsigned int access, obj_handle_t *result )
+{
+    struct wex_account account;
+    struct e1s_hive *m = NULL, *other;
+    struct e1s_file_security *security = NULL;
+    struct unicode_str path;
+    struct stat prefix;
+    struct key *alias = NULL;
+    char name[128];
+    WCHAR *buffer = NULL;
+    unsigned int count = 0, status;
+    enum wex_profile_status storage_status;
+    set_error( STATUS_ACCESS_DENIED );
+    if (!token_claim_e1s_profile( context, token, record, size, &account )) return NULL;
+    for (other = e1s_hives; other; other = other->next)
+        if (!memcmp( other->account.sid, account.sid, sizeof(account.sid) ))
+        { set_error( STATUS_OBJECT_NAME_COLLISION ); return NULL; }
+    if (equal_sid( token_get_user_sid( token ), &local_user_sid ) || e1s_hive_count >= 8)
+    { set_error( STATUS_ACCESS_DENIED ); return NULL; }
+    if (!(m = calloc( 1, sizeof(*m) ))) { set_error( STATUS_NO_MEMORY ); return NULL; }
+    m->account = account; m->storage.profile_fd = m->storage.hive_fd = -1;
+    if (fstat( config_dir_fd, &prefix )) goto failed;
+    storage_status = wex_profile_open_existing( config_dir_fd, prefix.st_dev, prefix.st_ino,
+        getuid(), getgid(), &account, wex_token_u64( record + 32 ), &m->storage );
+    if (storage_status)
+    {
+        set_error( storage_status == WEX_PROFILE_ABSENT ? STATUS_OBJECT_PATH_NOT_FOUND :
+                   storage_status == WEX_PROFILE_BUSY ? STATUS_SHARING_VIOLATION : STATUS_ACCESS_DENIED );
+        goto failed;
+    }
+    clear_error();
+    if (!(m->sd = e1s_profile_alloc_sd( token_get_user_sid( token ), 0 ))) goto failed;
+    snprintf( name, sizeof(name), "User\\%s", m->storage.path.sid );
+    if (!(m->user = e1s_create_new_root( name ))) goto failed;
+    snprintf( name, sizeof(name), "User\\%s_Classes", m->storage.path.sid );
+    if (!(alias = e1s_create_new_root( name ))) goto failed;
+    if (!(security = apply_e1s_profile_security( &account, &m->storage )))
+    { set_error( STATUS_ACCESS_DENIED ); goto failed; }
+    if (!e1s_read_hive( m )) goto failed;
+    buffer = ascii_to_unicode_str( "Software\\Classes", &path );
+    if (!buffer || !(m->classes = create_key_recursive( m->user, path, current_time ))) goto failed;
+    free( buffer ); buffer = NULL;
+    /* Per-user classes use the same shared Wow6432Node rule as machine
+     * classes. Ordinary Bob retains init_registry's existing behavior. */
+    buffer = ascii_to_unicode_str( "Wow6432Node", &path );
+    if (buffer)
+    {
+        struct key *wow = create_key_recursive( m->classes, path, current_time );
+        if (!wow) goto failed;
+        wow->flags |= KEY_WOWSHARE; release_object( wow );
+    }
+    free( buffer ); buffer = NULL;
+    if (!e1s_secure_keys( m->user, m->sd, 0, &count ) || !e1s_secure_keys( alias, m->sd, 0, &count )) goto failed;
+    /* HKU SID_Classes is an alias of the actual per-user Software/Classes.
+     * HKCR uses a separate unnamed live union, never imports machine data into
+     * Alice's hive. The whole operation is synchronous before publication. */
+    snprintf( name, sizeof(name), "\\Registry\\User\\%s\\Software\\Classes", m->storage.path.sid );
+    buffer = ascii_to_unicode_str( name, &path );
+    if (!buffer) goto failed;
+    set_value( alias, symlink_str, REG_LINK, path.str, path.len );
+    free( buffer ); buffer = NULL;
+    if (get_error()) goto failed;
+    alias->flags |= KEY_SYMLINK;
+    snprintf( name, sizeof(name), "User\\%s_E1S13View", m->storage.path.sid );
+    if (!(m->view = e1s_create_new_root( name ))) goto failed;
+    if (!e1s_secure_keys( m->view, m->sd, 0, &count )) goto failed;
+    key_unlink_name( &m->view->obj, m->view->obj.name );
+    m->view->e1s_view = m;
+    buffer = ascii_to_unicode_str( "Machine\\Software\\Classes", &path );
+    if (buffer)
+    {
+        struct object_params params = { .ops = &key_ops, .root = &root_key->obj, .name = path,
+                                        .attr = OBJ_CASE_INSENSITIVE };
+        m->machine_classes = open_named_object( &params );
+    }
+    free( buffer ); buffer = NULL;
+    if (!m->machine_classes || !e1s_refresh_view( m->view )) goto failed;
+    if (wex_profile_verify_existing( config_dir_fd, &account, &m->storage ) || !e1s_profile_security_verify( security ) ||
+        !token_validate_e1s_profile( context, token, &account ))
+    { set_error( STATUS_ACCESS_DENIED ); goto failed; }
+    if (!(*result = e1s_alloc_key_handle( m->user, access, 0 ))) goto failed;
+    m->user->flags |= KEY_E1S_ROOT;
+    m->classes->flags |= KEY_E1S_ROOT;
+    alias->flags |= KEY_E1S_ROOT;
+    e1s_profile_security_commit( security );
+    m->storage.acl_pending = 0;
+    m->next = e1s_hives; e1s_hives = m; e1s_hive_count++;
+    release_object( alias );
+    clear_error();
+    return m;
+failed:
+    status = get_error();
+    if (!status) status = STATUS_INSUFFICIENT_RESOURCES;
+    free( buffer );
+    if (m->view) { m->view->e1s_view = NULL; release_object( m->view ); }
+    if (m->classes) release_object( m->classes );
+    if (alias) { delete_key( alias, 1 ); release_object( alias ); }
+    if (m->user) { delete_key( m->user, 1 ); release_object( m->user ); }
+    if (m->machine_classes) release_object( m->machine_classes );
+    e1s_profile_security_abort( security );
+    if (m->storage.profile_fd >= 0) close( m->storage.profile_fd );
+    if (m->storage.hive_fd >= 0) close( m->storage.hive_fd );
+    free( m->sd ); free( m );
+    set_error( status );
+    return NULL;
+}
+#endif
+
+DECL_HANDLER(load_e1s_profile)
+{
+#if defined(WEX_E1S13_HKU_TEST) && defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
+    struct token *token, *effective = current->token ? current->token : current->process->token;
+    const struct wex_account *account;
+    struct e1s_hive *m;
+    struct key *key;
+    struct wex_account ignored;
+    if (!(token = get_token_obj( current->process, req->token, TOKEN_QUERY )))
+    {
+        if (req->operation == WEX_HKU_LOAD && token_e1s_broker())
+            token_claim_e1s_profile( req->context, NULL, get_req_data(), get_req_data_size(), &ignored );
+        return;
+    }
+    account = token_e1s_account( token );
+    if (req->operation == WEX_HKU_QUERY && !req->context && !req->access && !get_req_data_size() && !get_reply_max_size())
+    { reply->managed = !!account; release_object( token ); return; }
+    set_error( STATUS_ACCESS_DENIED );
+    if (req->operation == WEX_HKU_LOAD)
+    {
+        if (!token_e1s_broker()) goto done;
+        if (get_reply_max_size())
+        { token_claim_e1s_profile( req->context, NULL, get_req_data(), get_req_data_size(), &ignored ); goto done; }
+        m = e1s_load_hive( token, req->context, get_req_data(), get_req_data_size(), req->access, &reply->hkey );
+        if (!m) goto done;
+        reply->managed = 1;
+        goto done;
+    }
+    else
+    {
+        if (!account || get_reply_max_size()) goto done;
+        if (req->context || get_req_data_size()) goto done;
+        if (req->operation == WEX_HKU_OPEN || req->operation == WEX_HKU_UNLOAD_S14)
+        { if (!token_e1s_broker()) goto done; }
+        else if (req->operation != WEX_HKU_CURRENT && req->operation != WEX_HKU_CLASSES) goto done;
+        else if (!token_e1s_broker() && (token_e1s_account( effective ) == NULL ||
+                 memcmp( token_e1s_account( effective )->incarnation, account->incarnation, 16 ) ||
+                 !equal_sid( token_get_user_sid( effective ), token_get_user_sid( token ) ))) goto done;
+        if (!(m = e1s_find_hive( account ))) { set_error( STATUS_OBJECT_PATH_NOT_FOUND ); goto done; }
+        if (req->operation == WEX_HKU_UNLOAD_S14) { e1s_profile_unload_s14(); goto done; }
+    }
+    key = req->operation == WEX_HKU_CLASSES ? m->view : m->user;
+    clear_error();
+    reply->hkey = e1s_alloc_key_handle( key, req->access, 0 );
+    if (reply->hkey) reply->managed = 1;
+done:
+    release_object( token );
+#else
+    set_error( STATUS_NOT_SUPPORTED );
+#endif
 }
 
 static WCHAR *format_user_registry_path( const struct sid *sid, struct unicode_str *path )
@@ -3263,7 +3683,7 @@ static int check_create_subkey( const struct object_params *params )
 /* create a registry key */
 DECL_HANDLER(create_key)
 {
-    struct key *key, *parent = NULL;
+    struct key *key, *parent = NULL, *mapped = NULL;
     unsigned int access = req->access;
     struct key_init_data data = { .options = req->options, .modif = current_time };
     struct object_params params = { .ops = &key_ops, .init_data = &data };
@@ -3271,6 +3691,10 @@ DECL_HANDLER(create_key)
     if (!get_req_object_attributes( &params )) return;
     if (params.root) release_object( params.root );
     data.class = get_req_data_after_objattr( &params, &data.classlen );
+
+    if (token_e1s_account( current->token ? current->token : current->process->token ) &&
+        !e1s_find_hive( token_e1s_account( current->token ? current->token : current->process->token ) ))
+    { set_error( STATUS_OBJECT_NAME_NOT_FOUND ); return; }
 
     if (!is_wow64_process( current->process )) access = (access & ~KEY_WOW64_32KEY) | KEY_WOW64_64KEY;
     if (!(access & KEY_WOW64_64KEY)) params.attr |= OBJ_KEY_WOW64;
@@ -3280,22 +3704,34 @@ DECL_HANDLER(create_key)
     {
         if (!(parent = get_hkey_obj( params.objattr->rootdir, 0 ))) return;
         params.root = get_wow6432_parent( parent, access, params.name );
+        if (parent->e1s_view)
+        {
+            if (!(mapped = e1s_view_user( parent, 1 ))) goto done;
+            params.root = get_wow6432_parent( mapped, access, params.name );
+        }
     }
 
     if (elevation_enforced() && !check_create_subkey( &params )) goto done;
 
     if ((key = params.name.len ? create_named_object( &params ) : open_named_object( &params )))
     {
+        if (mapped)
+        {
+            struct object_params view_params = { .ops = &key_ops, .root = &parent->obj,
+                                                  .name = params.name, .attr = params.attr };
+            release_object( key );
+            if (!(key = open_named_object( &view_params ))) goto done;
+        }
         if (!params.name.len || get_error() == STATUS_OBJECT_NAME_EXISTS)
         {
             if (key->flags & KEY_PREDEF) set_error( STATUS_PREDEFINED_HANDLE );
             if (!(access & KEY_WOW64_64KEY)) key = grab_wow6432node( key );
-            reply->hkey = alloc_handle( current->process, key, access, params.attr );
+            reply->hkey = e1s_alloc_key_handle( key, access, params.attr );
         }
         else
         {
-            reply->hkey = alloc_handle_no_access_check( current->process, key,
-                                                        access, params.attr );
+            reply->hkey = key->e1s_sd ? e1s_alloc_key_handle( key, access, params.attr ) :
+                alloc_handle_no_access_check( current->process, key, access, params.attr );
             if (parent)
                 touch_key_ex( get_parent( key ), REG_NOTIFY_CHANGE_NAME,
                               !(key->flags & KEY_VOLATILE) && !is_per_session_key( key ) );
@@ -3305,6 +3741,7 @@ DECL_HANDLER(create_key)
     }
 
 done:
+    if (mapped) release_object( mapped );
     if (parent) release_object( parent );
 }
 
@@ -3329,7 +3766,7 @@ DECL_HANDLER(open_key)
     {
         if (!(access & KEY_WOW64_64KEY)) key = grab_wow6432node( key );
         if (key->flags & KEY_PREDEF) set_error( STATUS_PREDEFINED_HANDLE );
-        reply->hkey = alloc_handle( current->process, key, access, req->attributes );
+        reply->hkey = e1s_alloc_key_handle( key, access, req->attributes );
         if (debug_level > 1) dump_operation( key, NULL, "Open" );
         release_object( key );
     }
@@ -3339,7 +3776,7 @@ DECL_HANDLER(open_key)
 /* delete a registry key */
 DECL_HANDLER(delete_key)
 {
-    struct key *key = (struct key *)get_handle_obj( current->process, req->hkey, DELETE, &key_ops );
+    struct key *key = get_hkey_obj( req->hkey, DELETE );
 
     if (key)
     {
@@ -3354,7 +3791,7 @@ DECL_HANDLER(flush_key)
     struct key *key = get_hkey_obj( req->hkey, 0 );
     if (key)
     {
-        /* we don't need to do anything here with the current implementation */
+        if (key->e1s_sd) e1s_profile_unload_s14(); /* no false durable-success */
         release_object( key );
     }
 }
@@ -3457,7 +3894,8 @@ DECL_HANDLER(load_registry)
 
     if ((key = create_named_object( &params )))
     {
-        load_registry( key, req->file );
+        if (key->e1s_sd) set_error( STATUS_ACCESS_DENIED );
+        else load_registry( key, req->file );
         release_object( key );
     }
     if (parent) release_object( parent );
@@ -3483,7 +3921,8 @@ DECL_HANDLER(unload_registry)
 
     if ((key = open_named_object( &params )))
     {
-        if (key->obj.handle_count)
+        if (key->e1s_sd) e1s_profile_unload_s14();
+        else if (key->obj.handle_count)
             set_error( STATUS_CANNOT_DELETE );
         else if (key->obj.is_permanent)
             set_error( STATUS_ACCESS_DENIED );
@@ -3522,6 +3961,8 @@ DECL_HANDLER(set_registry_notification)
     key = get_hkey_obj( req->hkey, KEY_NOTIFY );
     if (key)
     {
+        if (key->e1s_view)
+        { set_error( STATUS_NOT_SUPPORTED ); release_object( key ); return; }
         event = get_event_obj( current->process, req->event, SYNCHRONIZE );
         if (event)
         {
@@ -3565,6 +4006,10 @@ DECL_HANDLER(rename_key)
     struct unicode_str name = get_req_unicode_str();
     struct key *key;
 
+    key = (struct key *)get_handle_obj( current->process, req->hkey, KEY_WRITE, &key_ops );
+    if (!key) return;
+    if (key->e1s_view) { set_error( STATUS_NOT_SUPPORTED ); release_object( key ); return; }
+    release_object( key );
     key = get_hkey_obj( req->hkey, KEY_WRITE );
     if (key)
     {

@@ -32,6 +32,7 @@
 #include "bcrypt.h"
 
 #include "wine/debug.h"
+#include "wine/wex_profile.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL( userenv );
 
@@ -665,18 +666,44 @@ BOOL WINAPI GetProfileType( DWORD *pdwFlags )
     return TRUE;
 }
 
+/* GPL-2.0-or-later S13: registration is an explicit broker preparation step.
+ * LoadUserProfile can open it only through the same broker gate; it neither
+ * infers an S12 reference from a path/name nor bypasses the one-shot load. */
+static NTSTATUS e1s_load_profile( ULONG op, HANDLE token, ACCESS_MASK access, HANDLE *key, ULONG *managed )
+{
+    typedef NTSTATUS (WINAPI *load_fn)(ULONG,HANDLE,HANDLE,ACCESS_MASK,const void*,ULONG,HANDLE*,ULONG*);
+    load_fn load = (load_fn)GetProcAddress( GetModuleHandleW( L"ntdll.dll" ), "NtLoadWexProfile" );
+    if (!load) { *key = NULL; *managed = 0; return STATUS_NOT_SUPPORTED; }
+    return load( op, NULL, token, access, NULL, 0, key, managed );
+}
+
+static BOOL load_managed_profile( HANDLE token, HANDLE *profile, BOOL valid_size )
+{
+    HANDLE key;
+    ULONG managed;
+    NTSTATUS status = e1s_load_profile( WEX_HKU_QUERY, token, 0, &key, &managed );
+    if (status == STATUS_NOT_SUPPORTED || (!status && !managed))
+    { *profile = HKEY_CURRENT_USER; return TRUE; }
+    *profile = NULL;
+    if (!status && !valid_size) { SetLastError( ERROR_INVALID_PARAMETER ); return FALSE; }
+    if (!status) status = e1s_load_profile( WEX_HKU_OPEN, token, KEY_ALL_ACCESS, &key, &managed );
+    if (status) { SetLastError( RtlNtStatusToDosError( status ) ); return FALSE; }
+    *profile = key;
+    return TRUE;
+}
+
 BOOL WINAPI LoadUserProfileA( HANDLE hToken, LPPROFILEINFOA lpProfileInfo )
 {
     FIXME("%p %p\n", hToken, lpProfileInfo );
-    lpProfileInfo->hProfile = HKEY_CURRENT_USER;
-    return TRUE;
+    if (!lpProfileInfo) { SetLastError( ERROR_INVALID_PARAMETER ); return FALSE; }
+    return load_managed_profile( hToken, &lpProfileInfo->hProfile, lpProfileInfo->dwSize == sizeof(*lpProfileInfo) );
 }
 
 BOOL WINAPI LoadUserProfileW( HANDLE hToken, LPPROFILEINFOW lpProfileInfo )
 {
     FIXME("%p %p\n", hToken, lpProfileInfo );
-    lpProfileInfo->hProfile = HKEY_CURRENT_USER;
-    return TRUE;
+    if (!lpProfileInfo) { SetLastError( ERROR_INVALID_PARAMETER ); return FALSE; }
+    return load_managed_profile( hToken, &lpProfileInfo->hProfile, lpProfileInfo->dwSize == sizeof(*lpProfileInfo) );
 }
 
 BOOL WINAPI RegisterGPNotification( HANDLE event, BOOL machine )
@@ -693,6 +720,15 @@ BOOL WINAPI UnregisterGPNotification( HANDLE event )
 
 BOOL WINAPI UnloadUserProfile( HANDLE hToken, HANDLE hProfile )
 {
+    HANDLE unused;
+    ULONG managed;
+    NTSTATUS status = e1s_load_profile( WEX_HKU_QUERY, hToken, 0, &unused, &managed );
+    if (!status && managed)
+    {
+        status = e1s_load_profile( WEX_HKU_UNLOAD_S14, hToken, 0, &unused, &managed );
+        SetLastError( RtlNtStatusToDosError( status ) );
+        return FALSE;
+    }
     FIXME("(%p, %p): stub\n", hToken, hProfile);
     return FALSE;
 }

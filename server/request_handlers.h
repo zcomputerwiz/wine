@@ -332,6 +332,7 @@ DECL_HANDLER(dwm_send);
 DECL_HANDLER(dwm_recv);
 DECL_HANDLER(dwm_reply);
 DECL_HANDLER(create_e1s_account_token);
+DECL_HANDLER(load_e1s_profile);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -661,6 +662,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_dwm_recv,
     (req_handler)req_dwm_reply,
     (req_handler)req_create_e1s_account_token,
+    (req_handler)req_load_e1s_profile,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -2530,3 +2532,11 @@ C_ASSERT( offsetof(struct create_e1s_account_token_reply, context) == 8 );
 C_ASSERT( offsetof(struct create_e1s_account_token_reply, token) == 12 );
 C_ASSERT( offsetof(struct create_e1s_account_token_reply, caps) == 16 );
 C_ASSERT( sizeof(struct create_e1s_account_token_reply) == 24 );
+C_ASSERT( offsetof(struct load_e1s_profile_request, operation) == 12 );
+C_ASSERT( offsetof(struct load_e1s_profile_request, context) == 16 );
+C_ASSERT( offsetof(struct load_e1s_profile_request, token) == 20 );
+C_ASSERT( offsetof(struct load_e1s_profile_request, access) == 24 );
+C_ASSERT( sizeof(struct load_e1s_profile_request) == 32 );
+C_ASSERT( offsetof(struct load_e1s_profile_reply, hkey) == 8 );
+C_ASSERT( offsetof(struct load_e1s_profile_reply, managed) == 12 );
+C_ASSERT( sizeof(struct load_e1s_profile_reply) == 16 );

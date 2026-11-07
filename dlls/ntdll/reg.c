@@ -33,8 +33,51 @@
 #include "ntstatus.h"
 #include "ntdll_misc.h"
 #include "wine/debug.h"
+#include "wine/server.h"
+#include "wine/wex_profile.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(reg);
+
+/* GPL-2.0-or-later S13 addition. Pointer-free private PE server wrapper;
+ * no Unix syscall table or separate WoW64 thunk. Outputs clear on denial. */
+NTSTATUS WINAPI NtLoadWexProfile( ULONG operation, HANDLE context, HANDLE token, ACCESS_MASK access,
+                                 const void *record, ULONG length, HANDLE *key, ULONG *managed )
+{
+    unsigned char input[WEX_HKU_RECORD_SIZE];
+    HANDLE result = NULL;
+    HANDLE effective = NULL;
+    ULONG flag = 0;
+    NTSTATUS status;
+    if (key) *key = NULL;
+    if (managed) *managed = 0;
+    if (!key || !managed || length > sizeof(input) || (length && !record)) return STATUS_INVALID_PARAMETER;
+    if (!token)
+    {
+        status = NtOpenThreadToken( NtCurrentThread(), TOKEN_QUERY, TRUE, &effective );
+        if (status == STATUS_NO_TOKEN) status = NtOpenProcessToken( NtCurrentProcess(), TOKEN_QUERY, &effective );
+        if (status) return status;
+        token = effective;
+    }
+    if (length) memcpy( input, record, length );
+    SERVER_START_REQ( load_e1s_profile )
+    {
+        req->operation = operation;
+        req->context = wine_server_obj_handle( context );
+        req->token = wine_server_obj_handle( token );
+        req->access = access;
+        if (length) wine_server_add_data( req, input, length );
+        status = wine_server_call( req );
+        result = wine_server_ptr_handle( reply->hkey );
+        flag = reply->managed;
+        if (!status && (wine_server_reply_size( reply ) || flag > 1 ||
+            (operation == WEX_HKU_QUERY ? !!result : !result))) status = STATUS_NOT_SUPPORTED;
+    }
+    SERVER_END_REQ;
+    if (effective) NtClose( effective );
+    if (status) { if (result) NtClose( result ); }
+    else { *key = result; *managed = flag; }
+    return status;
+}
 
 
 /******************************************************************************
@@ -229,6 +272,15 @@ NTSTATUS WINAPI RtlOpenCurrentUser(
 	NTSTATUS ret;
 
 	TRACE("(0x%08lx, %p)\n",DesiredAccess, KeyHandle);
+
+        {
+            HANDLE unused;
+            ULONG managed;
+            ret = NtLoadWexProfile( WEX_HKU_QUERY, NULL, NULL, 0, NULL, 0, &unused, &managed );
+            if (!ret && managed)
+                return NtLoadWexProfile( WEX_HKU_CURRENT, NULL, NULL, DesiredAccess, NULL, 0, KeyHandle, &managed );
+            if (ret && ret != STATUS_NOT_SUPPORTED) return ret;
+        }
 
         if ((ret = RtlFormatCurrentUserKeyPath(&ObjectName))) return ret;
 	InitializeObjectAttributes(&ObjectAttributes,&ObjectName,OBJ_CASE_INSENSITIVE,0, NULL);

@@ -44,6 +44,7 @@
 #include "accounts.h"
 #include "e1s_token.h"
 #include "wine/wex_token.h"
+#include "wine/wex_profile.h"
 
 #define MAX_SUBAUTH_COUNT 1
 
@@ -128,6 +129,7 @@ struct token
     struct luid    modified_id;     /* new id allocated every time token is modified */
     struct luid    lineage_id;      /* token_id of the first token of the chain of duplicates and filtered copies */
     struct luid    auth_id;         /* authentication (logon) id, shared by all tokens of the same logon */
+    struct wex_account e1s_account; /* S10 provenance; zero generation means unmanaged */
     struct list    privileges;      /* privileges available to the token */
     struct list    groups;          /* groups that the user of this token belongs to (sid_and_attributes) */
     struct sid    *user;            /* SID of user this token represents */
@@ -536,6 +538,7 @@ static struct token *create_token( unsigned int primary, unsigned int session_id
         /* the caller sets the authentication (logon) id; zero is the unassigned stub */
         token->auth_id.low_part = 0;
         token->auth_id.high_part = 0;
+        memset( &token->e1s_account, 0, sizeof(token->e1s_account) );
         list_init( &token->privileges );
         list_init( &token->groups );
         list_init( &token->restricted_sids );
@@ -680,6 +683,7 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
     if (!token) return token;
     token->lineage_id = src_token->lineage_id;
     token->auth_id = src_token->auth_id;
+    token->e1s_account = src_token->e1s_account;
 
     /* copy groups */
     LIST_FOR_EACH_ENTRY( group, &src_token->groups, struct group, entry )
@@ -2480,6 +2484,8 @@ struct e1s_token_context
     struct process *owner; /* weak: owner's handle table owns this object */
     thread_id_t thread;
     struct token *broker_primary;
+    struct token *issued;
+    int profile_attempted;
     struct luid broker_id, broker_modified;
     unsigned long long broker_gen, caps, expiry;
     unsigned int state; /* 0 negotiated, 1 installed, 2 permanently consumed */
@@ -2503,6 +2509,7 @@ static void e1s_context_destroy( struct object *obj )
     struct e1s_token_context *c = (struct e1s_token_context *)obj;
     if (c->release) c->release( c->cookie );
     if (c->broker_primary) release_object( c->broker_primary );
+    if (c->issued) release_object( c->issued );
     if (c->caller) release_object( c->caller );
     if (c->primary) release_object( c->primary );
 }
@@ -2675,7 +2682,14 @@ static int e1s_install_consumed( struct e1s_token_context *c, const struct e1s_t
     c->caller = (struct process *)grab_object( r->caller );
     c->primary = (struct token *)grab_object( r->primary );
     token_get_ids( c->primary, &c->caller_id, &c->caller_modified );
-    if (!e1s_caller_current( c )) return 0;
+    if (!e1s_caller_current( c ))
+    {
+        release_object( c->caller );
+        release_object( c->primary );
+        c->caller = NULL;
+        c->primary = NULL;
+        return 0;
+    }
     c->expiry = r->expiry;
     c->validate = r->validate; c->release = r->release; c->cookie = r->cookie;
     c->state = 1;
@@ -2751,6 +2765,8 @@ static void e1s_issue( struct e1s_token_context *c, const unsigned char *in, dat
                                             TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY, 0 );
     if (*handle)
     {
+        t->e1s_account = account;
+        c->issued = (struct token *)grab_object( t );
         memset( out, 0, WEX_TOKEN_RESPONSE_SIZE );
         wex_token_put32( out, 0x00010005 ); wex_token_put32( out + 4, WEX_TOKEN_RESPONSE_SIZE );
         wex_token_put64( out + 8, c->caps );
@@ -2770,6 +2786,82 @@ static void e1s_issue( struct e1s_token_context *c, const unsigned char *in, dat
     release_object( t );
 }
 #endif
+
+const struct wex_account *token_e1s_account( struct token *token )
+{
+    return token->e1s_account.generation ? &token->e1s_account : NULL;
+}
+
+const struct sid *token_get_user_sid( struct token *token )
+{
+    return token->user;
+}
+
+int token_e1s_profile_high( struct token *token )
+{
+    return token->integrity_rid >= SECURITY_MANDATORY_HIGH_RID;
+}
+
+int token_e1s_broker(void)
+{
+#if defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
+    return e1s_broker();
+#else
+    return 0;
+#endif
+}
+
+int token_validate_e1s_profile( obj_handle_t context, struct token *token, const struct wex_account *account )
+{
+#if defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
+    struct e1s_token_context *c;
+    struct wex_account fresh;
+    unsigned long long now;
+    int ret = 0;
+    if (!e1s_broker()) return 0;
+    c = (struct e1s_token_context *)get_handle_obj( current->process, context, 0, &e1s_context_ops );
+    if (!c) return 0;
+    if (e1s_context_current( c ) && c->issued == token && c->state == 2 &&
+        (now = e1s_now()) && now < c->expiry && e1s_caller_current( c ) &&
+        c->validate( c->cookie, c->input ) && e1s_lookup( c, &fresh ) &&
+        !strcmp( fresh.name, account->name ) && fresh.uid == account->uid &&
+        fresh.primary_gid == account->primary_gid && fresh.generation == account->generation &&
+        !memcmp( fresh.sid, account->sid, sizeof(fresh.sid) ) &&
+        !memcmp( fresh.incarnation, account->incarnation, 16 )) ret = 1;
+    release_object( c );
+    return ret;
+#else
+    return 0;
+#endif
+}
+
+int token_claim_e1s_profile( obj_handle_t context, struct token *token, const void *record,
+                            data_size_t size, struct wex_account *account )
+{
+#if defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
+    struct e1s_token_context *c;
+    const unsigned char *in = record;
+    int ret = 0;
+    if (!e1s_broker()) return 0;
+    c = (struct e1s_token_context *)get_handle_obj( current->process, context, 0, &e1s_context_ops );
+    if (!c) return 0;
+    if (e1s_context_current( c ) && !c->profile_attempted)
+    {
+        c->profile_attempted = 1; /* malformed references burn too */
+        if (size == WEX_HKU_RECORD_SIZE && wex_token_u32( in ) == 1 &&
+            wex_token_u32( in + 4 ) == WEX_HKU_RECORD_SIZE && !wex_token_u64( in + 40 ) &&
+            wex_token_u64( in + 32 ) && token && token->e1s_account.generation &&
+            !memcmp( in + 8, token->e1s_account.incarnation, 16 ) &&
+            wex_token_u64( in + 24 ) == token->e1s_account.generation &&
+            token_validate_e1s_profile( context, token, &token->e1s_account ))
+        { *account = token->e1s_account; ret = 1; }
+    }
+    release_object( c );
+    return ret;
+#else
+    return 0;
+#endif
+}
 
 int token_install_e1s_consumed( obj_handle_t context, const struct e1s_token_consumed *record )
 {

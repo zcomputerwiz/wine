@@ -42,6 +42,7 @@
 #include "wine/debug.h"
 #include "wine/exception.h"
 #include "wine/list.h"
+#include "wine/wex_profile.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(reg);
 
@@ -61,6 +62,80 @@ static const WCHAR * const root_key_names[] =
 
 static HKEY special_root_keys[ARRAY_SIZE(root_key_names)];
 static BOOL cache_disabled[ARRAY_SIZE(root_key_names)];
+
+/* Managed roots never share the legacy predefined-handle cache. These roots
+ * stay loaded until server exit in S13, so per-SID process caches cannot outlive
+ * their registration. S14 must add generation invalidation before unloading. */
+struct e1s_root_cache
+{
+    struct e1s_root_cache *next;
+    WCHAR *sid_path;
+    HANDLE user, classes;
+    LUID token_id, modified_id;
+};
+static struct e1s_root_cache *e1s_roots;
+static SRWLOCK e1s_root_lock = SRWLOCK_INIT;
+
+/* Private ntdll exports are deliberately absent from import libraries. */
+static NTSTATUS e1s_load_profile( ULONG op, HANDLE context, HANDLE token, ACCESS_MASK access,
+                                  const void *record, ULONG length, HANDLE *key, ULONG *managed )
+{
+    typedef NTSTATUS (WINAPI *load_fn)(ULONG,HANDLE,HANDLE,ACCESS_MASK,const void*,ULONG,HANDLE*,ULONG*);
+    load_fn load = (load_fn)GetProcAddress( GetModuleHandleW( L"ntdll.dll" ), "NtLoadWexProfile" );
+    if (!load) { *key = NULL; *managed = 0; return STATUS_NOT_SUPPORTED; }
+    return load( op, context, token, access, record, length, key, managed );
+}
+
+static BOOL e1s_managed_effective(void)
+{
+    HANDLE unused;
+    ULONG managed;
+    NTSTATUS status = e1s_load_profile( WEX_HKU_QUERY, NULL, NULL, 0, NULL, 0, &unused, &managed );
+    return status != STATUS_NOT_SUPPORTED && (status || managed);
+}
+
+static HKEY e1s_special_root( BOOL classes )
+{
+    struct e1s_root_cache *entry;
+    UNICODE_STRING path;
+    HANDLE *slot, result = NULL;
+    HANDLE token;
+    TOKEN_STATISTICS stats;
+    ULONG size;
+    NTSTATUS status;
+    ULONG managed;
+    status = NtOpenThreadToken( GetCurrentThread(), TOKEN_QUERY, TRUE, &token );
+    if (status == STATUS_NO_TOKEN) status = NtOpenProcessToken( GetCurrentProcess(), TOKEN_QUERY, &token );
+    if (status) return NULL;
+    status = NtQueryInformationToken( token, TokenStatistics, &stats, sizeof(stats), &size );
+    if (status) { NtClose( token ); return NULL; }
+    if (RtlFormatCurrentUserKeyPath( &path )) { NtClose( token ); return NULL; }
+    AcquireSRWLockExclusive( &e1s_root_lock );
+    for (entry = e1s_roots; entry; entry = entry->next)
+        if (!wcscmp( entry->sid_path, path.Buffer ) &&
+            !memcmp( &entry->token_id, &stats.TokenId, sizeof(LUID) ) &&
+            !memcmp( &entry->modified_id, &stats.ModifiedId, sizeof(LUID) )) break;
+    if (!entry && (entry = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*entry) )))
+    {
+        if (!(entry->sid_path = HeapAlloc( GetProcessHeap(), 0, path.Length + sizeof(WCHAR) )))
+        { HeapFree( GetProcessHeap(), 0, entry ); entry = NULL; }
+        else
+        { memcpy( entry->sid_path, path.Buffer, path.Length ); entry->sid_path[path.Length / sizeof(WCHAR)] = 0;
+          entry->token_id = stats.TokenId; entry->modified_id = stats.ModifiedId;
+          entry->next = e1s_roots; e1s_roots = entry; }
+    }
+    if (entry)
+    {
+        slot = classes ? &entry->classes : &entry->user;
+        if (!*slot) e1s_load_profile( classes ? WEX_HKU_CLASSES : WEX_HKU_CURRENT,
+                                      NULL, token, MAXIMUM_ALLOWED, NULL, 0, slot, &managed );
+        result = *slot;
+    }
+    ReleaseSRWLockExclusive( &e1s_root_lock );
+    RtlFreeUnicodeString( &path );
+    NtClose( token );
+    return result;
+}
 
 static CRITICAL_SECTION reg_mui_cs;
 static CRITICAL_SECTION_DEBUG reg_mui_cs_debug =
@@ -280,6 +355,23 @@ static NTSTATUS open_wow6432node_parent( HKEY *retkey, HKEY root, DWORD options,
         return status;
     }
 
+    /* S13's unnamed union cache has no absolute namespace path to reopen.
+     * Classes are shared between ABIs; retain the exact view (including a
+     * subkey view), rather than resolving its diagnostic name as a real key. */
+    if (e1s_managed_effective())
+    {
+        static const WCHAR marker[] = L"_E1S13View";
+        DWORD i, chars = info->NameLength / sizeof(WCHAR);
+        for (i = 0; i + ARRAY_SIZE(marker) - 1 <= chars; i++)
+            if (!wcsnicmp( info->Name + i, marker, ARRAY_SIZE(marker) - 1 ))
+            {
+                status = NtDuplicateObject( GetCurrentProcess(), root, GetCurrentProcess(),
+                                             (HANDLE *)retkey, 0, 0, DUPLICATE_SAME_ACCESS );
+                if (buf_ptr != buffer) HeapFree( GetProcessHeap(), 0, buf_ptr );
+                return status;
+            }
+    }
+
     name.Buffer = info->Name;
     name.Length = info->NameLength;
     root = 0;
@@ -481,6 +573,10 @@ static inline HKEY get_special_root_hkey( HKEY hkey )
 {
     unsigned int index = HandleToUlong(hkey) - HandleToUlong(HKEY_SPECIAL_ROOT_FIRST);
 
+    if ((HandleToUlong(hkey) == HandleToUlong(HKEY_CURRENT_USER) ||
+         HandleToUlong(hkey) == HandleToUlong(HKEY_CLASSES_ROOT)) && e1s_managed_effective())
+        return e1s_special_root( HandleToUlong(hkey) == HandleToUlong(HKEY_CLASSES_ROOT) );
+
     switch (HandleToUlong(hkey))
     {
         case (LONG)(LONG_PTR)HKEY_CLASSES_ROOT:
@@ -645,7 +741,7 @@ LSTATUS WINAPI DECLSPEC_HOTPATCH RegOpenKeyExW( HKEY hkey, LPCWSTR name, DWORD o
 {
     UNICODE_STRING nameW;
 
-    if (retkey && (!name || !name[0]) &&
+    if (retkey && (!name || !name[0]) && !e1s_managed_effective() &&
         (HandleToUlong(hkey) >= HandleToUlong(HKEY_SPECIAL_ROOT_FIRST)) &&
         (HandleToUlong(hkey) <= HandleToUlong(HKEY_SPECIAL_ROOT_LAST)))
     {
@@ -2749,6 +2845,17 @@ LSTATUS WINAPI RegNotifyChangeKeyValue( HKEY hkey, BOOL fWatchSubTree,
  */
 LSTATUS WINAPI RegOpenUserClassesRoot( HANDLE hToken, DWORD dwOptions, REGSAM samDesired, PHKEY phkResult )
 {
+    HANDLE key;
+    ULONG managed;
+    NTSTATUS status = e1s_load_profile( WEX_HKU_QUERY, NULL, hToken, 0, NULL, 0, &key, &managed );
+    if (!status && managed)
+    {
+        if (!phkResult || dwOptions) return ERROR_INVALID_PARAMETER;
+        status = e1s_load_profile( WEX_HKU_CLASSES, NULL, hToken, samDesired, NULL, 0, &key, &managed );
+        *phkResult = key;
+        return RtlNtStatusToDosError( status );
+    }
+    if (status && status != STATUS_NOT_SUPPORTED) return RtlNtStatusToDosError( status );
     FIXME("(%p, 0x%lx, 0x%lx, %p) semi-stub\n", hToken, dwOptions, samDesired, phkResult);
 
     *phkResult = HKEY_CLASSES_ROOT;

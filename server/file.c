@@ -47,6 +47,7 @@
 #include "request.h"
 #include "process.h"
 #include "security.h"
+#include "e1s_profile.h"
 
 static const WCHAR file_name[] = {'F','i','l','e'};
 
@@ -373,10 +374,14 @@ static struct security_descriptor *file_get_sd( struct object *obj )
     struct stat st;
     int unix_fd;
     struct security_descriptor *sd;
+    int managed;
 
     assert( obj->ops == &file_ops );
 
     unix_fd = get_file_unix_fd( file );
+
+    sd = e1s_profile_file_sd( unix_fd, &managed );
+    if (managed) return sd;
 
     if (unix_fd == -1 || fstat( unix_fd, &st ) == -1)
         return obj->sd;
@@ -485,10 +490,13 @@ static int file_set_sd( struct object *obj, const struct security_descriptor *sd
     struct stat st;
     mode_t mode;
     int unix_fd;
+    int managed;
 
     assert( obj->ops == &file_ops );
 
     unix_fd = get_file_unix_fd( file );
+    e1s_profile_file_sd( unix_fd, &managed );
+    if (managed) { set_error( STATUS_ACCESS_DENIED ); return 0; }
 
     if (unix_fd == -1 || fstat( unix_fd, &st ) == -1) return 1;
 

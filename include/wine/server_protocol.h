@@ -6530,6 +6530,25 @@ struct create_e1s_account_token_reply
     /* VARARG(record,e1s_token); */
 };
 
+/* WineExplorer private S13. Default server denies; no path/SID input.
+ * 48-byte storage reference is not a lease. Fixed maximum remains 88. */
+struct load_e1s_profile_request
+{
+    struct request_header __header;
+    unsigned int        operation;
+    obj_handle_t        context;
+    obj_handle_t        token;
+    unsigned int        access;
+    /* VARARG(record,e1s_token); */
+    char __pad_28[4];
+};
+struct load_e1s_profile_reply
+{
+    struct reply_header __header;
+    obj_handle_t        hkey;
+    unsigned int        managed;
+};
+
 
 enum request
 {
@@ -6858,6 +6877,7 @@ enum request
     REQ_dwm_recv,
     REQ_dwm_reply,
     REQ_create_e1s_account_token,
+    REQ_load_e1s_profile,
     REQ_NB_REQUESTS
 };
 
@@ -7190,6 +7210,7 @@ union generic_request
     struct dwm_recv_request dwm_recv_request;
     struct dwm_reply_request dwm_reply_request;
     struct create_e1s_account_token_request create_e1s_account_token_request;
+    struct load_e1s_profile_request load_e1s_profile_request;
 };
 union generic_reply
 {
@@ -7520,8 +7541,9 @@ union generic_reply
     struct dwm_recv_reply dwm_recv_reply;
     struct dwm_reply_reply dwm_reply_reply;
     struct create_e1s_account_token_reply create_e1s_account_token_reply;
+    struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 977
+#define SERVER_PROTOCOL_VERSION 978
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

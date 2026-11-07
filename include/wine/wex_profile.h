@@ -1,0 +1,17 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later
+ * Copyright 2026 WineExplorer contributors
+ */
+#ifndef __WINE_WEX_PROFILE_H
+#define __WINE_WEX_PROFILE_H
+#include "wex_token.h"
+/* Private S13, not S1 kind 6. LE: version:u32=1, size:u32=48,
+ * S4 account_key[16], map_generation:u64, S12 storage_generation:u64,
+ * reserved:u64=0. No SID, name, path, prefix or transferable lease. */
+#define WEX_HKU_RECORD_SIZE 48
+#define WEX_HKU_LOAD 1
+#define WEX_HKU_QUERY 2
+#define WEX_HKU_OPEN 3
+#define WEX_HKU_UNLOAD_S14 4
+#define WEX_HKU_CURRENT 5
+#define WEX_HKU_CLASSES 6
+#endif

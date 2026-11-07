@@ -15,4 +15,5 @@ SOURCES = \
 	rsrc.rc \
 	security.c \
 	service.c \
+	wex_hku.c \
 	wex_token.c

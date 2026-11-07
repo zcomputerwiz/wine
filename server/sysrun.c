@@ -42,6 +42,9 @@
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
+#if defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
+# include <poll.h>
+#endif
 #ifdef HAVE_SYS_PRCTL_H
 # include <sys/prctl.h>
 #endif
@@ -365,6 +368,7 @@ int sysrun_process_is_system( struct process *process )
  * caller has already passed the S3 consumed-opener/writer comparisons. This
  * operation neither issues tokens nor accepts authentication results. */
 #if defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
+#define SO_PEERPIDFD_LAB 77
 #define E1S6_REQUIRE(c, site) do { if (!(c)) { \
     fprintf( stderr, "E1S6_DENY server site=%s errno=%d\n", site, errno ); goto done; \
 } } while (0)
@@ -402,9 +406,14 @@ int sysrun_e1s6_endorse( const void *data, unsigned int size )
     struct ucred peer;
     socklen_t len = sizeof(peer);
     struct process *p = current->process;
+    struct token *new_primary = NULL;
+    struct luid new_id, new_modified;
+    struct pollfd verifier_pins[2] = { { -1, POLLIN, 0 }, { -1, POLLIN, 0 } };
+    struct ucred verifier[2];
     static unsigned long long generation;
-    unsigned long long fresh, expected = 0;
-    int fd = -1, pin = -1, random = -1, raised, ret = 0, type;
+    unsigned long long fresh, server_generation = generation, expected = 0;
+    int fd = -1, pin = -1, data_fd = -1, random = -1, raised, ret = 0, type;
+    unsigned int i;
 
     /* Handles belong to this broker's handle table. The client closes its
      * imported handles on every exit; duplicate native fds are local here. */
@@ -413,6 +422,8 @@ int sysrun_e1s6_endorse( const void *data, unsigned int size )
     E1S6_REQUIRE( fd >= 0, "endorse-control-fd" );
     pin = e1s6_get_fd( in + 4, "pin" );
     E1S6_REQUIRE( pin >= 0, "endorse-pin-fd" );
+    data_fd = e1s6_get_fd( in + 16, "data" );
+    E1S6_REQUIRE( data_fd >= 0, "endorse-data-fd" );
     E1S6_REQUIRE( !current->token, "endorse-thread-token" );
     E1S6_REQUIRE( p->e1s6_broker_image, "endorse-broker-image" );
     E1S6_REQUIRE( sysrun_process_is_system( p ), "endorse-system-role" );
@@ -422,29 +433,41 @@ int sysrun_e1s6_endorse( const void *data, unsigned int size )
     E1S6_REQUIRE( !getsockopt( pin, SOL_SOCKET, SO_PEERCRED, &peer, &len ) && len == sizeof(peer), "endorse-peercred" );
     E1S6_REQUIRE( peer.uid == getuid(), "endorse-peer-uid" );
     E1S6_REQUIRE( peer.pid > 0 && peer.pid == p->unix_pid, "endorse-peer-pid" );
-    len = sizeof(type);
-    E1S6_REQUIRE( !getsockopt( fd, SOL_SOCKET, SO_TYPE, &type, &len ) && type == SOCK_SEQPACKET, "endorse-socket-type" );
+    for (i = 0; i < 2; i++)
+    {
+        int socket_fd = i ? data_fd : fd;
+        len = sizeof(type);
+        E1S6_REQUIRE( !getsockopt( socket_fd, SOL_SOCKET, SO_TYPE, &type, &len ) &&
+                     len == sizeof(type) && type == SOCK_SEQPACKET, "endorse-socket-type" );
+        len = sizeof(verifier[i]);
+        E1S6_REQUIRE( !getsockopt( socket_fd, SOL_SOCKET, SO_PEERCRED, &verifier[i], &len ) &&
+                     len == sizeof(verifier[i]), "endorse-verifier-peercred" );
+        E1S6_REQUIRE( verifier[i].uid == 0 && verifier[i].pid > 0, "endorse-verifier-root" );
+        len = sizeof(verifier_pins[i].fd);
+        E1S6_REQUIRE( !getsockopt( socket_fd, SOL_SOCKET, SO_PEERPIDFD_LAB, &verifier_pins[i].fd, &len ) &&
+                     len == sizeof(verifier_pins[i].fd) && verifier_pins[i].fd >= 0, "endorse-verifier-peerpidfd" );
+    }
+    E1S6_REQUIRE( verifier[0].pid == verifier[1].pid, "endorse-verifier-same-peer" );
+    /* Both kernel-issued pins must still be live after acquisition: matching
+     * socket credential PIDs cannot then describe different PID lifetimes. */
+    E1S6_REQUIRE( !poll( verifier_pins, 2, 0 ), "endorse-verifier-pins-live" );
     /* The verifier supplies root/verifier generations and connection nonce.
      * The server supplies its own instance and broker-registration generations.
      * No random value is accepted as a portable grant. */
     E1S6_REQUIRE( (random = open( "/dev/urandom", O_RDONLY | O_CLOEXEC )) >= 0, "endorse-rng-open" );
-    if (!generation)
+    if (!server_generation)
     {
-        E1S6_REQUIRE( read( random, &fresh, sizeof(fresh) ) == (ssize_t)sizeof(fresh) && fresh, "endorse-server-generation" );
-        generation = fresh;
+        E1S6_REQUIRE( read( random, &server_generation, sizeof(server_generation) ) == (ssize_t)sizeof(server_generation) &&
+                     server_generation, "endorse-server-generation" );
     }
-    {
-        unsigned int i;
-        for (i = 0; i < 8; i++) expected |= (unsigned long long)in[8+i] << (8*i);
-    }
+    for (i = 0; i < 8; i++) expected |= (unsigned long long)in[8+i] << (8*i);
+    fresh = expected;
     if (!expected)
     {
         E1S6_REQUIRE( read( random, &fresh, sizeof(fresh) ) == (ssize_t)sizeof(fresh) && fresh, "endorse-broker-generation" );
         E1S6_REQUIRE( fresh != p->e1s6_broker_generation, "endorse-generation-collision" );
-        p->e1s6_broker_generation = fresh;
-        if (p->e1s6_primary) release_object( p->e1s6_primary );
-        p->e1s6_primary = (struct token *)grab_object( p->token );
-        token_get_ids( p->token, &p->e1s6_token_id, &p->e1s6_modified_id );
+        new_primary = (struct token *)grab_object( p->token );
+        token_get_ids( p->token, &new_id, &new_modified );
     }
     else
     {
@@ -457,11 +480,8 @@ int sysrun_e1s6_endorse( const void *data, unsigned int size )
     }
     memcpy( out, in, sizeof(out) );
     /* Local sideband encoding is explicitly LE, separate from S1 kind 7. */
-    {
-        unsigned int i;
-        for (i = 0; i < 8; i++) { out[i] = generation >> (8 * i); out[8+i] = p->e1s6_broker_generation >> (8 * i); }
-        for (i = 0; i < 4; i++) { out[16+i] = peer.pid >> (8 * i); out[20+i] = p->session_id >> (8 * i); }
-    }
+    for (i = 0; i < 8; i++) { out[i] = server_generation >> (8 * i); out[8+i] = fresh >> (8 * i); }
+    for (i = 0; i < 4; i++) { out[16+i] = peer.pid >> (8 * i); out[20+i] = p->session_id >> (8 * i); }
     raised = sysrun_raise();
     if (!raised) fprintf( stderr, "E1S6_DENY server site=endorse-raise-group errno=%d\n", errno );
     if (raised)
@@ -482,7 +502,25 @@ int sysrun_e1s6_endorse( const void *data, unsigned int size )
         if (!ret) fprintf( stderr, "E1S6_DENY server site=endorse-send errno=%d\n", errno );
     }
     sysrun_drop( raised );
+    if (ret)
+    {
+        /* Publish only after the complete seqpacket was delivered. No fallible
+         * operation follows this transfer of the staged token reference. */
+        generation = server_generation;
+        if (new_primary)
+        {
+            if (p->e1s6_primary) release_object( p->e1s6_primary );
+            p->e1s6_broker_generation = fresh;
+            p->e1s6_primary = new_primary;
+            p->e1s6_token_id = new_id;
+            p->e1s6_modified_id = new_modified;
+            new_primary = NULL;
+        }
+    }
 done:
+    if (new_primary) release_object( new_primary );
+    for (i = 0; i < 2; i++) if (verifier_pins[i].fd >= 0) close( verifier_pins[i].fd );
+    if (data_fd >= 0) close( data_fd );
     if (fd >= 0) close( fd );
     if (pin >= 0) close( pin );
     if (random >= 0) close( random );

@@ -4526,3 +4526,16 @@ enum inproc_sync_type
     unsigned __int64    caps;
     VARARG(record,e1s_token);           /* canonical kind 5; no native pointers */
 @END
+
+/* WineExplorer private S13. Default server denies; no path/SID input.
+ * 48-byte storage reference is not a lease. Fixed maximum remains 88. */
+@REQ(load_e1s_profile)
+    unsigned int        operation;
+    obj_handle_t        context;
+    obj_handle_t        token;
+    unsigned int        access;
+    VARARG(record,e1s_token);
+@REPLY
+    obj_handle_t        hkey;
+    unsigned int        managed;
+@END

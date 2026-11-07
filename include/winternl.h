@@ -5691,6 +5691,8 @@ NTSYSAPI NTSTATUS WINAPI NtQueryWexPipeCallerBinding(HANDLE,HANDLE*,HANDLE*,ULON
  * response capacity must be 136. Failure returns kind 5 with empty SID and no
  * handle. Context belongs to this endorsed broker connection, never the caller. */
 NTSYSAPI NTSTATUS WINAPI NtCreateWexAccountToken(ULONG,HANDLE*,HANDLE,ULONGLONG*,const void*,ULONG,HANDLE*,void*,ULONG*);
+/* S13 private PE ABI, operations/48-byte reference in wine/wex_profile.h. */
+NTSYSAPI NTSTATUS WINAPI NtLoadWexProfile(ULONG,HANDLE,HANDLE,ACCESS_MASK,const void*,ULONG,HANDLE*,ULONG*);
 
 NTSYSAPI NTSTATUS WINAPI __wine_unix_spawnvp( char * const argv[], int wait );
 

@@ -3737,6 +3737,21 @@ static void dump_create_e1s_account_token_reply( const struct create_e1s_account
     dump_varargs_e1s_token( ", record=", cur_size );
 }
 
+static void dump_load_e1s_profile_request( const struct load_e1s_profile_request *req )
+{
+    fprintf( stderr, " operation=%08x", req->operation );
+    fprintf( stderr, ", context=%04x", req->context );
+    fprintf( stderr, ", token=%04x", req->token );
+    fprintf( stderr, ", access=%08x", req->access );
+    dump_varargs_e1s_token( ", record=", cur_size );
+}
+
+static void dump_load_e1s_profile_reply( const struct load_e1s_profile_reply *req )
+{
+    fprintf( stderr, " hkey=%04x", req->hkey );
+    fprintf( stderr, ", managed=%08x", req->managed );
+}
+
 typedef void (*dump_func)( const void *req );
 
 static const dump_func req_dumpers[REQ_NB_REQUESTS] =
@@ -4066,6 +4081,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_dwm_recv_request,
     (dump_func)dump_dwm_reply_request,
     (dump_func)dump_create_e1s_account_token_request,
+    (dump_func)dump_load_e1s_profile_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -4395,6 +4411,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_dwm_recv_reply,
     NULL,
     (dump_func)dump_create_e1s_account_token_reply,
+    (dump_func)dump_load_e1s_profile_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -4724,6 +4741,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "dwm_recv",
     "dwm_reply",
     "create_e1s_account_token",
+    "load_e1s_profile",
 };
 
 static const struct

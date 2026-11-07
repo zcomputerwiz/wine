@@ -101,6 +101,7 @@
 #include "process.h"
 #include "request.h"
 #include "sysrun.h"
+#include "e1s_profile.h"
 
 #include "winternl.h"
 #include "winioctl.h"
@@ -1885,6 +1886,7 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
     struct closed_fd *closed_fd;
     struct fd *fd;
     int root_fd = -1;
+    struct e1s_profile_parent e1s_parent = { -1, NULL };
     int rw_mode;
     char *path;
 
@@ -1916,6 +1918,8 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
     }
 
     /* create the directory if needed */
+    if (!e1s_profile_check_parent( name, access, flags & O_CREAT, mode, &e1s_parent )) goto error;
+    if (e1s_parent.fd >= 0 && (options & FILE_DIRECTORY_FILE) && (flags & O_CREAT)) *mode = 0700;
     if ((options & FILE_DIRECTORY_FILE) && (flags & O_CREAT))
     {
         if (sysrun_mkdir( name, *mode ) == -1)
@@ -1960,6 +1964,11 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
     fd->unix_name = NULL;
     fstat( fd->unix_fd, &st );
     *mode = st.st_mode;
+
+    /* S13: enforce the registered descriptor before truncation, disposition
+     * or returning a Unix fd. Same-UID native opens remain outside Wine. */
+    if (!e1s_profile_inherit_fd( &e1s_parent, fd->unix_fd ) || !e1s_profile_check_fd( fd->unix_fd, access )) goto error;
+    e1s_profile_close_parent( &e1s_parent );
 
     /* only bother with an inode for normal files and directories */
     if (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode))
@@ -2073,6 +2082,7 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
     return fd;
 
 error:
+    e1s_profile_close_parent( &e1s_parent );
     release_object( fd );
     free( closed_fd );
     if (root_fd != -1) fchdir( server_dir_fd ); /* go back to the server dir */

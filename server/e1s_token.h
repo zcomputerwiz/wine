@@ -5,6 +5,7 @@
 #define __WINE_SERVER_E1S_TOKEN_H
 
 #include "wine/wex_token.h"
+#include "accounts.h"
 
 /* Server-internal S18 handoff, never a Wine client structure or IPC operation.
  * The producer has redeemed S8 on its owning authenticated connection, matched
@@ -36,5 +37,15 @@ struct e1s_token_consumed
 /* One call attempt per negotiation. Returns NTSTATUS via get_error(). Normal
  * builds refuse; no S18 producer or production negotiation is installed here. */
 extern int token_install_e1s_consumed( obj_handle_t context, const struct e1s_token_consumed *record );
+
+/* S13 shares S10's broker gate and burns a one-shot load attempt before
+ * checking storage bytes. Only the original issued token object is accepted. */
+extern int token_e1s_broker(void);
+extern int token_validate_e1s_profile( obj_handle_t, struct token *, const struct wex_account * );
+extern int token_claim_e1s_profile( obj_handle_t, struct token *, const void *, data_size_t,
+                                    struct wex_account * );
+extern const struct wex_account *token_e1s_account( struct token * );
+extern const struct sid *token_get_user_sid( struct token * );
+extern int token_e1s_profile_high( struct token * );
 
 #endif

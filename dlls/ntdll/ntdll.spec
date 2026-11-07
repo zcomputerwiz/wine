@@ -358,6 +358,7 @@
 @ stdcall -private NtQueryWexPipeCallerBinding(ptr ptr ptr ptr ptr ptr ptr ptr ptr)
 @ stdcall -private NtQueryWexPipeCallerBindingEx(ptr ptr)
 @ stdcall -private NtCreateWexAccountToken(long ptr ptr ptr ptr long ptr ptr ptr)
+@ stdcall -private NtLoadWexProfile(long ptr ptr long ptr long ptr ptr)
 @ stdcall -syscall=0x0045 NtQueueApcThread(long ptr long long long)
 @ stdcall -syscall NtQueueApcThreadEx(long long ptr long long long)
 @ stdcall -syscall NtQueueApcThreadEx2(long long long ptr long long long)
