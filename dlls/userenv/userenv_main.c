@@ -243,17 +243,57 @@ BOOL WINAPI CreateEnvironmentBlock( LPVOID* lpEnvironment,
     WCHAR *env, buf[UNICODE_STRING_MAX_CHARS], profiles_dir[MAX_PATH];
     DWORD len;
     HKEY hkey, hsubkey;
+    HANDLE tok = hToken;
+    HANDLE eff_to_close = NULL;
+    BOOL is_managed = FALSE;
 
     TRACE("%p %p %d\n", lpEnvironment, hToken, bInherit );
 
     if (!lpEnvironment)
         return FALSE;
 
+#ifdef WEX_E1S13_HKU_TEST
+    {
+        HANDLE unused;
+        ULONG managed = 0;
+        ULONGLONG gen = 0;
+        if (!tok)
+        {
+            if (!OpenThreadToken( GetCurrentThread(), TOKEN_QUERY, TRUE, &eff_to_close ))
+                OpenProcessToken( GetCurrentProcess(), TOKEN_QUERY, &eff_to_close );
+            tok = eff_to_close;
+        }
+        typedef NTSTATUS (WINAPI *query_fn)(ULONG,HANDLE,HANDLE,ACCESS_MASK,const void*,ULONG,HANDLE*,ULONG*,ULONGLONG*);
+        query_fn query = (query_fn)GetProcAddress( GetModuleHandleW( L"ntdll.dll" ), "NtLoadWexProfileEx" );
+        if (query && query( WEX_HKU_QUERY, NULL, tok, 0, NULL, 0, &unused, &managed, &gen ) == STATUS_SUCCESS && managed)
+        {
+            if (gen == 0)
+            {
+                if (eff_to_close) CloseHandle( eff_to_close );
+                SetLastError( ERROR_NOT_READY );
+                return FALSE;
+            }
+            bInherit = FALSE;
+            is_managed = TRUE;
+        }
+        if (!is_managed && eff_to_close)
+        {
+            CloseHandle( eff_to_close );
+            eff_to_close = NULL;
+            tok = NULL;
+        }
+    }
+#endif
+
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, env_keyW, 0, KEY_READ, &hkey) != ERROR_SUCCESS)
+    {
+        if (eff_to_close) CloseHandle( eff_to_close );
         return FALSE;
+    }
 
     if (RtlCreateEnvironment(bInherit, &env) != STATUS_SUCCESS)
     {
+        if (eff_to_close) CloseHandle( eff_to_close );
         RegCloseKey(hkey);
         return FALSE;
     }
@@ -327,7 +367,7 @@ BOOL WINAPI CreateEnvironmentBlock( LPVOID* lpEnvironment,
 
     set_wow64_environment(&env);
 
-    if (!hToken)
+    if (!tok)
     {
         if (profiles_dir[0])
         {
@@ -349,14 +389,15 @@ BOOL WINAPI CreateEnvironmentBlock( LPVOID* lpEnvironment,
         WCHAR *sidW, domain[MAX_PATH];
         DWORD size, domain_size = ARRAY_SIZE(domain);
 
-        if (GetTokenInformation(hToken, TokenUser, NULL, 0, &len) ||
+        if (GetTokenInformation(tok, TokenUser, NULL, 0, &len) ||
                 GetLastError()!=ERROR_INSUFFICIENT_BUFFER ||
                 !(token_user = HeapAlloc(GetProcessHeap(), 0, len)) ||
-                !GetTokenInformation(hToken, TokenUser, token_user, len, &len) ||
+                !GetTokenInformation(tok, TokenUser, token_user, len, &len) ||
                 !ConvertSidToStringSidW(token_user->User.Sid, &sidW))
         {
             HeapFree(GetProcessHeap(), 0, token_user);
             RtlDestroyEnvironment(env);
+            if (eff_to_close) CloseHandle( eff_to_close );
             return FALSE;
         }
 
@@ -367,13 +408,54 @@ BOOL WINAPI CreateEnvironmentBlock( LPVOID* lpEnvironment,
         if (LookupAccountSidW(NULL, token_user->User.Sid,
                     buf+len, &size, domain, &domain_size, &use))
         {
+#ifdef WEX_E1S13_HKU_TEST
+            if (is_managed)
+            {
+                WCHAR prof_dir[MAX_PATH];
+                DWORD cch = ARRAY_SIZE(prof_dir);
+                if (GetUserProfileDirectoryW( tok, prof_dir, &cch ))
+                {
+                    WCHAR sub[MAX_PATH];
+                    set_env_var(&env, L"USERNAME", buf+len);
+                    set_env_var(&env, L"USERPROFILE", prof_dir);
+                    if (prof_dir[0] && prof_dir[1] == ':')
+                    {
+                        WCHAR drv[3] = { prof_dir[0], ':', 0 };
+                        set_env_var(&env, L"HOMEDRIVE", drv);
+                        set_env_var(&env, L"HOMEPATH", prof_dir + 2);
+                    }
+                    set_env_var(&env, L"USERDOMAIN", L"WINEHOST");
+                    lstrcpyW(sub, prof_dir);
+                    lstrcatW(sub, L"\\AppData\\Roaming");
+                    set_env_var(&env, L"APPDATA", sub);
+                    lstrcpyW(sub, prof_dir);
+                    lstrcatW(sub, L"\\AppData\\Local");
+                    set_env_var(&env, L"LOCALAPPDATA", sub);
+                    lstrcpyW(sub, prof_dir);
+                    lstrcatW(sub, L"\\AppData\\Local\\Temp");
+                    set_env_var(&env, L"TEMP", sub);
+                    set_env_var(&env, L"TMP", sub);
+                }
+            }
+            else
+            {
+                set_env_var(&env, L"USERNAME", buf+len);
+                if (len) set_env_var(&env, L"USERPROFILE", buf);
+            }
+#else
             set_env_var(&env, L"USERNAME", buf+len);
             if (len) set_env_var(&env, L"USERPROFILE", buf);
+#endif
         }
 
         HeapFree(GetProcessHeap(), 0, token_user);
         lstrcpyW(buf, sidW);
         LocalFree(sidW);
+        if (eff_to_close)
+        {
+            CloseHandle( eff_to_close );
+            eff_to_close = NULL;
+        }
     }
 
     if (RegOpenKeyExW(HKEY_USERS, buf, 0, KEY_READ, &hkey) == ERROR_SUCCESS)
@@ -416,6 +498,35 @@ BOOL WINAPI ExpandEnvironmentStringsForUserA( HANDLE hToken, LPCSTR lpSrc,
 
     TRACE("%p %s %p %ld\n", hToken, debugstr_a(lpSrc), lpDest, dwSize);
 
+#ifdef WEX_E1S13_HKU_TEST
+    {
+        HANDLE unused;
+        ULONG managed = 0;
+        ULONGLONG gen = 0;
+        typedef NTSTATUS (WINAPI *query_fn)(ULONG,HANDLE,HANDLE,ACCESS_MASK,const void*,ULONG,HANDLE*,ULONG*,ULONGLONG*);
+        query_fn query = (query_fn)GetProcAddress( GetModuleHandleW( L"ntdll.dll" ), "NtLoadWexProfileEx" );
+        if (query && query( WEX_HKU_QUERY, NULL, hToken, 0, NULL, 0, &unused, &managed, &gen ) == STATUS_SUCCESS && managed)
+        {
+            int lenW = MultiByteToWideChar( CP_ACP, 0, lpSrc, -1, NULL, 0 );
+            WCHAR *srcW = HeapAlloc( GetProcessHeap(), 0, lenW * sizeof(WCHAR) );
+            WCHAR destW[MAX_PATH];
+            BOOL success = FALSE;
+            if (srcW)
+            {
+                MultiByteToWideChar( CP_ACP, 0, lpSrc, -1, srcW, lenW );
+                success = ExpandEnvironmentStringsForUserW( hToken, srcW, destW, ARRAY_SIZE(destW) );
+                HeapFree( GetProcessHeap(), 0, srcW );
+            }
+            if (success)
+            {
+                int outLen = WideCharToMultiByte( CP_ACP, 0, destW, -1, lpDest, dwSize, NULL, NULL );
+                return (outLen > 0);
+            }
+            return FALSE;
+        }
+    }
+#endif
+
     ret = ExpandEnvironmentStringsA( lpSrc, lpDest, dwSize );
     TRACE("<- %s\n", debugstr_a(lpDest));
     return ret;
@@ -427,6 +538,50 @@ BOOL WINAPI ExpandEnvironmentStringsForUserW( HANDLE hToken, LPCWSTR lpSrc,
     BOOL ret;
 
     TRACE("%p %s %p %ld\n", hToken, debugstr_w(lpSrc), lpDest, dwSize);
+
+#ifdef WEX_E1S13_HKU_TEST
+    {
+        HANDLE unused;
+        ULONG managed = 0;
+        ULONGLONG gen = 0;
+        typedef NTSTATUS (WINAPI *query_fn)(ULONG,HANDLE,HANDLE,ACCESS_MASK,const void*,ULONG,HANDLE*,ULONG*,ULONGLONG*);
+        query_fn query = (query_fn)GetProcAddress( GetModuleHandleW( L"ntdll.dll" ), "NtLoadWexProfileEx" );
+        if (query && query( WEX_HKU_QUERY, NULL, hToken, 0, NULL, 0, &unused, &managed, &gen ) == STATUS_SUCCESS && managed)
+        {
+            LPVOID env = NULL;
+            if (gen == 0)
+            {
+                SetLastError( ERROR_NOT_READY );
+                return FALSE;
+            }
+            if (CreateEnvironmentBlock( &env, hToken, FALSE ))
+            {
+                UNICODE_STRING us_src, us_dst;
+                ULONG needed = 0;
+                NTSTATUS status;
+                RtlInitUnicodeString( &us_src, lpSrc );
+                us_dst.Buffer = lpDest;
+                us_dst.Length = 0;
+                us_dst.MaximumLength = dwSize * sizeof(WCHAR);
+                status = RtlExpandEnvironmentStrings_U( env, &us_src, &us_dst, &needed );
+                DestroyEnvironmentBlock( env );
+                if (status == STATUS_BUFFER_TOO_SMALL)
+                {
+                    SetLastError( ERROR_INSUFFICIENT_BUFFER );
+                    return FALSE;
+                }
+                if (status != STATUS_SUCCESS)
+                {
+                    SetLastError( RtlNtStatusToDosError( status ) );
+                    return FALSE;
+                }
+                return TRUE;
+            }
+            SetLastError( ERROR_NOT_READY );
+            return FALSE;
+        }
+    }
+#endif
 
     ret = ExpandEnvironmentStringsW( lpSrc, lpDest, dwSize );
     TRACE("<- %s\n", debugstr_w(lpDest));
@@ -484,6 +639,98 @@ BOOL WINAPI GetUserProfileDirectoryW( HANDLE hToken, LPWSTR lpProfileDir,
         SetLastError( ERROR_INVALID_PARAMETER );
         return FALSE;
     }
+
+#ifdef WEX_E1S13_HKU_TEST
+    {
+        HANDLE unused;
+        ULONG managed = 0;
+        ULONGLONG gen = 0;
+        typedef NTSTATUS (WINAPI *query_fn)(ULONG,HANDLE,HANDLE,ACCESS_MASK,const void*,ULONG,HANDLE*,ULONG*,ULONGLONG*);
+        query_fn query = (query_fn)GetProcAddress( GetModuleHandleW( L"ntdll.dll" ), "NtLoadWexProfileEx" );
+        if (query && query( WEX_HKU_QUERY, NULL, hToken, 0, NULL, 0, &unused, &managed, &gen ) == STATUS_SUCCESS && managed)
+        {
+            HKEY hkey = NULL;
+            DWORD type, bytes = 0;
+            WCHAR prof_buf[MAX_PATH];
+            DWORD prof_chars;
+
+            if (gen == 0)
+            {
+                SetLastError( ERROR_NOT_READY );
+                return FALSE;
+            }
+
+            if (RegOpenKeyExW( HKEY_CURRENT_USER, L"Volatile Environment", 0, KEY_READ, &hkey ) != ERROR_SUCCESS)
+            {
+                if (hToken && ImpersonateLoggedOnUser( hToken ))
+                {
+                    RegOpenKeyExW( HKEY_CURRENT_USER, L"Volatile Environment", 0, KEY_READ, &hkey );
+                    RevertToSelf();
+                }
+            }
+
+            if (!hkey)
+            {
+                TOKEN_USER *tuser = NULL;
+                WCHAR *sidW = NULL;
+                DWORD tlen = 0;
+                HANDLE eff_tok = hToken;
+                HANDLE to_close = NULL;
+                if (!eff_tok)
+                {
+                    if (!OpenThreadToken( GetCurrentThread(), TOKEN_QUERY, TRUE, &to_close ))
+                        OpenProcessToken( GetCurrentProcess(), TOKEN_QUERY, &to_close );
+                    eff_tok = to_close;
+                }
+                if (eff_tok)
+                {
+                    GetTokenInformation( eff_tok, TokenUser, NULL, 0, &tlen );
+                    if (GetLastError() == ERROR_INSUFFICIENT_BUFFER && (tuser = HeapAlloc( GetProcessHeap(), 0, tlen )))
+                    {
+                        if (GetTokenInformation( eff_tok, TokenUser, tuser, tlen, &tlen ) &&
+                            ConvertSidToStringSidW( tuser->User.Sid, &sidW ))
+                        {
+                            WCHAR subpath[256];
+                            lstrcpyW( subpath, sidW );
+                            lstrcatW( subpath, L"\\Volatile Environment" );
+                            RegOpenKeyExW( HKEY_USERS, subpath, 0, KEY_READ, &hkey );
+                            LocalFree( sidW );
+                        }
+                        HeapFree( GetProcessHeap(), 0, tuser );
+                    }
+                    if (to_close) CloseHandle( to_close );
+                }
+            }
+
+            if (!hkey)
+            {
+                SetLastError( ERROR_NOT_READY );
+                return FALSE;
+            }
+
+            bytes = sizeof(prof_buf);
+            if (RegQueryValueExW( hkey, L"USERPROFILE", NULL, &type, (LPBYTE)prof_buf, &bytes ) != ERROR_SUCCESS || type != REG_SZ)
+            {
+                RegCloseKey( hkey );
+                SetLastError( ERROR_NOT_READY );
+                return FALSE;
+            }
+            RegCloseKey( hkey );
+
+            prof_chars = lstrlenW( prof_buf ) + 1;
+            if (*lpcchSize < prof_chars || !lpProfileDir)
+            {
+                *lpcchSize = prof_chars;
+                SetLastError( ERROR_INSUFFICIENT_BUFFER );
+                return FALSE;
+            }
+
+            lstrcpyW( lpProfileDir, prof_buf );
+            *lpcchSize = prof_chars;
+            return TRUE;
+        }
+    }
+#endif
 
     len = 0;
     GetTokenInformation( hToken, TokenUser, NULL, 0, &len );

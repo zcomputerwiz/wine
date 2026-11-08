@@ -53,6 +53,9 @@
 #include "initguid.h"
 #include "shobjidl.h"
 #include "wine/debug.h"
+#ifdef WEX_E1S13_HKU_TEST
+#include "wine/wex_profile.h"
+#endif
 
 WINE_DEFAULT_DEBUG_CHANNEL(shell);
 
@@ -2442,6 +2445,56 @@ static HRESULT _SHGetUserProfilePath(HANDLE hToken, DWORD dwFlags, BYTE folder,
         }
 
         /* For CSIDL_Type_User we also use the GUID if no szValueName is provided */
+#ifdef WEX_E1S13_HKU_TEST
+        {
+            HANDLE unused;
+            ULONG managed = 0;
+            ULONGLONG gen = 0;
+            typedef NTSTATUS (WINAPI *query_fn)(ULONG,HANDLE,HANDLE,ACCESS_MASK,const void*,ULONG,HANDLE*,ULONG*,ULONGLONG*);
+            query_fn query = (query_fn)GetProcAddress( GetModuleHandleW( L"ntdll.dll" ), "NtLoadWexProfileEx" );
+            if (query && query( WEX_HKU_QUERY, NULL, hToken, 0, NULL, 0, &unused, &managed, &gen ) == 0 && managed)
+            {
+                if (gen == 0)
+                {
+                    hr = E_FAIL;
+                    goto error;
+                }
+
+                if (folder == 0x28 /* CSIDL_PROFILE */)
+                {
+                    typedef BOOL (WINAPI *get_prof_fn)(HANDLE, LPWSTR, LPDWORD);
+                    HMODULE userenv = LoadLibraryW( L"userenv.dll" );
+                    if (userenv)
+                    {
+                        get_prof_fn get_prof = (get_prof_fn)GetProcAddress( userenv, "GetUserProfileDirectoryW" );
+                        DWORD cch = MAX_PATH;
+                        if (get_prof && get_prof( hToken, pszPath, &cch ))
+                        {
+                            FreeLibrary( userenv );
+                            hr = S_OK;
+                            goto error;
+                        }
+                        FreeLibrary( userenv );
+                    }
+                    hr = E_FAIL;
+                    goto error;
+                }
+
+                szValueName = CSIDL_Data[folder].value;
+                if (!szValueName)
+                {
+                    StringFromGUID2( CSIDL_Data[folder].id, buffer, 39 );
+                    szValueName = &buffer[0];
+                }
+
+                hr = _SHGetUserShellFolderPath(hRootKey, userPrefix, szValueName, pszPath);
+                if (FAILED(hr)) hr = E_FAIL;
+                if (userPrefix != NULL && userPrefix != DefaultW)
+                    LocalFree((HLOCAL) userPrefix);
+                goto error;
+            }
+        }
+#endif
         szValueName = CSIDL_Data[folder].value;
         if (!szValueName)
         {
@@ -2647,11 +2700,43 @@ static HRESULT _SHExpandEnvironmentStrings(LPCWSTR szSrc, LPWSTR szDest)
         {
             WCHAR userName[MAX_PATH];
             DWORD userLen = MAX_PATH;
-
-            lstrcpyW(szDest, szProfilesPrefix);
-            GetUserNameW(userName, &userLen);
-            PathAppendW(szDest, userName);
-            PathAppendW(szDest, szTemp + lstrlenW(L"%USERPROFILE%"));
+#ifdef WEX_E1S13_HKU_TEST
+            HANDLE unused;
+            ULONG managed = 0;
+            ULONGLONG gen = 0;
+            typedef NTSTATUS (WINAPI *query_fn)(ULONG,HANDLE,HANDLE,ACCESS_MASK,const void*,ULONG,HANDLE*,ULONG*,ULONGLONG*);
+            query_fn query = (query_fn)GetProcAddress( GetModuleHandleW( L"ntdll.dll" ), "NtLoadWexProfileEx" );
+            if (query && query( WEX_HKU_QUERY, NULL, NULL, 0, NULL, 0, &unused, &managed, &gen ) == 0 && managed && gen > 0)
+            {
+                typedef BOOL (WINAPI *get_prof_fn)(HANDLE, LPWSTR, LPDWORD);
+                HMODULE userenv = LoadLibraryW( L"userenv.dll" );
+                if (userenv)
+                {
+                    get_prof_fn get_prof = (get_prof_fn)GetProcAddress( userenv, "GetUserProfileDirectoryW" );
+                    WCHAR prof_dir[MAX_PATH];
+                    DWORD cch = ARRAY_SIZE(prof_dir);
+                    if (get_prof && get_prof( NULL, prof_dir, &cch ))
+                    {
+                        lstrcpyW(szDest, prof_dir);
+                        PathAppendW(szDest, szTemp + lstrlenW(L"%USERPROFILE%"));
+                        FreeLibrary( userenv );
+                        break;
+                    }
+                    FreeLibrary( userenv );
+                }
+                lstrcpyW(szDest, szProfilesPrefix);
+                GetUserNameW(userName, &userLen);
+                PathAppendW(szDest, userName);
+                PathAppendW(szDest, szTemp + lstrlenW(L"%USERPROFILE%"));
+            }
+            else
+#endif
+            {
+                lstrcpyW(szDest, szProfilesPrefix);
+                GetUserNameW(userName, &userLen);
+                PathAppendW(szDest, userName);
+                PathAppendW(szDest, szTemp + lstrlenW(L"%USERPROFILE%"));
+            }
         }
         else if (!wcsnicmp(szTemp, L"%SystemDrive%", lstrlenW(L"%SystemDrive%")))
         {
@@ -3028,6 +3113,19 @@ HRESULT WINAPI SHGetFolderPathAndSubDirW(
 
     /* if we don't care about existing directories we are ready */
     if(nFolder & CSIDL_FLAG_DONT_VERIFY) goto end;
+
+#ifdef WEX_E1S13_HKU_TEST
+    if (folder == 0x28 /* CSIDL_PROFILE */)
+    {
+        HANDLE unused;
+        ULONG managed = 0;
+        ULONGLONG gen = 0;
+        typedef NTSTATUS (WINAPI *query_fn)(ULONG,HANDLE,HANDLE,ACCESS_MASK,const void*,ULONG,HANDLE*,ULONG*,ULONGLONG*);
+        query_fn query = (query_fn)GetProcAddress( GetModuleHandleW( L"ntdll.dll" ), "NtLoadWexProfileEx" );
+        if (query && query( WEX_HKU_QUERY, NULL, hToken, 0, NULL, 0, &unused, &managed, &gen ) == 0 && managed && gen > 0)
+            goto end;
+    }
+#endif
 
     if (PathFileExistsW(szBuildPath)) goto end;
 

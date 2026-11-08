@@ -50,5 +50,51 @@ START_TEST(wex_hku)
     key = (HANDLE)0xdeadbeef; managed = ~0u;
     status = load(WEX_HKU_LOAD, NULL, token, KEY_READ, record, sizeof(record) + 1, &key, &managed);
     ok(status == (NTSTATUS)0xc000000d && !key && !managed, "oversize API accepted\n");
+
+    /* S15 normal server checks: ordinary process behavior is preserved */
+    {
+        typedef BOOL (WINAPI *get_prof_fn)(HANDLE, LPWSTR, LPDWORD);
+        typedef BOOL (WINAPI *create_env_fn)(LPVOID*, HANDLE, BOOL);
+        typedef BOOL (WINAPI *destroy_env_fn)(LPVOID);
+        typedef BOOL (WINAPI *expand_env_fn)(HANDLE, LPCWSTR, LPWSTR, DWORD);
+
+        HMODULE hUserenv = LoadLibraryA("userenv.dll");
+        if (hUserenv)
+        {
+            get_prof_fn pGetUserProfileDirectoryW = (get_prof_fn)GetProcAddress(hUserenv, "GetUserProfileDirectoryW");
+            create_env_fn pCreateEnvironmentBlock = (create_env_fn)GetProcAddress(hUserenv, "CreateEnvironmentBlock");
+            destroy_env_fn pDestroyEnvironmentBlock = (destroy_env_fn)GetProcAddress(hUserenv, "DestroyEnvironmentBlock");
+            expand_env_fn pExpandEnvironmentStringsForUserW = (expand_env_fn)GetProcAddress(hUserenv, "ExpandEnvironmentStringsForUserW");
+
+            if (pGetUserProfileDirectoryW)
+            {
+                WCHAR dir[MAX_PATH];
+                DWORD size = ARRAY_SIZE(dir);
+                BOOL ret = pGetUserProfileDirectoryW(token, dir, &size);
+                ok(ret, "GetUserProfileDirectoryW failed on normal token: %lu\n", GetLastError());
+                ok(wcsstr(dir, L".e1s") == NULL, "normal token saw managed .e1s directory: %s\n", wine_dbgstr_w(dir));
+            }
+
+            if (pCreateEnvironmentBlock && pDestroyEnvironmentBlock)
+            {
+                LPVOID env = NULL;
+                BOOL ret = pCreateEnvironmentBlock(&env, token, FALSE);
+                ok(ret, "CreateEnvironmentBlock failed on normal token: %lu\n", GetLastError());
+                if (ret && env)
+                    pDestroyEnvironmentBlock(env);
+            }
+
+            if (pExpandEnvironmentStringsForUserW)
+            {
+                WCHAR exp[MAX_PATH];
+                BOOL ret = pExpandEnvironmentStringsForUserW(token, L"%USERPROFILE%", exp, ARRAY_SIZE(exp));
+                ok(ret, "ExpandEnvironmentStringsForUserW failed on normal token: %lu\n", GetLastError());
+                ok(wcsstr(exp, L".e1s") == NULL, "normal token expanded .e1s directory: %s\n", wine_dbgstr_w(exp));
+            }
+
+            FreeLibrary(hUserenv);
+        }
+    }
+
     CloseHandle(token);
 }

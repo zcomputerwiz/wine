@@ -2966,6 +2966,125 @@ done:
     return ret;
 }
 
+static void e1s_set_str_val( struct key *key, const char *name, const char *val )
+{
+    struct unicode_str uname, uval;
+    WCHAR *wname = ascii_to_unicode_str( name, &uname );
+    WCHAR *wval = ascii_to_unicode_str( val, &uval );
+    if (wname && wval)
+    {
+        WCHAR *buf = mem_alloc( uval.len + sizeof(WCHAR) );
+        if (buf)
+        {
+            memcpy( buf, uval.str, uval.len );
+            buf[uval.len / sizeof(WCHAR)] = 0;
+            set_value( key, uname, REG_SZ, buf, uval.len + sizeof(WCHAR) );
+            free( buf );
+        }
+    }
+    free( wname );
+    free( wval );
+}
+
+static void e1s_populate_volatile_env( struct key *user, const struct wex_profile_storage *storage,
+                                       const struct wex_account *account, struct security_descriptor *sd )
+{
+    struct unicode_str path;
+    WCHAR *buffer = ascii_to_unicode_str( "Volatile Environment", &path );
+    char buf[512];
+    char computer_name[64] = "WINEHOST";
+    struct key *vol_env;
+
+    if (!buffer) return;
+    vol_env = create_key_recursive( user, path, current_time );
+    free( buffer );
+    if (!vol_env) return;
+
+    vol_env->flags |= KEY_VOLATILE;
+    vol_env->flags &= ~KEY_E1S_PERSIST;
+
+    if (sd)
+    {
+        size_t size = sizeof(*sd) + sd->owner_len + sd->group_len + sd->sacl_len + sd->dacl_len;
+        free( vol_env->obj.sd );
+        vol_env->obj.sd = memdup( sd, size );
+        vol_env->e1s_sd = sd;
+    }
+
+    {
+        static const WCHAR comp_path[] = {
+            'S','y','s','t','e','m','\\',
+            'C','o','n','t','r','o','l','S','e','t','0','0','1','\\',
+            'C','o','n','t','r','o','l','\\',
+            'C','o','m','p','u','t','e','r','N','a','m','e','\\',
+            'A','c','t','i','v','e','C','o','m','p','u','t','e','r','N','a','m','e'
+        };
+        static const WCHAR comp_val[] = { 'C','o','m','p','u','t','e','r','N','a','m','e' };
+        struct unicode_str cval_name = { comp_val, sizeof(comp_val) };
+        struct key *ckey = find_subkey_by_path( root_key, comp_path, sizeof(comp_path) );
+        int idx;
+        struct key_value *kv;
+        if (ckey && (kv = find_value( ckey, cval_name, &idx )) && kv->type == REG_SZ && kv->len > 0)
+        {
+            const WCHAR *w = kv->data;
+            size_t wlen = kv->len / sizeof(WCHAR);
+            size_t j;
+            if (wlen > 0 && w[wlen - 1] == 0) wlen--;
+            if (wlen > 0 && wlen < sizeof(computer_name))
+            {
+                for (j = 0; j < wlen; j++)
+                    computer_name[j] = (w[j] < 128) ? (char)w[j] : '_';
+                computer_name[wlen] = '\0';
+            }
+        }
+    }
+
+    /* 1. USERNAME */
+    e1s_set_str_val( vol_env, "USERNAME", account->name );
+
+    /* 2. USERPROFILE */
+    e1s_set_str_val( vol_env, "USERPROFILE", storage->path.windows );
+
+    /* 3. HOMEDRIVE */
+    if (storage->path.windows[0] && storage->path.windows[1] == ':')
+    {
+        char drive[3] = { storage->path.windows[0], ':', '\0' };
+        e1s_set_str_val( vol_env, "HOMEDRIVE", drive );
+        /* 4. HOMEPATH */
+        e1s_set_str_val( vol_env, "HOMEPATH", storage->path.windows + 2 );
+    }
+    else
+    {
+        e1s_set_str_val( vol_env, "HOMEDRIVE", "C:" );
+        e1s_set_str_val( vol_env, "HOMEPATH", storage->path.windows );
+    }
+
+    /* 5. USERDOMAIN */
+    e1s_set_str_val( vol_env, "USERDOMAIN", computer_name );
+
+    /* 6. APPDATA */
+    snprintf( buf, sizeof(buf), "%s\\AppData\\Roaming", storage->path.windows );
+    e1s_set_str_val( vol_env, "APPDATA", buf );
+
+    /* 7. LOCALAPPDATA */
+    snprintf( buf, sizeof(buf), "%s\\AppData\\Local", storage->path.windows );
+    e1s_set_str_val( vol_env, "LOCALAPPDATA", buf );
+
+    /* 8. TEMP */
+    snprintf( buf, sizeof(buf), "%s\\AppData\\Local\\Temp", storage->path.windows );
+    e1s_set_str_val( vol_env, "TEMP", buf );
+
+    /* 9. TMP */
+    e1s_set_str_val( vol_env, "TMP", buf );
+
+    /* Standard session variables */
+    e1s_set_str_val( vol_env, "CLIENTNAME", "Console" );
+    e1s_set_str_val( vol_env, "SESSIONNAME", "Console" );
+    e1s_set_str_val( vol_env, "HOMESHARE", "" );
+
+    release_object( vol_env );
+}
+
 static struct e1s_hive *e1s_load_hive( struct token *token, obj_handle_t context,
                                      const unsigned char *record, data_size_t size,
                                      unsigned int access, obj_handle_t *result )
@@ -3070,6 +3189,7 @@ static struct e1s_hive *e1s_load_hive( struct token *token, obj_handle_t context
     e1s_profile_security_commit( security );
     m->storage.acl_pending = 0;
     m->alias = alias;
+    e1s_populate_volatile_env( m->user, &m->storage, &m->account, m->sd );
     {
         struct save_branch_info *info = &save_branch_info[save_branch_count++];
         memset( info, 0, sizeof(*info) ); list_init( &info->tombstones );
@@ -3275,11 +3395,18 @@ DECL_HANDLER(load_e1s_profile)
     struct e1s_hive *m;
     struct key *key;
     struct wex_account ignored;
-    if (!(token = get_token_obj( current->process, req->token, TOKEN_QUERY )))
+    if (req->token || req->operation == WEX_HKU_LOAD) /* only read-side operations may default to the effective token */
     {
-        if (req->operation == WEX_HKU_LOAD && token_e1s_broker())
-            token_claim_e1s_profile( req->context, NULL, get_req_data(), get_req_data_size(), &ignored );
-        return;
+        if (!(token = get_token_obj( current->process, req->token, TOKEN_QUERY )))
+        {
+            if (req->operation == WEX_HKU_LOAD && token_e1s_broker())
+                token_claim_e1s_profile( req->context, NULL, get_req_data(), get_req_data_size(), &ignored );
+            return;
+        }
+    }
+    else
+    {
+        token = (struct token *)grab_object( effective );
     }
     account = token_e1s_account( token );
     if (req->operation == WEX_HKU_QUERY && !req->context && !req->access && !get_req_data_size() && !get_reply_max_size())
