@@ -40,6 +40,11 @@ struct process
     struct list          entry;           /* entry in system-wide process list */
     struct list          e1s_profile_entry; /* includes pending children before their first thread */
     int                  e1s_profile_dead;  /* final native death, not a retained process handle */
+    int                  e1s_profile_unstarted; /* initial CREATE_SUSPENDED thread never resumed */
+    int                  e1s_profile_thread_seen;
+    struct token        *e1s_profile_issued; /* exact explicit creation token, not the internal duplicate */
+    unsigned char        e1s_profile_lease_id[16]; /* nonzero after S14b commit */
+    unsigned int         e1s_profile_sid[5]; /* committed SID survives primary replacement */
     process_id_t         parent_id;       /* parent process id (at the time of creation) */
     struct list          thread_list;     /* thread list */
     struct debug_obj    *debug_obj;       /* debug object debugging this process */
@@ -110,6 +115,7 @@ struct process
 extern unsigned int alloc_ptid( void *ptr );
 extern void free_ptid( unsigned int id );
 extern int process_e1s_profile_busy( const struct sid * );
+extern unsigned int process_e1s_profile_committable( struct process * );
 extern void *get_ptid_entry( unsigned int id );
 extern struct process *create_process( int fd, struct process *parent, unsigned int flags,
                                        const struct startup_info_data *info,

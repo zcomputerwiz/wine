@@ -609,6 +609,11 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     }
     list_init( &process->e1s_profile_entry );
     process->e1s_profile_dead = 0;
+    process->e1s_profile_unstarted = 0;
+    process->e1s_profile_thread_seen = 0;
+    process->e1s_profile_issued = NULL;
+    memset( process->e1s_profile_lease_id, 0, sizeof(process->e1s_profile_lease_id) );
+    memset( process->e1s_profile_sid, 0, sizeof(process->e1s_profile_sid) );
     process->sync            = NULL;
     process->parent_id       = 0;
     process->debug_obj       = NULL;
@@ -719,6 +724,7 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
         /* Note: for security reasons, starting a new process does not attempt
          * to use the current impersonation token for the new process */
         process->token = token_duplicate( token ? token : parent->token, TRUE, 0, NULL, NULL, 0, NULL, 0, FALSE );
+        if (token && token_e1s_account( token )) process->e1s_profile_issued = (struct token *)grab_object( token );
         process->affinity = parent->affinity;
     }
     if (!process->handles || !process->token) goto error;
@@ -772,6 +778,7 @@ static void process_destroy( struct object *obj )
     if (process->idle_event) release_object( process->idle_event );
     if (process->id) free_ptid( process->id );
     if (process->token) release_object( process->token );
+    if (process->e1s_profile_issued) release_object( process->e1s_profile_issued );
     if (process->e1s6_primary) release_object( process->e1s6_primary );
     if (process->sync) release_object( process->sync );
     list_remove( &process->rawinput_entry );
@@ -1115,17 +1122,47 @@ void enum_processes( int (*cb)(struct process*, void*), void *user )
     }
 }
 
+/* GPL-2.0-or-later S14b. running_threads counts live thread objects, including
+ * suspended ones, not runnable threads. Accept exactly one initialized live
+ * initial thread, created suspended and never resumed (sticky bit in thread.c).
+ * Wine's native loader necessarily executes before init_process_done; the rule
+ * protects the Windows entry point, not that bootstrap. No parent-PID rule:
+ * S18 deliberately uses the retained caller as the child's designated parent. */
+unsigned int process_e1s_profile_committable( struct process *process )
+{
+    struct process *p;
+    struct thread *thread;
+    int found = 0;
+    LIST_FOR_EACH_ENTRY( p, &e1s_profile_processes, struct process, e1s_profile_entry )
+        if (p == process) { found = 1; break; }
+    if (!found) return STATUS_INVALID_CID;
+    if (process->e1s_profile_dead || process->is_terminating || !process->running_threads ||
+        process->startup_state == STARTUP_ABORTED) return STATUS_PROCESS_IS_TERMINATING;
+    if (memcmp( process->e1s_profile_lease_id, (unsigned char[16]){0}, 16 )) return STATUS_RESOURCE_IN_USE;
+    if (!process->e1s_profile_unstarted || process->startup_state != STARTUP_DONE ||
+        process->running_threads != 1 || list_empty( &process->thread_list )) return STATUS_INVALID_DEVICE_STATE;
+    thread = LIST_ENTRY( list_head( &process->thread_list ), struct thread, proc_entry );
+    if (list_next( &process->thread_list, &thread->proc_entry ) || thread->state == TERMINATED ||
+        !thread->suspend) return STATUS_INVALID_DEVICE_STATE;
+    return STATUS_SUCCESS;
+}
+
 /* Object refcounts include broker token handles and dead process handles and
- * cannot count profile users. Every pending/live process retains its primary;
- * its thread list retains impersonation tokens. Scan those exact references,
- * including suspended children, descendants and pending native termination. */
+ * cannot count profile users. Scan committed identities plus pending/live
+ * primary and thread impersonation tokens, including descendants and pending
+ * native termination. */
 int process_e1s_profile_busy( const struct sid *sid )
 {
+    static const unsigned char nt_authority[6] = SECURITY_NT_AUTHORITY;
     struct process *process;
     struct thread *thread;
     LIST_FOR_EACH_ENTRY( process, &e1s_profile_processes, struct process, e1s_profile_entry )
     {
         if (process->e1s_profile_dead) continue;
+        if (memcmp( process->e1s_profile_lease_id, (unsigned char[16]){0}, 16 ) &&
+            sid->revision == SID_REVISION && sid->sub_count == 5 &&
+            !memcmp( &sid->id_auth, &nt_authority, sizeof(sid->id_auth) ) &&
+            !memcmp( sid->sub_auth, process->e1s_profile_sid, sizeof(process->e1s_profile_sid) )) return 1;
         if (!process->token || equal_sid( token_get_user_sid( process->token ), sid )) return 1;
         LIST_FOR_EACH_ENTRY( thread, &process->thread_list, struct thread, proc_entry )
             if (thread->token && equal_sid( token_get_user_sid( thread->token ), sid )) return 1;

@@ -48,5 +48,8 @@ extern int token_e1s_profile_request( obj_handle_t, struct token *, uint64_t *, 
 extern const struct wex_account *token_e1s_account( struct token * );
 extern const struct sid *token_get_user_sid( struct token * );
 extern int token_e1s_profile_high( struct token * );
+extern int token_bind_e1s_profile( obj_handle_t, struct token *, const unsigned char * );
+extern int token_validate_e1s_commit( obj_handle_t, struct token *, const unsigned char *, uint64_t, uint64_t );
+extern int token_e1s_commit_identity( struct token *, struct token * );
 
 #endif

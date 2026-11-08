@@ -21,7 +21,4 @@ extern void e1s_profile_close_parent( struct e1s_profile_parent * );
 extern struct security_descriptor *e1s_profile_alloc_sd( const struct sid *, int file );
 extern int e1s_profile_secure_hive( int, const struct wex_account * );
 extern int e1s_profile_process_started( struct token * );
-/* Trusted S18 handoff after retaining/verifying the suspended child. Record
- * bytes alone do not authorize this call and it never resumes the child. */
-extern int e1s_profile_commit_process( struct process *, const unsigned char *, uint64_t );
 #endif

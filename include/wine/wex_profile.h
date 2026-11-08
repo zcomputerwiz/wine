@@ -17,5 +17,11 @@
 #define WEX_HKU_CACHE_CURRENT 7
 #define WEX_HKU_CACHE_CLASSES 8
 #define WEX_HKU_TEST_CRASH 9 /* separate WEX_E1S14_CRASH_TEST, lab broker only */
-#define WEX_HKU_TEST_TRANSFER 10 /* test-only exercise of internal S18 ownership handoff */
+#define WEX_HKU_TEST_TRANSFER 10 /* retired lab opcode; always denies, never reuse */
+#define WEX_HKU_COMMIT_PROCESS 11
+/* COMMIT: context is the retained S10 context used by LOAD, token is the exact
+ * issued token, access=0, record is a LE u32 process handle in this broker's
+ * handle table. No client-supplied identity or lease record is authority.
+ * Success: no key, managed=1, generation=0. Request 325 layout is unchanged. */
+#define WEX_HKU_COMMIT_RECORD_SIZE 4
 #endif

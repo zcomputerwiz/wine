@@ -952,6 +952,7 @@ int resume_thread( struct thread *thread )
     int old_count = thread->suspend;
     if (thread->suspend > 0)
     {
+        if (thread->suspend == 1) thread->process->e1s_profile_unstarted = 0;
         if (!(--thread->suspend)) resume_delayed_debug_events( thread );
         if (!is_thread_suspended( thread )) wake_thread( thread );
     }
@@ -1693,6 +1694,11 @@ DECL_HANDLER(new_thread)
         thread->dbg_hidden = !!(req->flags & THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER);
         thread->bypass_proc_suspend = !!(req->flags & THREAD_CREATE_FLAGS_BYPASS_PROCESS_FREEZE);
         add_process_thread( process, thread );
+        /* S14b: a later suspend cannot recreate this proof. A second thread
+         * also permanently disqualifies a pre-entry commit. */
+        process->e1s_profile_unstarted = !process->e1s_profile_thread_seen && process->startup_state == STARTUP_IN_PROGRESS &&
+            process->running_threads == 1 && !!(req->flags & THREAD_CREATE_FLAGS_CREATE_SUSPENDED);
+        process->e1s_profile_thread_seen = 1;
         reply->tid = get_thread_id( thread );
         if ((reply->handle = alloc_handle_no_access_check( current->process, thread,
                                                            req->access, params.attr )))

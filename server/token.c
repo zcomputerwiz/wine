@@ -2486,6 +2486,8 @@ struct e1s_token_context
     struct token *broker_primary;
     struct token *issued;
     int profile_attempted;
+    unsigned char profile_lease_id[16]; /* server-only binding, never client bytes */
+    struct luid profile_modified;
     struct luid broker_id, broker_modified;
     unsigned long long broker_gen, caps, expiry;
     unsigned int state; /* 0 negotiated, 1 installed, 2 permanently consumed */
@@ -2809,6 +2811,79 @@ int token_e1s_broker(void)
 #else
     return 0;
 #endif
+}
+
+/* GPL-2.0-or-later S14b: bind the one-shot LOAD context to the server's lease.
+ * Commit does not redeem evidence again or extend its deadline. S18 still owns
+ * the final authority/deadline/cancellation checks before guarded resume. */
+int token_bind_e1s_profile( obj_handle_t context, struct token *token, const unsigned char *lease_id )
+{
+#if defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
+    struct e1s_token_context *c;
+    int ret = 0;
+    if (!e1s_broker() || !(c = (struct e1s_token_context *)get_handle_obj(
+            current->process, context, 0, &e1s_context_ops ))) return 0;
+    if (e1s_context_current( c ) && c->state == 2 && c->profile_attempted && c->issued == token &&
+        !e1s_nonzero( c->profile_lease_id, 16 ))
+    {
+        memcpy( c->profile_lease_id, lease_id, 16 );
+        c->profile_modified = token->modified_id;
+        ret = 1;
+    }
+    release_object( c );
+    return ret;
+#else
+    return 0;
+#endif
+}
+
+int token_validate_e1s_commit( obj_handle_t context, struct token *token, const unsigned char *lease_id,
+                             uint64_t request_id, uint64_t server_gen )
+{
+#if defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
+    struct e1s_token_context *c;
+    unsigned int status = STATUS_SUCCESS;
+    if (!(c = (struct e1s_token_context *)get_handle_obj( current->process, context, 0, &e1s_context_ops )))
+        status = STATUS_INVALID_HANDLE;
+    else
+    {
+        if (!e1s_broker() || !e1s_context_current( c )) status = STATUS_INVALID_OWNER;
+        else if (c->state != 2 || !c->profile_attempted || c->issued != token ||
+                 !is_equal_luid( c->profile_modified, token->modified_id )) status = STATUS_BAD_TOKEN_TYPE;
+        else if (wex_token_u64( c->input + 148 ) != server_gen) status = STATUS_REVISION_MISMATCH;
+        else if (wex_token_u64( c->input + 16 ) != request_id ||
+                 memcmp( c->profile_lease_id, lease_id, 16 )) status = STATUS_INVALID_PARAMETER_MIX;
+        release_object( c );
+    }
+    if (status)
+        fprintf( stderr, "E1S14 deny=%s status=%08x\n",
+                 status == STATUS_INVALID_HANDLE ? "commit-context-handle" :
+                 status == STATUS_INVALID_OWNER ? "commit-context-owner" :
+                 status == STATUS_BAD_TOKEN_TYPE ? "commit-context-token" :
+                 status == STATUS_REVISION_MISMATCH ? "commit-context-generation" : "commit-context-lease", status );
+    set_error( status );
+    return !status;
+#else
+    set_error( STATUS_NOT_SUPPORTED ); return 0;
+#endif
+}
+
+/* create_process duplicates its primary internally, preserving lineage,
+ * AuthenticationId and ModifiedId. SID or logon identity alone is insufficient;
+ * a fresh S10 issuance of the same account has a different lineage and logon. */
+int token_e1s_commit_identity( struct token *issued, struct token *primary )
+{
+    return issued && primary && primary->primary && issued->primary &&
+           is_equal_luid( issued->lineage_id, primary->lineage_id ) &&
+           is_equal_luid( issued->auth_id, primary->auth_id ) &&
+           is_equal_luid( issued->modified_id, primary->modified_id ) &&
+           issued->session_id == primary->session_id &&
+           primary->elevation == TokenElevationTypeFull && primary->integrity_rid == SECURITY_MANDATORY_HIGH_RID &&
+           !primary->is_restricted && !primary->app_container &&
+           list_empty( &primary->restricted_sids ) && list_empty( &primary->capabilities ) &&
+           primary->e1s_account.generation == issued->e1s_account.generation &&
+           !memcmp( primary->e1s_account.incarnation, issued->e1s_account.incarnation, 16 ) &&
+           equal_sid( primary->user, issued->user );
 }
 
 int token_validate_e1s_profile( obj_handle_t context, struct token *token, const struct wex_account *account )

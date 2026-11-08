@@ -2569,16 +2569,6 @@ int e1s_profile_process_started( struct token *token )
     return 1;
 }
 
-int e1s_profile_commit_process( struct process *process, const unsigned char *lease_id, uint64_t request_id )
-{
-    struct e1s_hive *m = process && process->token ? e1s_find_hive( token_e1s_account( process->token ) ) : NULL;
-    if (!m || m->phase != E1S_LOADED || process->e1s_profile_dead ||
-        !lease_id || memcmp( lease_id, m->storage.reserved.lease_id, 16 ) ||
-        m->storage.reserved.request_id != request_id || m->storage.reserved.state != 1) return 0;
-    m->storage.reserved.state = 2; m->idle_sweeps = 0;
-    return 1;
-}
-
 static struct key *e1s_source_path( struct key *root, struct unicode_str path )
 {
     unsigned int len;
@@ -3183,6 +3173,11 @@ static struct e1s_hive *e1s_load_hive( struct token *token, obj_handle_t context
     if (save_branch_count < 3 || save_branch_count >= MAX_SAVE_BRANCH_INFO)
     { e1s_deny( STATUS_INSUFFICIENT_RESOURCES, "save-registration" ); goto failed; }
     if (!(*result = e1s_alloc_key_handle( m->user, access, 0 ))) goto failed;
+    if (!token_bind_e1s_profile( context, token, m->storage.reserved.lease_id ))
+    {
+        close_handle( current->process, *result ); *result = 0;
+        set_error( STATUS_INVALID_HANDLE ); goto failed;
+    }
     m->user->flags |= KEY_E1S_ROOT;
     m->classes->flags |= KEY_E1S_ROOT;
     alias->flags |= KEY_E1S_ROOT;
@@ -3366,6 +3361,50 @@ static int e1s_unload_hive( struct e1s_hive *m )
     return 1;
 }
 
+/* All checks precede the infallible state/accounting writes. Request dispatch
+ * serializes this with thread resume, token assignment, death and unload. */
+static int e1s_profile_commit_process( struct e1s_hive *m, struct token *issued,
+                                      obj_handle_t context, obj_handle_t handle )
+{
+    struct process *child;
+    const struct wex_account *account;
+    unsigned int status;
+    if (m->phase != E1S_LOADED)
+        return e1s_deny( m->phase == E1S_LOADING ? STATUS_DEVICE_NOT_READY :
+                         m->phase == E1S_UNLOADING ? STATUS_DELETE_PENDING : STATUS_REGISTRY_CORRUPT, "commit-phase" );
+    if (!token_validate_e1s_commit( context, issued, m->storage.reserved.lease_id,
+                                  m->storage.reserved.request_id, m->storage.reserved.server_gen )) return 0;
+    if (m->storage.reserved.server_gen != e1s_server_generation)
+        return e1s_deny( STATUS_REVISION_MISMATCH, "commit-server" );
+    if (m->storage.reserved.state != 1) return e1s_deny( STATUS_ALREADY_COMMITTED, "commit-state" );
+    if (!handle || handle == (obj_handle_t)~0u ||
+        !(child = get_process_from_handle( handle, PROCESS_QUERY_LIMITED_INFORMATION )))
+        return e1s_deny( STATUS_INVALID_CID, "commit-process-handle" );
+    if ((status = process_e1s_profile_committable( child )))
+        e1s_deny( status, status == STATUS_INVALID_CID ? "commit-foreign-server" :
+                         status == STATUS_PROCESS_IS_TERMINATING ? "commit-dead" :
+                         status == STATUS_RESOURCE_IN_USE ? "commit-process-bound" : "commit-not-suspended" );
+    else if (!(account = child->token ? token_e1s_account( child->token ) : NULL) ||
+             memcmp( account->incarnation, m->storage.reserved.account_key, 16 ) ||
+             memcmp( account->sid, m->account.sid, sizeof(account->sid) ) ||
+             !equal_sid( token_get_user_sid( child->token ), token_get_user_sid( issued ) ))
+        e1s_deny( STATUS_NO_SUCH_USER, "commit-account" );
+    else if (child->e1s_profile_issued != issued || !token_e1s_commit_identity( issued, child->token ))
+        e1s_deny( STATUS_BAD_TOKEN_TYPE, "commit-issued-token" );
+    else
+    {
+        /* Already in e1s_profile_processes since create_process, before its
+         * first thread. Bind exactly that entry; do not insert it twice. */
+        memcpy( child->e1s_profile_lease_id, m->storage.reserved.lease_id, 16 );
+        memcpy( child->e1s_profile_sid, m->account.sid, sizeof(child->e1s_profile_sid) );
+        m->storage.reserved.state = 2;
+        m->idle_sweeps = 0;
+        clear_error();
+    }
+    release_object( child );
+    return !get_error();
+}
+
 /* Committed leases belong to server process tracking, not broker lifetime.
  * Retry last-user draining on the existing 30-second registry timer; real key
  * handles keep a hive loaded. Setup-only leases still require explicit rollback
@@ -3395,6 +3434,20 @@ DECL_HANDLER(load_e1s_profile)
     struct e1s_hive *m;
     struct key *key;
     struct wex_account ignored;
+    if (req->operation == WEX_HKU_COMMIT_PROCESS)
+    {
+        /* Role first, even if the supplied token/context is absent or foreign. */
+        if (!token_e1s_broker()) { e1s_deny( STATUS_ACCESS_DENIED, "commit-broker" ); return; }
+        if (!req->token || req->access || get_req_data_size() != WEX_HKU_COMMIT_RECORD_SIZE || get_reply_max_size())
+        { e1s_deny( STATUS_INVALID_PARAMETER, "commit-shape" ); return; }
+        if (!(token = get_token_obj( current->process, req->token, TOKEN_QUERY )))
+        { e1s_deny( STATUS_NO_TOKEN, "commit-token-handle" ); return; }
+        account = token_e1s_account( token );
+        if (!(m = e1s_find_hive( account ))) e1s_deny( STATUS_OBJECT_PATH_NOT_FOUND, "commit-unloaded" );
+        else if (e1s_profile_commit_process( m, token, req->context, wex_token_u32( get_req_data() ) ))
+            reply->managed = 1;
+        release_object( token ); return;
+    }
     if (req->token || req->operation == WEX_HKU_LOAD) /* only read-side operations may default to the effective token */
     {
         if (!(token = get_token_obj( current->process, req->token, TOKEN_QUERY )))
@@ -3473,24 +3526,7 @@ DECL_HANDLER(load_e1s_profile)
 #endif
             goto done;
         }
-        if (req->operation == WEX_HKU_TEST_TRANSFER)
-        {
-#ifdef WEX_E1S14_CRASH_TEST
-            struct process *child = NULL;
-            if (!req->access && req->context &&
-                (child = get_process_from_handle( req->context, PROCESS_QUERY_LIMITED_INFORMATION )))
-            {
-                if (child->parent_id == current->process->id && child->token &&
-                    equal_sid( token_get_user_sid( child->token ), token_get_user_sid( token ) ) &&
-                    e1s_profile_commit_process( child, m->storage.reserved.lease_id, m->storage.reserved.request_id ))
-                { reply->managed = 1; clear_error(); }
-                release_object( child );
-            }
-#else
-            set_error( STATUS_NOT_SUPPORTED );
-#endif
-            goto done;
-        }
+        if (req->operation == WEX_HKU_TEST_TRANSFER) { set_error( STATUS_NOT_SUPPORTED ); goto done; }
     }
     if (m->phase != E1S_LOADED)
     {

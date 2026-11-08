@@ -25,7 +25,7 @@ START_TEST(wex_hku)
     wex_token_put32(record, 1); wex_token_put32(record + 4, sizeof(record));
     memset(record + 8, 0x11, 16); wex_token_put64(record + 24, 1); wex_token_put64(record + 32, 1);
     ok(load_ex != NULL, "S14 generation export missing\n");
-    for (op = WEX_HKU_LOAD; op <= WEX_HKU_TEST_TRANSFER; op++)
+    for (op = WEX_HKU_LOAD; op <= WEX_HKU_COMMIT_PROCESS; op++)
     {
         key = (HANDLE)0xdeadbeef; managed = ~0u;
         status = load(op, op == WEX_HKU_LOAD ? (HANDLE)0x1234 : NULL, token,
@@ -43,6 +43,18 @@ START_TEST(wex_hku)
             ok(!key && !managed && !generation, "extended operation %lu leaked outputs\n", op);
             if (key) CloseHandle(key);
         }
+    }
+    /* S14b production commit has a valid-sized local process-handle payload.
+     * A normal server still denies before interpreting context or token. */
+    wex_token_put32(record, (ULONG)(ULONG_PTR)GetCurrentProcess());
+    key = (HANDLE)0xdeadbeef; managed = ~0u; generation = ~(ULONGLONG)0;
+    status = load_ex ? load_ex(WEX_HKU_COMMIT_PROCESS, (HANDLE)0x1234, token, 0,
+                              record, WEX_HKU_COMMIT_RECORD_SIZE, &key, &managed, &generation) : 0;
+    if (load_ex)
+    {
+        ok(status == (NTSTATUS)0xc00000bb, "normal commit: %#lx\n", status);
+        ok(!key && !managed && !generation, "normal commit exposed outputs\n");
+        if (key) CloseHandle(key);
     }
     key = (HANDLE)0xdeadbeef; managed = ~0u;
     status = load(WEX_HKU_LOAD, NULL, token, KEY_READ, record, sizeof(record) - 1, &key, &managed);
