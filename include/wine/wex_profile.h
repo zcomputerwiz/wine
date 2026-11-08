@@ -24,4 +24,10 @@
  * handle table. No client-supplied identity or lease record is authority.
  * Success: no key, managed=1, generation=0. Request 325 layout is unchanged. */
 #define WEX_HKU_COMMIT_RECORD_SIZE 4
+#define WEX_HKU_STORAGE_QUERY 12
+/* STORAGE_QUERY: broker only, after S10 issuance and before LOAD. context and
+ * token as for LOAD, access=0, record is the LOAD record with storage_generation
+ * 0 (the only operation where 0 is accepted). Success: no key, managed=1 and
+ * the verified nonzero S12 storage generation, which the broker passes to LOAD;
+ * LOAD still compares it exactly. Does not consume the one-shot LOAD attempt. */
 #endif

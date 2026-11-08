@@ -25,7 +25,7 @@ START_TEST(wex_hku)
     wex_token_put32(record, 1); wex_token_put32(record + 4, sizeof(record));
     memset(record + 8, 0x11, 16); wex_token_put64(record + 24, 1); wex_token_put64(record + 32, 1);
     ok(load_ex != NULL, "S14 generation export missing\n");
-    for (op = WEX_HKU_LOAD; op <= WEX_HKU_COMMIT_PROCESS; op++)
+    for (op = WEX_HKU_LOAD; op <= WEX_HKU_STORAGE_QUERY; op++)
     {
         key = (HANDLE)0xdeadbeef; managed = ~0u;
         status = load(op, op == WEX_HKU_LOAD ? (HANDLE)0x1234 : NULL, token,

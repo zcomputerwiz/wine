@@ -655,7 +655,8 @@ static enum wex_profile_status find_existing( const struct chain *c, struct wex_
     return s;
 }
 
-static enum wex_profile_status validate_profile( const struct chain *c, struct wex_profile_storage *out, int recovery )
+static enum wex_profile_status validate_profile( const struct chain *c, struct wex_profile_storage *out, int recovery,
+                                                 int writable )
 {
     char text[1024], expected[1024], header[24], *line, *end;
     int meta = -1;
@@ -686,7 +687,7 @@ static enum wex_profile_status validate_profile( const struct chain *c, struct w
     s = check_skeleton( out->profile_fd, c );
     if (!s) s = walk_tree( out->profile_fd, c, 0, &count, 0 );
     if (s) return s;
-    out->hive_fd = openat( out->profile_fd, "user.reg", O_RDWR | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC );
+    out->hive_fd = openat( out->profile_fd, "user.reg", (writable ? O_RDWR : O_RDONLY) | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC );
     if (out->hive_fd < 0) return errno == ENOENT ? WEX_PROFILE_INCOMPLETE : WEX_PROFILE_SUBSTITUTION;
     if ((s = safe_fd( out->hive_fd, c, 0, 1 )) || (s = same_edge( out->profile_fd, "user.reg", out->hive_fd ))) return s;
     if (pread( out->hive_fd, header, sizeof(header), 0 ) != (ssize_t)sizeof(header) ||
@@ -698,9 +699,13 @@ static enum wex_profile_status validate_profile( const struct chain *c, struct w
 }
 #endif
 
-/* No-create load-side validation. Never seeds or removes stale transactions. */
+/* No-create load-side validation. Never seeds or removes stale transactions.
+ * discover: read-only generation discovery for the broker's storage query. It
+ * accepts generation 0, takes no SID hive lock, never opens or creates
+ * .hive.lock and opens the hive read-only; LOAD later revalidates exactly. */
 static enum wex_profile_status open_existing( int prefix, dev_t dev, ino_t ino, uid_t bob,
-    gid_t group, const struct wex_account *account, uint64_t generation, struct wex_profile_storage *out, int lock_hive )
+    gid_t group, const struct wex_account *account, uint64_t generation, struct wex_profile_storage *out, int lock_hive,
+    int discover )
 {
     if (!out) return WEX_PROFILE_COMPONENT;
     memset( out, 0, sizeof(*out) );
@@ -710,7 +715,7 @@ static enum wex_profile_status open_existing( int prefix, dev_t dev, ino_t ino, 
     struct stat st;
     enum wex_profile_status s;
     int exists = 0;
-    if (!bob || geteuid() != bob || getegid() != group || !generation)
+    if (!bob || geteuid() != bob || getegid() != group || (discover ? generation || lock_hive : !generation))
     { s = WEX_PROFILE_OWNER; goto done; }
     if ((s = wex_profile_layout( account, &out->path ))) goto done;
     c.sid_name = out->path.sid;
@@ -735,7 +740,7 @@ static enum wex_profile_status open_existing( int prefix, dev_t dev, ino_t ino, 
     {
         if ((s = sid_lock( &c, 1, &out->sid_lock_fd ))) goto done;
     }
-    else
+    else if (!discover)
     {
         out->sid_lock_fd = openat( c.sid, ".hive.lock", O_RDWR | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC );
         if (out->sid_lock_fd < 0) { s = WEX_PROFILE_SUBSTITUTION; goto done; }
@@ -744,8 +749,8 @@ static enum wex_profile_status open_existing( int prefix, dev_t dev, ino_t ino, 
     }
     if ((s = find_existing( &c, &out->path, &exists, 0, lock_hive < 0 ))) goto done;
     if (!exists) { s = WEX_PROFILE_ABSENT; goto done; }
-    if ((s = validate_profile( &c, out, lock_hive >= 0 )) || (s = recheck( &c ))) goto done;
-    if (out->profile_generation != generation) { s = WEX_PROFILE_IDENTITY; goto done; }
+    if ((s = validate_profile( &c, out, lock_hive >= 0, !discover )) || (s = recheck( &c ))) goto done;
+    if (!discover && out->profile_generation != generation) { s = WEX_PROFILE_IDENTITY; goto done; }
     /* Stable SID lock survives subsequent atomic replacement of this inode. */
     if (lock_hive > 0 && flock( out->hive_fd, LOCK_EX | LOCK_NB )) { s = WEX_PROFILE_BUSY; goto done; }
     if (fstat( out->hive_fd, &out->hive_identity )) { s = WEX_PROFILE_IO; goto done; }
@@ -768,7 +773,7 @@ done:
     return s == WEX_PROFILE_MAPPING || s == WEX_PROFILE_INCOMPLETE ? WEX_PROFILE_ABSENT : s;
 #else
     (void)prefix; (void)dev; (void)ino; (void)bob; (void)group; (void)account; (void)generation;
-    (void)lock_hive;
+    (void)lock_hive; (void)discover;
     return WEX_PROFILE_DISABLED;
 #endif
 }
@@ -776,7 +781,23 @@ done:
 enum wex_profile_status wex_profile_open_existing( int prefix, dev_t dev, ino_t ino, uid_t bob,
     gid_t group, const struct wex_account *account, uint64_t generation, struct wex_profile_storage *out )
 {
-    return open_existing( prefix, dev, ino, bob, group, account, generation, out, 1 );
+    return open_existing( prefix, dev, ino, bob, group, account, generation, out, 1, 0 );
+}
+
+enum wex_profile_status wex_profile_query_generation( int prefix, dev_t dev, ino_t ino, uid_t bob,
+    gid_t group, const struct wex_account *account, uint64_t *generation )
+{
+    struct wex_profile_storage found;
+    enum wex_profile_status s;
+    *generation = 0;
+    s = open_existing( prefix, dev, ino, bob, group, account, 0, &found, 0, 1 );
+    if (s) return s;
+    if (!found.profile_generation) s = WEX_PROFILE_IDENTITY;
+    else *generation = found.profile_generation;
+    if (found.profile_fd >= 0) close( found.profile_fd );
+    if (found.hive_fd >= 0) close( found.hive_fd );
+    if (found.sid_lock_fd >= 0) close( found.sid_lock_fd );
+    return s;
 }
 
 static enum wex_profile_status verify_existing( int prefix, const struct wex_account *a,
@@ -787,7 +808,7 @@ static enum wex_profile_status verify_existing( int prefix, const struct wex_acc
     struct wex_profile_storage check;
     enum wex_profile_status s;
     if (fstat( prefix, &p )) return WEX_PROFILE_IO;
-    s = open_existing( prefix, p.st_dev, p.st_ino, getuid(), getgid(), a, held->profile_generation, &check, saving ? -1 : 0 );
+    s = open_existing( prefix, p.st_dev, p.st_ino, getuid(), getgid(), a, held->profile_generation, &check, saving ? -1 : 0, 0 );
     if (s) return s;
     if (fstat( held->profile_fd, &h ) || fstat( check.profile_fd, &reopened ) ||
         h.st_dev != reopened.st_dev || h.st_ino != reopened.st_ino ||
@@ -977,7 +998,7 @@ enum wex_profile_status wex_profile_prepare( int prefix, dev_t dev, ino_t ino, u
         if (fsync( c.sid ) || fsync( c.base ) || fsync( c.users ) || fsync( c.drive ) || fsync( prefix ))
         { s = WEX_PROFILE_IO; goto done; }
     }
-    s = validate_profile( &c, out, 1 );
+    s = validate_profile( &c, out, 1, 1 );
     if (!s) s = recheck( &c );
     if (!s) out->reused = exists;
 done:

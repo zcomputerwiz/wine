@@ -71,6 +71,10 @@ enum wex_profile_status wex_profile_prepare( int prefix_fd, dev_t, ino_t,
 /* S13 no-create reopen. Storage generation is a consistency reference, not a lease. */
 enum wex_profile_status wex_profile_open_existing( int prefix_fd, dev_t, ino_t,
     uid_t, gid_t, const struct wex_account *, uint64_t, struct wex_profile_storage * );
+/* Broker storage query: read-only discovery of the verified nonzero storage
+ * generation. Same checks as the reopen; no locks or files are created. */
+enum wex_profile_status wex_profile_query_generation( int prefix_fd, dev_t, ino_t,
+    uid_t, gid_t, const struct wex_account *, uint64_t * );
 enum wex_profile_status wex_profile_verify_existing( int prefix_fd, const struct wex_account *,
                                                      const struct wex_profile_storage * );
 /* Writer owns neither fd nor storage. It must serialize and apply/query the

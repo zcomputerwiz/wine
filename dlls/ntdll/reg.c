@@ -79,6 +79,7 @@ NTSTATUS WINAPI NtLoadWexProfileEx( ULONG operation, HANDLE context, HANDLE toke
             (operation == WEX_HKU_QUERY ? (!!result || (!flag && gen)) :
              operation == WEX_HKU_UNLOAD_S14 || operation == WEX_HKU_TEST_CRASH ||
              operation == WEX_HKU_TEST_TRANSFER || operation == WEX_HKU_COMMIT_PROCESS ? (result || flag != 1 || gen) :
+             operation == WEX_HKU_STORAGE_QUERY ? (result || flag != 1 || !gen) :
              (!result || flag != 1 || !gen)))) status = STATUS_DATA_ERROR;
     }
     SERVER_END_REQ;

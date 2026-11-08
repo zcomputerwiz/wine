@@ -3448,6 +3448,36 @@ DECL_HANDLER(load_e1s_profile)
             reply->managed = 1;
         release_object( token ); return;
     }
+    if (req->operation == WEX_HKU_STORAGE_QUERY)
+    {
+        struct stat prefix;
+        uint64_t gen = 0;
+        enum wex_profile_status s;
+        if (!token_e1s_broker()) { e1s_deny( STATUS_ACCESS_DENIED, "query-broker" ); return; }
+        if (!req->token || !req->context || req->access || get_req_data_size() != WEX_HKU_RECORD_SIZE ||
+            get_reply_max_size())
+        { e1s_deny( STATUS_INVALID_PARAMETER, "query-shape" ); return; }
+        if (!(token = get_token_obj( current->process, req->token, TOKEN_QUERY )))
+        { e1s_deny( STATUS_NO_TOKEN, "query-token-handle" ); return; }
+        if (!token_query_e1s_profile( req->context, token, get_req_data(), get_req_data_size(), &ignored ))
+            e1s_deny( STATUS_ACCESS_DENIED, "query-context" );
+        else if (fstat( config_dir_fd, &prefix ))
+            e1s_deny( STATUS_ACCESS_DENIED, "query-prefix" );
+        else if ((s = wex_profile_query_generation( config_dir_fd, prefix.st_dev, prefix.st_ino,
+                                                    getuid(), getgid(), &ignored, &gen )))
+        {
+            set_error( s == WEX_PROFILE_ABSENT ? STATUS_OBJECT_PATH_NOT_FOUND :
+                       s == WEX_PROFILE_BUSY ? STATUS_SHARING_VIOLATION :
+                       s == WEX_PROFILE_RECOVERY ? STATUS_REGISTRY_CORRUPT : STATUS_ACCESS_DENIED );
+            fprintf( stderr, "E1S14 deny=storage-query storage=%u status=%08x\n", s, get_error() );
+        }
+        else
+        {
+            reply->managed = 1;
+            reply->generation = gen;
+        }
+        release_object( token ); return;
+    }
     if (req->token || req->operation == WEX_HKU_LOAD) /* only read-side operations may default to the effective token */
     {
         if (!(token = get_token_obj( current->process, req->token, TOKEN_QUERY )))

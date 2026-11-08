@@ -2938,6 +2938,38 @@ int token_claim_e1s_profile( obj_handle_t context, struct token *token, const vo
 #endif
 }
 
+/* Broker storage query before LOAD. Same identity record as LOAD except the
+ * storage generation must be 0. Never burns profile_attempted, never grants
+ * or extends anything; repeatable only until LOAD has been attempted. */
+int token_query_e1s_profile( obj_handle_t context, struct token *token, const void *record,
+                             data_size_t size, struct wex_account *account )
+{
+#if defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
+    struct e1s_token_context *c;
+    const unsigned char *in = record;
+    int ret = 0;
+    if (!e1s_broker() || !token) return 0;
+    c = (struct e1s_token_context *)get_handle_obj( current->process, context, 0, &e1s_context_ops );
+    if (!c) return 0;
+    if (e1s_context_current( c ) && !c->profile_attempted &&
+        size == WEX_HKU_RECORD_SIZE && wex_token_u32( in ) == 1 &&
+        wex_token_u32( in + 4 ) == WEX_HKU_RECORD_SIZE && !wex_token_u64( in + 32 ) && !wex_token_u64( in + 40 ) &&
+        token->e1s_account.generation && !memcmp( in + 8, token->e1s_account.incarnation, 16 ) &&
+        wex_token_u64( in + 24 ) == token->e1s_account.generation)
+    {
+        release_object( c );
+        if (!token_validate_e1s_profile( context, token, &token->e1s_account )) return 0;
+        *account = token->e1s_account;
+        return 1;
+    }
+    release_object( c );
+    return ret;
+#else
+    (void)context; (void)token; (void)record; (void)size; (void)account;
+    return 0;
+#endif
+}
+
 /* S14 obtains the request id from the retained consumed context, never from
  * the storage reference, token's numeric handle or an unload caller. */
 int token_e1s_profile_request( obj_handle_t context, struct token *token, uint64_t *request_id, uint64_t *server_gen )
