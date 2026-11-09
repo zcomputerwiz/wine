@@ -625,6 +625,7 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->machine         = native_machine;
     process->page_size       = get_page_size();
     process->unix_pid        = -1;
+    process->wex_broker_image = 0;
     process->e1s6_broker_image = 0;
     process->e1s6_image_seen = 0;
     process->e1s6_broker_generation = 0;
@@ -1200,6 +1201,7 @@ DECL_HANDLER(new_process)
     const obj_handle_t *job_handles = NULL;
     unsigned int i, job_handle_count, status;
     struct job *job;
+    int isolate = 0;
 
     if (socket_fd == -1)
     {
@@ -1238,9 +1240,25 @@ DECL_HANDLER(new_process)
     }
     else parent = (struct process *)grab_object( current->process );
 
+    /* WineExplorer elevation: when the verified broker creates a process for an explicit token
+     * with the caller as designated parent, the parent supplies placement only. The caller's
+     * job and debugger are not inherited, so the caller cannot suspend, stall or kill the
+     * elevated process through them. Inputs that would bring them back are refused. */
+    if (req->parent_process && req->token && sysrun_process_is_broker( current->process ))
+    {
+        if (req->debug || req->jobs_size || (req->flags & PROCESS_CREATE_FLAGS_INHERIT_HANDLES))
+        {
+            set_error( STATUS_ACCESS_DENIED );
+            close( socket_fd );
+            release_object( parent );
+            return;
+        }
+        isolate = 1;
+    }
+
     /* If a job further in the job chain does not permit breakaway process creation
      * succeeds and the process which is trying to breakaway is assigned to that job. */
-    if (parent->job && (req->flags & PROCESS_CREATE_FLAGS_BREAKAWAY) &&
+    if (!isolate && parent->job && (req->flags & PROCESS_CREATE_FLAGS_BREAKAWAY) &&
         !(parent->job->limit_flags & (JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK)))
     {
         set_error( STATUS_ACCESS_DENIED );
@@ -1371,7 +1389,7 @@ DECL_HANDLER(new_process)
     process->machine = req->machine;
     process->startup_info = (struct startup_info *)grab_object( info );
 
-    job = parent->job;
+    job = isolate ? NULL : parent->job;
     while (job)
     {
         if (!(job->limit_flags & JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK)
@@ -1424,7 +1442,7 @@ DECL_HANDLER(new_process)
         process->debug_obj = debug_obj;
         process->debug_children = !(req->flags & PROCESS_CREATE_FLAGS_NO_DEBUG_INHERIT);
     }
-    else if (parent->debug_children)
+    else if (!isolate && parent->debug_children)
     {
         process->debug_obj = parent->debug_obj;
         /* debug_children is set to 1 by default */

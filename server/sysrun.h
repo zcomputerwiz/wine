@@ -55,6 +55,9 @@ extern int sysrun_thread_created( struct thread *thread );
 extern void sysrun_main_image( struct process *process, struct fd *fd );
 /* does the process have the system role (a SYSTEM token and the descriptor of a system process)? */
 extern int sysrun_process_is_system( struct process *process );
+/* is the process the elevation broker: the system role, verified from the mapped machine-root
+ * system32/wexelevate.exe (production image name only), with its SYSTEM primary token? */
+extern int sysrun_process_is_broker( struct process *process );
 /* S6 lab sideband, compiled out unless WEX_E1S6_TRANSPORT_TEST is defined. */
 extern int sysrun_e1s6_endorse( const void *data, unsigned int size );
 /* are the desktop rules of the secure desktop (reserved names, cross-desktop access) in force? */

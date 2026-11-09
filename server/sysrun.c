@@ -316,6 +316,15 @@ void sysrun_main_image( struct process *process, struct fd *fd )
     unsigned int i;
     int unix_fd;
 
+    /* The elevation broker is recognised by the actual mapped file (device and inode of the
+     * machine-root system32/wexelevate.exe), whether services.exe started it or not; never by
+     * an image string, the SYSTEM SID alone or a parent claim. Production name only. */
+    if (!process->wex_broker_image && system_role_enabled() && fd && (unix_fd = get_unix_fd( fd )) != -1 &&
+        !fstat( unix_fd, &st ) && S_ISREG( st.st_mode ) &&
+        (unsigned int)snprintf( path, sizeof(path), "%s/drive_c/windows/system32/wexelevate.exe", machine_root ) < sizeof(path) &&
+        !stat( path, &ref ) && ref.st_dev == st.st_dev && ref.st_ino == st.st_ino)
+        process->wex_broker_image = 1;
+
 #ifdef WEX_E1S6_TRANSPORT_TEST
     /* The role follows the actual mapped file, never a client image string,
      * SYSTEM SID alone, a parent claim or inherited socket credentials. */
@@ -351,6 +360,17 @@ void sysrun_main_image( struct process *process, struct fd *fd )
     /* killed from the main loop: this runs in a request of the process itself */
     grab_object( process );
     add_timeout_user( -TICKS_PER_SEC / 100, kill_unverified, process );
+}
+
+int sysrun_process_is_broker( struct process *process )
+{
+#ifdef WEX_E1S6_TRANSPORT_TEST
+    int image = process->wex_broker_image || process->e1s6_broker_image; /* lab: also the test broker image */
+#else
+    int image = process->wex_broker_image;
+#endif
+    return image && sysrun_process_is_system( process ) &&
+           token_service_account( process->token ) == SERVICE_ACCOUNT_SYSTEM;
 }
 
 int sysrun_desktops_enforced(void)
