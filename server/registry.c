@@ -528,15 +528,30 @@ int elevation_helper_unset(void)
     return !value->len || !*(const WCHAR *)value->data;
 }
 
+/* Group names follow the same rule as valid_name() in accounts.c: 1-63 characters of [A-Za-z0-9_.-], not
+ * starting with '-', not "." or "..", and '$' only as the last character. */
+static int valid_name( const char *s )
+{
+    size_t i, len = strlen( s );
+    if (!len || len > 63 || *s == '-' || !strcmp( s, "." ) || !strcmp( s, ".." )) return 0;
+    for (i = 0; i < len; i++)
+        if (!((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') ||
+              (s[i] >= '0' && s[i] <= '9') || s[i] == '_' || s[i] == '-' || s[i] == '.' ||
+              (s[i] == '$' && i == len - 1))) return 0;
+    return 1;
+}
+
 /* The administrator group: "admin_group" of the root-owned sysrun.conf (a user controls its own environment, so
- * the name cannot come from there), else "sudo". */
+ * the name cannot come from there), else "sudo". A repeated "admin_group=" line or an empty or invalid name
+ * makes the configuration invalid and returns NULL, in which case nobody is an administrator; same rule as
+ * read_policy() in accounts.c. An unsafe file keeps the "sudo" default. */
 static const char *admin_group_name(void)
 {
     static char name[64];
     char buf[4096], *line, *next;
     struct stat st;
     ssize_t n;
-    int fd;
+    int fd, seen = 0;
 
     strcpy( name, "sudo" );
     if ((fd = open( "/etc/wineexplorer/sysrun.conf", O_RDONLY | O_NOFOLLOW | O_CLOEXEC )) == -1) return name;
@@ -551,8 +566,8 @@ static const char *admin_group_name(void)
     {
         if ((next = strchr( line, '\n' ))) *next++ = 0;
         if (strncmp( line, "admin_group=", 12 )) continue;
-        if (line[12] && strlen( line + 12 ) < sizeof(name)) strcpy( name, line + 12 );
-        break;
+        if (seen++ || !valid_name( line + 12 )) return NULL;
+        strcpy( name, line + 12 );
     }
     return name;
 }
@@ -565,12 +580,13 @@ int user_is_administrator(void)
     static int is_admin = -1;
     struct passwd *pw;
     struct group *gr;
+    const char *group;
     gid_t *gids;
     int i, count = 32;
 
     if (is_admin != -1) return is_admin;
     is_admin = 0;
-    if (!(pw = getpwuid( getuid() )) || !(gr = getgrnam( admin_group_name() ))) return 0;
+    if (!(group = admin_group_name()) || !(pw = getpwuid( getuid() )) || !(gr = getgrnam( group ))) return 0;
     for (;;)
     {
         int n = count;
