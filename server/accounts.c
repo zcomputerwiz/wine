@@ -50,9 +50,14 @@ struct account_map
 
 struct account_policy
 {
-    char admin_group[64], system_group[64];
+    /* builtin_admin: the native account that receives the reserved RID 500
+     * (the built-in Administrator) when the provisioning tool first maps it. */
+    char admin_group[64], system_group[64], builtin_admin[64];
     gid_t system_gid;
 };
+
+/* Reserved RID of the built-in Administrator account (well-known machine-SID-500). */
+#define BUILTIN_ADMIN_RID 500
 
 struct account_native
 {
@@ -265,12 +270,13 @@ static enum wex_account_status read_policy( int dir, struct account_policy *poli
 {
     char *buf, *line, *next;
     size_t len;
-    int seen_admin = 0, seen_group = 0;
+    int seen_admin = 0, seen_group = 0, seen_builtin = 0;
     struct native_group_result gr;
     enum wex_account_status status;
 
     strcpy( policy->admin_group, "sudo" );
     strcpy( policy->system_group, "wexsys" );
+    policy->builtin_admin[0] = 0;
     if ((status = read_protected( dir, "sysrun.conf", (gid_t)-1, &buf, &len ))) return status;
     status = WEX_ACCOUNT_MAP_INVALID;
     for (line = buf; *line; line = next)
@@ -286,6 +292,11 @@ static enum wex_account_status read_policy( int dir, struct account_policy *poli
         {
             if (seen_group++ || !valid_name( line + 6 )) goto done;
             strcpy( policy->system_group, line + 6 );
+        }
+        else if (!strncmp( line, "builtin_administrator=", 22 ))
+        {
+            if (seen_builtin++ || !valid_name( line + 22 )) goto done;
+            strcpy( policy->builtin_admin, line + 22 );
         }
     }
     status = WEX_ACCOUNT_ADMIN_GROUP_MISSING;
@@ -383,7 +394,10 @@ static enum wex_account_status parse_map( char *buf, struct account_map *map )
         {
             if (legacy++ || r->rid != 1000) return WEX_ACCOUNT_LEGACY_CONFLICT;
         }
-        else if (r->rid < 1001 || r->rid >= map->next_rid) return WEX_ACCOUNT_MAP_INVALID;
+        /* Counter RIDs start at 1001; RID 500 is the reserved built-in
+         * Administrator. The SID collision check above keeps it unique. */
+        else if (r->rid != BUILTIN_ADMIN_RID && (r->rid < 1001 || r->rid >= map->next_rid))
+            return WEX_ACCOUNT_MAP_INVALID;
     }
     return WEX_ACCOUNT_OK;
 }

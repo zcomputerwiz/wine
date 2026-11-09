@@ -63,7 +63,8 @@ enum wex_profile_status wex_profile_layout( const struct wex_account *a, struct 
         return WEX_PROFILE_COMPONENT;
     for (i = 0; i < 16; i++) nonzero |= a->incarnation[i];
     if (!nonzero || a->sid[0] != 21 || !a->sid[4]) return WEX_PROFILE_COMPONENT;
-    if (!a->sid[1] || !a->sid[2] || !a->sid[3] || a->sid[4] < 1001) return WEX_PROFILE_LEGACY;
+    /* Mapped accounts have counter RIDs from 1001, or the reserved built-in Administrator RID 500. */
+    if (!a->sid[1] || !a->sid[2] || !a->sid[3] || (a->sid[4] < 1001 && a->sid[4] != 500)) return WEX_PROFILE_LEGACY;
     snprintf( p.sid, sizeof(p.sid), "S-1-5-21-%"PRIu32"-%"PRIu32"-%"PRIu32"-%"PRIu32,
               a->sid[1], a->sid[2], a->sid[3], a->sid[4] );
     for (i = 0; i < 16; i++) snprintf( p.incarnation + i * 2, 3, "%02x", a->incarnation[i] );
