@@ -60,6 +60,9 @@
 #include "security.h"
 #include "handle.h"
 #include "request_handlers.h"
+#ifdef WEX_E1S6_TRANSPORT_TEST
+#include "sysrun.h"
+#endif
 
 /* Some versions of glibc don't define this */
 #ifndef SCM_RIGHTS
@@ -357,7 +360,11 @@ error:
 #endif
 
 /* pid of the process a pidfd refers to, -1 if it has exited or fd is not a pidfd */
+#ifdef WEX_E1S6_TRANSPORT_TEST
+int pidfd_pid( int pidfd )
+#else
 static int pidfd_pid( int pidfd )
+#endif
 {
     char path[64], line[128];
     FILE *f;
@@ -477,11 +484,51 @@ int receive_fd( struct process *process )
     else if (ret > 0)
     {
         struct cmsghdr *cmsg;
+#ifdef WEX_E1S6_TRANSPORT_TEST
+        struct ucred cred;
+        int have_cred = 0, pidfd = -1;
+#endif
         for (cmsg = CMSG_FIRSTHDR( &msghdr ); cmsg; cmsg = CMSG_NXTHDR( &msghdr, cmsg ))
         {
             if (cmsg->cmsg_level != SOL_SOCKET) continue;
             if (cmsg->cmsg_type == SCM_RIGHTS) fd = *(int *)CMSG_DATA(cmsg);
+#ifdef WEX_E1S6_TRANSPORT_TEST
+            else if (cmsg->cmsg_type == SCM_CREDENTIALS && cmsg->cmsg_len == CMSG_LEN(sizeof(cred)))
+            {
+                if (!have_cred) memcpy( &cred, CMSG_DATA(cmsg), sizeof(cred) );
+                have_cred = 1;
+            }
+            else if (cmsg->cmsg_type == SCM_PIDFD)
+            {
+                size_t n = cmsg->cmsg_len >= CMSG_LEN(0) ? (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int) : 0;
+                size_t i;
+                for (i = 0; i < n; i++)
+                {
+                    int v;
+                    memcpy( &v, CMSG_DATA(cmsg) + i * sizeof(int), sizeof(int) );
+                    if (pidfd == -1) pidfd = v;
+                    else close( v );
+                }
+            }
+#endif
         }
+#ifdef WEX_E1S6_TRANSPORT_TEST
+        if (pidfd != -1)
+        {
+            if (process->wex_pin_pidfd == -1 && have_cred && pidfd_pid( pidfd ) == cred.pid)
+            {
+                fcntl( pidfd, F_SETFD, FD_CLOEXEC );
+                process->wex_pin_pidfd = pidfd;
+                process->wex_pin_pid = cred.pid;
+                process->wex_pin_uid = cred.uid;
+                pidfd = -1;
+#ifdef WEX_R8_SERVER_TEST
+                fprintf( stderr, "wex-r8: process %04x pin pid=%d\n", process->id, (int)cred.pid );
+#endif
+            }
+            if (pidfd != -1) close( pidfd );
+        }
+#endif
     }
 
     if (ret == sizeof(data))
@@ -646,6 +693,9 @@ static void master_socket_poll_event( struct fd *fd, int event )
         int client = accept( get_unix_fd( master_socket->fd ), (struct sockaddr *) &dummy, &len );
         if (client == -1) return;
         fcntl( client, F_SETFL, O_NONBLOCK );
+#ifdef WEX_E1S6_TRANSPORT_TEST
+        if (sysrun_active) wex_dialog_pass_credentials( client );
+#endif
         if ((process = create_process( client, NULL, 0, NULL, NULL, NULL, 0, NULL )))
         {
             struct thread *thread = create_thread( -1, process, NULL );

@@ -128,6 +128,11 @@ extern int process_e1s_profile_busy( const struct sid * );
 extern int wex_handle_allowed( struct process *dst, struct object *obj );
 extern int any_process( int (*cb)(struct process *, void *), void *user );
 extern unsigned int process_e1s_profile_committable( struct process * );
+#ifdef WEX_E1S6_TRANSPORT_TEST
+extern int wex_dialog_pass_credentials( int fd );
+extern int pidfd_pid( int pidfd );
+extern int process_pin_matches( struct process *process );
+#endif
 extern void *get_ptid_entry( unsigned int id );
 extern struct process *create_process( int fd, struct process *parent, unsigned int flags,
                                        const struct startup_info_data *info,

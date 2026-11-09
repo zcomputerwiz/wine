@@ -146,7 +146,11 @@ fail:
 /* R8 step 3b: the kernel attaches the sender's credentials and a pidfd to every fd transfer on the
  * server end of the dialog's process socket, so receive_fd can pin the dialog's own loader. Set and
  * checked before the dialog process exists; failure denies the creation. */
+#ifdef WEX_E1S6_TRANSPORT_TEST
+int wex_dialog_pass_credentials( int fd )
+#else
 static int wex_dialog_pass_credentials( int fd )
+#endif
 {
     int on = 1, value = 0;
     socklen_t len = sizeof(value);
@@ -158,6 +162,16 @@ static int wex_dialog_pass_credentials( int fd )
     return !setsockopt( fd, SOL_SOCKET, SO_PASSPIDFD, &on, sizeof(on) ) &&
            !getsockopt( fd, SOL_SOCKET, SO_PASSPIDFD, &value, &len ) && value;
 }
+
+#ifdef WEX_E1S6_TRANSPORT_TEST
+int process_pin_matches( struct process *process )
+{
+    return process && process->wex_pin_pidfd != -1 &&
+           process->unix_pid != -1 &&
+           pidfd_pid( process->wex_pin_pidfd ) == process->wex_pin_pid &&
+           process->wex_pin_pid == process->unix_pid;
+}
+#endif
 static int running_processes, user_processes;
 static struct event *shutdown_event;           /* signaled when shutdown starts */
 static struct timeout_user *shutdown_timeout;  /* timeout for server shutdown */
@@ -1510,6 +1524,9 @@ DECL_HANDLER(new_process)
         close( socket_fd );
         goto done;
     }
+#ifdef WEX_E1S6_TRANSPORT_TEST
+    if (!dialog && sysrun_active) wex_dialog_pass_credentials( socket_fd );
+#endif
 
     if (!(process = create_process( socket_fd, parent, req->flags, info->data, params.sd,
                                     handles, req->handles_size / sizeof(*handles), token )))
