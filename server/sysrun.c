@@ -308,22 +308,51 @@ static void kill_unverified( void *private )
     release_object( process );
 }
 
+/* the installed elevation broker images (production names only), by device and inode */
+static int is_broker_image( const struct stat *st )
+{
+    static const char *const brokers[] =
+    {
+        "/drive_c/windows/system32/wexelevate.exe",
+        "/drive_c/windows/syswow64/wexelevate.exe",
+    };
+    char path[PATH_MAX];
+    struct stat ref;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(brokers); i++)
+        if ((unsigned int)snprintf( path, sizeof(path), "%s%s", machine_root, brokers[i] ) < sizeof(path) &&
+            !stat( path, &ref ) && ref.st_dev == st->st_dev && ref.st_ino == st->st_ino) return 1;
+    return 0;
+}
+
+/* the broker identity holds only with the primary token it had when its image was recognised */
+static void pin_broker( struct process *process )
+{
+    struct luid modified;
+
+    token_get_ids( process->token, &process->wex_broker_token_id, &modified );
+    process->wex_broker_image = 1;
+}
+
 void sysrun_main_image( struct process *process, struct fd *fd )
 {
     char path[PATH_MAX];
     struct stat st, ref;
     struct token *token;
     unsigned int i;
-    int unix_fd;
+    int unix_fd, broker = 0;
 
     /* The elevation broker is recognised by the actual mapped file (device and inode of the
-     * machine-root system32/wexelevate.exe), whether services.exe started it or not; never by
-     * an image string, the SYSTEM SID alone or a parent claim. Production name only. */
-    if (!process->wex_broker_image && system_role_enabled() && fd && (unix_fd = get_unix_fd( fd )) != -1 &&
-        !fstat( unix_fd, &st ) && S_ISREG( st.st_mode ) &&
-        (unsigned int)snprintf( path, sizeof(path), "%s/drive_c/windows/system32/wexelevate.exe", machine_root ) < sizeof(path) &&
-        !stat( path, &ref ) && ref.st_dev == st.st_dev && ref.st_ino == st.st_ino)
-        process->wex_broker_image = 1;
+     * machine-root wexelevate.exe), whether services.exe started it or not; never by an image
+     * string, the SYSTEM SID alone or a parent claim. Decided once, on the first executable
+     * image: a process that maps the broker later, as a second executable, never becomes it. */
+    if (!process->wex_image_seen)
+    {
+        process->wex_image_seen = 1;
+        broker = system_role_enabled() && fd && (unix_fd = get_unix_fd( fd )) != -1 &&
+                 !fstat( unix_fd, &st ) && S_ISREG( st.st_mode ) && is_broker_image( &st );
+    }
 
 #ifdef WEX_E1S6_TRANSPORT_TEST
     /* The role follows the actual mapped file, never a client image string,
@@ -339,7 +368,11 @@ void sysrun_main_image( struct process *process, struct fd *fd )
     }
     process->e1s6_image_seen = 1;
 #endif
-    if (!process->sysrun_pending) return;
+    if (!process->sysrun_pending)
+    {
+        if (broker) pin_broker( process );
+        return;
+    }
     process->sysrun_pending = 0;
     /* device and inode of the mapped file, never the NT path: that goes through the user's prefix links */
     if (fd && (unix_fd = get_unix_fd( fd )) != -1 && !fstat( unix_fd, &st ) && S_ISREG( st.st_mode ))
@@ -351,6 +384,7 @@ void sysrun_main_image( struct process *process, struct fd *fd )
             if (!(token = token_create_service( SERVICE_ACCOUNT_SYSTEM, process->session_id ))) break;
             release_object( process->token );
             process->token = token;
+            if (broker) pin_broker( process );
             return;
         }
     }
@@ -364,13 +398,17 @@ void sysrun_main_image( struct process *process, struct fd *fd )
 
 int sysrun_process_is_broker( struct process *process )
 {
+    struct luid id, modified;
+
 #ifdef WEX_E1S6_TRANSPORT_TEST
-    int image = process->wex_broker_image || process->e1s6_broker_image; /* lab: also the test broker image */
-#else
-    int image = process->wex_broker_image;
+    /* lab only: the test broker image; it has no pinned primary */
+    if (process->e1s6_broker_image && sysrun_process_is_system( process ) &&
+        token_service_account( process->token ) == SERVICE_ACCOUNT_SYSTEM) return 1;
 #endif
-    return image && sysrun_process_is_system( process ) &&
-           token_service_account( process->token ) == SERVICE_ACCOUNT_SYSTEM;
+    if (!process->wex_broker_image || !sysrun_process_is_system( process ) ||
+        token_service_account( process->token ) != SERVICE_ACCOUNT_SYSTEM) return 0;
+    token_get_ids( process->token, &id, &modified );
+    return !memcmp( &id, &process->wex_broker_token_id, sizeof(id) );
 }
 
 int sysrun_desktops_enforced(void)

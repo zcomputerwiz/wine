@@ -626,6 +626,8 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->page_size       = get_page_size();
     process->unix_pid        = -1;
     process->wex_broker_image = 0;
+    process->wex_image_seen = 0;
+    memset( &process->wex_broker_token_id, 0, sizeof(process->wex_broker_token_id) );
     process->e1s6_broker_image = 0;
     process->e1s6_image_seen = 0;
     process->e1s6_broker_generation = 0;
@@ -1246,7 +1248,8 @@ DECL_HANDLER(new_process)
      * elevated process through them. Inputs that would bring them back are refused. */
     if (req->parent_process && req->token && sysrun_process_is_broker( current->process ))
     {
-        if (req->debug || req->jobs_size || (req->flags & PROCESS_CREATE_FLAGS_INHERIT_HANDLES))
+        /* the broker launches on its own identity: never from an impersonating thread */
+        if (current->token || req->debug || req->jobs_size || (req->flags & PROCESS_CREATE_FLAGS_INHERIT_HANDLES))
         {
             set_error( STATUS_ACCESS_DENIED );
             close( socket_fd );
@@ -1423,7 +1426,10 @@ DECL_HANDLER(new_process)
         info->data->console = duplicate_handle( parent, info->data->console, process,
                                                 0, 0, DUPLICATE_SAME_ACCESS );
 
-    if (!(req->flags & PROCESS_CREATE_FLAGS_INHERIT_HANDLES) && info->data->console != 1)
+    /* an isolated elevation gets no standard handles from the caller (the broker passes none) */
+    if (isolate)
+        info->data->hstdin = info->data->hstdout = info->data->hstderr = 0;
+    else if (!(req->flags & PROCESS_CREATE_FLAGS_INHERIT_HANDLES) && info->data->console != 1)
     {
         info->data->hstdin  = duplicate_handle( parent, info->data->hstdin, process,
                                                 0, 0, DUPLICATE_SAME_ACCESS | DUPLICATE_SAME_ATTRIBUTES );

@@ -103,7 +103,9 @@ struct process
     unsigned int         sysrun_protected:1; /* system role descriptor on the process and its threads (sysrun.c) */
     unsigned int         sysrun_account:2;   /* SERVICE_ACCOUNT_* of the descriptor */
     unsigned int         sysrun_pending:1;   /* system group root process: SYSTEM token once its main image is verified */
-    unsigned int         wex_broker_image:1;  /* verified system-role main image is machine-root system32/wexelevate.exe */
+    unsigned int         wex_broker_image:1;  /* first executable image is machine-root wexelevate.exe (sysrun.c) */
+    unsigned int         wex_image_seen:1;    /* broker recognition decided once, on the first executable image */
+    struct luid          wex_broker_token_id; /* primary token at recognition; another primary is not the broker */
     unsigned int         e1s6_broker_image:1; /* lab only: mapped machine-root wexelevate image */
     unsigned int         e1s6_image_seen:1;
     unsigned long long   e1s6_broker_generation; /* fresh for each registration; server-issued */
