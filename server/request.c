@@ -352,6 +352,97 @@ error:
         fatal_protocol_error( thread, "read: %s\n", strerror( errno ));
 }
 
+#ifndef SCM_PIDFD
+#define SCM_PIDFD 0x04
+#endif
+
+/* pid of the process a pidfd refers to, -1 if it has exited or fd is not a pidfd */
+static int pidfd_pid( int pidfd )
+{
+    char path[64], line[128];
+    FILE *f;
+    int pid = -1;
+
+    snprintf( path, sizeof(path), "/proc/self/fdinfo/%d", pidfd );
+    if (!(f = fopen( path, "r" ))) return -1;
+    while (fgets( line, sizeof(line), f ))
+        if (!strncmp( line, "Pid:", 4 )) { pid = atoi( line + 4 ); break; }
+    fclose( f );
+    return pid > 0 ? pid : -1;
+}
+
+/* E1-S18e R8 step 3b: an fd transfer from a protected dialog carries exactly one SCM_RIGHTS fd, one
+ * SCM_CREDENTIALS and one SCM_PIDFD (SO_PASSCRED/SO_PASSPIDFD are set on the server end), nothing else.
+ * The first valid transfer, sent by the dialog's own loader before any PE code, pins its pid, uid and
+ * pidfd; every later one must come from the same live process. Returns 1 with *fd set if acceptable;
+ * otherwise every received fd is closed. */
+static int wex_dialog_fd_message( struct process *process, struct msghdr *msg, int *fd )
+{
+    struct cmsghdr *cmsg;
+    struct ucred cred;
+    int rights = 0, creds = 0, pidfds = 0, pidfd = -1, ok = 1, v;
+    size_t i, n;
+
+    *fd = -1;
+    memset( &cred, 0, sizeof(cred) );
+    if (msg->msg_flags & (MSG_CTRUNC | MSG_TRUNC)) ok = 0;
+    for (cmsg = CMSG_FIRSTHDR( msg ); cmsg; cmsg = CMSG_NXTHDR( msg, cmsg ))
+    {
+        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS)
+        {
+            n = cmsg->cmsg_len >= CMSG_LEN(0) ? (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int) : 0;
+            for (i = 0; i < n; i++)
+            {
+                memcpy( &v, CMSG_DATA(cmsg) + i * sizeof(int), sizeof(int) );
+                if (!rights && n == 1) *fd = v;
+                else close( v );
+            }
+            if (rights++ || n != 1) ok = 0;
+        }
+        else if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_PIDFD &&
+                 cmsg->cmsg_len == CMSG_LEN(sizeof(int)))
+        {
+            memcpy( &v, CMSG_DATA(cmsg), sizeof(int) );
+            if (!pidfds) pidfd = v;
+            else close( v );
+            if (pidfds++) ok = 0;
+        }
+        else if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_CREDENTIALS &&
+                 cmsg->cmsg_len == CMSG_LEN(sizeof(cred)))
+        {
+            if (!creds) memcpy( &cred, CMSG_DATA(cmsg), sizeof(cred) );
+            if (creds++) ok = 0;
+        }
+        else ok = 0;
+    }
+    if (!rights || !creds || !pidfds || *fd == -1 || pidfd == -1) ok = 0;
+    /* the pidfd must name the live process the credentials name */
+    if (ok && pidfd_pid( pidfd ) != cred.pid) ok = 0;
+    if (ok)
+    {
+        if (process->wex_pin_pidfd == -1)
+        {
+            fcntl( pidfd, F_SETFD, FD_CLOEXEC );
+            process->wex_pin_pidfd = pidfd;
+            process->wex_pin_pid = cred.pid;
+            process->wex_pin_uid = cred.uid;
+            pidfd = -1;
+#ifdef WEX_R8_SERVER_TEST
+            fprintf( stderr, "wex-r8: dialog %04x pin pid=%d uid=%u\n", process->id, (int)cred.pid, (unsigned int)cred.uid );
+#endif
+        }
+        else if (cred.pid != process->wex_pin_pid || cred.uid != process->wex_pin_uid ||
+                 pidfd_pid( process->wex_pin_pidfd ) != cred.pid) ok = 0;
+    }
+    if (pidfd != -1) close( pidfd );
+    if (!ok && *fd != -1)
+    {
+        close( *fd );
+        *fd = -1;
+    }
+    return ok;
+}
+
 /* receive a file descriptor on the process socket */
 int receive_fd( struct process *process )
 {
@@ -372,9 +463,18 @@ int receive_fd( struct process *process )
     vec.iov_base = (void *)&data;
     vec.iov_len  = sizeof(data);
 
-    ret = recvmsg( get_unix_fd( process->msg_fd ), &msghdr, 0 );
+    ret = recvmsg( get_unix_fd( process->msg_fd ), &msghdr, process->wex_creator ? MSG_CMSG_CLOEXEC : 0 );
 
-    if (ret > 0)
+    if (ret > 0 && process->wex_creator)
+    {
+        if (ret != sizeof(data) || !wex_dialog_fd_message( process, &msghdr, &fd ))
+        {
+            fprintf( stderr, "wineserver: protected dialog %04x: refused fd transfer\n", process->id );
+            kill_process( process, 1 );
+            return -1;
+        }
+    }
+    else if (ret > 0)
     {
         struct cmsghdr *cmsg;
         for (cmsg = CMSG_FIRSTHDR( &msghdr ); cmsg; cmsg = CMSG_NXTHDR( &msghdr, cmsg ))
@@ -397,6 +497,12 @@ int receive_fd( struct process *process )
                 fprintf( stderr, "%04x: *fd* %d <- %d bad thread id\n",
                          data.tid, data.fd, fd );
             close( fd );
+            if (process->wex_creator)  /* R8 3b: a protected dialog needs valid thread linkage */
+            {
+                if (thread) release_object( thread );
+                kill_process( process, 1 );
+                return -1;
+            }
         }
         else
         {

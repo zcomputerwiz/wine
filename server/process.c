@@ -71,6 +71,93 @@
 
 static struct list process_list = LIST_INIT(process_list);
 static struct list e1s_profile_processes = LIST_INIT(e1s_profile_processes);
+
+/* E1-S18e R8 (docs/E1_S18E_R8_SPEC.md section 3): a credentials dialog created by the verified broker
+ * is protected from creation. Only the broker and the dialog itself may hold handles to the dialog, its
+ * threads and the four ends of its two pipes; nothing else can open, duplicate or inherit them. */
+static struct list wex_dialogs = LIST_INIT(wex_dialogs);
+
+static void wex_dialog_unprotect( struct process *process )
+{
+    unsigned int i;
+
+    if (!process->wex_creator) return;
+    list_remove( &process->wex_dialog_entry );
+    list_init( &process->wex_dialog_entry );
+    for (i = 0; i < ARRAY_SIZE(process->wex_protected); i++)
+    {
+        if (process->wex_protected[i]) release_object( process->wex_protected[i] );
+        process->wex_protected[i] = NULL;
+    }
+    release_object( process->wex_creator );
+    process->wex_creator = NULL;
+}
+
+/* may a handle to obj be created in dst (NULL: a global handle)? */
+int wex_handle_allowed( struct process *dst, struct object *obj )
+{
+    struct process *dialog;
+    unsigned int i;
+
+    LIST_FOR_EACH_ENTRY( dialog, &wex_dialogs, struct process, wex_dialog_entry )
+    {
+        int hit = obj == &dialog->obj || thread_of_process( obj, dialog );
+        for (i = 0; !hit && i < ARRAY_SIZE(dialog->wex_protected); i++) hit = obj == dialog->wex_protected[i];
+        if (hit && dst != dialog && dst != dialog->wex_creator)
+        {
+#ifdef WEX_R8_SERVER_TEST
+            fprintf( stderr, "wex-r8: refused a handle to dialog %04x for %04x\n", dialog->id, dst ? dst->id : 0 );
+#endif
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* The broker passes exactly the dialog's read end (FILE_GENERIC_READ) and write end (FILE_GENERIC_WRITE)
+ * of two distinct anonymous pipes it created, and nobody else holds a handle to any of the four ends.
+ * On success objs[] holds the four ends (references taken). */
+static int wex_dialog_pipes_valid( struct process *broker, const obj_handle_t *handles, struct object *objs[4] )
+{
+    struct object *pipe[2];
+    unsigned int i, access[2];
+
+    memset( objs, 0, 4 * sizeof(*objs) );
+    for (i = 0; i < 2; i++)
+    {
+        if (!(objs[i] = get_handle_obj( broker, handles[i], 0, NULL ))) goto fail;
+        access[i] = get_handle_access( broker, handles[i] );
+        if (!named_pipe_anonymous_end( objs[i], broker, &objs[i + 2], &pipe[i] )) goto fail;
+    }
+    if (pipe[0] == pipe[1] || access[0] != FILE_GENERIC_READ || access[1] != FILE_GENERIC_WRITE) goto fail;
+    if (handles_held_elsewhere( broker, objs, 4 )) goto fail;
+    return 1;
+fail:
+    for (i = 0; i < 4; i++) if (objs[i]) release_object( objs[i] );
+    memset( objs, 0, 4 * sizeof(*objs) );
+    clear_error();
+    return 0;
+}
+
+#ifndef SO_PASSPIDFD
+#define SO_PASSPIDFD 76
+#endif
+
+/* R8 step 3b: the kernel attaches the sender's credentials and a pidfd to every fd transfer on the
+ * server end of the dialog's process socket, so receive_fd can pin the dialog's own loader. Set and
+ * checked before the dialog process exists; failure denies the creation. */
+static int wex_dialog_pass_credentials( int fd )
+{
+    int on = 1, value = 0;
+    socklen_t len = sizeof(value);
+
+    if (setsockopt( fd, SOL_SOCKET, SO_PASSCRED, &on, sizeof(on) ) ||
+        getsockopt( fd, SOL_SOCKET, SO_PASSCRED, &value, &len ) || !value) return 0;
+    value = 0;
+    len = sizeof(value);
+    return !setsockopt( fd, SOL_SOCKET, SO_PASSPIDFD, &on, sizeof(on) ) &&
+           !getsockopt( fd, SOL_SOCKET, SO_PASSPIDFD, &value, &len ) && value;
+}
 static int running_processes, user_processes;
 static struct event *shutdown_event;           /* signaled when shutdown starts */
 static struct timeout_user *shutdown_timeout;  /* timeout for server shutdown */
@@ -482,6 +569,20 @@ void free_ptid( unsigned int id )
     num_free_ptids++;
 }
 
+/* E1-S18e R8: call cb for every process object that has an id, including processes without
+ * running threads (process_list only holds those with threads); stop and return 1 when cb does */
+int any_process( int (*cb)(struct process *, void *), void *user )
+{
+    unsigned int i;
+
+    for (i = 0; i < used_ptid_entries; i++)
+    {
+        struct object *obj = ptid_entries[i].ptr;
+        if (obj && obj->ops == &process_ops && cb( (struct process *)obj, user )) return 1;
+    }
+    return 0;
+}
+
 /* retrieve the pointer corresponding to a process or thread id */
 void *get_ptid_entry( unsigned int id )
 {
@@ -627,7 +728,14 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->unix_pid        = -1;
     process->wex_broker_image = 0;
     process->wex_image_seen = 0;
+    process->wex_dialog_image = 0;
     memset( &process->wex_broker_token_id, 0, sizeof(process->wex_broker_token_id) );
+    process->wex_creator = NULL;
+    memset( process->wex_protected, 0, sizeof(process->wex_protected) );
+    list_init( &process->wex_dialog_entry );
+    process->wex_pin_pidfd = -1;
+    process->wex_pin_pid = -1;
+    process->wex_pin_uid = -1;
     process->e1s6_broker_image = 0;
     process->e1s6_image_seen = 0;
     process->e1s6_broker_generation = 0;
@@ -759,6 +867,8 @@ data_size_t get_process_startup_info_size( struct process *process )
 static void process_destroy( struct object *obj )
 {
     struct process *process = (struct process *)obj;
+    wex_dialog_unprotect( process );
+    if (process->wex_pin_pidfd != -1) close( process->wex_pin_pidfd );
     list_remove( &process->e1s_profile_entry );
     assert( obj->ops == &process_ops );
 
@@ -970,6 +1080,7 @@ static void process_killed( struct process *process )
 {
     assert( list_empty( &process->thread_list ));
     process->end_time = current_time;
+    wex_dialog_unprotect( process );
     winstation_process_killed( process );
     dwm_cleanup_process( process );
     close_process_desktop( process );
@@ -1203,7 +1314,8 @@ DECL_HANDLER(new_process)
     const obj_handle_t *job_handles = NULL;
     unsigned int i, job_handle_count, status;
     struct job *job;
-    int isolate = 0;
+    int isolate = 0, dialog = 0;
+    struct object *dialog_objs[4] = { NULL };
 
     if (socket_fd == -1)
     {
@@ -1258,6 +1370,13 @@ DECL_HANDLER(new_process)
         }
         isolate = 1;
     }
+
+    /* E1-S18e R8: a credentials dialog of the verified broker (the broker's own token, no designated
+     * parent, exactly two listed handles: the dialog's pipe ends) is protected from creation. The
+     * shipping click-consent window passes no handle list and is not affected. */
+    if (!req->parent_process && !req->token && req->handles_size == 2 * sizeof(obj_handle_t) &&
+        sysrun_process_is_broker( current->process ))
+        dialog = 1;
 
     /* If a job further in the job chain does not permit breakaway process creation
      * succeeds and the process which is trying to breakaway is assigned to that job. */
@@ -1384,10 +1503,29 @@ DECL_HANDLER(new_process)
         close( socket_fd );
         goto done;
     }
+    if (dialog && (req->debug || !wex_dialog_pipes_valid( current->process, handles, dialog_objs ) ||
+                   !wex_dialog_pass_credentials( socket_fd )))
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        close( socket_fd );
+        goto done;
+    }
 
     if (!(process = create_process( socket_fd, parent, req->flags, info->data, params.sd,
                                     handles, req->handles_size / sizeof(*handles), token )))
         goto done;
+
+    if (dialog)
+    {
+        /* protected before the reply: nothing else can reach the dialog, its threads or its pipes */
+        process->wex_creator = (struct process *)grab_object( current->process );
+        memcpy( process->wex_protected, dialog_objs, sizeof(dialog_objs) );
+        memset( dialog_objs, 0, sizeof(dialog_objs) );
+        list_add_tail( &wex_dialogs, &process->wex_dialog_entry );
+#ifdef WEX_R8_SERVER_TEST
+        fprintf( stderr, "wex-r8: dialog %04x protected\n", process->id );
+#endif
+    }
 
     process->machine = req->machine;
     process->startup_info = (struct startup_info *)grab_object( info );
@@ -1465,6 +1603,7 @@ DECL_HANDLER(new_process)
     reply->handle = alloc_handle_no_access_check( current->process, process, req->access, params.attr );
 
  done:
+    for (i = 0; i < ARRAY_SIZE(dialog_objs); i++) if (dialog_objs[i]) release_object( dialog_objs[i] );
     if (process) release_object( process );
     if (debug_obj) release_object( debug_obj );
     if (token) release_object( token );

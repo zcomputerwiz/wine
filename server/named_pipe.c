@@ -1457,6 +1457,27 @@ static void init_pipe_end( struct pipe_end *pipe_end, struct named_pipe *pipe,
     list_init( &pipe_end->message_queue );
 }
 
+/* E1-S18e R8: is obj one end of a connected single-instance pipe whose server and client ends were
+ * both created by the broker (CreatePipe)? Returns its peer (reference taken) and the pipe (no
+ * reference). */
+int named_pipe_anonymous_end( struct object *obj, struct process *broker, struct object **peer,
+                              struct object **pipe )
+{
+    struct pipe_end *end, *other, *server, *client;
+
+    if (obj->ops != &pipe_server_ops && obj->ops != &pipe_client_ops) return 0;
+    end = (struct pipe_end *)obj;
+    if (!(other = end->connection) || other->connection != end || !end->pipe || end->pipe != other->pipe) return 0;
+    server = obj->ops == &pipe_server_ops ? end : other;
+    client = server == end ? other : end;
+    if (server->obj.ops != &pipe_server_ops || client->obj.ops != &pipe_client_ops) return 0;
+    if (server->server_pid != get_process_id( broker ) || client->client_pid != get_process_id( broker )) return 0;
+    if (end->pipe->maxinstances != 1 || end->pipe->instances != 1) return 0;
+    *peer = grab_object( &other->obj );
+    *pipe = &end->pipe->obj;
+    return 1;
+}
+
 static struct pipe_server *create_pipe_server( struct named_pipe *pipe, unsigned int options,
                                                unsigned int pipe_flags )
 {

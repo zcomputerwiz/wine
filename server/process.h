@@ -105,7 +105,14 @@ struct process
     unsigned int         sysrun_pending:1;   /* system group root process: SYSTEM token once its main image is verified */
     unsigned int         wex_broker_image:1;  /* first executable image is machine-root wexelevate.exe (sysrun.c) */
     unsigned int         wex_image_seen:1;    /* broker recognition decided once, on the first executable image */
+    unsigned int         wex_dialog_image:1;  /* R8: protected dialog whose first executable image is consent.exe */
     struct luid          wex_broker_token_id; /* primary token at recognition; another primary is not the broker */
+    struct process      *wex_creator;        /* E1-S18e R8: the verified broker that created this dialog (retained) */
+    struct object       *wex_protected[4];   /* the dialog's two pipes, both ends, protected with it */
+    struct list          wex_dialog_entry;   /* entry in the protected dialog list */
+    int                  wex_pin_pidfd;      /* kernel pin from the dialog loader's first fd transfer, else -1 */
+    int                  wex_pin_pid;        /* SCM_CREDENTIALS pid and uid of that transfer */
+    unsigned int         wex_pin_uid;
     unsigned int         e1s6_broker_image:1; /* lab only: mapped machine-root wexelevate image */
     unsigned int         e1s6_image_seen:1;
     unsigned long long   e1s6_broker_generation; /* fresh for each registration; server-issued */
@@ -118,6 +125,8 @@ struct process
 extern unsigned int alloc_ptid( void *ptr );
 extern void free_ptid( unsigned int id );
 extern int process_e1s_profile_busy( const struct sid * );
+extern int wex_handle_allowed( struct process *dst, struct object *obj );
+extern int any_process( int (*cb)(struct process *, void *), void *user );
 extern unsigned int process_e1s_profile_committable( struct process * );
 extern void *get_ptid_entry( unsigned int id );
 extern struct process *create_process( int fd, struct process *parent, unsigned int flags,

@@ -714,6 +714,12 @@ struct thread *get_thread_from_id( thread_id_t id )
     return NULL;
 }
 
+/* is obj a thread of process? (E1-S18e R8 dialog protection) */
+int thread_of_process( struct object *obj, struct process *process )
+{
+    return obj->ops == &thread_ops && ((struct thread *)obj)->process == process;
+}
+
 /* get a thread from a handle (and increment the refcount) */
 struct thread *get_thread_from_handle( obj_handle_t handle, unsigned int access )
 {

@@ -308,7 +308,20 @@ static void kill_unverified( void *private )
     release_object( process );
 }
 
-/* the installed elevation broker images (production names only), by device and inode */
+/* is st one of the machine-root images in names (both ABIs), by device and inode? */
+static int is_machine_image( const struct stat *st, const char *const *names, unsigned int count )
+{
+    char path[PATH_MAX];
+    struct stat ref;
+    unsigned int i;
+
+    for (i = 0; i < count; i++)
+        if ((unsigned int)snprintf( path, sizeof(path), "%s%s", machine_root, names[i] ) < sizeof(path) &&
+            !stat( path, &ref ) && ref.st_dev == st->st_dev && ref.st_ino == st->st_ino) return 1;
+    return 0;
+}
+
+/* the installed elevation broker images (production names only) */
 static int is_broker_image( const struct stat *st )
 {
     static const char *const brokers[] =
@@ -316,14 +329,18 @@ static int is_broker_image( const struct stat *st )
         "/drive_c/windows/system32/wexelevate.exe",
         "/drive_c/windows/syswow64/wexelevate.exe",
     };
-    char path[PATH_MAX];
-    struct stat ref;
-    unsigned int i;
+    return is_machine_image( st, brokers, ARRAY_SIZE(brokers) );
+}
 
-    for (i = 0; i < ARRAY_SIZE(brokers); i++)
-        if ((unsigned int)snprintf( path, sizeof(path), "%s%s", machine_root, brokers[i] ) < sizeof(path) &&
-            !stat( path, &ref ) && ref.st_dev == st->st_dev && ref.st_ino == st->st_ino) return 1;
-    return 0;
+/* E1-S18e R8 step 3c: the installed credentials dialog images */
+static int is_dialog_image( const struct stat *st )
+{
+    static const char *const dialogs[] =
+    {
+        "/drive_c/windows/system32/consent.exe",
+        "/drive_c/windows/syswow64/consent.exe",
+    };
+    return is_machine_image( st, dialogs, ARRAY_SIZE(dialogs) );
 }
 
 /* the broker identity holds only with the primary token it had when its image was recognised */
@@ -350,8 +367,18 @@ void sysrun_main_image( struct process *process, struct fd *fd )
     if (!process->wex_image_seen)
     {
         process->wex_image_seen = 1;
-        broker = system_role_enabled() && fd && (unix_fd = get_unix_fd( fd )) != -1 &&
-                 !fstat( unix_fd, &st ) && S_ISREG( st.st_mode ) && is_broker_image( &st );
+        if (system_role_enabled() && fd && (unix_fd = get_unix_fd( fd )) != -1 &&
+            !fstat( unix_fd, &st ) && S_ISREG( st.st_mode ))
+        {
+            broker = is_broker_image( &st );
+            /* R8 3c: a protected dialog whose first executable image is the machine-root consent.exe;
+             * mapping it later, as a second executable, never counts */
+            process->wex_dialog_image = process->wex_creator && is_dialog_image( &st );
+#ifdef WEX_R8_SERVER_TEST
+            if (process->wex_creator)
+                fprintf( stderr, "wex-r8: dialog %04x image consent=%d\n", process->id, process->wex_dialog_image );
+#endif
+        }
     }
 
 #ifdef WEX_E1S6_TRANSPORT_TEST

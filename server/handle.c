@@ -247,6 +247,11 @@ static obj_handle_t alloc_handle_entry( struct process *process, void *ptr,
         set_error( STATUS_PROCESS_IS_TERMINATING );
         return 0;
     }
+    if (!wex_handle_allowed( process, obj ))  /* E1-S18e R8 protected dialog */
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return 0;
+    }
     return alloc_entry( process->handles, obj, access );
 }
 
@@ -280,6 +285,11 @@ obj_handle_t alloc_handle( struct process *process, void *ptr, unsigned int acce
 /* return the handle, or 0 on error */
 static obj_handle_t alloc_global_handle_no_access_check( void *obj, unsigned int access )
 {
+    if (!wex_handle_allowed( NULL, obj ))  /* E1-S18e R8 protected dialog */
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return 0;
+    }
     if (!global_table)
     {
         if (!(global_table = alloc_handle_table( NULL, 0 )))
@@ -349,6 +359,7 @@ static void inherit_handle( struct process *parent, const obj_handle_t handle, s
 
     src = get_handle( parent, handle );
     if (!src || !(src->access & RESERVED_INHERIT)) return;
+    if (!wex_handle_allowed( table->process, src->ptr )) return;  /* E1-S18e R8 protected dialog */
     index = handle_to_index( handle );
     if (dst[index].ptr) return;
     grab_object_for_handle( src->ptr );
@@ -395,8 +406,9 @@ struct handle_table *copy_handle_table( struct process *process, struct process 
             for (i = 0; i <= table->last; i++, ptr++)
             {
                 if (!ptr->ptr) continue;
-                if (ptr->access & RESERVED_INHERIT) grab_object_for_handle( ptr->ptr );
-                else ptr->ptr = NULL; /* don't inherit this entry */
+                if ((ptr->access & RESERVED_INHERIT) && wex_handle_allowed( process, ptr->ptr ))
+                    grab_object_for_handle( ptr->ptr );
+                else ptr->ptr = NULL; /* don't inherit this entry (or a protected dialog's object) */
             }
         }
     }
@@ -845,6 +857,37 @@ struct enum_handle_info
     unsigned int count;
     struct handle_info *handle;
 };
+
+struct held_elsewhere_info
+{
+    struct process *owner;
+    struct object **objs;
+    unsigned int count;
+};
+
+static int held_elsewhere_cb( struct process *process, void *user )
+{
+    struct held_elsewhere_info *info = user;
+    unsigned int i;
+
+    if (process == info->owner || !process->handles) return 0;
+    for (i = 0; i < info->count; i++) if (get_obj_handle_count( process, info->objs[i] )) return 1;
+    return 0;
+}
+
+/* E1-S18e R8: does any process other than owner, or the global table, hold a handle to one of objs? */
+int handles_held_elsewhere( struct process *owner, struct object **objs, unsigned int count )
+{
+    struct held_elsewhere_info info = { owner, objs, count };
+    struct handle_entry *entry;
+    unsigned int i;
+    int j;
+
+    if (global_table)
+        for (j = 0, entry = global_table->entries; j <= global_table->last; j++, entry++)
+            for (i = 0; i < count; i++) if (entry->ptr == objs[i]) return 1;
+    return any_process( held_elsewhere_cb, &info );
+}
 
 static int enum_handles( struct process *process, void *user )
 {
