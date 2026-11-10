@@ -80,6 +80,15 @@ NTSTATUS WINAPI NtQueryWexPipeCallerBinding( HANDLE pipe, HANDLE *process, HANDL
     return status;
 }
 
+typedef struct _WEX_PIPE_CALLER_BINDING_EXT
+{
+    WEX_PIPE_CALLER_BINDING binding;
+    const void *input;
+    ULONG in_size;
+    void *output;
+    ULONG *out_size;
+} WEX_PIPE_CALLER_BINDING_EXT;
+
 /***********************************************************************
  *             NtQueryWexPipeCallerBindingEx  (NTDLL.@)
  *
@@ -90,14 +99,37 @@ NTSTATUS WINAPI NtQueryWexPipeCallerBinding( HANDLE pipe, HANDLE *process, HANDL
 NTSTATUS WINAPI NtQueryWexPipeCallerBindingEx( HANDLE pipe, WEX_PIPE_CALLER_BINDING *binding )
 {
     NTSTATUS status;
+    const void *input = NULL;
+    ULONG input_size = 0;
+    void *output = NULL;
+    ULONG *output_size = NULL;
 
-    if (!binding || binding->Size != sizeof(*binding)) return STATUS_INVALID_PARAMETER;
+    if (!binding) return STATUS_INVALID_PARAMETER;
+
+    if (binding->Size == sizeof(WEX_PIPE_CALLER_BINDING_EXT))
+    {
+        WEX_PIPE_CALLER_BINDING_EXT *ext = (WEX_PIPE_CALLER_BINDING_EXT *)binding;
+        input = ext->input;
+        input_size = ext->in_size;
+        output = ext->output;
+        output_size = ext->out_size;
+    }
+    else if (binding->Size != sizeof(WEX_PIPE_CALLER_BINDING))
+        return STATUS_INVALID_PARAMETER;
+
     memset( binding, 0, sizeof(*binding) );
     SERVER_START_REQ( get_pipe_caller_binding )
     {
         req->pipe = wine_server_obj_handle( pipe );
+        if (input && input_size)
+            wine_server_add_data( req, input, input_size );
+        if (output && output_size && *output_size)
+            wine_server_set_reply( req, output, *output_size );
+
         if (!(status = wine_server_call( req )))
         {
+            if (output_size)
+                *output_size = wine_server_reply_size( reply );
             binding->Size = sizeof(*binding);
             binding->Version = reply->version;
             binding->Process = wine_server_ptr_handle( reply->process );

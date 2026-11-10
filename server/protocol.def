@@ -2706,6 +2706,7 @@ enum message_type
     struct luid    writer_modified_id;
     unsigned int   version;
     unsigned int   writer_flags;
+    VARARG(binding,bytes);
 @END
 
 /* Create a window */

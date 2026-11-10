@@ -48,4 +48,8 @@ struct wex_account
 enum wex_account_status lookup_account( const char *name, uid_t uid, uint64_t negotiated_caps,
                                         struct wex_account *result );
 
+#ifdef WEX_E1S6_TRANSPORT_TEST
+int accounts_get_map_generation( unsigned long long *gen );
+#endif
+
 #endif

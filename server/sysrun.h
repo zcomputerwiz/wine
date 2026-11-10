@@ -60,6 +60,12 @@ extern int sysrun_process_is_system( struct process *process );
 extern int sysrun_process_is_broker( struct process *process );
 /* S6 lab sideband, compiled out unless WEX_E1S6_TRANSPORT_TEST is defined. */
 extern int sysrun_e1s6_endorse( const void *data, unsigned int size );
+#ifdef WEX_E1S6_TRANSPORT_TEST
+extern int sysrun_get_s6_generations( struct process *process, unsigned long long *server_gen, unsigned long long *broker_gen );
+extern int sysrun_get_root_generation( unsigned long long *root_gen );
+extern int sysrun_get_policy_generation( unsigned long long *policy_gen );
+extern int registry_get_prefix_id( unsigned char prefix_id[16] );
+#endif
 /* are the desktop rules of the secure desktop (reserved names, cross-desktop access) in force? */
 extern int sysrun_desktops_enforced(void);
 /* access check of a request that names another process or thread by id instead of by handle */

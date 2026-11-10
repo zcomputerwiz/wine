@@ -1743,6 +1743,7 @@ static void dump_get_pipe_caller_binding_reply( const struct get_pipe_caller_bin
     dump_luid( ", writer_modified_id=", &req->writer_modified_id );
     fprintf( stderr, ", version=%08x", req->version );
     fprintf( stderr, ", writer_flags=%08x", req->writer_flags );
+    dump_varargs_bytes( ", binding=", cur_size );
 }
 
 static void dump_create_window_request( const struct create_window_request *req )
@@ -4757,8 +4758,10 @@ static const struct
     { "ACCESS_VIOLATION",            STATUS_ACCESS_VIOLATION },
     { "ADDRESS_ALREADY_ASSOCIATED",  STATUS_ADDRESS_ALREADY_ASSOCIATED },
     { "ALERTED",                     STATUS_ALERTED },
+    { "ALREADY_COMMITTED",           STATUS_ALREADY_COMMITTED },
     { "BAD_DEVICE_TYPE",             STATUS_BAD_DEVICE_TYPE },
     { "BAD_IMPERSONATION_LEVEL",     STATUS_BAD_IMPERSONATION_LEVEL },
+    { "BAD_TOKEN_TYPE",              STATUS_BAD_TOKEN_TYPE },
     { "BUFFER_OVERFLOW",             STATUS_BUFFER_OVERFLOW },
     { "BUFFER_TOO_SMALL",            STATUS_BUFFER_TOO_SMALL },
     { "CANCELLED",                   STATUS_CANCELLED },
@@ -4771,6 +4774,7 @@ static const struct
     { "CONNECTION_REFUSED",          STATUS_CONNECTION_REFUSED },
     { "CONNECTION_RESET",            STATUS_CONNECTION_RESET },
     { "DEBUGGER_INACTIVE",           STATUS_DEBUGGER_INACTIVE },
+    { "DELETE_PENDING",              STATUS_DELETE_PENDING },
     { "DEVICE_BUSY",                 STATUS_DEVICE_BUSY },
     { "DEVICE_NOT_READY",            STATUS_DEVICE_NOT_READY },
     { "DIRECTORY_NOT_EMPTY",         STATUS_DIRECTORY_NOT_EMPTY },
@@ -4801,6 +4805,7 @@ static const struct
     { "INFO_LENGTH_MISMATCH",        STATUS_INFO_LENGTH_MISMATCH },
     { "INSTANCE_NOT_AVAILABLE",      STATUS_INSTANCE_NOT_AVAILABLE },
     { "INSUFFICIENT_RESOURCES",      STATUS_INSUFFICIENT_RESOURCES },
+    { "INTEGER_OVERFLOW",            STATUS_INTEGER_OVERFLOW },
     { "INVALID_ACL",                 STATUS_INVALID_ACL },
     { "INVALID_ADDRESS",             STATUS_INVALID_ADDRESS },
     { "INVALID_ADDRESS_COMPONENT",   STATUS_INVALID_ADDRESS_COMPONENT },
@@ -4808,6 +4813,7 @@ static const struct
     { "INVALID_CID",                 STATUS_INVALID_CID },
     { "INVALID_CONNECTION",          STATUS_INVALID_CONNECTION },
     { "INVALID_DEVICE_REQUEST",      STATUS_INVALID_DEVICE_REQUEST },
+    { "INVALID_DEVICE_STATE",        STATUS_INVALID_DEVICE_STATE },
     { "INVALID_FILE_FOR_SECTION",    STATUS_INVALID_FILE_FOR_SECTION },
     { "INVALID_HANDLE",              STATUS_INVALID_HANDLE },
     { "INVALID_IMAGE_FORMAT",        STATUS_INVALID_IMAGE_FORMAT },
@@ -4821,6 +4827,7 @@ static const struct
     { "INVALID_PARAMETER",           STATUS_INVALID_PARAMETER },
     { "INVALID_PARAMETER_1",         STATUS_INVALID_PARAMETER_1 },
     { "INVALID_PARAMETER_2",         STATUS_INVALID_PARAMETER_2 },
+    { "INVALID_PARAMETER_MIX",       STATUS_INVALID_PARAMETER_MIX },
     { "INVALID_PIPE_STATE",          STATUS_INVALID_PIPE_STATE },
     { "INVALID_READ_MODE",           STATUS_INVALID_READ_MODE },
     { "INVALID_SECURITY_DESCR",      STATUS_INVALID_SECURITY_DESCR },
@@ -4854,6 +4861,7 @@ static const struct
     { "NO_SUCH_DEVICE",              STATUS_NO_SUCH_DEVICE },
     { "NO_SUCH_FILE",                STATUS_NO_SUCH_FILE },
     { "NO_SUCH_LOGON_SESSION",       STATUS_NO_SUCH_LOGON_SESSION },
+    { "NO_SUCH_USER",                STATUS_NO_SUCH_USER },
     { "NO_TOKEN",                    STATUS_NO_TOKEN },
     { "OBJECT_NAME_COLLISION",       STATUS_OBJECT_NAME_COLLISION },
     { "OBJECT_NAME_EXISTS",          STATUS_OBJECT_NAME_EXISTS },
@@ -4884,7 +4892,11 @@ static const struct
     { "PROCESS_NOT_IN_JOB",          STATUS_PROCESS_NOT_IN_JOB },
     { "QUOTA_EXCEEDED",              STATUS_QUOTA_EXCEEDED },
     { "RANGE_NOT_LOCKED",            STATUS_RANGE_NOT_LOCKED },
+    { "REGISTRY_CORRUPT",            STATUS_REGISTRY_CORRUPT },
+    { "REGISTRY_IO_FAILED",          STATUS_REGISTRY_IO_FAILED },
     { "REPARSE_POINT_NOT_RESOLVED",  STATUS_REPARSE_POINT_NOT_RESOLVED },
+    { "RESOURCE_IN_USE",             STATUS_RESOURCE_IN_USE },
+    { "REVISION_MISMATCH",           STATUS_REVISION_MISMATCH },
     { "SECTION_TOO_BIG",             STATUS_SECTION_TOO_BIG },
     { "SEMAPHORE_LIMIT_EXCEEDED",    STATUS_SEMAPHORE_LIMIT_EXCEEDED },
     { "SHARING_VIOLATION",           STATUS_SHARING_VIOLATION },

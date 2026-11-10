@@ -483,6 +483,86 @@ static int e1s6_get_fd( const unsigned char *p, const char *role )
 }
 #endif
 
+#if defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
+static unsigned long long s6_server_generation;
+
+struct stat_gen_tracker
+{
+    int initialized;
+    dev_t dev;
+    ino_t ino;
+    off_t size;
+    struct timespec mtim;
+    struct timespec ctim;
+    unsigned long long tag;
+};
+
+static int get_path_generation( const char *path, struct stat_gen_tracker *tracker, unsigned long long *gen )
+{
+    struct stat st;
+    int fd;
+    unsigned long long new_tag = 0;
+
+    if (!path || !path[0] || !tracker || !gen) return 0;
+    if (stat( path, &st ) != 0) return 0;
+
+    if (!tracker->initialized ||
+        tracker->dev != st.st_dev ||
+        tracker->ino != st.st_ino ||
+        tracker->size != st.st_size ||
+        tracker->mtim.tv_sec != st.st_mtim.tv_sec ||
+        tracker->mtim.tv_nsec != st.st_mtim.tv_nsec ||
+        tracker->ctim.tv_sec != st.st_ctim.tv_sec ||
+        tracker->ctim.tv_nsec != st.st_ctim.tv_nsec)
+    {
+        fd = open( "/dev/urandom", O_RDONLY | O_CLOEXEC );
+        if (fd < 0) return 0;
+        while (!new_tag)
+        {
+            if (read( fd, &new_tag, sizeof(new_tag) ) != sizeof(new_tag))
+            {
+                close( fd );
+                return 0;
+            }
+        }
+        close( fd );
+        tracker->dev = st.st_dev;
+        tracker->ino = st.st_ino;
+        tracker->size = st.st_size;
+        tracker->mtim = st.st_mtim;
+        tracker->ctim = st.st_ctim;
+        tracker->tag = new_tag;
+        tracker->initialized = 1;
+    }
+    *gen = tracker->tag;
+    return 1;
+}
+
+int sysrun_get_root_generation( unsigned long long *root_gen )
+{
+    static struct stat_gen_tracker root_tracker;
+    const char *root = sysrun_machine_root();
+    if (!root) return 0;
+    return get_path_generation( root, &root_tracker, root_gen );
+}
+
+int sysrun_get_policy_generation( unsigned long long *policy_gen )
+{
+    static struct stat_gen_tracker policy_tracker;
+    return get_path_generation( SYSRUN_CONF, &policy_tracker, policy_gen );
+}
+
+int sysrun_get_s6_generations( struct process *process, unsigned long long *server_gen, unsigned long long *broker_gen )
+{
+    if (!process || !server_gen || !broker_gen) return 0;
+    if (!s6_server_generation || !process->e1s6_broker_generation) return 0;
+    if (process->e1s6_primary != process->token) return 0;
+    *server_gen = s6_server_generation;
+    *broker_gen = process->e1s6_broker_generation;
+    return 1;
+}
+#endif
+
 int sysrun_e1s6_endorse( const void *data, unsigned int size )
 {
 #if defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
@@ -495,8 +575,7 @@ int sysrun_e1s6_endorse( const void *data, unsigned int size )
     struct luid new_id, new_modified;
     struct pollfd verifier_pins[2] = { { -1, POLLIN, 0 }, { -1, POLLIN, 0 } };
     struct ucred verifier[2];
-    static unsigned long long generation;
-    unsigned long long fresh, server_generation = generation, expected = 0;
+    unsigned long long fresh, server_generation = s6_server_generation, expected = 0;
     int fd = -1, pin = -1, data_fd = -1, random = -1, raised, ret = 0, type;
     unsigned int i;
 
@@ -591,7 +670,7 @@ int sysrun_e1s6_endorse( const void *data, unsigned int size )
     {
         /* Publish only after the complete seqpacket was delivered. No fallible
          * operation follows this transfer of the staged token reference. */
-        generation = server_generation;
+        s6_server_generation = server_generation;
         if (new_primary)
         {
             if (p->e1s6_primary) release_object( p->e1s6_primary );

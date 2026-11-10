@@ -3599,6 +3599,7 @@ struct get_pipe_caller_binding_reply
     struct luid    writer_modified_id;
     unsigned int   version;
     unsigned int   writer_flags;
+    /* VARARG(binding,bytes); */
 };
 
 
@@ -7545,6 +7546,6 @@ union generic_reply
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 979
+#define SERVER_PROTOCOL_VERSION 980
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

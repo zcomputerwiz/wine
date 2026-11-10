@@ -168,7 +168,30 @@ static struct e1s_hive *e1s_hives;
 static unsigned int e1s_hive_count;
 static struct e1s_sid_generation *e1s_generations;
 static uint64_t e1s_server_generation;
+#endif
+#if defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
 static unsigned char e1s_prefix_id[16];
+
+int registry_get_prefix_id( unsigned char prefix_id[16] )
+{
+    static const unsigned char zero[16] = {0};
+    if (!memcmp( e1s_prefix_id, zero, 16 ))
+    {
+        int fd = open( "/dev/urandom", O_RDONLY | O_CLOEXEC );
+        if (fd < 0) return 0;
+        while (!memcmp( e1s_prefix_id, zero, 16 ))
+        {
+            if (read( fd, e1s_prefix_id, 16 ) != 16)
+            {
+                close( fd );
+                return 0;
+            }
+        }
+        close( fd );
+    }
+    memcpy( prefix_id, e1s_prefix_id, 16 );
+    return 1;
+}
 #endif
 static int e1s_strict_loading;
 static int e1s_refresh_view( struct key * );
@@ -2859,8 +2882,8 @@ static int e1s_acquire_lease( struct e1s_hive *m, struct token *token, obj_handl
         return e1s_deny( STATUS_ACCESS_DENIED, "lease-request" );
     if (!e1s_server_generation)
     {
-        if (!e1s_random( e1s_prefix_id, sizeof(e1s_prefix_id) ) ||
-            !memcmp( e1s_prefix_id, (unsigned char[16]){0}, 16 ))
+        /* reuse the ID if an R8 BINDING (registry_get_prefix_id) already made it */
+        if (!registry_get_prefix_id( (unsigned char[16]){0} ))
         { e1s_server_generation = 0; return e1s_deny( STATUS_UNSUCCESSFUL, "lease-rng" ); }
         e1s_server_generation = server_gen;
     }

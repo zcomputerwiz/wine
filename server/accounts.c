@@ -608,3 +608,42 @@ done:
 #endif
     return status;
 }
+
+#ifdef WEX_E1S6_TRANSPORT_TEST
+int accounts_get_map_generation( unsigned long long *gen )
+{
+    int dir = -1;
+    char *buf = NULL;
+    size_t length;
+    struct account_policy policy;
+    struct account_map *map = NULL;
+    enum wex_account_status status;
+#ifndef WEX_ACCOUNTS_STANDALONE
+    int raised = sysrun_raise();
+#endif
+
+    if (!gen) return 0;
+    if ((dir = protected_directory( account_directory, &status )) == -1) goto done;
+    if ((status = read_policy( dir, &policy ))) goto done;
+    if ((status = read_protected( dir, "accounts.map", policy.system_gid, &buf, &length ))) goto done;
+    status = WEX_ACCOUNT_MAP_UNREADABLE;
+    if (!(map = malloc( sizeof(*map) ))) goto done;
+    if ((status = parse_map( buf, map ))) goto done;
+    if (!map->generation)
+    {
+        status = WEX_ACCOUNT_MAP_INVALID;
+        goto done;
+    }
+    *gen = map->generation;
+    status = WEX_ACCOUNT_OK;
+
+done:
+    free( map );
+    free( buf );
+    if (dir != -1) close( dir );
+#ifndef WEX_ACCOUNTS_STANDALONE
+    sysrun_drop( raised );
+#endif
+    return status == WEX_ACCOUNT_OK;
+}
+#endif

@@ -23,10 +23,12 @@
 #include "config.h"
 
 #include <assert.h>
+#include <fcntl.h>
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <sys/types.h>
 
 #include "ntstatus.h"
@@ -41,8 +43,30 @@
 #include "security.h"
 #include "process.h"
 #include "sysrun.h"
+#include "user.h"
+#include "accounts.h"
 
 struct named_pipe;
+
+#ifdef WEX_E1S6_TRANSPORT_TEST
+struct pipe_binding
+{
+    unsigned char prefix_id[16];
+    unsigned char host_process_id[16];
+    unsigned char opener_id[16];
+    unsigned char writer_id[16];
+    unsigned char desktop_route[16];
+    unsigned long long server_gen;
+    unsigned long long root_gen;
+    unsigned long long broker_gen;
+    unsigned long long map_gen;
+    unsigned long long policy_gen;
+    unsigned int caller_session;
+    struct process *opener_process;
+    struct process *writer_process;
+    struct desktop *desktop;
+};
+#endif
 
 /* WineExplorer private: immutable identity at client message submission. */
 struct pipe_writer
@@ -52,6 +76,9 @@ struct pipe_writer
     struct luid     token_id;
     struct luid     modified_id;
     int             impersonated;
+#ifdef WEX_E1S6_TRANSPORT_TEST
+    struct desktop *desktop;
+#endif
 };
 
 struct pipe_message
@@ -86,6 +113,9 @@ struct pipe_end
     struct list          message_queue;
     struct async_queue   read_q;     /* read queue */
     struct async_queue   write_q;    /* write queue */
+#ifdef WEX_E1S6_TRANSPORT_TEST
+    struct pipe_binding *binding;
+#endif
 };
 
 struct pipe_server
@@ -387,8 +417,25 @@ static struct fd *pipe_end_get_fd( struct object *obj )
     return (struct fd *) grab_object( pipe_end->fd );
 }
 
+#ifdef WEX_E1S6_TRANSPORT_TEST
+static void clear_pipe_binding( struct pipe_end *pipe_end )
+{
+    if (pipe_end->binding)
+    {
+        if (pipe_end->binding->desktop) release_object( pipe_end->binding->desktop );
+        if (pipe_end->binding->opener_process) release_object( pipe_end->binding->opener_process );
+        if (pipe_end->binding->writer_process) release_object( pipe_end->binding->writer_process );
+        free( pipe_end->binding );
+        pipe_end->binding = NULL;
+    }
+}
+#endif
+
 static void clear_pipe_writer( struct pipe_writer *writer )
 {
+#ifdef WEX_E1S6_TRANSPORT_TEST
+    if (writer->desktop) release_object( writer->desktop );
+#endif
     if (writer->primary) release_object( writer->primary );
     if (writer->process) release_object( writer->process );
     memset( writer, 0, sizeof(*writer) );
@@ -414,6 +461,9 @@ static struct pipe_message *queue_message( struct pipe_end *pipe_end, struct ios
             message->writer.primary = (struct token *)grab_object( current->process->token );
             token_get_ids( message->writer.primary, &message->writer.token_id, &message->writer.modified_id );
         }
+#ifdef WEX_E1S6_TRANSPORT_TEST
+        message->writer.desktop = get_thread_desktop_quiet( current );
+#endif
     }
     list_add_tail( &pipe_end->message_queue, &message->entry );
     return message;
@@ -445,6 +495,9 @@ static void pipe_end_disconnect( struct pipe_end *pipe_end, unsigned int status 
     struct async *async;
 
     pipe_end->connection = NULL;
+#ifdef WEX_E1S6_TRANSPORT_TEST
+    clear_pipe_binding( pipe_end );
+#endif
     clear_pipe_writer( &pipe_end->consumed_writer );
     pipe_end->consumed_valid = 0;
     pipe_end->binding_reads = 0;
@@ -481,6 +534,9 @@ static void pipe_end_destroy( struct object *obj )
     struct pipe_message *message;
 
     pipe_end_disconnect( pipe_end, STATUS_PIPE_BROKEN );
+#ifdef WEX_E1S6_TRANSPORT_TEST
+    clear_pipe_binding( pipe_end );
+#endif
 
     while (!list_empty( &pipe_end->message_queue ))
     {
@@ -1451,6 +1507,9 @@ static void init_pipe_end( struct pipe_end *pipe_end, struct named_pipe *pipe,
     memset( &pipe_end->consumed_writer, 0, sizeof(pipe_end->consumed_writer) );
     pipe_end->binding_reads = 0;
     pipe_end->consumed_valid = 0;
+#ifdef WEX_E1S6_TRANSPORT_TEST
+    pipe_end->binding = NULL;
+#endif
     pipe_end->buffer_size = buffer_size;
     init_async_queue( &pipe_end->read_q );
     init_async_queue( &pipe_end->write_q );
@@ -1781,12 +1840,41 @@ DECL_HANDLER(set_named_pipe_info)
 #define E1S6_BINDING_AUDIT(site) do {} while (0)
 #endif
 
+static int check_pipe_writer_binding( struct pipe_end *client, struct pipe_writer *writer )
+{
+    struct luid opener_id, opener_modified, writer_id, writer_modified;
+    token_get_ids( client->client_primary, &opener_id, &opener_modified );
+    token_get_ids( writer->primary, &writer_id, &writer_modified );
+#define CHECK_WRITER(c, site) do { if (!(c)) { E1S6_BINDING_AUDIT( site ); \
+    set_error( STATUS_ACCESS_DENIED ); return 0; } } while (0)
+    CHECK_WRITER( !client->client_impersonated, "opener-impersonated" );
+    CHECK_WRITER( !writer->impersonated, "writer-impersonated" );
+    CHECK_WRITER( writer->process == client->client_process, "writer-process" );
+    CHECK_WRITER( writer->primary == client->client_primary, "writer-primary" );
+    CHECK_WRITER( client->client_process->token == client->client_primary, "opener-primary-current" );
+    CHECK_WRITER( !memcmp( &opener_id, &client->client_token_id, sizeof(opener_id) ), "opener-token-id" );
+    CHECK_WRITER( !memcmp( &opener_modified, &client->client_modified_id, sizeof(opener_modified) ), "opener-modified-id" );
+    CHECK_WRITER( !memcmp( &writer_id, &writer->token_id, sizeof(writer_id) ), "writer-token-id" );
+    CHECK_WRITER( !memcmp( &writer_modified, &writer->modified_id, sizeof(writer_modified) ), "writer-modified-id" );
+#undef CHECK_WRITER
+    return 1;
+}
+
 DECL_HANDLER(get_pipe_caller_binding)
 {
     struct pipe_end *server, *client;
     struct pipe_writer *writer;
     struct luid token_id, modified_id;
     obj_handle_t process = 0, token = 0, writer_process = 0, writer_token = 0;
+#ifdef WEX_E1S6_TRANSPORT_TEST
+    const unsigned char *req_data;
+    data_size_t req_size;
+    struct pipe_binding *b;
+    int rng, i;
+    unsigned char reply_buf[124];
+    unsigned char *ptr;
+    static const unsigned char zero16[16] = {0};
+#endif
 
     /* Keep the same system-role / SeTcbPrivilege gate as create_linked_token. */
     if (!elevation_enforced() || token_service_account( current->process->token ) != SERVICE_ACCOUNT_SYSTEM ||
@@ -1824,22 +1912,142 @@ DECL_HANDLER(get_pipe_caller_binding)
 
     if (get_req_data_size())
     {
-        struct luid opener_id, opener_modified, writer_id, writer_modified;
-        token_get_ids( client->client_primary, &opener_id, &opener_modified );
-        token_get_ids( writer->primary, &writer_id, &writer_modified );
-#define CHECK_WRITER(c, site) do { if (!(c)) { E1S6_BINDING_AUDIT( site ); \
-    set_error( STATUS_ACCESS_DENIED ); goto done; } } while (0)
-        CHECK_WRITER( !client->client_impersonated, "opener-impersonated" );
-        CHECK_WRITER( !writer->impersonated, "writer-impersonated" );
-        CHECK_WRITER( writer->process == client->client_process, "writer-process" );
-        CHECK_WRITER( writer->primary == client->client_primary, "writer-primary" );
-        CHECK_WRITER( client->client_process->token == client->client_primary, "opener-primary-current" );
-        CHECK_WRITER( !memcmp( &opener_id, &client->client_token_id, sizeof(opener_id) ), "opener-token-id" );
-        CHECK_WRITER( !memcmp( &opener_modified, &client->client_modified_id, sizeof(opener_modified) ), "opener-modified-id" );
-        CHECK_WRITER( !memcmp( &writer_id, &writer->token_id, sizeof(writer_id) ), "writer-token-id" );
-        CHECK_WRITER( !memcmp( &writer_modified, &writer->modified_id, sizeof(writer_modified) ), "writer-modified-id" );
-#undef CHECK_WRITER
-        if (!sysrun_e1s6_endorse( get_req_data(), get_req_data_size() )) goto done;
+        if (!check_pipe_writer_binding( client, writer )) goto done;
+
+#ifdef WEX_E1S6_TRANSPORT_TEST
+        req_data = get_req_data();
+        req_size = get_req_data_size();
+        if (req_size >= 4 && !memcmp( req_data, "E1R8", 4 ))
+        {
+            if (req_size != 8)
+            {
+                E1S6_BINDING_AUDIT( "e1r8-size" );
+                set_error( STATUS_ACCESS_DENIED );
+                goto done;
+            }
+            if (req_data[4] != 1 || req_data[5] != 0)
+            {
+                E1S6_BINDING_AUDIT( "e1r8-version" );
+                set_error( STATUS_ACCESS_DENIED );
+                goto done;
+            }
+            if (req_data[6] != 1 || req_data[7] != 0)
+            {
+                E1S6_BINDING_AUDIT( "e1r8-op" );
+                set_error( STATUS_ACCESS_DENIED );
+                goto done;
+            }
+
+            if (!sysrun_process_is_broker( current->process ))
+            {
+                E1S6_BINDING_AUDIT( "caller-not-broker" );
+                set_error( STATUS_ACCESS_DENIED );
+                goto done;
+            }
+            if (!process_pin_matches( client->client_process ))
+            {
+                E1S6_BINDING_AUDIT( "opener-pin-missing" );
+                set_error( STATUS_ACCESS_DENIED );
+                goto done;
+            }
+            if (!writer->desktop)
+            {
+                E1S6_BINDING_AUDIT( "writer-desktop-missing" );
+                set_error( STATUS_ACCESS_DENIED );
+                goto done;
+            }
+            if (server->binding)
+            {
+                E1S6_BINDING_AUDIT( "binding-exists" );
+                set_error( STATUS_ACCESS_DENIED );
+                goto done;
+            }
+
+            b = mem_alloc( sizeof(*b) );
+            if (!b)
+            {
+                E1S6_BINDING_AUDIT( "binding-alloc" );
+                set_error( STATUS_NO_MEMORY );
+                goto done;
+            }
+            memset( b, 0, sizeof(*b) );
+
+            if (!registry_get_prefix_id( b->prefix_id ))
+            {
+                free( b );
+                E1S6_BINDING_AUDIT( "prefix-id" );
+                set_error( STATUS_ACCESS_DENIED );
+                goto done;
+            }
+
+            rng = open( "/dev/urandom", O_RDONLY | O_CLOEXEC );
+            if (rng < 0)
+            {
+                free( b );
+                E1S6_BINDING_AUDIT( "rng-open" );
+                set_error( STATUS_ACCESS_DENIED );
+                goto done;
+            }
+            while (!memcmp( b->host_process_id, zero16, 16 ) || !memcmp( b->host_process_id, b->prefix_id, 16 ))
+                if (read( rng, b->host_process_id, 16 ) != 16) { close( rng ); free( b ); set_error( STATUS_ACCESS_DENIED ); goto done; }
+            while (!memcmp( b->opener_id, zero16, 16 ) || !memcmp( b->opener_id, b->prefix_id, 16 ) || !memcmp( b->opener_id, b->host_process_id, 16 ))
+                if (read( rng, b->opener_id, 16 ) != 16) { close( rng ); free( b ); set_error( STATUS_ACCESS_DENIED ); goto done; }
+            while (!memcmp( b->writer_id, zero16, 16 ) || !memcmp( b->writer_id, b->prefix_id, 16 ) || !memcmp( b->writer_id, b->host_process_id, 16 ) || !memcmp( b->writer_id, b->opener_id, 16 ))
+                if (read( rng, b->writer_id, 16 ) != 16) { close( rng ); free( b ); set_error( STATUS_ACCESS_DENIED ); goto done; }
+            while (!memcmp( b->desktop_route, zero16, 16 ) || !memcmp( b->desktop_route, b->prefix_id, 16 ) || !memcmp( b->desktop_route, b->host_process_id, 16 ) || !memcmp( b->desktop_route, b->opener_id, 16 ) || !memcmp( b->desktop_route, b->writer_id, 16 ))
+                if (read( rng, b->desktop_route, 16 ) != 16) { close( rng ); free( b ); set_error( STATUS_ACCESS_DENIED ); goto done; }
+            close( rng );
+
+            if (!sysrun_get_s6_generations( current->process, &b->server_gen, &b->broker_gen ))
+            {
+                free( b );
+                E1S6_BINDING_AUDIT( "s6-generations" );
+                set_error( STATUS_ACCESS_DENIED );
+                goto done;
+            }
+            if (!accounts_get_map_generation( &b->map_gen ))
+            {
+                free( b );
+                E1S6_BINDING_AUDIT( "map-generation" );
+                set_error( STATUS_ACCESS_DENIED );
+                goto done;
+            }
+            if (!sysrun_get_root_generation( &b->root_gen ) || !sysrun_get_policy_generation( &b->policy_gen ))
+            {
+                free( b );
+                E1S6_BINDING_AUDIT( "path-generations" );
+                set_error( STATUS_ACCESS_DENIED );
+                goto done;
+            }
+
+            b->caller_session = client->client_process->session_id;
+            b->opener_process = (struct process *)grab_object( client->client_process );
+            b->writer_process = (struct process *)grab_object( writer->process );
+            b->desktop = (struct desktop *)grab_object( writer->desktop );
+            server->binding = b;
+
+            ptr = reply_buf;
+            memcpy( ptr, b->prefix_id, 16 ); ptr += 16;
+            memcpy( ptr, b->host_process_id, 16 ); ptr += 16;
+            memcpy( ptr, b->opener_id, 16 ); ptr += 16;
+            memcpy( ptr, b->writer_id, 16 ); ptr += 16;
+            memcpy( ptr, b->desktop_route, 16 ); ptr += 16;
+
+            for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->server_gen >> (8 * i));
+            for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->root_gen >> (8 * i));
+            for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->broker_gen >> (8 * i));
+            for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->map_gen >> (8 * i));
+            for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->policy_gen >> (8 * i));
+
+            for (i = 0; i < 4; i++) *ptr++ = (unsigned char)(b->caller_session >> (8 * i));
+            assert( ptr - reply_buf == 124 );
+            set_reply_data( reply_buf, sizeof(reply_buf) );
+        }
+        else
+#endif
+        {
+            if (!sysrun_e1s6_endorse( get_req_data(), get_req_data_size() )) goto done;
+        }
     }
 
     process = alloc_handle( current->process, client->client_process,
