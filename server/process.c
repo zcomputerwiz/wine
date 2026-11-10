@@ -171,6 +171,20 @@ int process_pin_matches( struct process *process )
            pidfd_pid( process->wex_pin_pidfd ) == process->wex_pin_pid &&
            process->wex_pin_pid == process->unix_pid;
 }
+
+int process_unstarted_suspended( struct process *process )
+{
+    struct thread *thread;
+
+    if (process->e1s_profile_dead || process->is_terminating || !process->running_threads ||
+        process->startup_state == STARTUP_ABORTED) return 0;
+    if (!process->e1s_profile_unstarted || process->startup_state != STARTUP_DONE ||
+        process->running_threads != 1 || list_empty( &process->thread_list )) return 0;
+    thread = LIST_ENTRY( list_head( &process->thread_list ), struct thread, proc_entry );
+    if (list_next( &process->thread_list, &thread->proc_entry ) || thread->state == TERMINATED ||
+        !thread->suspend) return 0;
+    return 1;
+}
 #endif
 static int running_processes, user_processes;
 static struct event *shutdown_event;           /* signaled when shutdown starts */

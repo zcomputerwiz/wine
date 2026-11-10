@@ -65,7 +65,34 @@ struct pipe_binding
     struct process *opener_process;
     struct process *writer_process;
     struct desktop *desktop;
+    struct token *opener_token;
+    struct luid opener_token_id;
+    struct luid opener_modified_id;
+    int endorsed;
+    struct process *dialog_process;
+    struct token *dialog_token;
+    struct luid dialog_token_id;
+    struct luid dialog_modified_id;
+    int dialog_pin_pid;
+    unsigned char dialog_id[16];
+    unsigned char sealed_tuple[220];
 };
+
+static inline unsigned long long unpack_u64_le( const unsigned char *p )
+{
+    unsigned long long v = 0;
+    int i;
+    for (i = 0; i < 8; i++) v |= ((unsigned long long)p[i]) << (8 * i);
+    return v;
+}
+
+static inline unsigned int unpack_u32_le( const unsigned char *p )
+{
+    unsigned int v = 0;
+    int i;
+    for (i = 0; i < 4; i++) v |= ((unsigned int)p[i]) << (8 * i);
+    return v;
+}
 #endif
 
 /* WineExplorer private: immutable identity at client message submission. */
@@ -425,6 +452,9 @@ static void clear_pipe_binding( struct pipe_end *pipe_end )
         if (pipe_end->binding->desktop) release_object( pipe_end->binding->desktop );
         if (pipe_end->binding->opener_process) release_object( pipe_end->binding->opener_process );
         if (pipe_end->binding->writer_process) release_object( pipe_end->binding->writer_process );
+        if (pipe_end->binding->opener_token) release_object( pipe_end->binding->opener_token );
+        if (pipe_end->binding->dialog_process) release_object( pipe_end->binding->dialog_process );
+        if (pipe_end->binding->dialog_token) release_object( pipe_end->binding->dialog_token );
         free( pipe_end->binding );
         pipe_end->binding = NULL;
     }
@@ -1919,129 +1949,563 @@ DECL_HANDLER(get_pipe_caller_binding)
         req_size = get_req_data_size();
         if (req_size >= 4 && !memcmp( req_data, "E1R8", 4 ))
         {
-            if (req_size != 8)
+            unsigned short version, op;
+
+            if (req_size < 8)
             {
                 E1S6_BINDING_AUDIT( "e1r8-size" );
                 set_error( STATUS_ACCESS_DENIED );
                 goto done;
             }
-            if (req_data[4] != 1 || req_data[5] != 0)
+            version = req_data[4] | (req_data[5] << 8);
+            if (version != 1)
             {
                 E1S6_BINDING_AUDIT( "e1r8-version" );
                 set_error( STATUS_ACCESS_DENIED );
                 goto done;
             }
-            if (req_data[6] != 1 || req_data[7] != 0)
+            op = req_data[6] | (req_data[7] << 8);
+
+            if (op == 1)
+            {
+                if (req_size != 8)
+                {
+                    E1S6_BINDING_AUDIT( "e1r8-size" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+
+                if (!sysrun_process_is_broker( current->process ))
+                {
+                    E1S6_BINDING_AUDIT( "caller-not-broker" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (!process_pin_matches( client->client_process ))
+                {
+                    E1S6_BINDING_AUDIT( "opener-pin-missing" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (!writer->desktop)
+                {
+                    E1S6_BINDING_AUDIT( "writer-desktop-missing" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (server->binding)
+                {
+                    E1S6_BINDING_AUDIT( "binding-exists" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+
+                b = mem_alloc( sizeof(*b) );
+                if (!b)
+                {
+                    E1S6_BINDING_AUDIT( "binding-alloc" );
+                    set_error( STATUS_NO_MEMORY );
+                    goto done;
+                }
+                memset( b, 0, sizeof(*b) );
+
+                if (!registry_get_prefix_id( b->prefix_id ))
+                {
+                    free( b );
+                    E1S6_BINDING_AUDIT( "prefix-id" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+
+                rng = open( "/dev/urandom", O_RDONLY | O_CLOEXEC );
+                if (rng < 0)
+                {
+                    free( b );
+                    E1S6_BINDING_AUDIT( "rng-open" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                while (!memcmp( b->host_process_id, zero16, 16 ) || !memcmp( b->host_process_id, b->prefix_id, 16 ))
+                    if (read( rng, b->host_process_id, 16 ) != 16) { close( rng ); free( b ); set_error( STATUS_ACCESS_DENIED ); goto done; }
+                while (!memcmp( b->opener_id, zero16, 16 ) || !memcmp( b->opener_id, b->prefix_id, 16 ) || !memcmp( b->opener_id, b->host_process_id, 16 ))
+                    if (read( rng, b->opener_id, 16 ) != 16) { close( rng ); free( b ); set_error( STATUS_ACCESS_DENIED ); goto done; }
+                while (!memcmp( b->writer_id, zero16, 16 ) || !memcmp( b->writer_id, b->prefix_id, 16 ) || !memcmp( b->writer_id, b->host_process_id, 16 ) || !memcmp( b->writer_id, b->opener_id, 16 ))
+                    if (read( rng, b->writer_id, 16 ) != 16) { close( rng ); free( b ); set_error( STATUS_ACCESS_DENIED ); goto done; }
+                while (!memcmp( b->desktop_route, zero16, 16 ) || !memcmp( b->desktop_route, b->prefix_id, 16 ) || !memcmp( b->desktop_route, b->host_process_id, 16 ) || !memcmp( b->desktop_route, b->opener_id, 16 ) || !memcmp( b->desktop_route, b->writer_id, 16 ))
+                    if (read( rng, b->desktop_route, 16 ) != 16) { close( rng ); free( b ); set_error( STATUS_ACCESS_DENIED ); goto done; }
+                close( rng );
+
+                if (!sysrun_get_s6_generations( current->process, &b->server_gen, &b->broker_gen ))
+                {
+                    free( b );
+                    E1S6_BINDING_AUDIT( "s6-generations" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (!accounts_get_map_generation( &b->map_gen ))
+                {
+                    free( b );
+                    E1S6_BINDING_AUDIT( "map-generation" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (!sysrun_get_root_generation( &b->root_gen ) || !sysrun_get_policy_generation( &b->policy_gen ))
+                {
+                    free( b );
+                    E1S6_BINDING_AUDIT( "path-generations" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+
+                b->caller_session = client->client_process->session_id;
+                b->opener_process = (struct process *)grab_object( client->client_process );
+                b->writer_process = (struct process *)grab_object( writer->process );
+                b->desktop = (struct desktop *)grab_object( writer->desktop );
+                b->opener_token = (struct token *)grab_object( client->client_primary );
+                token_get_ids( b->opener_token, &b->opener_token_id, &b->opener_modified_id );
+                server->binding = b;
+
+                ptr = reply_buf;
+                memcpy( ptr, b->prefix_id, 16 ); ptr += 16;
+                memcpy( ptr, b->host_process_id, 16 ); ptr += 16;
+                memcpy( ptr, b->opener_id, 16 ); ptr += 16;
+                memcpy( ptr, b->writer_id, 16 ); ptr += 16;
+                memcpy( ptr, b->desktop_route, 16 ); ptr += 16;
+
+                for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->server_gen >> (8 * i));
+                for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->root_gen >> (8 * i));
+                for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->broker_gen >> (8 * i));
+                for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->map_gen >> (8 * i));
+                for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->policy_gen >> (8 * i));
+
+                for (i = 0; i < 4; i++) *ptr++ = (unsigned char)(b->caller_session >> (8 * i));
+                assert( ptr - reply_buf == 124 );
+                set_reply_data( reply_buf, sizeof(reply_buf) );
+            }
+            else if (op == 2)
+            {
+                obj_handle_t d_handle;
+                const unsigned char *tuple;
+                struct process *D;
+                struct desktop *d_desktop;
+                unsigned long long cur_server_gen, cur_broker_gen;
+                unsigned long long cur_map_gen, cur_root_gen, cur_policy_gen;
+                unsigned long long t_deadline, t_root_gen, t_server_gen, t_broker_gen;
+                unsigned long long t_map_gen, t_policy_gen;
+                unsigned int t_caller_session, t_desktop_mode;
+                struct luid op_id, op_mod;
+
+                if (req_size != 216)
+                {
+                    E1S6_BINDING_AUDIT( "e1r8-size" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (!sysrun_process_is_broker( current->process ))
+                {
+                    E1S6_BINDING_AUDIT( "caller-not-broker" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (current->token)
+                {
+                    E1S6_BINDING_AUDIT( "caller-has-token" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (!sysrun_get_s6_generations( current->process, &cur_server_gen, &cur_broker_gen ))
+                {
+                    E1S6_BINDING_AUDIT( "s6-generations" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (!server->binding)
+                {
+                    E1S6_BINDING_AUDIT( "binding-missing" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (server->binding->endorsed)
+                {
+                    E1S6_BINDING_AUDIT( "already-endorsed" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                b = server->binding;
+
+                d_handle = (obj_handle_t)unpack_u32_le( req_data + 8 );
+                D = get_process_from_handle( d_handle, PROCESS_QUERY_LIMITED_INFORMATION );
+                if (!D)
+                {
+                    E1S6_BINDING_AUDIT( "dialog-handle" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (D->wex_creator != current->process)
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "dialog-creator" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (!D->wex_protected[0])
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "dialog-not-protected" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (!D->wex_dialog_image)
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "dialog-image-not-consent" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (!process_unstarted_suspended( D ))
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "dialog-not-suspended" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (token_service_account( D->token ) != SERVICE_ACCOUNT_SYSTEM)
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "dialog-not-system" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (!process_pin_matches( D ))
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "dialog-pin-mismatch" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (D->session_id != b->caller_session)
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "dialog-session-mismatch" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+
+                d_desktop = NULL;
+                if (D->desktop)
+                {
+                    d_desktop = get_desktop_obj( D, D->desktop, 0 );
+                    if (!d_desktop) clear_error();
+                }
+                if (d_desktop != b->desktop)
+                {
+                    if (d_desktop) release_object( d_desktop );
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "dialog-desktop-mismatch" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (d_desktop) release_object( d_desktop );
+
+                tuple = req_data + 12;
+                t_deadline = unpack_u64_le( tuple + 124 );
+                t_root_gen = unpack_u64_le( tuple + 132 );
+                t_server_gen = unpack_u64_le( tuple + 140 );
+                t_broker_gen = unpack_u64_le( tuple + 148 );
+                /* tuple + 156 is verifier_gen, not checked by server */
+                t_map_gen = unpack_u64_le( tuple + 164 );
+                t_policy_gen = unpack_u64_le( tuple + 172 );
+                t_caller_session = unpack_u32_le( tuple + 180 );
+                t_desktop_mode = unpack_u32_le( tuple + 200 );
+
+                if (!t_deadline)
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "tuple-deadline" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (t_root_gen != b->root_gen)
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "tuple-root-gen" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (t_server_gen != b->server_gen)
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "tuple-server-gen" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (t_broker_gen != b->broker_gen)
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "tuple-broker-gen" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (t_map_gen != b->map_gen)
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "tuple-map-gen" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (t_policy_gen != b->policy_gen)
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "tuple-policy-gen" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (t_caller_session != b->caller_session)
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "tuple-caller-session" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (memcmp( tuple + 184, b->desktop_route, 16 ))
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "tuple-desktop-route" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (t_desktop_mode != 1 && t_desktop_mode != 2)
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "tuple-desktop-mode" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+
+                if (cur_server_gen != b->server_gen || cur_broker_gen != b->broker_gen)
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "current-s6-generations" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (!accounts_get_map_generation( &cur_map_gen ) || cur_map_gen != b->map_gen)
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "current-map-generation" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (!sysrun_get_root_generation( &cur_root_gen ) || cur_root_gen != b->root_gen ||
+                    !sysrun_get_policy_generation( &cur_policy_gen ) || cur_policy_gen != b->policy_gen)
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "current-path-generations" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+
+                if (b->opener_process->is_terminating || b->opener_process->running_threads == 0)
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "opener-dead" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (b->opener_process->token != b->opener_token)
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "opener-token-changed" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                token_get_ids( b->opener_token, &op_id, &op_mod );
+                if (memcmp( &op_id, &b->opener_token_id, sizeof(op_id) ) ||
+                    memcmp( &op_mod, &b->opener_modified_id, sizeof(op_mod) ))
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "opener-token-id-changed" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+
+                rng = open( "/dev/urandom", O_RDONLY | O_CLOEXEC );
+                if (rng < 0)
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "rng-open" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                while (!memcmp( b->dialog_id, zero16, 16 ) ||
+                       !memcmp( b->dialog_id, b->prefix_id, 16 ) ||
+                       !memcmp( b->dialog_id, b->host_process_id, 16 ) ||
+                       !memcmp( b->dialog_id, b->opener_id, 16 ) ||
+                       !memcmp( b->dialog_id, b->writer_id, 16 ) ||
+                       !memcmp( b->dialog_id, b->desktop_route, 16 ))
+                {
+                    if (read( rng, b->dialog_id, 16 ) != 16)
+                    {
+                        close( rng );
+                        release_object( D );
+                        E1S6_BINDING_AUDIT( "rng-read" );
+                        set_error( STATUS_ACCESS_DENIED );
+                        goto done;
+                    }
+                }
+                close( rng );
+
+                b->dialog_process = (struct process *)grab_object( D );
+                b->dialog_token = (struct token *)grab_object( D->token );
+                token_get_ids( b->dialog_token, &b->dialog_token_id, &b->dialog_modified_id );
+                b->dialog_pin_pid = D->wex_pin_pid;
+                memcpy( b->sealed_tuple, tuple, 204 );
+                memcpy( b->sealed_tuple + 204, b->dialog_id, 16 );
+                b->endorsed = 1;
+                release_object( D );
+
+                set_reply_data( b->dialog_id, 16 );
+            }
+            else if (op == 3)
+            {
+                struct desktop *d_desktop;
+                unsigned long long cur_server_gen, cur_broker_gen;
+                unsigned long long cur_map_gen, cur_root_gen, cur_policy_gen;
+                struct luid id, mod;
+
+                if (req_size != 24)
+                {
+                    E1S6_BINDING_AUDIT( "e1r8-size" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (!sysrun_process_is_broker( current->process ))
+                {
+                    E1S6_BINDING_AUDIT( "recheck-caller-not-broker" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (current->token)
+                {
+                    E1S6_BINDING_AUDIT( "recheck-caller-has-token" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (!sysrun_get_s6_generations( current->process, &cur_server_gen, &cur_broker_gen ))
+                {
+                    E1S6_BINDING_AUDIT( "recheck-s6-generations" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (!server->binding || !server->binding->endorsed)
+                {
+                    E1S6_BINDING_AUDIT( "recheck-not-endorsed" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                b = server->binding;
+                if (memcmp( req_data + 8, b->dialog_id, 16 ))
+                {
+                    E1S6_BINDING_AUDIT( "recheck-dialog-id-mismatch" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+
+                if (b->dialog_process->is_terminating || b->dialog_process->running_threads == 0)
+                {
+                    E1S6_BINDING_AUDIT( "recheck-dialog-dead" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (b->dialog_process->token != b->dialog_token)
+                {
+                    E1S6_BINDING_AUDIT( "recheck-dialog-token-changed" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                token_get_ids( b->dialog_token, &id, &mod );
+                if (memcmp( &id, &b->dialog_token_id, sizeof(id) ) ||
+                    memcmp( &mod, &b->dialog_modified_id, sizeof(mod) ))
+                {
+                    E1S6_BINDING_AUDIT( "recheck-dialog-token-id-changed" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (b->dialog_process->session_id != b->caller_session)
+                {
+                    E1S6_BINDING_AUDIT( "recheck-dialog-session-mismatch" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                d_desktop = NULL;
+                if (b->dialog_process->desktop)
+                {
+                    d_desktop = get_desktop_obj( b->dialog_process, b->dialog_process->desktop, 0 );
+                    if (!d_desktop) clear_error();
+                }
+                if (d_desktop != b->desktop)
+                {
+                    if (d_desktop) release_object( d_desktop );
+                    E1S6_BINDING_AUDIT( "recheck-dialog-desktop-mismatch" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (d_desktop) release_object( d_desktop );
+
+                if (!process_pin_matches( b->dialog_process ) || b->dialog_process->wex_pin_pid != b->dialog_pin_pid)
+                {
+                    E1S6_BINDING_AUDIT( "recheck-dialog-pin-mismatch" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+
+                if (b->opener_process->is_terminating || b->opener_process->running_threads == 0)
+                {
+                    E1S6_BINDING_AUDIT( "recheck-opener-dead" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (b->opener_process->token != b->opener_token)
+                {
+                    E1S6_BINDING_AUDIT( "recheck-opener-token-changed" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                token_get_ids( b->opener_token, &id, &mod );
+                if (memcmp( &id, &b->opener_token_id, sizeof(id) ) ||
+                    memcmp( &mod, &b->opener_modified_id, sizeof(mod) ))
+                {
+                    E1S6_BINDING_AUDIT( "recheck-opener-token-id-changed" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+
+                if (cur_server_gen != b->server_gen || cur_broker_gen != b->broker_gen)
+                {
+                    E1S6_BINDING_AUDIT( "recheck-current-s6-generations" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (!accounts_get_map_generation( &cur_map_gen ) || cur_map_gen != b->map_gen)
+                {
+                    E1S6_BINDING_AUDIT( "recheck-current-map-generation" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (!sysrun_get_root_generation( &cur_root_gen ) || cur_root_gen != b->root_gen ||
+                    !sysrun_get_policy_generation( &cur_policy_gen ) || cur_policy_gen != b->policy_gen)
+                {
+                    E1S6_BINDING_AUDIT( "recheck-current-path-generations" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+            }
+            else
             {
                 E1S6_BINDING_AUDIT( "e1r8-op" );
                 set_error( STATUS_ACCESS_DENIED );
                 goto done;
             }
-
-            if (!sysrun_process_is_broker( current->process ))
-            {
-                E1S6_BINDING_AUDIT( "caller-not-broker" );
-                set_error( STATUS_ACCESS_DENIED );
-                goto done;
-            }
-            if (!process_pin_matches( client->client_process ))
-            {
-                E1S6_BINDING_AUDIT( "opener-pin-missing" );
-                set_error( STATUS_ACCESS_DENIED );
-                goto done;
-            }
-            if (!writer->desktop)
-            {
-                E1S6_BINDING_AUDIT( "writer-desktop-missing" );
-                set_error( STATUS_ACCESS_DENIED );
-                goto done;
-            }
-            if (server->binding)
-            {
-                E1S6_BINDING_AUDIT( "binding-exists" );
-                set_error( STATUS_ACCESS_DENIED );
-                goto done;
-            }
-
-            b = mem_alloc( sizeof(*b) );
-            if (!b)
-            {
-                E1S6_BINDING_AUDIT( "binding-alloc" );
-                set_error( STATUS_NO_MEMORY );
-                goto done;
-            }
-            memset( b, 0, sizeof(*b) );
-
-            if (!registry_get_prefix_id( b->prefix_id ))
-            {
-                free( b );
-                E1S6_BINDING_AUDIT( "prefix-id" );
-                set_error( STATUS_ACCESS_DENIED );
-                goto done;
-            }
-
-            rng = open( "/dev/urandom", O_RDONLY | O_CLOEXEC );
-            if (rng < 0)
-            {
-                free( b );
-                E1S6_BINDING_AUDIT( "rng-open" );
-                set_error( STATUS_ACCESS_DENIED );
-                goto done;
-            }
-            while (!memcmp( b->host_process_id, zero16, 16 ) || !memcmp( b->host_process_id, b->prefix_id, 16 ))
-                if (read( rng, b->host_process_id, 16 ) != 16) { close( rng ); free( b ); set_error( STATUS_ACCESS_DENIED ); goto done; }
-            while (!memcmp( b->opener_id, zero16, 16 ) || !memcmp( b->opener_id, b->prefix_id, 16 ) || !memcmp( b->opener_id, b->host_process_id, 16 ))
-                if (read( rng, b->opener_id, 16 ) != 16) { close( rng ); free( b ); set_error( STATUS_ACCESS_DENIED ); goto done; }
-            while (!memcmp( b->writer_id, zero16, 16 ) || !memcmp( b->writer_id, b->prefix_id, 16 ) || !memcmp( b->writer_id, b->host_process_id, 16 ) || !memcmp( b->writer_id, b->opener_id, 16 ))
-                if (read( rng, b->writer_id, 16 ) != 16) { close( rng ); free( b ); set_error( STATUS_ACCESS_DENIED ); goto done; }
-            while (!memcmp( b->desktop_route, zero16, 16 ) || !memcmp( b->desktop_route, b->prefix_id, 16 ) || !memcmp( b->desktop_route, b->host_process_id, 16 ) || !memcmp( b->desktop_route, b->opener_id, 16 ) || !memcmp( b->desktop_route, b->writer_id, 16 ))
-                if (read( rng, b->desktop_route, 16 ) != 16) { close( rng ); free( b ); set_error( STATUS_ACCESS_DENIED ); goto done; }
-            close( rng );
-
-            if (!sysrun_get_s6_generations( current->process, &b->server_gen, &b->broker_gen ))
-            {
-                free( b );
-                E1S6_BINDING_AUDIT( "s6-generations" );
-                set_error( STATUS_ACCESS_DENIED );
-                goto done;
-            }
-            if (!accounts_get_map_generation( &b->map_gen ))
-            {
-                free( b );
-                E1S6_BINDING_AUDIT( "map-generation" );
-                set_error( STATUS_ACCESS_DENIED );
-                goto done;
-            }
-            if (!sysrun_get_root_generation( &b->root_gen ) || !sysrun_get_policy_generation( &b->policy_gen ))
-            {
-                free( b );
-                E1S6_BINDING_AUDIT( "path-generations" );
-                set_error( STATUS_ACCESS_DENIED );
-                goto done;
-            }
-
-            b->caller_session = client->client_process->session_id;
-            b->opener_process = (struct process *)grab_object( client->client_process );
-            b->writer_process = (struct process *)grab_object( writer->process );
-            b->desktop = (struct desktop *)grab_object( writer->desktop );
-            server->binding = b;
-
-            ptr = reply_buf;
-            memcpy( ptr, b->prefix_id, 16 ); ptr += 16;
-            memcpy( ptr, b->host_process_id, 16 ); ptr += 16;
-            memcpy( ptr, b->opener_id, 16 ); ptr += 16;
-            memcpy( ptr, b->writer_id, 16 ); ptr += 16;
-            memcpy( ptr, b->desktop_route, 16 ); ptr += 16;
-
-            for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->server_gen >> (8 * i));
-            for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->root_gen >> (8 * i));
-            for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->broker_gen >> (8 * i));
-            for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->map_gen >> (8 * i));
-            for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->policy_gen >> (8 * i));
-
-            for (i = 0; i < 4; i++) *ptr++ = (unsigned char)(b->caller_session >> (8 * i));
-            assert( ptr - reply_buf == 124 );
-            set_reply_data( reply_buf, sizeof(reply_buf) );
         }
         else
 #endif

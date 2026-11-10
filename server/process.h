@@ -132,6 +132,7 @@ extern unsigned int process_e1s_profile_committable( struct process * );
 extern int wex_dialog_pass_credentials( int fd );
 extern int pidfd_pid( int pidfd );
 extern int process_pin_matches( struct process *process );
+extern int process_unstarted_suspended( struct process *process );
 #endif
 extern void *get_ptid_entry( unsigned int id );
 extern struct process *create_process( int fd, struct process *parent, unsigned int flags,
