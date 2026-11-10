@@ -64,6 +64,7 @@ struct pipe_binding
     unsigned long long map_gen;
     unsigned long long policy_gen;
     unsigned int caller_session;
+    unsigned long long host_uid;
     struct process *opener_process;
     struct process *writer_process;
     struct desktop *desktop;
@@ -94,6 +95,37 @@ static inline unsigned int unpack_u32_le( const unsigned char *p )
     int i;
     for (i = 0; i < 4; i++) v |= ((unsigned int)p[i]) << (8 * i);
     return v;
+}
+
+/* R8 desktop rule (3e decision 4 as corrected by Claude, 2026-11-10): like the consent prompt on
+ * Windows, D runs on the session's interactive (visible) window station whatever window station the
+ * caller uses: on its secure desktop for desktop_mode 1, or on the caller's own desktop for mode 2
+ * (which therefore needs a caller on that window station). The session is checked separately. */
+static int dialog_desktop_ok( struct process *dialog, const struct pipe_binding *b, unsigned int mode )
+{
+    struct desktop *d = NULL;
+    struct winstation *visible = get_visible_winstation();
+    int ok;
+
+    if (dialog->desktop && !(d = get_desktop_obj( dialog, dialog->desktop, 0 ))) clear_error();
+    ok = d && visible && d->winstation == visible &&
+         ((mode == 1 && d->secure) || (mode == 2 && d == b->desktop));
+#ifdef WEX_R8_SERVER_TEST
+    {
+        char dn[64] = "", cn[64] = "";
+        data_size_t len = 0, i;
+        const WCHAR *name;
+        if (d && (name = get_object_name( &d->winstation->obj, &len )))
+            for (i = 0; i < len / sizeof(WCHAR) && i < sizeof(dn) - 1; i++) dn[i] = name[i] < 128 ? name[i] : '?';
+        if (b->desktop && (name = get_object_name( &b->desktop->winstation->obj, &len )))
+            for (i = 0; i < len / sizeof(WCHAR) && i < sizeof(cn) - 1; i++) cn[i] = name[i] < 128 ? name[i] : '?';
+        fprintf( stderr, "wex-r8: desktop ok=%d mode=%u d_secure=%d d_ws=%s visible=%d caller_ws=%s caller_visible=%d\n",
+                 ok, mode, d ? d->secure : -1, dn, d && d->winstation == visible, cn,
+                 b->desktop && b->desktop->winstation == visible );
+    }
+#endif
+    if (d) release_object( d );
+    return ok;
 }
 #endif
 
@@ -1903,7 +1935,7 @@ DECL_HANDLER(get_pipe_caller_binding)
     data_size_t req_size;
     struct pipe_binding *b;
     int rng, i;
-    unsigned char reply_buf[124];
+    unsigned char reply_buf[132];
     unsigned char *ptr;
     static const unsigned char zero16[16] = {0};
 #endif
@@ -2060,6 +2092,7 @@ DECL_HANDLER(get_pipe_caller_binding)
                 }
 
                 b->caller_session = client->client_process->session_id;
+                b->host_uid = client->client_process->wex_pin_uid;
                 b->opener_process = (struct process *)grab_object( client->client_process );
                 b->writer_process = (struct process *)grab_object( writer->process );
                 b->desktop = (struct desktop *)grab_object( writer->desktop );
@@ -2081,7 +2114,8 @@ DECL_HANDLER(get_pipe_caller_binding)
                 for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->policy_gen >> (8 * i));
 
                 for (i = 0; i < 4; i++) *ptr++ = (unsigned char)(b->caller_session >> (8 * i));
-                assert( ptr - reply_buf == 124 );
+                for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->host_uid >> (8 * i));
+                assert( ptr - reply_buf == 132 );
                 set_reply_data( reply_buf, sizeof(reply_buf) );
             }
             else if (op == 2)
@@ -2089,7 +2123,6 @@ DECL_HANDLER(get_pipe_caller_binding)
                 obj_handle_t d_handle;
                 const unsigned char *tuple;
                 struct process *D;
-                struct desktop *d_desktop;
                 unsigned long long cur_server_gen, cur_broker_gen;
                 unsigned long long cur_map_gen, cur_root_gen, cur_policy_gen;
                 unsigned long long t_deadline, t_root_gen, t_server_gen, t_broker_gen;
@@ -2193,21 +2226,13 @@ DECL_HANDLER(get_pipe_caller_binding)
                     goto done;
                 }
 
-                d_desktop = NULL;
-                if (D->desktop)
+                if (!dialog_desktop_ok( D, b, unpack_u32_le( req_data + 12 + 200 ) ))
                 {
-                    d_desktop = get_desktop_obj( D, D->desktop, 0 );
-                    if (!d_desktop) clear_error();
-                }
-                if (d_desktop != b->desktop)
-                {
-                    if (d_desktop) release_object( d_desktop );
                     release_object( D );
                     E1S6_BINDING_AUDIT( "dialog-desktop-mismatch" );
                     set_error( STATUS_ACCESS_DENIED );
                     goto done;
                 }
-                if (d_desktop) release_object( d_desktop );
 
                 tuple = req_data + 12;
                 t_deadline = unpack_u64_le( tuple + 124 );
@@ -2457,7 +2482,6 @@ DECL_HANDLER(get_pipe_caller_binding)
             }
             else if (op == 3)
             {
-                struct desktop *d_desktop;
                 unsigned long long cur_server_gen, cur_broker_gen;
                 unsigned long long cur_map_gen, cur_root_gen, cur_policy_gen;
                 struct luid id, mod;
@@ -2526,20 +2550,12 @@ DECL_HANDLER(get_pipe_caller_binding)
                     set_error( STATUS_ACCESS_DENIED );
                     goto done;
                 }
-                d_desktop = NULL;
-                if (b->dialog_process->desktop)
+                if (!dialog_desktop_ok( b->dialog_process, b, unpack_u32_le( b->sealed_tuple + 200 ) ))
                 {
-                    d_desktop = get_desktop_obj( b->dialog_process, b->dialog_process->desktop, 0 );
-                    if (!d_desktop) clear_error();
-                }
-                if (d_desktop != b->desktop)
-                {
-                    if (d_desktop) release_object( d_desktop );
                     E1S6_BINDING_AUDIT( "recheck-dialog-desktop-mismatch" );
                     set_error( STATUS_ACCESS_DENIED );
                     goto done;
                 }
-                if (d_desktop) release_object( d_desktop );
 
                 if (!process_pin_matches( b->dialog_process ) || b->dialog_process->wex_pin_pid != b->dialog_pin_pid)
                 {
