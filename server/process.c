@@ -768,6 +768,9 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->e1s6_image_seen = 0;
     process->e1s6_broker_generation = 0;
     process->e1s6_primary = NULL;
+#ifdef WEX_E1S6_TRANSPORT_TEST
+    process->e1s6_control_fd = -1;
+#endif
     process->exit_code       = STILL_ACTIVE;
     process->running_threads = 0;
     process->user_threads    = 0;
@@ -921,6 +924,9 @@ static void process_destroy( struct object *obj )
     if (process->token) release_object( process->token );
     if (process->e1s_profile_issued) release_object( process->e1s_profile_issued );
     if (process->e1s6_primary) release_object( process->e1s6_primary );
+#ifdef WEX_E1S6_TRANSPORT_TEST
+    if (process->e1s6_control_fd >= 0) close( process->e1s6_control_fd );
+#endif
     if (process->sync) release_object( process->sync );
     list_remove( &process->rawinput_entry );
     free( process->rawinput_devices );

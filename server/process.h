@@ -118,6 +118,9 @@ struct process
     unsigned long long   e1s6_broker_generation; /* fresh for each registration; server-issued */
     struct token        *e1s6_primary;
     struct luid          e1s6_token_id, e1s6_modified_id;
+#ifdef WEX_E1S6_TRANSPORT_TEST
+    int                  e1s6_control_fd;     /* lab only: retained S6 control socket duplicate */
+#endif
 };
 
 /* process functions */

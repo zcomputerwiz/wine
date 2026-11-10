@@ -671,6 +671,8 @@ int sysrun_e1s6_endorse( const void *data, unsigned int size )
         /* Publish only after the complete seqpacket was delivered. No fallible
          * operation follows this transfer of the staged token reference. */
         s6_server_generation = server_generation;
+        if (p->e1s6_control_fd >= 0) close( p->e1s6_control_fd );
+        p->e1s6_control_fd = fcntl( fd, F_DUPFD_CLOEXEC, 0 );
         if (new_primary)
         {
             if (p->e1s6_primary) release_object( p->e1s6_primary );

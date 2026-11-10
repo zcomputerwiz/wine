@@ -49,6 +49,8 @@
 struct named_pipe;
 
 #ifdef WEX_E1S6_TRANSPORT_TEST
+#include <sys/socket.h>
+#include <sys/uio.h>
 struct pipe_binding
 {
     unsigned char prefix_id[16];
@@ -2354,6 +2356,93 @@ DECL_HANDLER(get_pipe_caller_binding)
                     }
                 }
                 close( rng );
+
+                if (current->process->e1s6_control_fd < 0)
+                {
+                    release_object( D );
+                    E1S6_BINDING_AUDIT( "endorsed-control-fd" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                else
+                {
+                    unsigned char endorsed_buf[244];
+                    struct ucred sender = { getpid(), geteuid(), getegid() };
+                    char ancillary[CMSG_SPACE(sizeof(sender)) + CMSG_SPACE(sizeof(int))];
+                    struct iovec io = { endorsed_buf, sizeof(endorsed_buf) };
+                    struct msghdr msg = { 0 };
+                    struct cmsghdr *cmsg;
+                    int d_pidfd, raised, sent_ok;
+
+                    memcpy( endorsed_buf, "E1R8", 4 );
+                    endorsed_buf[4] = 1; endorsed_buf[5] = 0;   /* version: 1 */
+                    endorsed_buf[6] = 16; endorsed_buf[7] = 0;  /* type: 16 (ENDORSED) */
+                    endorsed_buf[8] = 244; endorsed_buf[9] = 0; /* length: 244 */
+                    endorsed_buf[10] = 0; endorsed_buf[11] = 0;
+                    memcpy( endorsed_buf + 12, tuple, 8 );       /* request_id */
+                    memcpy( endorsed_buf + 20, tuple + 8, 4 );   /* attempt */
+                    endorsed_buf[24] = 0; endorsed_buf[25] = 0;  /* reserved: 0 */
+                    endorsed_buf[26] = 0; endorsed_buf[27] = 0;
+                    memcpy( endorsed_buf + 28, tuple + 12, 32 ); /* nonce */
+                    memcpy( endorsed_buf + 60, tuple + 44, 16 ); /* channel_id */
+                    /* Tuple tail: tuple[60..203] (144 bytes) + dialog_id (16 bytes) = 160 bytes */
+                    memcpy( endorsed_buf + 76, tuple + 60, 144 );
+                    memcpy( endorsed_buf + 220, b->dialog_id, 16 );
+                    /* D's pin pid and uid (u32 LE each) */
+                    for (i = 0; i < 4; i++) endorsed_buf[236 + i] = (unsigned char)((unsigned int)D->wex_pin_pid >> (8 * i));
+                    for (i = 0; i < 4; i++) endorsed_buf[240 + i] = (unsigned char)(D->wex_pin_uid >> (8 * i));
+
+                    /* a duplicate of D's kernel pin, never a fresh lookup by pid (pid reuse) */
+                    d_pidfd = fcntl( D->wex_pin_pidfd, F_DUPFD_CLOEXEC, 0 );
+                    if (d_pidfd < 0)
+                    {
+                        release_object( D );
+                        E1S6_BINDING_AUDIT( "endorsed-pidfd-open" );
+                        set_error( STATUS_ACCESS_DENIED );
+                        goto done;
+                    }
+
+                    memset( ancillary, 0, sizeof(ancillary) );
+                    msg.msg_iov = &io;
+                    msg.msg_iovlen = 1;
+                    msg.msg_control = ancillary;
+                    msg.msg_controllen = sizeof(ancillary);
+
+                    cmsg = CMSG_FIRSTHDR( &msg );
+                    cmsg->cmsg_level = SOL_SOCKET;
+                    cmsg->cmsg_type = SCM_CREDENTIALS;
+                    cmsg->cmsg_len = CMSG_LEN( sizeof(sender) );
+
+                    cmsg = CMSG_NXTHDR( &msg, cmsg );
+                    cmsg->cmsg_level = SOL_SOCKET;
+                    cmsg->cmsg_type = SCM_RIGHTS;
+                    cmsg->cmsg_len = CMSG_LEN( sizeof(int) );
+                    memcpy( CMSG_DATA(cmsg), &d_pidfd, sizeof(int) );
+
+                    sent_ok = 0;
+                    raised = sysrun_raise();
+                    if (raised)
+                    {
+                        sender.pid = getpid();
+                        sender.uid = geteuid();
+                        sender.gid = getegid();
+                        cmsg = CMSG_FIRSTHDR( &msg );
+                        memcpy( CMSG_DATA(cmsg), &sender, sizeof(sender) );
+                        sent_ok = (sendmsg( current->process->e1s6_control_fd, &msg, MSG_DONTWAIT | MSG_NOSIGNAL ) == (ssize_t)sizeof(endorsed_buf));
+                    }
+                    sysrun_drop( raised );
+                    close( d_pidfd );
+
+                    if (!sent_ok)
+                    {
+                        close( current->process->e1s6_control_fd );
+                        current->process->e1s6_control_fd = -1;
+                        release_object( D );
+                        E1S6_BINDING_AUDIT( "endorsed-send" );
+                        set_error( STATUS_ACCESS_DENIED );
+                        goto done;
+                    }
+                }
 
                 b->dialog_process = (struct process *)grab_object( D );
                 b->dialog_token = (struct token *)grab_object( D->token );
