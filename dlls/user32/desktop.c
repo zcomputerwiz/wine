@@ -113,6 +113,46 @@ LRESULT WINAPI DesktopWndProcW( HWND hwnd, UINT message, WPARAM wParam, LPARAM l
     }
 }
 
+/* WineExplorer Safe Mode (SM_CLEANBOOT): a black desktop with "Safe Mode" in the corners of the work area and the
+ * Wine version centred on the top row, as Windows draws it */
+static void paint_safe_mode( HDC hdc, const RECT *desktop )
+{
+    static const WCHAR safe_modeW[] = L"Safe Mode";
+    const char * (CDECL *get_version)(void);
+    NONCLIENTMETRICSW ncm = { sizeof(ncm) };
+    HFONT font = 0;
+    char version[64];
+    RECT work;
+    int len = lstrlenW( safe_modeW ), state = SaveDC( hdc );
+
+    FillRect( hdc, desktop, GetStockObject( BLACK_BRUSH ) );
+    if (!SystemParametersInfoW( SPI_GETWORKAREA, 0, &work, 0 )) work = *desktop;
+    /* the window caption font, smoothed in gray */
+    if (SystemParametersInfoW( SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0 ))
+    {
+        ncm.lfCaptionFont.lfQuality = ANTIALIASED_QUALITY;
+        if ((font = CreateFontIndirectW( &ncm.lfCaptionFont ))) SelectObject( hdc, font );
+    }
+    SetBkMode( hdc, TRANSPARENT );
+    SetTextColor( hdc, RGB(255, 255, 255) );
+    SetTextAlign( hdc, TA_LEFT | TA_TOP );
+    TextOutW( hdc, work.left, work.top, safe_modeW, len );
+    SetTextAlign( hdc, TA_RIGHT | TA_TOP );
+    TextOutW( hdc, work.right, work.top, safe_modeW, len );
+    SetTextAlign( hdc, TA_LEFT | TA_BOTTOM );
+    TextOutW( hdc, work.left, work.bottom, safe_modeW, len );
+    SetTextAlign( hdc, TA_RIGHT | TA_BOTTOM );
+    TextOutW( hdc, work.right, work.bottom, safe_modeW, len );
+    if ((get_version = (void *)GetProcAddress( GetModuleHandleW( L"ntdll.dll" ), "wine_get_version" )))
+    {
+        snprintf( version, sizeof(version), "Wine %s", get_version() );
+        SetTextAlign( hdc, TA_CENTER | TA_TOP );
+        TextOutA( hdc, (work.left + work.right) / 2, work.top, version, strlen( version ) );
+    }
+    RestoreDC( hdc, state );
+    if (font) DeleteObject( font );
+}
+
 /***********************************************************************
  *           PaintDesktop   (USER32.@)
  *
@@ -127,6 +167,12 @@ BOOL WINAPI PaintDesktop(HDC hdc)
         RECT rect;
 
         GetClientRect( hwnd, &rect );
+
+        if (GetSystemMetrics( SM_CLEANBOOT ))
+        {
+            paint_safe_mode( hdc, &rect );
+            return TRUE;
+        }
 
         /* Paint desktop pattern (only if wall paper does not cover everything) */
 

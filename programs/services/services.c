@@ -486,6 +486,44 @@ static BOOL schedule_delayed_autostart(struct service_entry **services, unsigned
     return TRUE;
 }
 
+/* WineExplorer Safe Mode: in Safe Mode (SafeBoot\Option's OptionValue 1) only what SafeBoot\Minimal lists may
+ * start, with Networking (2) what SafeBoot\Network lists: a service by its name or its load order group, as on
+ * Windows. Without a list (a prefix older than the lists) nothing is held back. Checked where a service is asked
+ * to start (automatic start, StartService), not in service_start: that also starts the internal Winedevice hosts
+ * that run the drivers, which no list names. */
+static HKEY safeboot_list;
+
+static void load_safeboot_list(void)
+{
+    DWORD option = 0, size = sizeof(option), type;
+    HKEY key;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"System\\CurrentControlSet\\Control\\SafeBoot\\Option", 0,
+                      KEY_QUERY_VALUE, &key))
+        return;
+    if (RegQueryValueExW(key, L"OptionValue", NULL, &type, (BYTE *)&option, &size) || type != REG_DWORD)
+        option = 0;
+    RegCloseKey(key);
+    if (option != 1 && option != 2) return;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, option == 2 ? L"System\\CurrentControlSet\\Control\\SafeBoot\\Network"
+                      : L"System\\CurrentControlSet\\Control\\SafeBoot\\Minimal", 0, KEY_READ, &safeboot_list))
+        WINE_WARN("Safe Mode %lu without a SafeBoot list; every service may start\n", option);
+}
+
+static BOOL safeboot_listed(const WCHAR *name)
+{
+    HKEY key;
+
+    if (!name || !name[0] || RegOpenKeyExW(safeboot_list, name, 0, KEY_QUERY_VALUE, &key)) return FALSE;
+    RegCloseKey(key);
+    return TRUE;
+}
+
+BOOL safeboot_allows(const struct service_entry *service)
+{
+    return !safeboot_list || safeboot_listed(service->name) || safeboot_listed(service->config.lpLoadOrderGroup);
+}
+
 static BOOL is_root_pnp_service(HDEVINFO set, const struct service_entry *service)
 {
     SP_DEVINFO_DATA device = {sizeof(device)};
@@ -552,6 +590,12 @@ static void scmdatabase_autostart_services(struct scmdatabase *db)
     {
         DWORD err;
         service = services_list[i];
+        if (!safeboot_allows(service))
+        {
+            TRACE("not starting %s in Safe Mode\n", wine_dbgstr_w(service->name));
+            release_service(service);
+            continue;
+        }
         if (service->delayed_autostart)
         {
             TRACE("delayed starting %s\n", wine_dbgstr_w(service->name));
@@ -1439,6 +1483,7 @@ int __cdecl main(int argc, char *argv[])
         return err;
 
     load_registry_parameters();
+    load_safeboot_list();
     err = scmdatabase_create(&active_database);
     if (err != ERROR_SUCCESS)
         return err;

@@ -2938,7 +2938,16 @@ static void test_GetSystemMetrics( void)
     /* */
     /* */
     /* */
-    /* SM_CLEANBOOT */
+    /* SM_CLEANBOOT: SafeBoot\Option's OptionValue; the volatile key exists only in Safe Mode */
+    {
+        DWORD option = 0, size = sizeof(option);
+
+        if (RegGetValueA( HKEY_LOCAL_MACHINE, "System\\CurrentControlSet\\Control\\SafeBoot\\Option", "OptionValue",
+                          RRF_RT_REG_DWORD, NULL, &option, &size ))
+            option = 0;
+        ok( GetSystemMetrics( SM_CLEANBOOT ) == option, "SM_CLEANBOOT %d, OptionValue %lu\n",
+            GetSystemMetrics( SM_CLEANBOOT ), option );
+    }
     /* SM_CXDRAG */
     /* SM_CYDRAG */
     /* SM_SHOWSOUNDS */

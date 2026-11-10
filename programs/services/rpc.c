@@ -1397,6 +1397,13 @@ DWORD __cdecl svcctl_StartServiceW(
     if (service->service_entry->config.dwStartType == SERVICE_DISABLED)
         return ERROR_SERVICE_DISABLED;
 
+    /* WineExplorer Safe Mode (services.c, safeboot_allows) */
+    if (!safeboot_allows(service->service_entry))
+    {
+        WINE_TRACE("%s is not a Safe Mode service\n", wine_dbgstr_w(service->service_entry->name));
+        return ERROR_NOT_SAFEBOOT_SERVICE;
+    }
+
     if (!scmdatabase_lock_startup(service->service_entry->db, 3000))
         return ERROR_SERVICE_DATABASE_LOCKED;
 

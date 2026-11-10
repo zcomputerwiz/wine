@@ -824,6 +824,49 @@ static void create_dynamic_registry_keys(void)
         RegCloseKey( key );
 }
 
+/* WineExplorer Safe Mode: the boot mode is in the file /run/wineexplorer/bootmode, which only root can create
+ * ("safe", "safenet" or "safecmd"; anything else is a normal start). As the Windows kernel does, publish it as the
+ * volatile key SafeBoot\Option, which does not exist in a normal start. Without the file nothing changes. */
+static void create_safeboot_option_key(void)
+{
+    static const WCHAR safeboot_keyW[] = L"System\\CurrentControlSet\\Control\\SafeBoot";
+    DWORD option = 0, alternate_shell = 0, size = 0;
+    char buffer[16];
+    HANDLE file;
+    HKEY key, option_key;
+
+    file = CreateFileW( L"\\\\?\\unix\\run\\wineexplorer\\bootmode", GENERIC_READ,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL );
+    if (file != INVALID_HANDLE_VALUE)
+    {
+        if (!ReadFile( file, buffer, sizeof(buffer) - 1, &size, NULL )) size = 0;
+        CloseHandle( file );
+    }
+    buffer[size] = 0;
+    buffer[strcspn( buffer, "\r\n" )] = 0;
+    if (!strcmp( buffer, "safe" )) option = 1;
+    else if (!strcmp( buffer, "safenet" )) option = 2;
+    else if (!strcmp( buffer, "safecmd" )) option = alternate_shell = 1;
+
+    if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, safeboot_keyW, 0, KEY_ALL_ACCESS, &key ))
+    {
+        /* a volatile parent would refuse the lists wine.inf adds under SafeBoot */
+        if (!option || RegCreateKeyExW( HKEY_LOCAL_MACHINE, safeboot_keyW, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &key, NULL ))
+            return;
+    }
+    if (!option)
+        RegDeleteKeyW( key, L"Option" );
+    else if (!RegCreateKeyExW( key, L"Option", 0, NULL, REG_OPTION_VOLATILE, KEY_ALL_ACCESS, NULL, &option_key, NULL ))
+    {
+        RegSetValueExW( option_key, L"OptionValue", 0, REG_DWORD, (const BYTE *)&option, sizeof(option) );
+        if (alternate_shell)
+            RegSetValueExW( option_key, L"UseAlternateShell", 0, REG_DWORD, (const BYTE *)&alternate_shell,
+                            sizeof(alternate_shell) );
+        RegCloseKey( option_key );
+    }
+    RegCloseKey( key );
+}
+
 /* create the ComputerName registry keys */
 static void create_computer_name_keys(void)
 {
@@ -1953,6 +1996,7 @@ int __cdecl main( int argc, char *argv[] )
     create_user_shared_data();
     create_hardware_registry_keys();
     create_dynamic_registry_keys();
+    create_safeboot_option_key();
     create_computer_name_keys();
     wininit();
     pendingRename();
