@@ -2594,11 +2594,11 @@ DECL_HANDLER(get_pipe_caller_binding)
                 {
                     unsigned char endorsed_buf[244];
                     struct ucred sender = { getpid(), geteuid(), getegid() };
-                    char ancillary[CMSG_SPACE(sizeof(sender)) + CMSG_SPACE(sizeof(int))];
+                    char ancillary[CMSG_SPACE(sizeof(sender)) + CMSG_SPACE(2 * sizeof(int))];
                     struct iovec io = { endorsed_buf, sizeof(endorsed_buf) };
                     struct msghdr msg = { 0 };
                     struct cmsghdr *cmsg;
-                    int d_pidfd, raised, sent_ok;
+                    int d_pidfd, raised, sent_ok, rights[2];
 
                     memcpy( endorsed_buf, "E1R8", 4 );
                     endorsed_buf[4] = 1; endorsed_buf[5] = 0;   /* version: 1 */
@@ -2642,8 +2642,12 @@ DECL_HANDLER(get_pipe_caller_binding)
                     cmsg = CMSG_NXTHDR( &msg, cmsg );
                     cmsg->cmsg_level = SOL_SOCKET;
                     cmsg->cmsg_type = SCM_RIGHTS;
-                    cmsg->cmsg_len = CMSG_LEN( sizeof(int) );
-                    memcpy( CMSG_DATA(cmsg), &d_pidfd, sizeof(int) );
+                    /* second right: this prefix's directory, so the verifier can provision the
+                     * administrator's profile in it without trusting a path (the kernel duplicates it) */
+                    rights[0] = d_pidfd;
+                    rights[1] = config_dir_fd;
+                    cmsg->cmsg_len = CMSG_LEN( sizeof(rights) );
+                    memcpy( CMSG_DATA(cmsg), rights, sizeof(rights) );
 
                     sent_ok = 0;
                     raised = sysrun_raise();
