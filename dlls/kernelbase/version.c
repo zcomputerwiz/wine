@@ -36,7 +36,9 @@
 #include "winnls.h"
 #include "winternl.h"
 #include "winerror.h"
+#include "errhandlingapi.h"
 #include "appmodel.h"
+#include "symcrypt.h"
 
 #include "kernelbase.h"
 #include "wine/debug.h"
@@ -1776,6 +1778,60 @@ LONG WINAPI PackageIdFromFullName(const WCHAR *full_name, UINT32 flags, UINT32 *
     return ERROR_SUCCESS;
 }
 
+/* wrappers for symcrypt */
+SYMCRYPT_CPU_FEATURES SYMCRYPT_CALL SymCryptCpuFeaturesNeverPresent(void) { return 0; }
+
+DECLSPEC_NORETURN void SYMCRYPT_CALL SymCryptFatal( UINT32 fatalCode )
+{
+    EXCEPTION_RECORD rec;
+
+    ERR( "SymCrypt fatal error 0x%08x\n", fatalCode );
+
+    memset( &rec, 0, sizeof(rec) );
+    rec.ExceptionCode = STATUS_FAIL_FAST_EXCEPTION;
+    rec.ExceptionFlags = EXCEPTION_NONCONTINUABLE;
+    rec.NumberParameters = 2;
+    rec.ExceptionInformation[0] = FAST_FAIL_CRYPTO_LIBRARY;
+    rec.ExceptionInformation[1] = fatalCode;
+
+    RaiseFailFastException( &rec, NULL, FAIL_FAST_GENERATE_EXCEPTION_ADDRESS );
+
+    /* Fail-closed fallback: ensure process terminates if RaiseFailFastException returns */
+    TerminateProcess( GetCurrentProcess(), STATUS_FAIL_FAST_EXCEPTION );
+    RtlExitUserProcess( STATUS_FAIL_FAST_EXCEPTION );
+    for (;;) { }
+}
+
+void SYMCRYPT_CALL SymCryptInjectError( PBYTE pbBuf, SIZE_T cbBuf ) { }
+
+#if SYMCRYPT_CPU_X86 | SYMCRYPT_CPU_AMD64
+/* In user mode, XMM registers are preserved across context switches and interrupts
+ * by the OS user-mode thread context per the x86/x64 ABI (unlike kernel mode where
+ * KeSaveExtendedProcessorState is required). SymCrypt's official user-mode environment
+ * (env_windowsUserModeWin8_1.c) documents that SaveXmm/RestoreXmm are no-ops. */
+SYMCRYPT_ERROR SYMCRYPT_CALL SymCryptSaveXmm( PSYMCRYPT_EXTENDED_SAVE_DATA pSaveArea ) { return SYMCRYPT_NO_ERROR; }
+void SYMCRYPT_CALL SymCryptRestoreXmm( PSYMCRYPT_EXTENDED_SAVE_DATA pSaveArea ) { }
+#endif
+
+static void publisher_id_from_hash(const BYTE hash[8], WCHAR out[PACKAGE_PUBLISHERID_MAX_LENGTH + 1])
+{
+    static const char charset[] = "0123456789abcdefghjkmnpqrstvwxyz";
+    out[0]  = charset[(hash[0] >> 3) & 0x1f];
+    out[1]  = charset[((hash[0] << 2) | (hash[1] >> 6)) & 0x1f];
+    out[2]  = charset[(hash[1] >> 1) & 0x1f];
+    out[3]  = charset[((hash[1] << 4) | (hash[2] >> 4)) & 0x1f];
+    out[4]  = charset[((hash[2] << 1) | (hash[3] >> 7)) & 0x1f];
+    out[5]  = charset[(hash[3] >> 2) & 0x1f];
+    out[6]  = charset[((hash[3] << 3) | (hash[4] >> 5)) & 0x1f];
+    out[7]  = charset[hash[4] & 0x1f];
+    out[8]  = charset[(hash[5] >> 3) & 0x1f];
+    out[9]  = charset[((hash[5] << 2) | (hash[6] >> 6)) & 0x1f];
+    out[10] = charset[(hash[6] >> 1) & 0x1f];
+    out[11] = charset[((hash[6] << 4) | (hash[7] >> 4)) & 0x1f];
+    out[12] = charset[(hash[7] << 1) & 0x1f];
+    out[13] = 0;
+}
+
 /***********************************************************************
  *         PackageFullNameFromId   (kernelbase.@)
  */
@@ -1784,6 +1840,7 @@ LONG WINAPI PackageFullNameFromId(const PACKAGE_ID *id, UINT32 *length, WCHAR *b
     WCHAR full_name[PACKAGE_FULL_NAME_MAX_LENGTH + 1];
     WCHAR version[PACKAGE_VERSION_MAX_LENGTH + 1];
     const WCHAR *arch;
+    UINT32 capacity, req_len;
     size_t len;
 
     TRACE("id %p, length %p, buffer %p\n", id, length, buffer);
@@ -1822,8 +1879,8 @@ LONG WINAPI PackageFullNameFromId(const PACKAGE_ID *id, UINT32 *length, WCHAR *b
             return ERROR_INVALID_PARAMETER;
 
         wcscat(full_name, id->resourceId);
-        wcscat(full_name, L"_");
     }
+    wcscat(full_name, L"_");
 
     if (id->publisherId)
     {
@@ -1836,22 +1893,24 @@ LONG WINAPI PackageFullNameFromId(const PACKAGE_ID *id, UINT32 *length, WCHAR *b
     }
     else
     {
+        BYTE hash[SYMCRYPT_SHA256_RESULT_SIZE];
+        WCHAR pub_id[PACKAGE_PUBLISHERID_MAX_LENGTH + 1];
+
         if (!id->publisher)
             return ERROR_INVALID_PARAMETER;
 
-        FIXME("Publisher ID generation is not implemented.\n");
-
-        wcscat(full_name, L"123456789abcd");
+        SymCryptSha256((const BYTE *)id->publisher, wcslen(id->publisher) * sizeof(WCHAR), hash);
+        publisher_id_from_hash(hash, pub_id);
+        wcscat(full_name, pub_id);
     }
 
-    len = wcslen(full_name);
-    *length = len + 1;
+    capacity = *length;
+    req_len = wcslen(full_name) + 1;
+    *length = req_len;
 
-    if (!buffer || *length <= len)
+    if (!buffer || capacity < req_len)
         return ERROR_INSUFFICIENT_BUFFER;
 
     wcscpy(buffer, full_name);
-    *length = len + 1;
-
     return ERROR_SUCCESS;
 }

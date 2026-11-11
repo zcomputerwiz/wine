@@ -1165,9 +1165,105 @@ static void test_PackageFullNameFromId(void)
     id.publisherId = NULL;
     ret = pPackageFullNameFromId(&id, &length, buffer);
     ok(!ret, "Unexpected ret %ld.\n", ret);
-    todo_wine
     ok(!wcscmp(buffer, L"name_1.2.3.4_x86_resourceid_0mk95qz5wh294"),
              "Unexpected full name %s.\n", debugstr_w(buffer));
+
+    /* Buffer capacity handling and sentinels */
+    memset(buffer, 0x55, sizeof(buffer));
+    length = 0;
+    ret = pPackageFullNameFromId(&id, &length, buffer);
+    ok(ret == ERROR_INSUFFICIENT_BUFFER, "Unexpected ret %ld.\n", ret);
+    ok(length == 42, "Unexpected length %u.\n", length);
+    ok(buffer[0] == 0x5555, "Buffer unexpectedly modified.\n");
+
+    memset(buffer, 0x55, sizeof(buffer));
+    length = 1;
+    ret = pPackageFullNameFromId(&id, &length, buffer);
+    ok(ret == ERROR_INSUFFICIENT_BUFFER, "Unexpected ret %ld.\n", ret);
+    ok(length == 42, "Unexpected length %u.\n", length);
+    ok(buffer[0] == 0x5555, "Buffer unexpectedly modified.\n");
+
+    memset(buffer, 0x55, sizeof(buffer));
+    length = 41; /* required - 1 */
+    ret = pPackageFullNameFromId(&id, &length, buffer);
+    ok(ret == ERROR_INSUFFICIENT_BUFFER, "Unexpected ret %ld.\n", ret);
+    ok(length == 42, "Unexpected length %u.\n", length);
+    ok(buffer[0] == 0x5555, "Buffer unexpectedly modified.\n");
+
+    memset(buffer, 0x55, sizeof(buffer));
+    length = 42; /* exact required length */
+    ret = pPackageFullNameFromId(&id, &length, buffer);
+    ok(!ret, "Unexpected ret %ld.\n", ret);
+    ok(length == 42, "Unexpected length %u.\n", length);
+    ok(!wcscmp(buffer, L"name_1.2.3.4_x86_resourceid_0mk95qz5wh294"),
+             "Unexpected full name %s.\n", debugstr_w(buffer));
+    ok(buffer[42] == 0x5555, "Buffer overflow past exact capacity.\n");
+
+    memset(buffer, 0x55, sizeof(buffer));
+    length = 50; /* extra capacity */
+    ret = pPackageFullNameFromId(&id, &length, buffer);
+    ok(!ret, "Unexpected ret %ld.\n", ret);
+    ok(length == 42, "Unexpected length %u.\n", length);
+    ok(!wcscmp(buffer, L"name_1.2.3.4_x86_resourceid_0mk95qz5wh294"),
+             "Unexpected full name %s.\n", debugstr_w(buffer));
+
+    /* Resource ID NULL or empty preserves empty field separator */
+    id.resourceId = NULL;
+    length = 0;
+    ret = pPackageFullNameFromId(&id, &length, NULL);
+    ok(ret == ERROR_INSUFFICIENT_BUFFER, "Unexpected ret %ld.\n", ret);
+    ok(length == 32, "Unexpected length %u.\n", length);
+    ret = pPackageFullNameFromId(&id, &length, buffer);
+    ok(!ret, "Unexpected ret %ld.\n", ret);
+    ok(!wcscmp(buffer, L"name_1.2.3.4_x86__0mk95qz5wh294"),
+             "Unexpected full name %s.\n", debugstr_w(buffer));
+
+    id.resourceId = (WCHAR *)L"";
+    length = 0;
+    ret = pPackageFullNameFromId(&id, &length, NULL);
+    ok(ret == ERROR_INSUFFICIENT_BUFFER, "Unexpected ret %ld.\n", ret);
+    ok(length == 32, "Unexpected length %u.\n", length);
+    ret = pPackageFullNameFromId(&id, &length, buffer);
+    ok(!ret, "Unexpected ret %ld.\n", ret);
+    ok(!wcscmp(buffer, L"name_1.2.3.4_x86__0mk95qz5wh294"),
+             "Unexpected full name %s.\n", debugstr_w(buffer));
+
+    /* Additional synthetic publisher strings */
+    id.resourceId = (WCHAR *)L"res";
+    id.publisher = (WCHAR *)L"CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US";
+    length = 0;
+    ret = pPackageFullNameFromId(&id, &length, NULL);
+    ok(ret == ERROR_INSUFFICIENT_BUFFER, "Unexpected ret %ld.\n", ret);
+    ret = pPackageFullNameFromId(&id, &length, buffer);
+    ok(!ret, "Unexpected ret %ld.\n", ret);
+    ok(!wcscmp(buffer, L"name_1.2.3.4_x86_res_8wekyb3d8bbwe"),
+             "Unexpected full name %s.\n", debugstr_w(buffer));
+
+    id.publisher = (WCHAR *)L"CN=Test";
+    length = 0;
+    ret = pPackageFullNameFromId(&id, &length, NULL);
+    ok(ret == ERROR_INSUFFICIENT_BUFFER, "Unexpected ret %ld.\n", ret);
+    ret = pPackageFullNameFromId(&id, &length, buffer);
+    ok(!ret, "Unexpected ret %ld.\n", ret);
+    ok(!wcscmp(buffer, L"name_1.2.3.4_x86_res_hz258y3tkez3a"),
+             "Unexpected full name %s.\n", debugstr_w(buffer));
+
+    /* Publisher ID length validation */
+    id.publisherId = (WCHAR *)L"1234567890ab"; /* 12 characters */
+    length = 0;
+    ret = pPackageFullNameFromId(&id, &length, NULL);
+    ok(ret == ERROR_INVALID_PARAMETER, "Unexpected ret %ld.\n", ret);
+
+    id.publisherId = (WCHAR *)L"1234567890abcd"; /* 14 characters */
+    length = 0;
+    ret = pPackageFullNameFromId(&id, &length, NULL);
+    ok(ret == ERROR_INVALID_PARAMETER, "Unexpected ret %ld.\n", ret);
+
+    id.publisherId = NULL;
+    id.publisher = NULL;
+    length = 0;
+    ret = pPackageFullNameFromId(&id, &length, NULL);
+    ok(ret == ERROR_INVALID_PARAMETER, "Unexpected ret %ld.\n", ret);
 }
 
 START_TEST(version)
