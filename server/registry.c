@@ -162,6 +162,7 @@ struct e1s_hive
     enum { E1S_LOADING, E1S_LOADED, E1S_UNLOADING, E1S_POISONED } phase;
     unsigned int idle_sweeps;
     int refreshing;
+    int joined;             /* a later logon took a lease on the already loaded hive */
 };
 static struct e1s_hive *e1s_hives;
 #if defined(WEX_E1S13_HKU_TEST) && defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
@@ -3114,6 +3115,45 @@ static void e1s_populate_volatile_env( struct key *user, const struct wex_profil
     release_object( vol_env );
 }
 
+/* A further logon of the account whose hive is already loaded and committed
+ * (E1-S18 review R14). The loaded bundle is kept; this request gets its own
+ * lease, to be committed once like the first. Only the exact same account,
+ * storage generation and user SID may join, after the storage and the token
+ * context have been validated again. The claim has already burned the LOAD
+ * attempt of this context. */
+static struct e1s_hive *e1s_join_hive( struct e1s_hive *m, struct token *token, obj_handle_t context,
+                                       const struct wex_account *account, uint64_t storage_generation,
+                                       unsigned int access, obj_handle_t *result )
+{
+    struct wex_profile_lease_reserved saved = m->storage.reserved;
+    unsigned int status;
+
+    if (memcmp( m->account.incarnation, account->incarnation, 16 ) ||
+        m->account.generation != account->generation || m->account.uid != account->uid ||
+        strcmp( m->account.name, account->name ) ||
+        !storage_generation || storage_generation != m->storage.profile_generation ||
+        memcmp( saved.user_sid, token_get_user_sid( token ), sizeof(saved.user_sid) ))
+    { e1s_deny( STATUS_OBJECT_NAME_COLLISION, "join-identity" ); return NULL; }
+    if (wex_profile_verify_existing( config_dir_fd, account, &m->storage ) ||
+        !token_validate_e1s_profile( context, token, account ))
+    { e1s_deny( STATUS_ACCESS_DENIED, "join-verify" ); return NULL; }
+    if (!e1s_acquire_lease( m, token, context )) { m->storage.reserved = saved; return NULL; }
+    if (!(*result = e1s_alloc_key_handle( m->user, access, 0 )) ||
+        !token_bind_e1s_profile( context, token, m->storage.reserved.lease_id ))
+    {
+        status = get_error();
+        if (*result) { close_handle( current->process, *result ); *result = 0; }
+        m->storage.reserved = saved;
+        set_error( status ? status : STATUS_INVALID_HANDLE );
+        return NULL;
+    }
+    m->joined = 1;
+    m->idle_sweeps = 0;
+    fprintf( stderr, "E1S14 join lease state=1\n" );
+    clear_error();
+    return m;
+}
+
 static struct e1s_hive *e1s_load_hive( struct token *token, obj_handle_t context,
                                      const unsigned char *record, data_size_t size,
                                      unsigned int access, obj_handle_t *result )
@@ -3133,6 +3173,8 @@ static struct e1s_hive *e1s_load_hive( struct token *token, obj_handle_t context
     for (other = e1s_hives; other; other = other->next)
         if (!memcmp( other->account.sid, account.sid, sizeof(account.sid) ))
         {
+            if (other->phase == E1S_LOADED && other->storage.reserved.state == 2)
+                return e1s_join_hive( other, token, context, &account, wex_token_u64( record + 32 ), access, result );
             e1s_deny( other->phase == E1S_UNLOADING ? STATUS_DELETE_PENDING :
                       other->phase == E1S_LOADING ? STATUS_DEVICE_NOT_READY :
                       other->phase == E1S_POISONED ? STATUS_REGISTRY_CORRUPT : STATUS_OBJECT_NAME_COLLISION,
@@ -3359,6 +3401,10 @@ static int e1s_unload_hive( struct e1s_hive *m )
     if (m->phase == E1S_LOADING) return e1s_deny( STATUS_DEVICE_NOT_READY, "unload-loading" );
     if (m->phase == E1S_UNLOADING) return e1s_deny( STATUS_DELETE_PENDING, "unload-unloading" );
     if (m->phase != E1S_LOADED) return e1s_deny( STATUS_REGISTRY_CORRUPT, "unload-recovery" );
+    /* A later logon whose setup failed gives only its own lease back: the hive
+     * returns to the committed state of the earlier users and stays loaded
+     * while they live. */
+    if (m->joined && m->storage.reserved.state == 1) m->storage.reserved.state = 2;
     memcpy( sid.sub_auth, m->account.sid, sizeof(m->account.sid) );
     if (process_e1s_profile_busy( &sid ))
     {
