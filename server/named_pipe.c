@@ -2361,13 +2361,21 @@ DECL_HANDLER(get_pipe_caller_binding)
                     set_error( STATUS_ACCESS_DENIED );
                     goto done;
                 }
-                if (server->binding->endorsed)
+                b = server->binding;
+                /* A further attempt of the same request gets a fresh dialog: only once the previous
+                 * dialog is gone, before any receipt, with the next attempt number (at most 3) and the
+                 * same request id and deadline. */
+                if (b->endorsed &&
+                    (b->receipt_used || b->dialog_process->running_threads ||
+                     memcmp( req_data + 12, b->sealed_tuple, 8 ) ||
+                     unpack_u32_le( req_data + 12 + 8 ) != unpack_u32_le( b->sealed_tuple + 8 ) + 1 ||
+                     unpack_u32_le( req_data + 12 + 8 ) > 3 ||
+                     memcmp( req_data + 12 + 124, b->sealed_tuple + 124, 8 )))
                 {
                     E1S6_BINDING_AUDIT( "already-endorsed" );
                     set_error( STATUS_ACCESS_DENIED );
                     goto done;
                 }
-                b = server->binding;
 
                 d_handle = (obj_handle_t)unpack_u32_le( req_data + 8 );
                 D = get_process_from_handle( d_handle, PROCESS_QUERY_LIMITED_INFORMATION );
@@ -2565,6 +2573,7 @@ DECL_HANDLER(get_pipe_caller_binding)
                     set_error( STATUS_ACCESS_DENIED );
                     goto done;
                 }
+                if (b->endorsed) memset( b->dialog_id, 0, 16 );  /* a further attempt: a new dialog id */
                 while (!memcmp( b->dialog_id, zero16, 16 ) ||
                        !memcmp( b->dialog_id, b->prefix_id, 16 ) ||
                        !memcmp( b->dialog_id, b->host_process_id, 16 ) ||
@@ -2674,6 +2683,8 @@ DECL_HANDLER(get_pipe_caller_binding)
                     }
                 }
 
+                if (b->dialog_process) release_object( b->dialog_process );
+                if (b->dialog_token) release_object( b->dialog_token );
                 b->dialog_process = (struct process *)grab_object( D );
                 b->dialog_token = (struct token *)grab_object( D->token );
                 token_get_ids( b->dialog_token, &b->dialog_token_id, &b->dialog_modified_id );
