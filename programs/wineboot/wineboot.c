@@ -824,6 +824,9 @@ static void create_dynamic_registry_keys(void)
         RegCloseKey( key );
 }
 
+/* SafeBoot\Option's OptionValue for this start (0: a normal start); process_run_key reads it */
+static DWORD safeboot_option;
+
 /* WineExplorer Safe Mode: the boot mode is in the file /run/wineexplorer/bootmode, which only root can create
  * ("safe", "safenet" or "safecmd"; anything else is a normal start). As the Windows kernel does, publish it as the
  * volatile key SafeBoot\Option, which does not exist in a normal start. Without the file nothing changes. */
@@ -847,6 +850,7 @@ static void create_safeboot_option_key(void)
     if (!strcmp( buffer, "safe" )) option = 1;
     else if (!strcmp( buffer, "safenet" )) option = 2;
     else if (!strcmp( buffer, "safecmd" )) option = alternate_shell = 1;
+    safeboot_option = option;
 
     if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, safeboot_keyW, 0, KEY_ALL_ACCESS, &key ))
     {
@@ -1332,24 +1336,40 @@ static void process_run_key( HKEY key, const WCHAR *keyname, BOOL delete, BOOL s
     while (i)
     {
         DWORD len = max_value, len_data = max_cmdline, type;
+        BOOL defer;
 
         if ((res = RegEnumValueW( runkey, --i, value, &len, 0, &type, (BYTE *)cmdline, &len_data )))
         {
             WINE_ERR( "Couldn't read value %lu (%ld).\n", i, res );
             continue;
         }
-        if (delete && (res = RegDeleteValueW( runkey, value )))
+        /* In Safe Mode, Windows runs only the RunOnce values whose name starts with '*'; the others stay for the
+         * next normal start. */
+        if (safeboot_option && !wcsicmp( keyname, L"RunOnce" ) && value[0] != '*')
+        {
+            WINE_TRACE( "Safe Mode: leaving %s for a normal start.\n", wine_dbgstr_w(value) );
+            continue;
+        }
+        /* A name starting with '!' is deleted once its command has ended, whatever its exit code, instead of
+         * before it starts; that needs a key that waits for each command. */
+        defer = delete && synchronous && value[0] == '!';
+        if (delete && !defer && (res = RegDeleteValueW( runkey, value )))
         {
             WINE_ERR( "Couldn't delete value %lu (%ld). Running command anyways.\n", i, res );
         }
         if (type != REG_SZ)
         {
             WINE_ERR( "Incorrect type of value %lu (%lu).\n", i, type );
+            if (defer) RegDeleteValueW( runkey, value );
             continue;
         }
         if (runCmd( cmdline, NULL, synchronous, FALSE ) == INVALID_RUNCMD_RETURN)
         {
             WINE_ERR( "Error running cmd %s (%lu).\n", wine_dbgstr_w(cmdline), GetLastError() );
+        }
+        if (defer && (res = RegDeleteValueW( runkey, value )))
+        {
+            WINE_ERR( "Couldn't delete value %lu (%ld).\n", i, res );
         }
         WINE_TRACE( "Done processing cmd %lu.\n", i );
     }
@@ -1373,6 +1393,13 @@ end:
 static void ProcessRunKeys( HKEY root, const WCHAR *keyname, BOOL delete, BOOL synchronous )
 {
     HKEY key;
+
+    /* Windows does not run the Run keys in Safe Mode (RunOnce: see process_run_key) */
+    if (safeboot_option && !wcsicmp( keyname, L"Run" ))
+    {
+        WINE_TRACE( "Safe Mode: not processing %s.\n", wine_dbgstr_w(keyname) );
+        return;
+    }
 
     if (root == HKEY_LOCAL_MACHINE)
     {
