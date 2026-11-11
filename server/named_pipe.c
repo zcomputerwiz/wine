@@ -51,6 +51,9 @@ struct named_pipe;
 #ifdef WEX_E1S6_TRANSPORT_TEST
 #include <sys/socket.h>
 #include <sys/uio.h>
+#include <poll.h>
+#include <time.h>
+#include "e1s_token.h"
 struct pipe_binding
 {
     unsigned char prefix_id[16];
@@ -79,6 +82,7 @@ struct pipe_binding
     int dialog_pin_pid;
     unsigned char dialog_id[16];
     unsigned char sealed_tuple[220];
+    int receipt_used;   /* R10: one receipt installation attempt per binding */
 };
 
 static inline unsigned long long unpack_u64_le( const unsigned char *p )
@@ -1904,6 +1908,203 @@ DECL_HANDLER(set_named_pipe_info)
 #define E1S6_BINDING_AUDIT(site) do {} while (0)
 #endif
 
+#if defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
+/* E1-S18e R10: the consumed record for token issue comes from the verifier, never from broker bytes.
+ * After the verifier has consumed the evidence it sends one RECEIPT packet (E1R8 type 30) on the control
+ * socket the server retained at endorsement, before it answers the broker. The broker's E1R8 op 4 only
+ * names its S10 context; the server reads that one packet without blocking, requires the kernel
+ * credentials of the endorsed root verifier, compares every field with the tuple it sealed at
+ * ENDORSE_DIALOG and with the current generations, builds the kind 4 input itself and installs it with
+ * the retained opener objects. Any failure burns the context. */
+struct receipt_cookie
+{
+    int verifier_pin;
+    unsigned long long root_gen, map_gen, policy_gen;
+};
+
+static int receipt_validate( void *cookie, const unsigned char *input )
+{
+    struct receipt_cookie *c = cookie;
+    struct pollfd pin = { c->verifier_pin, POLLIN, 0 };
+    unsigned long long gen;
+
+    if (poll( &pin, 1, 0 )) return 0;  /* the verifier that vouched has gone */
+    if (!accounts_get_map_generation( &gen ) || gen != c->map_gen) return 0;
+    if (!sysrun_get_root_generation( &gen ) || gen != c->root_gen) return 0;
+    if (!sysrun_get_policy_generation( &gen ) || gen != c->policy_gen) return 0;
+    return 1;
+}
+
+static void receipt_release( void *cookie )
+{
+    struct receipt_cookie *c = cookie;
+    close( c->verifier_pin );
+    free( c );
+}
+
+static int receipt_nonzero( const unsigned char *p, unsigned int n )
+{
+    unsigned char bits = 0;
+    while (n--) bits |= *p++;
+    return bits != 0;
+}
+
+static int install_verifier_receipt( struct pipe_binding *b, obj_handle_t context )
+{
+    static const unsigned char evidence_head[8] = { 3, 0, 1, 0, 220, 0, 0, 0 };
+    unsigned char pkt[512], input[WEX_TOKEN_INPUT_SIZE];
+    const unsigned char *t = b->sealed_tuple, *ev = pkt + 92;
+    char canonical[64], ancillary[256];
+    struct iovec io = { pkt, sizeof(pkt) };
+    struct msghdr msg = { 0 };
+    struct cmsghdr *cmsg;
+    struct ucred peer, cred;
+    struct pollfd live = { -1, POLLIN, 0 };
+    socklen_t len = sizeof(peer);
+    struct e1s_token_consumed r;
+    struct receipt_cookie *cookie = NULL;
+    struct timespec ts;
+    struct luid id, mod;
+    unsigned long long now, completed, expiry, gen, server_gen, broker_gen;
+    unsigned int i, name_len, creds = 0;
+    int fd = current->process->e1s6_control_fd, pin = -1, one = 1, ok = 0;
+    const char *site;
+    ssize_t n;
+
+    site = "receipt-opener";
+    if (b->opener_process->is_terminating || !b->opener_process->running_threads ||
+        b->opener_process->token != b->opener_token) goto done;
+    token_get_ids( b->opener_token, &id, &mod );
+    if (memcmp( &id, &b->opener_token_id, sizeof(id) ) || memcmp( &mod, &b->opener_modified_id, sizeof(mod) )) goto done;
+
+    site = "receipt-generations";
+    if (!sysrun_get_s6_generations( current->process, &server_gen, &broker_gen ) ||
+        server_gen != b->server_gen || broker_gen != b->broker_gen) goto done;
+    if (!accounts_get_map_generation( &gen ) || gen != b->map_gen) goto done;
+    if (!sysrun_get_root_generation( &gen ) || gen != b->root_gen) goto done;
+    if (!sysrun_get_policy_generation( &gen ) || gen != b->policy_gen) goto done;
+
+    /* the endorsed verifier: root peer of the retained control socket, pinned and alive */
+    site = "receipt-verifier";
+    if (fd < 0 || getsockopt( fd, SOL_SOCKET, SO_PEERCRED, &peer, &len ) || len != sizeof(peer) ||
+        peer.uid != 0 || peer.pid <= 0) goto done;
+    len = sizeof(pin);
+    if (getsockopt( fd, SOL_SOCKET, 77 /* SO_PEERPIDFD */, &pin, &len ) || len != sizeof(pin) || pin < 0)
+    { pin = -1; goto done; }
+    live.fd = pin;
+    if (poll( &live, 1, 0 )) goto done;
+    if (setsockopt( fd, SOL_SOCKET, SO_PASSCRED, &one, sizeof(one) )) goto done;
+
+    /* exactly one packet, already queued: the verifier sends it before it answers the broker */
+    site = "receipt-receive";
+    msg.msg_iov = &io; msg.msg_iovlen = 1;
+    msg.msg_control = ancillary; msg.msg_controllen = sizeof(ancillary);
+    n = recvmsg( fd, &msg, MSG_DONTWAIT | MSG_TRUNC | MSG_CMSG_CLOEXEC );
+    if (n < 0) goto done;
+    for (cmsg = CMSG_FIRSTHDR( &msg ); cmsg; cmsg = CMSG_NXTHDR( &msg, cmsg ))
+    {
+        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_CREDENTIALS &&
+            cmsg->cmsg_len == CMSG_LEN( sizeof(cred) ))
+        {
+            memcpy( &cred, CMSG_DATA( cmsg ), sizeof(cred) );
+            if (cred.uid != 0 || cred.pid != peer.pid) creds = 2;
+            creds++;
+        }
+        else
+        {
+            if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS)
+            {
+                int *fds = (int *)CMSG_DATA( cmsg );
+                unsigned int count = (cmsg->cmsg_len - CMSG_LEN( 0 )) / sizeof(int);
+                for (i = 0; i < count; i++) close( fds[i] );
+            }
+            creds = 2;
+        }
+    }
+    site = "receipt-sender";
+    if (creds != 1 || (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC))) goto done;
+
+    /* header: this attempt's request, attempt, nonce and channel as sealed at ENDORSE_DIALOG */
+    site = "receipt-frame";
+    if (n < 317 || n > 379 || memcmp( pkt, "E1R8", 4 ) || pkt[4] != 1 || pkt[5] || pkt[6] != 30 || pkt[7] ||
+        unpack_u32_le( pkt + 8 ) != (unsigned int)n || memcmp( pkt + 12, t, 12 ) || unpack_u32_le( pkt + 24 ) ||
+        memcmp( pkt + 28, t + 12, 48 ) || !receipt_nonzero( pkt + 76, 16 )) goto done;
+
+    /* the exact 220-byte evidence record against the sealed tuple and the binding's generations */
+    site = "receipt-evidence";
+    if (clock_gettime( CLOCK_MONOTONIC, &ts ) || ts.tv_sec <= 0) goto done;
+    now = (unsigned long long)ts.tv_sec * 1000000000 + ts.tv_nsec;
+    completed = unpack_u64_le( ev + 148 );
+    expiry = unpack_u64_le( ev + 156 );
+    if (memcmp( ev, evidence_head, 8 ) || unpack_u64_le( ev + 8 ) != 0x3ff ||
+        unpack_u32_le( ev + 212 ) != 1 || unpack_u32_le( ev + 216 ) != 1) goto done;
+    site = "receipt-evidence-request";
+    if (memcmp( ev + 16, t, 8 ) || memcmp( ev + 24, t + 92, 32 ) || memcmp( ev + 56, t + 60, 32 ) ||
+        memcmp( ev + 88, t + 12, 32 ) || memcmp( ev + 120, t + 8, 4 )) goto done;
+    site = "receipt-evidence-account";
+    if (!receipt_nonzero( ev + 124, 16 ) || !unpack_u64_le( ev + 140 ) ||
+        unpack_u64_le( ev + 140 ) >= 0xffffffffull) goto done;
+    site = "receipt-evidence-time";
+    if (!completed || completed > now || now >= expiry || expiry > unpack_u64_le( t + 124 )) goto done;
+    /* The record's root and verifier generations are the verifier's own instance values: the verifier
+     * generation is the one sealed in the tuple; its root generation has no server counterpart (the
+     * server's root generation is a path generation and stays in the kind 4 input from the tuple). */
+    site = "receipt-evidence-generations";
+    if (unpack_u64_le( ev + 172 ) != b->server_gen || unpack_u64_le( ev + 180 ) != b->broker_gen ||
+        unpack_u64_le( ev + 188 ) != unpack_u64_le( t + 156 ) || unpack_u64_le( ev + 196 ) != b->map_gen ||
+        unpack_u64_le( ev + 204 ) != b->policy_gen) goto done;
+
+    site = "receipt-name";
+    name_len = unpack_u32_le( pkt + 312 );
+    if (!name_len || name_len > 63 || (unsigned int)n != 316 + name_len) goto done;
+    for (i = 0; i < name_len; i++) if (pkt[316 + i] <= 0x20 || pkt[316 + i] >= 0x7f) goto done;
+    memcpy( canonical, pkt + 316, name_len );
+    canonical[name_len] = 0;
+
+    /* kind 4 from the sealed tuple and the receipt; nothing here is a broker byte */
+    memset( input, 0, sizeof(input) );
+    wex_token_put32( input, 0x00010004 );
+    wex_token_put32( input + 4, WEX_TOKEN_REQUEST_SIZE );
+    wex_token_put64( input + 8, WEX_TOKEN_CAPS );
+    memcpy( input + 16, t, 8 );             /* request id */
+    memcpy( input + 24, t + 92, 32 );       /* request digest */
+    memcpy( input + 56, t + 60, 32 );       /* binding digest */
+    memcpy( input + 88, t + 12, 32 );       /* nonce */
+    memcpy( input + 120, t + 8, 4 );        /* attempt */
+    memcpy( input + 124, ev + 124, 16 );    /* account key the verifier authenticated */
+    memcpy( input + 140, t + 132, 24 );     /* root, server, broker generations */
+    memcpy( input + 164, t + 164, 16 );     /* map, policy generations */
+    wex_token_put32( input + 180, b->caller_session );
+    memcpy( input + 188, pkt + 76, 16 );    /* evidence reference */
+
+    site = "receipt-install";
+    if (!(cookie = malloc( sizeof(*cookie) ))) goto done;
+    cookie->verifier_pin = pin;
+    cookie->root_gen = b->root_gen; cookie->map_gen = b->map_gen; cookie->policy_gen = b->policy_gen;
+    memset( &r, 0, sizeof(r) );
+    memcpy( r.input, input, sizeof(r.input) );
+    r.canonical_name = canonical;
+    r.caller = b->opener_process;
+    r.primary = b->opener_token;
+    r.expiry = expiry;
+    r.validate = receipt_validate;
+    r.release = receipt_release;
+    r.cookie = cookie;
+    if ((ok = token_install_e1s_consumed( context, &r ))) { pin = -1; cookie = NULL; }
+done:
+    if (!ok)
+    {
+        E1S6_BINDING_AUDIT( site );
+        token_install_e1s_consumed( context, NULL );  /* a failed receipt burns the context */
+        set_error( STATUS_ACCESS_DENIED );
+    }
+    else fprintf( stderr, "wex-r8: receipt installed\n" );
+    free( cookie );
+    if (pin >= 0) close( pin );
+    return ok;
+}
+#endif
+
 static int check_pipe_writer_binding( struct pipe_end *client, struct pipe_writer *writer )
 {
     struct luid opener_id, opener_modified, writer_id, writer_modified;
@@ -2605,6 +2806,33 @@ DECL_HANDLER(get_pipe_caller_binding)
                     goto done;
                 }
             }
+#ifdef __linux__
+            else if (op == 4)
+            {
+                /* R10: install the verifier's receipt into the broker's S10 context (handle at 8) */
+                if (req_size != 12)
+                {
+                    E1S6_BINDING_AUDIT( "e1r8-size" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (!sysrun_process_is_broker( current->process ) || current->token)
+                {
+                    E1S6_BINDING_AUDIT( "receipt-caller-not-broker" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                if (!server->binding || !server->binding->endorsed || server->binding->receipt_used)
+                {
+                    E1S6_BINDING_AUDIT( "receipt-state" );
+                    set_error( STATUS_ACCESS_DENIED );
+                    goto done;
+                }
+                b = server->binding;
+                b->receipt_used = 1;
+                if (!install_verifier_receipt( b, (obj_handle_t)unpack_u32_le( req_data + 8 ) )) goto done;
+            }
+#endif
             else
             {
                 E1S6_BINDING_AUDIT( "e1r8-op" );
