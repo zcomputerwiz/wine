@@ -28,6 +28,14 @@
 static BOOL (WINAPI * pGetProductInfo)(DWORD, DWORD, DWORD, DWORD, DWORD *);
 static UINT (WINAPI * pEnumSystemFirmwareTables)(DWORD, void *, DWORD);
 static UINT (WINAPI * pGetSystemFirmwareTable)(DWORD, DWORD, void *, DWORD);
+static LONG (WINAPI * pGetCurrentApplicationUserModelId)(UINT32 *, WCHAR *);
+static LONG (WINAPI * pGetCurrentPackageFamilyName)(UINT32 *, WCHAR *);
+static LONG (WINAPI * pGetCurrentPackageFullName)(UINT32 *, WCHAR *);
+static LONG (WINAPI * pGetCurrentPackagePath)(UINT32 *, WCHAR *);
+static LONG (WINAPI * pGetPackageFamilyName)(HANDLE, UINT32 *, WCHAR *);
+static LONG (WINAPI * pGetPackageFamilyNameFromToken)(HANDLE, UINT32 *, WCHAR *);
+static LONG (WINAPI * pGetPackageFullName)(HANDLE, UINT32 *, WCHAR *);
+static LONG (WINAPI * pGetPackageFullNameFromToken)(HANDLE, UINT32 *, WCHAR *);
 static LONG (WINAPI * pPackageFullNameFromId)(const PACKAGE_ID *, UINT32 *, WCHAR *);
 static LONG (WINAPI * pPackageIdFromFullName)(const WCHAR *, UINT32, UINT32 *, BYTE *);
 
@@ -51,8 +59,21 @@ static void init_function_pointers(void)
     GET_PROC(GetProductInfo);
     GET_PROC(EnumSystemFirmwareTables);
     GET_PROC(GetSystemFirmwareTable);
+    GET_PROC(GetCurrentApplicationUserModelId);
+    GET_PROC(GetCurrentPackageFamilyName);
+    GET_PROC(GetCurrentPackageFullName);
+    GET_PROC(GetCurrentPackagePath);
+    GET_PROC(GetPackageFamilyName);
+    GET_PROC(GetPackageFullName);
     GET_PROC(PackageFullNameFromId);
     GET_PROC(PackageIdFromFullName);
+
+    hmod = GetModuleHandleA("kernelbase.dll");
+    if (hmod)
+    {
+        GET_PROC(GetPackageFamilyNameFromToken);
+        GET_PROC(GetPackageFullNameFromToken);
+    }
 
     hmod = GetModuleHandleA("ntdll.dll");
 
@@ -1266,6 +1287,258 @@ static void test_PackageFullNameFromId(void)
     ok(ret == ERROR_INVALID_PARAMETER, "Unexpected ret %ld.\n", ret);
 }
 
+static BOOL buffer_has_canary(const WCHAR *buffer, size_t count, WCHAR canary)
+{
+    size_t i;
+
+    for (i = 0; i < count; ++i)
+    {
+        if (buffer[i] != canary)
+            return FALSE;
+    }
+    return TRUE;
+}
+
+static void check_current_package_call(const char *api_name,
+        LONG (WINAPI *fn)(UINT32 *, WCHAR *), LONG expected_no_pkg)
+{
+    WCHAR buffer[64 + 16];
+    UINT32 length;
+    LONG ret;
+
+    ok(fn != NULL, "%s is not available.\n", api_name);
+    if (!fn)
+        return;
+
+    length = 64;
+    ret = fn(&length, NULL);
+    ok(ret == ERROR_INVALID_PARAMETER, "%s(64, NULL) returned %ld.\n", api_name, ret);
+    ok(length == 64, "%s(64, NULL) modified length %u.\n", api_name, length);
+
+    length = 0;
+    ret = fn(&length, NULL);
+    ok(ret == expected_no_pkg, "%s(0, NULL) returned %ld, expected %ld.\n",
+            api_name, ret, expected_no_pkg);
+    ok(length == 0, "%s(0, NULL) modified length %u.\n", api_name, length);
+
+    memset(buffer, 0x55, sizeof(buffer));
+    length = 0;
+    ret = fn(&length, buffer);
+    ok(ret == expected_no_pkg, "%s(0, buffer) returned %ld, expected %ld.\n",
+            api_name, ret, expected_no_pkg);
+    ok(length == 0, "%s(0, buffer) modified length %u.\n", api_name, length);
+    ok(buffer_has_canary(buffer, ARRAY_SIZE(buffer), 0x5555),
+            "%s(0, buffer) modified buffer.\n", api_name);
+
+    memset(buffer, 0x55, sizeof(buffer));
+    length = 64;
+    ret = fn(&length, buffer);
+    ok(ret == expected_no_pkg, "%s(64, buffer) returned %ld, expected %ld.\n",
+            api_name, ret, expected_no_pkg);
+    ok(length == 64, "%s(64, buffer) modified length %u.\n", api_name, length);
+    ok(buffer_has_canary(buffer, ARRAY_SIZE(buffer), 0x5555),
+            "%s(64, buffer) modified buffer.\n", api_name);
+}
+
+static void check_explicit_package_call(const char *api_name, const char *handle_desc,
+        LONG (WINAPI *fn)(HANDLE, UINT32 *, WCHAR *), HANDLE handle, LONG expected_ret)
+{
+    WCHAR buffer[64 + 16];
+    UINT32 length;
+    LONG ret;
+
+    /* Parameter validation precedes handle lookup across all handle states. */
+    length = 64;
+    ret = fn(handle, &length, NULL);
+    ok(ret == ERROR_INVALID_PARAMETER, "%s(%s, 64, NULL) returned %ld.\n",
+            api_name, handle_desc, ret);
+    ok(length == 64, "%s(%s, 64, NULL) modified length %u.\n",
+            api_name, handle_desc, length);
+
+    /* Valid length/buffer shapes evaluate the handle and unpackaged state. */
+    length = 0;
+    ret = fn(handle, &length, NULL);
+    ok(ret == expected_ret, "%s(%s, 0, NULL) returned %ld, expected %ld.\n",
+            api_name, handle_desc, ret, expected_ret);
+    ok(length == 0, "%s(%s, 0, NULL) modified length %u.\n",
+            api_name, handle_desc, length);
+
+    memset(buffer, 0x55, sizeof(buffer));
+    length = 0;
+    ret = fn(handle, &length, buffer);
+    ok(ret == expected_ret, "%s(%s, 0, buffer) returned %ld, expected %ld.\n",
+            api_name, handle_desc, ret, expected_ret);
+    ok(length == 0, "%s(%s, 0, buffer) modified length %u.\n",
+            api_name, handle_desc, length);
+    ok(buffer_has_canary(buffer, ARRAY_SIZE(buffer), 0x5555),
+            "%s(%s, 0, buffer) modified buffer.\n", api_name, handle_desc);
+
+    memset(buffer, 0x55, sizeof(buffer));
+    length = 64;
+    ret = fn(handle, &length, buffer);
+    ok(ret == expected_ret, "%s(%s, 64, buffer) returned %ld, expected %ld.\n",
+            api_name, handle_desc, ret, expected_ret);
+    ok(length == 64, "%s(%s, 64, buffer) modified length %u.\n",
+            api_name, handle_desc, length);
+    ok(buffer_has_canary(buffer, ARRAY_SIZE(buffer), 0x5555),
+            "%s(%s, 64, buffer) modified buffer.\n", api_name, handle_desc);
+}
+
+static void test_package_identity_unpackaged(void)
+{
+    static const struct
+    {
+        const char *name;
+        LONG (WINAPI **fn)(HANDLE, UINT32 *, WCHAR *);
+    }
+    process_apis[] =
+    {
+        { "GetPackageFullName", &pGetPackageFullName },
+        { "GetPackageFamilyName", &pGetPackageFamilyName },
+    },
+    token_apis[] =
+    {
+        { "GetPackageFullNameFromToken", &pGetPackageFullNameFromToken },
+        { "GetPackageFamilyNameFromToken", &pGetPackageFamilyNameFromToken },
+    };
+    HANDLE proc_limited, proc_query, proc_sync, proc_closed;
+    HANDLE token_query, token_source, token_dup_primary, token_dup_imp, token_dup_only, token_closed;
+    HANDLE event;
+    DWORD pid = GetCurrentProcessId();
+    unsigned int i;
+    BOOL ok_handle;
+
+    check_current_package_call("GetCurrentPackageFullName",
+            pGetCurrentPackageFullName, APPMODEL_ERROR_NO_PACKAGE);
+    check_current_package_call("GetCurrentPackageFamilyName",
+            pGetCurrentPackageFamilyName, APPMODEL_ERROR_NO_PACKAGE);
+    check_current_package_call("GetCurrentPackagePath",
+            pGetCurrentPackagePath, APPMODEL_ERROR_NO_PACKAGE);
+    check_current_package_call("GetCurrentApplicationUserModelId",
+            pGetCurrentApplicationUserModelId, APPMODEL_ERROR_NO_APPLICATION);
+
+    proc_limited = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    ok(proc_limited != NULL, "OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) failed: %lu.\n", GetLastError());
+
+    proc_query = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    ok(proc_query != NULL, "OpenProcess(PROCESS_QUERY_INFORMATION) failed: %lu.\n", GetLastError());
+
+    proc_sync = OpenProcess(SYNCHRONIZE, FALSE, pid);
+    ok(proc_sync != NULL, "OpenProcess(SYNCHRONIZE) failed: %lu.\n", GetLastError());
+
+    event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ok(event != NULL, "CreateEventW failed: %lu.\n", GetLastError());
+
+    for (i = 0; i < ARRAY_SIZE(process_apis); ++i)
+    {
+        LONG (WINAPI *fn)(HANDLE, UINT32 *, WCHAR *) = *process_apis[i].fn;
+        const char *name = process_apis[i].name;
+
+        ok(fn != NULL, "%s is not available.\n", name);
+        if (!fn)
+            continue;
+
+        check_explicit_package_call(name, "NULL", fn, NULL, ERROR_INVALID_PARAMETER);
+        check_explicit_package_call(name, "GetCurrentProcess", fn, GetCurrentProcess(), APPMODEL_ERROR_NO_PACKAGE);
+        if (proc_limited)
+            check_explicit_package_call(name, "proc_limited", fn, proc_limited, APPMODEL_ERROR_NO_PACKAGE);
+        if (proc_query)
+            check_explicit_package_call(name, "proc_query", fn, proc_query, APPMODEL_ERROR_NO_PACKAGE);
+        if (proc_sync)
+            check_explicit_package_call(name, "proc_sync", fn, proc_sync, ERROR_ACCESS_DENIED);
+        if (event)
+            check_explicit_package_call(name, "wrong_type_event", fn, event, ERROR_INVALID_HANDLE);
+    }
+
+    proc_closed = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    ok(proc_closed != NULL, "OpenProcess for closed handle test failed: %lu.\n", GetLastError());
+    if (proc_closed)
+    {
+        ok_handle = CloseHandle(proc_closed);
+        ok(ok_handle, "CloseHandle(proc_closed) failed: %lu.\n", GetLastError());
+        for (i = 0; i < ARRAY_SIZE(process_apis); ++i)
+        {
+            if (*process_apis[i].fn)
+                check_explicit_package_call(process_apis[i].name, "proc_closed",
+                        *process_apis[i].fn, proc_closed, ERROR_INVALID_HANDLE);
+        }
+    }
+
+    token_query = NULL;
+    ok_handle = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token_query);
+    ok(ok_handle && token_query != NULL, "OpenProcessToken(TOKEN_QUERY) failed: %lu.\n", GetLastError());
+
+    token_source = NULL;
+    token_dup_primary = NULL;
+    token_dup_imp = NULL;
+    ok_handle = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &token_source);
+    ok(ok_handle && token_source != NULL,
+            "OpenProcessToken(TOKEN_QUERY | TOKEN_DUPLICATE) failed: %lu.\n", GetLastError());
+    if (token_source)
+    {
+        ok_handle = DuplicateTokenEx(token_source, TOKEN_QUERY, NULL,
+                SecurityIdentification, TokenPrimary, &token_dup_primary);
+        ok(ok_handle && token_dup_primary != NULL,
+                "DuplicateTokenEx(TokenPrimary) failed: %lu.\n", GetLastError());
+
+        ok_handle = DuplicateTokenEx(token_source, TOKEN_QUERY, NULL,
+                SecurityImpersonation, TokenImpersonation, &token_dup_imp);
+        ok(ok_handle && token_dup_imp != NULL,
+                "DuplicateTokenEx(TokenImpersonation) failed: %lu.\n", GetLastError());
+    }
+
+    token_dup_only = NULL;
+    ok_handle = OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE, &token_dup_only);
+    ok(ok_handle && token_dup_only != NULL, "OpenProcessToken(TOKEN_DUPLICATE) failed: %lu.\n", GetLastError());
+
+    for (i = 0; i < ARRAY_SIZE(token_apis); ++i)
+    {
+        LONG (WINAPI *fn)(HANDLE, UINT32 *, WCHAR *) = *token_apis[i].fn;
+        const char *name = token_apis[i].name;
+
+        ok(fn != NULL, "%s is not available.\n", name);
+        if (!fn)
+            continue;
+
+        check_explicit_package_call(name, "NULL", fn, NULL, ERROR_INVALID_PARAMETER);
+        if (token_query)
+            check_explicit_package_call(name, "token_query", fn, token_query, APPMODEL_ERROR_NO_PACKAGE);
+        if (token_dup_primary)
+            check_explicit_package_call(name, "token_dup_primary", fn, token_dup_primary, APPMODEL_ERROR_NO_PACKAGE);
+        if (token_dup_imp)
+            check_explicit_package_call(name, "token_dup_imp", fn, token_dup_imp, APPMODEL_ERROR_NO_PACKAGE);
+        if (token_dup_only)
+            check_explicit_package_call(name, "token_dup_only", fn, token_dup_only, ERROR_ACCESS_DENIED);
+        if (event)
+            check_explicit_package_call(name, "wrong_type_event", fn, event, ERROR_INVALID_HANDLE);
+    }
+
+    token_closed = NULL;
+    ok_handle = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token_closed);
+    ok(ok_handle && token_closed != NULL, "OpenProcessToken for closed handle test failed: %lu.\n", GetLastError());
+    if (token_closed)
+    {
+        ok_handle = CloseHandle(token_closed);
+        ok(ok_handle, "CloseHandle(token_closed) failed: %lu.\n", GetLastError());
+        for (i = 0; i < ARRAY_SIZE(token_apis); ++i)
+        {
+            if (*token_apis[i].fn)
+                check_explicit_package_call(token_apis[i].name, "token_closed",
+                        *token_apis[i].fn, token_closed, ERROR_INVALID_HANDLE);
+        }
+    }
+
+    if (token_dup_only) CloseHandle(token_dup_only);
+    if (token_dup_imp) CloseHandle(token_dup_imp);
+    if (token_dup_primary) CloseHandle(token_dup_primary);
+    if (token_source) CloseHandle(token_source);
+    if (token_query) CloseHandle(token_query);
+    if (event) CloseHandle(event);
+    if (proc_sync) CloseHandle(proc_sync);
+    if (proc_query) CloseHandle(proc_query);
+    if (proc_limited) CloseHandle(proc_limited);
+}
+
 START_TEST(version)
 {
     char **argv;
@@ -1294,4 +1567,5 @@ START_TEST(version)
     test_SystemFirmwareTable();
     test_PackageIdFromFullName();
     test_PackageFullNameFromId();
+    test_package_identity_unpackaged();
 }

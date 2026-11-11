@@ -630,9 +630,9 @@
 # @ stub GetPackageApplicationResourcesContext
 # @ stub GetPackageContext
 @ stdcall GetPackageFamilyName(long ptr ptr)
-# @ stub GetPackageFamilyNameFromToken
+@ stdcall GetPackageFamilyNameFromToken(long ptr ptr)
 @ stdcall GetPackageFullName(long ptr ptr)
-# @ stub GetPackageFullNameFromToken
+@ stdcall GetPackageFullNameFromToken(long ptr ptr)
 # @ stub GetPackageId
 # @ stub GetPackageInfo
 # @ stub GetPackageInstallTime
