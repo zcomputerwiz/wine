@@ -141,6 +141,9 @@ static inline struct ace *set_ace( struct ace *ace, const struct sid *sid, unsig
 
 extern void security_set_thread_token( struct thread *thread, obj_handle_t handle );
 extern const struct sid *security_unix_uid_to_sid( uid_t uid );
+/* system tier T4-0: the server's user SID (Wine's fixed one, or the accounts map's with session 0) */
+extern void security_init_server_user(void);
+extern const struct sid *security_server_user_sid(void);
 extern int check_object_access( struct token *token, struct object *obj, unsigned int *access );
 
 /* elevation enforcement is on while an elevation helper is configured (registry.c) */

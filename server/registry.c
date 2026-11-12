@@ -1106,7 +1106,7 @@ static int key_in_user_tree( struct key *key )
     if (!own_name)
     {
         struct unicode_str path;
-        WCHAR *full = format_user_registry_path( &local_user_sid, &path );
+        WCHAR *full = format_user_registry_path( security_server_user_sid(), &path );
         own_len = path.len - 5 * sizeof(WCHAR);  /* skip "User\\" */
         own_name = memdup( full + 5, own_len );
         free( full );
@@ -1206,7 +1206,7 @@ static struct security_descriptor *key_get_sd( struct object *obj )
         {
             const struct default_ace aces[] =
             {
-                { &local_user_sid,    CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+                { security_server_user_sid(), CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
                 { &local_system_sid,  CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
                 { &builtin_admins_sid, CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
             };
@@ -3241,7 +3241,7 @@ static struct e1s_hive *e1s_load_hive( struct token *token, obj_handle_t context
                       "load-conflict" );
             return NULL;
         }
-    if (equal_sid( token_get_user_sid( token ), &local_user_sid ) || e1s_hive_count >= 8)
+    if (equal_sid( token_get_user_sid( token ), security_server_user_sid() ) || e1s_hive_count >= 8)
     { set_error( STATUS_ACCESS_DENIED ); return NULL; }
     if (!(m = calloc( 1, sizeof(*m) ))) { set_error( STATUS_NO_MEMORY ); return NULL; }
     m->account = account; m->storage.profile_fd = m->storage.hive_fd = m->storage.sid_lock_fd = -1;
@@ -3863,7 +3863,7 @@ void init_registry(void)
     /* load user.reg into HKEY_CURRENT_USER */
 
     /* FIXME: match default user in token.c. should get from process token instead */
-    current_user_path = format_user_registry_path( &local_user_sid, &current_user_str );
+    current_user_path = format_user_registry_path( security_server_user_sid(), &current_user_str );
     if (!current_user_path ||
         !(hkcu = create_key_recursive( root_key, current_user_str, current_time )))
         fatal_error( "could not create HKEY_CURRENT_USER registry key\n" );

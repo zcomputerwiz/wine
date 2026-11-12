@@ -40,6 +40,7 @@
 #include "thread.h"
 #include "request.h"
 #include "unicode.h"
+#include "security.h"
 #include "sysrun.h"
 #include "session0.h"
 
@@ -267,6 +268,7 @@ int main( int argc, char *argv[] )
     sock_init();
     open_master_socket();
     session0_init( session0_server );  /* before the registry is loaded */
+    security_init_server_user();       /* the user SID, which names HKEY_CURRENT_USER */
 
     if (debug_level) fprintf( stderr, "wineserver: starting (pid=%ld)\n", (long) getpid() );
     set_current_time();

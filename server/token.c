@@ -42,6 +42,7 @@
 #include "security.h"
 #include "sysrun.h"
 #include "accounts.h"
+#include "session0.h"
 #include "e1s_token.h"
 #include "wine/wex_token.h"
 #include "wine/wex_profile.h"
@@ -227,11 +228,35 @@ void security_set_thread_token( struct thread *thread, obj_handle_t handle )
     }
 }
 
+/* The SID of the server's user. Wine gives every user S-1-5-21-0-0-0-1000. With the system tier's session 0,
+ * which holds every user's registry, each user needs a SID of their own: a server whose programs use session 0
+ * takes its user's SID from the E1 accounts map (docs/SYSTEM_TIER_WORK_ORDERS.md, T4-0); the account bound to the
+ * legacy SID keeps S-1-5-21-0-0-0-1000. */
+static struct sid mapped_user_sid;
+static const struct sid *server_user_sid = &local_user_sid;
+
+void security_init_server_user(void)
+{
+    unsigned int subauth[5], i;
+
+    if (!session0_client || !accounts_own_sid( getuid(), subauth )) return;
+    mapped_user_sid.revision = SID_REVISION;
+    mapped_user_sid.sub_count = 5;
+    memcpy( mapped_user_sid.id_auth, local_user_sid.id_auth, sizeof(mapped_user_sid.id_auth) );
+    for (i = 0; i < 5; i++) mapped_user_sid.sub_auth[i] = subauth[i];
+    server_user_sid = &mapped_user_sid;
+}
+
+const struct sid *security_server_user_sid(void)
+{
+    return server_user_sid;
+}
+
 const struct sid *security_unix_uid_to_sid( uid_t uid )
 {
     /* very simple mapping: either the current user or not the current user */
     if (uid == getuid())
-        return &local_user_sid;
+        return server_user_sid;
     else
         return &anonymous_logon_sid;
 }
