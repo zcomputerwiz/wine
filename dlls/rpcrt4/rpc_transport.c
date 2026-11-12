@@ -595,11 +595,11 @@ static RPC_STATUS rpcrt4_conn_np_impersonate_client(RpcConnection *conn)
     {
         DWORD error = GetLastError();
         WARN("ImpersonateNamedPipeClient failed with error %lu\n", error);
-        switch (error)
-        {
-        case ERROR_CANNOT_IMPERSONATE:
+        if (error == ERROR_CANNOT_IMPERSONATE)
             return RPC_S_NO_CONTEXT_AVAILABLE;
-        }
+        if (error)
+            return error;
+        return RPC_S_CALL_FAILED;
     }
     return RPC_S_OK;
 }
