@@ -1269,6 +1269,7 @@ static void dump_get_registry_channel_request( const struct get_registry_channel
 static void dump_get_registry_channel_reply( const struct get_registry_channel_reply *req )
 {
     fprintf( stderr, " cookie=%04x", req->cookie );
+    fprintf( stderr, ", user_hive=%d", req->user_hive );
 }
 
 static void dump_set_registry_relay_request( const struct set_registry_relay_request *req )

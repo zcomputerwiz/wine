@@ -239,6 +239,12 @@ void security_init_server_user(void)
 {
     unsigned int subauth[5], i;
 
+    if (session0_server)
+    {
+        /* session 0 is the system: its own HKEY_CURRENT_USER is SYSTEM's, never a user's hive */
+        server_user_sid = &local_system_sid;
+        return;
+    }
     if (!session0_client || !accounts_own_sid( getuid(), subauth )) return;
     mapped_user_sid.revision = SID_REVISION;
     mapped_user_sid.sub_count = 5;

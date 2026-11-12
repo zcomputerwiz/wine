@@ -38,6 +38,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/file.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -246,10 +247,13 @@ struct save_branch_info
     bool            is_shared_machine;
     bool            sysrun;  /* machine hive of a system role server: fixed path, saved with the system group */
     struct e1s_hive *managed; /* S14: descriptor-only save, never filename routing */
+    void           *agent;    /* system tier T4a: the user's server that saves this hive (session 0) */
+    struct security_descriptor *owner_sd; /* T4a: default descriptor of the hive's keys, for its user */
+    struct key     *classes_alias;        /* T4a: \Registry\User\<SID>_Classes */
     struct list     tombstones;
 };
 
-#define MAX_SAVE_BRANCH_INFO 11 /* three startup branches and eight managed profiles */
+#define MAX_SAVE_BRANCH_INFO (11 + 64) /* three startup branches, eight managed profiles, 64 users' hives (session 0) */
 static int save_branch_count;
 static bool machine_hive_saved;  /* elevation enforced by the machine hive loaded at startup */
 static struct save_branch_info save_branch_info[MAX_SAVE_BRANCH_INFO];
@@ -1199,6 +1203,11 @@ static struct security_descriptor *key_get_sd( struct object *obj )
 
     if (obj->sd) return obj->sd;
     if (((struct key *)obj)->e1s_sd) return ((struct key *)obj)->e1s_sd;
+    if (session0_server)  /* system tier T4a: a user's hive held by session 0 belongs to that user */
+    {
+        struct save_branch_info *info = find_branch_info( (struct key *)obj );
+        if (info && info->owner_sd) return info->owner_sd;
+    }
 
     if (key_in_user_tree( (struct key *)obj ))
     {
@@ -4369,12 +4378,165 @@ done:
     return ret;
 }
 
+/* System tier T4a (docs/SYSTEM_TIER_WORK_ORDERS.md): session 0 holds a user's hive for the user's own server,
+ * which reads user.reg for it at the first program's registry call and writes what session 0 sends back, since
+ * session 0's account cannot write in the user's home. */
+
+static struct save_branch_info *session0_find_agent( void *agent )
+{
+    int i;
+
+    for (i = 0; i < save_branch_count; i++) if (save_branch_info[i].agent == agent) return &save_branch_info[i];
+    return NULL;
+}
+
+/* send the hive to its server when it changed; 1 when saved or unchanged */
+static int session0_save_user_hive( struct save_branch_info *info )
+{
+    FILE *f;
+    int fd, ret = 0;
+
+    if (!(info->key->flags & KEY_DIRTY)) return 1;
+    if ((fd = memfd_create( "wex-user-hive", MFD_CLOEXEC )) == -1) return 0;
+    if ((f = fdopen( dup( fd ), "w" )))
+    {
+        save_all_subkeys( info->key, f );
+        if (!fflush( f ) && !ferror( f ) && session0_send_hive( info->agent, fd ))
+        {
+            make_clean( info->key );
+            ret = 1;
+        }
+        fclose( f );
+    }
+    close( fd );
+    return ret;
+}
+
+/* load a user's hive (fd: the user's user.reg, or -1 for a new one) under \Registry\User\<sid> for agent */
+unsigned int session0_load_user_hive( const struct sid *sid, int fd, void *agent )
+{
+    static const WCHAR classes_link[] = {'\\','R','e','g','i','s','t','r','y','\\','U','s','e','r','\\'};
+    struct save_branch_info *info;
+    struct unicode_str path, alias_path, target;
+    struct key *key = NULL, *alias = NULL;
+    WCHAR *name = NULL, *alias_name = NULL, *link = NULL;
+    data_size_t len;
+    FILE *f = NULL;
+    unsigned int status;
+
+    const struct default_ace aces[] =
+    {
+        { sid,                 CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+        { &local_system_sid,   CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+        { &builtin_admins_sid, CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+    };
+
+    if (save_branch_count >= MAX_SAVE_BRANCH_INFO)
+    {
+        status = STATUS_INSUFFICIENT_RESOURCES;
+        goto done;
+    }
+    if (!(name = format_user_registry_path( sid, &path )))
+    {
+        status = STATUS_NO_MEMORY;
+        goto done;
+    }
+    clear_error();
+    if (!(key = create_key_recursive( root_key, path, current_time )))
+    {
+        status = get_error() ? get_error() : STATUS_NO_MEMORY;
+        goto done;
+    }
+    if (find_branch_info( key ) && find_branch_info( key )->key == key)
+    {
+        status = STATUS_OBJECT_NAME_COLLISION;  /* held for another server of the same user */
+        goto done;
+    }
+    if (fd != -1 && (f = fdopen( fd, "r" )))
+    {
+        fd = -1;
+        load_keys( key, "<user hive>", f, 0 );
+    }
+    clear_error();
+
+    /* \Registry\User\<sid>_Classes is a link to the hive's Software\Classes, as in the E1 profile hives */
+    alias_path.len = path.len + 8 * sizeof(WCHAR);
+    len = sizeof(classes_link) + (path.len - 5 * sizeof(WCHAR)) + sizeof(L"\\Software\\Classes") - sizeof(WCHAR);
+    if (!(alias_name = mem_alloc( alias_path.len )) || !(link = mem_alloc( len )))
+    {
+        status = STATUS_NO_MEMORY;
+        goto done;
+    }
+    memcpy( alias_name, path.str, path.len );
+    memcpy( (char *)alias_name + path.len, L"_Classes", 8 * sizeof(WCHAR) );
+    alias_path.str = alias_name;
+    memcpy( link, classes_link, sizeof(classes_link) );
+    memcpy( (char *)link + sizeof(classes_link), path.str + 5, path.len - 5 * sizeof(WCHAR) );
+    memcpy( (char *)link + sizeof(classes_link) + path.len - 5 * sizeof(WCHAR), L"\\Software\\Classes",
+            sizeof(L"\\Software\\Classes") - sizeof(WCHAR) );
+    target.str = link;
+    target.len = len;
+    if ((alias = create_key_recursive( root_key, alias_path, current_time )))
+    {
+        set_value( alias, symlink_str, REG_LINK, target.str, target.len );
+        alias->flags |= KEY_SYMLINK | KEY_VOLATILE;
+    }
+    clear_error();
+
+    info = &save_branch_info[save_branch_count++];
+    memset( info, 0, sizeof(*info) );
+    list_init( &info->tombstones );
+    info->key = (struct key *)grab_object( key );
+    info->filename = "<user hive>";  /* diagnostics only: the agent saves it */
+    info->agent = agent;
+    info->owner_sd = key_alloc_default_sd( aces, ARRAY_SIZE(aces) );
+    info->classes_alias = alias ? (struct key *)grab_object( alias ) : NULL;
+    make_clean( key );
+    status = STATUS_SUCCESS;
+
+done:
+    if (f) fclose( f );
+    if (fd != -1) close( fd );
+    if (key) release_object( key );
+    if (alias) release_object( alias );
+    free( name );
+    free( alias_name );
+    free( link );
+    return status;
+}
+
+/* the agent's server is leaving: save once more when asked, then drop the hive */
+void session0_unload_user_hive( void *agent, int save )
+{
+    struct save_branch_info *info = session0_find_agent( agent );
+    int i;
+
+    if (!info) return;
+    if (save) session0_save_user_hive( info );
+    i = info - save_branch_info;
+    if (info->classes_alias)
+    {
+        unlink_named_object( &info->classes_alias->obj );
+        release_object( info->classes_alias );
+    }
+    info->key->flags |= KEY_DELETED;
+    unlink_named_object( &info->key->obj );
+    release_object( info->key );
+    free( info->owner_sd );
+    if (i != --save_branch_count) save_branch_info[i] = save_branch_info[save_branch_count];
+    list_init( &save_branch_info[i].tombstones );  /* the lists of user hives and managed profiles are empty */
+    memset( &save_branch_info[save_branch_count], 0, sizeof(save_branch_info[0]) );
+}
+
 static int save_branch( struct save_branch_info *info )
 {
     if (info->managed) return e1s_save_hive( info->managed );
+    if (info->agent) return session0_save_user_hive( info );
     /* System tier: session 0 owns the machine hives. A server whose programs use session 0 keeps its copy of
      * them only for the per-session keys, which are never saved, and its own start-up reads. */
     if (session0_client && (info == &save_branch_info[0] || info == &save_branch_info[1])) return 1;
+    /* T4a: so is the user's hive once session 0 holds it; session 0 sends it back to be written */
+    if (session0_user_hive_remote() && info == &save_branch_info[2]) return 1;
     /* The system group is raised for the save only if elevation was enforced by the on-disk hive at startup (the
      * access checks then decide which writes exist); otherwise a machine hive keeps the stock rule: it is saved if
      * the real user can write it. The live value is not used: a user could set the helper in memory. */
@@ -4415,6 +4577,7 @@ void flush_registry(void)
 {
     int i;
 
+    session0_client_exit();  /* T4a: the last changes of the user's hive held by session 0 */
     if (fchdir( config_dir_fd ) == -1) return;
     for (i = 0; i < save_branch_count; i++)
     {

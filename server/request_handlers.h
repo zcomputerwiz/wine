@@ -1322,6 +1322,7 @@ C_ASSERT( offsetof(struct rename_key_request, hkey) == 12 );
 C_ASSERT( sizeof(struct rename_key_request) == 16 );
 C_ASSERT( sizeof(struct get_registry_channel_request) == 16 );
 C_ASSERT( offsetof(struct get_registry_channel_reply, cookie) == 8 );
+C_ASSERT( offsetof(struct get_registry_channel_reply, user_hive) == 12 );
 C_ASSERT( sizeof(struct get_registry_channel_reply) == 16 );
 C_ASSERT( offsetof(struct set_registry_relay_request, fd) == 12 );
 C_ASSERT( sizeof(struct set_registry_relay_request) == 16 );

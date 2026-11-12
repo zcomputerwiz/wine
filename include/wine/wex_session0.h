@@ -38,13 +38,30 @@ struct wex_session0_request
     unsigned int magic;
     unsigned int version;
     unsigned int desc_size;   /* size of the token description that follows */
-    unsigned int reserved;
+    unsigned int type;        /* WEX_SESSION0_* below */
 };
+
+/* Message types. CHANNEL: the program's registry channel in SCM_RIGHTS; one message, then the link closes.
+ * USER_HIVE (T4a): a user's server hands session 0 its user.reg (SCM_RIGHTS; none for a new hive) to hold
+ * under \Registry\User\<SID of the described token>; the link stays open: session 0 sends HIVE_SAVE messages
+ * (the whole hive in a memory file, SCM_RIGHTS) for that server to write, and the server sends HIVE_UNLOAD at
+ * its exit, answered by a last HIVE_SAVE when there are changes and a reply. */
+#define WEX_SESSION0_CHANNEL      0
+#define WEX_SESSION0_USER_HIVE    1
+#define WEX_SESSION0_HIVE_SAVE    2
+#define WEX_SESSION0_HIVE_UNLOAD  3
 
 struct wex_session0_reply
 {
     unsigned int magic;
     unsigned int status;      /* NTSTATUS */
+};
+
+/* session 0 to a user's server on a hive link */
+struct wex_session0_hive_save
+{
+    unsigned int magic;
+    unsigned int type;        /* WEX_SESSION0_HIVE_SAVE */
 };
 
 /* Keys that stay in each session's own server: per-session state that differs between sessions (devices,

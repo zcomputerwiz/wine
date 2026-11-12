@@ -335,6 +335,23 @@ static unsigned int regsrv_match( const WCHAR *path, unsigned int count, const c
     return (count == len || path[len] == '\\') ? len : 0;
 }
 
+/* the path starts with an ASCII prefix, without regard to case */
+static BOOL regsrv_match_start( const WCHAR *path, unsigned int count, const char *prefix )
+{
+    unsigned int i, len = strlen( prefix );
+
+    if (count < len) return FALSE;
+    for (i = 0; i < len; i++)
+    {
+        WCHAR ch = path[i];
+        unsigned char p = prefix[i];
+        if (ch >= 'A' && ch <= 'Z') ch += 'a' - 'A';
+        if (p >= 'A' && p <= 'Z') p += 'a' - 'A';
+        if (ch != p) return FALSE;
+    }
+    return TRUE;
+}
+
 static BOOL regsrv_in_list( const WCHAR *rest, unsigned int count, const char * const *list, unsigned int n )
 {
     unsigned int i;
@@ -356,6 +373,48 @@ static BOOL regsrv_machine_path( const WCHAR *path, USHORT len )
         return n == count || !regsrv_in_list( path + n + 1, count - n - 1, regsrv_session_default_keys,
                                               ARRAY_SIZE(regsrv_session_default_keys) );
     return FALSE;
+}
+
+/* T4a: when session 0 also holds this process's user hive, the absolute paths of \Registry\User\<SID> and
+ * <SID>_Classes for the process token's user go there too (ASCII, set at each new channel) */
+static int regsrv_user_hive;
+static char regsrv_user_prefix[160];
+
+static void regsrv_set_user_prefix(void)
+{
+    DWORD_PTR sid_data[(sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE) / sizeof(DWORD_PTR)];
+    DWORD i, len = sizeof(sid_data);
+    SID *sid;
+    int n;
+
+    regsrv_user_prefix[0] = 0;
+    if (NtQueryInformationToken( (HANDLE)~(ULONG_PTR)3 /* the process token */, TokenUser, sid_data, len, &len ))
+        return;
+    sid = ((TOKEN_USER *)sid_data)->User.Sid;
+    n = snprintf( regsrv_user_prefix, sizeof(regsrv_user_prefix), "\\Registry\\User\\S-%u-%u", sid->Revision,
+                  MAKELONG( MAKEWORD( sid->IdentifierAuthority.Value[5], sid->IdentifierAuthority.Value[4] ),
+                            MAKEWORD( sid->IdentifierAuthority.Value[3], sid->IdentifierAuthority.Value[2] )));
+    for (i = 0; i < sid->SubAuthorityCount && n > 0 && n < (int)sizeof(regsrv_user_prefix); i++)
+        n += snprintf( regsrv_user_prefix + n, sizeof(regsrv_user_prefix) - n, "-%u", sid->SubAuthority[i] );
+    if (n <= 0 || n >= (int)sizeof(regsrv_user_prefix) - 9) regsrv_user_prefix[0] = 0;
+}
+
+/* a path below \Registry\User\S-: perhaps this process's user hive */
+static BOOL regsrv_user_candidate( const WCHAR *path, USHORT len )
+{
+    return path && regsrv_match_start( path, len / sizeof(WCHAR), "\\Registry\\User\\S-" );
+}
+
+/* this process's user hive (or its _Classes), held by session 0 */
+static BOOL regsrv_user_path( const WCHAR *path, USHORT len )
+{
+    char classes[176];
+    unsigned int count = len / sizeof(WCHAR);
+
+    if (!regsrv_user_hive || !regsrv_user_prefix[0] || !path) return FALSE;
+    if (regsrv_match( path, count, regsrv_user_prefix )) return TRUE;
+    snprintf( classes, sizeof(classes), "%s_Classes", regsrv_user_prefix );
+    return regsrv_match( path, count, classes ) != 0;
 }
 
 static void regsrv_lock( sigset_t *old )
@@ -485,6 +544,7 @@ static BOOL regsrv_send_fd( int sock, int fd )
 static BOOL regsrv_connect(void)
 {
     obj_handle_t cookie = 0, handle = 0, version = 0;
+    int user_hive = 0;
     int sock = -1, request = -1, reply_pipe[2] = { -1, -1 }, wait_pipe[2] = { -1, -1 };
     unsigned int status;
     WORD machines[8];
@@ -495,6 +555,7 @@ static BOOL regsrv_connect(void)
     {
         status = wine_server_call( req );
         cookie = reply->cookie;
+        user_hive = reply->user_hive;
     }
     SERVER_END_REQ;
     if (!status) sock = wine_server_receive_fd( &handle );
@@ -506,6 +567,7 @@ static BOOL regsrv_connect(void)
         return FALSE;
     }
     regsrv_state = 1;  /* from now on the machine trees are session 0's, reachable or not */
+    if ((regsrv_user_hive = !status && user_hive)) regsrv_set_user_prefix();
     if (status || sock == -1 || handle != cookie) goto error;
 
     if ((request = regsrv_receive_fd( sock, &version )) == -1 || version != SERVER_PROTOCOL_VERSION) goto error;
@@ -603,14 +665,16 @@ BOOL regsrv_route_path( const WCHAR *path, USHORT len )
 {
     sigset_t sigset;
 
-    if (!regsrv_machine_path( path, len ) || regsrv_state < 0) return FALSE;
+    BOOL machine = regsrv_machine_path( path, len );
+
+    if ((!machine && !regsrv_user_candidate( path, len )) || regsrv_state < 0) return FALSE;
     if (!regsrv_state)
     {
         regsrv_lock( &sigset );
         if (!regsrv_state) regsrv_connect();
         regsrv_unlock( &sigset );
     }
-    return regsrv_state > 0;
+    return regsrv_state > 0 && (machine || regsrv_user_path( path, len ));
 }
 
 /* the absolute path of a name relative to a session 0 key; the caller frees path->Buffer */

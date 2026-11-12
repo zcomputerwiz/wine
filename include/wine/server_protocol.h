@@ -2888,7 +2888,7 @@ struct get_registry_channel_reply
 {
     struct reply_header __header;
     obj_handle_t cookie;
-    char __pad_12[4];
+    int          user_hive;
 };
 
 
@@ -7595,6 +7595,6 @@ union generic_reply
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 982
+#define SERVER_PROTOCOL_VERSION 983
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

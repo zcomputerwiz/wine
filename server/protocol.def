@@ -2257,6 +2257,7 @@ struct process_info
 @REQ(get_registry_channel)
 @REPLY
     obj_handle_t cookie;       /* the channel fd is in flight with this value */
+    int          user_hive;    /* T4a: session 0 also holds the user's hive (HKEY_USERS of its SID) */
 @END
 
 

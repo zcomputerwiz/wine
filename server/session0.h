@@ -42,4 +42,14 @@ extern void session0_relay_notify( struct process *process, unsigned int cookie 
 /* a user's server: drop a process's relay, setting its pending events */
 extern void session0_relay_release( struct process *process );
 
+/* T4a, session 0 (registry.c): hold a user's hive for its server (agent), drop it; send it to the agent
+ * (session0.c) */
+struct sid;
+extern unsigned int session0_load_user_hive( const struct sid *sid, int fd, void *agent );
+extern void session0_unload_user_hive( void *agent, int save );
+extern int session0_send_hive( void *agent, int fd );
+/* T4a, a user's server: its user hive is held by session 0 (its own copy is not saved); flush it at exit */
+extern int session0_user_hive_remote(void);
+extern void session0_client_exit(void);
+
 #endif /* __WINE_SERVER_SESSION0_H */

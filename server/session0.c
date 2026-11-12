@@ -63,6 +63,7 @@
 #include "security.h"
 #include "sysrun.h"
 #include "thread.h"
+#include "e1s_token.h"
 #include "session0.h"
 #include "wine/wex_session0.h"
 
@@ -81,6 +82,7 @@ struct session0_socket
     struct object obj;
     struct fd    *fd;
     int           trusted;              /* links: the peer may describe tokens */
+    int           hive;                 /* T4a: the link is the agent of a user's hive */
 };
 
 static void session0_socket_dump( struct object *obj, int verbose );
@@ -183,6 +185,7 @@ static void init_listener(void)
 
     if (!(listener = alloc_object( &session0_socket_ops ))) fatal_error( "--session0: no memory\n" );
     listener->trusted = 0;
+    listener->hive = 0;
     if (!(listener->fd = create_anonymous_fd( &session0_listen_fd_ops, fd, &listener->obj, 0 )))
         fatal_error( "--session0: no listener object\n" );
     set_fd_events( listener->fd, POLLIN );  /* the listener keeps its reference for the life of the server */
@@ -252,6 +255,7 @@ static void session0_listen_event( struct fd *fd, int event )
         close( client );
         return;
     }
+    link->hive = 0;
     if (session0_dev) link->trusted = cred.uid == getuid();
     else link->trusted = cred.uid != getuid() && peer_is_launched_server( cred.pid, cred.uid );
     if (!(link->fd = create_anonymous_fd( &session0_link_fd_ops, client, &link->obj, 0 )))
@@ -326,12 +330,47 @@ static void session0_link_event( struct fd *fd, int event )
     if (extra != -1) close( extra );
 
     hdr = buf;
-    if (n < (ssize_t)sizeof(*hdr) || (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) || channel == -1 || extra != -1 ||
+    if (link->hive)
+    {
+        /* a hive link: HIVE_UNLOAD at the server's exit, or the server is gone (end of file) */
+        int unload = n >= (ssize_t)sizeof(*hdr) && hdr->magic == WEX_SESSION0_MAGIC &&
+                     hdr->type == WEX_SESSION0_HIVE_UNLOAD;
+        if (channel != -1) close( channel );
+        free( buf );
+        if (n > 0 && !unload) return;  /* nothing else is expected: ignore it */
+        session0_unload_user_hive( link, unload );
+        reply.status = STATUS_SUCCESS;
+        if (unload) send( get_unix_fd( fd ), &reply, sizeof(reply), MSG_NOSIGNAL | MSG_DONTWAIT );
+        release_object( link );
+        return;
+    }
+    if (n < (ssize_t)sizeof(*hdr) || (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) || extra != -1 ||
         hdr->magic != WEX_SESSION0_MAGIC || hdr->version != WEX_SESSION0_VERSION ||
-        hdr->desc_size != n - sizeof(*hdr))
+        hdr->desc_size != n - sizeof(*hdr) ||
+        (hdr->type != WEX_SESSION0_CHANNEL && hdr->type != WEX_SESSION0_USER_HIVE) ||
+        (hdr->type == WEX_SESSION0_CHANNEL && channel == -1))
         reply.status = STATUS_INVALID_PARAMETER;
     else if (!link->trusted)
         reply.status = STATUS_ACCESS_DENIED;
+    else if (hdr->type == WEX_SESSION0_USER_HIVE)
+    {
+        /* T4a: hold the user's hive (channel is the user.reg descriptor, or none) for this link's server */
+        struct token *token = token_create_described( hdr + 1, hdr->desc_size );
+
+        if (!token) reply.status = STATUS_INVALID_PARAMETER;
+        else
+        {
+            reply.status = session0_load_user_hive( token_get_user_sid( token ), channel, link );
+            channel = -1;
+            release_object( token );
+        }
+        if (channel != -1) close( channel );
+        free( buf );
+        send( get_unix_fd( fd ), &reply, sizeof(reply), MSG_NOSIGNAL | MSG_DONTWAIT );
+        if (reply.status) release_object( link );
+        else link->hive = 1;  /* the link stays: it is the hive's agent */
+        return;
+    }
     else
     {
         fcntl( channel, F_SETFL, O_NONBLOCK );
@@ -342,6 +381,31 @@ static void session0_link_event( struct fd *fd, int event )
     free( buf );
     send( get_unix_fd( fd ), &reply, sizeof(reply), MSG_NOSIGNAL | MSG_DONTWAIT );
     release_object( link );  /* one message per link */
+}
+
+/* T4a, session 0: send a user's hive (a memory file) to the server that holds the link */
+int session0_send_hive( void *agent, int fd )
+{
+    struct session0_socket *link = agent;
+    struct wex_session0_hive_save save = { WEX_SESSION0_MAGIC, WEX_SESSION0_HIVE_SAVE };
+    char cmsg_buffer[CMSG_SPACE( sizeof(int) )];
+    struct msghdr msg;
+    struct cmsghdr *cmsg;
+    struct iovec vec;
+
+    memset( &msg, 0, sizeof(msg) );
+    vec.iov_base = &save;
+    vec.iov_len = sizeof(save);
+    msg.msg_iov = &vec;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsg_buffer;
+    msg.msg_controllen = sizeof(cmsg_buffer);
+    cmsg = CMSG_FIRSTHDR( &msg );
+    cmsg->cmsg_len = CMSG_LEN( sizeof(int) );
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    memcpy( CMSG_DATA( cmsg ), &fd, sizeof(int) );
+    return sendmsg( get_unix_fd( link->fd ), &msg, MSG_NOSIGNAL | MSG_DONTWAIT ) == sizeof(save);
 }
 
 int session0_request_allowed( enum request req )
@@ -551,6 +615,183 @@ DECL_HANDLER(relay_registry_notification)
     reply->cookie = entry->cookie;
 }
 
+/* T4a, a user's server: the link that holds this user's hive in session 0. Session 0 sends the hive back to be
+ * written to user.reg, since its account cannot write in the user's home. */
+static struct session0_socket *hive_link;
+
+static void hive_link_event( struct fd *fd, int event );
+static const struct fd_ops hive_link_fd_ops = { .poll_event = hive_link_event };
+
+int session0_user_hive_remote(void)
+{
+    return hive_link != NULL;
+}
+
+/* write a hive that session 0 sent (a memory file) to user.reg, through a temporary file and a rename */
+static void write_user_hive( int src )
+{
+    static const char tmp[] = "user.reg.wex-session0";
+    char buf[65536];
+    ssize_t n = 0;
+    int dst, ok = 1;
+
+    if (lseek( src, 0, SEEK_SET )) return;
+    if ((dst = openat( config_dir_fd, tmp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600 )) == -1)
+        return;
+    while (ok && (n = read( src, buf, sizeof(buf) )) > 0)
+        if (write( dst, buf, n ) != n) ok = 0;
+    if (n < 0 || fsync( dst )) ok = 0;
+    close( dst );
+    if (ok && !renameat( config_dir_fd, tmp, config_dir_fd, "user.reg" )) return;
+    unlinkat( config_dir_fd, tmp, 0 );
+}
+
+/* one message on the hive link: a save, which is written (0), or the reply to HIVE_UNLOAD (1); -1 when gone */
+static int hive_link_receive( int sock )
+{
+    struct wex_session0_reply reply;  /* a save has the same size and comes with a descriptor */
+    char cmsg_buffer[CMSG_SPACE( sizeof(int) )];
+    struct msghdr msg;
+    struct cmsghdr *cmsg;
+    struct iovec vec;
+    int fd = -1;
+    ssize_t n;
+
+    memset( &msg, 0, sizeof(msg) );
+    vec.iov_base = &reply;
+    vec.iov_len = sizeof(reply);
+    msg.msg_iov = &vec;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsg_buffer;
+    msg.msg_controllen = sizeof(cmsg_buffer);
+    if ((n = recvmsg( sock, &msg, MSG_CMSG_CLOEXEC )) <= 0) return (n < 0 && errno == EAGAIN) ? 0 : -1;
+    for (cmsg = CMSG_FIRSTHDR( &msg ); cmsg; cmsg = CMSG_NXTHDR( &msg, cmsg ))
+        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) memcpy( &fd, CMSG_DATA( cmsg ), sizeof(fd) );
+    if (n != sizeof(reply) || reply.magic != WEX_SESSION0_MAGIC)
+    {
+        if (fd != -1) close( fd );
+        return 0;
+    }
+    if (fd != -1)
+    {
+        if (reply.status == WEX_SESSION0_HIVE_SAVE) write_user_hive( fd );
+        close( fd );
+        return 0;
+    }
+    return 1;
+}
+
+static void hive_link_event( struct fd *fd, int event )
+{
+    if ((event & POLLIN) && hive_link_receive( get_unix_fd( fd ) ) >= 0 && !(event & (POLLHUP | POLLERR))) return;
+    if (event & (POLLHUP | POLLERR) || (event & POLLIN))
+    {
+        /* session 0 is gone: it has dropped the hive; the next channel request loads it again */
+        set_fd_events( fd, -1 );
+        if (hive_link)
+        {
+            struct session0_socket *link = hive_link;
+            hive_link = NULL;
+            release_object( link );
+        }
+    }
+}
+
+/* hold this user's hive in session 0, for a program of the server's own user; 1 when held */
+static int ensure_user_hive( struct token *token )
+{
+    struct wex_session0_request hdr;
+    struct wex_session0_reply answer;
+    struct sockaddr_un addr;
+    char cmsg_buffer[CMSG_SPACE( sizeof(int) )];
+    struct msghdr msg;
+    struct cmsghdr *cmsg;
+    struct iovec vec[2];
+    struct pollfd pfd;
+    struct session0_socket *link;
+    data_size_t size;
+    void *desc = NULL;
+    int sock = -1, hive = -1, ok = 0;
+
+    if (hive_link) return 1;
+    if (!equal_sid( token_get_user_sid( token ), security_server_user_sid() )) return 0;  /* SYSTEM, services */
+    size = token_describe( token, NULL, 0 );
+    if (size > WEX_SESSION0_MAX_MSG - sizeof(hdr) || !(desc = malloc( size ))) return 0;
+    token_describe( token, desc, size );
+    hive = openat( config_dir_fd, "user.reg", O_RDONLY | O_NOFOLLOW | O_CLOEXEC );  /* none: a new hive */
+
+    memset( &addr, 0, sizeof(addr) );
+    addr.sun_family = AF_UNIX;
+    strcpy( addr.sun_path, session0_path );
+    if ((sock = socket( AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0 )) == -1 ||
+        connect( sock, (struct sockaddr *)&addr, sizeof(addr) ) == -1) goto done;
+    hdr.magic = WEX_SESSION0_MAGIC;
+    hdr.version = WEX_SESSION0_VERSION;
+    hdr.desc_size = size;
+    hdr.type = WEX_SESSION0_USER_HIVE;
+    vec[0].iov_base = &hdr;
+    vec[0].iov_len = sizeof(hdr);
+    vec[1].iov_base = desc;
+    vec[1].iov_len = size;
+    memset( &msg, 0, sizeof(msg) );
+    msg.msg_iov = vec;
+    msg.msg_iovlen = 2;
+    if (hive != -1)
+    {
+        msg.msg_control = cmsg_buffer;
+        msg.msg_controllen = sizeof(cmsg_buffer);
+        cmsg = CMSG_FIRSTHDR( &msg );
+        cmsg->cmsg_len = CMSG_LEN( sizeof(int) );
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_RIGHTS;
+        memcpy( CMSG_DATA( cmsg ), &hive, sizeof(int) );
+    }
+    if (sendmsg( sock, &msg, MSG_NOSIGNAL ) != (ssize_t)(sizeof(hdr) + size)) goto done;
+    pfd.fd = sock;
+    pfd.events = POLLIN;
+    if (poll( &pfd, 1, 2000 ) != 1 || recv( sock, &answer, sizeof(answer), 0 ) != sizeof(answer) ||
+        answer.magic != WEX_SESSION0_MAGIC || answer.status) goto done;
+    if (!(link = alloc_object( &session0_socket_ops ))) goto done;
+    link->trusted = 1;
+    link->hive = 1;
+    if (!(link->fd = create_anonymous_fd( &hive_link_fd_ops, sock, &link->obj, 0 )))
+    {
+        sock = -1;  /* closed with the fd object */
+        release_object( link );
+        goto done;
+    }
+    sock = -1;
+    hive_link = link;
+    set_fd_events( link->fd, POLLIN );
+    ok = 1;
+
+done:
+    if (sock != -1) close( sock );
+    if (hive != -1) close( hive );
+    free( desc );
+    return ok;
+}
+
+/* at the server's exit: session 0 sends the last changes and drops the hive */
+void session0_client_exit(void)
+{
+    struct wex_session0_request hdr = { WEX_SESSION0_MAGIC, WEX_SESSION0_VERSION, 0, WEX_SESSION0_HIVE_UNLOAD };
+    struct session0_socket *link = hive_link;
+    struct pollfd pfd;
+    int i, sock;
+
+    if (!link) return;
+    hive_link = NULL;
+    sock = get_unix_fd( link->fd );
+    if (send( sock, &hdr, sizeof(hdr), MSG_NOSIGNAL ) == sizeof(hdr))
+    {
+        pfd.fd = sock;
+        pfd.events = POLLIN;
+        for (i = 0; i < 8 && poll( &pfd, 1, 2000 ) == 1; i++) if (hive_link_receive( sock )) break;
+    }
+    release_object( link );
+}
+
 /* a registry channel to session 0 for the calling program, with its primary token */
 DECL_HANDLER(get_registry_channel)
 {
@@ -571,6 +812,8 @@ DECL_HANDLER(get_registry_channel)
         set_error( STATUS_NOT_SUPPORTED );
         return;
     }
+    /* T4a: the user's hive goes to session 0 with the first program of the server's user */
+    reply->user_hive = ensure_user_hive( current->process->token );
     size = token_describe( current->process->token, NULL, 0 );
     if (size > WEX_SESSION0_MAX_MSG - sizeof(hdr) || !(desc = mem_alloc( size ))) return;
     token_describe( current->process->token, desc, size );
@@ -593,7 +836,7 @@ DECL_HANDLER(get_registry_channel)
     hdr.magic = WEX_SESSION0_MAGIC;
     hdr.version = WEX_SESSION0_VERSION;
     hdr.desc_size = size;
-    hdr.reserved = 0;
+    hdr.type = WEX_SESSION0_CHANNEL;
     vec[0].iov_base = &hdr;
     vec[0].iov_len = sizeof(hdr);
     vec[1].iov_base = desc;
