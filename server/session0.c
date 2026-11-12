@@ -472,6 +472,7 @@ void session0_init( int server_mode )
     if (server_mode)
     {
         session0_server = 1;
+        default_session_id = 0;  /* T5.3: session 0's own programs (its services) are in session 0, as on Windows */
         init_listener();
         return;
     }
