@@ -852,6 +852,14 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
         process->token = token ? (struct token *)grab_object( token ) : NULL;
         process->affinity = ~0;
     }
+    else if (!parent && session0_server)
+    {
+        /* WineExplorer T5.4: session 0's own programs are its services and the system's tools, as on Windows: they
+         * run as LocalSystem. Only session 0's account starts programs here */
+        process->handles = alloc_handle_table( process, 0 );
+        process->token = token_create_service( SERVICE_ACCOUNT_SYSTEM, default_session_id );
+        process->affinity = ~0;
+    }
     else if (!parent)
     {
         process->handles = alloc_handle_table( process, 0 );

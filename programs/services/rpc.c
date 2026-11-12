@@ -36,6 +36,7 @@
 
 #include "services.h"
 #include "svcctl.h"
+#include "forward.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(service);
 
@@ -148,7 +149,8 @@ typedef enum
     SC_HTYPE_MANAGER,
     SC_HTYPE_SERVICE,
     SC_HTYPE_LOCK,
-    SC_HTYPE_NOTIFY
+    SC_HTYPE_NOTIFY,
+    SC_HTYPE_REMOTE     /* WineExplorer T5.4: a service of session 0's service manager */
 } SC_HANDLE_TYPE;
 
 struct sc_handle
@@ -161,7 +163,65 @@ struct sc_manager_handle       /* service control manager handle */
 {
     struct sc_handle hdr;
     struct scmdatabase *db;
+    DWORD requested;           /* T5.4: the access asked for, asked again of session 0 */
+    SC_RPC_HANDLE remote;      /* T5.4: session 0's manager handle, opened at the first call that needs it */
+    DWORD remote_error;
 };
+
+/* WineExplorer system tier T5.4: in a session whose server reaches session 0 (forward_mode), the services that
+ * are not the session's own (is_session_service) are session 0's: their calls go there (forward.c) on handles of
+ * this type */
+struct sc_remote_handle
+{
+    struct sc_handle hdr;
+    SC_RPC_HANDLE remote;
+};
+
+BOOL forward_mode;
+static CRITICAL_SECTION remote_cs;
+static CRITICAL_SECTION_DEBUG remote_cs_debug =
+{
+    0, 0, &remote_cs,
+    { &remote_cs_debug.ProcessLocksList, &remote_cs_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": remote_cs") }
+};
+static CRITICAL_SECTION remote_cs = { &remote_cs_debug, -1, 0, 0, 0, 0 };
+
+static SC_RPC_HANDLE remote_of(SC_RPC_HANDLE handle)
+{
+    struct sc_handle *hdr = handle;
+    return hdr && hdr->type == SC_HTYPE_REMOTE ? ((struct sc_remote_handle *)hdr)->remote : NULL;
+}
+
+/* session 0's manager handle for a manager handle of this session; made as the caller of this call, the first time */
+static DWORD manager_remote(struct sc_manager_handle *manager, SC_RPC_HANDLE *remote)
+{
+    DWORD err;
+
+    EnterCriticalSection(&remote_cs);
+    if (!manager->remote && !manager->remote_error)
+        manager->remote_error = forward_open_manager(manager->requested, &manager->remote);
+    *remote = manager->remote;
+    err = manager->remote ? ERROR_SUCCESS : manager->remote_error;
+    LeaveCriticalSection(&remote_cs);
+    return err;
+}
+
+static DWORD wrap_remote(SC_RPC_HANDLE remote, SC_RPC_HANDLE *handle)
+{
+    struct sc_remote_handle *wrapped;
+
+    if (!(wrapped = malloc(sizeof(*wrapped))))
+    {
+        forward_close(&remote);
+        return ERROR_NOT_ENOUGH_SERVER_MEMORY;
+    }
+    wrapped->hdr.type = SC_HTYPE_REMOTE;
+    wrapped->hdr.access = 0;  /* session 0 checks the access */
+    wrapped->remote = remote;
+    *handle = &wrapped->hdr;
+    return ERROR_SUCCESS;
+}
 
 struct sc_notify_handle
 {
@@ -377,7 +437,7 @@ DWORD __cdecl svcctl_OpenSCManagerW(
     SC_RPC_HANDLE *handle)
 {
     struct sc_manager_handle *manager;
-    DWORD err;
+    DWORD err, requested;
 
     WINE_TRACE("(%s, %s, %lx)\n", wine_dbgstr_w(MachineName), wine_dbgstr_w(DatabaseName), dwAccessMask);
 
@@ -389,6 +449,7 @@ DWORD __cdecl svcctl_OpenSCManagerW(
             return ERROR_INVALID_NAME;
     }
 
+    requested = dwAccessMask;
     if (dwAccessMask && (err = check_client_access(NULL, FALSE, &g_scm_generic, &dwAccessMask)))
         return err;
 
@@ -396,6 +457,9 @@ DWORD __cdecl svcctl_OpenSCManagerW(
         return ERROR_NOT_ENOUGH_SERVER_MEMORY;
 
     manager->hdr.type = SC_HTYPE_MANAGER;
+    manager->requested = requested;
+    manager->remote = NULL;
+    manager->remote_error = forward_mode ? ERROR_SUCCESS : ERROR_SERVICE_DOES_NOT_EXIST;
 
     if (dwAccessMask & MAXIMUM_ALLOWED)
         dwAccessMask |= SC_MANAGER_ALL_ACCESS;
@@ -415,7 +479,15 @@ static void SC_RPC_HANDLE_destroy(SC_RPC_HANDLE handle)
         case SC_HTYPE_MANAGER:
         {
             struct sc_manager_handle *manager = (struct sc_manager_handle *)hdr;
+            forward_close(&manager->remote);
             free(manager);
+            break;
+        }
+        case SC_HTYPE_REMOTE:
+        {
+            struct sc_remote_handle *remote = (struct sc_remote_handle *)hdr;
+            forward_close(&remote->remote);
+            free(remote);
             break;
         }
         case SC_HTYPE_SERVICE:
@@ -463,6 +535,14 @@ DWORD __cdecl svcctl_GetServiceDisplayNameW(
     scmdatabase_lock(manager->db);
 
     entry = scmdatabase_find_service(manager->db, lpServiceName);
+    if (forward_mode && (!entry || !is_session_service(entry->name, entry->config.dwServiceType)))
+    {
+        SC_RPC_HANDLE remote;
+
+        scmdatabase_unlock(manager->db);
+        if ((err = manager_remote(manager, &remote))) return err;
+        return forward_GetServiceDisplayNameW(remote, lpServiceName, lpBuffer, cchBufSize);
+    }
     if (entry != NULL)
     {
         LPCWSTR name;
@@ -507,6 +587,14 @@ DWORD __cdecl svcctl_GetServiceKeyNameW(
     scmdatabase_lock(manager->db);
 
     entry = scmdatabase_find_service_by_displayname(manager->db, lpServiceDisplayName);
+    if (forward_mode && (!entry || !is_session_service(entry->name, entry->config.dwServiceType)))
+    {
+        SC_RPC_HANDLE remote;
+
+        scmdatabase_unlock(manager->db);
+        if ((err = manager_remote(manager, &remote))) return err;
+        return forward_GetServiceKeyNameW(remote, lpServiceDisplayName, lpBuffer, cchBufSize);
+    }
     if (entry != NULL)
     {
         int len;
@@ -580,6 +668,17 @@ DWORD __cdecl svcctl_OpenServiceW(
     entry = grab_service(scmdatabase_find_service(manager->db, lpServiceName));
     scmdatabase_unlock(manager->db);
 
+    /* T5.4: a service that is not the session's own, or one this session does not know (made since it started),
+     * is session 0's */
+    if (forward_mode && (!entry || !is_session_service(entry->name, entry->config.dwServiceType)))
+    {
+        SC_RPC_HANDLE remote_manager, remote_service = NULL;
+
+        if (entry) release_service(entry);
+        if ((err = manager_remote(manager, &remote_manager))) return err;
+        if ((err = forward_OpenServiceW(remote_manager, lpServiceName, dwDesiredAccess, &remote_service))) return err;
+        return wrap_remote(remote_service, phService);
+    }
     if (entry == NULL)
         return ERROR_SERVICE_DOES_NOT_EXIST;
 
@@ -698,6 +797,21 @@ static DWORD create_serviceW(
     if ((err = validate_scm_handle(hSCManager, SC_MANAGER_CREATE_SERVICE, &manager)) != ERROR_SUCCESS)
         return err;
 
+    /* T5.4: a new service that is not a session's own is made in session 0, which checks the caller again */
+    if (forward_mode && lpServiceName && !is_session_service(lpServiceName, dwServiceType))
+    {
+        SC_RPC_HANDLE remote_manager, remote_service = NULL;
+
+        if ((err = manager_remote(manager, &remote_manager))) return err;
+        if ((err = forward_CreateServiceW(remote_manager, lpServiceName, lpDisplayName, dwDesiredAccess,
+                                          dwServiceType, dwStartType, dwErrorControl, lpBinaryPathName,
+                                          lpLoadOrderGroup, lpdwTagId, lpDependencies, dwDependenciesSize,
+                                          lpServiceStartName, lpPassword, dwPasswordSize, is_wow64,
+                                          &remote_service)))
+            return err;
+        return wrap_remote(remote_service, phService);
+    }
+
     if (dwDesiredAccess && (err = check_client_access(NULL, TRUE, &g_svc_generic, &dwDesiredAccess)))
         return err;
 
@@ -803,6 +917,7 @@ DWORD __cdecl svcctl_DeleteService(
     struct sc_service_handle *service;
     DWORD err;
 
+    if (remote_of(hService)) return forward_DeleteService(remote_of(hService));
     if ((err = validate_service_handle(hService, DELETE, &service)) != ERROR_SUCCESS)
         return err;
 
@@ -827,6 +942,7 @@ DWORD __cdecl svcctl_QueryServiceConfigW(
     struct sc_service_handle *service;
     DWORD err;
 
+    if (remote_of(hService)) return forward_QueryServiceConfigW(remote_of(hService), config, buf_size, needed_size);
     WINE_TRACE("(%p)\n", config);
 
     if ((err = validate_service_handle(hService, SERVICE_QUERY_CONFIG, &service)) != 0)
@@ -866,6 +982,11 @@ DWORD __cdecl svcctl_ChangeServiceConfigW(
     struct sc_service_handle *service;
     DWORD err;
 
+    if (remote_of(hService))
+        return forward_ChangeServiceConfigW(remote_of(hService), dwServiceType, dwStartType, dwErrorControl,
+                                            lpBinaryPathName, lpLoadOrderGroup, lpdwTagId, lpDependencies,
+                                            dwDependenciesSize, lpServiceStartName, lpPassword, dwPasswordSize,
+                                            lpDisplayName);
     WINE_TRACE("\n");
 
     if ((err = validate_service_handle(hService, SERVICE_CHANGE_CONFIG, &service)) != 0)
@@ -1066,6 +1187,7 @@ DWORD __cdecl svcctl_ChangeServiceConfig2W( SC_RPC_HANDLE hService, SC_RPC_CONFI
     struct sc_service_handle *service;
     DWORD err;
 
+    if (remote_of(hService)) return forward_ChangeServiceConfig2W(remote_of(hService), config);
     if ((err = validate_service_handle(hService, SERVICE_CHANGE_CONFIG, &service)) != 0)
         return err;
 
@@ -1136,6 +1258,7 @@ DWORD __cdecl svcctl_QueryServiceConfig2W( SC_RPC_HANDLE hService, DWORD level,
     struct sc_service_handle *service;
     DWORD err;
 
+    if (remote_of(hService)) return forward_QueryServiceConfig2W(remote_of(hService), level, buffer, size, needed);
     memset(buffer, 0, size);
 
     if ((err = validate_service_handle(hService, SERVICE_QUERY_CONFIG, &service)) != 0)
@@ -1214,6 +1337,8 @@ DWORD __cdecl svcctl_QueryServiceStatusEx(
     DWORD err;
     LPSERVICE_STATUS_PROCESS pSvcStatusData;
 
+    if (remote_of(hService))
+        return forward_QueryServiceStatusEx(remote_of(hService), InfoLevel, lpBuffer, cbBufSize, pcbBytesNeeded);
     memset(lpBuffer, 0, cbBufSize);
 
     if ((err = validate_service_handle(hService, SERVICE_QUERY_STATUS, &service)) != 0)
@@ -1389,6 +1514,7 @@ DWORD __cdecl svcctl_StartServiceW(
     struct sc_service_handle *service;
     DWORD err;
 
+    if (remote_of(hService)) return forward_StartServiceW(remote_of(hService), dwNumServiceArgs, lpServiceArgVectors);
     WINE_TRACE("(%p, %ld, %p)\n", hService, dwNumServiceArgs, lpServiceArgVectors);
 
     if ((err = validate_service_handle(hService, SERVICE_START, &service)) != 0)
@@ -1424,6 +1550,7 @@ DWORD __cdecl svcctl_ControlService(
     BOOL shared_process;
     DWORD result;
 
+    if (remote_of(hService)) return forward_ControlService(remote_of(hService), dwControl, lpServiceStatus);
     WINE_TRACE("(%p, %ld, %p)\n", hService, dwControl, lpServiceStatus);
 
     switch (dwControl)
@@ -1605,6 +1732,173 @@ static BOOL map_state(DWORD state, DWORD mask)
     return FALSE;
 }
 
+/* T5.4: an enumeration in forward mode is the session's own services and session 0's other services */
+struct enum_item
+{
+    WCHAR *name;
+    WCHAR *display;
+    SERVICE_STATUS_PROCESS status;
+};
+
+static BOOL match_group(const WCHAR *g1, const WCHAR *g2);
+
+static BOOL add_enum_item(struct enum_item **items, DWORD *count, DWORD *capacity, const WCHAR *name,
+                          const WCHAR *display, const SERVICE_STATUS_PROCESS *status)
+{
+    struct enum_item *item;
+
+    if (*count == *capacity)
+    {
+        DWORD grow = *capacity ? *capacity * 2 : 32;
+        if (!(item = realloc(*items, grow * sizeof(**items)))) return FALSE;
+        *items = item;
+        *capacity = grow;
+    }
+    item = &(*items)[*count];
+    if (!(item->name = wcsdup(name))) return FALSE;
+    item->display = display ? wcsdup(display) : NULL;
+    if (display && !item->display)
+    {
+        free(item->name);
+        return FALSE;
+    }
+    item->status = *status;
+    (*count)++;
+    return TRUE;
+}
+
+/* a string of session 0's enumeration: inside the buffer and terminated there */
+static const WCHAR *enum_string(const BYTE *buffer, DWORD size, DWORD offset)
+{
+    const WCHAR *str = (const WCHAR *)(buffer + offset);
+    DWORD i, len;
+
+    if (!offset || offset >= size || offset % sizeof(WCHAR)) return NULL;
+    len = (size - offset) / sizeof(WCHAR);
+    for (i = 0; i < len; i++) if (!str[i]) return str;
+    return NULL;
+}
+
+static DWORD enum_merged(struct sc_manager_handle *manager, BOOL ex, DWORD type, DWORD state, LPCWSTR group,
+                         BYTE *buffer, DWORD size, DWORD *needed, DWORD *returned)
+{
+    const DWORD record = ex ? sizeof(struct enum_service_status_process) : sizeof(struct enum_service_status);
+    struct enum_item *items = NULL;
+    DWORD count = 0, capacity = 0, total, offset, sz, i, err = ERROR_SUCCESS, rsize = 8192, rneeded, rcount = 0;
+    BOOL group_found = !group;
+    struct service_entry *service;
+    SC_RPC_HANDLE remote;
+    BYTE *rbuf = NULL;
+
+    *returned = 0;
+    *needed = 0;
+    scmdatabase_lock(manager->db);
+    LIST_FOR_EACH_ENTRY(service, &manager->db->services, struct service_entry, entry)
+    {
+        SERVICE_STATUS_PROCESS status;
+
+        if (!is_session_service(service->name, service->config.dwServiceType)) continue;
+        if (group && service->config.lpLoadOrderGroup && !wcsicmp(group, service->config.lpLoadOrderGroup))
+            group_found = TRUE;
+        if (!(service->status.dwServiceType & type) || !map_state(service->status.dwCurrentState, state)) continue;
+        if (ex && !match_group(service->config.lpLoadOrderGroup, group)) continue;
+        fill_status_process(&status, service);
+        if (!add_enum_item(&items, &count, &capacity, service->name, service->config.lpDisplayName, &status))
+        {
+            err = ERROR_NOT_ENOUGH_SERVER_MEMORY;
+            break;
+        }
+    }
+    scmdatabase_unlock(manager->db);
+
+    /* session 0's services; without session 0 the session's own are listed */
+    if (!err && !manager_remote(manager, &remote))
+    {
+        DWORD remote_err;
+
+        for (;;)
+        {
+            if (!(rbuf = malloc(rsize))) break;
+            rneeded = rcount = 0;
+            remote_err = ex ? forward_EnumServicesStatusExW(remote, type, state, rbuf, rsize, &rneeded, &rcount, group)
+                            : forward_EnumServicesStatusW(remote, type, state, rbuf, rsize, &rneeded, &rcount);
+            if (remote_err != ERROR_MORE_DATA || rneeded <= rsize || rneeded > 64 * 1024 * 1024) break;
+            free(rbuf);
+            rbuf = NULL;
+            rsize = rneeded;
+        }
+        if (rbuf && !remote_err)
+        {
+            group_found = TRUE;
+            for (i = 0; i < rcount && (i + 1) * record <= rsize && !err; i++)
+            {
+                const struct enum_service_status_process *rex = (const void *)(rbuf + i * record);
+                const struct enum_service_status *rplain = (const void *)(rbuf + i * record);
+                const WCHAR *name = enum_string(rbuf, rsize, rex->service_name);
+                const WCHAR *display = rex->display_name ? enum_string(rbuf, rsize, rex->display_name) : NULL;
+                SERVICE_STATUS_PROCESS status;
+
+                if (!name) continue;
+                memset(&status, 0, sizeof(status));
+                if (ex) status = rex->service_status_process;
+                else memcpy(&status, &rplain->service_status, sizeof(rplain->service_status));
+                if (is_session_service(name, status.dwServiceType)) continue;  /* session 0's own copy */
+                if (!add_enum_item(&items, &count, &capacity, name, display, &status))
+                    err = ERROR_NOT_ENOUGH_SERVER_MEMORY;
+            }
+        }
+        else if (rbuf && remote_err != ERROR_SERVICE_DOES_NOT_EXIST)
+            WINE_WARN("session 0's services are not listed: %lu\n", remote_err);
+        free(rbuf);
+    }
+
+    if (!err && !group_found) err = ERROR_SERVICE_DOES_NOT_EXIST;
+    if (!err)
+    {
+        total = count * record;
+        for (i = 0; i < count; i++)
+        {
+            total += (lstrlenW(items[i].name) + 1) * sizeof(WCHAR);
+            if (items[i].display) total += (lstrlenW(items[i].display) + 1) * sizeof(WCHAR);
+        }
+        *needed = total;
+        if (total > size) err = ERROR_MORE_DATA;
+    }
+    if (!err)
+    {
+        offset = count * record;
+        for (i = 0; i < count; i++)
+        {
+            struct enum_service_status_process *sex = (void *)(buffer + i * record);
+            struct enum_service_status *splain = (void *)(buffer + i * record);
+
+            sz = (lstrlenW(items[i].name) + 1) * sizeof(WCHAR);
+            memcpy(buffer + offset, items[i].name, sz);
+            sex->service_name = offset;
+            offset += sz;
+            if (!items[i].display) sex->display_name = 0;
+            else
+            {
+                sz = (lstrlenW(items[i].display) + 1) * sizeof(WCHAR);
+                memcpy(buffer + offset, items[i].display, sz);
+                sex->display_name = offset;
+                offset += sz;
+            }
+            if (ex) sex->service_status_process = items[i].status;
+            else memcpy(&splain->service_status, &items[i].status, sizeof(splain->service_status));
+        }
+        *returned = count;
+        *needed = 0;
+    }
+    for (i = 0; i < count; i++)
+    {
+        free(items[i].name);
+        free(items[i].display);
+    }
+    free(items);
+    return err;
+}
+
 DWORD __cdecl svcctl_EnumServicesStatusW(
     SC_RPC_HANDLE hmngr,
     DWORD type,
@@ -1627,6 +1921,7 @@ DWORD __cdecl svcctl_EnumServicesStatusW(
 
     if ((err = validate_scm_handle(hmngr, SC_MANAGER_ENUMERATE_SERVICE, &manager)) != ERROR_SUCCESS)
         return err;
+    if (forward_mode) return enum_merged(manager, FALSE, type, state, NULL, buffer, size, needed, returned);
 
     if (resume)
         WINE_FIXME("resume index not supported\n");
@@ -1747,6 +2042,7 @@ DWORD __cdecl svcctl_EnumServicesStatusExW(
 
     if ((err = validate_scm_handle(hmngr, SC_MANAGER_ENUMERATE_SERVICE, &manager)) != ERROR_SUCCESS)
         return err;
+    if (forward_mode) return enum_merged(manager, TRUE, type, state, group, buffer, size, needed, returned);
 
     scmdatabase_lock(manager->db);
 
@@ -1883,6 +2179,8 @@ DWORD __cdecl svcctl_NotifyServiceStatusChange(
             params.params->dwNotifyMask, clientprocessguid, scmprocessguid,
             createremotequeue, hNotify);
 
+    /* T5.4: status notifications of session 0's services are not relayed yet */
+    if (remote_of(handle)) return ERROR_CALL_NOT_IMPLEMENTED;
     switch (hdr->type)
     {
     case SC_HTYPE_SERVICE:
@@ -2103,6 +2401,8 @@ DWORD __cdecl svcctl_QueryServiceObjectSecurity(
     BYTE *sd;
     DWORD err, size;
 
+    if (remote_of(service))
+        return forward_QueryServiceObjectSecurity(remote_of(service), info, descriptor, buf_size, needed_size);
     WINE_TRACE("(%p, 0x%lx)\n", service, info);
 
     if (!(info & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION)) ||
@@ -2142,6 +2442,7 @@ DWORD __cdecl svcctl_SetServiceObjectSecurity(
     ACL *dacl;
     HKEY key;
 
+    if (remote_of(service)) return forward_SetServiceObjectSecurity(remote_of(service), info, descriptor, buf_size);
     WINE_TRACE("(%p, 0x%lx)\n", service, info);
 
     if (info != DACL_SECURITY_INFORMATION) return ERROR_INVALID_PARAMETER;

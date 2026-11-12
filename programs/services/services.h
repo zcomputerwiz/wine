@@ -96,6 +96,10 @@ void service_lock(struct service_entry *service);
 void service_unlock(struct service_entry *service);
 DWORD service_start(struct service_entry *service, DWORD service_argc, LPCWSTR *service_argv);
 BOOL safeboot_allows(const struct service_entry *service);
+/* WineExplorer system tier T5.4: services that every session (session 0 included) runs for itself; the others
+ * are session 0's while a session forwards (forward_mode) */
+BOOL is_session_service(const WCHAR *name, DWORD type);
+extern BOOL forward_mode;
 void notify_service_state(struct service_entry *service);
 
 /* Process functions */

@@ -1163,7 +1163,8 @@ DECL_HANDLER(create_service_token)
 {
     struct token *caller = current->process->token, *token;
 
-    if (!sysrun_active || !elevation_enforced())
+    /* WineExplorer T5.4: session 0 runs services too; only session 0's own account has programs there */
+    if (!session0_server && (!sysrun_active || !elevation_enforced()))
     {
         set_error( STATUS_NOT_SUPPORTED );
         return;
@@ -1173,8 +1174,11 @@ DECL_HANDLER(create_service_token)
         set_error( STATUS_PRIVILEGE_NOT_HELD );
         return;
     }
-    /* Wine's administrator token also holds SeTcbPrivilege: require the system role itself */
-    if (token_service_account( caller ) != SERVICE_ACCOUNT_SYSTEM || !sysrun_process_privileged( current->process ))
+    /* Wine's administrator token also holds SeTcbPrivilege: require the system role itself (in session 0, a
+     * process whose token is SYSTEM's: only session 0's own account runs programs there, and its registry-only
+     * clients cannot make this request) */
+    if (token_service_account( caller ) != SERVICE_ACCOUNT_SYSTEM ||
+        (!session0_server && !sysrun_process_privileged( current->process )))
     {
         set_error( STATUS_ACCESS_DENIED );
         return;
