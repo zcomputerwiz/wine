@@ -65,6 +65,6 @@ struct token;
 extern int session0_open_pipe( struct token *token, const WCHAR *name, data_size_t len );
 /* T5.2, session 0 (named_pipe.c): connect a session's opener to a pipe here over sock (owned from now on) */
 extern unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_size_t len, int sock,
-                                        uid_t uid );
+                                        uid_t uid, int session );
 
 #endif /* __WINE_SERVER_SESSION0_H */

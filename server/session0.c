@@ -107,6 +107,99 @@ static struct list session_links = LIST_INIT( session_links );
 static unsigned int next_session_id;      /* 0: the file was not read yet */
 static unsigned int reserved_session_id;
 
+/* R9: the account each session id was given to. An id is given again only to that account, also after a restart
+ * of session 0: the owners are kept in session0.owners ("id uid" lines, appended before the answer; the last
+ * SESSION0_MAX_OWNERS are read at start). An id without a record is not given back. */
+#define SESSION0_MAX_OWNERS 65536
+struct session_id_owner
+{
+    unsigned int id;
+    uid_t        uid;
+};
+static struct session_id_owner *id_owners;
+static unsigned int id_owner_count, id_owner_capacity;
+static int id_owners_loaded;
+
+static int add_id_owner( unsigned int id, uid_t uid )
+{
+    unsigned int i;
+
+    for (i = 0; i < id_owner_count; i++)
+        if (id_owners[i].id == id)
+        {
+            id_owners[i].uid = uid;  /* a later record wins */
+            return 1;
+        }
+    if (id_owner_count == SESSION0_MAX_OWNERS)
+    {
+        memmove( id_owners, id_owners + 1, (id_owner_count - 1) * sizeof(*id_owners) );  /* the oldest goes */
+        id_owner_count--;
+    }
+    if (id_owner_count == id_owner_capacity)
+    {
+        unsigned int capacity = id_owner_capacity ? id_owner_capacity * 2 : 64;
+        struct session_id_owner *grown = realloc( id_owners, capacity * sizeof(*grown) );
+
+        if (!grown) return 0;
+        id_owners = grown;
+        id_owner_capacity = capacity;
+    }
+    id_owners[id_owner_count].id = id;
+    id_owners[id_owner_count].uid = uid;
+    id_owner_count++;
+    return 1;
+}
+
+static void load_id_owners(void)
+{
+    char line[64];
+    unsigned int id, uid;
+    FILE *file;
+    int fd;
+
+    id_owners_loaded = 1;
+    if ((fd = openat( config_dir_fd, "session0.owners", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC )) == -1)
+        return;
+    if (!(file = fdopen( fd, "r" )))
+    {
+        close( fd );
+        return;
+    }
+    while (fgets( line, sizeof(line), file ))
+        if (sscanf( line, "%u %u", &id, &uid ) == 2 && id) add_id_owner( id, uid );
+    fclose( file );
+}
+
+/* record a new id's owner before it is given out; 0 if it cannot be recorded (the id is then not given) */
+static int record_id_owner( unsigned int id, uid_t uid )
+{
+    char line[64];
+    int fd, len, ok;
+
+    if (!id_owners_loaded) load_id_owners();
+    len = snprintf( line, sizeof(line), "%u %u\n", id, (unsigned int)uid );
+    if ((fd = openat( config_dir_fd, "session0.owners", O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC,
+                      0600 )) == -1)
+    {
+        fprintf( stderr, "session0: cannot record the owner of session %u: %s\n", id, strerror( errno ));
+        return 0;
+    }
+    ok = write( fd, line, len ) == len && !fsync( fd );
+    close( fd );
+    return ok && add_id_owner( id, uid );
+}
+
+/* 1 when uid may have id back (it is recorded as that account's), 0 otherwise */
+static int reclaim_session_id( unsigned int id, uid_t uid )
+{
+    unsigned int i;
+
+    if (!id_owners_loaded) load_id_owners();
+    for (i = 0; i < id_owner_count; i++)
+        if (id_owners[i].id == id) return id_owners[i].uid == uid;
+    return 0;
+}
+
 static void reserve_session_ids(void)
 {
     static const char name[] = "session0.ids", tmp[] = "session0.ids.tmp";
@@ -761,7 +854,10 @@ static void session0_link_event( struct fd *fd, int event )
             if (wanted && other->session_id == wanted) in_use = 1;
         }
         if (count >= SESSION0_MAX_SESSIONS_PER_USER) reply.status = STATUS_INSUFFICIENT_RESOURCES;
-        else if (wanted && (wanted >= next_session_id || in_use)) reply.status = STATUS_OBJECT_NAME_COLLISION;
+        else if (wanted && (wanted >= next_session_id || in_use || !reclaim_session_id( wanted, link->peer_uid )))
+            reply.status = STATUS_OBJECT_NAME_COLLISION;  /* R9: an id goes back only to its own account */
+        else if (!wanted && !record_id_owner( next_session_id, link->peer_uid ))
+            reply.status = STATUS_INSUFFICIENT_RESOURCES;
         else
         {
             reply.status = STATUS_SUCCESS;
@@ -792,9 +888,15 @@ static void session0_link_event( struct fd *fd, int event )
         }
         else
         {
+            struct session0_socket *session_link;
+            int session = -1;  /* R9: the session of the bridge's peer server, from its session link */
+
+            LIST_FOR_EACH_ENTRY( session_link, &session_links, struct session0_socket, entry )
+                if (session_link->peer_pid == link->peer_pid && session_link->peer_uid == link->peer_uid)
+                    session = session_link->session_id;
             memcpy( name, (const char *)(hdr + 1) + hdr->desc_size, hdr->machine );
             fcntl( channel, F_SETFL, O_NONBLOCK );
-            reply.status = pipe_bridge_accept( token, name, hdr->machine, channel, link->peer_uid );
+            reply.status = pipe_bridge_accept( token, name, hdr->machine, channel, link->peer_uid, session );
         }
         channel = -1;  /* the bridge owns it now, or it was closed */
         free( name );

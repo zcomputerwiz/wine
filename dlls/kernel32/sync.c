@@ -536,11 +536,14 @@ BOOL WINAPI GetNamedPipeServerProcessId( HANDLE pipe, ULONG *id )
  */
 BOOL WINAPI GetNamedPipeClientSessionId( HANDLE pipe, ULONG *id )
 {
-    FIXME( "%p, %p\n", pipe, id );
+    IO_STATUS_BLOCK iosb;
 
     if (!id) return FALSE;
-    *id = NtCurrentTeb()->Peb->SessionId;
-    return TRUE;
+    /* the session of the process that opened the client end (WineExplorer: for a pipe of session 0 opened from a
+     * session, that session) */
+    return set_ntstatus( NtFsControlFile( pipe, NULL, NULL, NULL, &iosb,
+                                          FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE, (void *)"ClientSessionId",
+                                          sizeof("ClientSessionId"), id, sizeof(*id) ));
 }
 
 /***********************************************************************
