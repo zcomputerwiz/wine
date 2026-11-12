@@ -1049,7 +1049,6 @@ static void test_buffered_paint(void)
     ok(hr == E_FAIL, "Unexpected return code %#lx\n", hr);
 
     hr = pBufferedPaintClear(buffer, NULL);
-    todo_wine
     ok(hr == S_OK, "Unexpected return code %#lx\n", hr);
 
     /* access buffer attributes */
