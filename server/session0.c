@@ -267,7 +267,7 @@ static void session0_listen_event( struct fd *fd, int event )
 }
 
 /* serve a channel as a registry-only client with the described token */
-static unsigned int start_registry_client( int channel, const void *desc, data_size_t size )
+static unsigned int start_registry_client( int channel, const void *desc, data_size_t size, unsigned int machine )
 {
     struct process *process;
     struct thread *thread;
@@ -283,6 +283,8 @@ static unsigned int start_registry_client( int channel, const void *desc, data_s
     process = create_process( channel, NULL, WEX_CREATE_REGISTRY_CLIENT, NULL, NULL, NULL, 0, token );
     release_object( token );
     if (!process) return get_error() ? get_error() : STATUS_NO_MEMORY;
+    /* the program's machine decides its registry view: a 32-bit program sees the 32-bit HKLM\Software */
+    if (machine <= 0xffff && is_machine_supported( machine )) process->machine = machine;
     if ((thread = create_thread( -1, process, NULL ))) add_process_thread( process, thread );
     status = thread ? STATUS_SUCCESS : (get_error() ? get_error() : STATUS_NO_MEMORY);
     release_object( process );
@@ -374,7 +376,7 @@ static void session0_link_event( struct fd *fd, int event )
     else
     {
         fcntl( channel, F_SETFL, O_NONBLOCK );
-        reply.status = start_registry_client( channel, hdr + 1, hdr->desc_size );
+        reply.status = start_registry_client( channel, hdr + 1, hdr->desc_size, hdr->machine );
         channel = -1;  /* the client owns it now, or it was closed */
     }
     if (channel != -1) close( channel );
@@ -729,6 +731,7 @@ static int ensure_user_hive( struct token *token )
     hdr.version = WEX_SESSION0_VERSION;
     hdr.desc_size = size;
     hdr.type = WEX_SESSION0_USER_HIVE;
+    hdr.machine = 0;
     vec[0].iov_base = &hdr;
     vec[0].iov_len = sizeof(hdr);
     vec[1].iov_base = desc;
@@ -837,6 +840,7 @@ DECL_HANDLER(get_registry_channel)
     hdr.version = WEX_SESSION0_VERSION;
     hdr.desc_size = size;
     hdr.type = WEX_SESSION0_CHANNEL;
+    hdr.machine = current->process->machine;
     vec[0].iov_base = &hdr;
     vec[0].iov_len = sizeof(hdr);
     vec[1].iov_base = desc;

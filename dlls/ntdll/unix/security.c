@@ -1176,6 +1176,8 @@ NTSTATUS WINAPI NtQuerySecurityObject( HANDLE handle, SECURITY_INFORMATION info,
     void *buffer;
     unsigned int buffer_size = 512;
 
+    handle = regvirt_underlying( handle );  /* a virtualized key (system tier T2b) */
+
     TRACE( "(%p,0x%08x,%p,0x%08x,%p)\n", handle, info, descr, length, retlen );
 
     for (;;)
@@ -1236,6 +1238,8 @@ NTSTATUS WINAPI NtSetSecurityObject( HANDLE handle, SECURITY_INFORMATION info, P
     data_size_t len;
     OBJECT_ATTRIBUTES attr;
     unsigned int status;
+
+    handle = regvirt_underlying( handle );  /* a virtualized key (system tier T2b) */
 
     TRACE( "%p 0x%08x %p\n", handle, info, descr );
 

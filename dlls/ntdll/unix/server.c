@@ -2470,6 +2470,7 @@ NTSTATUS WINAPI NtDuplicateObject( HANDLE source_process, HANDLE source, HANDLE 
 
     if (dest) *dest = 0;
 
+    if (regvirt_is_handle( source )) return STATUS_NOT_SUPPORTED;  /* a virtualized key (T2b) */
     if (regsrv_is_handle( source ))  /* a key of session 0: within this process only */
     {
         if (source_process != NtCurrentProcess() || (dest && dest_process != NtCurrentProcess()))
@@ -2575,6 +2576,7 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
         return STATUS_SUCCESS;
 
     if (regsrv_is_handle( handle )) return regsrv_close( handle );  /* a key of session 0 */
+    if (regvirt_is_handle( handle )) return regvirt_close( handle );  /* a virtualized key (T2b) */
 
     /* hold fd_cache_mutex to prevent the fd from being added again between the
      * call to remove_fd_from_cache and close_handle */

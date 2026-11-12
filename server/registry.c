@@ -4633,7 +4633,9 @@ DECL_HANDLER(create_key)
         !e1s_find_hive( token_e1s_account( current->token ? current->token : current->process->token ) ))
     { set_error( STATUS_OBJECT_NAME_NOT_FOUND ); return; }
 
-    if (!is_wow64_process( current->process )) access = (access & ~KEY_WOW64_32KEY) | KEY_WOW64_64KEY;
+    /* system tier: a registry-only client of session 0 states its program's view in every request */
+    if (!is_wow64_process( current->process ) && !current->process->wex_registry_client)
+        access = (access & ~KEY_WOW64_32KEY) | KEY_WOW64_64KEY;
     if (!(access & KEY_WOW64_64KEY)) params.attr |= OBJ_KEY_WOW64;
     if (req->options & REG_OPTION_CREATE_LINK) params.attr = (params.attr & ~OBJ_OPENIF) | OBJ_OPENLINK;
 
@@ -4690,7 +4692,9 @@ DECL_HANDLER(open_key)
     struct object_params params = { .ops = &key_ops, .name = get_req_unicode_str(),
                                     .attr = req->attributes };
 
-    if (!is_wow64_process( current->process )) access = (access & ~KEY_WOW64_32KEY) | KEY_WOW64_64KEY;
+    /* system tier: a registry-only client of session 0 states its program's view in every request */
+    if (!is_wow64_process( current->process ) && !current->process->wex_registry_client)
+        access = (access & ~KEY_WOW64_32KEY) | KEY_WOW64_64KEY;
     if (!(access & KEY_WOW64_64KEY)) params.attr |= OBJ_KEY_WOW64;
 
     if (req->parent)

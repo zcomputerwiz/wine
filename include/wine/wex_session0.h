@@ -30,7 +30,7 @@
 /* the link message from a user's server to session 0: header, then the token description; SCM_RIGHTS carries
  * the channel. Session 0 answers with a reply. One message per connection. */
 #define WEX_SESSION0_MAGIC    0x30535857  /* "WXS0" */
-#define WEX_SESSION0_VERSION  1
+#define WEX_SESSION0_VERSION  2
 #define WEX_SESSION0_MAX_MSG  65536
 
 struct wex_session0_request
@@ -39,6 +39,7 @@ struct wex_session0_request
     unsigned int version;
     unsigned int desc_size;   /* size of the token description that follows */
     unsigned int type;        /* WEX_SESSION0_* below */
+    unsigned int machine;     /* CHANNEL: the program's machine (IMAGE_FILE_MACHINE_*): its registry view */
 };
 
 /* Message types. CHANNEL: the program's registry channel in SCM_RIGHTS; one message, then the link closes.

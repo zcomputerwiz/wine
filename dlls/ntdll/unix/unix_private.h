@@ -270,6 +270,10 @@ extern HANDLE regsrv_add_key( obj_handle_t remote, unsigned int generation, cons
                               ACCESS_MASK access, ULONG attributes );
 extern NTSTATUS regsrv_close( HANDLE handle );
 extern NTSTATUS regsrv_duplicate( HANDLE source, HANDLE *dest, ACCESS_MASK access, ULONG attributes, ULONG options );
+/* T2b: virtualized keys (registry.c) */
+extern BOOL regvirt_is_handle( HANDLE handle );
+extern HANDLE regvirt_underlying( HANDLE handle );
+extern NTSTATUS regvirt_close( HANDLE handle );
 extern void server_enter_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigset );
 extern void server_leave_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigset );
 extern unsigned int server_select( const union select_op *select_op, data_size_t size, UINT flags,
