@@ -30,7 +30,7 @@
 /* the link message from a user's server to session 0: header, then the token description; SCM_RIGHTS carries
  * the channel. Session 0 answers with a reply. One message per connection. */
 #define WEX_SESSION0_MAGIC    0x30535857  /* "WXS0" */
-#define WEX_SESSION0_VERSION  3
+#define WEX_SESSION0_VERSION  4
 #define WEX_SESSION0_MAX_MSG  65536
 
 struct wex_session0_request
@@ -53,9 +53,32 @@ struct wex_session0_request
 #define WEX_SESSION0_USER_HIVE    1
 #define WEX_SESSION0_HIVE_SAVE    2
 #define WEX_SESSION0_HIVE_UNLOAD  3
-/* SESSION_ID (T6.1): a user's server asks for its session id at start; session 0 gives each logon its own */
+/* SESSION_ID (T6.1): a user's server asks for its session id at start; session 0 gives each logon its own. The
+ * link then stays open as the session link (T6.2): session 0 sends orders on it (wex_session0_order) and the
+ * server answers each (wex_session0_order_reply). The server accepts orders only on the link it opened itself
+ * to the configured socket, after it checked with SO_PEERCRED that session 0's account and the system group
+ * serve that socket; it checks every link to session 0 the same way. */
 #define WEX_SESSION0_SESSION_ID   4
 #define WEX_SESSION0_HIVE_SAVED   5
+
+/* orders */
+#define WEX_SESSION0_ORDER_PING   1   /* answered with the server's session id */
+
+struct wex_session0_order
+{
+    unsigned int magic;
+    unsigned int order;       /* WEX_SESSION0_ORDER_* */
+    unsigned int serial;      /* repeated in the answer */
+    unsigned int arg;
+};
+
+struct wex_session0_order_reply
+{
+    unsigned int magic;
+    unsigned int serial;
+    unsigned int status;      /* NTSTATUS; STATUS_NOT_SUPPORTED for an order the server does not know */
+    unsigned int value;
+};
 
 struct wex_session0_reply
 {
