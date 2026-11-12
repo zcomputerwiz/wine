@@ -30,7 +30,7 @@
 /* the link message from a user's server to session 0: header, then the token description; SCM_RIGHTS carries
  * the channel. Session 0 answers with a reply. One message per connection. */
 #define WEX_SESSION0_MAGIC    0x30535857  /* "WXS0" */
-#define WEX_SESSION0_VERSION  2
+#define WEX_SESSION0_VERSION  3
 #define WEX_SESSION0_MAX_MSG  65536
 
 struct wex_session0_request
@@ -43,16 +43,19 @@ struct wex_session0_request
 };
 
 /* Message types. CHANNEL: the program's registry channel in SCM_RIGHTS; one message, then the link closes.
- * USER_HIVE (T4a): a user's server hands session 0 its user.reg (SCM_RIGHTS; none for a new hive) to hold
- * under \Registry\User\<SID of the described token>; the link stays open: session 0 sends HIVE_SAVE messages
- * (the whole hive in a memory file, SCM_RIGHTS) for that server to write, and the server sends HIVE_UNLOAD at
- * its exit, answered by a last HIVE_SAVE when there are changes and a reply. */
+ * USER_HIVE (T4a): a user's server hands session 0 a copy of its user.reg (SCM_RIGHTS: a memory file sealed
+ * against writes and size changes; none for a new hive) to hold under \Registry\User\<SID of the described
+ * token>; the link stays open: session 0 sends HIVE_SAVE messages (the whole hive in a memory file, SCM_RIGHTS)
+ * for that server to write, the server answers each with HIVE_SAVED (machine: 1 written, 0 not; a hive that was
+ * not written is sent again), and the server sends HIVE_UNLOAD at its exit, answered by a last HIVE_SAVE when
+ * there are changes and a reply. */
 #define WEX_SESSION0_CHANNEL      0
 #define WEX_SESSION0_USER_HIVE    1
 #define WEX_SESSION0_HIVE_SAVE    2
 #define WEX_SESSION0_HIVE_UNLOAD  3
 /* SESSION_ID (T6.1): a user's server asks for its session id at start; session 0 gives each logon its own */
 #define WEX_SESSION0_SESSION_ID   4
+#define WEX_SESSION0_HIVE_SAVED   5
 
 struct wex_session0_reply
 {

@@ -27,6 +27,11 @@
 /* create_process flag: a registry-only client of session 0, with the given token */
 #define WEX_CREATE_REGISTRY_CLIENT 0x80000000
 
+/* change notifications pending for one program: its relay in its own server, and session 0 for its client */
+#define SESSION0_MAX_COOKIES 4096
+/* the largest user hive session 0 holds (a larger one stays with the user's server) */
+#define SESSION0_MAX_USER_HIVE (64 * 1024 * 1024)
+
 extern int session0_server;   /* this server is session 0 */
 extern int session0_client;   /* this server's programs get their machine registry from session 0 */
 
@@ -48,6 +53,8 @@ struct sid;
 extern unsigned int session0_load_user_hive( const struct sid *sid, int fd, void *agent );
 extern void session0_unload_user_hive( void *agent, int save );
 extern int session0_send_hive( void *agent, int fd );
+/* the agent wrote (ok) or failed to write the hive it was sent last; a failure makes it dirty again */
+extern void session0_user_hive_saved( void *agent, int ok );
 /* T4a, a user's server: its user hive is held by session 0 (its own copy is not saved); flush it at exit */
 extern int session0_user_hive_remote(void);
 extern void session0_client_exit(void);

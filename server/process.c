@@ -769,6 +769,7 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->wex_pin_uid = -1;
     process->wex_registry_client = 0;
     process->wex_relay = NULL;
+    process->wex_relay_cookies = 0;
     process->e1s6_broker_image = 0;
     process->e1s6_image_seen = 0;
     process->e1s6_broker_generation = 0;

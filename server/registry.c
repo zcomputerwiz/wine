@@ -250,6 +250,7 @@ struct save_branch_info
     void           *agent;    /* system tier T4a: the user's server that saves this hive (session 0) */
     struct security_descriptor *owner_sd; /* T4a: default descriptor of the hive's keys, for its user */
     struct key     *classes_alias;        /* T4a: \Registry\User\<SID>_Classes */
+    unsigned int    save_pending;         /* T4a: saves sent to the agent that it has not yet answered */
     struct list     tombstones;
 };
 
@@ -260,6 +261,7 @@ static struct save_branch_info save_branch_info[MAX_SAVE_BRANCH_INFO];
 
 static bool registry_loaded = false;
 static bool in_merge = false;
+static int load_nofollow;  /* loading a hive that its user wrote: links are not followed */
 static uint64_t next_mod_seq = 0;
 
 static struct save_branch_info *find_branch_info( const struct key *key )
@@ -1024,6 +1026,7 @@ static void do_notification( struct key *key, struct notify *notify, int del )
     notify->events = NULL;
     notify->event_count = 0;
     for (i = 0; i < notify->cookie_count; ++i) session0_relay_notify( notify->process, notify->cookies[i] );
+    if (notify->cookie_count) notify->process->wex_relay_cookies -= notify->cookie_count;
     free( notify->cookies );
     notify->cookies = NULL;
     notify->cookie_count = 0;
@@ -1292,6 +1295,13 @@ static struct object *key_lookup_name( struct object *obj, struct unicode_str *n
         struct key_value *value;
 
         if (!name->len && (attr & OBJ_OPENLINK)) return NULL;
+        /* system tier: a user's hive loaded in session 0 never reaches outside itself through its own links */
+        if (load_nofollow)
+        {
+            if (!name->len) return NULL;
+            set_error( STATUS_ACCESS_DENIED );
+            return NULL;
+        }
 
         if (!(value = find_value( key, symlink_str, &index )) ||
             value->len < sizeof(WCHAR) || *(WCHAR *)value->data != '\\')
@@ -4403,13 +4413,52 @@ static int session0_save_user_hive( struct save_branch_info *info )
         save_all_subkeys( info->key, f );
         if (!fflush( f ) && !ferror( f ) && session0_send_hive( info->agent, fd ))
         {
+            /* clean from now on; HIVE_SAVED with a failure, or none, makes it dirty again */
             make_clean( info->key );
+            info->save_pending++;
             ret = 1;
         }
         fclose( f );
     }
     close( fd );
     return ret;
+}
+
+/* the agent's answer to a hive it was sent (answers come in the order of the saves) */
+void session0_user_hive_saved( void *agent, int ok )
+{
+    struct save_branch_info *info = session0_find_agent( agent );
+
+    if (!info || !info->save_pending) return;
+    info->save_pending--;
+    if (!ok) info->key->flags |= KEY_DIRTY;  /* the whole hive is sent again at the next period */
+}
+
+/* a private copy of the user's hive that the user's server sent: a sealed memory file, so that it cannot change
+ * or block while session 0 reads it; NULL when it is not one */
+static FILE *session0_hive_snapshot( int fd, char **text )
+{
+    const int seals = F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE;
+    struct stat st;
+    size_t used = 0;
+    ssize_t n;
+    FILE *f;
+
+    *text = NULL;
+    if ((fcntl( fd, F_GET_SEALS ) & seals) != seals || fstat( fd, &st ) || !S_ISREG( st.st_mode ) ||
+        st.st_size <= 0 || st.st_size > SESSION0_MAX_USER_HIVE) return NULL;
+    if (!(*text = malloc( st.st_size + 1 ))) return NULL;
+    while (used < st.st_size)
+    {
+        n = pread( fd, *text + used, st.st_size - used, used );
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        used += n;
+    }
+    if (used == st.st_size && !memchr( *text, 0, used ) && (f = fmemopen( *text, used, "r" ))) return f;
+    free( *text );
+    *text = NULL;
+    return NULL;
 }
 
 /* load a user's hive (fd: the user's user.reg, or -1 for a new one) under \Registry\User\<sid> for agent */
@@ -4422,6 +4471,7 @@ unsigned int session0_load_user_hive( const struct sid *sid, int fd, void *agent
     WCHAR *name = NULL, *alias_name = NULL, *link = NULL;
     data_size_t len;
     FILE *f = NULL;
+    char *text = NULL;
     unsigned int status;
 
     const struct default_ace aces[] =
@@ -4434,6 +4484,11 @@ unsigned int session0_load_user_hive( const struct sid *sid, int fd, void *agent
     if (save_branch_count >= MAX_SAVE_BRANCH_INFO)
     {
         status = STATUS_INSUFFICIENT_RESOURCES;
+        goto done;
+    }
+    if (fd != -1 && !(f = session0_hive_snapshot( fd, &text )))
+    {
+        status = STATUS_NOT_REGISTRY_FILE;
         goto done;
     }
     if (!(name = format_user_registry_path( sid, &path )))
@@ -4452,10 +4507,11 @@ unsigned int session0_load_user_hive( const struct sid *sid, int fd, void *agent
         status = STATUS_OBJECT_NAME_COLLISION;  /* held for another server of the same user */
         goto done;
     }
-    if (fd != -1 && (f = fdopen( fd, "r" )))
+    if (f)
     {
-        fd = -1;
+        load_nofollow = 1;
         load_keys( key, "<user hive>", f, 0 );
+        load_nofollow = 0;
     }
     clear_error();
 
@@ -4496,6 +4552,7 @@ unsigned int session0_load_user_hive( const struct sid *sid, int fd, void *agent
 
 done:
     if (f) fclose( f );
+    free( text );
     if (fd != -1) close( fd );
     if (key) release_object( key );
     if (alias) release_object( alias );
@@ -4915,6 +4972,9 @@ DECL_HANDLER(set_registry_notification)
             /* system tier: the change is reported to the program's own server, which sets its event */
             unsigned int *cookies;
 
+            /* the same bound as the program's relay: a client sending raw requests cannot grow session 0 */
+            if (current->process->wex_relay_cookies >= SESSION0_MAX_COOKIES)
+            { set_error( STATUS_INSUFFICIENT_RESOURCES ); release_object( key ); return; }
             if (!(notify = find_notify( key, current->process, req->hkey )) && (notify = mem_alloc( sizeof(*notify) )))
             {
                 memset( notify, 0, sizeof(*notify) );
@@ -4928,6 +4988,7 @@ DECL_HANDLER(set_registry_notification)
             {
                 notify->cookies = cookies;
                 notify->cookies[notify->cookie_count++] = req->relay_cookie;
+                current->process->wex_relay_cookies++;
                 set_error( STATUS_PENDING );
             }
             else if (notify) set_error( STATUS_NO_MEMORY );

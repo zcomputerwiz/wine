@@ -43,6 +43,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -83,7 +84,15 @@ struct session0_socket
     struct fd    *fd;
     int           trusted;              /* links: the peer may describe tokens */
     int           hive;                 /* T4a: the link is the agent of a user's hive */
+    int           pending;              /* a link whose message has not come yet */
+    struct timeout_user *timeout;       /* when a pending link is dropped */
 };
+
+/* Links that wait for their message are few and short-lived: a user's server sends it right after connecting.
+ * Peers that are not trusted are dropped at once, so a local user cannot hold session 0's descriptors. */
+#define SESSION0_MAX_PENDING 64
+#define SESSION0_PENDING_TIMEOUT (-5 * TICKS_PER_SEC)
+static int pending_links;
 
 static void session0_socket_dump( struct object *obj, int verbose );
 static void session0_socket_destroy( struct object *obj );
@@ -110,7 +119,29 @@ static void session0_socket_dump( struct object *obj, int verbose )
 static void session0_socket_destroy( struct object *obj )
 {
     struct session0_socket *sock = (struct session0_socket *)obj;
+    if (sock->timeout) remove_timeout_user( sock->timeout );
+    if (sock->pending) pending_links--;
+    /* session 0: a hive never outlives its agent's link, however the link ended */
+    if (sock->hive && session0_server) session0_unload_user_hive( sock, 0 );
     if (sock->fd) release_object( sock->fd );
+}
+
+/* the link's message came (or it was dropped): it no longer counts as pending */
+static void link_settled( struct session0_socket *link )
+{
+    if (link->timeout) remove_timeout_user( link->timeout );
+    link->timeout = NULL;
+    if (link->pending) pending_links--;
+    link->pending = 0;
+}
+
+static void link_timeout( void *private )
+{
+    struct session0_socket *link = private;
+
+    link->timeout = NULL;
+    link_settled( link );
+    release_object( link );  /* the reference the link held for its message */
 }
 
 /* one "key=value" line of the root-owned configuration; 0 if the file or the key is missing */
@@ -186,6 +217,8 @@ static void init_listener(void)
     if (!(listener = alloc_object( &session0_socket_ops ))) fatal_error( "--session0: no memory\n" );
     listener->trusted = 0;
     listener->hive = 0;
+    listener->pending = 0;
+    listener->timeout = NULL;
     if (!(listener->fd = create_anonymous_fd( &session0_listen_fd_ops, fd, &listener->obj, 0 )))
         fatal_error( "--session0: no listener object\n" );
     set_fd_events( listener->fd, POLLIN );  /* the listener keeps its reference for the life of the server */
@@ -265,8 +298,36 @@ static int peer_is_launched_server( pid_t pid, uid_t uid )
     return uid_ok && gid_ok && !strncmp( buf, "Name:\twineserver\n", 17 );
 }
 
+#ifndef SO_PEERPIDFD
+#define SO_PEERPIDFD 77
+#endif
+
+/* the peer is trusted (see the top of this file). The pid of SO_PEERCRED is checked through a pidfd taken
+ * before /proc is read: when that process is still alive afterwards, /proc described it and not a later
+ * process that was given the same pid. Kernels without SO_PEERPIDFD (before 6.5) get the check without it. */
+static int peer_trusted( int client, const struct ucred *cred )
+{
+    struct pollfd pfd;
+    socklen_t len = sizeof(int);
+    int pidfd = -1, ok;
+
+    if (session0_dev) return cred->uid == getuid();
+    if (cred->uid == getuid()) return 0;
+    if (getsockopt( client, SOL_SOCKET, SO_PEERPIDFD, &pidfd, &len )) pidfd = -1;
+    ok = peer_is_launched_server( cred->pid, cred->uid );
+    if (ok && pidfd != -1)
+    {
+        pfd.fd = pidfd;
+        pfd.events = POLLIN;  /* a pidfd is readable once its process has exited */
+        if (poll( &pfd, 1, 0 ) != 0) ok = 0;
+    }
+    if (pidfd != -1) close( pidfd );
+    return ok;
+}
+
 static void session0_listen_event( struct fd *fd, int event )
 {
+    struct wex_session0_reply reply = { WEX_SESSION0_MAGIC, STATUS_ACCESS_DENIED, 0 };
     struct session0_socket *link;
     struct ucred cred;
     socklen_t len = sizeof(cred);
@@ -274,19 +335,30 @@ static void session0_listen_event( struct fd *fd, int event )
 
     if (!(event & POLLIN)) return;
     if ((client = accept4( get_unix_fd( fd ), NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC )) == -1) return;
-    if (getsockopt( client, SOL_SOCKET, SO_PEERCRED, &cred, &len ) || !(link = alloc_object( &session0_socket_ops )))
+    if (getsockopt( client, SOL_SOCKET, SO_PEERCRED, &cred, &len ) || !peer_trusted( client, &cred ) ||
+        pending_links >= SESSION0_MAX_PENDING)
+    {
+        if (pending_links >= SESSION0_MAX_PENDING) reply.status = STATUS_INSUFFICIENT_RESOURCES;
+        send( client, &reply, sizeof(reply), MSG_NOSIGNAL | MSG_DONTWAIT );
+        close( client );
+        return;
+    }
+    if (!(link = alloc_object( &session0_socket_ops )))
     {
         close( client );
         return;
     }
     link->hive = 0;
-    if (session0_dev) link->trusted = cred.uid == getuid();
-    else link->trusted = cred.uid != getuid() && peer_is_launched_server( cred.pid, cred.uid );
+    link->trusted = 1;
+    link->pending = 1;
+    link->timeout = NULL;
+    pending_links++;
     if (!(link->fd = create_anonymous_fd( &session0_link_fd_ops, client, &link->obj, 0 )))
     {
         release_object( link );
         return;
     }
+    link->timeout = add_timeout_user( SESSION0_PENDING_TIMEOUT, link_timeout, link );
     set_fd_events( link->fd, POLLIN );  /* the link holds its own reference until the message is handled */
 }
 
@@ -354,15 +426,20 @@ static void session0_link_event( struct fd *fd, int event )
         }
     }
     if (extra != -1) close( extra );
+    link_settled( link );
 
     hdr = buf;
     if (link->hive)
     {
-        /* a hive link: HIVE_UNLOAD at the server's exit, or the server is gone (end of file) */
-        int unload = n >= (ssize_t)sizeof(*hdr) && hdr->magic == WEX_SESSION0_MAGIC &&
-                     hdr->type == WEX_SESSION0_HIVE_UNLOAD;
+        /* a hive link: HIVE_SAVED after each save, HIVE_UNLOAD at the server's exit, or the server is gone (end
+         * of file) */
+        int valid = n >= (ssize_t)sizeof(*hdr) && hdr->magic == WEX_SESSION0_MAGIC;
+        int unload = valid && hdr->type == WEX_SESSION0_HIVE_UNLOAD;
+        int saved = valid && hdr->type == WEX_SESSION0_HIVE_SAVED ? (hdr->machine == 1 ? 1 : 0) : -1;
+
         if (channel != -1) close( channel );
         free( buf );
+        if (saved != -1) session0_user_hive_saved( link, saved );
         if (n > 0 && !unload) return;  /* nothing else is expected: ignore it */
         session0_unload_user_hive( link, unload );
         reply.status = STATUS_SUCCESS;
@@ -477,7 +554,7 @@ int session0_request_allowed( enum request req )
  * program's relay in its own server (set_registry_relay), which sets the event. When the channel is lost, the
  * relay sets every pending event: a spurious change report, never a lost one. */
 
-#define RELAY_MAX_PENDING 4096
+#define RELAY_MAX_PENDING SESSION0_MAX_COOKIES
 
 struct registry_relay
 {
@@ -652,6 +729,7 @@ DECL_HANDLER(relay_registry_notification)
 /* T4a, a user's server: the link that holds this user's hive in session 0. Session 0 sends the hive back to be
  * written to user.reg, since its account cannot write in the user's home. */
 static struct session0_socket *hive_link;
+static int hive_kept_here;  /* user.reg could not be given to session 0 */
 
 static void hive_link_event( struct fd *fd, int event );
 static const struct fd_ops hive_link_fd_ops = { .poll_event = hive_link_event };
@@ -661,23 +739,29 @@ int session0_user_hive_remote(void)
     return hive_link != NULL;
 }
 
-/* write a hive that session 0 sent (a memory file) to user.reg, through a temporary file and a rename */
-static void write_user_hive( int src )
+/* write a hive that session 0 sent (a memory file) to user.reg, through a temporary file and a rename; 1 when
+ * written */
+static int write_user_hive( int src )
 {
     static const char tmp[] = "user.reg.wex-session0";
     char buf[65536];
     ssize_t n = 0;
     int dst, ok = 1;
 
-    if (lseek( src, 0, SEEK_SET )) return;
+    if (lseek( src, 0, SEEK_SET )) return 0;
     if ((dst = openat( config_dir_fd, tmp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600 )) == -1)
-        return;
+    {
+        fprintf( stderr, "wineserver: cannot write the user hive from session 0: %s\n", strerror( errno ));
+        return 0;
+    }
     while (ok && (n = read( src, buf, sizeof(buf) )) > 0)
         if (write( dst, buf, n ) != n) ok = 0;
     if (n < 0 || fsync( dst )) ok = 0;
     close( dst );
-    if (ok && !renameat( config_dir_fd, tmp, config_dir_fd, "user.reg" )) return;
+    if (ok && !renameat( config_dir_fd, tmp, config_dir_fd, "user.reg" )) return 1;
+    fprintf( stderr, "wineserver: cannot write the user hive from session 0: %s\n", strerror( errno ));
     unlinkat( config_dir_fd, tmp, 0 );
+    return 0;
 }
 
 /* one message on the hive link: a save, which is written (0), or the reply to HIVE_UNLOAD (1); -1 when gone */
@@ -708,7 +792,13 @@ static int hive_link_receive( int sock )
     }
     if (fd != -1)
     {
-        if (reply.status == WEX_SESSION0_HIVE_SAVE) write_user_hive( fd );
+        if (reply.status == WEX_SESSION0_HIVE_SAVE)
+        {
+            /* the answer: session 0 sends the hive again when it was not written */
+            struct wex_session0_request saved = { WEX_SESSION0_MAGIC, WEX_SESSION0_VERSION, 0,
+                                                  WEX_SESSION0_HIVE_SAVED, write_user_hive( fd ) };
+            send( sock, &saved, sizeof(saved), MSG_NOSIGNAL | MSG_DONTWAIT );
+        }
         close( fd );
         return 0;
     }
@@ -731,6 +821,49 @@ static void hive_link_event( struct fd *fd, int event )
     }
 }
 
+/* a copy of user.reg for session 0 in a memory file sealed against changes: session 0 reads it without
+ * blocking, and the user cannot change it while it is read. -1 with *ok set: there is no user.reg (a new hive);
+ * -1 with *ok clear: user.reg cannot be sent (not a regular file, too large, unreadable) and stays here */
+static int user_hive_snapshot( int *ok )
+{
+    char buf[65536];
+    struct stat st;
+    off_t copied = 0;
+    ssize_t n;
+    int src, dst = -1;
+
+    *ok = 0;
+    if ((src = openat( config_dir_fd, "user.reg", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC )) == -1)
+    {
+        *ok = errno == ENOENT;
+        return -1;
+    }
+    if (fstat( src, &st ) || !S_ISREG( st.st_mode ) || st.st_size > SESSION0_MAX_USER_HIVE) goto failed;
+    if (!st.st_size)
+    {
+        *ok = 1;  /* an empty file: a new hive */
+        close( src );
+        return -1;
+    }
+    if ((dst = memfd_create( "wex-user-hive", MFD_CLOEXEC | MFD_ALLOW_SEALING )) == -1) goto failed;
+    while ((n = read( src, buf, sizeof(buf) )) > 0)
+    {
+        if (copied + n > SESSION0_MAX_USER_HIVE || write( dst, buf, n ) != n) goto failed;
+        copied += n;
+    }
+    if (n < 0 || !copied ||
+        fcntl( dst, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL )) goto failed;
+    close( src );
+    *ok = 1;
+    return dst;
+
+failed:
+    fprintf( stderr, "wineserver: user.reg is not given to session 0: not a regular file, too large or unreadable\n" );
+    if (dst != -1) close( dst );
+    close( src );
+    return -1;
+}
+
 /* hold this user's hive in session 0, for a program of the server's own user; 1 when held */
 static int ensure_user_hive( struct token *token )
 {
@@ -745,14 +878,20 @@ static int ensure_user_hive( struct token *token )
     struct session0_socket *link;
     data_size_t size;
     void *desc = NULL;
-    int sock = -1, hive = -1, ok = 0;
+    int sock = -1, hive = -1, ok = 0, readable;
 
     if (hive_link) return 1;
+    if (hive_kept_here) return 0;
     if (!equal_sid( token_get_user_sid( token ), security_server_user_sid() )) return 0;  /* SYSTEM, services */
     size = token_describe( token, NULL, 0 );
     if (size > WEX_SESSION0_MAX_MSG - sizeof(hdr) || !(desc = malloc( size ))) return 0;
     token_describe( token, desc, size );
-    hive = openat( config_dir_fd, "user.reg", O_RDONLY | O_NOFOLLOW | O_CLOEXEC );  /* none: a new hive */
+    hive = user_hive_snapshot( &readable );  /* none: a new hive */
+    if (hive == -1 && !readable)
+    {
+        hive_kept_here = 1;  /* this server keeps the hive for its life */
+        goto done;
+    }
 
     memset( &addr, 0, sizeof(addr) );
     addr.sun_family = AF_UNIX;
@@ -789,6 +928,8 @@ static int ensure_user_hive( struct token *token )
     if (!(link = alloc_object( &session0_socket_ops ))) goto done;
     link->trusted = 1;
     link->hive = 1;
+    link->pending = 0;
+    link->timeout = NULL;
     if (!(link->fd = create_anonymous_fd( &hive_link_fd_ops, sock, &link->obj, 0 )))
     {
         sock = -1;  /* closed with the fd object */
