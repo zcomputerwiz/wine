@@ -88,7 +88,7 @@ struct session0_socket
     struct timeout_user *timeout;       /* when a pending link is dropped */
     unsigned int  session_id;           /* T6.2, session 0: a session link, of this session */
     unsigned int  serial;               /* the serial of the last order sent */
-    int           answered;             /* the session's server has answered an order */
+    unsigned int  outstanding;          /* the serial of the order that waits for its answer, or 0 */
     uid_t         peer_uid;
     pid_t         peer_pid;
     struct list   entry;                /* in session_links */
@@ -99,6 +99,50 @@ struct session0_socket
 #define SESSION0_MAX_SESSIONS_PER_USER 32
 static struct list session_links = LIST_INIT( session_links );
 
+/* Session ids are never given twice, also across restarts of session 0, while servers of the old session 0 still
+ * run: the next id is kept in session0.ids in session 0's directory, reserved in blocks so that the file is
+ * written rarely. Every id given out is below the number in the file. */
+#define SESSION_ID_BLOCK 64
+static unsigned int next_session_id;      /* 0: the file was not read yet */
+static unsigned int reserved_session_id;
+
+static void reserve_session_ids(void)
+{
+    static const char name[] = "session0.ids", tmp[] = "session0.ids.tmp";
+    char buf[32];
+    unsigned int reserved;
+    ssize_t n;
+    int fd, ok = 0;
+
+    if (!next_session_id)
+    {
+        unsigned long value = 0;
+
+        if ((fd = openat( config_dir_fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC )) != -1)
+        {
+            if ((n = read( fd, buf, sizeof(buf) - 1 )) > 0)
+            {
+                buf[n] = 0;
+                value = strtoul( buf, NULL, 10 );
+            }
+            close( fd );
+        }
+        next_session_id = reserved_session_id = (value && value < 0x80000000) ? value : 1;
+    }
+    if (next_session_id < reserved_session_id) return;
+    reserved = next_session_id + SESSION_ID_BLOCK;
+    n = snprintf( buf, sizeof(buf), "%u\n", reserved );
+    if ((fd = openat( config_dir_fd, tmp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600 )) != -1)
+    {
+        ok = write( fd, buf, n ) == n && !fsync( fd );
+        close( fd );
+        ok = ok && !renameat( config_dir_fd, tmp, config_dir_fd, name );
+        if (!ok) unlinkat( config_dir_fd, tmp, 0 );
+    }
+    if (!ok) fprintf( stderr, "session0: cannot keep the next session id in %s: %s\n", name, strerror( errno ));
+    reserved_session_id = reserved;  /* without the file, ids are still unique for this run */
+}
+
 static void init_link( struct session0_socket *link )
 {
     link->trusted = 0;
@@ -107,7 +151,7 @@ static void init_link( struct session0_socket *link )
     link->timeout = NULL;
     link->session_id = 0;
     link->serial = 0;
-    link->answered = 0;
+    link->outstanding = 0;
     link->peer_uid = (uid_t)-1;
     link->peer_pid = 0;
     list_init( &link->entry );
@@ -183,7 +227,9 @@ static int session0_send_order( struct session0_socket *link, unsigned int order
     msg.order = order;
     msg.serial = ++link->serial;
     msg.arg = arg;
-    return send( get_unix_fd( link->fd ), &msg, sizeof(msg), MSG_NOSIGNAL | MSG_DONTWAIT ) == sizeof(msg);
+    if (send( get_unix_fd( link->fd ), &msg, sizeof(msg), MSG_NOSIGNAL | MSG_DONTWAIT ) != sizeof(msg)) return 0;
+    link->outstanding = msg.serial;  /* one order at a time; its answer clears it */
+    return 1;
 }
 
 /* one "key=value" line of the root-owned configuration; 0 if the file or the key is missing */
@@ -303,6 +349,31 @@ static int connect_session0( int nonblock )
 
 /* T6.2, a user's server: the session link, on which session 0 sends orders */
 static struct session0_socket *session_link;
+static struct timeout_user *relink_timeout;
+static unsigned int relink_delay;  /* seconds, doubled after each failed try up to a minute */
+
+static int request_session_id( unsigned int wanted );
+static void schedule_relink( unsigned int delay );
+
+static void relink( void *private )
+{
+    relink_timeout = NULL;
+    if (session_link) return;
+    if (request_session_id( default_session_id ))
+    {
+        fprintf( stderr, "wineserver: linked to session 0 again as session %u\n", default_session_id );
+        relink_delay = 0;
+        return;
+    }
+    schedule_relink( relink_delay < 30 ? relink_delay * 2 : 60 );
+}
+
+static void schedule_relink( unsigned int delay )
+{
+    if (relink_timeout) return;
+    relink_delay = delay;
+    relink_timeout = add_timeout_user( -(timeout_t)delay * TICKS_PER_SEC, relink, NULL );
+}
 
 static void session_link_event( struct fd *fd, int event );
 static const struct fd_ops session_link_fd_ops = { .poll_event = session_link_event };
@@ -344,13 +415,15 @@ static void session_link_event( struct fd *fd, int event )
         if (n > 0) return;  /* not an order: ignored */
     }
     else if (!(event & (POLLHUP | POLLERR))) return;
-    /* session 0 is gone: no orders until this server is started again */
+    /* session 0 is gone (restarted): link again, under this server's own session id */
     set_fd_events( fd, -1 );
     if ((link = session_link))
     {
         session_link = NULL;
         release_object( link );
     }
+    fprintf( stderr, "wineserver: session 0 closed the session link; linking again\n" );
+    schedule_relink( 2 );
 }
 
 /* keep a link on which session 0 has answered SESSION_ID as the session link; 1 when kept */
@@ -371,26 +444,27 @@ static int open_session_link( int sock )
     return 1;
 }
 
-/* T6.1: the session id of this server's logon, from session 0 (1 when it does not answer); T6.2: the link stays
- * as the session link */
-static void request_session_id(void)
+/* T6.1: the session id of this server's logon from session 0 (wanted 0), or this server's own id again after
+ * session 0 restarted; T6.2: the link stays as the session link. 1 when linked */
+static int request_session_id( unsigned int wanted )
 {
-    struct wex_session0_request hdr = { WEX_SESSION0_MAGIC, WEX_SESSION0_VERSION, 0, WEX_SESSION0_SESSION_ID, 0 };
+    struct wex_session0_request hdr = { WEX_SESSION0_MAGIC, WEX_SESSION0_VERSION, 0, WEX_SESSION0_SESSION_ID, wanted };
     struct wex_session0_reply answer;
     struct pollfd pfd;
     int sock;
 
-    if ((sock = connect_session0( 0 )) == -1) return;
+    if ((sock = connect_session0( 0 )) == -1) return 0;
     pfd.fd = sock;
     pfd.events = POLLIN;
     if (send( sock, &hdr, sizeof(hdr), MSG_NOSIGNAL ) == sizeof(hdr) && poll( &pfd, 1, 2000 ) == 1 &&
         recv( sock, &answer, sizeof(answer), 0 ) == sizeof(answer) && answer.magic == WEX_SESSION0_MAGIC &&
-        !answer.status && answer.value)
+        !answer.status && answer.value && (!wanted || answer.value == wanted))
     {
         default_session_id = answer.value;
-        if (open_session_link( sock )) return;
+        if (open_session_link( sock )) return session_link != NULL;
     }
     close( sock );
+    return 0;
 }
 
 void session0_init( int server_mode )
@@ -421,7 +495,10 @@ void session0_init( int server_mode )
             session0_client = 0;
         }
     }
-    if (session0_client) request_session_id();
+    /* a launcher-started server is a logon session only with an id from session 0: without one it does not start
+     * (an id it made up could be another session's); a development server keeps 1 */
+    if (session0_client && !request_session_id( 0 ) && sysrun_active)
+        fatal_error( "session 0 at %s did not register this session\n", session0_path );
 }
 
 uid_t session0_hive_owner(void)
@@ -569,7 +646,8 @@ static void session0_link_event( struct fd *fd, int event )
     msg.msg_control = cmsg_buffer;
     msg.msg_controllen = sizeof(cmsg_buffer);
     n = recvmsg( get_unix_fd( fd ), &msg, MSG_CMSG_CLOEXEC );
-    for (cmsg = n > 0 ? CMSG_FIRSTHDR( &msg ) : NULL; cmsg; cmsg = CMSG_NXTHDR( &msg, cmsg ))
+    /* also for an empty message: descriptors can come with one, and are closed below like any other */
+    for (cmsg = n >= 0 ? CMSG_FIRSTHDR( &msg ) : NULL; cmsg; cmsg = CMSG_NXTHDR( &msg, cmsg ))
     {
         int *fds = (int *)CMSG_DATA( cmsg ), count, i;
 
@@ -591,12 +669,14 @@ static void session0_link_event( struct fd *fd, int event )
         struct wex_session0_order_reply *answer = buf;
 
         if (channel != -1) close( channel );
-        if (n == sizeof(*answer) && answer->magic == WEX_SESSION0_MAGIC && answer->serial == link->serial &&
-            !answer->status && !link->answered)
+        /* exactly one answer per order sent; anything else is ignored */
+        if (n == sizeof(*answer) && answer->magic == WEX_SESSION0_MAGIC && link->outstanding &&
+            answer->serial == link->outstanding)
         {
-            link->answered = 1;
-            fprintf( stderr, "session0: session %u (server pid %d, uid %u) answers on its link: session id %u\n",
-                     link->session_id, (int)link->peer_pid, (unsigned int)link->peer_uid, answer->value );
+            link->outstanding = 0;
+            if (!answer->status)  /* the only order so far is PING */
+                fprintf( stderr, "session0: session %u (server pid %d, uid %u) answers on its link: session id %u\n",
+                         link->session_id, (int)link->peer_pid, (unsigned int)link->peer_uid, answer->value );
         }
         free( buf );
         if (n > 0) return;  /* anything else is ignored */
@@ -632,23 +712,32 @@ static void session0_link_event( struct fd *fd, int event )
         reply.status = STATUS_ACCESS_DENIED;
     else if (hdr->type == WEX_SESSION0_SESSION_ID)
     {
-        static unsigned int next_session_id = 1;  /* session 0 is 0 */
+        /* a new server asks with 0; a server that lost its link (session 0 restarted) asks for its own id again,
+         * which it gets when the id was given out before (below the reserved number) and no link holds it */
+        unsigned int wanted = hdr->machine;
         struct session0_socket *other;
-        unsigned int count = 0;
+        unsigned int count = 0, in_use = 0;
 
+        reserve_session_ids();
         LIST_FOR_EACH_ENTRY( other, &session_links, struct session0_socket, entry )
+        {
             if (other->peer_uid == link->peer_uid) count++;
+            if (wanted && other->session_id == wanted) in_use = 1;
+        }
         if (count >= SESSION0_MAX_SESSIONS_PER_USER) reply.status = STATUS_INSUFFICIENT_RESOURCES;
+        else if (wanted && (wanted >= next_session_id || in_use)) reply.status = STATUS_OBJECT_NAME_COLLISION;
         else
         {
             reply.status = STATUS_SUCCESS;
-            reply.value = next_session_id++;
-            if (!next_session_id) next_session_id = 1;
+            reply.value = wanted ? wanted : next_session_id++;
             /* T6.2: the link stays as the session link; a first order checks that the server takes orders */
             if (channel != -1) close( channel );
             free( buf );
             link->session_id = reply.value;
             list_add_tail( &session_links, &link->entry );
+            if (wanted)
+                fprintf( stderr, "session0: session %u (server pid %d, uid %u) linked again\n", wanted,
+                         (int)link->peer_pid, (unsigned int)link->peer_uid );
             send( get_unix_fd( fd ), &reply, sizeof(reply), MSG_NOSIGNAL | MSG_DONTWAIT );
             session0_send_order( link, WEX_SESSION0_ORDER_PING, 0 );
             return;
@@ -973,9 +1062,25 @@ static int hive_link_receive( int sock )
     msg.msg_iovlen = 1;
     msg.msg_control = cmsg_buffer;
     msg.msg_controllen = sizeof(cmsg_buffer);
-    if ((n = recvmsg( sock, &msg, MSG_CMSG_CLOEXEC )) <= 0) return (n < 0 && errno == EAGAIN) ? 0 : -1;
+    if ((n = recvmsg( sock, &msg, MSG_CMSG_CLOEXEC )) < 0) return errno == EAGAIN ? 0 : -1;
+    /* also for an empty message (the end): a descriptor that came with it is closed */
     for (cmsg = CMSG_FIRSTHDR( &msg ); cmsg; cmsg = CMSG_NXTHDR( &msg, cmsg ))
-        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) memcpy( &fd, CMSG_DATA( cmsg ), sizeof(fd) );
+    {
+        int *fds = (int *)CMSG_DATA( cmsg ), count, i;
+
+        if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) continue;
+        count = (cmsg->cmsg_len - CMSG_LEN( 0 )) / sizeof(int);
+        for (i = 0; i < count; i++)
+        {
+            if (fd != -1) close( fd );
+            fd = fds[i];
+        }
+    }
+    if (!n)
+    {
+        if (fd != -1) close( fd );
+        return -1;
+    }
     if (n != sizeof(reply) || reply.magic != WEX_SESSION0_MAGIC)
     {
         if (fd != -1) close( fd );
