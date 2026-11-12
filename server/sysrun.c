@@ -61,6 +61,7 @@
 #include "security.h"
 #include "file.h"
 #include "handle.h"
+#include "session0.h"
 
 #define SYSRUN_CONF "/etc/wineexplorer/sysrun.conf"
 
@@ -393,6 +394,17 @@ void sysrun_main_image( struct process *process, struct fd *fd )
                 !stat( path, &ref ) && ref.st_dev == st.st_dev && ref.st_ino == st.st_ino)
                 process->e1s6_broker_image = 1;
     }
+    /* E1 R9: session 0's broker (B0) is the same image, mapped by one of session 0's own programs; session 0's
+     * directory is the machine root */
+    if (!process->e1s6_image_seen && session0_server && !process->wex_registry_client && fd &&
+        (unix_fd = get_unix_fd( fd )) != -1 && !fstat( unix_fd, &st ) && S_ISREG( st.st_mode ))
+    {
+        static const char *const brokers[] = { "wexelevate.exe", "wexelevate_test.exe" };
+        for (i = 0; i < ARRAY_SIZE(brokers); i++)
+            if ((unsigned int)snprintf( path, sizeof(path), "drive_c/windows/system32/%s", brokers[i] ) < sizeof(path) &&
+                !fstatat( config_dir_fd, path, &ref, 0 ) && ref.st_dev == st.st_dev && ref.st_ino == st.st_ino)
+                process->e1s6_broker_image = 1;
+    }
     process->e1s6_image_seen = 1;
 #endif
     if (!process->sysrun_pending)
@@ -590,8 +602,17 @@ int sysrun_e1s6_endorse( const void *data, unsigned int size )
     E1S6_REQUIRE( data_fd >= 0, "endorse-data-fd" );
     E1S6_REQUIRE( !current->token, "endorse-thread-token" );
     E1S6_REQUIRE( p->e1s6_broker_image, "endorse-broker-image" );
-    E1S6_REQUIRE( sysrun_process_is_system( p ), "endorse-system-role" );
-    E1S6_REQUIRE( sysrun_process_privileged( p ), "endorse-sysrun-connection" );
+    if (session0_server)
+    {
+        /* E1 R9: session 0 endorses its broker B0, one of its own LocalSystem programs (checked below); the
+         * launcher's system role does not exist here */
+        E1S6_REQUIRE( !p->wex_registry_client, "endorse-session0-own-program" );
+    }
+    else
+    {
+        E1S6_REQUIRE( sysrun_process_is_system( p ), "endorse-system-role" );
+        E1S6_REQUIRE( sysrun_process_privileged( p ), "endorse-sysrun-connection" );
+    }
     E1S6_REQUIRE( token_service_account( p->token ) == SERVICE_ACCOUNT_SYSTEM, "endorse-system-primary" );
     E1S6_REQUIRE( token_has_privilege( p->token, SeTcbPrivilege ), "endorse-tcb" );
     E1S6_REQUIRE( !getsockopt( pin, SOL_SOCKET, SO_PEERCRED, &peer, &len ) && len == sizeof(peer), "endorse-peercred" );
@@ -646,7 +667,8 @@ int sysrun_e1s6_endorse( const void *data, unsigned int size )
     /* Local sideband encoding is explicitly LE, separate from S1 kind 7. */
     for (i = 0; i < 8; i++) { out[i] = server_generation >> (8 * i); out[8+i] = fresh >> (8 * i); }
     for (i = 0; i < 4; i++) { out[16+i] = peer.pid >> (8 * i); out[20+i] = p->session_id >> (8 * i); }
-    raised = sysrun_raise();
+    /* session 0 runs as its own account with the system group as its group: nothing to raise */
+    raised = session0_server ? 1 : sysrun_raise();
     if (!raised) fprintf( stderr, "E1S6_DENY server site=endorse-raise-group errno=%d\n", errno );
     if (raised)
     {
@@ -665,7 +687,7 @@ int sysrun_e1s6_endorse( const void *data, unsigned int size )
         ret = sendmsg( fd, &msg, MSG_DONTWAIT | MSG_NOSIGNAL ) == (ssize_t)sizeof(out);
         if (!ret) fprintf( stderr, "E1S6_DENY server site=endorse-send errno=%d\n", errno );
     }
-    sysrun_drop( raised );
+    if (!session0_server) sysrun_drop( raised );
     if (ret)
     {
         /* Publish only after the complete seqpacket was delivered. No fallible
