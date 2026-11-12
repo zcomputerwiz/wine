@@ -5694,6 +5694,38 @@ struct get_token_info_reply
 
 
 
+struct set_token_package_request
+{
+    struct request_header __header;
+    obj_handle_t   handle;
+    /* VARARG(aumid,unicode_str); */
+};
+struct set_token_package_reply
+{
+    struct reply_header __header;
+};
+
+
+
+struct get_token_package_request
+{
+    struct request_header __header;
+    obj_handle_t   handle;
+};
+struct get_token_package_reply
+{
+    struct reply_header __header;
+    data_size_t    total;
+    data_size_t    full_len;
+    data_size_t    family_len;
+    data_size_t    app_len;
+    data_size_t    root_len;
+    data_size_t    exe_len;
+    /* VARARG(data,bytes); */
+};
+
+
+
 struct create_linked_token_request
 {
     struct request_header __header;
@@ -6868,6 +6900,8 @@ enum request
     REQ_grant_process_admin_token,
     REQ_create_service_token,
     REQ_get_token_info,
+    REQ_set_token_package,
+    REQ_get_token_package,
     REQ_create_linked_token,
     REQ_create_completion,
     REQ_open_completion,
@@ -7204,6 +7238,8 @@ union generic_request
     struct grant_process_admin_token_request grant_process_admin_token_request;
     struct create_service_token_request create_service_token_request;
     struct get_token_info_request get_token_info_request;
+    struct set_token_package_request set_token_package_request;
+    struct get_token_package_request get_token_package_request;
     struct create_linked_token_request create_linked_token_request;
     struct create_completion_request create_completion_request;
     struct open_completion_request open_completion_request;
@@ -7538,6 +7574,8 @@ union generic_reply
     struct grant_process_admin_token_reply grant_process_admin_token_reply;
     struct create_service_token_reply create_service_token_reply;
     struct get_token_info_reply get_token_info_reply;
+    struct set_token_package_reply set_token_package_reply;
+    struct get_token_package_reply get_token_package_reply;
     struct create_linked_token_reply create_linked_token_reply;
     struct create_completion_reply create_completion_reply;
     struct open_completion_reply open_completion_reply;
@@ -7595,6 +7633,6 @@ union generic_reply
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 983
+#define SERVER_PROTOCOL_VERSION 984
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

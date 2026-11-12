@@ -1,0 +1,21 @@
+HKCR
+{
+    NoRemove AppID
+    {
+        ForceRemove '{45BA127D-10A8-46EA-8AB7-56EA9078943C}' = s 'ApplicationActivationManager'
+        {
+            val DllSurrogate = s ''
+        }
+    }
+    NoRemove CLSID
+    {
+        ForceRemove '{45BA127D-10A8-46EA-8AB7-56EA9078943C}' = s 'ApplicationActivationManager'
+        {
+            val AppID = s '{45BA127D-10A8-46EA-8AB7-56EA9078943C}'
+            InprocServer32 = s '%MODULE%'
+            {
+                val ThreadingModel = s 'Both'
+            }
+        }
+    }
+}

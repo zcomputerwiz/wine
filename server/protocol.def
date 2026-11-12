@@ -4016,6 +4016,27 @@ struct handle_info
 @END
 
 
+/* Give a token the package context of an application of the prefix catalog */
+@REQ(set_token_package)
+    obj_handle_t   handle;        /* handle to the token */
+    VARARG(aumid,unicode_str);    /* application: FamilyName!ApplicationId */
+@END
+
+
+/* Get the package context of a token */
+@REQ(get_token_package)
+    obj_handle_t   handle;        /* handle to the token */
+@REPLY
+    data_size_t    total;         /* total size of the data */
+    data_size_t    full_len;      /* size of the package full name */
+    data_size_t    family_len;    /* size of the package family name */
+    data_size_t    app_len;       /* size of the application id */
+    data_size_t    root_len;      /* size of the path of the package directory */
+    data_size_t    exe_len;       /* size of the relative path of the executable */
+    VARARG(data,bytes);           /* the strings above, then the class table */
+@END
+
+
 /* Create a token which is an elevation counterpart to this token */
 @REQ(create_linked_token)
     obj_handle_t   handle;        /* handle to the token */

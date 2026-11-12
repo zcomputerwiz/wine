@@ -43,6 +43,7 @@
 #include "sysrun.h"
 #include "accounts.h"
 #include "session0.h"
+#include "uwp_context.h"
 #include "e1s_token.h"
 #include "wine/wex_token.h"
 #include "wine/wex_profile.h"
@@ -147,6 +148,8 @@ struct token
     int            is_restricted;   /* token has restricting SIDs */
     struct sid    *app_container;   /* AppContainer package SID */
     struct list    capabilities;    /* capability SIDs */
+    struct uwp_context *package;    /* package context (UWP compatibility) */
+    int            package_pending; /* no process image has been checked against the context yet */
 };
 
 struct privilege
@@ -538,6 +541,7 @@ static void token_destroy( struct object *obj )
     }
 
     free( token->default_dacl );
+    if (token->package) uwp_context_release( token->package );
 }
 
 /* creates a new token.
@@ -587,6 +591,8 @@ static struct token *create_token( unsigned int primary, unsigned int session_id
         token->integrity_rid = SECURITY_MANDATORY_HIGH_RID;
         token->app_container = NULL;
         token->is_restricted = 0;
+        token->package = NULL;
+        token->package_pending = 0;
 
         /* copy user */
         token->user = memdup( user, sid_len( user ));
@@ -771,6 +777,13 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
         list_add_tail( &token->restricted_sids, &newgroup->entry );
     }
     token->is_restricted = src_token->is_restricted;
+
+    /* the package context follows every duplicate, checked against an image or not */
+    if (src_token->package)
+    {
+        token->package = uwp_context_retain( src_token->package );
+        token->package_pending = src_token->package_pending;
+    }
 
     /* copy capabilities */
     LIST_FOR_EACH_ENTRY( group, &src_token->capabilities, struct group, entry )
@@ -3321,4 +3334,68 @@ struct token *token_create_described( const void *data, data_size_t size )
 error:
     release_object( token );
     return NULL;
+}
+
+/* does the token carry a package context that no process image has been checked against? */
+int token_package_pending( const struct token *token )
+{
+    return token->package && token->package_pending;
+}
+
+/* The first executable image of a process settles a pending package context, by the file the process
+ * actually maps (device and inode), never by an image string. Returns 0 when that file is not the
+ * executable of the application. */
+int token_package_check_image( struct token *token, struct fd *fd )
+{
+    if (!token_package_pending( token )) return 1;
+    if (!uwp_context_is_executable( token->package, fd )) return 0;
+    token->package_pending = 0;
+    return 1;
+}
+
+/* give a token the package context of an application of the catalog */
+DECL_HANDLER(set_token_package)
+{
+    struct token *token;
+    struct uwp_context *ctx;
+
+    if (!(token = (struct token *)get_handle_obj( current->process, req->handle, TOKEN_ADJUST_DEFAULT, &token_ops )))
+        return;
+
+    /* Only a token that is not yet the identity of anything: a primary token that no process runs with and
+     * that has no context. A process gets a context by being started with such a token from the executable
+     * of the application (token_package_check_image), never by changing the token it runs with. */
+    if (!token->primary || token->package || is_process_token( token )) set_error( STATUS_ACCESS_DENIED );
+    else if ((ctx = uwp_context_from_aumid( get_req_data(), get_req_data_size() )))
+    {
+        token->package = ctx;
+        token->package_pending = 1;
+    }
+    release_object( token );
+}
+
+/* get the package context of a token */
+DECL_HANDLER(get_token_package)
+{
+    struct token *token;
+
+    if (!(token = (struct token *)get_handle_obj( current->process, req->handle, TOKEN_QUERY, &token_ops )))
+        return;
+
+    if (!token->package) set_error( STATUS_NOT_FOUND );
+    else
+    {
+        struct uwp_context_sizes sizes;
+        const void *data;
+
+        reply->total      = uwp_context_get_data( token->package, &sizes, &data );
+        reply->full_len   = sizes.full_name;
+        reply->family_len = sizes.family_name;
+        reply->app_len    = sizes.app_id;
+        reply->root_len   = sizes.root;
+        reply->exe_len    = sizes.executable;
+        if (reply->total <= get_reply_max_size()) set_reply_data( data, reply->total );
+        else set_error( STATUS_BUFFER_TOO_SMALL );
+    }
+    release_object( token );
 }

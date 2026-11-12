@@ -1685,6 +1685,12 @@ DECL_HANDLER(map_image_view)
                     ? IMAGE_FILE_MACHINE_AMD64 : native_machine;
             else
                 current->process->machine = req->machine;
+            /* a process started with a package context has to be the application of that context */
+            if (!token_package_check_image( current->process->token, view->fd ))
+            {
+                set_error( STATUS_ACCESS_DENIED );
+                goto done;
+            }
         }
 
         if (view->base != (mapping->image.map_addr ? mapping->image.map_addr : mapping->image.base) + req->offset)

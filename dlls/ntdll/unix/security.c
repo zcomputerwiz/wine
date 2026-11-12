@@ -371,6 +371,35 @@ NTSTATUS WINAPI NtQueryInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS c
 
     TRACE( "(%p,%s,%p,%d,%p)\n", token, debugstr_TokenInformationClass(class), info, length, retlen );
 
+    if (class == TokenWinePackage)
+    {
+        WINE_TOKEN_PACKAGE_INFORMATION *package = info;
+        const ULONG header = offsetof( WINE_TOKEN_PACKAGE_INFORMATION, data );
+
+        SERVER_START_REQ( get_token_package )
+        {
+            req->handle = wine_server_obj_handle( token );
+            if (length > header) wine_server_set_reply( req, package->data, length - header );
+            status = wine_server_call( req );
+            if (!status || status == STATUS_BUFFER_TOO_SMALL)
+            {
+                if (retlen) *retlen = header + reply->total;
+                if (!status)
+                {
+                    package->full_name_len   = reply->full_len;
+                    package->family_name_len = reply->family_len;
+                    package->app_id_len      = reply->app_len;
+                    package->root_len        = reply->root_len;
+                    package->executable_len  = reply->exe_len;
+                    package->classes_len     = reply->total - reply->full_len - reply->family_len -
+                                               reply->app_len - reply->root_len - reply->exe_len;
+                }
+            }
+        }
+        SERVER_END_REQ;
+        return status;
+    }
+
     if (class < ARRAY_SIZE(info_len)) len = info_len[class];
     if (retlen) *retlen = len;
     if (length < len) return STATUS_BUFFER_TOO_SMALL;
@@ -733,6 +762,19 @@ NTSTATUS WINAPI NtSetInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS cla
     unsigned int ret = STATUS_NOT_IMPLEMENTED;
 
     TRACE( "%p %d %p %u\n", token, class, info, length );
+
+    if (class == TokenWinePackage)
+    {
+        if (!info || !length) return STATUS_INVALID_PARAMETER;
+        SERVER_START_REQ( set_token_package )
+        {
+            req->handle = wine_server_obj_handle( token );
+            wine_server_add_data( req, info, length );
+            ret = wine_server_call( req );
+        }
+        SERVER_END_REQ;
+        return ret;
+    }
 
     switch (class)
     {

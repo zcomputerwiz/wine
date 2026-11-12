@@ -154,6 +154,9 @@ extern const struct luid SeAssignPrimaryTokenPrivilege;
 extern const struct luid SeTcbPrivilege;
 extern int token_has_privilege( struct token *token, struct luid priv );
 extern unsigned int token_check_assign_primary( struct token *token );
+struct fd;
+extern int token_package_pending( const struct token *token );
+extern int token_package_check_image( struct token *token, struct fd *fd );
 
 static inline int thread_single_check_privilege( struct thread *thread, struct luid priv )
 {

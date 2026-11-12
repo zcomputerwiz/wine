@@ -17,6 +17,8 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 #define COBJMACROS
+#include "ntstatus.h"
+#define WIN32_NO_STATUS
 #include "objbase.h"
 #include "ctxtcall.h"
 #include "comsvcs.h"
@@ -41,6 +43,84 @@ struct activatable_class_data
     DWORD module_offset;
     DWORD threading_model;
 };
+
+/* The package context of this process: the class table kept by the server with the primary token.
+ * Read once; a process keeps the identity it was started with. */
+static WINE_TOKEN_PACKAGE_INFORMATION *process_package;
+static HRESULT process_package_hr;
+
+static BOOL WINAPI init_process_package(INIT_ONCE *once, void *param, void **context)
+{
+    WINE_TOKEN_PACKAGE_INFORMATION *info = NULL;
+    NTSTATUS status;
+    ULONG size = 0;
+    HANDLE token;
+
+    if ((status = NtOpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)))
+    {
+        process_package_hr = HRESULT_FROM_NT(status);
+        return TRUE;
+    }
+    status = NtQueryInformationToken(token, TokenWinePackage, NULL, 0, &size);
+    while (status == STATUS_BUFFER_TOO_SMALL)
+    {
+        free(info);
+        if (!(info = malloc(size)))
+        {
+            status = STATUS_NO_MEMORY;
+            break;
+        }
+        status = NtQueryInformationToken(token, TokenWinePackage, info, size, &size);
+    }
+    NtClose(token);
+
+    if (!status) process_package = info;
+    else
+    {
+        free(info);
+        /* no package context is the ordinary case; anything else is an error, not "unpackaged" */
+        process_package_hr = status == STATUS_NOT_FOUND ? S_FALSE : HRESULT_FROM_NT(status);
+    }
+    return TRUE;
+}
+
+/* Look a class up in the package of this process. S_OK: the package declares the class, and only its own
+ * module may serve it. S_FALSE: no package context, or the package does not declare the class. */
+static HRESULT get_package_library_for_classid(const WCHAR *classid, UINT32 classid_len, WCHAR **out)
+{
+    static INIT_ONCE once = INIT_ONCE_STATIC_INIT;
+    const WCHAR *root, *ptr, *end;
+    UINT32 root_len;
+
+    InitOnceExecuteOnce(&once, init_process_package, NULL, NULL);
+    if (!process_package) return process_package_hr;
+
+    root = process_package->data + (process_package->full_name_len + process_package->family_name_len +
+                                    process_package->app_id_len) / sizeof(WCHAR);
+    root_len = process_package->root_len / sizeof(WCHAR);
+    ptr = root + root_len + process_package->executable_len / sizeof(WCHAR);
+    end = ptr + process_package->classes_len / sizeof(WCHAR);
+
+    while (ptr < end)
+    {
+        UINT32 class_len = wcslen(ptr), path_len = wcslen(ptr + class_len + 1);
+
+        /* the counted name is compared, so a name with an embedded NUL matches nothing */
+        if (class_len == classid_len && !memcmp(ptr, classid, class_len * sizeof(WCHAR)))
+        {
+            WCHAR *path;
+
+            if (!(path = malloc((root_len + 1 + path_len + 1) * sizeof(WCHAR)))) return E_OUTOFMEMORY;
+            memcpy(path, root, root_len * sizeof(WCHAR));
+            path[root_len] = '\\';
+            memcpy(path + root_len + 1, ptr + class_len + 1, (path_len + 1) * sizeof(WCHAR));
+            *out = path;
+            return S_OK;
+        }
+        ptr += class_len + 1 + path_len + 1;
+    }
+    return S_FALSE;
+}
 
 static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
 {
@@ -151,7 +231,10 @@ HRESULT WINAPI DECLSPEC_HOTPATCH RoGetActivationFactory(HSTRING classid, REFIID 
 {
     PFNGETACTIVATIONFACTORY pDllGetActivationFactory;
     IActivationFactory *factory;
-    WCHAR *library;
+    const WCHAR *raw_classid;
+    UINT32 classid_len;
+    BOOL from_package;
+    WCHAR *library = NULL;
     HMODULE module;
     HRESULT hr;
 
@@ -163,14 +246,26 @@ HRESULT WINAPI DECLSPEC_HOTPATCH RoGetActivationFactory(HSTRING classid, REFIID 
     if (FAILED(hr = ensure_mta()))
         return hr;
 
-    hr = get_library_for_classid(WindowsGetStringRawBuffer(classid, NULL), &library);
+    /* A class declared by the package of this process is served by the module of that package only: a
+     * failure to load it is the result, and no other registration is tried. Everything else, and every
+     * process without a package context, takes the ordinary lookup. */
+    raw_classid = WindowsGetStringRawBuffer(classid, &classid_len);
+    if (FAILED(hr = get_package_library_for_classid(raw_classid, classid_len, &library)))
+    {
+        ERR("Failed to read the package context, hr %#lx.\n", hr);
+        return hr;
+    }
+    from_package = hr == S_OK;
+
+    if (!from_package) hr = get_library_for_classid(raw_classid, &library);
     if (FAILED(hr))
     {
         ERR("Failed to find library for %s\n", debugstr_hstring(classid));
         return hr;
     }
 
-    if (!(module = LoadLibraryW(library)))
+    if (!(module = from_package ? LoadLibraryExW(library, NULL, LOAD_WITH_ALTERED_SEARCH_PATH)
+                                : LoadLibraryW(library)))
     {
         ERR("Failed to load module %s\n", debugstr_w(library));
         hr = HRESULT_FROM_WIN32(GetLastError());

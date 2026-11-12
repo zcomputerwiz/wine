@@ -57,8 +57,8 @@ void WINAPI UnregisterAppStateChangeNotification( PAPPSTATE_REGISTRATION reg )
 
 HRESULT WINAPI DllGetClassObject( REFCLSID clsid, REFIID riid, void **out )
 {
-    FIXME( "clsid %s, riid %s, out %p stub!\n", debugstr_guid(clsid), debugstr_guid(riid), out );
-    return CLASS_E_CLASSNOTAVAILABLE;
+    TRACE( "clsid %s, riid %s, out %p.\n", debugstr_guid(clsid), debugstr_guid(riid), out );
+    return activation_manager_get_class_object( clsid, riid, out );
 }
 
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )

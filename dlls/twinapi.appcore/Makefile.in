@@ -3,6 +3,7 @@ MODULE    = twinapi.appcore.dll
 IMPORTS   = combase advapi32
 
 SOURCES = \
+	activation_manager.c \
 	advertising_manager.c \
 	analytics_info.c \
 	application_view.c \
@@ -10,4 +11,5 @@ SOURCES = \
 	client_device_information.c \
 	core_application.c \
 	data_transfer.c \
-	main.c
+	main.c \
+	twinapi.appcore.rc

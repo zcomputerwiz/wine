@@ -2018,6 +2018,25 @@ typedef enum _PROCESSINFOCLASS {
 #endif
 } PROCESSINFOCLASS;
 
+#ifdef __WINESRC__
+/* Wine-private token information class: the package context of a token (WineExplorer UWP compatibility).
+ * A query returns a WINE_TOKEN_PACKAGE_INFORMATION, or STATUS_NOT_FOUND for a token without a context.
+ * Setting takes "FamilyName!ApplicationId" (WCHARs, not terminated) and gives a primary token that no
+ * process runs with the context of that application of the prefix catalog. */
+#define TokenWinePackage ((TOKEN_INFORMATION_CLASS)1000)
+
+typedef struct _WINE_TOKEN_PACKAGE_INFORMATION
+{
+    ULONG full_name_len;    /* sizes in bytes of the strings in data, in this order; none is terminated */
+    ULONG family_name_len;
+    ULONG app_id_len;
+    ULONG root_len;         /* path of the package directory */
+    ULONG executable_len;   /* executable of the application, relative to the package directory */
+    ULONG classes_len;      /* class table: class, NUL, relative path of its server, NUL, ... */
+    WCHAR data[1];
+} WINE_TOKEN_PACKAGE_INFORMATION;
+#endif
+
 #define MEM_EXECUTE_OPTION_DISABLE   0x01
 #define MEM_EXECUTE_OPTION_ENABLE    0x02
 #define MEM_EXECUTE_OPTION_DISABLE_THUNK_EMULATION 0x04

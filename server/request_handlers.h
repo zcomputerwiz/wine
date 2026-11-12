@@ -281,6 +281,8 @@ DECL_HANDLER(make_process_system);
 DECL_HANDLER(grant_process_admin_token);
 DECL_HANDLER(create_service_token);
 DECL_HANDLER(get_token_info);
+DECL_HANDLER(set_token_package);
+DECL_HANDLER(get_token_package);
 DECL_HANDLER(create_linked_token);
 DECL_HANDLER(create_completion);
 DECL_HANDLER(open_completion);
@@ -614,6 +616,8 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_grant_process_admin_token,
     (req_handler)req_create_service_token,
     (req_handler)req_get_token_info,
+    (req_handler)req_set_token_package,
+    (req_handler)req_get_token_package,
     (req_handler)req_create_linked_token,
     (req_handler)req_create_completion,
     (req_handler)req_open_completion,
@@ -2265,6 +2269,17 @@ C_ASSERT( offsetof(struct get_token_info_reply, integrity_rid) == 60 );
 C_ASSERT( offsetof(struct get_token_info_reply, is_app_container) == 64 );
 C_ASSERT( offsetof(struct get_token_info_reply, is_restricted) == 68 );
 C_ASSERT( sizeof(struct get_token_info_reply) == 72 );
+C_ASSERT( offsetof(struct set_token_package_request, handle) == 12 );
+C_ASSERT( sizeof(struct set_token_package_request) == 16 );
+C_ASSERT( offsetof(struct get_token_package_request, handle) == 12 );
+C_ASSERT( sizeof(struct get_token_package_request) == 16 );
+C_ASSERT( offsetof(struct get_token_package_reply, total) == 8 );
+C_ASSERT( offsetof(struct get_token_package_reply, full_len) == 12 );
+C_ASSERT( offsetof(struct get_token_package_reply, family_len) == 16 );
+C_ASSERT( offsetof(struct get_token_package_reply, app_len) == 20 );
+C_ASSERT( offsetof(struct get_token_package_reply, root_len) == 24 );
+C_ASSERT( offsetof(struct get_token_package_reply, exe_len) == 28 );
+C_ASSERT( sizeof(struct get_token_package_reply) == 32 );
 C_ASSERT( offsetof(struct create_linked_token_request, handle) == 12 );
 C_ASSERT( sizeof(struct create_linked_token_request) == 16 );
 C_ASSERT( offsetof(struct create_linked_token_reply, linked) == 8 );

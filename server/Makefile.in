@@ -54,6 +54,8 @@ SOURCES = \
 	trace.c \
 	unicode.c \
 	user.c \
+	uwp_context.c \
+	uwp_context.h \
 	wex_profile_storage.c \
 	wex_profile_storage.h \
 	window.c \

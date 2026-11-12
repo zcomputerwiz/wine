@@ -3196,6 +3196,28 @@ static void dump_get_token_info_reply( const struct get_token_info_reply *req )
     fprintf( stderr, ", is_restricted=%d", req->is_restricted );
 }
 
+static void dump_set_token_package_request( const struct set_token_package_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    dump_varargs_unicode_str( ", aumid=", cur_size );
+}
+
+static void dump_get_token_package_request( const struct get_token_package_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+}
+
+static void dump_get_token_package_reply( const struct get_token_package_reply *req )
+{
+    fprintf( stderr, " total=%u", req->total );
+    fprintf( stderr, ", full_len=%u", req->full_len );
+    fprintf( stderr, ", family_len=%u", req->family_len );
+    fprintf( stderr, ", app_len=%u", req->app_len );
+    fprintf( stderr, ", root_len=%u", req->root_len );
+    fprintf( stderr, ", exe_len=%u", req->exe_len );
+    dump_varargs_bytes( ", data=", cur_size );
+}
+
 static void dump_create_linked_token_request( const struct create_linked_token_request *req )
 {
     fprintf( stderr, " handle=%04x", req->handle );
@@ -4058,6 +4080,8 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_grant_process_admin_token_request,
     (dump_func)dump_create_service_token_request,
     (dump_func)dump_get_token_info_request,
+    (dump_func)dump_set_token_package_request,
+    (dump_func)dump_get_token_package_request,
     (dump_func)dump_create_linked_token_request,
     (dump_func)dump_create_completion_request,
     (dump_func)dump_open_completion_request,
@@ -4391,6 +4415,8 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     NULL,
     (dump_func)dump_create_service_token_reply,
     (dump_func)dump_get_token_info_reply,
+    NULL,
+    (dump_func)dump_get_token_package_reply,
     (dump_func)dump_create_linked_token_reply,
     (dump_func)dump_create_completion_reply,
     (dump_func)dump_open_completion_reply,
@@ -4724,6 +4750,8 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "grant_process_admin_token",
     "create_service_token",
     "get_token_info",
+    "set_token_package",
+    "get_token_package",
     "create_linked_token",
     "create_completion",
     "open_completion",
@@ -4826,6 +4854,7 @@ static const struct
     { "ERROR_INVALID_WINDOW_HANDLE", 0xc0010000 | ERROR_INVALID_WINDOW_HANDLE },
     { "ERROR_NO_MORE_USER_HANDLES",  0xc0010000 | ERROR_NO_MORE_USER_HANDLES },
     { "ERROR_WINDOW_OF_OTHER_THREAD", 0xc0010000 | ERROR_WINDOW_OF_OTHER_THREAD },
+    { "FILE_CORRUPT_ERROR",          STATUS_FILE_CORRUPT_ERROR },
     { "FILE_DELETED",                STATUS_FILE_DELETED },
     { "FILE_INVALID",                STATUS_FILE_INVALID },
     { "FILE_IS_A_DIRECTORY",         STATUS_FILE_IS_A_DIRECTORY },

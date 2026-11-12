@@ -46,6 +46,8 @@
 
 #include "wine/debug.h"
 
+extern HRESULT activation_manager_get_class_object( REFCLSID clsid, REFIID iid, void **out );
+
 extern IActivationFactory *application_view_factory;
 extern IActivationFactory *client_device_information_factory;
 extern IActivationFactory *analytics_info_factory;

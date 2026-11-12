@@ -440,6 +440,9 @@ NTSTATUS WINAPI wow64_NtQueryInformationToken( UINT *args )
     NTSTATUS status;
     ULONG ret_size, sid_len;
 
+    /* WINE_TOKEN_PACKAGE_INFORMATION: nothing to map */
+    if (class == TokenWinePackage) return NtQueryInformationToken( handle, class, info, len, retlen );
+
     switch (class)
     {
     case TokenPrivileges: /* TOKEN_PRIVILEGES */
@@ -623,6 +626,9 @@ NTSTATUS WINAPI wow64_NtSetInformationToken( UINT *args )
     TOKEN_INFORMATION_CLASS class = get_ulong( &args );
     void *ptr = get_ptr( &args );
     ULONG len = get_ulong( &args );
+
+    /* WCHAR string: nothing to map */
+    if (class == TokenWinePackage) return NtSetInformationToken( handle, class, ptr, len );
 
     switch (class)
     {

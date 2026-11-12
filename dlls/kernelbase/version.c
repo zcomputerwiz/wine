@@ -1553,9 +1553,7 @@ static BOOL validate_package_string_buffer( const UINT32 *length, const WCHAR *b
     return length && (buffer || !*length);
 }
 
-/* Temporary U1-R0A no-context process validation: require PROCESS_QUERY_LIMITED_INFORMATION
- * via ProcessBasicInformation without opening a process token or reading the PEB as package
- * authority. R2 replaces the query body with server package context. */
+/* The process handle has to allow PROCESS_QUERY_LIMITED_INFORMATION, with or without a package. */
 static LONG validate_package_process_handle( HANDLE process )
 {
     PROCESS_BASIC_INFORMATION info;
@@ -1566,17 +1564,117 @@ static LONG validate_package_process_handle( HANDLE process )
     return ERROR_SUCCESS;
 }
 
-/* Temporary U1-R0A no-context token validation: require TOKEN_QUERY via TokenType without
- * broadening token access. R2 replaces the query body with server package context. */
-static LONG validate_package_token_handle( HANDLE token )
+enum package_string
 {
-    TOKEN_TYPE type;
-    ULONG ret_len;
+    PACKAGE_STRING_FULL_NAME,
+    PACKAGE_STRING_FAMILY_NAME,
+    PACKAGE_STRING_APP_ID,
+    PACKAGE_STRING_PATH,
+    PACKAGE_STRING_AUMID,
+};
+
+/* The package context of a token. The server keeps it with the token; nothing in the process (environment,
+ * PEB, image path) is consulted. Returns NULL with the error: APPMODEL_ERROR_NO_PACKAGE without a context. */
+static WINE_TOKEN_PACKAGE_INFORMATION *get_token_package( HANDLE token, LONG *err )
+{
+    WINE_TOKEN_PACKAGE_INFORMATION *info = NULL;
+    ULONG size = 0;
     NTSTATUS status;
 
-    status = NtQueryInformationToken( token, TokenType, &type, sizeof(type), &ret_len );
-    if (status) return RtlNtStatusToDosError( status );
+    status = NtQueryInformationToken( token, TokenWinePackage, NULL, 0, &size );
+    while (status == STATUS_BUFFER_TOO_SMALL)
+    {
+        HeapFree( GetProcessHeap(), 0, info );
+        if (!(info = HeapAlloc( GetProcessHeap(), 0, size )))
+        {
+            *err = ERROR_OUTOFMEMORY;
+            return NULL;
+        }
+        status = NtQueryInformationToken( token, TokenWinePackage, info, size, &size );
+    }
+    if (status)
+    {
+        HeapFree( GetProcessHeap(), 0, info );
+        *err = status == STATUS_NOT_FOUND ? APPMODEL_ERROR_NO_PACKAGE : RtlNtStatusToDosError( status );
+        return NULL;
+    }
+    return info;
+}
+
+/* Lengths count characters and include the terminator, in and out. */
+static LONG copy_package_string( const WINE_TOKEN_PACKAGE_INFORMATION *info, enum package_string which,
+                                 UINT32 *length, WCHAR *buffer )
+{
+    const WCHAR *family = info->data + info->full_name_len / sizeof(WCHAR);
+    const WCHAR *app_id = family + info->family_name_len / sizeof(WCHAR);
+    const WCHAR *str;
+    UINT32 len, extra = 0;
+
+    switch (which)
+    {
+    case PACKAGE_STRING_FULL_NAME:
+        str = info->data;
+        len = info->full_name_len / sizeof(WCHAR);
+        break;
+    case PACKAGE_STRING_FAMILY_NAME:
+        str = family;
+        len = info->family_name_len / sizeof(WCHAR);
+        break;
+    case PACKAGE_STRING_APP_ID:
+        str = app_id;
+        len = info->app_id_len / sizeof(WCHAR);
+        break;
+    case PACKAGE_STRING_PATH:
+        str = app_id + info->app_id_len / sizeof(WCHAR);
+        len = info->root_len / sizeof(WCHAR);
+        break;
+    case PACKAGE_STRING_AUMID:   /* FamilyName!ApplicationId */
+        str = family;
+        len = info->family_name_len / sizeof(WCHAR);
+        extra = 1 + info->app_id_len / sizeof(WCHAR);
+        break;
+    default:
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    if (*length < len + extra + 1)
+    {
+        *length = len + extra + 1;
+        return ERROR_INSUFFICIENT_BUFFER;
+    }
+    memcpy( buffer, str, len * sizeof(WCHAR) );
+    if (extra)
+    {
+        buffer[len] = '!';
+        memcpy( buffer + len + 1, app_id, (extra - 1) * sizeof(WCHAR) );
+    }
+    buffer[len + extra] = 0;
+    *length = len + extra + 1;
     return ERROR_SUCCESS;
+}
+
+static LONG get_token_package_string( HANDLE token, enum package_string which, UINT32 *length, WCHAR *buffer )
+{
+    WINE_TOKEN_PACKAGE_INFORMATION *info;
+    LONG err = ERROR_SUCCESS;
+
+    if (!(info = get_token_package( token, &err ))) return err;
+    err = copy_package_string( info, which, length, buffer );
+    HeapFree( GetProcessHeap(), 0, info );
+    return err;
+}
+
+/* The identity of a process is the package context of its primary token. */
+static LONG get_process_package_string( HANDLE process, enum package_string which, UINT32 *length, WCHAR *buffer )
+{
+    HANDLE token;
+    NTSTATUS status;
+    LONG err;
+
+    if ((status = NtOpenProcessToken( process, TOKEN_QUERY, &token ))) return RtlNtStatusToDosError( status );
+    err = get_token_package_string( token, which, length, buffer );
+    NtClose( token );
+    return err;
 }
 
 /***********************************************************************
@@ -1584,13 +1682,15 @@ static LONG validate_package_token_handle( HANDLE token )
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentApplicationUserModelId( UINT32 *length, WCHAR *id )
 {
+    LONG err;
+
     TRACE( "(%p %p)\n", length, id );
 
     if (!validate_package_string_buffer( length, id ))
         return ERROR_INVALID_PARAMETER;
 
-    /* Temporary U1-R0A unpackaged behavior until R2 wires server package context. */
-    return APPMODEL_ERROR_NO_APPLICATION;
+    err = get_process_package_string( GetCurrentProcess(), PACKAGE_STRING_AUMID, length, id );
+    return err == APPMODEL_ERROR_NO_PACKAGE ? APPMODEL_ERROR_NO_APPLICATION : err;
 }
 
 /***********************************************************************
@@ -1603,8 +1703,7 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageFamilyName( UINT32 *length,
     if (!validate_package_string_buffer( length, name ))
         return ERROR_INVALID_PARAMETER;
 
-    /* Temporary U1-R0A unpackaged behavior until R2 wires server package context. */
-    return APPMODEL_ERROR_NO_PACKAGE;
+    return get_process_package_string( GetCurrentProcess(), PACKAGE_STRING_FAMILY_NAME, length, name );
 }
 
 
@@ -1618,8 +1717,7 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageFullName( UINT32 *length, W
     if (!validate_package_string_buffer( length, name ))
         return ERROR_INVALID_PARAMETER;
 
-    /* Temporary U1-R0A unpackaged behavior until R2 wires server package context. */
-    return APPMODEL_ERROR_NO_PACKAGE;
+    return get_process_package_string( GetCurrentProcess(), PACKAGE_STRING_FULL_NAME, length, name );
 }
 
 
@@ -1628,8 +1726,18 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageFullName( UINT32 *length, W
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageId( UINT32 *len, BYTE *buffer )
 {
-    FIXME( "(%p %p): stub\n", len, buffer );
-    return APPMODEL_ERROR_NO_PACKAGE;
+    WCHAR full_name[PACKAGE_FULL_NAME_MAX_LENGTH + 1];
+    UINT32 name_len = ARRAY_SIZE(full_name);
+    LONG err;
+
+    TRACE( "(%p %p)\n", len, buffer );
+
+    if (!len || (!buffer && *len))
+        return ERROR_INVALID_PARAMETER;
+
+    if ((err = get_process_package_string( GetCurrentProcess(), PACKAGE_STRING_FULL_NAME, &name_len, full_name )))
+        return err;
+    return PackageIdFromFullName( full_name, 0 /* PACKAGE_INFORMATION_BASIC */, len, buffer );
 }
 
 /***********************************************************************
@@ -1637,8 +1745,16 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageId( UINT32 *len, BYTE *buff
  */
 LONG WINAPI GetCurrentPackageInfo( const UINT32 flags, UINT32 *buffer_size, BYTE *buffer, UINT32 *count )
 {
-    FIXME( "(%#x %p %p %p): stub\n", flags, buffer_size, buffer, count );
-    return APPMODEL_ERROR_NO_PACKAGE;
+    WCHAR full_name[PACKAGE_FULL_NAME_MAX_LENGTH + 1];
+    UINT32 name_len = ARRAY_SIZE(full_name);
+    LONG err;
+
+    err = get_process_package_string( GetCurrentProcess(), PACKAGE_STRING_FULL_NAME, &name_len, full_name );
+    if (err) return err;
+
+    /* a packaged process: the package graph is not implemented, and it is not reported as absent */
+    FIXME( "(%#x %p %p %p): not implemented for a packaged process\n", flags, buffer_size, buffer, count );
+    return ERROR_CALL_NOT_IMPLEMENTED;
 }
 
 /***********************************************************************
@@ -1651,8 +1767,7 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackagePath( UINT32 *length, WCHAR
     if (!validate_package_string_buffer( length, path ))
         return ERROR_INVALID_PARAMETER;
 
-    /* Temporary U1-R0A unpackaged behavior until R2 wires server package context. */
-    return APPMODEL_ERROR_NO_PACKAGE;
+    return get_process_package_string( GetCurrentProcess(), PACKAGE_STRING_PATH, length, path );
 }
 
 
@@ -1671,8 +1786,7 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetPackageFullName( HANDLE process, UINT32 *
     if ((err = validate_package_process_handle( process )))
         return err;
 
-    /* Temporary U1-R0A unpackaged behavior until R2 wires server package context. */
-    return APPMODEL_ERROR_NO_PACKAGE;
+    return get_process_package_string( process, PACKAGE_STRING_FULL_NAME, length, name );
 }
 
 
@@ -1691,8 +1805,7 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetPackageFamilyName( HANDLE process, UINT32
     if ((err = validate_package_process_handle( process )))
         return err;
 
-    /* Temporary U1-R0A unpackaged behavior until R2 wires server package context. */
-    return APPMODEL_ERROR_NO_PACKAGE;
+    return get_process_package_string( process, PACKAGE_STRING_FAMILY_NAME, length, name );
 }
 
 
@@ -1701,18 +1814,12 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetPackageFamilyName( HANDLE process, UINT32
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetPackageFullNameFromToken( HANDLE token, UINT32 *length, WCHAR *name )
 {
-    LONG err;
-
     TRACE( "(%p %p %p)\n", token, length, name );
 
     if (!token || !validate_package_string_buffer( length, name ))
         return ERROR_INVALID_PARAMETER;
 
-    if ((err = validate_package_token_handle( token )))
-        return err;
-
-    /* Temporary U1-R0A unpackaged behavior until R2 wires server package context. */
-    return APPMODEL_ERROR_NO_PACKAGE;
+    return get_token_package_string( token, PACKAGE_STRING_FULL_NAME, length, name );
 }
 
 
@@ -1721,18 +1828,12 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetPackageFullNameFromToken( HANDLE token, U
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetPackageFamilyNameFromToken( HANDLE token, UINT32 *length, WCHAR *name )
 {
-    LONG err;
-
     TRACE( "(%p %p %p)\n", token, length, name );
 
     if (!token || !validate_package_string_buffer( length, name ))
         return ERROR_INVALID_PARAMETER;
 
-    if ((err = validate_package_token_handle( token )))
-        return err;
-
-    /* Temporary U1-R0A unpackaged behavior until R2 wires server package context. */
-    return APPMODEL_ERROR_NO_PACKAGE;
+    return get_token_package_string( token, PACKAGE_STRING_FAMILY_NAME, length, name );
 }
 
 /***********************************************************************

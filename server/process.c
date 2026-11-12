@@ -1750,6 +1750,13 @@ DECL_HANDLER(init_process_done)
         return;
     }
 
+    /* a package context is kept only by a process started from the executable of the application */
+    if (token_package_pending( process->token ))
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
+
     current->teb = req->teb;
     process->peb = req->peb;
 
@@ -2034,6 +2041,8 @@ DECL_HANDLER(set_process_info)
             {
                 unsigned int status = token_check_assign_primary( token );
 
+                /* a package context is settled by starting a process, not by a new token for a running one */
+                if (!status && token_package_pending( token )) status = STATUS_ACCESS_DENIED;
                 if (status)
                 {
                     set_error( status );
@@ -2131,6 +2140,16 @@ DECL_HANDLER(make_process_system)
             shutdown_timeout = add_timeout_user( master_socket_timeout, server_shutdown_timeout, NULL );
     }
     release_object( process );
+}
+
+/* is the token the primary token of a process? */
+int is_process_token( struct token *token )
+{
+    struct process *process;
+
+    LIST_FOR_EACH_ENTRY( process, &process_list, struct process, entry )
+        if (process->token == token) return 1;
+    return 0;
 }
 
 /* grant a process a primary admin token with Default elevation */
