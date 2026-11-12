@@ -282,6 +282,174 @@ static inline unsigned int wait_reply( int reply_fd, struct __server_request_inf
 
 
 /***********************************************************************
+ * WineExplorer system tier, ST-04 prototype (docs/SYSTEM_TIER_WORK_ORDERS.md).
+ *
+ * With WEX_REGISTRY_SERVER set to the socket of a second server, the registry calls for \Registry\Machine
+ * go to that server over a connection of this process's own, not to the session's server. Key handles from
+ * it carry REGSRV_TAG so that later calls and NtClose find their server. Development switch only: the
+ * second server sees an ordinary client (the registry-only client is ST-11), every thread shares the one
+ * connection under a mutex, and a lost connection ends the thread (reconnect is ST-15).
+ */
+#define REGSRV_TAG 0x40000000
+
+static int get_unix_tid(void);
+
+static int regsrv_state;  /* 0 not checked, 1 on, -1 off */
+static int regsrv_request_fd = -1, regsrv_reply_fd = -1;
+static pthread_mutex_t regsrv_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static BOOL regsrv_on(void)
+{
+    if (!regsrv_state) regsrv_state = getenv( "WEX_REGISTRY_SERVER" ) ? 1 : -1;
+    return regsrv_state > 0;
+}
+
+BOOL regsrv_is_handle( HANDLE handle )
+{
+    ULONG_PTR value = (ULONG_PTR)handle;
+
+    return regsrv_on() && value < 0x80000000 && (value & REGSRV_TAG);
+}
+
+obj_handle_t regsrv_obj_handle( HANDLE handle )
+{
+    if (regsrv_is_handle( handle )) return (ULONG_PTR)handle & ~(ULONG_PTR)REGSRV_TAG;
+    return wine_server_obj_handle( handle );
+}
+
+HANDLE regsrv_ptr_handle( obj_handle_t handle )
+{
+    return handle ? (HANDLE)(ULONG_PTR)(handle | REGSRV_TAG) : 0;
+}
+
+/* an absolute name under \Registry\Machine */
+BOOL regsrv_is_machine_name( const UNICODE_STRING *name )
+{
+    static const char prefix[] = "\\registry\\machine";
+    unsigned int i, len = sizeof(prefix) - 1;
+
+    if (!regsrv_on() || !name || name->Length / sizeof(WCHAR) < len) return FALSE;
+    for (i = 0; i < len; i++)
+    {
+        WCHAR ch = name->Buffer[i];
+        if (ch >= 'A' && ch <= 'Z') ch += 'a' - 'A';
+        if (ch != (unsigned char)prefix[i]) return FALSE;
+    }
+    return name->Length / sizeof(WCHAR) == len || name->Buffer[len] == '\\';
+}
+
+static int regsrv_transfer_fd( int sock, int send, obj_handle_t *handle )
+{
+    struct send_fd data = { 0, send };
+    char cmsg_buffer[256];
+    struct msghdr msghdr = { 0 };
+    struct cmsghdr *cmsg;
+    struct iovec vec;
+    int ret, fd = -1;
+
+    msghdr.msg_iov = &vec;
+    msghdr.msg_iovlen = 1;
+    msghdr.msg_control = cmsg_buffer;
+    msghdr.msg_controllen = sizeof(cmsg_buffer);
+    if (send != -1)
+    {
+        vec.iov_base = &data;
+        vec.iov_len = sizeof(data);
+        cmsg = CMSG_FIRSTHDR( &msghdr );
+        cmsg->cmsg_len = CMSG_LEN( sizeof(send) );
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_RIGHTS;
+        *(int *)CMSG_DATA(cmsg) = send;
+        msghdr.msg_controllen = cmsg->cmsg_len;
+        do ret = sendmsg( sock, &msghdr, 0 ); while (ret == -1 && errno == EINTR);
+        return ret == sizeof(data) ? 0 : -1;
+    }
+    vec.iov_base = handle;
+    vec.iov_len = sizeof(*handle);
+    do ret = recvmsg( sock, &msghdr, MSG_CMSG_CLOEXEC ); while (ret == -1 && errno == EINTR);
+    if (ret <= 0) return -1;
+    for (cmsg = CMSG_FIRSTHDR( &msghdr ); cmsg; cmsg = CMSG_NXTHDR( &msghdr, cmsg ))
+        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) fd = *(int *)CMSG_DATA(cmsg);
+    return fd;
+}
+
+/* the ordinary client handshake, on a connection of its own; called with regsrv_mutex held */
+static BOOL regsrv_connect(void)
+{
+    const char *path = getenv( "WEX_REGISTRY_SERVER" );
+    struct sockaddr_un addr = { 0 };
+    WORD machines[8];
+    obj_handle_t version = 0, device = 0;
+    int sock, request, reply_pipe[2], wait_pipe[2];
+    unsigned int status;
+
+    if (!path || strlen( path ) >= sizeof(addr.sun_path)) return FALSE;
+    addr.sun_family = AF_UNIX;
+    strcpy( addr.sun_path, path );
+    if ((sock = socket( AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0 )) == -1) return FALSE;
+    if (connect( sock, (struct sockaddr *)&addr, sizeof(addr) ) == -1 ||
+        (request = regsrv_transfer_fd( sock, -1, &version )) == -1)
+    {
+        close( sock );
+        return FALSE;
+    }
+    if (version != SERVER_PROTOCOL_VERSION || server_pipe( reply_pipe ) == -1)
+    {
+        close( request );
+        close( sock );
+        return FALSE;
+    }
+    if (server_pipe( wait_pipe ) == -1)
+    {
+        close( reply_pipe[0] ); close( reply_pipe[1] ); close( request ); close( sock );
+        return FALSE;
+    }
+    regsrv_transfer_fd( sock, reply_pipe[1], NULL );
+    regsrv_transfer_fd( sock, wait_pipe[1], NULL );
+
+    SERVER_START_REQ( init_first_thread )
+    {
+        req->unix_pid    = getpid();
+        req->unix_tid    = get_unix_tid();
+        req->reply_fd    = reply_pipe[1];
+        req->wait_fd     = wait_pipe[1];
+        req->debug_level = 0;
+        req->page_size   = get_host_page_size();
+        wine_server_set_reply( req, machines, sizeof(machines) );
+        if (!(status = send_request( request, &__req ))) status = wait_reply( reply_pipe[0], &__req );
+        if (!status && reply->inproc_device) close( regsrv_transfer_fd( sock, -1, &device ) );
+    }
+    SERVER_END_REQ;
+    close( reply_pipe[1] );
+    close( wait_pipe[1] );
+    if (status)
+    {
+        close( reply_pipe[0] ); close( wait_pipe[0] ); close( request ); close( sock );
+        return FALSE;
+    }
+    /* the socket and the wait pipe stay open for the life of the process: closing the socket ends the client */
+    regsrv_reply_fd = reply_pipe[0];
+    regsrv_request_fd = request;
+    return TRUE;
+}
+
+unsigned int regsrv_call( void *req_ptr )
+{
+    struct __server_request_info * const req = req_ptr;
+    sigset_t old_set;
+    unsigned int ret;
+
+    pthread_sigmask( SIG_BLOCK, &server_block_set, &old_set );
+    pthread_mutex_lock( &regsrv_mutex );
+    if (regsrv_request_fd == -1 && !regsrv_connect()) ret = STATUS_PIPE_DISCONNECTED;
+    else if (!(ret = send_request( regsrv_request_fd, req ))) ret = wait_reply( regsrv_reply_fd, req );
+    pthread_mutex_unlock( &regsrv_mutex );
+    pthread_sigmask( SIG_SETMASK, &old_set, NULL );
+    return ret;
+}
+
+
+/***********************************************************************
  *           server_call_unlocked
  */
 unsigned int server_call_unlocked( void *req_ptr )
@@ -1966,6 +2134,17 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
 
     if (HandleToLong( handle ) >= ~5 && HandleToLong( handle ) <= ~0)
         return STATUS_SUCCESS;
+
+    if (regsrv_is_handle( handle ))  /* a key of the registry server (ST-04 prototype) */
+    {
+        SERVER_START_REQ( close_handle )
+        {
+            req->handle = regsrv_obj_handle( handle );
+            ret = regsrv_call( req );
+        }
+        SERVER_END_REQ;
+        return ret;
+    }
 
     /* hold fd_cache_mutex to prevent the fd from being added again between the
      * call to remove_fd_from_cache and close_handle */

@@ -89,12 +89,17 @@ NTSTATUS WINAPI NtCreateKey( HANDLE *key, ACCESS_MASK access, const OBJECT_ATTRI
 
     SERVER_START_REQ( create_key )
     {
+        /* ST-04 prototype: a machine key, or a key under one, belongs to the registry server */
+        BOOL remote = regsrv_is_handle( attr->RootDirectory ) ||
+                      (!attr->RootDirectory && regsrv_is_machine_name( attr->ObjectName ));
+
+        if (remote) objattr->rootdir = regsrv_obj_handle( attr->RootDirectory );
         req->access     = access;
         req->options    = options;
         wine_server_add_data( req, objattr, len );
         if (class) wine_server_add_data( req, class->Buffer, class->Length );
-        ret = wine_server_call( req );
-        *key = wine_server_ptr_handle( reply->hkey );
+        ret = remote ? regsrv_call( req ) : wine_server_call( req );
+        *key = remote ? regsrv_ptr_handle( reply->hkey ) : wine_server_ptr_handle( reply->hkey );
     }
     SERVER_END_REQ;
 
@@ -147,12 +152,16 @@ NTSTATUS WINAPI NtOpenKeyEx( HANDLE *key, ACCESS_MASK access, const OBJECT_ATTRI
 
     SERVER_START_REQ( open_key )
     {
-        req->parent     = wine_server_obj_handle( attr->RootDirectory );
+        /* ST-04 prototype: a machine key, or a key under one, belongs to the registry server */
+        BOOL remote = regsrv_is_handle( attr->RootDirectory ) ||
+                      (!attr->RootDirectory && regsrv_is_machine_name( attr->ObjectName ));
+
+        req->parent     = regsrv_obj_handle( attr->RootDirectory );
         req->access     = access;
         req->attributes = attributes;
         wine_server_add_data( req, attr->ObjectName->Buffer, attr->ObjectName->Length );
-        ret = wine_server_call( req );
-        *key = wine_server_ptr_handle( reply->hkey );
+        ret = remote ? regsrv_call( req ) : wine_server_call( req );
+        *key = remote ? regsrv_ptr_handle( reply->hkey ) : wine_server_ptr_handle( reply->hkey );
     }
     SERVER_END_REQ;
     TRACE("<- %p\n", *key);
@@ -201,8 +210,8 @@ NTSTATUS WINAPI NtDeleteKey( HANDLE key )
 
     SERVER_START_REQ( delete_key )
     {
-        req->hkey = wine_server_obj_handle( key );
-        ret = wine_server_call( req );
+        req->hkey = regsrv_obj_handle( key );
+        ret = (regsrv_is_handle( key ) ? regsrv_call( req ) : wine_server_call( req ));
     }
     SERVER_END_REQ;
     return ret;
@@ -260,11 +269,11 @@ static NTSTATUS enumerate_key( HANDLE handle, int index, KEY_INFORMATION_CLASS i
 
     SERVER_START_REQ( enum_key )
     {
-        req->hkey       = wine_server_obj_handle( handle );
+        req->hkey       = regsrv_obj_handle( handle );
         req->index      = index;
         req->info_class = info_class;
         if (length > fixed_size) wine_server_set_reply( req, data_ptr, length - fixed_size );
-        if (!(ret = wine_server_call( req )))
+        if (!(ret = (regsrv_is_handle( handle ) ? regsrv_call( req ) : wine_server_call( req ))))
         {
             switch (info_class)
             {
@@ -466,11 +475,11 @@ NTSTATUS WINAPI NtEnumerateValueKey( HANDLE handle, ULONG index, KEY_VALUE_INFOR
 
     SERVER_START_REQ( enum_key_value )
     {
-        req->hkey       = wine_server_obj_handle( handle );
+        req->hkey       = regsrv_obj_handle( handle );
         req->index      = index;
         req->info_class = info_class;
         if (length > fixed_size) wine_server_set_reply( req, ptr, length - fixed_size );
-        if (!(ret = wine_server_call( req )))
+        if (!(ret = (regsrv_is_handle( handle ) ? regsrv_call( req ) : wine_server_call( req ))))
         {
             copy_key_value_info( info_class, info, length, reply->type, reply->namelen,
                                  wine_server_reply_size(reply) - reply->namelen );
@@ -540,10 +549,10 @@ NTSTATUS WINAPI NtQueryValueKey( HANDLE handle, const UNICODE_STRING *name,
 
     SERVER_START_REQ( get_key_value )
     {
-        req->hkey = wine_server_obj_handle( handle );
+        req->hkey = regsrv_obj_handle( handle );
         wine_server_add_data( req, name->Buffer, name->Length );
         if (length > fixed_size && data_ptr) wine_server_set_reply( req, data_ptr, length - fixed_size );
-        if (!(ret = wine_server_call( req )))
+        if (!(ret = (regsrv_is_handle( handle ) ? regsrv_call( req ) : wine_server_call( req ))))
         {
             copy_key_value_info( info_class, info, length, reply->type,
                                  name->Length, reply->total );
@@ -582,12 +591,12 @@ NTSTATUS WINAPI NtSetValueKey( HANDLE key, const UNICODE_STRING *name, ULONG ind
 
     SERVER_START_REQ( set_key_value )
     {
-        req->hkey    = wine_server_obj_handle( key );
+        req->hkey    = regsrv_obj_handle( key );
         req->type    = type;
         req->namelen = name->Length;
         wine_server_add_data( req, name->Buffer, name->Length );
         wine_server_add_data( req, data, count );
-        ret = wine_server_call( req );
+        ret = (regsrv_is_handle( key ) ? regsrv_call( req ) : wine_server_call( req ));
     }
     SERVER_END_REQ;
     return ret;
@@ -607,9 +616,9 @@ NTSTATUS WINAPI NtDeleteValueKey( HANDLE key, const UNICODE_STRING *name )
 
     SERVER_START_REQ( delete_key_value )
     {
-        req->hkey = wine_server_obj_handle( key );
+        req->hkey = regsrv_obj_handle( key );
         wine_server_add_data( req, name->Buffer, name->Length );
-        ret = wine_server_call( req );
+        ret = (regsrv_is_handle( key ) ? regsrv_call( req ) : wine_server_call( req ));
     }
     SERVER_END_REQ;
     return ret;
@@ -683,8 +692,8 @@ NTSTATUS WINAPI NtFlushKey( HANDLE key )
 
     SERVER_START_REQ( flush_key )
     {
-	req->hkey = wine_server_obj_handle( key );
-	ret = wine_server_call( req );
+	req->hkey = regsrv_obj_handle( key );
+	ret = (regsrv_is_handle( key ) ? regsrv_call( req ) : wine_server_call( req ));
     }
     SERVER_END_REQ;
     return ret;
