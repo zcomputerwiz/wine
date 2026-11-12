@@ -68,6 +68,7 @@ AddReg=\
     Misc,\
     OLE,\
     Printing,\
+    SafeBoot,\
     Services, \
     SessionMgr,\
     ThemeManager
@@ -1223,6 +1224,32 @@ HKLM,"System\CurrentControlSet\Services\Tcpip6\Parameters",,16
 HKLM,"System\CurrentControlSet\Services\VxD\MSTCP",,16
 HKLM,"System\CurrentControlSet\Services\Winsock\Parameters",,16
 HKLM,"System\CurrentControlSet\Services\Winsock2\Parameters\Protocol_Catalog9\Catalog_Entries",,16
+
+[SafeBoot]
+; WineExplorer Safe Mode: services.exe starts only what Minimal (Safe Mode) or Network (with Networking) lists,
+; by service name or load order group. NDIS and nsiproxy are in the "System Bus Extender" group, so that group
+; is not listed.
+HKLM,"System\CurrentControlSet\Control\SafeBoot","AlternateShell",,"cmd.exe"
+HKLM,"System\CurrentControlSet\Control\SafeBoot\Minimal\EventLog",,,"Service"
+HKLM,"System\CurrentControlSet\Control\SafeBoot\Minimal\MountMgr",,,"Driver"
+HKLM,"System\CurrentControlSet\Control\SafeBoot\Minimal\PlugPlay",,,"Service"
+HKLM,"System\CurrentControlSet\Control\SafeBoot\Minimal\RpcSs",,,"Service"
+HKLM,"System\CurrentControlSet\Control\SafeBoot\Minimal\winebus",,,"Driver"
+HKLM,"System\CurrentControlSet\Control\SafeBoot\Minimal\wineusb",,,"Driver"
+HKLM,"System\CurrentControlSet\Control\SafeBoot\Minimal\Winmgmt",,,"Service"
+HKLM,"System\CurrentControlSet\Control\SafeBoot\Minimal\wexelevate",,,"Service"
+HKLM,"System\CurrentControlSet\Control\SafeBoot\Network\EventLog",,,"Service"
+HKLM,"System\CurrentControlSet\Control\SafeBoot\Network\LanmanServer",,,"Service"
+HKLM,"System\CurrentControlSet\Control\SafeBoot\Network\MountMgr",,,"Driver"
+HKLM,"System\CurrentControlSet\Control\SafeBoot\Network\NDIS",,,"Driver"
+HKLM,"System\CurrentControlSet\Control\SafeBoot\Network\nsiproxy",,,"Driver"
+HKLM,"System\CurrentControlSet\Control\SafeBoot\Network\PlugPlay",,,"Service"
+HKLM,"System\CurrentControlSet\Control\SafeBoot\Network\RpcSs",,,"Service"
+HKLM,"System\CurrentControlSet\Control\SafeBoot\Network\TermService",,,"Service"
+HKLM,"System\CurrentControlSet\Control\SafeBoot\Network\winebus",,,"Driver"
+HKLM,"System\CurrentControlSet\Control\SafeBoot\Network\wineusb",,,"Driver"
+HKLM,"System\CurrentControlSet\Control\SafeBoot\Network\Winmgmt",,,"Service"
+HKLM,"System\CurrentControlSet\Control\SafeBoot\Network\wexelevate",,,"Service"
 
 [VersionInfo]
 HKLM,%CurrentVersionNT%,"CurrentVersion",2,"6.3"
