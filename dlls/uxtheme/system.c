@@ -168,6 +168,13 @@ static void UXTHEME_LoadTheme(BOOL reload)
     else
         TRACE("Failed to open theme registry key\n");
 
+    /* WineExplorer Safe Mode: as on Windows, where the Themes service is not among the Safe Mode services, no visual
+     * style is loaded and windows are drawn classic; the account's choice stays in the registry for the next start. */
+    if (bThemeActive && GetSystemMetrics(SM_CLEANBOOT)) {
+        TRACE("Safe Mode: theming not loaded\n");
+        bThemeActive = FALSE;
+    }
+
     if(bThemeActive) {
         /* Make sure the theme requested is actually valid */
         hr = MSSTYLES_OpenThemeFile(szCurrentTheme,
