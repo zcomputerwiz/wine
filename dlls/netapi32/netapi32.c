@@ -26,6 +26,7 @@
 #include "ntstatus.h"
 #include "windef.h"
 #include "winbase.h"
+#include "winreg.h"
 #include "winternl.h"
 #include "winsock2.h"
 #include "ws2ipdef.h"
@@ -1863,6 +1864,54 @@ NET_API_STATUS WINAPI NetGroupGetInfo(LPCWSTR servername, LPCWSTR groupname, DWO
  *     ERROR_ACCESS_DENIED - the user does not have access to the info.
  *     NERR_InvalidComputer - computer name is invalid.
  */
+/* WineExplorer: the account lockout policy lives in the machine registry, where the elevation password
+ * verifier reads it. Durations are stored in minutes; a LockoutDuration of 0 is "until unlocked". One policy
+ * for 32-bit and 64-bit programs: the key is opened in the 64-bit view. */
+static const WCHAR lockout_keyW[] = L"Software\\WineExplorer\\Elevation";
+
+static DWORD lockout_value( HKEY key, const WCHAR *name, DWORD def, DWORD max )
+{
+    DWORD value, size = sizeof(value);
+
+    if (!key || RegGetValueW( key, NULL, name, RRF_RT_REG_DWORD, NULL, &value, &size )) return def;
+    return value > max ? max : value;
+}
+
+NET_API_STATUS WINAPI NetUserModalsSet(
+    LPCWSTR server, DWORD level, LPBYTE buffer, LPDWORD parm_err)
+{
+    const USER_MODALS_INFO_3 *umi = (const USER_MODALS_INFO_3 *)buffer;
+    DWORD threshold, duration, window;
+    LSTATUS ret;
+    HKEY key;
+
+    TRACE("(%s %ld %p %p)\n", debugstr_w(server), level, buffer, parm_err);
+
+    if (parm_err) *parm_err = 0;
+    if (level != 3)
+    {
+        if (level > 2 && (level < 1001 || level > 1007)) return ERROR_INVALID_LEVEL;
+        FIXME("level %ld not implemented!\n", level);
+        return NERR_InternalError;
+    }
+    if (!umi) return ERROR_INVALID_PARAMETER;
+
+    threshold = umi->usrmod3_lockout_threshold;
+    duration = umi->usrmod3_lockout_duration == 0xffffffff ? 0 : umi->usrmod3_lockout_duration / 60;
+    window = umi->usrmod3_lockout_observation_window / 60;
+    if (threshold > 999 || duration > 99999 || window < 1 || window > 99999 ||
+        (umi->usrmod3_lockout_duration != 0xffffffff && (duration < 1 || window > duration)))
+        return ERROR_INVALID_PARAMETER;
+
+    if ((ret = RegCreateKeyExW( HKEY_LOCAL_MACHINE, lockout_keyW, 0, NULL, 0, KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &key, NULL )))
+        return ret;
+    ret = RegSetValueExW( key, L"LockoutBadCount", 0, REG_DWORD, (const BYTE *)&threshold, sizeof(threshold) );
+    if (!ret) ret = RegSetValueExW( key, L"LockoutDuration", 0, REG_DWORD, (const BYTE *)&duration, sizeof(duration) );
+    if (!ret) ret = RegSetValueExW( key, L"ResetLockoutCount", 0, REG_DWORD, (const BYTE *)&window, sizeof(window) );
+    RegCloseKey( key );
+    return ret;
+}
+
 NET_API_STATUS WINAPI NetUserModalsGet(
     LPCWSTR szServer, DWORD level, LPBYTE *pbuffer)
 {
@@ -1947,10 +1996,27 @@ NET_API_STATUS WINAPI NetUserModalsGet(
             break;
         }
         case 3:
-            /* return lockout information */
-            FIXME("level 3 not implemented!\n");
-            *pbuffer = NULL;
-            return NERR_InternalError;
+        {
+            /* return lockout information (defaults: never locked out, 30 minutes) */
+            USER_MODALS_INFO_3 *umi;
+            DWORD duration;
+            HKEY key = NULL;
+
+            if (NetApiBufferAllocate( sizeof(*umi), (LPVOID *)pbuffer ) != NERR_Success)
+            {
+                *pbuffer = NULL;
+                return ERROR_NOT_ENOUGH_MEMORY;
+            }
+            umi = (USER_MODALS_INFO_3 *)*pbuffer;
+            RegOpenKeyExW( HKEY_LOCAL_MACHINE, lockout_keyW, 0, KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key );
+            duration = lockout_value( key, L"LockoutDuration", 30, 99999 );
+            umi->usrmod3_lockout_threshold = lockout_value( key, L"LockoutBadCount", 0, 999 );
+            umi->usrmod3_lockout_duration = duration ? duration * 60 : 0xffffffff;
+            umi->usrmod3_lockout_observation_window = 60 * lockout_value( key, L"ResetLockoutCount",
+                                                                            duration && duration < 30 ? duration : 30, 99999 );
+            if (key) RegCloseKey( key );
+            break;
+        }
         default:
             TRACE("Invalid level %ld is specified\n", level);
             *pbuffer = NULL;

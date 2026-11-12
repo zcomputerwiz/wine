@@ -16,6 +16,7 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include <stdlib.h>
 #include <windows.h>
 #include <lm.h>
 #include <wine/debug.h>
@@ -289,6 +290,80 @@ static BOOL arg_is(const WCHAR* str1, const WCHAR* str2)
     return CompareStringW(LOCALE_USER_DEFAULT, NORM_IGNORECASE, str1, -1, str2, -1) == CSTR_EQUAL;
 }
 
+/* WineExplorer: "net accounts", the lockout part only (NetUserModals level 3):
+ * /lockoutthreshold:N (0 or NEVER: no lockout), /lockoutduration:minutes, /lockoutwindow:minutes. */
+static BOOL net_accounts(int argc, const WCHAR* argv[])
+{
+    static const WCHAR *names[] = { L"/lockoutthreshold:", L"/lockoutduration:", L"/lockoutwindow:" };
+    USER_MODALS_INFO_3 *info, set;
+    NET_API_STATUS status;
+    BOOL change = FALSE;
+    WCHAR line[256], *end;
+    int i, j;
+
+    if ((status = NetUserModalsGet(NULL, 3, (BYTE **)&info)))
+    {
+        output_error_string(status);
+        return FALSE;
+    }
+    set = *info;
+    NetApiBufferFree(info);
+
+    for (i = 2; i < argc; i++)
+    {
+        const WCHAR *value = NULL;
+        DWORD number;
+
+        for (j = 0; j < ARRAY_SIZE(names); j++)
+            if (!wcsnicmp(argv[i], names[j], lstrlenW(names[j]))) break;
+        if (j < ARRAY_SIZE(names)) value = argv[i] + lstrlenW(names[j]);
+        if (value && !j && arg_is(value, L"never")) number = 0;
+        else
+        {
+            number = value ? wcstoul(value, &end, 10) : 0;
+            if (!value || end == value || *end || number > 99999)
+            {
+                output_string(STRING_USAGE);
+                return FALSE;
+            }
+        }
+        if (j == 0) set.usrmod3_lockout_threshold = number;
+        else if (j == 1) set.usrmod3_lockout_duration = number ? number * 60 : 0xffffffff;
+        else set.usrmod3_lockout_observation_window = number * 60;
+        change = TRUE;
+    }
+
+    if (change)
+    {
+        if ((status = NetUserModalsSet(NULL, 3, (BYTE *)&set, NULL)))
+        {
+            output_error_string(status);
+            return FALSE;
+        }
+    }
+    else
+    {
+        if (set.usrmod3_lockout_threshold)
+            swprintf(line, ARRAY_SIZE(line), L"Lockout threshold:                                    %u\n",
+                     set.usrmod3_lockout_threshold);
+        else
+            swprintf(line, ARRAY_SIZE(line), L"Lockout threshold:                                    Never\n");
+        output_write(line, lstrlenW(line));
+        if (set.usrmod3_lockout_duration != 0xffffffff)
+            swprintf(line, ARRAY_SIZE(line), L"Lockout duration (minutes):                           %u\n",
+                     set.usrmod3_lockout_duration / 60);
+        else
+            swprintf(line, ARRAY_SIZE(line), L"Lockout duration (minutes):                           Never\n");
+        output_write(line, lstrlenW(line));
+        swprintf(line, ARRAY_SIZE(line), L"Lockout observation window (minutes):                 %u\n",
+                 set.usrmod3_lockout_observation_window / 60);
+        output_write(line, lstrlenW(line));
+    }
+    swprintf(line, ARRAY_SIZE(line), L"The command completed successfully.\n\n");
+    output_write(line, lstrlenW(line));
+    return TRUE;
+}
+
 int __cdecl wmain(int argc, const WCHAR* argv[])
 {
     BOOL switch_yes = FALSE;
@@ -370,6 +445,10 @@ int __cdecl wmain(int argc, const WCHAR* argv[])
     else if(arg_is(argv[1], L"use"))
     {
         if(!net_use(argc, argv)) return 1;
+    }
+    else if(arg_is(argv[1], L"accounts"))
+    {
+        if(!net_accounts(argc, argv)) return 2;
     }
     else
         output_string(STRING_USAGE);
