@@ -91,6 +91,9 @@ extern const struct acl *token_get_default_dacl( struct token *token );
 extern const struct sid *token_get_owner( struct token *token );
 extern const struct sid *token_get_primary_group( struct token *token );
 extern unsigned int token_get_session_id( struct token *token );
+/* WineExplorer system tier: a token described to session 0, and rebuilt there */
+extern data_size_t token_describe( struct token *token, void *data, data_size_t size );
+extern struct token *token_create_described( const void *data, data_size_t size );
 extern void token_get_ids( const struct token *token, struct luid *token_id, struct luid *modified_id );
 extern int token_sid_present( struct token *token, const struct sid *sid, int deny );
 

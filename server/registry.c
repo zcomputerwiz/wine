@@ -54,6 +54,7 @@
 #include "unicode.h"
 #include "security.h"
 #include "sysrun.h"
+#include "session0.h"
 #include "e1s_token.h"
 #include "e1s_profile.h"
 #include "wine/wex_profile.h"
@@ -72,6 +73,8 @@ struct notify
     unsigned int      filter;   /* which events to notify on */
     obj_handle_t      hkey;     /* hkey associated with this notification */
     struct process   *process;  /* process in which the hkey is valid */
+    unsigned int     *cookies;  /* system tier: a registry-only client's notifications, sent to its relay */
+    unsigned int      cookie_count;
 };
 
 static const WCHAR key_name[] = {'K','e','y'};
@@ -1004,6 +1007,10 @@ static void do_notification( struct key *key, struct notify *notify, int del )
     free( notify->events );
     notify->events = NULL;
     notify->event_count = 0;
+    for (i = 0; i < notify->cookie_count; ++i) session0_relay_notify( notify->process, notify->cookies[i] );
+    free( notify->cookies );
+    notify->cookies = NULL;
+    notify->cookie_count = 0;
 
     if (del)
     {
@@ -2811,8 +2818,9 @@ static FILE *fopen_machine_hive( const char *filename )
         if (errno != ENOENT) fatal_error( "cannot open the machine hive %s: %s\n", filename, strerror( errno ));
         return NULL;
     }
-    if (fstat( fd, &st ) || !S_ISREG( st.st_mode ) || st.st_uid != 0 || st.st_gid != sysrun_group() ||
-        (st.st_mode & S_IWOTH))
+    /* system tier: once session 0 owns the machine hives, it saves them as its own account */
+    if (fstat( fd, &st ) || !S_ISREG( st.st_mode ) || (st.st_uid != 0 && st.st_uid != session0_hive_owner()) ||
+        st.st_gid != sysrun_group() || (st.st_mode & S_IWOTH))
         fatal_error( "the machine hive %s is not a regular file of root and the system group\n", filename );
     if (!(f = fdopen( fd, "r" ))) fatal_error( "out of memory\n" );
     return f;
@@ -4312,6 +4320,9 @@ done:
 static int save_branch( struct save_branch_info *info )
 {
     if (info->managed) return e1s_save_hive( info->managed );
+    /* System tier: session 0 owns the machine hives. A server whose programs use session 0 keeps its copy of
+     * them only for the per-session keys, which are never saved, and its own start-up reads. */
+    if (session0_client && (info == &save_branch_info[0] || info == &save_branch_info[1])) return 1;
     /* The system group is raised for the save only if elevation was enforced by the on-disk hive at startup (the
      * access checks then decide which writes exist); otherwise a machine hive keeps the stock rule: it is saved if
      * the real user can write it. The live value is not used: a user could set the helper in memory. */
@@ -4678,6 +4689,30 @@ DECL_HANDLER(set_registry_notification)
     {
         if (key->e1s_view)
         { set_error( STATUS_NOT_SUPPORTED ); release_object( key ); return; }
+        if (current->process->wex_registry_client && !req->event && req->relay_cookie)
+        {
+            /* system tier: the change is reported to the program's own server, which sets its event */
+            unsigned int *cookies;
+
+            if (!(notify = find_notify( key, current->process, req->hkey )) && (notify = mem_alloc( sizeof(*notify) )))
+            {
+                memset( notify, 0, sizeof(*notify) );
+                notify->subtree = req->subtree;
+                notify->filter  = req->filter;
+                notify->hkey    = req->hkey;
+                notify->process = current->process;
+                list_add_head( &key->notify_list, &notify->entry );
+            }
+            if (notify && (cookies = realloc( notify->cookies, (notify->cookie_count + 1) * sizeof(*cookies) )))
+            {
+                notify->cookies = cookies;
+                notify->cookies[notify->cookie_count++] = req->relay_cookie;
+                set_error( STATUS_PENDING );
+            }
+            else if (notify) set_error( STATUS_NO_MEMORY );
+            release_object( key );
+            return;
+        }
         event = get_event_obj( current->process, req->event, SYNCHRONIZE );
         if (event)
         {
@@ -4689,6 +4724,8 @@ DECL_HANDLER(set_registry_notification)
                 {
                     notify->events  = NULL;
                     notify->event_count = 0;
+                    notify->cookies = NULL;
+                    notify->cookie_count = 0;
                     notify->subtree = req->subtree;
                     notify->filter  = req->filter;
                     notify->hkey    = req->hkey;

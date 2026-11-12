@@ -66,6 +66,7 @@
 #include "e1s_profile.h"
 #include "e1s_token.h"
 #include "sysrun.h"
+#include "session0.h"
 
 /* process object */
 
@@ -764,6 +765,8 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->wex_pin_pidfd = -1;
     process->wex_pin_pid = -1;
     process->wex_pin_uid = -1;
+    process->wex_registry_client = 0;
+    process->wex_relay = NULL;
     process->e1s6_broker_image = 0;
     process->e1s6_image_seen = 0;
     process->e1s6_broker_generation = 0;
@@ -838,7 +841,15 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     if (!(process->sync = create_internal_sync( 1, 0 ))) goto error;
 
     /* create the handle table */
-    if (!parent)
+    if (!parent && (flags & WEX_CREATE_REGISTRY_CLIENT))
+    {
+        /* system tier: a registry channel of a program in a user's session, with its described token */
+        process->wex_registry_client = 1;
+        process->handles = alloc_handle_table( process, 0 );
+        process->token = token ? (struct token *)grab_object( token ) : NULL;
+        process->affinity = ~0;
+    }
+    else if (!parent)
     {
         process->handles = alloc_handle_table( process, 0 );
         process->token = token_create_first_interactive( default_session_id );
@@ -924,6 +935,7 @@ static void process_destroy( struct object *obj )
     if (process->token) release_object( process->token );
     if (process->e1s_profile_issued) release_object( process->e1s_profile_issued );
     if (process->e1s6_primary) release_object( process->e1s6_primary );
+    session0_relay_release( process );
 #ifdef WEX_E1S6_TRANSPORT_TEST
     if (process->e1s6_control_fd >= 0) close( process->e1s6_control_fd );
 #endif

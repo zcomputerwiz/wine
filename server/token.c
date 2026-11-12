@@ -3113,3 +3113,177 @@ DECL_HANDLER(create_linked_token)
         release_object( token );
     }
 }
+
+/* WineExplorer system tier (docs/SYSTEM_TIER_DESIGN.md): a token described by a user's server to session 0,
+ * which builds a primary token from it for that program's registry channel. Both ends are the same server
+ * build, so the description uses native layout: a header, then the user, owner and primary group SIDs, the
+ * AppContainer SID when there is one, the groups, the privileges, the restricting SIDs and the capabilities
+ * (each a 32-bit attribute word and a SID, privileges as luid_attr), then the default DACL. Every item is a
+ * multiple of 4 bytes long. */
+#define WEX_TOKEN_DESC_MAGIC 0x31544458  /* "XDT1" */
+
+struct wex_token_desc
+{
+    unsigned int magic;
+    unsigned int size;
+    unsigned int session_id;
+    int          elevation;
+    unsigned int integrity_rid;
+    unsigned int is_restricted;
+    unsigned int group_count;
+    unsigned int priv_count;
+    unsigned int restricted_count;
+    unsigned int capability_count;
+    unsigned int has_app_container;
+    unsigned int dacl_size;
+    struct luid  auth_id;
+};
+
+static data_size_t desc_put( char *buf, data_size_t pos, data_size_t size, const void *data, data_size_t len )
+{
+    if (buf && pos + len <= size) memcpy( buf + pos, data, len );
+    return pos + len;
+}
+
+static data_size_t desc_put_groups( char *buf, data_size_t pos, data_size_t size, struct list *list,
+                                    unsigned int *count )
+{
+    struct group *group;
+
+    *count = 0;
+    LIST_FOR_EACH_ENTRY( group, list, struct group, entry )
+    {
+        pos = desc_put( buf, pos, size, &group->attrs, sizeof(group->attrs) );
+        pos = desc_put( buf, pos, size, &group->sid, sid_len( &group->sid ));
+        (*count)++;
+    }
+    return pos;
+}
+
+/* describe a token; returns the size needed, the description is written only when it fits */
+data_size_t token_describe( struct token *token, void *data, data_size_t size )
+{
+    struct wex_token_desc hdr;
+    struct privilege *priv;
+    char *buf = data;
+    data_size_t pos = sizeof(hdr);
+
+    memset( &hdr, 0, sizeof(hdr) );
+    hdr.magic = WEX_TOKEN_DESC_MAGIC;
+    hdr.session_id = token->session_id;
+    hdr.elevation = token->elevation;
+    hdr.integrity_rid = token->integrity_rid;
+    hdr.is_restricted = token->is_restricted;
+    hdr.has_app_container = token->app_container != NULL;
+    hdr.dacl_size = token->default_dacl ? token->default_dacl->size : 0;
+    hdr.auth_id = token->auth_id;
+
+    pos = desc_put( buf, pos, size, token->user, sid_len( token->user ));
+    pos = desc_put( buf, pos, size, token->owner, sid_len( token->owner ));
+    pos = desc_put( buf, pos, size, token->primary_group, sid_len( token->primary_group ));
+    if (token->app_container) pos = desc_put( buf, pos, size, token->app_container, sid_len( token->app_container ));
+    pos = desc_put_groups( buf, pos, size, &token->groups, &hdr.group_count );
+    LIST_FOR_EACH_ENTRY( priv, &token->privileges, struct privilege, entry )
+    {
+        struct luid_attr la;
+        la.luid = priv->luid;
+        la.attrs = (priv->enabled ? SE_PRIVILEGE_ENABLED : 0) | (priv->def ? SE_PRIVILEGE_ENABLED_BY_DEFAULT : 0);
+        pos = desc_put( buf, pos, size, &la, sizeof(la) );
+        hdr.priv_count++;
+    }
+    pos = desc_put_groups( buf, pos, size, &token->restricted_sids, &hdr.restricted_count );
+    pos = desc_put_groups( buf, pos, size, &token->capabilities, &hdr.capability_count );
+    if (token->default_dacl) pos = desc_put( buf, pos, size, token->default_dacl, token->default_dacl->size );
+    hdr.size = pos;
+    desc_put( buf, 0, size, &hdr, sizeof(hdr) );
+    return pos;
+}
+
+static const struct sid *desc_get_sid( const char *buf, data_size_t size, data_size_t *pos )
+{
+    const struct sid *sid = (const struct sid *)(buf + *pos);
+
+    if (*pos > size || size - *pos < offsetof( struct sid, sub_auth )) return NULL;
+    if (!sid_valid_size( sid, size - *pos ) || sid->revision != SID_REVISION) return NULL;
+    *pos += sid_len( sid );
+    return sid;
+}
+
+static int desc_get_groups( const char *buf, data_size_t size, data_size_t *pos, unsigned int count,
+                            struct list *list )
+{
+    unsigned int i, attrs;
+    const struct sid *sid;
+
+    for (i = 0; i < count; i++)
+    {
+        struct group *group;
+
+        if (*pos > size || size - *pos < sizeof(attrs)) return 0;
+        memcpy( &attrs, buf + *pos, sizeof(attrs) );
+        *pos += sizeof(attrs);
+        if (!(sid = desc_get_sid( buf, size, pos ))) return 0;
+        if (!(group = mem_alloc( offsetof( struct group, sid.sub_auth[sid->sub_count] )))) return 0;
+        group->attrs = attrs;
+        copy_sid( &group->sid, sid );
+        list_add_tail( list, &group->entry );
+    }
+    return 1;
+}
+
+/* build a primary token from a description; NULL if it is malformed */
+struct token *token_create_described( const void *data, data_size_t size )
+{
+    const char *buf = data;
+    struct wex_token_desc hdr;
+    const struct sid *user, *owner, *group, *app_container = NULL;
+    const struct acl *dacl;
+    struct token *token;
+    data_size_t pos = sizeof(hdr), privs_pos;
+    unsigned int i;
+
+    if (size < sizeof(hdr)) return NULL;
+    memcpy( &hdr, buf, sizeof(hdr) );
+    if (hdr.magic != WEX_TOKEN_DESC_MAGIC || hdr.size != size || hdr.group_count > 1024 || hdr.priv_count > 256 ||
+        hdr.restricted_count > 1024 || hdr.capability_count > 1024) return NULL;
+    if (!(user = desc_get_sid( buf, size, &pos )) || !(owner = desc_get_sid( buf, size, &pos )) ||
+        !(group = desc_get_sid( buf, size, &pos ))) return NULL;
+    if (hdr.has_app_container && !(app_container = desc_get_sid( buf, size, &pos ))) return NULL;
+
+    if (!(token = create_token( TRUE, hdr.session_id, user, owner, group, NULL, 0, NULL, 0, NULL, NULL, 0,
+                                hdr.elevation ))) return NULL;
+    token->integrity_rid = hdr.integrity_rid;
+    token->auth_id = hdr.auth_id;
+    if (!desc_get_groups( buf, size, &pos, hdr.group_count, &token->groups )) goto error;
+
+    privs_pos = pos;
+    if (pos > size || hdr.priv_count > (size - pos) / sizeof(struct luid_attr)) goto error;
+    pos += hdr.priv_count * sizeof(struct luid_attr);
+    for (i = 0; i < hdr.priv_count; i++)
+    {
+        struct luid_attr la;
+        struct privilege *priv;
+
+        memcpy( &la, buf + privs_pos + i * sizeof(la), sizeof(la) );
+        if (!(priv = privilege_add( token, la.luid, la.attrs & SE_PRIVILEGE_ENABLED ))) goto error;
+        priv->def = !!(la.attrs & SE_PRIVILEGE_ENABLED_BY_DEFAULT);
+    }
+    if (!desc_get_groups( buf, size, &pos, hdr.restricted_count, &token->restricted_sids )) goto error;
+    if (!desc_get_groups( buf, size, &pos, hdr.capability_count, &token->capabilities )) goto error;
+    token->is_restricted = !!hdr.is_restricted;
+    if (app_container && !(token->app_container = memdup( app_container, sid_len( app_container )))) goto error;
+    if (hdr.dacl_size)
+    {
+        if (pos > size || size - pos < hdr.dacl_size) goto error;
+        dacl = (const struct acl *)(buf + pos);
+        if (!acl_is_valid( dacl, hdr.dacl_size ) || dacl->size != hdr.dacl_size) goto error;
+        if (!(token->default_dacl = memdup( dacl, hdr.dacl_size ))) goto error;
+        pos += hdr.dacl_size;
+    }
+    if (pos != size) goto error;
+    return token;
+
+error:
+    release_object( token );
+    return NULL;
+}

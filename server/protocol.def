@@ -2242,6 +2242,7 @@ struct process_info
     obj_handle_t event;        /* event to set */
     int          subtree;      /* should we watch the whole subtree? */
     unsigned int filter;       /* things to watch */
+    unsigned int relay_cookie; /* system tier: a registry-only client's change goes to its relay */
 @END
 
 
@@ -2249,6 +2250,27 @@ struct process_info
 @REQ(rename_key)
     obj_handle_t hkey;         /* handle to the key to be renamed */
     VARARG(name,unicode_str);  /* new name */
+@END
+
+
+/* WineExplorer system tier: get a registry channel to session 0 for the calling program */
+@REQ(get_registry_channel)
+@REPLY
+    obj_handle_t cookie;       /* the channel fd is in flight with this value */
+@END
+
+
+/* WineExplorer system tier: the read end of a registry channel's wait pipe, where session 0 reports changes */
+@REQ(set_registry_relay)
+    int          fd;           /* the pipe, in flight */
+@END
+
+
+/* WineExplorer system tier: an event to set when session 0 reports a change with the returned cookie */
+@REQ(relay_registry_notification)
+    obj_handle_t event;        /* event to set */
+@REPLY
+    unsigned int cookie;       /* to pass to session 0 with set_registry_notification */
 @END
 
 

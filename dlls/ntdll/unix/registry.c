@@ -68,20 +68,70 @@ NTSTATUS open_hkcu_key( const char *path, HANDLE *key )
 }
 
 
+
+/* WineExplorer system tier: where a create or an open goes. A machine key goes to session 0, and the
+ * absolute path is kept with its handle there; a per-session key below a session 0 key is opened in this
+ * process's server by its absolute path. */
+struct regsrv_target
+{
+    UNICODE_STRING    path;     /* absolute path of a machine key */
+    BOOL              owned;    /* path.Buffer to be freed */
+    BOOL              remote;   /* session 0 */
+    BOOL              use_abs;  /* open here by the absolute path */
+    OBJECT_ATTRIBUTES abs;
+};
+
+static NTSTATUS regsrv_target( const OBJECT_ATTRIBUTES *attr, struct regsrv_target *t )
+{
+    NTSTATUS status;
+
+    memset( t, 0, sizeof(*t) );
+    if (regsrv_is_handle( attr->RootDirectory ))
+    {
+        if ((status = regsrv_full_path( attr->RootDirectory, attr->ObjectName, &t->path ))) return status;
+        t->owned = TRUE;
+        if (!(t->remote = regsrv_route_path( t->path.Buffer, t->path.Length )))
+        {
+            t->abs = *attr;
+            t->abs.RootDirectory = 0;
+            t->abs.ObjectName = &t->path;
+            t->use_abs = TRUE;
+        }
+    }
+    else if (!attr->RootDirectory && attr->ObjectName &&
+             regsrv_route_path( attr->ObjectName->Buffer, attr->ObjectName->Length ))
+    {
+        t->path = *attr->ObjectName;
+        t->remote = TRUE;
+    }
+    return STATUS_SUCCESS;
+}
+
+static void regsrv_target_free( struct regsrv_target *t )
+{
+    if (t->owned) free( t->path.Buffer );
+}
+
 /******************************************************************************
  *              NtCreateKey  (NTDLL.@)
  */
 NTSTATUS WINAPI NtCreateKey( HANDLE *key, ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr,
                              ULONG index, const UNICODE_STRING *class, ULONG options, ULONG *dispos )
 {
-    unsigned int ret;
+    unsigned int ret, generation = 0;
     data_size_t len;
     struct object_attributes *objattr;
+    struct regsrv_target target;
 
     *key = 0;
     if (attr->Length != sizeof(OBJECT_ATTRIBUTES)) return STATUS_INVALID_PARAMETER;
     if (!attr->ObjectName->Length && !attr->RootDirectory) return STATUS_OBJECT_PATH_SYNTAX_BAD;
-    if ((ret = wine_server_alloc_object_attributes( attr, &objattr, &len ))) return ret;
+    if ((ret = regsrv_target( attr, &target ))) return ret;
+    if ((ret = wine_server_alloc_object_attributes( target.use_abs ? &target.abs : attr, &objattr, &len )))
+    {
+        regsrv_target_free( &target );
+        return ret;
+    }
     objattr->attributes |= OBJ_OPENIF | OBJ_CASE_INSENSITIVE;
 
     TRACE( "(%p,%s,%s,%x,%x,%p)\n", attr->RootDirectory, debugstr_us(attr->ObjectName),
@@ -89,17 +139,23 @@ NTSTATUS WINAPI NtCreateKey( HANDLE *key, ACCESS_MASK access, const OBJECT_ATTRI
 
     SERVER_START_REQ( create_key )
     {
-        /* ST-04 prototype: a machine key, or a key under one, belongs to the registry server */
-        BOOL remote = regsrv_is_handle( attr->RootDirectory ) ||
-                      (!attr->RootDirectory && regsrv_is_machine_name( attr->ObjectName ));
-
-        if (remote) objattr->rootdir = regsrv_obj_handle( attr->RootDirectory );
         req->access     = access;
         req->options    = options;
         wine_server_add_data( req, objattr, len );
         if (class) wine_server_add_data( req, class->Buffer, class->Length );
-        ret = remote ? regsrv_call( req ) : wine_server_call( req );
-        *key = remote ? regsrv_ptr_handle( reply->hkey ) : wine_server_ptr_handle( reply->hkey );
+        if (target.remote)
+        {
+            ret = regsrv_call( req, attr->RootDirectory, &objattr->rootdir, &generation );
+            if ((ret == STATUS_SUCCESS || ret == STATUS_OBJECT_NAME_EXISTS) &&
+                !(*key = regsrv_add_key( reply->hkey, generation, &target.path, access,
+                                         objattr->attributes | ((options & REG_OPTION_OPEN_LINK) ? OBJ_OPENLINK : 0) )))
+                ret = STATUS_NO_MEMORY;
+        }
+        else
+        {
+            ret = wine_server_call( req );
+            *key = wine_server_ptr_handle( reply->hkey );
+        }
     }
     SERVER_END_REQ;
 
@@ -115,6 +171,7 @@ NTSTATUS WINAPI NtCreateKey( HANDLE *key, ACCESS_MASK access, const OBJECT_ATTRI
 
     TRACE( "<- %p\n", *key );
     free( objattr );
+    regsrv_target_free( &target );
     return ret;
 }
 
@@ -137,12 +194,16 @@ NTSTATUS WINAPI NtCreateKeyTransacted( HANDLE *key, ACCESS_MASK access, const OB
  */
 NTSTATUS WINAPI NtOpenKeyEx( HANDLE *key, ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr, ULONG options )
 {
-    unsigned int ret;
+    unsigned int ret, generation = 0;
     ULONG attributes;
+    struct regsrv_target target;
+    const OBJECT_ATTRIBUTES *use;
 
     *key = 0;
     if (attr->Length != sizeof(*attr)) return STATUS_INVALID_PARAMETER;
     if (attr->ObjectName->Length & 1) return STATUS_OBJECT_NAME_INVALID;
+    if ((ret = regsrv_target( attr, &target ))) return ret;
+    use = target.use_abs ? &target.abs : attr;
 
     TRACE( "(%p,%s,%x,%p)\n", attr->RootDirectory, debugstr_us(attr->ObjectName), access, key );
 
@@ -152,18 +213,24 @@ NTSTATUS WINAPI NtOpenKeyEx( HANDLE *key, ACCESS_MASK access, const OBJECT_ATTRI
 
     SERVER_START_REQ( open_key )
     {
-        /* ST-04 prototype: a machine key, or a key under one, belongs to the registry server */
-        BOOL remote = regsrv_is_handle( attr->RootDirectory ) ||
-                      (!attr->RootDirectory && regsrv_is_machine_name( attr->ObjectName ));
-
-        req->parent     = regsrv_obj_handle( attr->RootDirectory );
+        req->parent     = wine_server_obj_handle( use->RootDirectory );
         req->access     = access;
         req->attributes = attributes;
-        wine_server_add_data( req, attr->ObjectName->Buffer, attr->ObjectName->Length );
-        ret = remote ? regsrv_call( req ) : wine_server_call( req );
-        *key = remote ? regsrv_ptr_handle( reply->hkey ) : wine_server_ptr_handle( reply->hkey );
+        wine_server_add_data( req, use->ObjectName->Buffer, use->ObjectName->Length );
+        if (target.remote)
+        {
+            ret = regsrv_call( req, attr->RootDirectory, &req->parent, &generation );
+            if (!ret && !(*key = regsrv_add_key( reply->hkey, generation, &target.path, access, attributes )))
+                ret = STATUS_NO_MEMORY;
+        }
+        else
+        {
+            ret = wine_server_call( req );
+            *key = wine_server_ptr_handle( reply->hkey );
+        }
     }
     SERVER_END_REQ;
+    regsrv_target_free( &target );
     TRACE("<- %p\n", *key);
     return ret;
 }
@@ -210,8 +277,8 @@ NTSTATUS WINAPI NtDeleteKey( HANDLE key )
 
     SERVER_START_REQ( delete_key )
     {
-        req->hkey = regsrv_obj_handle( key );
-        ret = (regsrv_is_handle( key ) ? regsrv_call( req ) : wine_server_call( req ));
+        req->hkey = wine_server_obj_handle( key );
+        ret = (regsrv_is_handle( key ) ? regsrv_call( req, key, &req->hkey, NULL ) : wine_server_call( req ));
     }
     SERVER_END_REQ;
     return ret;
@@ -234,7 +301,7 @@ NTSTATUS WINAPI NtRenameKey( HANDLE key, UNICODE_STRING *name )
     {
         req->hkey = wine_server_obj_handle( key );
         wine_server_add_data( req, name->Buffer, name->Length );
-        ret = wine_server_call( req );
+        ret = regsrv_is_handle( key ) ? regsrv_call( req, key, &req->hkey, NULL ) : wine_server_call( req );
     }
     SERVER_END_REQ;
     return ret;
@@ -269,11 +336,11 @@ static NTSTATUS enumerate_key( HANDLE handle, int index, KEY_INFORMATION_CLASS i
 
     SERVER_START_REQ( enum_key )
     {
-        req->hkey       = regsrv_obj_handle( handle );
+        req->hkey       = wine_server_obj_handle( handle );
         req->index      = index;
         req->info_class = info_class;
         if (length > fixed_size) wine_server_set_reply( req, data_ptr, length - fixed_size );
-        if (!(ret = (regsrv_is_handle( handle ) ? regsrv_call( req ) : wine_server_call( req ))))
+        if (!(ret = (regsrv_is_handle( handle ) ? regsrv_call( req, handle, &req->hkey, NULL ) : wine_server_call( req ))))
         {
             switch (info_class)
             {
@@ -475,11 +542,11 @@ NTSTATUS WINAPI NtEnumerateValueKey( HANDLE handle, ULONG index, KEY_VALUE_INFOR
 
     SERVER_START_REQ( enum_key_value )
     {
-        req->hkey       = regsrv_obj_handle( handle );
+        req->hkey       = wine_server_obj_handle( handle );
         req->index      = index;
         req->info_class = info_class;
         if (length > fixed_size) wine_server_set_reply( req, ptr, length - fixed_size );
-        if (!(ret = (regsrv_is_handle( handle ) ? regsrv_call( req ) : wine_server_call( req ))))
+        if (!(ret = (regsrv_is_handle( handle ) ? regsrv_call( req, handle, &req->hkey, NULL ) : wine_server_call( req ))))
         {
             copy_key_value_info( info_class, info, length, reply->type, reply->namelen,
                                  wine_server_reply_size(reply) - reply->namelen );
@@ -549,10 +616,10 @@ NTSTATUS WINAPI NtQueryValueKey( HANDLE handle, const UNICODE_STRING *name,
 
     SERVER_START_REQ( get_key_value )
     {
-        req->hkey = regsrv_obj_handle( handle );
+        req->hkey = wine_server_obj_handle( handle );
         wine_server_add_data( req, name->Buffer, name->Length );
         if (length > fixed_size && data_ptr) wine_server_set_reply( req, data_ptr, length - fixed_size );
-        if (!(ret = (regsrv_is_handle( handle ) ? regsrv_call( req ) : wine_server_call( req ))))
+        if (!(ret = (regsrv_is_handle( handle ) ? regsrv_call( req, handle, &req->hkey, NULL ) : wine_server_call( req ))))
         {
             copy_key_value_info( info_class, info, length, reply->type,
                                  name->Length, reply->total );
@@ -591,12 +658,12 @@ NTSTATUS WINAPI NtSetValueKey( HANDLE key, const UNICODE_STRING *name, ULONG ind
 
     SERVER_START_REQ( set_key_value )
     {
-        req->hkey    = regsrv_obj_handle( key );
+        req->hkey    = wine_server_obj_handle( key );
         req->type    = type;
         req->namelen = name->Length;
         wine_server_add_data( req, name->Buffer, name->Length );
         wine_server_add_data( req, data, count );
-        ret = (regsrv_is_handle( key ) ? regsrv_call( req ) : wine_server_call( req ));
+        ret = (regsrv_is_handle( key ) ? regsrv_call( req, key, &req->hkey, NULL ) : wine_server_call( req ));
     }
     SERVER_END_REQ;
     return ret;
@@ -616,9 +683,9 @@ NTSTATUS WINAPI NtDeleteValueKey( HANDLE key, const UNICODE_STRING *name )
 
     SERVER_START_REQ( delete_key_value )
     {
-        req->hkey = regsrv_obj_handle( key );
+        req->hkey = wine_server_obj_handle( key );
         wine_server_add_data( req, name->Buffer, name->Length );
-        ret = (regsrv_is_handle( key ) ? regsrv_call( req ) : wine_server_call( req ));
+        ret = (regsrv_is_handle( key ) ? regsrv_call( req, key, &req->hkey, NULL ) : wine_server_call( req ));
     }
     SERVER_END_REQ;
     return ret;
@@ -642,6 +709,7 @@ NTSTATUS WINAPI NtNotifyChangeMultipleKeys( HANDLE key, ULONG count, OBJECT_ATTR
     if (count || attr || apc || apc_context || buffer || length)
         FIXME( "Unimplemented optional parameter\n" );
 
+
     if (!async)
     {
         OBJECT_ATTRIBUTES attr;
@@ -650,15 +718,45 @@ NTSTATUS WINAPI NtNotifyChangeMultipleKeys( HANDLE key, ULONG count, OBJECT_ATTR
         if (ret) return ret;
     }
 
-    SERVER_START_REQ( set_registry_notification )
+    if (regsrv_is_handle( key ))
     {
-        req->hkey    = wine_server_obj_handle( key );
-        req->event   = wine_server_obj_handle( event );
-        req->subtree = subtree;
-        req->filter  = filter;
-        ret = wine_server_call( req );
+        /* a session 0 key: the event is registered with this process's server, which sets it when session 0
+         * reports the change under the cookie (system tier) */
+        unsigned int cookie = 0;
+
+        SERVER_START_REQ( relay_registry_notification )
+        {
+            req->event = wine_server_obj_handle( event );
+            ret = wine_server_call( req );
+            cookie = reply->cookie;
+        }
+        SERVER_END_REQ;
+        if (!ret)
+        {
+            SERVER_START_REQ( set_registry_notification )
+            {
+                req->hkey         = wine_server_obj_handle( key );
+                req->event        = 0;
+                req->subtree      = subtree;
+                req->filter       = filter;
+                req->relay_cookie = cookie;
+                ret = regsrv_call( req, key, &req->hkey, NULL );
+            }
+            SERVER_END_REQ;
+        }
     }
-    SERVER_END_REQ;
+    else
+    {
+        SERVER_START_REQ( set_registry_notification )
+        {
+            req->hkey    = wine_server_obj_handle( key );
+            req->event   = wine_server_obj_handle( event );
+            req->subtree = subtree;
+            req->filter  = filter;
+            ret = wine_server_call( req );
+        }
+        SERVER_END_REQ;
+    }
 
     if (!async)
     {
@@ -692,8 +790,8 @@ NTSTATUS WINAPI NtFlushKey( HANDLE key )
 
     SERVER_START_REQ( flush_key )
     {
-	req->hkey = regsrv_obj_handle( key );
-	ret = (regsrv_is_handle( key ) ? regsrv_call( req ) : wine_server_call( req ));
+	req->hkey = wine_server_obj_handle( key );
+	ret = (regsrv_is_handle( key ) ? regsrv_call( req, key, &req->hkey, NULL ) : wine_server_call( req ));
     }
     SERVER_END_REQ;
     return ret;

@@ -113,6 +113,8 @@ struct process
     int                  wex_pin_pidfd;      /* kernel pin from the dialog loader's first fd transfer, else -1 */
     int                  wex_pin_pid;        /* SCM_CREDENTIALS pid and uid of that transfer */
     unsigned int         wex_pin_uid;
+    unsigned int         wex_registry_client:1; /* system tier: a registry-only client of session 0 */
+    struct object       *wex_relay;            /* system tier: where session 0 reports changes of its keys */
     unsigned int         e1s6_broker_image:1; /* lab only: mapped machine-root wexelevate image */
     unsigned int         e1s6_image_seen:1;
     unsigned long long   e1s6_broker_generation; /* fresh for each registration; server-issued */
