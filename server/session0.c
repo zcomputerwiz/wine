@@ -65,6 +65,7 @@
 #include "sysrun.h"
 #include "thread.h"
 #include "e1s_token.h"
+#include "accounts.h"
 #include "session0.h"
 #include "wine/wex_session0.h"
 
@@ -596,18 +597,50 @@ static void session0_listen_event( struct fd *fd, int event )
     set_fd_events( link->fd, POLLIN );  /* the link holds its own reference until the message is handled */
 }
 
+/* A token that a session's server describes stands for that server's own user (the account map's SID of the
+ * peer's uid) or for its session's system role (SYSTEM, LocalService, NetworkService). Another user's account is
+ * refused: a session's server cannot act as another user in session 0 (T5 review). What the description says
+ * beyond the user (groups, privileges, elevation) rests on the launcher-started server, as everything since T1. */
+static int described_token_bound( struct token *token, uid_t uid )
+{
+    static const unsigned char nt_authority[6] = { 0, 0, 0, 0, 0, 5 };
+    const struct sid *user = token_get_user_sid( token );
+    unsigned int subauth[5], i;
+
+    if (session0_dev) return 1;
+    if (token_service_account( token ) != -1) return 1;
+    if (!accounts_own_sid( uid, subauth )) return 0;
+    if (user->sub_count != 5 || memcmp( user->id_auth, nt_authority, sizeof(nt_authority) )) return 0;
+    for (i = 0; i < 5; i++) if (user->sub_auth[i] != subauth[i]) return 0;
+    return 1;
+}
+
+/* the described token, if it is bound to the peer; else NULL with *status set */
+static struct token *create_bound_token( const void *desc, data_size_t size, uid_t uid, unsigned int *status )
+{
+    struct token *token = token_create_described( desc, size );
+
+    *status = STATUS_INVALID_PARAMETER;
+    if (!token) return NULL;
+    if (described_token_bound( token, uid )) return token;
+    release_object( token );
+    *status = STATUS_ACCESS_DENIED;
+    return NULL;
+}
+
 /* serve a channel as a registry-only client with the described token */
-static unsigned int start_registry_client( int channel, const void *desc, data_size_t size, unsigned int machine )
+static unsigned int start_registry_client( int channel, const void *desc, data_size_t size, unsigned int machine,
+                                           uid_t uid )
 {
     struct process *process;
     struct thread *thread;
     struct token *token;
     unsigned int status;
 
-    if (!(token = token_create_described( desc, size )))
+    if (!(token = create_bound_token( desc, size, uid, &status )))
     {
         close( channel );
-        return STATUS_INVALID_PARAMETER;
+        return status;
     }
     clear_error();
     process = create_process( channel, NULL, WEX_CREATE_REGISTRY_CLIENT, NULL, NULL, NULL, 0, token );
@@ -749,12 +782,12 @@ static void session0_link_event( struct fd *fd, int event )
     else if (hdr->type == WEX_SESSION0_PIPE)
     {
         /* T5.2: join the channel (a stream socket) to the named pipe, as a client with the described token */
-        struct token *token = token_create_described( hdr + 1, hdr->desc_size );
+        struct token *token = create_bound_token( hdr + 1, hdr->desc_size, link->peer_uid, &reply.status );
         WCHAR *name = malloc( hdr->machine ? hdr->machine : 1 );
 
         if (!token || !name)
         {
-            reply.status = STATUS_INVALID_PARAMETER;
+            if (token) reply.status = STATUS_NO_MEMORY;
             close( channel );
         }
         else
@@ -770,10 +803,9 @@ static void session0_link_event( struct fd *fd, int event )
     else if (hdr->type == WEX_SESSION0_USER_HIVE)
     {
         /* T4a: hold the user's hive (channel is the user.reg descriptor, or none) for this link's server */
-        struct token *token = token_create_described( hdr + 1, hdr->desc_size );
+        struct token *token = create_bound_token( hdr + 1, hdr->desc_size, link->peer_uid, &reply.status );
 
-        if (!token) reply.status = STATUS_INVALID_PARAMETER;
-        else
+        if (token)  /* else reply.status says why */
         {
             reply.status = session0_load_user_hive( token_get_user_sid( token ), channel, link );
             channel = -1;
@@ -789,7 +821,7 @@ static void session0_link_event( struct fd *fd, int event )
     else
     {
         fcntl( channel, F_SETFL, O_NONBLOCK );
-        reply.status = start_registry_client( channel, hdr + 1, hdr->desc_size, hdr->machine );
+        reply.status = start_registry_client( channel, hdr + 1, hdr->desc_size, hdr->machine, link->peer_uid );
         channel = -1;  /* the client owns it now, or it was closed */
     }
     if (channel != -1) close( channel );

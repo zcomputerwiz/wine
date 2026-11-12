@@ -116,14 +116,22 @@ static DWORD map_exception_code( DWORD code )
         return err; \
     } while (0)
 
-/* session 0 is there: its service manager's pipe opens */
+/* this session's server uses session 0: a WexSession0\ name is a pipe of session 0 there, and is not found in a
+ * server that does not use it. That session 0 cannot be reached at this moment changes nothing (T5 review): the
+ * session still leaves session 0's services to it, and their calls fail until it is back */
 BOOL forward_available(void)
 {
     HANDLE pipe = CreateFileW( s0_pipe, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL );
+    DWORD err = GetLastError();
 
-    if (pipe == INVALID_HANDLE_VALUE) return FALSE;
-    CloseHandle( pipe );
-    return TRUE;
+    if (pipe != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle( pipe );
+        return TRUE;
+    }
+    if (err != ERROR_FILE_NOT_FOUND && err != ERROR_PATH_NOT_FOUND)
+        WINE_WARN( "session 0's service manager is not reachable now (%lu)\n", err );
+    return err != ERROR_FILE_NOT_FOUND && err != ERROR_PATH_NOT_FOUND;
 }
 
 /* the connection for a manager handle is made here, as the RPC caller */

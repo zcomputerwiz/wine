@@ -2973,6 +2973,8 @@ struct pipe_bridge
     struct pipe_end pipe_end;
     struct list     entry;         /* in bridges */
     int             alive;         /* holds its own reference until the connection ends */
+    int             draining;      /* its peer closed: what it wrote is still being sent */
+    struct timeout_user *drain_timeout;
     uid_t           peer_uid;      /* session 0: the account of the session that opened it */
     unsigned char   tx_head[4];    /* the length of the message being sent */
     unsigned int    tx_head_pos;
@@ -3015,16 +3017,40 @@ static const struct fd_ops pipe_bridge_fd_ops =
     .poll_event = pipe_bridge_poll_event,
 };
 
-/* the connection ended: stop polling and drop the bridge's own reference (the last thing its caller does) */
+/* stop polling and drop the bridge's own reference (the last thing its caller does) */
+static void pipe_bridge_finish( struct pipe_bridge *bridge )
+{
+    if (bridge->drain_timeout) remove_timeout_user( bridge->drain_timeout );
+    bridge->drain_timeout = NULL;
+    bridge->alive = 0;
+    if (bridge->pipe_end.fd) set_fd_events( bridge->pipe_end.fd, -1 );
+    release_object( bridge );
+}
+
+static void pipe_bridge_drain_timeout( void *private )
+{
+    struct pipe_bridge *bridge = private;
+
+    bridge->drain_timeout = NULL;
+    pipe_bridge_finish( bridge );
+}
+
+/* the connection ended. What the peer wrote before it closed, and was told was written, is sent before the socket
+ * closes (T5 review); a socket that takes nothing for 10 s ends it anyway */
 static void pipe_bridge_closed( struct pipe_end *end )
 {
     struct pipe_bridge *bridge = (struct pipe_bridge *)end;
 
-    if (!bridge->alive) return;
-    pipe_bridge_flush( end );  /* what the peer wrote before it closed, as far as the socket takes it now */
-    bridge->alive = 0;
-    if (end->fd) set_fd_events( end->fd, -1 );
-    release_object( bridge );
+    if (!bridge->alive || bridge->draining) return;
+    pipe_bridge_flush( end );
+    if (list_empty( &end->message_queue ) || !end->fd)
+    {
+        pipe_bridge_finish( bridge );
+        return;
+    }
+    bridge->draining = 1;
+    set_fd_events( end->fd, POLLOUT );
+    bridge->drain_timeout = add_timeout_user( -10 * TICKS_PER_SEC, pipe_bridge_drain_timeout, bridge );
 }
 
 /* read while the other end has room for more; always watch for the end of the connection */
@@ -3113,6 +3139,13 @@ static void pipe_bridge_poll_event( struct fd *fd, int event )
     int sock = get_unix_fd( fd );
     ssize_t ret;
 
+    if (bridge->draining)
+    {
+        if (event & POLLOUT) pipe_bridge_flush( end );
+        if ((event & (POLLERR | POLLHUP)) || list_empty( &end->message_queue )) pipe_bridge_finish( bridge );
+        else set_fd_events( fd, POLLOUT );
+        return;
+    }
     if (event & POLLOUT) pipe_bridge_flush( end );
     while ((event & POLLIN) && bridge->alive && end->connection &&
            pipe_end_get_avail( end->connection ) < PIPE_BRIDGE_MAX_QUEUED)
@@ -3166,6 +3199,8 @@ static struct pipe_bridge *create_pipe_bridge( struct named_pipe *pipe, int sock
     list_add_tail( &bridges, &bridge->entry );
     bridge->pipe_end.state = FILE_PIPE_CONNECTED_STATE;
     bridge->alive = 1;
+    bridge->draining = 0;
+    bridge->drain_timeout = NULL;
     bridge->peer_uid = (uid_t)-1;
     bridge->tx_head_pos = bridge->rx_head_pos = 0;
     bridge->rx_data = NULL;

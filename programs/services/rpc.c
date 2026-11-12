@@ -178,14 +178,6 @@ struct sc_remote_handle
 };
 
 BOOL forward_mode;
-static CRITICAL_SECTION remote_cs;
-static CRITICAL_SECTION_DEBUG remote_cs_debug =
-{
-    0, 0, &remote_cs,
-    { &remote_cs_debug.ProcessLocksList, &remote_cs_debug.ProcessLocksList },
-      0, 0, { (DWORD_PTR)(__FILE__ ": remote_cs") }
-};
-static CRITICAL_SECTION remote_cs = { &remote_cs_debug, -1, 0, 0, 0, 0 };
 
 static SC_RPC_HANDLE remote_of(SC_RPC_HANDLE handle)
 {
@@ -193,18 +185,12 @@ static SC_RPC_HANDLE remote_of(SC_RPC_HANDLE handle)
     return hdr && hdr->type == SC_HTYPE_REMOTE ? ((struct sc_remote_handle *)hdr)->remote : NULL;
 }
 
-/* session 0's manager handle for a manager handle of this session; made as the caller of this call, the first time */
+/* session 0's manager handle for a manager handle of this session. It is opened with the manager handle, as its
+ * opener (svcctl_OpenSCManagerW), so whoever uses the handle has the opener's access, as on Windows */
 static DWORD manager_remote(struct sc_manager_handle *manager, SC_RPC_HANDLE *remote)
 {
-    DWORD err;
-
-    EnterCriticalSection(&remote_cs);
-    if (!manager->remote && !manager->remote_error)
-        manager->remote_error = forward_open_manager(manager->requested, &manager->remote);
     *remote = manager->remote;
-    err = manager->remote ? ERROR_SUCCESS : manager->remote_error;
-    LeaveCriticalSection(&remote_cs);
-    return err;
+    return manager->remote ? ERROR_SUCCESS : manager->remote_error;
 }
 
 static DWORD wrap_remote(SC_RPC_HANDLE remote, SC_RPC_HANDLE *handle)
@@ -459,7 +445,9 @@ DWORD __cdecl svcctl_OpenSCManagerW(
     manager->hdr.type = SC_HTYPE_MANAGER;
     manager->requested = requested;
     manager->remote = NULL;
-    manager->remote_error = forward_mode ? ERROR_SUCCESS : ERROR_SERVICE_DOES_NOT_EXIST;
+    /* T5.4: session 0's part of the handle, as this caller; this session's own services work without it */
+    manager->remote_error = forward_mode ? forward_open_manager(requested, &manager->remote)
+                                         : ERROR_SERVICE_DOES_NOT_EXIST;
 
     if (dwAccessMask & MAXIMUM_ALLOWED)
         dwAccessMask |= SC_MANAGER_ALL_ACCESS;
@@ -1811,10 +1799,10 @@ static DWORD enum_merged(struct sc_manager_handle *manager, BOOL ex, DWORD type,
     }
     scmdatabase_unlock(manager->db);
 
-    /* session 0's services; without session 0 the session's own are listed */
-    if (!err && !manager_remote(manager, &remote))
+    /* session 0's services: a list without them is not given as complete (T5 review) */
+    if (!err && !(err = manager_remote(manager, &remote)))
     {
-        DWORD remote_err;
+        DWORD remote_err = ERROR_NOT_ENOUGH_SERVER_MEMORY;
 
         for (;;)
         {
@@ -1847,8 +1835,8 @@ static DWORD enum_merged(struct sc_manager_handle *manager, BOOL ex, DWORD type,
                     err = ERROR_NOT_ENOUGH_SERVER_MEMORY;
             }
         }
-        else if (rbuf && remote_err != ERROR_SERVICE_DOES_NOT_EXIST)
-            WINE_WARN("session 0's services are not listed: %lu\n", remote_err);
+        else if (!rbuf || !group || remote_err != ERROR_SERVICE_DOES_NOT_EXIST)
+            err = remote_err;  /* only a group that session 0 does not have is no error */
         free(rbuf);
     }
 
