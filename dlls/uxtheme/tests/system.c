@@ -1158,6 +1158,49 @@ static void test_buffered_paint(void)
     DeleteDC(target);
 }
 
+/* A window away from the screen's origin: the buffer clips to the target's visible region, which GetRandomRgn
+ * gives in screen coordinates */
+static void test_buffered_paint_window(void)
+{
+    HPAINTBUFFER buffer;
+    COLORREF color;
+    HBRUSH brush;
+    HDC hdc, src;
+    HWND hwnd;
+    RECT rect;
+    HRESULT hr;
+
+    if (!pBeginBufferedPaint)
+    {
+        win_skip("Buffered painting API is not supported.\n");
+        return;
+    }
+
+    hwnd = CreateWindowExA(WS_EX_TOPMOST, "static", NULL, WS_POPUP | WS_VISIBLE, 100, 120, 60, 40, NULL, NULL, NULL,
+                           NULL);
+    ok(hwnd != NULL, "Failed to create a window\n");
+    hdc = GetDC(hwnd);
+    SetRect(&rect, 0, 0, 60, 40);
+    FillRect(hdc, &rect, GetStockObject(WHITE_BRUSH));
+
+    brush = CreateSolidBrush(RGB(255, 0, 0));
+    SetRect(&rect, 10, 5, 50, 35);
+    buffer = pBeginBufferedPaint(hdc, &rect, BPBF_COMPATIBLEBITMAP, NULL, &src);
+    ok(buffer != NULL, "BeginBufferedPaint failed\n");
+    FillRect(src, &rect, brush);
+    hr = pEndBufferedPaint(buffer, TRUE);
+    ok(hr == S_OK, "Unexpected return code %#lx\n", hr);
+
+    color = GetPixel(hdc, 30, 20);
+    ok(color == RGB(255, 0, 0), "Got color %#lx inside the buffer\n", color);
+    color = GetPixel(hdc, 5, 3);
+    ok(color == RGB(255, 255, 255), "Got color %#lx outside the buffer\n", color);
+
+    DeleteObject(brush);
+    ReleaseDC(hwnd, hdc);
+    DestroyWindow(hwnd);
+}
+
 static void test_GetThemePartSize(void)
 {
     static const DWORD enabled = 1;
@@ -2922,6 +2965,7 @@ START_TEST(system)
     test_GetThemePartSize();
     test_CloseThemeData();
     test_buffered_paint();
+    test_buffered_paint_window();
     test_GetThemeIntList();
     test_GetThemeTransitionDuration();
     test_DrawThemeParentBackground();
