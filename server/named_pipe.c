@@ -29,7 +29,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <errno.h>
+#include <poll.h>
 #include <sys/types.h>
+#include <sys/socket.h>
 
 #include "ntstatus.h"
 #include "windef.h"
@@ -45,6 +48,8 @@
 #include "sysrun.h"
 #include "user.h"
 #include "accounts.h"
+#include "session0.h"
+#include "unicode.h"
 
 struct named_pipe;
 
@@ -203,6 +208,8 @@ struct named_pipe
     timeout_t           timeout;
     struct list         listeners;   /* list of servers listening on this pipe */
     struct async_queue  waiters;     /* list of clients waiting to connect */
+    WCHAR              *s0_name;     /* WineExplorer T5.2: a pipe of session 0 (opening it bridges there) */
+    data_size_t         s0_len;
 };
 
 struct named_pipe_device
@@ -342,6 +349,14 @@ static const struct fd_ops pipe_client_fd_ops =
     .reselect_async  = pipe_end_reselect_async,
 };
 
+/* WineExplorer system tier T5.2: a pipe end bridged to another server (below) */
+static const struct object_ops pipe_bridge_ops;
+static void pipe_bridge_flush( struct pipe_end *end );
+static void pipe_bridge_update_events( struct pipe_end *end );
+static void pipe_bridge_closed( struct pipe_end *end );
+static struct object *pipe_bridge_open_remote( struct named_pipe *pipe, unsigned int options );
+static struct object *pipe_bridge_lookup( struct unicode_str *name );
+
 static void named_pipe_device_dump( struct object *obj, int verbose );
 static bool named_pipe_device_init( struct object *obj, const void *init_data );
 static WCHAR *named_pipe_device_get_full_name( struct object *obj, data_size_t max, data_size_t *len );
@@ -436,6 +451,8 @@ static bool named_pipe_init( struct object *obj, const void *init_data )
     pipe->timeout      = data->timeout;
     pipe->message_mode = (data->flags & NAMED_PIPE_MESSAGE_STREAM_WRITE) != 0;
     pipe->sharing      = data->sharing;
+    pipe->s0_name      = NULL;
+    pipe->s0_len       = 0;
     init_async_queue( &pipe->waiters );
     list_init( &pipe->listeners );
     return true;
@@ -474,6 +491,7 @@ static void named_pipe_destroy( struct object *obj)
     assert( list_empty( &pipe->listeners ) );
     assert( !pipe->instances );
     free_async_queue( &pipe->waiters );
+    free( pipe->s0_name );
 }
 
 static struct fd *pipe_end_get_fd( struct object *obj )
@@ -594,6 +612,8 @@ static void pipe_end_disconnect( struct pipe_end *pipe_end, unsigned int status 
         connection->connection = NULL;
         pipe_end_disconnect( connection, status );
     }
+    /* last: a bridge drops its own reference here, which can free it */
+    if (pipe_end->obj.ops == &pipe_bridge_ops) pipe_bridge_closed( pipe_end );
 }
 
 static void pipe_end_destroy( struct object *obj )
@@ -696,6 +716,8 @@ static struct object *named_pipe_device_lookup_name( struct object *obj, struct 
     }
 
     if ((found = find_object( device->pipes, *name, attr | OBJ_CASE_INSENSITIVE )))
+        name->len = 0;
+    else if (session0_client && (found = pipe_bridge_lookup( name )))
         name->len = 0;
 
     return found;
@@ -1167,6 +1189,12 @@ static void reselect_read_queue( struct pipe_end *pipe_end, int reselect_write )
 {
     struct async *async;
 
+    /* a bridge's reader is the other server: what is queued for it is sent there */
+    if (pipe_end->obj.ops == &pipe_bridge_ops)
+    {
+        pipe_bridge_flush( pipe_end );
+        return;
+    }
     ignore_reselect = 1;
     while (!list_empty( &pipe_end->message_queue ) && (async = find_pending_async( &pipe_end->read_q )))
     {
@@ -1182,6 +1210,9 @@ static void reselect_read_queue( struct pipe_end *pipe_end, int reselect_write )
             fd_async_wake_up( pipe_end->connection->fd, ASYNC_TYPE_WAIT, STATUS_SUCCESS );
         else if (reselect_write)
             reselect_write_queue( pipe_end->connection );
+        /* a bridge reads more from the other server once this end has room again */
+        if (pipe_end->connection && pipe_end->connection->obj.ops == &pipe_bridge_ops)
+            pipe_bridge_update_events( pipe_end->connection );
     }
 }
 
@@ -1511,8 +1542,10 @@ static void pipe_server_ioctl( struct fd *fd, ioctl_code_t code, struct async *a
         return;
 
     case FSCTL_PIPE_IMPERSONATE:
-        /* while elevation is enforced, impersonate the client; otherwise the caller's own token */
-        if (elevation_enforced())
+        /* while elevation is enforced, impersonate the client; otherwise the caller's own token. A client of
+         * another session (a bridge, T5.2) is always impersonated with its own token */
+        if (elevation_enforced() ||
+            (server->pipe_end.connection && server->pipe_end.connection->obj.ops == &pipe_bridge_ops))
         {
             struct token *token, *client_token = server->pipe_end.connection ? server->pipe_end.connection->client_token : NULL;
 
@@ -1689,6 +1722,7 @@ static struct object *named_pipe_open_file( struct object *obj, unsigned int acc
     struct pipe_end *client;
     unsigned int pipe_sharing;
 
+    if (pipe->s0_name) return pipe_bridge_open_remote( pipe, options );
     if (list_empty( &pipe->listeners ))
     {
         set_error( STATUS_PIPE_NOT_AVAILABLE );
@@ -1764,6 +1798,11 @@ static void named_pipe_dir_ioctl( struct fd *fd, ioctl_code_t code, struct async
             params.name.str = buffer->Name;
             params.name.len = (buffer->NameLength / sizeof(WCHAR)) * sizeof(WCHAR);
             if (!(pipe = open_named_object( &params ))) return;
+            if (pipe->s0_name)  /* T5.2: whether session 0 has an instance free shows at the open */
+            {
+                release_object( pipe );
+                return;
+            }
 
             if (list_empty( &pipe->listeners ))
             {
@@ -1838,6 +1877,12 @@ DECL_HANDLER(create_named_pipe)
 
     if (params.root) release_object( params.root );
     if (!pipe) return;
+    if (pipe->s0_name)  /* T5.2: session 0's pipes are served in session 0 only */
+    {
+        release_object( pipe );
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
 
     if (!reply->created)
     {
@@ -2908,4 +2953,357 @@ done:
         if (process) close_handle( current->process, process );
     }
     release_object( server );
+}
+
+/* WineExplorer system tier T5.2: pipes of session 0.
+ *
+ * A program of a session that opens \Device\NamedPipe\WexSession0\<name> gets a client end whose other end is a
+ * bridge: its server asks session 0 (session0_open_pipe), with the opener's token, for <name>; session 0 connects
+ * a bridge of its own as the client of one of that pipe's listening instances, with the described token as the
+ * client's token, so that the service impersonates the real caller. The two bridges are joined by a stream
+ * socket; each message is sent as a 4-byte length (little endian) and its data, so message boundaries survive.
+ * Only the pipes that session 0 lists may be opened this way. */
+
+#define PIPE_BRIDGE_MAX_MESSAGE  (16 * 1024 * 1024)  /* a longer message ends the connection */
+#define PIPE_BRIDGE_MAX_QUEUED   (4 * 1024 * 1024)   /* unread data before the bridge stops reading */
+#define PIPE_BRIDGE_MAX_PER_USER 256                 /* session 0: open bridges per account */
+
+struct pipe_bridge
+{
+    struct pipe_end pipe_end;
+    struct list     entry;         /* in bridges */
+    int             alive;         /* holds its own reference until the connection ends */
+    uid_t           peer_uid;      /* session 0: the account of the session that opened it */
+    unsigned char   tx_head[4];    /* the length of the message being sent */
+    unsigned int    tx_head_pos;
+    unsigned char   rx_head[4];    /* the length of the message being received */
+    unsigned int    rx_head_pos;
+    unsigned char  *rx_data;
+    data_size_t     rx_size;
+    data_size_t     rx_pos;
+};
+
+static struct list bridges = LIST_INIT( bridges );
+
+static void pipe_bridge_dump( struct object *obj, int verbose )
+{
+    struct pipe_bridge *bridge = (struct pipe_bridge *)obj;
+    fprintf( stderr, "Named pipe bridge connection=%p\n", bridge->pipe_end.connection );
+}
+
+static void pipe_bridge_destroy( struct object *obj )
+{
+    struct pipe_bridge *bridge = (struct pipe_bridge *)obj;
+
+    list_remove( &bridge->entry );
+    free( bridge->rx_data );
+    pipe_end_destroy( obj );
+}
+
+static const struct object_ops pipe_bridge_ops =
+{
+    .size    = sizeof(struct pipe_bridge),
+    .type    = &no_type,
+    .dump    = pipe_bridge_dump,
+    .destroy = pipe_bridge_destroy,
+};
+
+static void pipe_bridge_poll_event( struct fd *fd, int event );
+
+static const struct fd_ops pipe_bridge_fd_ops =
+{
+    .poll_event = pipe_bridge_poll_event,
+};
+
+/* the connection ended: stop polling and drop the bridge's own reference (the last thing its caller does) */
+static void pipe_bridge_closed( struct pipe_end *end )
+{
+    struct pipe_bridge *bridge = (struct pipe_bridge *)end;
+
+    if (!bridge->alive) return;
+    pipe_bridge_flush( end );  /* what the peer wrote before it closed, as far as the socket takes it now */
+    bridge->alive = 0;
+    if (end->fd) set_fd_events( end->fd, -1 );
+    release_object( bridge );
+}
+
+/* read while the other end has room for more; always watch for the end of the connection */
+static void pipe_bridge_update_events( struct pipe_end *end )
+{
+    struct pipe_bridge *bridge = (struct pipe_bridge *)end;
+    int events = 0;
+
+    if (!bridge->alive || !end->fd) return;
+    if (end->connection && pipe_end_get_avail( end->connection ) < PIPE_BRIDGE_MAX_QUEUED) events |= POLLIN;
+    if (!list_empty( &end->message_queue )) events |= POLLOUT;
+    set_fd_events( end->fd, events );
+}
+
+/* send what the bridge's peer wrote. Called from requests too, so it never ends the connection itself: an error
+ * shows up as POLLERR or POLLHUP in pipe_bridge_poll_event */
+static void pipe_bridge_flush( struct pipe_end *end )
+{
+    struct pipe_bridge *bridge = (struct pipe_bridge *)end;
+    struct pipe_message *message;
+    int sock, saved_ignore = ignore_reselect;
+    data_size_t size;
+    ssize_t ret;
+
+    if (!bridge->alive || !end->fd) return;
+    sock = get_unix_fd( end->fd );
+    /* completing a writer reselects its queue, which would flush again from the middle of this loop */
+    ignore_reselect = 1;
+    while (!list_empty( &end->message_queue ))
+    {
+        message = LIST_ENTRY( list_head( &end->message_queue ), struct pipe_message, entry );
+        size = message->iosb->in_size;
+        if (bridge->tx_head_pos < sizeof(bridge->tx_head))
+        {
+            if (!bridge->tx_head_pos)
+            {
+                bridge->tx_head[0] = size;
+                bridge->tx_head[1] = size >> 8;
+                bridge->tx_head[2] = size >> 16;
+                bridge->tx_head[3] = size >> 24;
+            }
+            ret = send( sock, bridge->tx_head + bridge->tx_head_pos, sizeof(bridge->tx_head) - bridge->tx_head_pos,
+                        MSG_NOSIGNAL | MSG_DONTWAIT );
+            if (ret <= 0) break;
+            bridge->tx_head_pos += ret;
+            if (bridge->tx_head_pos < sizeof(bridge->tx_head)) break;
+        }
+        while (message->read_pos < size)
+        {
+            ret = send( sock, (const char *)message->iosb->in_data + message->read_pos, size - message->read_pos,
+                        MSG_NOSIGNAL | MSG_DONTWAIT );
+            if (ret <= 0) break;
+            message->read_pos += ret;
+        }
+        if (message->read_pos < size) break;
+        bridge->tx_head_pos = 0;
+        wake_message( message, size );
+        free_message( message );
+    }
+    ignore_reselect = saved_ignore;
+    pipe_bridge_update_events( end );
+}
+
+/* deliver one message from the other server to the bridge's peer */
+static void pipe_bridge_deliver( struct pipe_bridge *bridge )
+{
+    struct pipe_end *peer = bridge->pipe_end.connection;
+    struct iosb *iosb;
+
+    if (peer && (iosb = create_data_iosb( bridge->rx_data, bridge->rx_size )))
+    {
+        bridge->rx_data = NULL;  /* the iosb owns it */
+        if (queue_message( peer, iosb )) reselect_read_queue( peer, 0 );
+        release_object( iosb );
+    }
+    free( bridge->rx_data );
+    bridge->rx_data = NULL;
+    bridge->rx_head_pos = 0;
+    bridge->rx_size = bridge->rx_pos = 0;
+}
+
+static void pipe_bridge_poll_event( struct fd *fd, int event )
+{
+    struct pipe_bridge *bridge = get_fd_user( fd );
+    struct pipe_end *end = &bridge->pipe_end;
+    int sock = get_unix_fd( fd );
+    ssize_t ret;
+
+    if (event & POLLOUT) pipe_bridge_flush( end );
+    while ((event & POLLIN) && bridge->alive && end->connection &&
+           pipe_end_get_avail( end->connection ) < PIPE_BRIDGE_MAX_QUEUED)
+    {
+        if (bridge->rx_head_pos < sizeof(bridge->rx_head))
+        {
+            ret = recv( sock, bridge->rx_head + bridge->rx_head_pos, sizeof(bridge->rx_head) - bridge->rx_head_pos,
+                        MSG_DONTWAIT );
+            if (ret < 0 && (errno == EAGAIN || errno == EINTR)) break;
+            if (ret <= 0) goto closed;
+            bridge->rx_head_pos += ret;
+            if (bridge->rx_head_pos < sizeof(bridge->rx_head)) continue;
+            bridge->rx_size = bridge->rx_head[0] | (bridge->rx_head[1] << 8) | (bridge->rx_head[2] << 16) |
+                              ((data_size_t)bridge->rx_head[3] << 24);
+            if (bridge->rx_size > PIPE_BRIDGE_MAX_MESSAGE) goto closed;
+            bridge->rx_pos = 0;
+            if (!(bridge->rx_data = malloc( bridge->rx_size ? bridge->rx_size : 1 ))) goto closed;
+        }
+        if (bridge->rx_pos < bridge->rx_size)
+        {
+            ret = recv( sock, bridge->rx_data + bridge->rx_pos, bridge->rx_size - bridge->rx_pos, MSG_DONTWAIT );
+            if (ret < 0 && (errno == EAGAIN || errno == EINTR)) break;
+            if (ret <= 0) goto closed;
+            bridge->rx_pos += ret;
+            if (bridge->rx_pos < bridge->rx_size) continue;
+        }
+        pipe_bridge_deliver( bridge );
+    }
+    if (!(event & (POLLERR | POLLHUP)) && bridge->alive && end->connection)
+    {
+        pipe_bridge_update_events( end );
+        return;
+    }
+closed:
+    /* the other server closed the connection, or it broke the rules: end it on this side too (this can free the
+     * bridge) */
+    if (bridge->alive) pipe_end_disconnect( end, STATUS_PIPE_BROKEN );
+}
+
+/* a bridge over sock (which it owns from now on, also on failure); it holds its own reference */
+static struct pipe_bridge *create_pipe_bridge( struct named_pipe *pipe, int sock, data_size_t buffer_size )
+{
+    struct pipe_bridge *bridge;
+
+    if (!(bridge = alloc_object( &pipe_bridge_ops )))
+    {
+        close( sock );
+        return NULL;
+    }
+    init_pipe_end( &bridge->pipe_end, pipe, 0, buffer_size );
+    list_add_tail( &bridges, &bridge->entry );
+    bridge->pipe_end.state = FILE_PIPE_CONNECTED_STATE;
+    bridge->alive = 1;
+    bridge->peer_uid = (uid_t)-1;
+    bridge->tx_head_pos = bridge->rx_head_pos = 0;
+    bridge->rx_data = NULL;
+    bridge->rx_size = bridge->rx_pos = 0;
+    if (!(bridge->pipe_end.fd = create_anonymous_fd( &pipe_bridge_fd_ops, sock, &bridge->pipe_end.obj, 0 )))
+    {
+        bridge->alive = 0;
+        release_object( bridge );
+        return NULL;
+    }
+    return bridge;
+}
+
+/* a user's server: a name under WexSession0\ names a pipe of session 0. The object stands for it in the open */
+static struct object *pipe_bridge_lookup( struct unicode_str *name )
+{
+    static const WCHAR prefix[] = {'W','e','x','S','e','s','s','i','o','n','0','\\'};
+    const data_size_t prefix_len = sizeof(prefix);
+    struct named_pipe_init_data data = { .maxinstances = 1, .outsize = 65536, .insize = 65536,
+                                         .sharing = FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                         .flags = NAMED_PIPE_MESSAGE_STREAM_WRITE };
+    struct named_pipe *pipe;
+
+    if (name->len <= prefix_len || memicmp_strW( name->str, prefix, prefix_len )) return NULL;
+    if (!(pipe = alloc_object( &named_pipe_ops ))) return NULL;
+    named_pipe_init( &pipe->obj, &data );
+    if (!(pipe->s0_name = memdup( (const char *)name->str + prefix_len, name->len - prefix_len )))
+    {
+        release_object( pipe );
+        return NULL;
+    }
+    pipe->s0_len = name->len - prefix_len;
+    return &pipe->obj;
+}
+
+/* a user's server: open a pipe of session 0 for the current thread */
+static struct object *pipe_bridge_open_remote( struct named_pipe *pipe, unsigned int options )
+{
+    struct token *token = current->token ? current->token : current->process->token;
+    struct pipe_bridge *bridge;
+    struct pipe_end *client;
+    int sock;
+
+    if (!token)
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return NULL;
+    }
+    if ((sock = session0_open_pipe( token, pipe->s0_name, pipe->s0_len )) == -1) return NULL;
+    if (!(bridge = create_pipe_bridge( pipe, sock, pipe->insize ))) return NULL;
+    if (!(client = create_pipe_client( pipe, pipe->outsize, options )))
+    {
+        pipe_end_disconnect( &bridge->pipe_end, STATUS_PIPE_BROKEN );  /* frees the bridge */
+        return NULL;
+    }
+    client->connection = &bridge->pipe_end;
+    bridge->pipe_end.connection = client;
+    pipe_bridge_update_events( &bridge->pipe_end );
+    return &client->obj;
+}
+
+/* session 0: the pipes that a session may open here */
+static int pipe_bridge_allowed( const WCHAR *name, data_size_t len )
+{
+    static const WCHAR svcctl[] = {'s','v','c','c','t','l'};
+
+    return len == sizeof(svcctl) && !memicmp_strW( name, svcctl, len );
+}
+
+/* session 0: connect a session's opener (described by token) to a listening instance of the named pipe, over sock
+ * (owned from now on); the status for the session's server */
+unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_size_t len, int sock, uid_t uid )
+{
+    static const WCHAR device[] = {'\\','D','e','v','i','c','e','\\','N','a','m','e','d','P','i','p','e','\\'};
+    struct object_params params = { .ops = &named_pipe_ops, .attr = OBJ_CASE_INSENSITIVE };
+    unsigned int access = FILE_GENERIC_READ | FILE_GENERIC_WRITE, count = 0;
+    struct pipe_bridge *bridge, *other;
+    struct pipe_server *server;
+    struct named_pipe *pipe;
+    WCHAR *path;
+
+    if (!len || len % sizeof(WCHAR) || !pipe_bridge_allowed( name, len ))
+    {
+        close( sock );
+        return STATUS_ACCESS_DENIED;
+    }
+    LIST_FOR_EACH_ENTRY( other, &bridges, struct pipe_bridge, entry )
+        if (other->peer_uid == uid) count++;
+    if (count >= PIPE_BRIDGE_MAX_PER_USER)
+    {
+        close( sock );
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    if (!(path = malloc( sizeof(device) + len )))
+    {
+        close( sock );
+        return STATUS_NO_MEMORY;
+    }
+    memcpy( path, device, sizeof(device) );
+    memcpy( (char *)path + sizeof(device), name, len );
+    params.name.str = path;
+    params.name.len = sizeof(device) + len;
+    clear_error();
+    pipe = open_named_object( &params );
+    free( path );
+    if (!pipe)
+    {
+        close( sock );
+        return get_error() ? get_error() : STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+    if (!check_object_access( token, &pipe->obj, &access ) ||
+        !(pipe->sharing & FILE_SHARE_READ) || !(pipe->sharing & FILE_SHARE_WRITE))
+    {
+        release_object( pipe );
+        close( sock );
+        return STATUS_ACCESS_DENIED;
+    }
+    if (list_empty( &pipe->listeners ))
+    {
+        release_object( pipe );
+        close( sock );
+        return STATUS_PIPE_NOT_AVAILABLE;
+    }
+    if (!(bridge = create_pipe_bridge( pipe, sock, pipe->outsize )))
+    {
+        release_object( pipe );
+        return STATUS_NO_MEMORY;
+    }
+    bridge->peer_uid = uid;
+    bridge->pipe_end.client_token = (struct token *)grab_object( token );
+    server = LIST_ENTRY( list_head( &pipe->listeners ), struct pipe_server, entry );
+    async_wake_up( &server->listen_q, STATUS_SUCCESS );
+    server->pipe_end.state = FILE_PIPE_CONNECTED_STATE;
+    server->pipe_end.connection = &bridge->pipe_end;
+    bridge->pipe_end.connection = &server->pipe_end;
+    bridge->pipe_end.server_pid = server->pipe_end.server_pid;
+    list_remove( &server->entry );
+    release_object( pipe );
+    pipe_bridge_update_events( &bridge->pipe_end );
+    return STATUS_SUCCESS;
 }

@@ -703,10 +703,12 @@ static void session0_link_event( struct fd *fd, int event )
     }
     if (n < (ssize_t)sizeof(*hdr) || (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) || extra != -1 ||
         hdr->magic != WEX_SESSION0_MAGIC || hdr->version != WEX_SESSION0_VERSION ||
-        hdr->desc_size != n - sizeof(*hdr) ||
+        (hdr->type != WEX_SESSION0_PIPE && hdr->desc_size != n - sizeof(*hdr)) ||
+        (hdr->type == WEX_SESSION0_PIPE && (hdr->desc_size > n - sizeof(*hdr) ||
+                                            hdr->machine != n - sizeof(*hdr) - hdr->desc_size)) ||
         (hdr->type != WEX_SESSION0_CHANNEL && hdr->type != WEX_SESSION0_USER_HIVE &&
-         hdr->type != WEX_SESSION0_SESSION_ID) ||
-        (hdr->type == WEX_SESSION0_CHANNEL && channel == -1))
+         hdr->type != WEX_SESSION0_SESSION_ID && hdr->type != WEX_SESSION0_PIPE) ||
+        ((hdr->type == WEX_SESSION0_CHANNEL || hdr->type == WEX_SESSION0_PIPE) && channel == -1))
         reply.status = STATUS_INVALID_PARAMETER;
     else if (!link->trusted)
         reply.status = STATUS_ACCESS_DENIED;
@@ -742,6 +744,27 @@ static void session0_link_event( struct fd *fd, int event )
             session0_send_order( link, WEX_SESSION0_ORDER_PING, 0 );
             return;
         }
+    }
+    else if (hdr->type == WEX_SESSION0_PIPE)
+    {
+        /* T5.2: join the channel (a stream socket) to the named pipe, as a client with the described token */
+        struct token *token = token_create_described( hdr + 1, hdr->desc_size );
+        WCHAR *name = malloc( hdr->machine ? hdr->machine : 1 );
+
+        if (!token || !name)
+        {
+            reply.status = STATUS_INVALID_PARAMETER;
+            close( channel );
+        }
+        else
+        {
+            memcpy( name, (const char *)(hdr + 1) + hdr->desc_size, hdr->machine );
+            fcntl( channel, F_SETFL, O_NONBLOCK );
+            reply.status = pipe_bridge_accept( token, name, hdr->machine, channel, link->peer_uid );
+        }
+        channel = -1;  /* the bridge owns it now, or it was closed */
+        free( name );
+        if (token) release_object( token );
     }
     else if (hdr->type == WEX_SESSION0_USER_HIVE)
     {
@@ -1256,6 +1279,93 @@ void session0_client_exit(void)
         for (i = 0; i < 8 && poll( &pfd, 1, 2000 ) == 1; i++) if (hive_link_receive( sock )) break;
     }
     release_object( link );
+}
+
+/* T5.2, a user's server: ask session 0 to join one end of a stream socket to its named pipe, for the token; the
+ * other end, or -1 with the error set */
+int session0_open_pipe( struct token *token, const WCHAR *name, data_size_t len )
+{
+    struct wex_session0_request hdr;
+    struct wex_session0_reply answer;
+    char cmsg_buffer[CMSG_SPACE( sizeof(int) )];
+    struct msghdr msg;
+    struct cmsghdr *cmsg;
+    struct iovec vec[3];
+    struct pollfd pfd;
+    data_size_t size;
+    void *desc;
+    int sv[2], link;
+
+    if (!session0_client)
+    {
+        set_error( STATUS_OBJECT_NAME_NOT_FOUND );
+        return -1;
+    }
+    size = token_describe( token, NULL, 0 );
+    if (size + len > WEX_SESSION0_MAX_MSG - sizeof(hdr) || !(desc = mem_alloc( size ))) return -1;
+    token_describe( token, desc, size );
+    if (socketpair( AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv ) == -1)
+    {
+        free( desc );
+        file_set_error();
+        return -1;
+    }
+    if ((link = connect_session0( 1 )) == -1)
+    {
+        set_error( STATUS_PIPE_NOT_AVAILABLE );
+        goto failed;
+    }
+    hdr.magic = WEX_SESSION0_MAGIC;
+    hdr.version = WEX_SESSION0_VERSION;
+    hdr.desc_size = size;
+    hdr.type = WEX_SESSION0_PIPE;
+    hdr.machine = len;
+    vec[0].iov_base = &hdr;
+    vec[0].iov_len = sizeof(hdr);
+    vec[1].iov_base = desc;
+    vec[1].iov_len = size;
+    vec[2].iov_base = (void *)name;
+    vec[2].iov_len = len;
+    memset( &msg, 0, sizeof(msg) );
+    msg.msg_iov = vec;
+    msg.msg_iovlen = 3;
+    msg.msg_control = cmsg_buffer;
+    msg.msg_controllen = sizeof(cmsg_buffer);
+    cmsg = CMSG_FIRSTHDR( &msg );
+    cmsg->cmsg_len = CMSG_LEN( sizeof(int) );
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    memcpy( CMSG_DATA( cmsg ), &sv[0], sizeof(int) );
+    if (sendmsg( link, &msg, MSG_NOSIGNAL ) != (ssize_t)(sizeof(hdr) + size + len))
+    {
+        set_error( STATUS_PIPE_NOT_AVAILABLE );
+        goto failed;
+    }
+    pfd.fd = link;
+    pfd.events = POLLIN;
+    if (poll( &pfd, 1, 2000 ) != 1 || recv( link, &answer, sizeof(answer), 0 ) != sizeof(answer) ||
+        answer.magic != WEX_SESSION0_MAGIC)
+    {
+        set_error( STATUS_PIPE_NOT_AVAILABLE );
+        goto failed;
+    }
+    if (answer.status)
+    {
+        set_error( answer.status );
+        goto failed;
+    }
+    close( link );
+    close( sv[0] );
+    free( desc );
+    fcntl( sv[1], F_SETFL, O_NONBLOCK );
+    return sv[1];
+
+failed:
+    if (link != -1) close( link );
+    close( sv[0] );
+    close( sv[1] );
+    free( desc );
+    return -1;
 }
 
 /* a registry channel to session 0 for the calling program, with its primary token */

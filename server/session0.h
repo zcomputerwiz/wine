@@ -59,4 +59,12 @@ extern void session0_user_hive_saved( void *agent, int ok );
 extern int session0_user_hive_remote(void);
 extern void session0_client_exit(void);
 
+/* T5.2, a user's server (session0.c): a stream socket bridged to the named pipe of session 0 for the token, or
+ * -1 with the error set */
+struct token;
+extern int session0_open_pipe( struct token *token, const WCHAR *name, data_size_t len );
+/* T5.2, session 0 (named_pipe.c): connect a session's opener to a pipe here over sock (owned from now on) */
+extern unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_size_t len, int sock,
+                                        uid_t uid );
+
 #endif /* __WINE_SERVER_SESSION0_H */

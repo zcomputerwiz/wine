@@ -835,6 +835,17 @@ static struct iosb *create_iosb( const void *in_data, data_size_t in_size, data_
     return iosb;
 }
 
+/* WineExplorer T5.2: an iosb whose input is data (taken over: freed with the iosb) */
+struct iosb *create_data_iosb( void *data, data_size_t size )
+{
+    struct iosb *iosb;
+
+    if (!(iosb = create_iosb( NULL, 0, 0 ))) return NULL;
+    iosb->in_data = data;
+    iosb->in_size = size;
+    return iosb;
+}
+
 /* create an async associated with iosb for async-based requests
  * returned async must be passed to async_handoff */
 struct async *create_request_async( struct fd *fd, const struct async_data *data, int is_system )

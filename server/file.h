@@ -270,6 +270,7 @@ extern void async_wake_up( struct async_queue *queue, unsigned int status );
 extern struct completion *fd_get_completion( struct fd *fd, apc_param_t *p_key );
 extern void fd_copy_completion( struct fd *src, struct fd *dst );
 extern struct iosb *async_get_iosb( struct async *async );
+extern struct iosb *create_data_iosb( void *data, data_size_t size );
 extern struct thread *async_get_thread( struct async *async );
 extern struct async *find_pending_async( struct async_queue *queue );
 extern void cancel_terminating_process_asyncs( struct process *process );
