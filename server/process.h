@@ -196,6 +196,6 @@ static inline int is_wow64_process( struct process *process )
     return is_machine_64bit( native_machine ) && !is_machine_64bit( process->machine );
 }
 
-static const unsigned int default_session_id = 1;
+extern unsigned int default_session_id;  /* the session of this server's logon; from session 0 when it is used */
 
 #endif  /* __WINE_SERVER_PROCESS_H */

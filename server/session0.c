@@ -192,6 +192,29 @@ static void init_listener(void)
     master_socket_timeout = TIMEOUT_INFINITE;  /* session 0 runs until it is stopped */
 }
 
+/* T6.1: the session id of this server's logon, from session 0 (1 when it does not answer) */
+static void request_session_id(void)
+{
+    struct wex_session0_request hdr = { WEX_SESSION0_MAGIC, WEX_SESSION0_VERSION, 0, WEX_SESSION0_SESSION_ID, 0 };
+    struct wex_session0_reply answer;
+    struct sockaddr_un addr;
+    struct pollfd pfd;
+    int sock;
+
+    memset( &addr, 0, sizeof(addr) );
+    addr.sun_family = AF_UNIX;
+    strcpy( addr.sun_path, session0_path );
+    if ((sock = socket( AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0 )) == -1) return;
+    pfd.fd = sock;
+    pfd.events = POLLIN;
+    if (!connect( sock, (struct sockaddr *)&addr, sizeof(addr) ) &&
+        send( sock, &hdr, sizeof(hdr), MSG_NOSIGNAL ) == sizeof(hdr) && poll( &pfd, 1, 2000 ) == 1 &&
+        recv( sock, &answer, sizeof(answer), 0 ) == sizeof(answer) && answer.magic == WEX_SESSION0_MAGIC &&
+        !answer.status && answer.value)
+        default_session_id = answer.value;
+    close( sock );
+}
+
 void session0_init( int server_mode )
 {
     if (server_mode)
@@ -202,6 +225,7 @@ void session0_init( int server_mode )
     }
     /* a launcher-started server uses the configuration only: the user controls the environment */
     if (get_socket_path( sysrun_active )) session0_client = 1;
+    if (session0_client) request_session_id();
     if (session0_client)
     {
         char user[64];
@@ -295,7 +319,7 @@ static void session0_link_event( struct fd *fd, int event )
 {
     struct session0_socket *link = get_fd_user( fd );
     struct wex_session0_request *hdr;
-    struct wex_session0_reply reply = { WEX_SESSION0_MAGIC, STATUS_ACCESS_DENIED };
+    struct wex_session0_reply reply = { WEX_SESSION0_MAGIC, STATUS_ACCESS_DENIED, 0 };
     char cmsg_buffer[CMSG_SPACE( 2 * sizeof(int) )];
     struct msghdr msg;
     struct cmsghdr *cmsg;
@@ -349,11 +373,19 @@ static void session0_link_event( struct fd *fd, int event )
     if (n < (ssize_t)sizeof(*hdr) || (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) || extra != -1 ||
         hdr->magic != WEX_SESSION0_MAGIC || hdr->version != WEX_SESSION0_VERSION ||
         hdr->desc_size != n - sizeof(*hdr) ||
-        (hdr->type != WEX_SESSION0_CHANNEL && hdr->type != WEX_SESSION0_USER_HIVE) ||
+        (hdr->type != WEX_SESSION0_CHANNEL && hdr->type != WEX_SESSION0_USER_HIVE &&
+         hdr->type != WEX_SESSION0_SESSION_ID) ||
         (hdr->type == WEX_SESSION0_CHANNEL && channel == -1))
         reply.status = STATUS_INVALID_PARAMETER;
     else if (!link->trusted)
         reply.status = STATUS_ACCESS_DENIED;
+    else if (hdr->type == WEX_SESSION0_SESSION_ID)
+    {
+        static unsigned int next_session_id = 1;  /* session 0 is 0 */
+        reply.status = STATUS_SUCCESS;
+        reply.value = next_session_id++;
+        if (!next_session_id) next_session_id = 1;
+    }
     else if (hdr->type == WEX_SESSION0_USER_HIVE)
     {
         /* T4a: hold the user's hive (channel is the user.reg descriptor, or none) for this link's server */

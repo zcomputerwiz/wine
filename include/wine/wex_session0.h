@@ -51,11 +51,14 @@ struct wex_session0_request
 #define WEX_SESSION0_USER_HIVE    1
 #define WEX_SESSION0_HIVE_SAVE    2
 #define WEX_SESSION0_HIVE_UNLOAD  3
+/* SESSION_ID (T6.1): a user's server asks for its session id at start; session 0 gives each logon its own */
+#define WEX_SESSION0_SESSION_ID   4
 
 struct wex_session0_reply
 {
     unsigned int magic;
     unsigned int status;      /* NTSTATUS */
+    unsigned int value;       /* SESSION_ID: the session id */
 };
 
 /* session 0 to a user's server on a hive link */
@@ -63,6 +66,7 @@ struct wex_session0_hive_save
 {
     unsigned int magic;
     unsigned int type;        /* WEX_SESSION0_HIVE_SAVE */
+    unsigned int reserved;    /* the same size as a reply */
 };
 
 /* Keys that stay in each session's own server: per-session state that differs between sessions (devices,
