@@ -574,6 +574,19 @@ namespace Windows.Storage {
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Storage.StorageFolder),
+        uuid(08f327ff-85d5-48b9-aee9-28511e339f9f)
+    ]
+    interface IStorageFolderStatics : IInspectable
+    {
+        HRESULT GetFolderFromPathAsync(
+            [in] HSTRING path,
+            [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFolder *> **operation
+        );
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
         uuid(4207a996-ca2f-42f7-bde8-8b10457a7f30)
     ]
     interface IStorageItem : IInspectable
@@ -687,7 +700,8 @@ namespace Windows.Storage {
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
-        /* static(Windows.Storage.IStorageFolderStatics, Windows.Foundation.UniversalApiContract, 1.0), */
+        marshaling_behavior(agile),
+        static(Windows.Storage.IStorageFolderStatics, Windows.Foundation.UniversalApiContract, 1.0),
         /* static(Windows.Storage.IStorageFolderStatics2, Windows.Foundation.UniversalApiContract, 10.0) */
     ]
     runtimeclass StorageFolder

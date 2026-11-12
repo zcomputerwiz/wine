@@ -29,7 +29,9 @@
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_Foundation_Collections
 #include "windows.foundation.h"
+#define WIDL_using_Windows_Storage
 #define WIDL_using_Windows_Storage_Streams
+#include "windows.storage.h"
 #include "windows.storage.streams.h"
 #include "robuffer.h"
 
@@ -46,6 +48,24 @@ static void check_interface_( unsigned int line, void *obj, const IID *iid, BOOL
     ok_(__FILE__, line)( hr == S_OK || broken( is_broken && hr == E_NOINTERFACE ), "got hr %#lx.\n", hr );
     if (SUCCEEDED(hr))
         IUnknown_Release( unk );
+}
+
+/* Counted comparison of an HSTRING against a NUL-terminated expected value.
+ * HSTRING buffers are not guaranteed to be NUL-terminated, so lstrcmpW must
+ * not be used on them directly. */
+static BOOL hstring_equals( HSTRING hstr, const WCHAR *expected )
+{
+    UINT32 len = WindowsGetStringLen( hstr );
+    const WCHAR *buffer;
+    UINT32 i;
+
+    buffer = WindowsGetStringRawBuffer( hstr, NULL );
+    if (lstrlenW( expected ) != len)
+        return FALSE;
+    for (i = 0; i < len; i++)
+        if (buffer[i] != expected[i])
+            return FALSE;
+    return TRUE;
 }
 
 #define DEFINE_ASYNC_COMPLETED_HANDLER( name, iface_type, async_type )                              \
@@ -198,6 +218,9 @@ DEFINE_ASYNC_COMPLETED_HANDLER( async_uint32_uint32_completed_handler, \
 
 DEFINE_ASYNC_COMPLETED_HANDLER( async_buffer_uint32_completed_handler, \
         IAsyncOperationWithProgressCompletedHandler_IBuffer_UINT32, IAsyncOperationWithProgress_IBuffer_UINT32 )
+
+DEFINE_ASYNC_COMPLETED_HANDLER( async_storage_folder_completed_handler, \
+        IAsyncOperationCompletedHandler_StorageFolder, IAsyncOperation_StorageFolder )
 
 #define check_async_info( a, b, c ) check_async_info_( __LINE__, a, b, c )
 static void check_async_info_( int line, void *async, AsyncStatus expect_status, HRESULT expect_hr )
@@ -526,6 +549,564 @@ static void test_InMemoryRandomAccessStream(void)
     ok( ref == 0, "got ref %ld.\n", ref );
 }
 
+static void test_StorageFolder(void)
+{
+    static const WCHAR *storage_folder_name = L"Windows.Storage.StorageFolder";
+    IStorageFolderStatics *statics = (void *)0xdeadbeef;
+    IStorageFolder *folder = (void *)0xdeadbeef;
+    IStorageItem *item = (void *)0xdeadbeef;
+    IActivationFactory *factory = (void *)0xdeadbeef;
+    IAsyncOperation_StorageFolder *operation;
+    HSTRING path, name, res_path, class_name;
+    WCHAR temp_path[MAX_PATH], dir_path[MAX_PATH + 64], file_path[MAX_PATH + 64], missing_path[MAX_PATH + 64];
+    WCHAR *dir_name;
+    HANDLE file_handle;
+    FileAttributes attrs;
+    DateTime date_created;
+    boolean is_folder, is_file;
+    HRESULT hr;
+    LONG ref;
+    DWORD res;
+    unsigned int attempt;
+    BOOL dir_created = FALSE;
+    IID *iids;
+    ULONG iid_count;
+
+    hr = get_activation_factory( storage_folder_name, &factory );
+    if (FAILED(hr))
+        return;
+
+    check_interface( factory, &IID_IUnknown, FALSE );
+    check_interface( factory, &IID_IInspectable, FALSE );
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_IStorageFolderStatics, (void **)&statics );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    /* Native x86 and x64 return E_ILLEGAL_METHOD_CALL for this factory metadata. */
+    class_name = (HSTRING)(ULONG_PTR)0xdeadbeef;
+    hr = IStorageFolderStatics_GetRuntimeClassName( statics, &class_name );
+    ok( hr == E_ILLEGAL_METHOD_CALL, "got hr %#lx.\n", hr );
+    ok( !class_name, "got class_name %p.\n", class_name );
+    if (class_name != (HSTRING)(ULONG_PTR)0xdeadbeef) WindowsDeleteString( class_name );
+
+    /* Defensive Wine-only checks; native NULL-pointer behavior is unmeasured. */
+    if (winetest_platform_is_wine)
+    {
+        hr = IActivationFactory_QueryInterface( factory, &IID_IStorageFolderStatics, NULL );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+        hr = IStorageFolderStatics_QueryInterface( statics, &IID_IStorageFolderStatics, NULL );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+        hr = IActivationFactory_ActivateInstance( factory, NULL );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+        hr = IStorageFolderStatics_GetRuntimeClassName( statics, NULL );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+        hr = IStorageFolderStatics_GetTrustLevel( statics, NULL );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+        hr = IStorageFolderStatics_GetIids( statics, NULL, &iids );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+        hr = IStorageFolderStatics_GetIids( statics, &iid_count, NULL );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+        hr = IStorageFolderStatics_GetFolderFromPathAsync( statics, NULL, NULL );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+    }
+
+    /* A nonzero unique value produces a name without creating a file.
+     * CreateDirectoryW establishes ownership exclusively; retry collisions. */
+    if (GetTempPathW( MAX_PATH, temp_path ))
+        for (attempt = 0; attempt < 64; ++attempt)
+        {
+            UINT unique = ((GetCurrentProcessId() + GetTickCount() + attempt) % 65535) + 1;
+            if (!GetTempFileNameW( temp_path, L"wsf", unique, dir_path )) break;
+            if (CreateDirectoryW( dir_path, NULL )) { dir_created = TRUE; break; }
+            if (GetLastError() != ERROR_ALREADY_EXISTS) break;
+        }
+    if (!dir_created)
+    {
+        win_skip( "failed to create unique temp directory, error %lu.\n", GetLastError() );
+        IStorageFolderStatics_Release( statics );
+        IActivationFactory_Release( factory );
+        return;
+    }
+    /* The item name is the last component of the unique directory path. */
+    dir_name = wcsrchr( dir_path, L'\\' );
+    dir_name = dir_name ? dir_name + 1 : dir_path;
+    lstrcpynW( file_path, dir_path, MAX_PATH + 64 );
+    lstrcatW( file_path, L"\\file" );
+    file_handle = CreateFileW( file_path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL );
+    if (file_handle == INVALID_HANDLE_VALUE)
+    {
+        win_skip( "failed to create temp file, error %lu.\n", GetLastError() );
+        RemoveDirectoryW( dir_path );
+        IStorageFolderStatics_Release( statics );
+        IActivationFactory_Release( factory );
+        return;
+    }
+    CloseHandle( file_handle );
+    lstrcpynW( missing_path, dir_path, MAX_PATH + 64 );
+    lstrcatW( missing_path, L"\\does_not_exist" );
+
+    /* Success case: a real directory. */
+    hr = WindowsCreateString( dir_path, lstrlenW( dir_path ), &path );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    operation = (void *)0xdeadbeef;
+    hr = IStorageFolderStatics_GetFolderFromPathAsync( statics, path, &operation );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !!operation, "got operation %p.\n", operation );
+    WindowsDeleteString( path );
+
+    check_interface( operation, &IID_IUnknown, FALSE );
+    check_interface( operation, &IID_IInspectable, FALSE );
+    check_interface( operation, &IID_IAsyncInfo, FALSE );
+
+    if (winetest_platform_is_wine)
+    {
+        hr = IAsyncOperation_StorageFolder_GetResults( operation, NULL );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+    }
+
+    res = await_IAsyncOperation_StorageFolder( operation, 1000 );
+    ok( res == 0, "await_IAsyncOperation_StorageFolder returned %#x\n", res );
+    check_async_info( operation, Completed, S_OK );
+
+    hr = IAsyncOperation_StorageFolder_GetResults( operation, &folder );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !!folder, "got folder %p.\n", folder );
+
+    check_interface( folder, &IID_IUnknown, FALSE );
+    check_interface( folder, &IID_IInspectable, FALSE );
+    check_interface( folder, &IID_IStorageFolder, FALSE );
+    check_interface( folder, &IID_IStorageItem, FALSE );
+
+    hr = IStorageFolder_QueryInterface( folder, &IID_IStorageItem, (void **)&item );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    name = NULL;
+    hr = IStorageItem_get_Name( item, &name );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !!name, "got name %p.\n", name );
+    {
+        const WCHAR *name_buf;
+        UINT32 name_len = WindowsGetStringLen( name );
+        name_buf = WindowsGetStringRawBuffer( name, NULL );
+        ok( hstring_equals( name, dir_name ), "got name %s.\n", wine_dbgstr_wn( name_buf, name_len ) );
+    }
+    WindowsDeleteString( name );
+
+    res_path = NULL;
+    hr = IStorageItem_get_Path( item, &res_path );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !!res_path, "got path %p.\n", res_path );
+    {
+        const WCHAR *path_buf;
+        UINT32 path_len = WindowsGetStringLen( res_path );
+        path_buf = WindowsGetStringRawBuffer( res_path, NULL );
+        ok( hstring_equals( res_path, dir_path ), "got path %s.\n", wine_dbgstr_wn( path_buf, path_len ) );
+    }
+    WindowsDeleteString( res_path );
+
+    attrs = 0;
+    hr = IStorageItem_get_Attributes( item, &attrs );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( (attrs & FileAttributes_Directory) == FileAttributes_Directory, "got attrs %#x.\n", attrs );
+
+    date_created.UniversalTime = 0;
+    hr = IStorageItem_get_DateCreated( item, &date_created );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( date_created.UniversalTime > 0, "got date created %I64d.\n", date_created.UniversalTime );
+
+    is_folder = FALSE;
+    hr = IStorageItem_IsOfType( item, StorageItemTypes_Folder, &is_folder );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( is_folder == TRUE, "got is_folder %d.\n", is_folder );
+    is_file = TRUE;
+    hr = IStorageItem_IsOfType( item, StorageItemTypes_File, &is_file );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( is_file == FALSE, "got is_file %d.\n", is_file );
+
+    /* Defensive Wine-only checks; native NULL-pointer behavior is unmeasured. */
+    if (winetest_platform_is_wine)
+    {
+        hr = IStorageFolder_QueryInterface( folder, &IID_IStorageFolder, NULL );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+        hr = IStorageFolder_GetIids( folder, NULL, &iids );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+        hr = IStorageFolder_GetIids( folder, &iid_count, NULL );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+        hr = IStorageFolder_GetRuntimeClassName( folder, NULL );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+        hr = IStorageFolder_GetTrustLevel( folder, NULL );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+        hr = IStorageItem_get_Name( item, NULL );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+        hr = IStorageItem_get_Path( item, NULL );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+        hr = IStorageItem_get_Attributes( item, NULL );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+        hr = IStorageItem_get_DateCreated( item, NULL );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+        hr = IStorageItem_IsOfType( item, StorageItemTypes_Folder, NULL );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+        /* Unsupported mutation/enumeration stubs reject a NULL operation output. */
+        hr = IStorageFolder_GetFileAsync( folder, NULL, NULL );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+        hr = IStorageItem_DeleteAsyncOverloadDefaultOptions( item, NULL );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+    }
+
+    IStorageItem_Release( item );
+    IStorageFolder_Release( folder );
+    IAsyncOperation_StorageFolder_Release( operation );
+
+    /* Success case: lowercase-drive absolute path (drive letters are case insensitive). */
+    {
+        WCHAR lower_dir_path[MAX_PATH + 64];
+        lstrcpynW( lower_dir_path, dir_path, MAX_PATH + 64 );
+        if (lower_dir_path[0] >= L'A' && lower_dir_path[0] <= L'Z')
+            lower_dir_path[0] += (L'a' - L'A');
+        hr = WindowsCreateString( lower_dir_path, lstrlenW( lower_dir_path ), &path );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        operation = (void *)0xdeadbeef;
+        hr = IStorageFolderStatics_GetFolderFromPathAsync( statics, path, &operation );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( !!operation, "got operation %p.\n", operation );
+        WindowsDeleteString( path );
+
+        res = await_IAsyncOperation_StorageFolder( operation, 1000 );
+        ok( res == 0, "await_IAsyncOperation_StorageFolder returned %#x\n", res );
+        check_async_info( operation, Completed, S_OK );
+
+        hr = IAsyncOperation_StorageFolder_GetResults( operation, &folder );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( !!folder, "got folder %p.\n", folder );
+
+        hr = IStorageFolder_QueryInterface( folder, &IID_IStorageItem, (void **)&item );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        name = NULL;
+        hr = IStorageItem_get_Name( item, &name );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        {
+            const WCHAR *name_buf;
+            UINT32 name_len = WindowsGetStringLen( name );
+            name_buf = WindowsGetStringRawBuffer( name, NULL );
+            ok( hstring_equals( name, dir_name ), "got name %s.\n", wine_dbgstr_wn( name_buf, name_len ) );
+        }
+        WindowsDeleteString( name );
+
+        IStorageItem_Release( item );
+        IStorageFolder_Release( folder );
+        IAsyncOperation_StorageFolder_Release( operation );
+    }
+
+    /* Error case: missing path. */
+    hr = WindowsCreateString( missing_path, lstrlenW( missing_path ), &path );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    operation = (void *)0xdeadbeef;
+    hr = IStorageFolderStatics_GetFolderFromPathAsync( statics, path, &operation );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !!operation, "got operation %p.\n", operation );
+    WindowsDeleteString( path );
+
+    res = await_IAsyncOperation_StorageFolder( operation, 1000 );
+    ok( res == 0, "await_IAsyncOperation_StorageFolder returned %#x\n", res );
+    check_async_info( operation, Error, HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND ) );
+    folder = (void *)0xdeadbeef;
+    hr = IAsyncOperation_StorageFolder_GetResults( operation, &folder );
+    ok( hr == HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND ), "got hr %#lx.\n", hr );
+    ok( !folder, "got folder %p.\n", folder );
+    IAsyncOperation_StorageFolder_Release( operation );
+
+    /* Error case: path is a file, not a directory. */
+    hr = WindowsCreateString( file_path, lstrlenW( file_path ), &path );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    operation = (void *)0xdeadbeef;
+    hr = IStorageFolderStatics_GetFolderFromPathAsync( statics, path, &operation );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !!operation, "got operation %p.\n", operation );
+    WindowsDeleteString( path );
+
+    res = await_IAsyncOperation_StorageFolder( operation, 1000 );
+    ok( res == 0, "await_IAsyncOperation_StorageFolder returned %#x\n", res );
+    check_async_info( operation, Error, HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ) );
+    folder = (void *)0xdeadbeef;
+    hr = IAsyncOperation_StorageFolder_GetResults( operation, &folder );
+    ok( hr == HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ), "got hr %#lx.\n", hr );
+    ok( !folder, "got folder %p.\n", folder );
+    IAsyncOperation_StorageFolder_Release( operation );
+
+    /* Error case: empty path. */
+    hr = WindowsCreateString( L"", 0, &path );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    operation = (void *)0xdeadbeef;
+    hr = IStorageFolderStatics_GetFolderFromPathAsync( statics, path, &operation );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !!operation, "got operation %p.\n", operation );
+    WindowsDeleteString( path );
+
+    res = await_IAsyncOperation_StorageFolder( operation, 1000 );
+    ok( res == 0, "await_IAsyncOperation_StorageFolder returned %#x\n", res );
+    check_async_info( operation, Error, HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ) );
+    folder = (void *)0xdeadbeef;
+    hr = IAsyncOperation_StorageFolder_GetResults( operation, &folder );
+    ok( hr == HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ), "got hr %#lx.\n", hr );
+    ok( !folder, "got folder %p.\n", folder );
+    IAsyncOperation_StorageFolder_Release( operation );
+
+    /* These path edge cases are not yet measured on Windows. */
+    if (winetest_platform_is_wine)
+    {
+        /* Error case: embedded NUL code unit in the counted path. */
+        {
+            /* Counted length 7: C : \ 0 b a r (a true embedded NUL at index 3). */
+            WCHAR embedded_nul_src[] = { L'C', L':', L'\\', 0, L'b', L'a', L'r', 0 };
+            hr = WindowsCreateString( embedded_nul_src, 7, &path );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            operation = (void *)0xdeadbeef;
+            hr = IStorageFolderStatics_GetFolderFromPathAsync( statics, path, &operation );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            ok( !!operation, "got operation %p.\n", operation );
+            WindowsDeleteString( path );
+
+            res = await_IAsyncOperation_StorageFolder( operation, 1000 );
+            ok( res == 0, "await_IAsyncOperation_StorageFolder returned %#x\n", res );
+            check_async_info( operation, Error, HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ) );
+            folder = (void *)0xdeadbeef;
+            hr = IAsyncOperation_StorageFolder_GetResults( operation, &folder );
+            ok( hr == HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ), "got hr %#lx.\n", hr );
+            ok( !folder, "got folder %p.\n", folder );
+            IAsyncOperation_StorageFolder_Release( operation );
+        }
+
+        /* Error case: relative path. */
+        hr = WindowsCreateString( L"relative\\path", lstrlenW( L"relative\\path" ), &path );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        operation = (void *)0xdeadbeef;
+        hr = IStorageFolderStatics_GetFolderFromPathAsync( statics, path, &operation );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( !!operation, "got operation %p.\n", operation );
+        WindowsDeleteString( path );
+
+        res = await_IAsyncOperation_StorageFolder( operation, 1000 );
+        ok( res == 0, "await_IAsyncOperation_StorageFolder returned %#x\n", res );
+        check_async_info( operation, Error, HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ) );
+        folder = (void *)0xdeadbeef;
+        hr = IAsyncOperation_StorageFolder_GetResults( operation, &folder );
+        ok( hr == HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ), "got hr %#lx.\n", hr );
+        ok( !folder, "got folder %p.\n", folder );
+        IAsyncOperation_StorageFolder_Release( operation );
+
+        /* Error case: relative name beginning with a letter (no colon). */
+        hr = WindowsCreateString( L"folder", lstrlenW( L"folder" ), &path );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        operation = (void *)0xdeadbeef;
+        hr = IStorageFolderStatics_GetFolderFromPathAsync( statics, path, &operation );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( !!operation, "got operation %p.\n", operation );
+        WindowsDeleteString( path );
+
+        res = await_IAsyncOperation_StorageFolder( operation, 1000 );
+        ok( res == 0, "await_IAsyncOperation_StorageFolder returned %#x\n", res );
+        check_async_info( operation, Error, HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ) );
+        folder = (void *)0xdeadbeef;
+        hr = IAsyncOperation_StorageFolder_GetResults( operation, &folder );
+        ok( hr == HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ), "got hr %#lx.\n", hr );
+        ok( !folder, "got folder %p.\n", folder );
+        IAsyncOperation_StorageFolder_Release( operation );
+
+        /* Error case: drive-relative path (letter and colon, no backslash). */
+        hr = WindowsCreateString( L"C:relative", lstrlenW( L"C:relative" ), &path );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        operation = (void *)0xdeadbeef;
+        hr = IStorageFolderStatics_GetFolderFromPathAsync( statics, path, &operation );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( !!operation, "got operation %p.\n", operation );
+        WindowsDeleteString( path );
+
+        res = await_IAsyncOperation_StorageFolder( operation, 1000 );
+        ok( res == 0, "await_IAsyncOperation_StorageFolder returned %#x\n", res );
+        check_async_info( operation, Error, HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ) );
+        folder = (void *)0xdeadbeef;
+        hr = IAsyncOperation_StorageFolder_GetResults( operation, &folder );
+        ok( hr == HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ), "got hr %#lx.\n", hr );
+        ok( !folder, "got folder %p.\n", folder );
+        IAsyncOperation_StorageFolder_Release( operation );
+
+        /* Error case: device namespace \\.\ (rejected). */
+        hr = WindowsCreateString( L"\\\\.\\", lstrlenW( L"\\\\.\\\\" ), &path );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        operation = (void *)0xdeadbeef;
+        hr = IStorageFolderStatics_GetFolderFromPathAsync( statics, path, &operation );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( !!operation, "got operation %p.\n", operation );
+        WindowsDeleteString( path );
+
+        res = await_IAsyncOperation_StorageFolder( operation, 1000 );
+        ok( res == 0, "await_IAsyncOperation_StorageFolder returned %#x\n", res );
+        check_async_info( operation, Error, HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ) );
+        folder = (void *)0xdeadbeef;
+        hr = IAsyncOperation_StorageFolder_GetResults( operation, &folder );
+        ok( hr == HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ), "got hr %#lx.\n", hr );
+        ok( !folder, "got folder %p.\n", folder );
+        IAsyncOperation_StorageFolder_Release( operation );
+
+        /* Error case: device namespace \\?\ (rejected). */
+        hr = WindowsCreateString( L"\\\\?\\", lstrlenW( L"\\\\?\\\\" ), &path );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        operation = (void *)0xdeadbeef;
+        hr = IStorageFolderStatics_GetFolderFromPathAsync( statics, path, &operation );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( !!operation, "got operation %p.\n", operation );
+        WindowsDeleteString( path );
+
+        res = await_IAsyncOperation_StorageFolder( operation, 1000 );
+        ok( res == 0, "await_IAsyncOperation_StorageFolder returned %#x\n", res );
+        check_async_info( operation, Error, HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ) );
+        folder = (void *)0xdeadbeef;
+        hr = IAsyncOperation_StorageFolder_GetResults( operation, &folder );
+        ok( hr == HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ), "got hr %#lx.\n", hr );
+        ok( !folder, "got folder %p.\n", folder );
+        IAsyncOperation_StorageFolder_Release( operation );
+
+        /* Error case: bare double-backslash (no server or share). */
+        hr = WindowsCreateString( L"\\\\", lstrlenW( L"\\\\" ), &path );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        operation = (void *)0xdeadbeef;
+        hr = IStorageFolderStatics_GetFolderFromPathAsync( statics, path, &operation );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( !!operation, "got operation %p.\n", operation );
+        WindowsDeleteString( path );
+
+        res = await_IAsyncOperation_StorageFolder( operation, 1000 );
+        ok( res == 0, "await_IAsyncOperation_StorageFolder returned %#x\n", res );
+        check_async_info( operation, Error, HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ) );
+        folder = (void *)0xdeadbeef;
+        hr = IAsyncOperation_StorageFolder_GetResults( operation, &folder );
+        ok( hr == HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ), "got hr %#lx.\n", hr );
+        ok( !folder, "got folder %p.\n", folder );
+        IAsyncOperation_StorageFolder_Release( operation );
+
+        /* Error case: UNC path with no share. */
+        hr = WindowsCreateString( L"\\\\server", lstrlenW( L"\\\\server" ), &path );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        operation = (void *)0xdeadbeef;
+        hr = IStorageFolderStatics_GetFolderFromPathAsync( statics, path, &operation );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( !!operation, "got operation %p.\n", operation );
+        WindowsDeleteString( path );
+
+        res = await_IAsyncOperation_StorageFolder( operation, 1000 );
+        ok( res == 0, "await_IAsyncOperation_StorageFolder returned %#x\n", res );
+        check_async_info( operation, Error, HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ) );
+        folder = (void *)0xdeadbeef;
+        hr = IAsyncOperation_StorageFolder_GetResults( operation, &folder );
+        ok( hr == HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ), "got hr %#lx.\n", hr );
+        ok( !folder, "got folder %p.\n", folder );
+        IAsyncOperation_StorageFolder_Release( operation );
+
+        /* Error case: UNC path with empty share. */
+        {
+            WCHAR empty_share[] = { L'\\', L'\\', L's', L'e', L'r', L'v', L'e', L'r', L'\\', 0 };
+            hr = WindowsCreateString( empty_share, 9, &path );
+        }
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        operation = (void *)0xdeadbeef;
+        hr = IStorageFolderStatics_GetFolderFromPathAsync( statics, path, &operation );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( !!operation, "got operation %p.\n", operation );
+        WindowsDeleteString( path );
+
+        res = await_IAsyncOperation_StorageFolder( operation, 1000 );
+        ok( res == 0, "await_IAsyncOperation_StorageFolder returned %#x\n", res );
+        check_async_info( operation, Error, HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ) );
+        folder = (void *)0xdeadbeef;
+        hr = IAsyncOperation_StorageFolder_GetResults( operation, &folder );
+        ok( hr == HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ), "got hr %#lx.\n", hr );
+        ok( !folder, "got folder %p.\n", folder );
+        IAsyncOperation_StorageFolder_Release( operation );
+
+        /* Error case: UNC path with a second separator after the server separator
+         * (\\server\\): the first share code unit is a separator, so the share is empty. */
+        {
+            WCHAR empty_share2[] = { L'\\', L'\\', L's', L'e', L'r', L'v', L'e', L'r', L'\\', L'\\', 0 };
+            hr = WindowsCreateString( empty_share2, 10, &path );
+        }
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        operation = (void *)0xdeadbeef;
+        hr = IStorageFolderStatics_GetFolderFromPathAsync( statics, path, &operation );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( !!operation, "got operation %p.\n", operation );
+        WindowsDeleteString( path );
+
+        res = await_IAsyncOperation_StorageFolder( operation, 1000 );
+        ok( res == 0, "await_IAsyncOperation_StorageFolder returned %#x\n", res );
+        check_async_info( operation, Error, HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ) );
+        folder = (void *)0xdeadbeef;
+        hr = IAsyncOperation_StorageFolder_GetResults( operation, &folder );
+        ok( hr == HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ), "got hr %#lx.\n", hr );
+        ok( !folder, "got folder %p.\n", folder );
+        IAsyncOperation_StorageFolder_Release( operation );
+
+        /* Error case: overlong path. */
+        {
+            WCHAR overlong_path[MAX_PATH + 2];
+            overlong_path[0] = L'C';
+            overlong_path[1] = L':';
+            overlong_path[2] = L'\\';
+            for (UINT32 i = 3; i < MAX_PATH + 1; i++)
+                overlong_path[i] = L'a';
+            overlong_path[MAX_PATH + 1] = 0;
+            hr = WindowsCreateString( overlong_path, MAX_PATH + 1, &path );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            operation = (void *)0xdeadbeef;
+            hr = IStorageFolderStatics_GetFolderFromPathAsync( statics, path, &operation );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            ok( !!operation, "got operation %p.\n", operation );
+            WindowsDeleteString( path );
+
+            res = await_IAsyncOperation_StorageFolder( operation, 1000 );
+            ok( res == 0, "await_IAsyncOperation_StorageFolder returned %#x\n", res );
+            check_async_info( operation, Error, HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ) );
+            folder = (void *)0xdeadbeef;
+            hr = IAsyncOperation_StorageFolder_GetResults( operation, &folder );
+            ok( hr == HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ), "got hr %#lx.\n", hr );
+            ok( !folder, "got folder %p.\n", folder );
+            IAsyncOperation_StorageFolder_Release( operation );
+        }
+
+    }
+
+    /* NULL path is the canonical empty string: returns an operation that errors with 0x80070057. */
+    operation = (void *)0xdeadbeef;
+    hr = IStorageFolderStatics_GetFolderFromPathAsync( statics, NULL, &operation );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !!operation, "got operation %p.\n", operation );
+
+    res = await_IAsyncOperation_StorageFolder( operation, 1000 );
+    ok( res == 0, "await_IAsyncOperation_StorageFolder returned %#x\n", res );
+    check_async_info( operation, Error, HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ) );
+    folder = (void *)0xdeadbeef;
+    hr = IAsyncOperation_StorageFolder_GetResults( operation, &folder );
+    ok( hr == HRESULT_FROM_WIN32( ERROR_INVALID_PARAMETER ), "got hr %#lx.\n", hr );
+    ok( !folder, "got folder %p.\n", folder );
+    IAsyncOperation_StorageFolder_Release( operation );
+
+    if (winetest_platform_is_wine)
+    {
+        hr = WindowsCreateString( dir_path, lstrlenW( dir_path ), &path );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        hr = IStorageFolderStatics_GetFolderFromPathAsync( statics, path, NULL );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+        WindowsDeleteString( path );
+    }
+
+    ref = IStorageFolderStatics_Release( statics );
+    ok( ref == 1, "got ref %ld.\n", ref );
+    ref = IActivationFactory_Release( factory );
+    ok( ref == 0, "got ref %ld.\n", ref );
+
+    DeleteFileW( file_path );
+    RemoveDirectoryW( dir_path );
+}
+
 START_TEST(storage)
 {
     HRESULT hr;
@@ -535,6 +1116,7 @@ START_TEST(storage)
 
     test_RandomAccessStreamReference();
     test_InMemoryRandomAccessStream();
+    test_StorageFolder();
 
     RoUninitialize();
 }

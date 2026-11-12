@@ -517,6 +517,142 @@ HRESULT creation_fn( IUnknown *invoker, IUnknown *param,                        
     return S_OK;                                                                                                    \
 }                                                                                                                   \
 
+/* Narrowly typed non-progress IAsyncOperation<T> wrapper over the same async_info
+ * machinery. The module only ships WithProgress wrappers, so this adds the single
+ * typed operation needed for StorageFolder::GetFolderFromPathAsync. */
+#define DEFINE_IASYNCOPERATION( iface_type, completed_type, cs_type_str, impl_type,                                  \
+        result_type, propvar_type, propvar_name, creation_fn )                                                      \
+static inline struct impl_type *impl_from_##iface_type( iface_type *iface )                                         \
+{                                                                                                                   \
+    return CONTAINING_RECORD( iface, struct impl_type, iface_type##_iface );                                        \
+}                                                                                                                   \
+static HRESULT WINAPI impl_type##_QueryInterface( iface_type *iface, REFIID iid, void **out )                       \
+{                                                                                                                   \
+    struct impl_type *impl = impl_from_##iface_type( iface );                                                       \
+                                                                                                                    \
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );                                       \
+                                                                                                                    \
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||                                                                        \
+        IsEqualGUID( iid, &IID_IInspectable ) ||                                                                    \
+        IsEqualGUID( iid, &IID_IAgileObject ) ||                                                                    \
+        IsEqualGUID( iid, &IID_##iface_type ))                                                                      \
+    {                                                                                                               \
+        IInspectable_AddRef( (*out = &impl->iface_type##_iface) );                                                  \
+        return S_OK;                                                                                                \
+    }                                                                                                               \
+                                                                                                                    \
+    return IAsyncInfoImpl_QueryInterface( impl->IAsyncInfoImpl_inner, iid, out );                                   \
+}                                                                                                                   \
+static ULONG WINAPI impl_type##_AddRef( iface_type *iface )                                                         \
+{                                                                                                                   \
+    struct impl_type *impl = impl_from_##iface_type( iface );                                                       \
+    ULONG ref = InterlockedIncrement( &impl->ref );                                                                 \
+    TRACE( "iface %p, ref %lu.\n", iface, ref );                                                                    \
+    return ref;                                                                                                     \
+}                                                                                                                   \
+static ULONG WINAPI impl_type##_Release( iface_type *iface )                                                        \
+{                                                                                                                   \
+    struct impl_type *impl = impl_from_##iface_type( iface );                                                       \
+    ULONG ref = InterlockedDecrement( &impl->ref );                                                                 \
+    TRACE( "iface %p, ref %lu.\n", iface, ref );                                                                    \
+                                                                                                                    \
+    if (!ref)                                                                                                       \
+    {                                                                                                               \
+        /* guard against re-entry if inner releases an outer iface */                                               \
+        InterlockedIncrement( &impl->ref );                                                                         \
+        IAsyncInfoImpl_Release( impl->IAsyncInfoImpl_inner );                                                       \
+        free( impl );                                                                                               \
+    }                                                                                                               \
+                                                                                                                    \
+    return ref;                                                                                                     \
+}                                                                                                                   \
+static HRESULT WINAPI impl_type##_GetIids( iface_type *iface, ULONG *iid_count, IID **iids )                        \
+{                                                                                                                   \
+    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );                                     \
+    return E_NOTIMPL;                                                                                               \
+}                                                                                                                   \
+static HRESULT WINAPI impl_type##_GetRuntimeClassName( iface_type *iface, HSTRING *class_name )                     \
+{                                                                                                                   \
+    return WindowsCreateString( L"Windows.Foundation.IAsyncOperation`1<"cs_type_str">",                             \
+                                ARRAY_SIZE(L"Windows.Foundation.IAsyncOperation`1<"cs_type_str">") - 1,             \
+                                class_name );                                                                       \
+}                                                                                                                   \
+static HRESULT WINAPI impl_type##_GetTrustLevel( iface_type *iface, TrustLevel *trust_level )                       \
+{                                                                                                                   \
+    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );                                                \
+    return E_NOTIMPL;                                                                                               \
+}                                                                                                                   \
+static HRESULT WINAPI impl_type##_put_Completed( iface_type *iface, completed_type *typed_handler )                 \
+{                                                                                                                   \
+    IAsyncOperationCompletedHandlerImpl *handler = (IAsyncOperationCompletedHandlerImpl *)typed_handler;            \
+    struct impl_type *impl = impl_from_##iface_type( iface );                                                       \
+    TRACE( "iface %p, handler %p.\n", iface, handler );                                                             \
+    return IAsyncInfoImpl_put_Completed( impl->IAsyncInfoImpl_inner, handler );                                     \
+}                                                                                                                   \
+static HRESULT WINAPI impl_type##_get_Completed( iface_type *iface, completed_type **typed_handler )                \
+{                                                                                                                   \
+    IAsyncOperationCompletedHandlerImpl **handler = (IAsyncOperationCompletedHandlerImpl **)typed_handler;          \
+    struct impl_type *impl = impl_from_##iface_type( iface );                                                       \
+    TRACE( "iface %p, handler %p.\n", iface, handler );                                                             \
+    return IAsyncInfoImpl_get_Completed( impl->IAsyncInfoImpl_inner, handler );                                     \
+}                                                                                                                   \
+static HRESULT WINAPI impl_type##_GetResults( iface_type *iface, result_type *results )                             \
+{                                                                                                                   \
+    struct impl_type *impl = impl_from_##iface_type( iface );                                                       \
+    PROPVARIANT result = {.vt = propvar_type};                                                                      \
+    HRESULT hr;                                                                                                     \
+                                                                                                                    \
+    TRACE( "iface %p, results %p.\n", iface, results );                                                             \
+                                                                                                                    \
+    if (!results) return E_POINTER;                                                                                 \
+    *results = NULL;                                                                                                \
+    hr = IAsyncInfoImpl_get_Result( impl->IAsyncInfoImpl_inner, &result );                                          \
+                                                                                                                    \
+    *results = (result_type)result.propvar_name;                                                                    \
+    if (propvar_type == VT_UNKNOWN && result.punkVal) IUnknown_AddRef( result.punkVal );                            \
+    PropVariantClear( &result );                                                                                    \
+    return hr;                                                                                                      \
+}                                                                                                                   \
+static const struct iface_type##Vtbl impl_type##_vtbl =                                                             \
+{                                                                                                                   \
+    /* IUnknown methods */                                                                                          \
+    impl_type##_QueryInterface,                                                                                     \
+    impl_type##_AddRef,                                                                                             \
+    impl_type##_Release,                                                                                            \
+    /* IInspectable methods */                                                                                      \
+    impl_type##_GetIids,                                                                                            \
+    impl_type##_GetRuntimeClassName,                                                                                \
+    impl_type##_GetTrustLevel,                                                                                      \
+    /* IAsyncOperation<result_type> */                                                                              \
+    impl_type##_put_Completed,                                                                                      \
+    impl_type##_get_Completed,                                                                                      \
+    impl_type##_GetResults,                                                                                         \
+};                                                                                                                  \
+HRESULT creation_fn( IUnknown *invoker, IUnknown *param,                                                            \
+        async_operation_callback callback, iface_type **out )                                                       \
+{                                                                                                                   \
+    struct impl_type *impl;                                                                                         \
+    HRESULT hr;                                                                                                     \
+                                                                                                                    \
+    *out = NULL;                                                            \
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;                                                 \
+    impl->iface_type##_iface.lpVtbl = &impl_type##_vtbl;                                                            \
+    impl->ref = 1;                                                                                                  \
+                                                                                                                    \
+    if (FAILED(hr = async_info_create( invoker, param, callback,                                                    \
+            (IInspectable *)&impl->iface_type##_iface, &impl->IAsyncInfoImpl_inner ))                               \
+            || FAILED(hr = IAsyncInfoImpl_Start( impl->IAsyncInfoImpl_inner )))                                     \
+    {                                                                                                               \
+        if (impl->IAsyncInfoImpl_inner) IAsyncInfoImpl_Release( impl->IAsyncInfoImpl_inner );                       \
+        free( impl );                                                                                               \
+        return hr;                                                                                                  \
+    }                                                                                                               \
+                                                                                                                    \
+    *out = &impl->iface_type##_iface;                                                                               \
+    TRACE( "created IAsyncOperation %p.\n", *out );                                                                 \
+    return S_OK;                                                                                                    \
+}                                                                                                                   \
+
 struct async_buffer_uint32
 {
     IAsyncOperationWithProgress_IBuffer_UINT32 IAsyncOperationWithProgress_IBuffer_UINT32_iface;
@@ -540,3 +676,14 @@ DEFINE_IASYNCOPERATIONWITHPROGRESS( IAsyncOperationWithProgress_UINT32_UINT32, \
         IAsyncOperationProgressHandler_UINT32_UINT32, \
         IAsyncOperationWithProgressCompletedHandler_UINT32_UINT32, \
         "UInt32,UInt32", async_uint32_uint32, UINT32, VT_UI4, ulVal, async_operation_uint32_uint32_create )
+
+struct async_storage_folder
+{
+    IAsyncOperation_StorageFolder IAsyncOperation_StorageFolder_iface;
+    IAsyncInfoImpl *IAsyncInfoImpl_inner;
+    LONG ref;
+};
+
+DEFINE_IASYNCOPERATION( IAsyncOperation_StorageFolder, \
+        IAsyncOperationCompletedHandler_StorageFolder, \
+        "Windows.Storage.StorageFolder", async_storage_folder, IStorageFolder*, VT_UNKNOWN, punkVal, async_operation_storage_folder_create )
