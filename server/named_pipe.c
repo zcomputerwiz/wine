@@ -169,6 +169,7 @@ struct pipe_end
     struct named_pipe   *pipe;
     struct pipe_end     *connection; /* the other end of the pipe */
     process_id_t         client_pid; /* process that created the client */
+    unsigned int         client_session; /* its session (a bridge: the session of the server that opened it) */
     process_id_t         server_pid; /* process that created the server */
     struct token        *client_token; /* token of the thread that opened the client end (elevation enforced) */
     struct process      *client_process; /* retained opener, not a later PID lookup */
@@ -1450,6 +1451,11 @@ static void pipe_end_get_connection_attribute( struct pipe_end *pipe_end )
         value = &pipe_end->server_pid;
         value_size = sizeof(pipe_end->server_pid);
     }
+    else if (attr_size == sizeof("ClientSessionId") && !memcmp( attr, "ClientSessionId", attr_size ))
+    {
+        value = &pipe_end->client_session;
+        value_size = sizeof(pipe_end->client_session);
+    }
     else
     {
         set_error( STATUS_ILLEGAL_FUNCTION );
@@ -1605,6 +1611,7 @@ static void init_pipe_end( struct pipe_end *pipe_end, struct named_pipe *pipe,
     memset( &pipe_end->client_token_id, 0, sizeof(pipe_end->client_token_id) );
     memset( &pipe_end->client_modified_id, 0, sizeof(pipe_end->client_modified_id) );
     pipe_end->client_impersonated = 0;
+    pipe_end->client_session = 0;
     memset( &pipe_end->consumed_writer, 0, sizeof(pipe_end->consumed_writer) );
     pipe_end->binding_reads = 0;
     pipe_end->consumed_valid = 0;
@@ -1676,6 +1683,7 @@ static struct pipe_end *create_pipe_client( struct named_pipe *pipe, data_size_t
     init_pipe_end( client, pipe, 0, buffer_size );
     client->state = FILE_PIPE_CONNECTED_STATE;
     client->client_pid = get_process_id( current->process );
+    client->client_session = current->process->token ? token_get_session_id( current->process->token ) : 0;
     client->client_process = (struct process *)grab_object( current->process );
     client->client_impersonated = (current->token != NULL);
     if (current->process->token)
@@ -1745,6 +1753,7 @@ static struct object *named_pipe_open_file( struct object *obj, unsigned int acc
         server->pipe_end.connection = client;
         client->connection = &server->pipe_end;
         server->pipe_end.client_pid = client->client_pid;
+        server->pipe_end.client_session = client->client_session;
         client->server_pid = server->pipe_end.server_pid;
         list_remove( &server->entry );
     }
@@ -3262,17 +3271,21 @@ static struct object *pipe_bridge_open_remote( struct named_pipe *pipe, unsigned
     return &client->obj;
 }
 
-/* session 0: the pipes that a session may open here */
+/* session 0: the pipes that a session may open here (1), and those only a session with a session link may (2) */
 static int pipe_bridge_allowed( const WCHAR *name, data_size_t len )
 {
     static const WCHAR svcctl[] = {'s','v','c','c','t','l'};
+    static const WCHAR broker[] = {'w','e','x','e','l','e','v','a','t','e','.','r','9'};  /* E1 R9's B0 */
 
-    return len == sizeof(svcctl) && !memicmp_strW( name, svcctl, len );
+    if (len == sizeof(svcctl) && !memicmp_strW( name, svcctl, len )) return 1;
+    if (len == sizeof(broker) && !memicmp_strW( name, broker, len )) return 2;
+    return 0;
 }
 
 /* session 0: connect a session's opener (described by token) to a listening instance of the named pipe, over sock
  * (owned from now on); the status for the session's server */
-unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_size_t len, int sock, uid_t uid )
+unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_size_t len, int sock, uid_t uid,
+                                 int session )
 {
     static const WCHAR device[] = {'\\','D','e','v','i','c','e','\\','N','a','m','e','d','P','i','p','e','\\'};
     struct object_params params = { .ops = &named_pipe_ops, .attr = OBJ_CASE_INSENSITIVE };
@@ -3281,8 +3294,10 @@ unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_si
     struct pipe_server *server;
     struct named_pipe *pipe;
     WCHAR *path;
+    int allowed;
 
-    if (!len || len % sizeof(WCHAR) || !pipe_bridge_allowed( name, len ))
+    if (!len || len % sizeof(WCHAR) || !(allowed = pipe_bridge_allowed( name, len )) ||
+        (allowed == 2 && session < 0))
     {
         close( sock );
         return STATUS_ACCESS_DENIED;
@@ -3337,6 +3352,8 @@ unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_si
     server->pipe_end.connection = &bridge->pipe_end;
     bridge->pipe_end.connection = &server->pipe_end;
     bridge->pipe_end.server_pid = server->pipe_end.server_pid;
+    bridge->pipe_end.client_session = session > 0 ? session : 0;
+    server->pipe_end.client_session = bridge->pipe_end.client_session;  /* R9: the session of the opener's server */
     list_remove( &server->entry );
     release_object( pipe );
     pipe_bridge_update_events( &bridge->pipe_end );
