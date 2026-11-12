@@ -890,7 +890,8 @@ static void save_subkeys( const struct key *key, const struct key *base, FILE *f
     if (key->flags & KEY_VOLATILE) return;
     /* save key if it has either some values or no subkeys, or needs special options */
     /* keys with no values but subkeys are saved implicitly by saving the subkeys */
-    if ((key->last_value >= 0) || (key->last_subkey == -1) || key->class || (key->flags & KEY_SYMLINK))
+    if ((key->last_value >= 0) || (key->last_subkey == -1) || key->class || (key->flags & KEY_SYMLINK) ||
+        (session0_server && key->obj.sd))
     {
         fprintf( f, "\n[" );
         if (key != base) dump_path( key, base, f );
@@ -901,6 +902,17 @@ static void save_subkeys( const struct key *key, const struct key *base, FILE *f
             fprintf( f, "#class=\"" );
             dump_strW( key->class, key->classlen, f, "\"\"" );
             fprintf( f, "\"\n" );
+        }
+        /* the system tier's stored key permission */
+        if (session0_server && key->obj.sd)
+        {
+            const struct security_descriptor *sd = key->obj.sd;
+            const unsigned char *bytes = (const unsigned char *)sd;
+            data_size_t size = sizeof(*sd) + sd->owner_len + sd->group_len + sd->sacl_len + sd->dacl_len;
+            data_size_t n;
+            fprintf( f, "#sd=" );
+            for (n = 0; n < size; n++) fprintf( f, "%02x", (unsigned int)bytes[n] );
+            fprintf( f, "\n" );
         }
         if (key->flags & KEY_SYMLINK) fputs( "#link\n", f );
         for (i = 0; i <= key->last_value; i++) dump_value( &key->values[i], f );
@@ -2313,6 +2325,15 @@ static int load_global_option( const char *buffer, struct file_load_info *info )
     return 1;
 }
 
+/* value of a hex digit, or -1 if the character is not a hex digit */
+static int hex_digit_value( char c )
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
 /* load a key option from the input file */
 static int load_key_option( struct key *key, const char *buffer, struct file_load_info *info )
 {
@@ -2341,6 +2362,37 @@ static int load_key_option( struct key *key, const char *buffer, struct file_loa
         free( key->class );
         if (!(key->class = memdup( info->tmp, len ))) len = 0;
         key->classlen = len;
+    }
+    if (!strncmp( buffer, "#sd=", 4 ))
+    {
+        const char *hex = buffer + 4;
+        data_size_t hexlen = strlen( hex );
+        data_size_t size, n;
+        unsigned char *sd;
+
+        /* the system tier's stored key permission */
+        if (hexlen & 1) goto bad_sd;  /* odd length */
+        size = hexlen / 2;
+        if (!size || size > 65536) goto bad_sd;  /* empty or too large */
+        for (n = 0; n < hexlen; n++)
+            if (!isxdigit( hex[n] )) goto bad_sd;  /* non-hex character */
+        if (!(sd = mem_alloc( size ))) return 0;
+        for (n = 0; n < size; n++)
+            sd[n] = (hex_digit_value( hex[2*n] ) << 4) | hex_digit_value( hex[2*n+1] );
+        if (!sd_is_valid( (const struct security_descriptor *)sd, size ))
+        {
+            free( sd );
+            goto bad_sd;
+        }
+        set_sd_defaults_from_token( &key->obj, (const struct security_descriptor *)sd,
+            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION |
+            SACL_SECURITY_INFORMATION, NULL );
+        free( sd );
+        return 1;
+
+    bad_sd:
+        file_read_error( "Malformed security descriptor", info );
+        return 0;
     }
     if (!strncmp( buffer, "#link", 5 )) key->flags |= KEY_SYMLINK;
     /* ignore unknown options */
@@ -4353,7 +4405,9 @@ static void periodic_save( void *arg )
 static void set_periodic_save_timer(void)
 {
     if (save_timeout_user) remove_timeout_user( save_timeout_user );
-    save_timeout_user = add_timeout_user( save_period, periodic_save, NULL );
+    /* system tier: session 0 holds every session's machine registry; it saves changes within 5 s, as the
+     * lazy flush of Windows does (unchanged hives are not written) */
+    save_timeout_user = add_timeout_user( session0_server ? 5 * -TICKS_PER_SEC : save_period, periodic_save, NULL );
 }
 
 /* save the modified registry branches to disk */

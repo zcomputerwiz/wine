@@ -48,8 +48,9 @@ struct wex_session0_reply
 };
 
 /* Keys that stay in each session's own server: per-session state that differs between sessions (devices,
- * display, drive and port mappings, computer name state, the service manager's instance counter, the
- * volatile hardware tree). Paths relative to \Registry\Machine and \Registry\User\.Default; a key matches
+ * display, drive and port mappings, computer name state, the service manager's instance counter, Safe Mode's
+ * SafeBoot\Option, which each session's wineboot writes from the boot mode, the volatile hardware tree).
+ * Paths relative to \Registry\Machine and \Registry\User\.Default; a key matches
  * when its path equals an entry or continues it with a backslash. Compared without regard to case. */
 #define WEX_SESSION_MACHINE_KEYS \
     "Hardware", \
@@ -67,6 +68,8 @@ struct wex_session0_reply
     "System\\CurrentControlSet\\Control\\ComputerName", \
     "System\\ControlSet001\\Control\\ServiceCurrent", \
     "System\\CurrentControlSet\\Control\\ServiceCurrent", \
+    "System\\ControlSet001\\Control\\SafeBoot\\Option", \
+    "System\\CurrentControlSet\\Control\\SafeBoot\\Option", \
     "System\\ControlSet001\\Services\\Tcpip\\Parameters", \
     "System\\CurrentControlSet\\Services\\Tcpip\\Parameters", \
     "Software\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList", \

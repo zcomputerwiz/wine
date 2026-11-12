@@ -28,7 +28,7 @@
  * else, and it has no Unix pid, so session 0 never signals or traces it.
  *
  * Trust: session 0 believes a token description only from a user's server that the launcher started (its
- * uids are the user's, its saved group is the system group, and it runs the configured wineserver), or, in
+ * uids are the user's, its saved group is the system group and its real group is not), or, in
  * development (WEX_SESSION0_DEV=1 in session 0's own environment), from a server of session 0's own uid.
  * Anything else is refused. */
 
@@ -73,9 +73,7 @@ int session0_client;
 
 static char session0_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
 static int session0_dev;                /* development trust: a peer of session 0's own uid */
-static gid_t peer_group;                /* production trust: the launcher's system group ... */
-static dev_t peer_exe_dev;              /* ... and the configured wineserver */
-static ino_t peer_exe_ino;
+static gid_t peer_group;                /* production trust: the launcher's system group */
 static uid_t hive_owner = (uid_t)-1;    /* the session 0 account, when it is configured */
 
 struct session0_socket
@@ -162,16 +160,12 @@ static void init_listener(void)
     session0_dev = getenv( "WEX_SESSION0_DEV" ) && !strcmp( getenv( "WEX_SESSION0_DEV" ), "1" );
     if (!session0_dev)
     {
-        char group[64], exe[PATH_MAX];
+        char group[64];
         struct group *gr;
 
         if (!read_conf( "group", group, sizeof(group) ) || !(gr = getgrnam( group )))
             fatal_error( "--session0: no system group in %s\n", SESSION0_CONF );
-        if (!read_conf( "wineserver", exe, sizeof(exe) ) || stat( exe, &st ))
-            fatal_error( "--session0: no wineserver in %s\n", SESSION0_CONF );
         peer_group = gr->gr_gid;
-        peer_exe_dev = st.st_dev;
-        peer_exe_ino = st.st_ino;
     }
 
     memset( &addr, 0, sizeof(addr) );
@@ -220,17 +214,17 @@ uid_t session0_hive_owner(void)
     return hive_owner;
 }
 
-/* a launcher-started server of the peer's uid running the configured wineserver */
+/* A launcher-started server of the peer's uid. Only the setgid launcher gives a process of a user who is not in
+ * the system group that group as its saved group, and it starts only the configured wineserver and the machine
+ * root's wineboot; such a process is not dumpable, so the user cannot take it over. Its executable cannot be
+ * checked from here: /proc/<pid>/exe of a non-dumpable process of another uid is not readable. */
 static int peer_is_launched_server( pid_t pid, uid_t uid )
 {
     char path[64], buf[2048], *line;
     unsigned int r, e, s, f;
     int fd, uid_ok = 0, gid_ok = 0;
-    struct stat st;
     ssize_t n;
 
-    snprintf( path, sizeof(path), "/proc/%d/exe", (int)pid );
-    if (stat( path, &st ) || st.st_dev != peer_exe_dev || st.st_ino != peer_exe_ino) return 0;
     snprintf( path, sizeof(path), "/proc/%d/status", (int)pid );
     if ((fd = open( path, O_RDONLY | O_CLOEXEC )) == -1) return 0;
     n = read( fd, buf, sizeof(buf) - 1 );
@@ -241,7 +235,7 @@ static int peer_is_launched_server( pid_t pid, uid_t uid )
         uid_ok = r == uid && e == uid && s == uid && f == uid;
     if ((line = strstr( buf, "\nGid:" )) && sscanf( line + 5, "%u %u %u %u", &r, &e, &s, &f ) == 4)
         gid_ok = s == peer_group && r != peer_group && (e == r || e == peer_group);
-    return uid_ok && gid_ok;
+    return uid_ok && gid_ok && !strncmp( buf, "Name:\twineserver\n", 17 );
 }
 
 static void session0_listen_event( struct fd *fd, int event )
