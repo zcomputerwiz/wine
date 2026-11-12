@@ -111,6 +111,9 @@ DECL_HANDLER(unload_registry);
 DECL_HANDLER(save_registry);
 DECL_HANDLER(set_registry_notification);
 DECL_HANDLER(rename_key);
+DECL_HANDLER(get_registry_channel);
+DECL_HANDLER(set_registry_relay);
+DECL_HANDLER(relay_registry_notification);
 DECL_HANDLER(create_timer);
 DECL_HANDLER(open_timer);
 DECL_HANDLER(set_timer);
@@ -441,6 +444,9 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_save_registry,
     (req_handler)req_set_registry_notification,
     (req_handler)req_rename_key,
+    (req_handler)req_get_registry_channel,
+    (req_handler)req_set_registry_relay,
+    (req_handler)req_relay_registry_notification,
     (req_handler)req_create_timer,
     (req_handler)req_open_timer,
     (req_handler)req_set_timer,
@@ -1310,9 +1316,20 @@ C_ASSERT( offsetof(struct set_registry_notification_request, hkey) == 12 );
 C_ASSERT( offsetof(struct set_registry_notification_request, event) == 16 );
 C_ASSERT( offsetof(struct set_registry_notification_request, subtree) == 20 );
 C_ASSERT( offsetof(struct set_registry_notification_request, filter) == 24 );
+C_ASSERT( offsetof(struct set_registry_notification_request, relay_cookie) == 28 );
 C_ASSERT( sizeof(struct set_registry_notification_request) == 32 );
 C_ASSERT( offsetof(struct rename_key_request, hkey) == 12 );
 C_ASSERT( sizeof(struct rename_key_request) == 16 );
+C_ASSERT( sizeof(struct get_registry_channel_request) == 16 );
+C_ASSERT( offsetof(struct get_registry_channel_reply, cookie) == 8 );
+C_ASSERT( offsetof(struct get_registry_channel_reply, user_hive) == 12 );
+C_ASSERT( sizeof(struct get_registry_channel_reply) == 16 );
+C_ASSERT( offsetof(struct set_registry_relay_request, fd) == 12 );
+C_ASSERT( sizeof(struct set_registry_relay_request) == 16 );
+C_ASSERT( offsetof(struct relay_registry_notification_request, event) == 12 );
+C_ASSERT( sizeof(struct relay_registry_notification_request) == 16 );
+C_ASSERT( offsetof(struct relay_registry_notification_reply, cookie) == 8 );
+C_ASSERT( sizeof(struct relay_registry_notification_reply) == 16 );
 C_ASSERT( offsetof(struct create_timer_request, access) == 12 );
 C_ASSERT( offsetof(struct create_timer_request, manual) == 16 );
 C_ASSERT( sizeof(struct create_timer_request) == 24 );

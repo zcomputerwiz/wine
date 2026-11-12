@@ -449,7 +449,7 @@ void init_directories( struct fd *intl_fd )
 
     /* sessions */
     create_session( 0 );
-    create_session( default_session_id );
+    if (default_session_id) create_session( default_session_id );  /* WineExplorer session 0 is session 0 */
 
     /* object types */
 

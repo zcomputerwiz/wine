@@ -44,6 +44,7 @@ SOURCES = \
 	serial.c \
 	signal.c \
 	sock.c \
+	session0.c \
 	symlink.c \
 	sysrun.c \
 	sysrun.h \

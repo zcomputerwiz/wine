@@ -91,6 +91,9 @@ extern const struct acl *token_get_default_dacl( struct token *token );
 extern const struct sid *token_get_owner( struct token *token );
 extern const struct sid *token_get_primary_group( struct token *token );
 extern unsigned int token_get_session_id( struct token *token );
+/* WineExplorer system tier: a token described to session 0, and rebuilt there */
+extern data_size_t token_describe( struct token *token, void *data, data_size_t size );
+extern struct token *token_create_described( const void *data, data_size_t size );
 extern void token_get_ids( const struct token *token, struct luid *token_id, struct luid *modified_id );
 extern int token_sid_present( struct token *token, const struct sid *sid, int deny );
 
@@ -138,6 +141,9 @@ static inline struct ace *set_ace( struct ace *ace, const struct sid *sid, unsig
 
 extern void security_set_thread_token( struct thread *thread, obj_handle_t handle );
 extern const struct sid *security_unix_uid_to_sid( uid_t uid );
+/* system tier T4-0: the server's user SID (Wine's fixed one, or the accounts map's with session 0) */
+extern void security_init_server_user(void);
+extern const struct sid *security_server_user_sid(void);
 extern int check_object_access( struct token *token, struct object *obj, unsigned int *access );
 
 /* elevation enforcement is on while an elevation helper is configured (registry.c) */

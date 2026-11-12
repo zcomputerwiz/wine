@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <winbase.h>
 #include <winuser.h>
+#include <winreg.h>
 
 #include "wine/test.h"
 
@@ -1065,6 +1066,24 @@ static inline void test_no_stop(void)
     ok(GetLastError() == ERROR_INVALID_HANDLE, "GetLastError = %ld\n", GetLastError());
 }
 
+/* In Safe Mode only what SafeBoot\Minimal or SafeBoot\Network lists may start; the spooler is in neither. */
+static void test_safe_mode(void)
+{
+    SC_HANDLE service;
+    BOOL ret;
+
+    service = OpenServiceA(scm_handle, "Spooler", SERVICE_START);
+    if (!service)
+    {
+        skip("No spooler service: %lu\n", GetLastError());
+        return;
+    }
+    SetLastError(0xdeadbeef);
+    ret = StartServiceA(service, 0, NULL);
+    ok(!ret && GetLastError() == ERROR_NOT_SAFEBOOT_SERVICE, "StartService returned %d, error %lu\n", ret, GetLastError());
+    CloseServiceHandle(service);
+}
+
 static void test_runner(void (*p_run_test)(void))
 {
     HANDLE thread;
@@ -1236,6 +1255,16 @@ START_TEST(service)
     argc = winetest_get_mainargs(&argv);
 
     if(argc < 3) {
+        DWORD option = 0, size = sizeof(option);
+
+        /* the test services are not Safe Mode services */
+        if(!RegGetValueA(HKEY_LOCAL_MACHINE, "System\\CurrentControlSet\\Control\\SafeBoot\\Option", "OptionValue",
+                         RRF_RT_REG_DWORD, NULL, &option, &size) && option) {
+            test_safe_mode();
+            CloseServiceHandle(scm_handle);
+            return;
+        }
+
         test_runner(test_service);
         test_runner(test_no_stop);
         test_runner(test_kill_service_process);

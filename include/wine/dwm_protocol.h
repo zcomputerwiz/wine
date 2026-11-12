@@ -152,6 +152,9 @@ C_ASSERT( offsetof(struct dwm_clock_page, qpc_period) == 24 );
 /* the desktop name is appended to both; the mapping and the event are per desktop */
 #define DWM_CLOCK_NAME       L"Local\\__wex_dwm_clock_"
 #define DWM_CLOCK_EVENT_NAME L"Local\\__wex_dwm_frame_"
+/* auto-reset, per desktop (the desktop name is appended): the broker sets it when its attribute or thumbnail
+ * revision changes, so that the shell bridge polls at once. Only a hint: a lost or forged signal costs one poll. */
+#define DWM_CHANGE_EVENT_NAME L"Local\\__wex_dwm_change_"
 
 /*
  * Fixed-width control-channel message envelope (Section 2.1 of DWM_ARCHITECTURE.md).

@@ -2857,7 +2857,7 @@ struct set_registry_notification_request
     obj_handle_t event;
     int          subtree;
     unsigned int filter;
-    char __pad_28[4];
+    unsigned int relay_cookie;
 };
 struct set_registry_notification_reply
 {
@@ -2875,6 +2875,46 @@ struct rename_key_request
 struct rename_key_reply
 {
     struct reply_header __header;
+};
+
+
+
+struct get_registry_channel_request
+{
+    struct request_header __header;
+    char __pad_12[4];
+};
+struct get_registry_channel_reply
+{
+    struct reply_header __header;
+    obj_handle_t cookie;
+    int          user_hive;
+};
+
+
+
+struct set_registry_relay_request
+{
+    struct request_header __header;
+    int          fd;
+};
+struct set_registry_relay_reply
+{
+    struct reply_header __header;
+};
+
+
+
+struct relay_registry_notification_request
+{
+    struct request_header __header;
+    obj_handle_t event;
+};
+struct relay_registry_notification_reply
+{
+    struct reply_header __header;
+    unsigned int cookie;
+    char __pad_12[4];
 };
 
 
@@ -6658,6 +6698,9 @@ enum request
     REQ_save_registry,
     REQ_set_registry_notification,
     REQ_rename_key,
+    REQ_get_registry_channel,
+    REQ_set_registry_relay,
+    REQ_relay_registry_notification,
     REQ_create_timer,
     REQ_open_timer,
     REQ_set_timer,
@@ -6991,6 +7034,9 @@ union generic_request
     struct save_registry_request save_registry_request;
     struct set_registry_notification_request set_registry_notification_request;
     struct rename_key_request rename_key_request;
+    struct get_registry_channel_request get_registry_channel_request;
+    struct set_registry_relay_request set_registry_relay_request;
+    struct relay_registry_notification_request relay_registry_notification_request;
     struct create_timer_request create_timer_request;
     struct open_timer_request open_timer_request;
     struct set_timer_request set_timer_request;
@@ -7322,6 +7368,9 @@ union generic_reply
     struct save_registry_reply save_registry_reply;
     struct set_registry_notification_reply set_registry_notification_reply;
     struct rename_key_reply rename_key_reply;
+    struct get_registry_channel_reply get_registry_channel_reply;
+    struct set_registry_relay_reply set_registry_relay_reply;
+    struct relay_registry_notification_reply relay_registry_notification_reply;
     struct create_timer_reply create_timer_reply;
     struct open_timer_reply open_timer_reply;
     struct set_timer_reply set_timer_reply;
@@ -7546,6 +7595,6 @@ union generic_reply
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 980
+#define SERVER_PROTOCOL_VERSION 983
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

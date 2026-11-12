@@ -7598,6 +7598,8 @@ NTSTATUS WINAPI NtQueryObject( HANDLE handle, OBJECT_INFORMATION_CLASS info_clas
 {
     unsigned int status;
 
+    handle = regvirt_underlying( handle );  /* a virtualized key (system tier T2b) */
+
     TRACE("(%p,0x%08x,%p,0x%08x,%p)\n", handle, info_class, ptr, len, used_len);
 
     if (used_len) *used_len = 0;
@@ -7613,7 +7615,8 @@ NTSTATUS WINAPI NtQueryObject( HANDLE handle, OBJECT_INFORMATION_CLASS info_clas
         SERVER_START_REQ( get_object_info )
         {
             req->handle = wine_server_obj_handle( handle );
-            status = wine_server_call( req );
+            status = regsrv_is_handle( handle ) ? regsrv_call( req, handle, &req->handle, NULL )
+                                            : wine_server_call( req );
             if (status == STATUS_SUCCESS)
             {
                 memset( p, 0, sizeof(*p) );
@@ -7636,7 +7639,8 @@ NTSTATUS WINAPI NtQueryObject( HANDLE handle, OBJECT_INFORMATION_CLASS info_clas
             req->handle = wine_server_obj_handle( handle );
             if (len > sizeof(*p) + sizeof(WCHAR))
                 wine_server_set_reply( req, p + 1, len - sizeof(*p) - sizeof(WCHAR) );
-            status = wine_server_call( req );
+            status = regsrv_is_handle( handle ) ? regsrv_call( req, handle, &req->handle, NULL )
+                                            : wine_server_call( req );
             if (status == STATUS_SUCCESS)
             {
                 if (!reply->total)  /* no name */
@@ -7675,7 +7679,8 @@ NTSTATUS WINAPI NtQueryObject( HANDLE handle, OBJECT_INFORMATION_CLASS info_clas
         {
             req->handle = wine_server_obj_handle( handle );
             wine_server_set_reply( req, buffer, sizeof(buffer) );
-            status = wine_server_call( req );
+            status = regsrv_is_handle( handle ) ? regsrv_call( req, handle, &req->handle, NULL )
+                                            : wine_server_call( req );
         }
         SERVER_END_REQ;
         if (status) break;

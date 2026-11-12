@@ -3,9 +3,12 @@ IMPORTS   = rpcrt4 advapi32 userenv setupapi
 ENABLE_ARCHS = $(HOST_ARCH)
 
 EXTRADLLFLAGS = -mwindows
+EXTRAIDLFLAGS = --prefix-client=s0_
 
 SOURCES = \
+	forward.c \
 	rpc.c \
 	services.c \
 	svcctl.idl \
+	svcctl_s0.idl \
 	utils.c

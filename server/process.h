@@ -113,6 +113,9 @@ struct process
     int                  wex_pin_pidfd;      /* kernel pin from the dialog loader's first fd transfer, else -1 */
     int                  wex_pin_pid;        /* SCM_CREDENTIALS pid and uid of that transfer */
     unsigned int         wex_pin_uid;
+    unsigned int         wex_registry_client:1; /* system tier: a registry-only client of session 0 */
+    struct object       *wex_relay;            /* system tier: where session 0 reports changes of its keys */
+    unsigned int         wex_relay_cookies;    /* system tier: notification cookies held for a registry client */
     unsigned int         e1s6_broker_image:1; /* lab only: mapped machine-root wexelevate image */
     unsigned int         e1s6_image_seen:1;
     unsigned long long   e1s6_broker_generation; /* fresh for each registration; server-issued */
@@ -194,6 +197,6 @@ static inline int is_wow64_process( struct process *process )
     return is_machine_64bit( native_machine ) && !is_machine_64bit( process->machine );
 }
 
-static const unsigned int default_session_id = 1;
+extern unsigned int default_session_id;  /* the session of this server's logon; from session 0 when it is used */
 
 #endif  /* __WINE_SERVER_PROCESS_H */

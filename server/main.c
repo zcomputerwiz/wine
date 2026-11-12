@@ -40,7 +40,9 @@
 #include "thread.h"
 #include "request.h"
 #include "unicode.h"
+#include "security.h"
 #include "sysrun.h"
+#include "session0.h"
 
 /* command-line options */
 int debug_level = 0;
@@ -59,6 +61,7 @@ static void usage( FILE *fh )
     fprintf(fh, "   -h,    --help            display this help message\n");
     fprintf(fh, "   -k[n], --kill[=n]        kill the current wineserver, optionally with signal n\n");
     fprintf(fh, "   -p[n], --persistent[=n]  make server persistent, optionally for n seconds\n");
+    fprintf(fh, "   --session0               serve the machine registry to other servers' programs\n");
     fprintf(fh, "   -v,    --version         display version information and exit\n");
     fprintf(fh, "   -w,    --wait            wait until the current wineserver terminates\n");
     fprintf(fh, "\n");
@@ -95,6 +98,9 @@ static void option_callback( int optc, char *optarg )
         else
             master_socket_timeout = TIMEOUT_INFINITE;
         break;
+    case 'S':
+        session0_server = 1;  /* known before the server directory is checked */
+        break;
     case 'v':
         fprintf( stderr, "%s\n", PACKAGE_STRING );
         exit(0);
@@ -119,6 +125,7 @@ static struct long_option
     {"help",        0, 'h'},
     {"kill",        2, 'k'},
     {"persistent",  2, 'p'},
+    {"session0",    0, 'S'},
     {"version",     0, 'v'},
     {"wait",        0, 'w'},
     { NULL }
@@ -260,6 +267,8 @@ int main( int argc, char *argv[] )
 
     sock_init();
     open_master_socket();
+    session0_init( session0_server );  /* before the registry is loaded */
+    security_init_server_user();       /* the user SID, which names HKEY_CURRENT_USER */
 
     if (debug_level) fprintf( stderr, "wineserver: starting (pid=%ld)\n", (long) getpid() );
     set_current_time();

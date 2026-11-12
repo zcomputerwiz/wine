@@ -1758,6 +1758,19 @@ DECL_HANDLER(init_first_thread)
     process->page_size = req->page_size;
     if (!init_thread( current, req->reply_fd, req->wait_fd )) return;
 
+    if (process->wex_registry_client)
+    {
+        /* system tier: no Unix pid (session 0 never signals or traces a registry client), no affinity and
+         * no debug level from the client */
+        reply->pid          = get_process_id( process );
+        reply->tid          = get_thread_id( current );
+        reply->session_id   = process->session_id;
+        reply->server_start = server_start_time;
+        set_reply_data( supported_machines,
+                        min( supported_machines_count * sizeof(unsigned short), get_reply_max_size() ));
+        return;
+    }
+
     current->unix_pid = process->unix_pid = req->unix_pid;
     current->unix_tid = req->unix_tid;
 

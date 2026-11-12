@@ -38,6 +38,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/file.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -54,6 +55,7 @@
 #include "unicode.h"
 #include "security.h"
 #include "sysrun.h"
+#include "session0.h"
 #include "e1s_token.h"
 #include "e1s_profile.h"
 #include "wine/wex_profile.h"
@@ -72,6 +74,8 @@ struct notify
     unsigned int      filter;   /* which events to notify on */
     obj_handle_t      hkey;     /* hkey associated with this notification */
     struct process   *process;  /* process in which the hkey is valid */
+    unsigned int     *cookies;  /* system tier: a registry-only client's notifications, sent to its relay */
+    unsigned int      cookie_count;
 };
 
 static const WCHAR key_name[] = {'K','e','y'};
@@ -162,6 +166,7 @@ struct e1s_hive
     enum { E1S_LOADING, E1S_LOADED, E1S_UNLOADING, E1S_POISONED } phase;
     unsigned int idle_sweeps;
     int refreshing;
+    int joined;             /* a later logon took a lease on the already loaded hive */
 };
 static struct e1s_hive *e1s_hives;
 #if defined(WEX_E1S13_HKU_TEST) && defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
@@ -242,16 +247,21 @@ struct save_branch_info
     bool            is_shared_machine;
     bool            sysrun;  /* machine hive of a system role server: fixed path, saved with the system group */
     struct e1s_hive *managed; /* S14: descriptor-only save, never filename routing */
+    void           *agent;    /* system tier T4a: the user's server that saves this hive (session 0) */
+    struct security_descriptor *owner_sd; /* T4a: default descriptor of the hive's keys, for its user */
+    struct key     *classes_alias;        /* T4a: \Registry\User\<SID>_Classes */
+    unsigned int    save_pending;         /* T4a: saves sent to the agent that it has not yet answered */
     struct list     tombstones;
 };
 
-#define MAX_SAVE_BRANCH_INFO 11 /* three startup branches and eight managed profiles */
+#define MAX_SAVE_BRANCH_INFO (11 + 64) /* three startup branches, eight managed profiles, 64 users' hives (session 0) */
 static int save_branch_count;
 static bool machine_hive_saved;  /* elevation enforced by the machine hive loaded at startup */
 static struct save_branch_info save_branch_info[MAX_SAVE_BRANCH_INFO];
 
 static bool registry_loaded = false;
 static bool in_merge = false;
+static int load_nofollow;  /* loading a hive that its user wrote: links are not followed */
 static uint64_t next_mod_seq = 0;
 
 static struct save_branch_info *find_branch_info( const struct key *key )
@@ -886,7 +896,8 @@ static void save_subkeys( const struct key *key, const struct key *base, FILE *f
     if (key->flags & KEY_VOLATILE) return;
     /* save key if it has either some values or no subkeys, or needs special options */
     /* keys with no values but subkeys are saved implicitly by saving the subkeys */
-    if ((key->last_value >= 0) || (key->last_subkey == -1) || key->class || (key->flags & KEY_SYMLINK))
+    if ((key->last_value >= 0) || (key->last_subkey == -1) || key->class || (key->flags & KEY_SYMLINK) ||
+        (session0_server && key->obj.sd))
     {
         fprintf( f, "\n[" );
         if (key != base) dump_path( key, base, f );
@@ -897,6 +908,17 @@ static void save_subkeys( const struct key *key, const struct key *base, FILE *f
             fprintf( f, "#class=\"" );
             dump_strW( key->class, key->classlen, f, "\"\"" );
             fprintf( f, "\"\n" );
+        }
+        /* the system tier's stored key permission */
+        if (session0_server && key->obj.sd)
+        {
+            const struct security_descriptor *sd = key->obj.sd;
+            const unsigned char *bytes = (const unsigned char *)sd;
+            data_size_t size = sizeof(*sd) + sd->owner_len + sd->group_len + sd->sacl_len + sd->dacl_len;
+            data_size_t n;
+            fprintf( f, "#sd=" );
+            for (n = 0; n < size; n++) fprintf( f, "%02x", (unsigned int)bytes[n] );
+            fprintf( f, "\n" );
         }
         if (key->flags & KEY_SYMLINK) fputs( "#link\n", f );
         for (i = 0; i <= key->last_value; i++) dump_value( &key->values[i], f );
@@ -1003,6 +1025,11 @@ static void do_notification( struct key *key, struct notify *notify, int del )
     free( notify->events );
     notify->events = NULL;
     notify->event_count = 0;
+    for (i = 0; i < notify->cookie_count; ++i) session0_relay_notify( notify->process, notify->cookies[i] );
+    if (notify->cookie_count) notify->process->wex_relay_cookies -= notify->cookie_count;
+    free( notify->cookies );
+    notify->cookies = NULL;
+    notify->cookie_count = 0;
 
     if (del)
     {
@@ -1086,7 +1113,7 @@ static int key_in_user_tree( struct key *key )
     if (!own_name)
     {
         struct unicode_str path;
-        WCHAR *full = format_user_registry_path( &local_user_sid, &path );
+        WCHAR *full = format_user_registry_path( security_server_user_sid(), &path );
         own_len = path.len - 5 * sizeof(WCHAR);  /* skip "User\\" */
         own_name = memdup( full + 5, own_len );
         free( full );
@@ -1179,6 +1206,11 @@ static struct security_descriptor *key_get_sd( struct object *obj )
 
     if (obj->sd) return obj->sd;
     if (((struct key *)obj)->e1s_sd) return ((struct key *)obj)->e1s_sd;
+    if (session0_server)  /* system tier T4a: a user's hive held by session 0 belongs to that user */
+    {
+        struct save_branch_info *info = find_branch_info( (struct key *)obj );
+        if (info && info->owner_sd) return info->owner_sd;
+    }
 
     if (key_in_user_tree( (struct key *)obj ))
     {
@@ -1186,7 +1218,7 @@ static struct security_descriptor *key_get_sd( struct object *obj )
         {
             const struct default_ace aces[] =
             {
-                { &local_user_sid,    CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+                { security_server_user_sid(), CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
                 { &local_system_sid,  CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
                 { &builtin_admins_sid, CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
             };
@@ -1263,6 +1295,13 @@ static struct object *key_lookup_name( struct object *obj, struct unicode_str *n
         struct key_value *value;
 
         if (!name->len && (attr & OBJ_OPENLINK)) return NULL;
+        /* system tier: a user's hive loaded in session 0 never reaches outside itself through its own links */
+        if (load_nofollow)
+        {
+            if (!name->len) return NULL;
+            set_error( STATUS_ACCESS_DENIED );
+            return NULL;
+        }
 
         if (!(value = find_value( key, symlink_str, &index )) ||
             value->len < sizeof(WCHAR) || *(WCHAR *)value->data != '\\')
@@ -2305,6 +2344,15 @@ static int load_global_option( const char *buffer, struct file_load_info *info )
     return 1;
 }
 
+/* value of a hex digit, or -1 if the character is not a hex digit */
+static int hex_digit_value( char c )
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
 /* load a key option from the input file */
 static int load_key_option( struct key *key, const char *buffer, struct file_load_info *info )
 {
@@ -2333,6 +2381,37 @@ static int load_key_option( struct key *key, const char *buffer, struct file_loa
         free( key->class );
         if (!(key->class = memdup( info->tmp, len ))) len = 0;
         key->classlen = len;
+    }
+    if (!strncmp( buffer, "#sd=", 4 ))
+    {
+        const char *hex = buffer + 4;
+        data_size_t hexlen = strlen( hex );
+        data_size_t size, n;
+        unsigned char *sd;
+
+        /* the system tier's stored key permission */
+        if (hexlen & 1) goto bad_sd;  /* odd length */
+        size = hexlen / 2;
+        if (!size || size > 65536) goto bad_sd;  /* empty or too large */
+        for (n = 0; n < hexlen; n++)
+            if (!isxdigit( hex[n] )) goto bad_sd;  /* non-hex character */
+        if (!(sd = mem_alloc( size ))) return 0;
+        for (n = 0; n < size; n++)
+            sd[n] = (hex_digit_value( hex[2*n] ) << 4) | hex_digit_value( hex[2*n+1] );
+        if (!sd_is_valid( (const struct security_descriptor *)sd, size ))
+        {
+            free( sd );
+            goto bad_sd;
+        }
+        set_sd_defaults_from_token( &key->obj, (const struct security_descriptor *)sd,
+            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION |
+            SACL_SECURITY_INFORMATION, NULL );
+        free( sd );
+        return 1;
+
+    bad_sd:
+        file_read_error( "Malformed security descriptor", info );
+        return 0;
     }
     if (!strncmp( buffer, "#link", 5 )) key->flags |= KEY_SYMLINK;
     /* ignore unknown options */
@@ -2810,8 +2889,9 @@ static FILE *fopen_machine_hive( const char *filename )
         if (errno != ENOENT) fatal_error( "cannot open the machine hive %s: %s\n", filename, strerror( errno ));
         return NULL;
     }
-    if (fstat( fd, &st ) || !S_ISREG( st.st_mode ) || st.st_uid != 0 || st.st_gid != sysrun_group() ||
-        (st.st_mode & S_IWOTH))
+    /* system tier: once session 0 owns the machine hives, it saves them as its own account */
+    if (fstat( fd, &st ) || !S_ISREG( st.st_mode ) || (st.st_uid != 0 && st.st_uid != session0_hive_owner()) ||
+        st.st_gid != sysrun_group() || (st.st_mode & S_IWOTH))
         fatal_error( "the machine hive %s is not a regular file of root and the system group\n", filename );
     if (!(f = fdopen( fd, "r" ))) fatal_error( "out of memory\n" );
     return f;
@@ -3114,6 +3194,45 @@ static void e1s_populate_volatile_env( struct key *user, const struct wex_profil
     release_object( vol_env );
 }
 
+/* A further logon of the account whose hive is already loaded and committed
+ * (E1-S18 review R14). The loaded bundle is kept; this request gets its own
+ * lease, to be committed once like the first. Only the exact same account,
+ * storage generation and user SID may join, after the storage and the token
+ * context have been validated again. The claim has already burned the LOAD
+ * attempt of this context. */
+static struct e1s_hive *e1s_join_hive( struct e1s_hive *m, struct token *token, obj_handle_t context,
+                                       const struct wex_account *account, uint64_t storage_generation,
+                                       unsigned int access, obj_handle_t *result )
+{
+    struct wex_profile_lease_reserved saved = m->storage.reserved;
+    unsigned int status;
+
+    if (memcmp( m->account.incarnation, account->incarnation, 16 ) ||
+        m->account.generation != account->generation || m->account.uid != account->uid ||
+        strcmp( m->account.name, account->name ) ||
+        !storage_generation || storage_generation != m->storage.profile_generation ||
+        memcmp( saved.user_sid, token_get_user_sid( token ), sizeof(saved.user_sid) ))
+    { e1s_deny( STATUS_OBJECT_NAME_COLLISION, "join-identity" ); return NULL; }
+    if (wex_profile_verify_existing( config_dir_fd, account, &m->storage ) ||
+        !token_validate_e1s_profile( context, token, account ))
+    { e1s_deny( STATUS_ACCESS_DENIED, "join-verify" ); return NULL; }
+    if (!e1s_acquire_lease( m, token, context )) { m->storage.reserved = saved; return NULL; }
+    if (!(*result = e1s_alloc_key_handle( m->user, access, 0 )) ||
+        !token_bind_e1s_profile( context, token, m->storage.reserved.lease_id ))
+    {
+        status = get_error();
+        if (*result) { close_handle( current->process, *result ); *result = 0; }
+        m->storage.reserved = saved;
+        set_error( status ? status : STATUS_INVALID_HANDLE );
+        return NULL;
+    }
+    m->joined = 1;
+    m->idle_sweeps = 0;
+    fprintf( stderr, "E1S14 join lease state=1\n" );
+    clear_error();
+    return m;
+}
+
 static struct e1s_hive *e1s_load_hive( struct token *token, obj_handle_t context,
                                      const unsigned char *record, data_size_t size,
                                      unsigned int access, obj_handle_t *result )
@@ -3133,13 +3252,15 @@ static struct e1s_hive *e1s_load_hive( struct token *token, obj_handle_t context
     for (other = e1s_hives; other; other = other->next)
         if (!memcmp( other->account.sid, account.sid, sizeof(account.sid) ))
         {
+            if (other->phase == E1S_LOADED && other->storage.reserved.state == 2)
+                return e1s_join_hive( other, token, context, &account, wex_token_u64( record + 32 ), access, result );
             e1s_deny( other->phase == E1S_UNLOADING ? STATUS_DELETE_PENDING :
                       other->phase == E1S_LOADING ? STATUS_DEVICE_NOT_READY :
                       other->phase == E1S_POISONED ? STATUS_REGISTRY_CORRUPT : STATUS_OBJECT_NAME_COLLISION,
                       "load-conflict" );
             return NULL;
         }
-    if (equal_sid( token_get_user_sid( token ), &local_user_sid ) || e1s_hive_count >= 8)
+    if (equal_sid( token_get_user_sid( token ), security_server_user_sid() ) || e1s_hive_count >= 8)
     { set_error( STATUS_ACCESS_DENIED ); return NULL; }
     if (!(m = calloc( 1, sizeof(*m) ))) { set_error( STATUS_NO_MEMORY ); return NULL; }
     m->account = account; m->storage.profile_fd = m->storage.hive_fd = m->storage.sid_lock_fd = -1;
@@ -3359,6 +3480,10 @@ static int e1s_unload_hive( struct e1s_hive *m )
     if (m->phase == E1S_LOADING) return e1s_deny( STATUS_DEVICE_NOT_READY, "unload-loading" );
     if (m->phase == E1S_UNLOADING) return e1s_deny( STATUS_DELETE_PENDING, "unload-unloading" );
     if (m->phase != E1S_LOADED) return e1s_deny( STATUS_REGISTRY_CORRUPT, "unload-recovery" );
+    /* A later logon whose setup failed gives only its own lease back: the hive
+     * returns to the committed state of the earlier users and stays loaded
+     * while they live. */
+    if (m->joined && m->storage.reserved.state == 1) m->storage.reserved.state = 2;
     memcpy( sid.sub_auth, m->account.sid, sizeof(m->account.sid) );
     if (process_e1s_profile_busy( &sid ))
     {
@@ -3757,7 +3882,7 @@ void init_registry(void)
     /* load user.reg into HKEY_CURRENT_USER */
 
     /* FIXME: match default user in token.c. should get from process token instead */
-    current_user_path = format_user_registry_path( &local_user_sid, &current_user_str );
+    current_user_path = format_user_registry_path( security_server_user_sid(), &current_user_str );
     if (!current_user_path ||
         !(hkcu = create_key_recursive( root_key, current_user_str, current_time )))
         fatal_error( "could not create HKEY_CURRENT_USER registry key\n" );
@@ -4263,9 +4388,212 @@ done:
     return ret;
 }
 
+/* System tier T4a (docs/SYSTEM_TIER_WORK_ORDERS.md): session 0 holds a user's hive for the user's own server,
+ * which reads user.reg for it at the first program's registry call and writes what session 0 sends back, since
+ * session 0's account cannot write in the user's home. */
+
+static struct save_branch_info *session0_find_agent( void *agent )
+{
+    int i;
+
+    for (i = 0; i < save_branch_count; i++) if (save_branch_info[i].agent == agent) return &save_branch_info[i];
+    return NULL;
+}
+
+/* send the hive to its server when it changed; 1 when saved or unchanged */
+static int session0_save_user_hive( struct save_branch_info *info )
+{
+    FILE *f;
+    int fd, ret = 0;
+
+    if (!(info->key->flags & KEY_DIRTY)) return 1;
+    if ((fd = memfd_create( "wex-user-hive", MFD_CLOEXEC )) == -1) return 0;
+    if ((f = fdopen( dup( fd ), "w" )))
+    {
+        save_all_subkeys( info->key, f );
+        if (!fflush( f ) && !ferror( f ) && session0_send_hive( info->agent, fd ))
+        {
+            /* clean from now on; HIVE_SAVED with a failure, or none, makes it dirty again */
+            make_clean( info->key );
+            info->save_pending++;
+            ret = 1;
+        }
+        fclose( f );
+    }
+    close( fd );
+    return ret;
+}
+
+/* the agent's answer to a hive it was sent (answers come in the order of the saves) */
+void session0_user_hive_saved( void *agent, int ok )
+{
+    struct save_branch_info *info = session0_find_agent( agent );
+
+    if (!info || !info->save_pending) return;
+    info->save_pending--;
+    if (!ok) info->key->flags |= KEY_DIRTY;  /* the whole hive is sent again at the next period */
+}
+
+/* a private copy of the user's hive that the user's server sent: a sealed memory file, so that it cannot change
+ * or block while session 0 reads it; NULL when it is not one */
+static FILE *session0_hive_snapshot( int fd, char **text )
+{
+    const int seals = F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE;
+    struct stat st;
+    size_t used = 0;
+    ssize_t n;
+    FILE *f;
+
+    *text = NULL;
+    if ((fcntl( fd, F_GET_SEALS ) & seals) != seals || fstat( fd, &st ) || !S_ISREG( st.st_mode ) ||
+        st.st_size <= 0 || st.st_size > SESSION0_MAX_USER_HIVE) return NULL;
+    if (!(*text = malloc( st.st_size + 1 ))) return NULL;
+    while (used < st.st_size)
+    {
+        n = pread( fd, *text + used, st.st_size - used, used );
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        used += n;
+    }
+    if (used == st.st_size && !memchr( *text, 0, used ) && (f = fmemopen( *text, used, "r" ))) return f;
+    free( *text );
+    *text = NULL;
+    return NULL;
+}
+
+/* load a user's hive (fd: the user's user.reg, or -1 for a new one) under \Registry\User\<sid> for agent */
+unsigned int session0_load_user_hive( const struct sid *sid, int fd, void *agent )
+{
+    static const WCHAR classes_link[] = {'\\','R','e','g','i','s','t','r','y','\\','U','s','e','r','\\'};
+    struct save_branch_info *info;
+    struct unicode_str path, alias_path, target;
+    struct key *key = NULL, *alias = NULL;
+    WCHAR *name = NULL, *alias_name = NULL, *link = NULL;
+    data_size_t len;
+    FILE *f = NULL;
+    char *text = NULL;
+    unsigned int status;
+
+    const struct default_ace aces[] =
+    {
+        { sid,                 CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+        { &local_system_sid,   CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+        { &builtin_admins_sid, CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+    };
+
+    if (save_branch_count >= MAX_SAVE_BRANCH_INFO)
+    {
+        status = STATUS_INSUFFICIENT_RESOURCES;
+        goto done;
+    }
+    if (fd != -1 && !(f = session0_hive_snapshot( fd, &text )))
+    {
+        status = STATUS_NOT_REGISTRY_FILE;
+        goto done;
+    }
+    if (!(name = format_user_registry_path( sid, &path )))
+    {
+        status = STATUS_NO_MEMORY;
+        goto done;
+    }
+    clear_error();
+    if (!(key = create_key_recursive( root_key, path, current_time )))
+    {
+        status = get_error() ? get_error() : STATUS_NO_MEMORY;
+        goto done;
+    }
+    if (find_branch_info( key ) && find_branch_info( key )->key == key)
+    {
+        status = STATUS_OBJECT_NAME_COLLISION;  /* held for another server of the same user */
+        goto done;
+    }
+    if (f)
+    {
+        load_nofollow = 1;
+        load_keys( key, "<user hive>", f, 0 );
+        load_nofollow = 0;
+    }
+    clear_error();
+
+    /* \Registry\User\<sid>_Classes is a link to the hive's Software\Classes, as in the E1 profile hives */
+    alias_path.len = path.len + 8 * sizeof(WCHAR);
+    len = sizeof(classes_link) + (path.len - 5 * sizeof(WCHAR)) + sizeof(L"\\Software\\Classes") - sizeof(WCHAR);
+    if (!(alias_name = mem_alloc( alias_path.len )) || !(link = mem_alloc( len )))
+    {
+        status = STATUS_NO_MEMORY;
+        goto done;
+    }
+    memcpy( alias_name, path.str, path.len );
+    memcpy( (char *)alias_name + path.len, L"_Classes", 8 * sizeof(WCHAR) );
+    alias_path.str = alias_name;
+    memcpy( link, classes_link, sizeof(classes_link) );
+    memcpy( (char *)link + sizeof(classes_link), path.str + 5, path.len - 5 * sizeof(WCHAR) );
+    memcpy( (char *)link + sizeof(classes_link) + path.len - 5 * sizeof(WCHAR), L"\\Software\\Classes",
+            sizeof(L"\\Software\\Classes") - sizeof(WCHAR) );
+    target.str = link;
+    target.len = len;
+    if ((alias = create_key_recursive( root_key, alias_path, current_time )))
+    {
+        set_value( alias, symlink_str, REG_LINK, target.str, target.len );
+        alias->flags |= KEY_SYMLINK | KEY_VOLATILE;
+    }
+    clear_error();
+
+    info = &save_branch_info[save_branch_count++];
+    memset( info, 0, sizeof(*info) );
+    list_init( &info->tombstones );
+    info->key = (struct key *)grab_object( key );
+    info->filename = "<user hive>";  /* diagnostics only: the agent saves it */
+    info->agent = agent;
+    info->owner_sd = key_alloc_default_sd( aces, ARRAY_SIZE(aces) );
+    info->classes_alias = alias ? (struct key *)grab_object( alias ) : NULL;
+    make_clean( key );
+    status = STATUS_SUCCESS;
+
+done:
+    if (f) fclose( f );
+    free( text );
+    if (fd != -1) close( fd );
+    if (key) release_object( key );
+    if (alias) release_object( alias );
+    free( name );
+    free( alias_name );
+    free( link );
+    return status;
+}
+
+/* the agent's server is leaving: save once more when asked, then drop the hive */
+void session0_unload_user_hive( void *agent, int save )
+{
+    struct save_branch_info *info = session0_find_agent( agent );
+    int i;
+
+    if (!info) return;
+    if (save) session0_save_user_hive( info );
+    i = info - save_branch_info;
+    if (info->classes_alias)
+    {
+        unlink_named_object( &info->classes_alias->obj );
+        release_object( info->classes_alias );
+    }
+    info->key->flags |= KEY_DELETED;
+    unlink_named_object( &info->key->obj );
+    release_object( info->key );
+    free( info->owner_sd );
+    if (i != --save_branch_count) save_branch_info[i] = save_branch_info[save_branch_count];
+    list_init( &save_branch_info[i].tombstones );  /* the lists of user hives and managed profiles are empty */
+    memset( &save_branch_info[save_branch_count], 0, sizeof(save_branch_info[0]) );
+}
+
 static int save_branch( struct save_branch_info *info )
 {
     if (info->managed) return e1s_save_hive( info->managed );
+    if (info->agent) return session0_save_user_hive( info );
+    /* System tier: session 0 owns the machine hives. A server whose programs use session 0 keeps its copy of
+     * them only for the per-session keys, which are never saved, and its own start-up reads. */
+    if (session0_client && (info == &save_branch_info[0] || info == &save_branch_info[1])) return 1;
+    /* T4a: so is the user's hive once session 0 holds it; session 0 sends it back to be written */
+    if (session0_user_hive_remote() && info == &save_branch_info[2]) return 1;
     /* The system group is raised for the save only if elevation was enforced by the on-disk hive at startup (the
      * access checks then decide which writes exist); otherwise a machine hive keeps the stock rule: it is saved if
      * the real user can write it. The live value is not used: a user could set the helper in memory. */
@@ -4296,7 +4624,9 @@ static void periodic_save( void *arg )
 static void set_periodic_save_timer(void)
 {
     if (save_timeout_user) remove_timeout_user( save_timeout_user );
-    save_timeout_user = add_timeout_user( save_period, periodic_save, NULL );
+    /* system tier: session 0 holds every session's machine registry; it saves changes within 5 s, as the
+     * lazy flush of Windows does (unchanged hives are not written) */
+    save_timeout_user = add_timeout_user( session0_server ? 5 * -TICKS_PER_SEC : save_period, periodic_save, NULL );
 }
 
 /* save the modified registry branches to disk */
@@ -4304,6 +4634,7 @@ void flush_registry(void)
 {
     int i;
 
+    session0_client_exit();  /* T4a: the last changes of the user's hive held by session 0 */
     if (fchdir( config_dir_fd ) == -1) return;
     for (i = 0; i < save_branch_count; i++)
     {
@@ -4359,7 +4690,9 @@ DECL_HANDLER(create_key)
         !e1s_find_hive( token_e1s_account( current->token ? current->token : current->process->token ) ))
     { set_error( STATUS_OBJECT_NAME_NOT_FOUND ); return; }
 
-    if (!is_wow64_process( current->process )) access = (access & ~KEY_WOW64_32KEY) | KEY_WOW64_64KEY;
+    /* system tier: a registry-only client of session 0 states its program's view in every request */
+    if (!is_wow64_process( current->process ) && !current->process->wex_registry_client)
+        access = (access & ~KEY_WOW64_32KEY) | KEY_WOW64_64KEY;
     if (!(access & KEY_WOW64_64KEY)) params.attr |= OBJ_KEY_WOW64;
     if (req->options & REG_OPTION_CREATE_LINK) params.attr = (params.attr & ~OBJ_OPENIF) | OBJ_OPENLINK;
 
@@ -4416,7 +4749,9 @@ DECL_HANDLER(open_key)
     struct object_params params = { .ops = &key_ops, .name = get_req_unicode_str(),
                                     .attr = req->attributes };
 
-    if (!is_wow64_process( current->process )) access = (access & ~KEY_WOW64_32KEY) | KEY_WOW64_64KEY;
+    /* system tier: a registry-only client of session 0 states its program's view in every request */
+    if (!is_wow64_process( current->process ) && !current->process->wex_registry_client)
+        access = (access & ~KEY_WOW64_32KEY) | KEY_WOW64_64KEY;
     if (!(access & KEY_WOW64_64KEY)) params.attr |= OBJ_KEY_WOW64;
 
     if (req->parent)
@@ -4632,6 +4967,34 @@ DECL_HANDLER(set_registry_notification)
     {
         if (key->e1s_view)
         { set_error( STATUS_NOT_SUPPORTED ); release_object( key ); return; }
+        if (current->process->wex_registry_client && !req->event && req->relay_cookie)
+        {
+            /* system tier: the change is reported to the program's own server, which sets its event */
+            unsigned int *cookies;
+
+            /* the same bound as the program's relay: a client sending raw requests cannot grow session 0 */
+            if (current->process->wex_relay_cookies >= SESSION0_MAX_COOKIES)
+            { set_error( STATUS_INSUFFICIENT_RESOURCES ); release_object( key ); return; }
+            if (!(notify = find_notify( key, current->process, req->hkey )) && (notify = mem_alloc( sizeof(*notify) )))
+            {
+                memset( notify, 0, sizeof(*notify) );
+                notify->subtree = req->subtree;
+                notify->filter  = req->filter;
+                notify->hkey    = req->hkey;
+                notify->process = current->process;
+                list_add_head( &key->notify_list, &notify->entry );
+            }
+            if (notify && (cookies = realloc( notify->cookies, (notify->cookie_count + 1) * sizeof(*cookies) )))
+            {
+                notify->cookies = cookies;
+                notify->cookies[notify->cookie_count++] = req->relay_cookie;
+                current->process->wex_relay_cookies++;
+                set_error( STATUS_PENDING );
+            }
+            else if (notify) set_error( STATUS_NO_MEMORY );
+            release_object( key );
+            return;
+        }
         event = get_event_obj( current->process, req->event, SYNCHRONIZE );
         if (event)
         {
@@ -4643,6 +5006,8 @@ DECL_HANDLER(set_registry_notification)
                 {
                     notify->events  = NULL;
                     notify->event_count = 0;
+                    notify->cookies = NULL;
+                    notify->cookie_count = 0;
                     notify->subtree = req->subtree;
                     notify->filter  = req->filter;
                     notify->hkey    = req->hkey;

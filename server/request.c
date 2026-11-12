@@ -60,6 +60,7 @@
 #include "security.h"
 #include "handle.h"
 #include "request_handlers.h"
+#include "session0.h"
 #ifdef WEX_E1S6_TRANSPORT_TEST
 #include "sysrun.h"
 #endif
@@ -283,10 +284,12 @@ static void call_req_handler( struct thread *thread )
 
     if (debug_level) trace_request();
 
-    if (req < REQ_NB_REQUESTS)
-        req_handlers[req]( &current->req, &reply );
-    else
+    if (req >= REQ_NB_REQUESTS)
         set_error( STATUS_NOT_IMPLEMENTED );
+    else if (current->process->wex_registry_client && !session0_request_allowed( req ))
+        set_error( STATUS_ACCESS_DENIED );  /* system tier: a registry channel makes registry requests only */
+    else
+        req_handlers[req]( &current->req, &reply );
 
     if (current)
     {
@@ -771,7 +774,9 @@ static char *create_server_dir( int force )
         fatal_error( "open %s: %s\n", config_dir, strerror( errno ));
     if (fstat( config_dir_fd, &st ) == -1)
         fatal_error( "stat %s: %s\n", config_dir, strerror( errno ));
-    if (st.st_uid != getuid())
+    /* system tier: session 0 runs as its own account on the machine root, which stays root's (the launcher
+     * trusts only root-owned paths) and is writable through the system group */
+    if (st.st_uid != getuid() && !(session0_server && st.st_uid == 0))
         fatal_error( "%s is not owned by you\n", config_dir );
 
     /* create the base directory if needed */

@@ -76,6 +76,7 @@
 #include "winnt.h"
 #include "winioctl.h"
 #include "wine/server.h"
+#include "wine/wex_session0.h"
 #include "wine/debug.h"
 #include "unix_private.h"
 #include "ddk/wdm.h"
@@ -278,6 +279,605 @@ static inline unsigned int wait_reply( int reply_fd, struct __server_request_inf
     if (req->u.reply.reply_header.reply_size)
         read_reply_data( reply_fd, req->reply_data, req->u.reply.reply_header.reply_size );
     return req->u.reply.reply_header.error;
+}
+
+
+/***********************************************************************
+ * WineExplorer system tier (docs/SYSTEM_TIER_DESIGN.md; docs/SYSTEM_TIER_WORK_ORDERS.md, T1).
+ *
+ * When this process's server uses session 0 (it answers get_registry_channel), the registry calls for the
+ * machine trees (\Registry\Machine and \Registry\User\.Default, except the per-session keys listed in
+ * wine/wex_session0.h) go to session 0 over a channel of this process's own: a socket that the server got
+ * from session 0 together with a description of this process's token. Session 0's key handles are entries
+ * of a table here, handed out as REGSRV_TAG + index * 4, so that they survive a new channel: when the
+ * channel is lost, the next call gets a new one and reopens each key by its path before using it. All
+ * threads share the channel under a mutex.
+ */
+#define REGSRV_TAG  0x40000000
+#define REGSRV_MAX  0x00400000  /* table entries */
+
+struct regsrv_key
+{
+    obj_handle_t remote;       /* handle in session 0, valid for generation */
+    unsigned int generation;
+    ACCESS_MASK  access;
+    ULONG        attributes;   /* for a reopen */
+    WCHAR       *path;         /* absolute path as opened; NULL for a free entry */
+    USHORT       len;          /* in bytes */
+};
+
+static struct regsrv_key *regsrv_keys;
+static unsigned int regsrv_keys_count, regsrv_keys_size;
+static unsigned int regsrv_generation = 1;
+static int regsrv_state;  /* 0 not asked yet, 1 session 0 in use, -1 not used */
+static int regsrv_sock = -1, regsrv_request_fd = -1, regsrv_reply_fd = -1, regsrv_wait_fd = -1;
+static pthread_mutex_t regsrv_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static const char * const regsrv_session_machine_keys[] = { WEX_SESSION_MACHINE_KEYS };
+static const char * const regsrv_session_default_keys[] = { WEX_SESSION_DEFAULT_USER_KEYS };
+
+static int get_unix_tid(void);
+
+/* characters of path matched by an ASCII prefix that ends there or at a backslash, without regard to case */
+static unsigned int regsrv_match( const WCHAR *path, unsigned int count, const char *prefix )
+{
+    unsigned int i, len = strlen( prefix );
+
+    if (count < len) return 0;
+    for (i = 0; i < len; i++)
+    {
+        WCHAR ch = path[i];
+        unsigned char p = prefix[i];
+        if (ch >= 'A' && ch <= 'Z') ch += 'a' - 'A';
+        if (p >= 'A' && p <= 'Z') p += 'a' - 'A';
+        if (ch != p) return 0;
+    }
+    return (count == len || path[len] == '\\') ? len : 0;
+}
+
+/* the path starts with an ASCII prefix, without regard to case */
+static BOOL regsrv_match_start( const WCHAR *path, unsigned int count, const char *prefix )
+{
+    unsigned int i, len = strlen( prefix );
+
+    if (count < len) return FALSE;
+    for (i = 0; i < len; i++)
+    {
+        WCHAR ch = path[i];
+        unsigned char p = prefix[i];
+        if (ch >= 'A' && ch <= 'Z') ch += 'a' - 'A';
+        if (p >= 'A' && p <= 'Z') p += 'a' - 'A';
+        if (ch != p) return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL regsrv_in_list( const WCHAR *rest, unsigned int count, const char * const *list, unsigned int n )
+{
+    unsigned int i;
+
+    for (i = 0; i < n; i++) if (regsrv_match( rest, count, list[i] )) return TRUE;
+    return FALSE;
+}
+
+/* a path of the machine trees that session 0 holds */
+static BOOL regsrv_machine_path( const WCHAR *path, USHORT len )
+{
+    unsigned int count = len / sizeof(WCHAR), n;
+
+    if (!path) return FALSE;
+    if ((n = regsrv_match( path, count, "\\Registry\\Machine" )))
+        return n == count || !regsrv_in_list( path + n + 1, count - n - 1, regsrv_session_machine_keys,
+                                              ARRAY_SIZE(regsrv_session_machine_keys) );
+    if ((n = regsrv_match( path, count, "\\Registry\\User\\.Default" )))
+        return n == count || !regsrv_in_list( path + n + 1, count - n - 1, regsrv_session_default_keys,
+                                              ARRAY_SIZE(regsrv_session_default_keys) );
+    return FALSE;
+}
+
+/* T4a: when session 0 also holds this process's user hive, the absolute paths of \Registry\User\<SID> and
+ * <SID>_Classes for the process token's user go there too (ASCII, set at each new channel) */
+static int regsrv_user_hive;
+static char regsrv_user_prefix[160];
+
+static void regsrv_set_user_prefix(void)
+{
+    DWORD_PTR sid_data[(sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE) / sizeof(DWORD_PTR)];
+    DWORD i, len = sizeof(sid_data);
+    SID *sid;
+    int n;
+
+    regsrv_user_prefix[0] = 0;
+    if (NtQueryInformationToken( (HANDLE)~(ULONG_PTR)3 /* the process token */, TokenUser, sid_data, len, &len ))
+        return;
+    sid = ((TOKEN_USER *)sid_data)->User.Sid;
+    n = snprintf( regsrv_user_prefix, sizeof(regsrv_user_prefix), "\\Registry\\User\\S-%u-%u", sid->Revision,
+                  MAKELONG( MAKEWORD( sid->IdentifierAuthority.Value[5], sid->IdentifierAuthority.Value[4] ),
+                            MAKEWORD( sid->IdentifierAuthority.Value[3], sid->IdentifierAuthority.Value[2] )));
+    for (i = 0; i < sid->SubAuthorityCount && n > 0 && n < (int)sizeof(regsrv_user_prefix); i++)
+        n += snprintf( regsrv_user_prefix + n, sizeof(regsrv_user_prefix) - n, "-%u", sid->SubAuthority[i] );
+    if (n <= 0 || n >= (int)sizeof(regsrv_user_prefix) - 9) regsrv_user_prefix[0] = 0;
+}
+
+/* a path below \Registry\User\S-: perhaps this process's user hive */
+static BOOL regsrv_user_candidate( const WCHAR *path, USHORT len )
+{
+    return path && regsrv_match_start( path, len / sizeof(WCHAR), "\\Registry\\User\\S-" );
+}
+
+/* this process's user hive (or its _Classes), held by session 0 */
+static BOOL regsrv_user_path( const WCHAR *path, USHORT len )
+{
+    char classes[176];
+    unsigned int count = len / sizeof(WCHAR);
+
+    if (!regsrv_user_hive || !regsrv_user_prefix[0] || !path) return FALSE;
+    if (regsrv_match( path, count, regsrv_user_prefix )) return TRUE;
+    snprintf( classes, sizeof(classes), "%s_Classes", regsrv_user_prefix );
+    return regsrv_match( path, count, classes ) != 0;
+}
+
+static void regsrv_lock( sigset_t *old )
+{
+    pthread_sigmask( SIG_BLOCK, &server_block_set, old );
+    pthread_mutex_lock( &regsrv_mutex );
+}
+
+static void regsrv_unlock( sigset_t *old )
+{
+    pthread_mutex_unlock( &regsrv_mutex );
+    pthread_sigmask( SIG_SETMASK, old, NULL );
+}
+
+static void regsrv_disconnect(void)
+{
+    if (regsrv_request_fd != -1) close( regsrv_request_fd );
+    if (regsrv_reply_fd != -1) close( regsrv_reply_fd );
+    if (regsrv_wait_fd != -1) close( regsrv_wait_fd );
+    if (regsrv_sock != -1) close( regsrv_sock );
+    regsrv_request_fd = regsrv_reply_fd = regsrv_wait_fd = regsrv_sock = -1;
+    regsrv_generation++;
+}
+
+/* send a request and read its reply on the channel; FALSE when the channel is lost */
+static BOOL regsrv_transfer( struct __server_request_info *req, unsigned int *status )
+{
+    struct iovec vec[__SERVER_MAX_DATA + 1];
+    unsigned int i, count = 1;
+    size_t left = sizeof(req->u.req);
+    char *ptr;
+    ssize_t ret;
+
+    vec[0].iov_base = &req->u.req;
+    vec[0].iov_len = sizeof(req->u.req);
+    if (req->u.req.request_header.request_size)
+    {
+        for (i = 0; i < req->data_count; i++)
+        {
+            vec[count].iov_base = (void *)req->data[i].ptr;
+            vec[count].iov_len = req->data[i].size;
+            left += req->data[i].size;
+            count++;
+        }
+    }
+    while (left)
+    {
+        if ((ret = writev( regsrv_request_fd, vec, count )) < 0)
+        {
+            if (errno == EINTR) continue;
+            return FALSE;
+        }
+        left -= ret;
+        for (i = 0; i < count && ret; i++)
+        {
+            size_t part = min( (size_t)ret, vec[i].iov_len );
+            vec[i].iov_base = (char *)vec[i].iov_base + part;
+            vec[i].iov_len -= part;
+            ret -= part;
+        }
+    }
+
+    for (ptr = (char *)&req->u.reply, left = sizeof(req->u.reply); left; )
+    {
+        if ((ret = read( regsrv_reply_fd, ptr, left )) > 0) { ptr += ret; left -= ret; continue; }
+        if (ret < 0 && errno == EINTR) continue;
+        return FALSE;
+    }
+    for (ptr = req->reply_data, left = req->u.reply.reply_header.reply_size; left; )
+    {
+        if ((ret = read( regsrv_reply_fd, ptr, left )) > 0) { ptr += ret; left -= ret; continue; }
+        if (ret < 0 && errno == EINTR) continue;
+        return FALSE;
+    }
+    *status = req->u.reply.reply_header.error;
+    return TRUE;
+}
+
+static int regsrv_receive_fd( int sock, obj_handle_t *handle )
+{
+    char cmsg_buffer[256];
+    struct msghdr msghdr;
+    struct cmsghdr *cmsg;
+    struct iovec vec;
+    int ret, fd = -1;
+
+    memset( &msghdr, 0, sizeof(msghdr) );
+    vec.iov_base = handle;
+    vec.iov_len = sizeof(*handle);
+    msghdr.msg_iov = &vec;
+    msghdr.msg_iovlen = 1;
+    msghdr.msg_control = cmsg_buffer;
+    msghdr.msg_controllen = sizeof(cmsg_buffer);
+    do ret = recvmsg( sock, &msghdr, MSG_CMSG_CLOEXEC ); while (ret == -1 && errno == EINTR);
+    if (ret <= 0) return -1;
+    for (cmsg = CMSG_FIRSTHDR( &msghdr ); cmsg; cmsg = CMSG_NXTHDR( &msghdr, cmsg ))
+        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) memcpy( &fd, CMSG_DATA( cmsg ), sizeof(fd) );
+    return fd;
+}
+
+static BOOL regsrv_send_fd( int sock, int fd )
+{
+    struct send_fd data = { 0, fd };  /* thread id 0: the channel's only thread */
+    char cmsg_buffer[CMSG_SPACE( sizeof(int) )];
+    struct msghdr msghdr;
+    struct cmsghdr *cmsg;
+    struct iovec vec;
+    int ret;
+
+    memset( &msghdr, 0, sizeof(msghdr) );
+    vec.iov_base = &data;
+    vec.iov_len = sizeof(data);
+    msghdr.msg_iov = &vec;
+    msghdr.msg_iovlen = 1;
+    msghdr.msg_control = cmsg_buffer;
+    msghdr.msg_controllen = sizeof(cmsg_buffer);
+    cmsg = CMSG_FIRSTHDR( &msghdr );
+    cmsg->cmsg_len = CMSG_LEN( sizeof(fd) );
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    memcpy( CMSG_DATA( cmsg ), &fd, sizeof(fd) );
+    do ret = sendmsg( sock, &msghdr, MSG_NOSIGNAL ); while (ret == -1 && errno == EINTR);
+    return ret == sizeof(data);
+}
+
+/* ask this process's server for a channel and make the client handshake on it; with regsrv_mutex held */
+static BOOL regsrv_connect(void)
+{
+    obj_handle_t cookie = 0, handle = 0, version = 0;
+    int user_hive = 0;
+    int sock = -1, request = -1, reply_pipe[2] = { -1, -1 }, wait_pipe[2] = { -1, -1 };
+    unsigned int status;
+    WORD machines[8];
+    sigset_t sigset;
+
+    server_enter_uninterrupted_section( &fd_cache_mutex, &sigset );
+    SERVER_START_REQ( get_registry_channel )
+    {
+        status = wine_server_call( req );
+        cookie = reply->cookie;
+        user_hive = reply->user_hive;
+    }
+    SERVER_END_REQ;
+    if (!status) sock = wine_server_receive_fd( &handle );
+    server_leave_uninterrupted_section( &fd_cache_mutex, &sigset );
+
+    if (status == STATUS_NOT_SUPPORTED || status == STATUS_NOT_IMPLEMENTED)
+    {
+        regsrv_state = -1;  /* this server keeps the machine registry itself */
+        return FALSE;
+    }
+    regsrv_state = 1;  /* from now on the machine trees are session 0's, reachable or not */
+    if ((regsrv_user_hive = !status && user_hive)) regsrv_set_user_prefix();
+    if (status || sock == -1 || handle != cookie) goto error;
+
+    if ((request = regsrv_receive_fd( sock, &version )) == -1 || version != SERVER_PROTOCOL_VERSION) goto error;
+    if (server_pipe( reply_pipe ) == -1 || server_pipe( wait_pipe ) == -1) goto error;
+    if (!regsrv_send_fd( sock, reply_pipe[1] ) || !regsrv_send_fd( sock, wait_pipe[1] )) goto error;
+    regsrv_sock = sock;
+    regsrv_request_fd = request;
+    regsrv_reply_fd = reply_pipe[0];
+    regsrv_wait_fd = wait_pipe[0];
+    sock = request = reply_pipe[0] = wait_pipe[0] = -1;
+
+    SERVER_START_REQ( init_first_thread )
+    {
+        req->unix_pid    = getpid();
+        req->unix_tid    = get_unix_tid();
+        req->reply_fd    = reply_pipe[1];
+        req->wait_fd     = wait_pipe[1];
+        req->debug_level = 0;
+        req->page_size   = get_host_page_size();
+        wine_server_set_reply( req, machines, sizeof(machines) );
+        if (!regsrv_transfer( &__req, &status )) status = STATUS_PIPE_DISCONNECTED;
+    }
+    SERVER_END_REQ;
+    close( reply_pipe[1] );
+    close( wait_pipe[1] );
+    if (status)
+    {
+        regsrv_disconnect();
+        return FALSE;
+    }
+
+    /* session 0 reports key changes on the wait pipe: its read end goes to this process's server, which
+     * sets the events of the notifications (relay_registry_notification) */
+    wine_server_send_fd( regsrv_wait_fd );
+    SERVER_START_REQ( set_registry_relay )
+    {
+        req->fd = regsrv_wait_fd;
+        status = wine_server_call( req );
+    }
+    SERVER_END_REQ;
+    if (status) WARN( "no relay for change notifications: %08x\n", status );
+    close( regsrv_wait_fd );
+    regsrv_wait_fd = -1;
+    return TRUE;
+
+error:
+    if (sock != -1) close( sock );
+    if (request != -1) close( request );
+    if (reply_pipe[0] != -1) { close( reply_pipe[0] ); close( reply_pipe[1] ); }
+    if (wait_pipe[0] != -1) { close( wait_pipe[0] ); close( wait_pipe[1] ); }
+    return FALSE;
+}
+
+static struct regsrv_key *regsrv_get( HANDLE handle )
+{
+    ULONG_PTR value = (ULONG_PTR)handle;
+    unsigned int index;
+
+    if (value < REGSRV_TAG || value >= REGSRV_TAG + REGSRV_MAX * 4 || (value & 3)) return NULL;
+    index = (value - REGSRV_TAG) / 4;
+    if (index >= regsrv_keys_count || !regsrv_keys[index].path) return NULL;
+    return &regsrv_keys[index];
+}
+
+/* reopen a key of an earlier channel by its path; with regsrv_mutex held and a channel */
+static BOOL regsrv_reopen( struct regsrv_key *key, unsigned int *status )
+{
+    BOOL ok;
+
+    SERVER_START_REQ( open_key )
+    {
+        req->parent     = 0;
+        req->access     = key->access;
+        req->attributes = key->attributes;
+        wine_server_add_data( req, key->path, key->len );
+        if ((ok = regsrv_transfer( &__req, status )) && !*status)
+        {
+            key->remote = reply->hkey;
+            key->generation = regsrv_generation;
+        }
+    }
+    SERVER_END_REQ;
+    return ok;
+}
+
+BOOL regsrv_is_handle( HANDLE handle )
+{
+    ULONG_PTR value = (ULONG_PTR)handle;
+
+    return regsrv_state > 0 && value >= REGSRV_TAG && value < REGSRV_TAG + REGSRV_MAX * 4 && !(value & 3);
+}
+
+/* the absolute path is one that session 0 holds, and this process's server uses session 0 */
+BOOL regsrv_route_path( const WCHAR *path, USHORT len )
+{
+    sigset_t sigset;
+
+    BOOL machine = regsrv_machine_path( path, len );
+
+    if ((!machine && !regsrv_user_candidate( path, len )) || regsrv_state < 0) return FALSE;
+    if (!regsrv_state)
+    {
+        regsrv_lock( &sigset );
+        if (!regsrv_state) regsrv_connect();
+        regsrv_unlock( &sigset );
+    }
+    return regsrv_state > 0 && (machine || regsrv_user_path( path, len ));
+}
+
+/* the absolute path of a name relative to a session 0 key; the caller frees path->Buffer */
+NTSTATUS regsrv_full_path( HANDLE parent, const UNICODE_STRING *name, UNICODE_STRING *path )
+{
+    struct regsrv_key *key;
+    unsigned int len;
+    NTSTATUS status = STATUS_SUCCESS;
+    sigset_t sigset;
+
+    regsrv_lock( &sigset );
+    if (!(key = regsrv_get( parent ))) status = STATUS_INVALID_HANDLE;
+    else
+    {
+        len = key->len + (name && name->Length ? sizeof(WCHAR) + name->Length : 0);
+        if (len > 0xfffe || !(path->Buffer = malloc( len ))) status = STATUS_NO_MEMORY;
+        else
+        {
+            memcpy( path->Buffer, key->path, key->len );
+            if (name && name->Length)
+            {
+                path->Buffer[key->len / sizeof(WCHAR)] = '\\';
+                memcpy( path->Buffer + key->len / sizeof(WCHAR) + 1, name->Buffer, name->Length );
+            }
+            path->Length = path->MaximumLength = len;
+        }
+    }
+    regsrv_unlock( &sigset );
+    return status;
+}
+
+/* make a request on the channel. A key's current handle in session 0 is written to *field first (the key
+ * is reopened if it belongs to an earlier channel); a lost channel is replaced once. */
+unsigned int regsrv_call( void *req_ptr, HANDLE handle, obj_handle_t *field, unsigned int *generation )
+{
+    struct __server_request_info * const req = req_ptr;
+    struct regsrv_key *key;
+    unsigned int status = STATUS_PIPE_DISCONNECTED, attempt;
+    sigset_t sigset;
+
+    regsrv_lock( &sigset );
+    for (attempt = 0; attempt < 2; attempt++)
+    {
+        if (regsrv_request_fd == -1 && !regsrv_connect())
+        {
+            status = STATUS_PIPE_DISCONNECTED;
+            break;
+        }
+        if (handle)
+        {
+            if (!(key = regsrv_get( handle )))
+            {
+                status = STATUS_INVALID_HANDLE;
+                break;
+            }
+            if (key->generation != regsrv_generation)
+            {
+                if (!regsrv_reopen( key, &status ))
+                {
+                    regsrv_disconnect();
+                    continue;
+                }
+                if (status) break;
+            }
+            *field = key->remote;
+        }
+        if (generation) *generation = regsrv_generation;
+        if (regsrv_transfer( req, &status )) break;
+        regsrv_disconnect();
+        status = STATUS_PIPE_DISCONNECTED;
+    }
+    regsrv_unlock( &sigset );
+    return status;
+}
+
+/* a new key handle for a handle of session 0 opened on the given channel generation */
+HANDLE regsrv_add_key( obj_handle_t remote, unsigned int generation, const UNICODE_STRING *path,
+                       ACCESS_MASK access, ULONG attributes )
+{
+    struct regsrv_key *key = NULL;
+    unsigned int i;
+    WCHAR *copy;
+    sigset_t sigset;
+    HANDLE ret = 0;
+
+    if (!(copy = malloc( path->Length ? path->Length : sizeof(WCHAR) ))) return 0;
+    memcpy( copy, path->Buffer, path->Length );
+    regsrv_lock( &sigset );
+    for (i = 0; i < regsrv_keys_count; i++) if (!regsrv_keys[i].path) break;
+    if (i == regsrv_keys_count)
+    {
+        if (i == regsrv_keys_size && i < REGSRV_MAX)
+        {
+            unsigned int size = regsrv_keys_size ? regsrv_keys_size * 2 : 64;
+            struct regsrv_key *keys = realloc( regsrv_keys, size * sizeof(*keys) );
+            if (keys)
+            {
+                regsrv_keys = keys;
+                regsrv_keys_size = size;
+            }
+        }
+        if (i < regsrv_keys_size) regsrv_keys_count++;
+    }
+    if (i < regsrv_keys_count)
+    {
+        key = &regsrv_keys[i];
+        key->remote = remote;
+        key->generation = generation;
+        key->access = access;
+        key->attributes = attributes & (OBJ_OPENLINK | OBJ_CASE_INSENSITIVE);
+        key->path = copy;
+        key->len = path->Length;
+        ret = (HANDLE)(ULONG_PTR)(REGSRV_TAG + i * 4);
+    }
+    regsrv_unlock( &sigset );
+    if (!key) free( copy );
+    return ret;
+}
+
+static void regsrv_free( struct regsrv_key *key )
+{
+    unsigned int status;
+
+    if (key->generation == regsrv_generation && regsrv_request_fd != -1)
+    {
+        SERVER_START_REQ( close_handle )
+        {
+            req->handle = key->remote;
+            if (!regsrv_transfer( &__req, &status )) regsrv_disconnect();
+        }
+        SERVER_END_REQ;
+    }
+    free( key->path );
+    key->path = NULL;
+}
+
+NTSTATUS regsrv_close( HANDLE handle )
+{
+    struct regsrv_key *key;
+    sigset_t sigset;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    regsrv_lock( &sigset );
+    if ((key = regsrv_get( handle ))) regsrv_free( key );
+    else status = STATUS_INVALID_HANDLE;
+    regsrv_unlock( &sigset );
+    return status;
+}
+
+/* duplicate a session 0 key handle within this process */
+NTSTATUS regsrv_duplicate( HANDLE source, HANDLE *dest, ACCESS_MASK access, ULONG attributes, ULONG options )
+{
+    struct regsrv_key *key;
+    unsigned int status, generation = 0;
+    obj_handle_t remote = 0;
+    sigset_t sigset;
+
+    if (dest) *dest = 0;
+    regsrv_lock( &sigset );
+    if (!(key = regsrv_get( source )))
+    {
+        regsrv_unlock( &sigset );
+        return STATUS_INVALID_HANDLE;
+    }
+    if (options & DUPLICATE_SAME_ACCESS) access = key->access;
+    attributes = key->attributes;
+    regsrv_unlock( &sigset );
+
+    status = STATUS_SUCCESS;
+    if (dest)
+    {
+        SERVER_START_REQ( dup_handle )
+        {
+            req->src_process = wine_server_obj_handle( NtCurrentProcess() );
+            req->dst_process = wine_server_obj_handle( NtCurrentProcess() );
+            req->access      = access;
+            req->attributes  = 0;
+            req->options     = options & ~DUPLICATE_CLOSE_SOURCE;
+            status = regsrv_call( req, source, &req->src_handle, &generation );
+            remote = reply->handle;
+        }
+        SERVER_END_REQ;
+        if (!status)
+        {
+            UNICODE_STRING copy;
+            /* the source entry may be freed by another thread from now on: copy its path under the lock */
+            regsrv_lock( &sigset );
+            key = regsrv_get( source );
+            copy.Length = copy.MaximumLength = key ? key->len : 0;
+            copy.Buffer = key ? malloc( max( key->len, sizeof(WCHAR) )) : NULL;
+            if (copy.Buffer) memcpy( copy.Buffer, key->path, key->len );
+            regsrv_unlock( &sigset );
+            if (!copy.Buffer) status = STATUS_INVALID_HANDLE;
+            else
+            {
+                if (!(*dest = regsrv_add_key( remote, generation, &copy, access, attributes )))
+                    status = STATUS_NO_MEMORY;
+                free( copy.Buffer );
+            }
+        }
+    }
+    if (options & DUPLICATE_CLOSE_SOURCE) regsrv_close( source );
+    return status;
 }
 
 
@@ -1332,6 +1932,8 @@ static const char *init_server_dir( dev_t dev, ino_t ino )
  *
  * Setup the wine configuration dir.
  */
+static int config_dir_of_root;  /* the prefix is root's: only session 0's running server may serve it */
+
 static int setup_config_dir(void)
 {
     char *p, *dir;
@@ -1356,7 +1958,11 @@ static int setup_config_dir(void)
     }
 
     if (stat( ".", &st ) == -1) fatal_perror( "stat %s", config_dir );
-    if (st.st_uid != getuid()) fatal_error( "'%s' is not owned by you\n", config_dir );
+    /* WineExplorer system tier T5.3: session 0's account runs programs on the machine root, which stays root's.
+     * Only a server already running for it is used (server_connect starts none): a server accepts a prefix of
+     * another owner only as session 0 (wineserver --session0) */
+    if (st.st_uid == 0 && getuid()) config_dir_of_root = 1;
+    else if (st.st_uid != getuid()) fatal_error( "'%s' is not owned by you\n", config_dir );
 
     server_dir = init_server_dir( st.st_dev, st.st_ino );
 
@@ -1412,6 +2018,13 @@ static void server_connect_error( const char *serverdir )
  *
  * Attempt to connect to an existing server socket.
  */
+static void start_server_checked( BOOL debug )
+{
+    if (config_dir_of_root)
+        fatal_error( "'%s' is not owned by you, and no session 0 server is running for it\n", config_dir );
+    start_server( debug );
+}
+
 static int server_connect(void)
 {
     struct sockaddr_un addr;
@@ -1424,7 +2037,7 @@ static int server_connect(void)
     if (chdir( server_dir ) == -1)
     {
         if (errno != ENOENT) fatal_perror( "chdir to %s", server_dir );
-        start_server( TRACE_ON(server) );
+        start_server_checked( TRACE_ON(server) );
         if (chdir( server_dir ) == -1) fatal_perror( "chdir to %s", server_dir );
     }
 
@@ -1439,13 +2052,13 @@ static int server_connect(void)
         if (retry)
         {
             usleep( 100000 * retry * retry );
-            start_server( TRACE_ON(server) );
+            start_server_checked( TRACE_ON(server) );
             if (lstat( SOCKETNAME, &st ) == -1) continue;  /* still no socket, wait a bit more */
         }
         else if (lstat( SOCKETNAME, &st ) == -1) /* check for an already existing socket */
         {
             if (errno != ENOENT) fatal_perror( "lstat %s/%s", server_dir, SOCKETNAME );
-            start_server( TRACE_ON(server) );
+            start_server_checked( TRACE_ON(server) );
             if (lstat( SOCKETNAME, &st ) == -1) continue;  /* still no socket, wait a bit more */
         }
 
@@ -1870,6 +2483,14 @@ NTSTATUS WINAPI NtDuplicateObject( HANDLE source_process, HANDLE source, HANDLE 
 
     if (dest) *dest = 0;
 
+    if (regvirt_is_handle( source )) return STATUS_NOT_SUPPORTED;  /* a virtualized key (T2b) */
+    if (regsrv_is_handle( source ))  /* a key of session 0: within this process only */
+    {
+        if (source_process != NtCurrentProcess() || (dest && dest_process != NtCurrentProcess()))
+            return STATUS_NOT_SUPPORTED;
+        return regsrv_duplicate( source, dest, access, attributes, options );
+    }
+
     if ((options & DUPLICATE_CLOSE_SOURCE) && source_process != NtCurrentProcess())
     {
         union apc_call call;
@@ -1966,6 +2587,9 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
 
     if (HandleToLong( handle ) >= ~5 && HandleToLong( handle ) <= ~0)
         return STATUS_SUCCESS;
+
+    if (regsrv_is_handle( handle )) return regsrv_close( handle );  /* a key of session 0 */
+    if (regvirt_is_handle( handle )) return regvirt_close( handle );  /* a virtualized key (T2b) */
 
     /* hold fd_cache_mutex to prevent the fd from being added again between the
      * call to remove_fd_from_cache and close_handle */

@@ -143,17 +143,31 @@ HPAINTBUFFER WINAPI BeginBufferedPaint(HDC targetdc, const RECT *rect,
         return NULL;
     }
 
+    /* the bitmap first: a new memory DC is 1x1, and a clip region combined with RGN_AND starts from its size */
+    DeleteObject(SelectObject(buffer->memorydc, buffer->bitmap));
     SetWindowOrgEx(buffer->memorydc, rect->left, rect->top, NULL);
     if (!params || !(params->dwFlags & BPPF_NOCLIP))
     {
         HRGN hrgn = CreateRectRgn(0, 0, 0, 0);
         if (hrgn)
         {
-            if (GetClipRgn(targetdc, hrgn) > 0 || GetRandomRgn(targetdc, hrgn, SYSRGN) > 0)
+            /* GetClipRgn gives the target's device coordinates. Without a clip region the system region is used,
+             * which is in screen coordinates. */
+            int found = GetClipRgn(targetdc, hrgn);
+            if (found <= 0 && GetRandomRgn(targetdc, hrgn, SYSRGN) > 0)
             {
-                POINT org;
-                GetWindowOrgEx(targetdc, &org);
-                OffsetRgn(hrgn, rect->left - org.x, rect->top - org.y);
+                POINT dc_org;
+                GetDCOrgEx(targetdc, &dc_org);
+                OffsetRgn(hrgn, -dc_org.x, -dc_org.y);
+                found = 1;
+            }
+            if (found > 0)
+            {
+                POINT window_org, viewport_org;
+                /* device to logical coordinates of the target (MM_TEXT), then to the buffer, whose origin is rect */
+                GetWindowOrgEx(targetdc, &window_org);
+                GetViewportOrgEx(targetdc, &viewport_org);
+                OffsetRgn(hrgn, window_org.x - viewport_org.x - rect->left, window_org.y - viewport_org.y - rect->top);
                 ExtSelectClipRgn(buffer->memorydc, hrgn, RGN_AND);
             }
             DeleteObject(hrgn);
@@ -165,7 +179,6 @@ HPAINTBUFFER WINAPI BeginBufferedPaint(HDC targetdc, const RECT *rect,
         ExcludeClipRect(buffer->memorydc, params->prcExclude->left, params->prcExclude->top,
                         params->prcExclude->right, params->prcExclude->bottom);
     }
-    DeleteObject(SelectObject(buffer->memorydc, buffer->bitmap));
 
     if (params && (params->dwFlags & BPPF_ERASE))
     {

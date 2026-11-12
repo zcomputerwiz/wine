@@ -609,6 +609,47 @@ done:
     return status;
 }
 
+#ifndef WEX_ACCOUNTS_STANDALONE
+/* System tier (docs/SYSTEM_TIER_WORK_ORDERS.md, T4-0): the SID subauthorities after S-1-5 of a local account's
+ * active record, the legacy record included (21 0 0 0 1000), for a server that takes its user's SID from the map.
+ * 1 when found; 0 without a valid protected map or record. Unlike lookup_account, the server's own uid is the
+ * question here, so the legacy rule of lookup_account does not apply. */
+int accounts_own_sid( uid_t uid, unsigned int subauth[5] )
+{
+    struct account_map *map = NULL;
+    struct account_policy policy;
+    enum wex_account_status status;
+    char *buf = NULL;
+    size_t length;
+    unsigned int i;
+    int dir, found = 0, raised = sysrun_raise();
+
+    if ((dir = protected_directory( account_directory, &status )) == -1) goto done;
+    if (read_policy( dir, &policy ) || read_protected( dir, "accounts.map", policy.system_gid, &buf, &length ))
+        goto done;
+    if (!(map = malloc( sizeof(*map) )) || parse_map( buf, map )) goto done;
+    for (i = 0; i < map->count; i++)
+    {
+        const struct account_record *r = &map->records[i];
+
+        if (!r->active || r->uid != uid) continue;
+        subauth[0] = 21;
+        subauth[1] = r->legacy ? 0 : map->machine[0];
+        subauth[2] = r->legacy ? 0 : map->machine[1];
+        subauth[3] = r->legacy ? 0 : map->machine[2];
+        subauth[4] = r->rid;
+        found = 1;
+        break;
+    }
+done:
+    free( map );
+    free( buf );
+    if (dir != -1) close( dir );
+    sysrun_drop( raised );
+    return found;
+}
+#endif
+
 #ifdef WEX_E1S6_TRANSPORT_TEST
 int accounts_get_map_generation( unsigned long long *gen )
 {

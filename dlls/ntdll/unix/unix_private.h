@@ -261,6 +261,19 @@ extern void sysrun_early_init(void);
 #define SYSRUN_REFUSED 77  /* exit status of wex-sysrun when it refuses */
 
 extern unsigned int server_call_unlocked( void *req_ptr );
+/* WineExplorer system tier: machine registry calls to session 0 (server.c) */
+extern BOOL regsrv_is_handle( HANDLE handle );
+extern BOOL regsrv_route_path( const WCHAR *path, USHORT len );
+extern NTSTATUS regsrv_full_path( HANDLE parent, const UNICODE_STRING *name, UNICODE_STRING *path );
+extern unsigned int regsrv_call( void *req_ptr, HANDLE handle, obj_handle_t *field, unsigned int *generation );
+extern HANDLE regsrv_add_key( obj_handle_t remote, unsigned int generation, const UNICODE_STRING *path,
+                              ACCESS_MASK access, ULONG attributes );
+extern NTSTATUS regsrv_close( HANDLE handle );
+extern NTSTATUS regsrv_duplicate( HANDLE source, HANDLE *dest, ACCESS_MASK access, ULONG attributes, ULONG options );
+/* T2b: virtualized keys (registry.c) */
+extern BOOL regvirt_is_handle( HANDLE handle );
+extern HANDLE regvirt_underlying( HANDLE handle );
+extern NTSTATUS regvirt_close( HANDLE handle );
 extern void server_enter_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigset );
 extern void server_leave_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigset );
 extern unsigned int server_select( const union select_op *select_op, data_size_t size, UINT flags,

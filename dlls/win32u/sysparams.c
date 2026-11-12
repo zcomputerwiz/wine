@@ -7106,6 +7106,27 @@ BOOL WINAPI NtUserSystemParametersInfo( UINT action, UINT val, void *ptr, UINT w
 #undef WINE_SPI_WARN
 }
 
+/* SM_CLEANBOOT: 0 for a normal start, 1 for Safe Mode, 2 for Safe Mode with Networking, from the volatile key
+ * wineboot creates (WineExplorer; it is absent in a normal start). The mode does not change during a start, so a
+ * value once found is kept. */
+static int get_clean_boot(void)
+{
+    static int clean_boot = -1;
+    char buffer[offsetof(KEY_VALUE_PARTIAL_INFORMATION, Data[sizeof(DWORD)])];
+    KEY_VALUE_PARTIAL_INFORMATION *value = (void *)buffer;
+    HKEY hkey;
+    int ret = 0;
+
+    if (clean_boot != -1) return clean_boot;
+    if (!(hkey = reg_open_ascii_key( NULL, "\\Registry\\Machine\\System\\CurrentControlSet\\Control\\SafeBoot\\Option" )))
+        return 0;
+    if (query_reg_ascii_value( hkey, "OptionValue", value, sizeof(buffer) ) == sizeof(DWORD) && value->Type == REG_DWORD &&
+        *(DWORD *)value->Data <= 2)
+        ret = *(DWORD *)value->Data;
+    NtClose( hkey );
+    return clean_boot = ret;
+}
+
 int get_system_metrics( int index )
 {
     NONCLIENTMETRICSW ncm;
@@ -7285,7 +7306,7 @@ int get_system_metrics( int index )
     case SM_NETWORK:
         return 3;  /* FIXME */
     case SM_CLEANBOOT:
-        return 0; /* 0 = ok, 1 = failsafe, 2 = failsafe + network */
+        return get_clean_boot(); /* 0 = ok, 1 = failsafe, 2 = failsafe + network */
     case SM_CXDRAG:
         get_entry( &entry_DRAGWIDTH, 0, &ret );
         return ret;

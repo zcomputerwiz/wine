@@ -1176,6 +1176,8 @@ NTSTATUS WINAPI NtQuerySecurityObject( HANDLE handle, SECURITY_INFORMATION info,
     void *buffer;
     unsigned int buffer_size = 512;
 
+    handle = regvirt_underlying( handle );  /* a virtualized key (system tier T2b) */
+
     TRACE( "(%p,0x%08x,%p,0x%08x,%p)\n", handle, info, descr, length, retlen );
 
     for (;;)
@@ -1187,7 +1189,8 @@ NTSTATUS WINAPI NtQuerySecurityObject( HANDLE handle, SECURITY_INFORMATION info,
             req->handle = wine_server_obj_handle( handle );
             req->security_info = info;
             wine_server_set_reply( req, buffer, buffer_size );
-            status = wine_server_call( req );
+            status = regsrv_is_handle( handle ) ? regsrv_call( req, handle, &req->handle, NULL )
+                                     : wine_server_call( req );
             buffer_size = reply->sd_len;
         }
         SERVER_END_REQ;
@@ -1236,6 +1239,8 @@ NTSTATUS WINAPI NtSetSecurityObject( HANDLE handle, SECURITY_INFORMATION info, P
     OBJECT_ATTRIBUTES attr;
     unsigned int status;
 
+    handle = regvirt_underlying( handle );  /* a virtualized key (system tier T2b) */
+
     TRACE( "%p 0x%08x %p\n", handle, info, descr );
 
     if (!descr) return STATUS_ACCESS_VIOLATION;
@@ -1262,7 +1267,8 @@ NTSTATUS WINAPI NtSetSecurityObject( HANDLE handle, SECURITY_INFORMATION info, P
         req->handle = wine_server_obj_handle( handle );
         req->security_info = info;
         wine_server_add_data( req, sd, objattr->sd_len );
-        status = wine_server_call( req );
+        status = regsrv_is_handle( handle ) ? regsrv_call( req, handle, &req->handle, NULL )
+                                     : wine_server_call( req );
     }
     SERVER_END_REQ;
     free( objattr );
