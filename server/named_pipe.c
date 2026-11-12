@@ -2195,6 +2195,23 @@ DECL_HANDLER(get_pipe_caller_binding)
     static const unsigned char zero16[16] = {0};
 #endif
 
+#ifdef WEX_E1S6_TRANSPORT_TEST
+    /* E1 R9: session 0's broker B0 registers its S6 channel with the verifier here. It has no caller in this
+     * server to bind (its requests come over the bridge; the verifier binds each attempt to the agent's channel),
+     * so none of the binding below applies: only the endorsement, whose own checks (the broker image mapped by one
+     * of session 0's programs, a LocalSystem primary token with SeTcbPrivilege, no thread token) decide. */
+    if (session0_server)
+    {
+        if (get_req_data_size() < 4 || !memcmp( get_req_data(), "E1R8", 4 ))
+        {
+            E1S6_BINDING_AUDIT( "session0-op" );
+            set_error( STATUS_ACCESS_DENIED );
+            return;
+        }
+        sysrun_e1s6_endorse( get_req_data(), get_req_data_size() );  /* sets the error itself */
+        return;
+    }
+#endif
     /* Keep the same system-role / SeTcbPrivilege gate as create_linked_token. */
     if (!elevation_enforced() || token_service_account( current->process->token ) != SERVICE_ACCOUNT_SYSTEM ||
         !sysrun_process_privileged( current->process ) || !token_has_privilege( current->process->token, SeTcbPrivilege ))
