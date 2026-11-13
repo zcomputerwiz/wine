@@ -353,11 +353,17 @@ static int read_conf( const char *key, char *value, size_t size )
 }
 
 /* the socket path: the configuration, else (development) the environment */
+static int socket_from_conf;  /* session 0 is named by the machine's configuration, not by the environment */
+
 static int get_socket_path( int conf_only )
 {
     const char *env;
 
-    if (read_conf( "session0_socket", session0_path, sizeof(session0_path) )) return session0_path[0] == '/';
+    if (read_conf( "session0_socket", session0_path, sizeof(session0_path) ))
+    {
+        socket_from_conf = session0_path[0] == '/';
+        return socket_from_conf;
+    }
     if (conf_only || !(env = getenv( "WEX_SESSION0_SOCKET" )) || env[0] != '/' ||
         strlen( env ) >= sizeof(session0_path)) return 0;
     strcpy( session0_path, env );
@@ -572,6 +578,12 @@ void session0_init( int server_mode )
     }
     /* a launcher-started server uses the configuration only: the user controls the environment */
     if (get_socket_path( sysrun_active )) session0_client = 1;
+    /* The machine's session 0 serves launcher-started servers only (peer_trusted). A server that the launcher did
+     * not start (the setup's skeleton prefix, a prefix of the user's own, a program run with another WINEPREFIX)
+     * is therefore a server of its own, with the files of its prefix, as it was before session 0 existed: as a
+     * client it would be refused, and its programs' machine registry would fail. Development mode (the socket
+     * named by the environment, no configuration) is unchanged. */
+    if (session0_client && !sysrun_active && socket_from_conf) session0_client = 0;
     if (session0_client)
     {
         char name[64];
