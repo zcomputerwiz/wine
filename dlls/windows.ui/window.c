@@ -55,7 +55,14 @@ enum window_event
 struct core_window
 {
     ICoreWindow ICoreWindow_iface;
+    ICoreWindowInterop ICoreWindowInterop_iface;
     LONG ref;
+
+    HWND hwnd;                  /* the native window, created on first need, on the thread of the window */
+    SIZE size;                  /* its client size, for SizeChanged */
+    BOOL pointer_inside;        /* the mouse is over the window (PointerEntered raised) */
+    struct ui_pointer_state last_pointer;
+    UINT32 frame_id;
 
     struct list entry;          /* the windows of the process */
     DWORD thread_id;
@@ -63,7 +70,7 @@ struct core_window
 
     CRITICAL_SECTION cs;
     BOOL attached;              /* GetForCurrentThread finds it */
-    BOOL visible, active, closed, input_enabled;
+    BOOL visible, active, closed, input_enabled, shown;
     CoreWindowFlowDirection flow_direction;
     struct list handlers[EVENT_COUNT];
 };
@@ -85,18 +92,26 @@ static inline struct core_window *impl_from_ICoreWindow( ICoreWindow *iface )
 
 /* ---- the event arguments ------------------------------------------------------------------------ */
 
-enum args_kind { ARGS_CLOSED, ARGS_ACTIVATED, ARGS_VISIBILITY };
+enum args_kind { ARGS_CLOSED, ARGS_ACTIVATED, ARGS_VISIBILITY, ARGS_INPUT_ENABLED, ARGS_KEY, ARGS_CHARACTER, ARGS_SIZE };
 
 struct event_args
 {
     ICoreWindowEventArgs ICoreWindowEventArgs_iface;
     IWindowActivatedEventArgs IWindowActivatedEventArgs_iface;
     IVisibilityChangedEventArgs IVisibilityChangedEventArgs_iface;
+    IInputEnabledEventArgs IInputEnabledEventArgs_iface;
+    IKeyEventArgs IKeyEventArgs_iface;
+    ICharacterReceivedEventArgs ICharacterReceivedEventArgs_iface;
+    IWindowSizeChangedEventArgs IWindowSizeChangedEventArgs_iface;
     LONG ref;
     enum args_kind kind;
     boolean handled;
     CoreWindowActivationState state;
-    boolean visible;
+    boolean visible;        /* VisibilityChanged: visible; InputEnabled: enabled */
+    VirtualKey virtual_key;
+    UINT32 key_code;
+    CorePhysicalKeyStatus key_status;
+    Size size;
 };
 
 static inline struct event_args *args_from_base( ICoreWindowEventArgs *iface )
@@ -123,6 +138,14 @@ static HRESULT args_query( struct event_args *args, REFIID iid, void **out )
         *out = &args->IWindowActivatedEventArgs_iface;
     else if (args->kind == ARGS_VISIBILITY && IsEqualGUID( iid, &IID_IVisibilityChangedEventArgs ))
         *out = &args->IVisibilityChangedEventArgs_iface;
+    else if (args->kind == ARGS_INPUT_ENABLED && IsEqualGUID( iid, &IID_IInputEnabledEventArgs ))
+        *out = &args->IInputEnabledEventArgs_iface;
+    else if (args->kind == ARGS_KEY && IsEqualGUID( iid, &IID_IKeyEventArgs ))
+        *out = &args->IKeyEventArgs_iface;
+    else if (args->kind == ARGS_CHARACTER && IsEqualGUID( iid, &IID_ICharacterReceivedEventArgs ))
+        *out = &args->ICharacterReceivedEventArgs_iface;
+    else if (args->kind == ARGS_SIZE && IsEqualGUID( iid, &IID_IWindowSizeChangedEventArgs ))
+        *out = &args->IWindowSizeChangedEventArgs_iface;
     else
     {
         *out = NULL;
@@ -147,12 +170,19 @@ static ULONG args_release( struct event_args *args )
 
 static HRESULT args_class_name( struct event_args *args, HSTRING *name )
 {
+    const WCHAR *class_name;
+
     switch (args->kind)
     {
-    case ARGS_ACTIVATED: return WindowsCreateString( L"Windows.UI.Core.WindowActivatedEventArgs", 39, name );
-    case ARGS_VISIBILITY: return WindowsCreateString( L"Windows.UI.Core.VisibilityChangedEventArgs", 41, name );
-    default: return WindowsCreateString( L"Windows.UI.Core.CoreWindowEventArgs", 35, name );
+    case ARGS_ACTIVATED: class_name = L"Windows.UI.Core.WindowActivatedEventArgs"; break;
+    case ARGS_VISIBILITY: class_name = L"Windows.UI.Core.VisibilityChangedEventArgs"; break;
+    case ARGS_INPUT_ENABLED: class_name = L"Windows.UI.Core.InputEnabledEventArgs"; break;
+    case ARGS_KEY: class_name = L"Windows.UI.Core.KeyEventArgs"; break;
+    case ARGS_CHARACTER: class_name = L"Windows.UI.Core.CharacterReceivedEventArgs"; break;
+    case ARGS_SIZE: class_name = L"Windows.UI.Core.WindowSizeChangedEventArgs"; break;
+    default: class_name = L"Windows.UI.Core.CoreWindowEventArgs"; break;
     }
+    return WindowsCreateString( class_name, wcslen( class_name ), name );
 }
 
 static HRESULT WINAPI base_args_QueryInterface( ICoreWindowEventArgs *iface, REFIID iid, void **out )
@@ -307,11 +337,133 @@ static const IVisibilityChangedEventArgsVtbl visibility_args_vtbl =
     visibility_args_get_Visible,
 };
 
+#define ARGS_COMMON( name, type, member )                                                              \
+    static inline struct event_args *args_from_##name( type *iface )                                  \
+    {                                                                                                 \
+        return CONTAINING_RECORD( iface, struct event_args, member );                                 \
+    }                                                                                                 \
+    static HRESULT WINAPI name##_args_QueryInterface( type *iface, REFIID iid, void **out )            \
+    {                                                                                                 \
+        return args_query( args_from_##name( iface ), iid, out );                                     \
+    }                                                                                                 \
+    static ULONG WINAPI name##_args_AddRef( type *iface )                                              \
+    {                                                                                                 \
+        return args_addref( args_from_##name( iface ) );                                              \
+    }                                                                                                 \
+    static ULONG WINAPI name##_args_Release( type *iface )                                             \
+    {                                                                                                 \
+        return args_release( args_from_##name( iface ) );                                             \
+    }                                                                                                 \
+    static HRESULT WINAPI name##_args_GetIids( type *iface, ULONG *count, IID **iids )                 \
+    {                                                                                                 \
+        return E_NOTIMPL;                                                                             \
+    }                                                                                                 \
+    static HRESULT WINAPI name##_args_GetRuntimeClassName( type *iface, HSTRING *class_name )          \
+    {                                                                                                 \
+        return args_class_name( args_from_##name( iface ), class_name );                              \
+    }                                                                                                 \
+    static HRESULT WINAPI name##_args_GetTrustLevel( type *iface, TrustLevel *level )                  \
+    {                                                                                                 \
+        *level = BaseTrust;                                                                           \
+        return S_OK;                                                                                  \
+    }
+
+ARGS_COMMON( input_enabled, IInputEnabledEventArgs, IInputEnabledEventArgs_iface )
+ARGS_COMMON( key, IKeyEventArgs, IKeyEventArgs_iface )
+ARGS_COMMON( character, ICharacterReceivedEventArgs, ICharacterReceivedEventArgs_iface )
+ARGS_COMMON( size, IWindowSizeChangedEventArgs, IWindowSizeChangedEventArgs_iface )
+
+static HRESULT WINAPI input_enabled_args_get_InputEnabled( IInputEnabledEventArgs *iface, boolean *value )
+{
+    *value = args_from_input_enabled( iface )->visible;
+    return S_OK;
+}
+
+static const IInputEnabledEventArgsVtbl input_enabled_args_vtbl =
+{
+    input_enabled_args_QueryInterface,
+    input_enabled_args_AddRef,
+    input_enabled_args_Release,
+    input_enabled_args_GetIids,
+    input_enabled_args_GetRuntimeClassName,
+    input_enabled_args_GetTrustLevel,
+    input_enabled_args_get_InputEnabled,
+};
+
+static HRESULT WINAPI key_args_get_VirtualKey( IKeyEventArgs *iface, VirtualKey *value )
+{
+    *value = args_from_key( iface )->virtual_key;
+    return S_OK;
+}
+
+static HRESULT WINAPI key_args_get_KeyStatus( IKeyEventArgs *iface, CorePhysicalKeyStatus *value )
+{
+    *value = args_from_key( iface )->key_status;
+    return S_OK;
+}
+
+static const IKeyEventArgsVtbl key_args_vtbl =
+{
+    key_args_QueryInterface,
+    key_args_AddRef,
+    key_args_Release,
+    key_args_GetIids,
+    key_args_GetRuntimeClassName,
+    key_args_GetTrustLevel,
+    key_args_get_VirtualKey,
+    key_args_get_KeyStatus,
+};
+
+static HRESULT WINAPI character_args_get_KeyCode( ICharacterReceivedEventArgs *iface, UINT32 *value )
+{
+    *value = args_from_character( iface )->key_code;
+    return S_OK;
+}
+
+static HRESULT WINAPI character_args_get_KeyStatus( ICharacterReceivedEventArgs *iface, CorePhysicalKeyStatus *value )
+{
+    *value = args_from_character( iface )->key_status;
+    return S_OK;
+}
+
+static const ICharacterReceivedEventArgsVtbl character_args_vtbl =
+{
+    character_args_QueryInterface,
+    character_args_AddRef,
+    character_args_Release,
+    character_args_GetIids,
+    character_args_GetRuntimeClassName,
+    character_args_GetTrustLevel,
+    character_args_get_KeyCode,
+    character_args_get_KeyStatus,
+};
+
+static HRESULT WINAPI size_args_get_Size( IWindowSizeChangedEventArgs *iface, Size *value )
+{
+    *value = args_from_size( iface )->size;
+    return S_OK;
+}
+
+static const IWindowSizeChangedEventArgsVtbl size_args_vtbl =
+{
+    size_args_QueryInterface,
+    size_args_AddRef,
+    size_args_Release,
+    size_args_GetIids,
+    size_args_GetRuntimeClassName,
+    size_args_GetTrustLevel,
+    size_args_get_Size,
+};
+
 static struct event_args *args_create( enum args_kind kind )
 {
     struct event_args *args;
 
     if (!(args = calloc( 1, sizeof(*args) ))) return NULL;
+    args->IInputEnabledEventArgs_iface.lpVtbl = &input_enabled_args_vtbl;
+    args->IKeyEventArgs_iface.lpVtbl = &key_args_vtbl;
+    args->ICharacterReceivedEventArgs_iface.lpVtbl = &character_args_vtbl;
+    args->IWindowSizeChangedEventArgs_iface.lpVtbl = &size_args_vtbl;
     args->ICoreWindowEventArgs_iface.lpVtbl = &base_args_vtbl;
     args->IWindowActivatedEventArgs_iface.lpVtbl = &activated_args_vtbl;
     args->IVisibilityChangedEventArgs_iface.lpVtbl = &visibility_args_vtbl;
@@ -346,6 +498,27 @@ static void window_raise( struct core_window *window, enum window_event event, s
                 (ITypedEventHandler_CoreWindow_VisibilityChangedEventArgs *)handlers[i], &window->ICoreWindow_iface,
                 &args->IVisibilityChangedEventArgs_iface );
             break;
+        case EVENT_INPUT_ENABLED:
+            ITypedEventHandler_CoreWindow_InputEnabledEventArgs_Invoke(
+                (ITypedEventHandler_CoreWindow_InputEnabledEventArgs *)handlers[i], &window->ICoreWindow_iface,
+                &args->IInputEnabledEventArgs_iface );
+            break;
+        case EVENT_KEY_DOWN:
+        case EVENT_KEY_UP:
+            ITypedEventHandler_CoreWindow_KeyEventArgs_Invoke(
+                (ITypedEventHandler_CoreWindow_KeyEventArgs *)handlers[i], &window->ICoreWindow_iface,
+                &args->IKeyEventArgs_iface );
+            break;
+        case EVENT_CHARACTER_RECEIVED:
+            ITypedEventHandler_CoreWindow_CharacterReceivedEventArgs_Invoke(
+                (ITypedEventHandler_CoreWindow_CharacterReceivedEventArgs *)handlers[i], &window->ICoreWindow_iface,
+                &args->ICharacterReceivedEventArgs_iface );
+            break;
+        case EVENT_SIZE_CHANGED:
+            ITypedEventHandler_CoreWindow_WindowSizeChangedEventArgs_Invoke(
+                (ITypedEventHandler_CoreWindow_WindowSizeChangedEventArgs *)handlers[i], &window->ICoreWindow_iface,
+                &args->IWindowSizeChangedEventArgs_iface );
+            break;
         default:
             break;
         }
@@ -353,13 +526,14 @@ static void window_raise( struct core_window *window, enum window_event event, s
     ui_handler_snapshot_free( handlers, count );
 }
 
-enum window_op { OP_VISIBILITY, OP_ACTIVATED, OP_CLOSED };
+enum window_op { OP_VISIBILITY, OP_ACTIVATED, OP_CLOSED, OP_INPUT_ENABLED };
 
 struct window_event_item
 {
     struct core_window *window;
     enum window_op op;
     boolean visible;
+    CoreWindowActivationState state;
 };
 
 static void window_event_run( void *context )
@@ -380,8 +554,15 @@ static void window_event_run( void *context )
     case OP_ACTIVATED:
         if ((args = args_create( ARGS_ACTIVATED )))
         {
-            args->state = CoreWindowActivationState_CodeActivated;
+            args->state = item->state;
             window_raise( window, EVENT_ACTIVATED, args );
+        }
+        break;
+    case OP_INPUT_ENABLED:
+        if ((args = args_create( ARGS_INPUT_ENABLED )))
+        {
+            args->visible = item->visible;
+            window_raise( window, EVENT_INPUT_ENABLED, args );
         }
         break;
     case OP_CLOSED:
@@ -395,7 +576,8 @@ static void window_event_run( void *context )
     free( item );
 }
 
-static void window_post( struct core_window *window, enum window_op op, boolean visible )
+static void window_post_state( struct core_window *window, enum window_op op, boolean visible,
+                               CoreWindowActivationState state )
 {
     struct window_event_item *item;
 
@@ -403,6 +585,7 @@ static void window_post( struct core_window *window, enum window_op op, boolean 
     item->window = window;
     item->op = op;
     item->visible = visible;
+    item->state = state;
     ICoreWindow_AddRef( &window->ICoreWindow_iface );
     if (FAILED(ui_dispatcher_post( window->dispatcher, CoreDispatcherPriority_Normal, window_event_run, item )))
     {
@@ -411,12 +594,352 @@ static void window_post( struct core_window *window, enum window_op op, boolean 
     }
 }
 
+static void window_post( struct core_window *window, enum window_op op, boolean visible )
+{
+    window_post_state( window, op, visible, CoreWindowActivationState_CodeActivated );
+}
+
+/* ---- the native window ---------------------------------------------------------------------------- */
+
+#define CORE_WINDOW_CLASS L"Windows.UI.Core.CoreWindow"
+#define DEFAULT_CLIENT_WIDTH 1200
+#define DEFAULT_CLIENT_HEIGHT 900
+
+static HRESULT window_close_internal( struct core_window *impl );
+static BOOL CALLBACK register_window_class( INIT_ONCE *once, void *param, void **context );
+static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wp, LPARAM lp );
+
+static struct core_window *window_from_hwnd( HWND hwnd )
+{
+    return (struct core_window *)GetWindowLongPtrW( hwnd, GWLP_USERDATA );
+}
+
+/* the client rectangle in screen coordinates; with no native window yet, the size the window will have */
+static void window_get_client_rect( struct core_window *window, RECT *rect )
+{
+    if (window->hwnd)
+    {
+        POINT origin = { 0, 0 };
+
+        GetClientRect( window->hwnd, rect );
+        ClientToScreen( window->hwnd, &origin );
+        OffsetRect( rect, origin.x, origin.y );
+        return;
+    }
+    rect->left = rect->top = 0;
+    rect->right = min( DEFAULT_CLIENT_WIDTH, GetSystemMetrics( SM_CXSCREEN ) );
+    rect->bottom = min( DEFAULT_CLIENT_HEIGHT, GetSystemMetrics( SM_CYSCREEN ) );
+}
+
+/* The native window is created on the thread of the window, when the application first needs it (Activate or
+ * ICoreWindowInterop::WindowHandle), hidden. */
+static BOOL window_ensure_native( struct core_window *window )
+{
+    static INIT_ONCE class_once = INIT_ONCE_STATIC_INIT;
+    WCHAR title[MAX_PATH], *name;
+    RECT rect;
+    DWORD style = WS_OVERLAPPEDWINDOW;
+
+    if (window->hwnd) return TRUE;
+    if (window->thread_id != GetCurrentThreadId()) return FALSE;
+    InitOnceExecuteOnce( &class_once, register_window_class, NULL, NULL );
+
+    GetModuleFileNameW( NULL, title, ARRAY_SIZE(title) );
+    name = wcsrchr( title, '\\' );
+    name = name ? name + 1 : title;
+
+    window_get_client_rect( window, &rect );
+    AdjustWindowRectEx( &rect, style, FALSE, 0 );
+    window->hwnd = CreateWindowExW( 0, CORE_WINDOW_CLASS, name, style, CW_USEDEFAULT, CW_USEDEFAULT,
+                                    rect.right - rect.left, rect.bottom - rect.top, NULL, NULL, NULL, window );
+    if (!window->hwnd)
+    {
+        ERR( "failed to create the native window, error %lu\n", GetLastError() );
+        return FALSE;
+    }
+    window_get_client_rect( window, &rect );
+    window->size.cx = rect.right - rect.left;
+    window->size.cy = rect.bottom - rect.top;
+    return TRUE;
+}
+
+static BOOL CALLBACK register_window_class( INIT_ONCE *once, void *param, void **context )
+{
+    WNDCLASSEXW cls = { sizeof(cls) };
+
+    cls.style = CS_DBLCLKS;
+    cls.lpfnWndProc = core_window_proc;
+    cls.hCursor = LoadCursorW( NULL, (const WCHAR *)IDC_ARROW );
+    cls.lpszClassName = CORE_WINDOW_CLASS;
+    RegisterClassExW( &cls );
+    return TRUE;
+}
+
+static void window_raise_key( struct core_window *window, enum window_event event, enum args_kind kind, WPARAM wp,
+                              LPARAM lp, BOOL released, BOOL *handled )
+{
+    struct event_args *args;
+
+    if (!(args = args_create( kind ))) return;
+    if (kind == ARGS_KEY) args->virtual_key = wp;
+    else args->key_code = wp;
+    args->key_status.RepeatCount = LOWORD( lp );
+    args->key_status.ScanCode = (lp >> 16) & 0xff;
+    args->key_status.IsExtendedKey = !!(lp & (1 << 24));
+    args->key_status.IsMenuKeyDown = !!(lp & (1 << 29));
+    args->key_status.WasKeyDown = !!(lp & (1 << 30));
+    args->key_status.IsKeyReleased = released;
+    window_raise( window, event, args );
+    *handled = args->handled;
+    args_release( args );
+}
+
+static VirtualKeyModifiers current_modifiers(void)
+{
+    VirtualKeyModifiers modifiers = VirtualKeyModifiers_None;
+
+    if (GetKeyState( VK_CONTROL ) & 0x8000) modifiers |= VirtualKeyModifiers_Control;
+    if (GetKeyState( VK_MENU ) & 0x8000) modifiers |= VirtualKeyModifiers_Menu;
+    if (GetKeyState( VK_SHIFT ) & 0x8000) modifiers |= VirtualKeyModifiers_Shift;
+    if ((GetKeyState( VK_LWIN ) | GetKeyState( VK_RWIN )) & 0x8000) modifiers |= VirtualKeyModifiers_Windows;
+    return modifiers;
+}
+
+/* a pointer event of the mouse; x and y are client coordinates; the buttons are the MK_ flags of the message */
+static BOOL window_raise_pointer( struct core_window *window, enum window_event event, int x, int y, WPARAM keys,
+                                  PointerUpdateKind kind, int wheel_delta, BOOL horizontal )
+{
+    IPointerEventArgs *args;
+    struct ui_pointer_state state = {0};
+    unsigned int i, count;
+    IUnknown **handlers;
+    BOOL handled;
+
+    state.x = x;
+    state.y = y;
+    state.pointer_id = 1;
+    state.frame_id = ++window->frame_id;
+    state.timestamp = GetTickCount64() * 1000;
+    state.left = !!(keys & MK_LBUTTON);
+    state.right = !!(keys & MK_RBUTTON);
+    state.middle = !!(keys & MK_MBUTTON);
+    state.x1 = !!(keys & MK_XBUTTON1);
+    state.x2 = !!(keys & MK_XBUTTON2);
+    state.wheel_delta = wheel_delta;
+    state.horizontal_wheel = horizontal;
+    state.update_kind = kind;
+    state.modifiers = current_modifiers();
+    window->last_pointer = state;
+
+    if (!(args = ui_pointer_args_create( &state ))) return FALSE;
+    handlers = ui_handler_snapshot( &window->handlers[event], &window->cs, &count );
+    for (i = 0; i < count; i++)
+        ITypedEventHandler_CoreWindow_PointerEventArgs_Invoke( (ITypedEventHandler_CoreWindow_PointerEventArgs *)handlers[i],
+                                                                &window->ICoreWindow_iface, args );
+    ui_handler_snapshot_free( handlers, count );
+    handled = ui_pointer_args_handled( args );
+    IPointerEventArgs_Release( args );
+    return handled;
+}
+
+static void window_set_active( struct core_window *window, BOOL active, CoreWindowActivationState state )
+{
+    BOOL changed;
+
+    EnterCriticalSection( &window->cs );
+    changed = window->active != active;
+    window->active = active;
+    LeaveCriticalSection( &window->cs );
+    if (changed) window_post_state( window, OP_ACTIVATED, 0, state );
+}
+
+static void window_set_visible( struct core_window *window, BOOL visible )
+{
+    BOOL changed;
+
+    EnterCriticalSection( &window->cs );
+    changed = window->visible != visible;
+    window->visible = visible;
+    LeaveCriticalSection( &window->cs );
+    if (changed) window_post( window, OP_VISIBILITY, visible );
+}
+
+static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wp, LPARAM lp )
+{
+    struct core_window *window = msg == WM_NCCREATE ? NULL : window_from_hwnd( hwnd );
+    BOOL handled = FALSE;
+
+    if (msg == WM_NCCREATE)
+    {
+        SetWindowLongPtrW( hwnd, GWLP_USERDATA, (LONG_PTR)((CREATESTRUCTW *)lp)->lpCreateParams );
+        return DefWindowProcW( hwnd, msg, wp, lp );
+    }
+    if (!window || window->closed) return DefWindowProcW( hwnd, msg, wp, lp );
+
+    switch (msg)
+    {
+    case WM_ACTIVATE:
+        if (LOWORD( wp ) == WA_INACTIVE) window_set_active( window, FALSE, CoreWindowActivationState_Deactivated );
+        else window_set_active( window, TRUE, LOWORD( wp ) == WA_CLICKACTIVE ?
+                                CoreWindowActivationState_PointerActivated : CoreWindowActivationState_CodeActivated );
+        break;
+
+    case WM_SIZE:
+        if (wp == SIZE_MINIMIZED) window_set_visible( window, FALSE );
+        else
+        {
+            if (wp == SIZE_RESTORED || wp == SIZE_MAXIMIZED) window_set_visible( window, IsWindowVisible( hwnd ) );
+            if ((int)LOWORD( lp ) != window->size.cx || (int)HIWORD( lp ) != window->size.cy)
+            {
+                struct event_args *args;
+
+                window->size.cx = LOWORD( lp );
+                window->size.cy = HIWORD( lp );
+                if ((args = args_create( ARGS_SIZE )))
+                {
+                    args->size.Width = window->size.cx;
+                    args->size.Height = window->size.cy;
+                    window_raise( window, EVENT_SIZE_CHANGED, args );
+                    args_release( args );
+                }
+            }
+        }
+        break;
+
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN:
+        window_raise_key( window, EVENT_KEY_DOWN, ARGS_KEY, wp, lp, FALSE, &handled );
+        if (handled && msg == WM_KEYDOWN) return 0;
+        break;
+    case WM_KEYUP:
+    case WM_SYSKEYUP:
+        window_raise_key( window, EVENT_KEY_UP, ARGS_KEY, wp, lp, TRUE, &handled );
+        if (handled && msg == WM_KEYUP) return 0;
+        break;
+    case WM_CHAR:
+        window_raise_key( window, EVENT_CHARACTER_RECEIVED, ARGS_CHARACTER, wp, lp, FALSE, &handled );
+        return 0;
+
+    case WM_MOUSEMOVE:
+        if (!window->pointer_inside)
+        {
+            TRACKMOUSEEVENT track = { sizeof(track), TME_LEAVE, hwnd, 0 };
+
+            window->pointer_inside = TRUE;
+            TrackMouseEvent( &track );
+            window_raise_pointer( window, EVENT_POINTER_ENTERED, (short)LOWORD( lp ), (short)HIWORD( lp ), wp,
+                                  PointerUpdateKind_Other, 0, FALSE );
+        }
+        window_raise_pointer( window, EVENT_POINTER_MOVED, (short)LOWORD( lp ), (short)HIWORD( lp ), wp,
+                              PointerUpdateKind_Other, 0, FALSE );
+        return 0;
+    case WM_MOUSELEAVE:
+        window->pointer_inside = FALSE;
+        window_raise_pointer( window, EVENT_POINTER_EXITED, window->last_pointer.x, window->last_pointer.y,
+                              0, PointerUpdateKind_Other, 0, FALSE );
+        return 0;
+
+#define POINTER_BUTTON( down_msg, dblclk_msg, up_msg, down_kind, up_kind )                                  \
+    case down_msg:                                                                                           \
+    case dblclk_msg:                                                                                         \
+        window_raise_pointer( window, EVENT_POINTER_PRESSED, (short)LOWORD( lp ), (short)HIWORD( lp ), wp,   \
+                              down_kind, 0, FALSE );                                                         \
+        return 0;                                                                                            \
+    case up_msg:                                                                                             \
+        window_raise_pointer( window, EVENT_POINTER_RELEASED, (short)LOWORD( lp ), (short)HIWORD( lp ), wp,  \
+                              up_kind, 0, FALSE );                                                           \
+        return 0;
+    POINTER_BUTTON( WM_LBUTTONDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONUP, PointerUpdateKind_LeftButtonPressed,
+                    PointerUpdateKind_LeftButtonReleased )
+    POINTER_BUTTON( WM_RBUTTONDOWN, WM_RBUTTONDBLCLK, WM_RBUTTONUP, PointerUpdateKind_RightButtonPressed,
+                    PointerUpdateKind_RightButtonReleased )
+    POINTER_BUTTON( WM_MBUTTONDOWN, WM_MBUTTONDBLCLK, WM_MBUTTONUP, PointerUpdateKind_MiddleButtonPressed,
+                    PointerUpdateKind_MiddleButtonReleased )
+#undef POINTER_BUTTON
+
+    case WM_MOUSEWHEEL:
+    case WM_MOUSEHWHEEL:
+    {
+        POINT pt = { (short)LOWORD( lp ), (short)HIWORD( lp ) };   /* screen coordinates */
+
+        ScreenToClient( hwnd, &pt );
+        window_raise_pointer( window, EVENT_POINTER_WHEEL_CHANGED, pt.x, pt.y, LOWORD( wp ), PointerUpdateKind_Other,
+                              GET_WHEEL_DELTA_WPARAM( wp ), msg == WM_MOUSEHWHEEL );
+        return 0;
+    }
+
+    case WM_CLOSE:
+        /* the system closes the window of the view and the application ends: Closed, then the dispatcher quits */
+        window_close_internal( window );
+        return 0;
+    }
+    return DefWindowProcW( hwnd, msg, wp, lp );
+}
+
+/* ---- ICoreWindowInterop --------------------------------------------------------------------------- */
+
+static inline struct core_window *impl_from_ICoreWindowInterop( ICoreWindowInterop *iface )
+{
+    return CONTAINING_RECORD( iface, struct core_window, ICoreWindowInterop_iface );
+}
+
+static HRESULT WINAPI interop_QueryInterface( ICoreWindowInterop *iface, REFIID iid, void **out )
+{
+    return ICoreWindow_QueryInterface( &impl_from_ICoreWindowInterop( iface )->ICoreWindow_iface, iid, out );
+}
+
+static ULONG WINAPI interop_AddRef( ICoreWindowInterop *iface )
+{
+    return ICoreWindow_AddRef( &impl_from_ICoreWindowInterop( iface )->ICoreWindow_iface );
+}
+
+static ULONG WINAPI interop_Release( ICoreWindowInterop *iface )
+{
+    return ICoreWindow_Release( &impl_from_ICoreWindowInterop( iface )->ICoreWindow_iface );
+}
+
+static HRESULT WINAPI interop_get_WindowHandle( ICoreWindowInterop *iface, HWND *hwnd )
+{
+    struct core_window *impl = impl_from_ICoreWindowInterop( iface );
+
+    TRACE( "iface %p, hwnd %p.\n", iface, hwnd );
+    if (!hwnd) return E_POINTER;
+    *hwnd = NULL;
+    if (impl->closed) return E_ILLEGAL_METHOD_CALL;
+    if (!window_ensure_native( impl )) return RPC_E_WRONG_THREAD;
+    *hwnd = impl->hwnd;
+    return S_OK;
+}
+
+static HRESULT WINAPI interop_put_MessageHandled( ICoreWindowInterop *iface, boolean value )
+{
+    TRACE( "iface %p, value %d.\n", iface, value );
+    return S_OK;
+}
+
+static const ICoreWindowInteropVtbl interop_vtbl =
+{
+    interop_QueryInterface,
+    interop_AddRef,
+    interop_Release,
+    interop_get_WindowHandle,
+    interop_put_MessageHandled,
+};
+
 /* ---- ICoreWindow --------------------------------------------------------------------------------- */
 
 static HRESULT WINAPI window_QueryInterface( ICoreWindow *iface, REFIID iid, void **out )
 {
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+
     TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
 
+    if (IsEqualGUID( iid, &IID_ICoreWindowInterop ))
+    {
+        *out = &impl->ICoreWindowInterop_iface;
+        ICoreWindow_AddRef( iface );
+        return S_OK;
+    }
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_ICoreWindow ))
     {
@@ -480,12 +1003,16 @@ static HRESULT WINAPI window_get_AutomationHostProvider( ICoreWindow *iface, IIn
 
 static HRESULT WINAPI window_get_Bounds( ICoreWindow *iface, Rect *value )
 {
+    RECT rect;
+
     TRACE( "iface %p, value %p.\n", iface, value );
-    /* no native window yet: the whole screen */
-    value->X = 0;
-    value->Y = 0;
-    value->Width = GetSystemMetrics( SM_CXSCREEN );
-    value->Height = GetSystemMetrics( SM_CYSCREEN );
+    /* Observed on Windows 11: the client area of the window, 1200x900 for a window of the default size (before
+     * the native window exists, the size it will have) */
+    window_get_client_rect( impl_from_ICoreWindow( iface ), &rect );
+    value->X = rect.left;
+    value->Y = rect.top;
+    value->Width = rect.right - rect.left;
+    value->Height = rect.bottom - rect.top;
     return S_OK;
 }
 
@@ -566,16 +1093,27 @@ static HRESULT WINAPI window_get_Visible( ICoreWindow *iface, boolean *value )
 static HRESULT WINAPI window_Activate( ICoreWindow *iface )
 {
     struct core_window *impl = impl_from_ICoreWindow( iface );
-    BOOL became_visible = FALSE, became_active = FALSE;
+    BOOL first;
 
     TRACE( "iface %p.\n", iface );
 
     if (impl->thread_id != GetCurrentThreadId()) return RPC_E_WRONG_THREAD;
+    if (impl->closed) return S_OK;
+    if (!window_ensure_native( impl )) return E_FAIL;
 
-    /* Observed on Windows 11: without a presented frame the window stays invisible and raises neither Activated
-     * nor VisibilityChanged, however long the thread processes events. Presentation (U1.1b) will raise them. */
-    (void)became_visible;
-    (void)became_active;
+    /* Observed on Windows 11 with an unlocked desktop: Activate shows the window; VisibilityChanged(true),
+     * Activated (CodeActivated) and InputEnabled(true) follow, in that order, once events are processed; no
+     * SizeChanged. */
+    EnterCriticalSection( &impl->cs );
+    first = !impl->shown;
+    impl->shown = TRUE;
+    LeaveCriticalSection( &impl->cs );
+
+    window_set_visible( impl, TRUE );
+    ShowWindow( impl->hwnd, IsIconic( impl->hwnd ) ? SW_RESTORE : SW_SHOW );
+    SetForegroundWindow( impl->hwnd );
+    window_set_active( impl, TRUE, CoreWindowActivationState_CodeActivated );
+    if (first) window_post( impl, OP_INPUT_ENABLED, impl->input_enabled );
     return S_OK;
 }
 
@@ -596,6 +1134,14 @@ static HRESULT window_close_internal( struct core_window *impl )
     LeaveCriticalSection( &impl->cs );
 
     if (already) return S_OK;
+    if (impl->hwnd)
+    {
+        HWND hwnd = impl->hwnd;
+
+        impl->hwnd = NULL;
+        SetWindowLongPtrW( hwnd, GWLP_USERDATA, 0 );
+        DestroyWindow( hwnd );
+    }
     if (was_visible) window_post( impl, OP_VISIBILITY, FALSE );
     window_post( impl, OP_CLOSED, 0 );
     return S_OK;
@@ -774,6 +1320,7 @@ HRESULT WINAPI WineUICreateCoreWindow( ICoreWindow **out )
 
     if (!(window = calloc( 1, sizeof(*window) ))) return E_OUTOFMEMORY;
     window->ICoreWindow_iface.lpVtbl = &window_vtbl;
+    window->ICoreWindowInterop_iface.lpVtbl = &interop_vtbl;
     window->ref = 1;
     window->thread_id = GetCurrentThreadId();
     window->input_enabled = TRUE;

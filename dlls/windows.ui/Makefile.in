@@ -8,6 +8,7 @@ SOURCES = \
 	dispatcher.c \
 	inputpane.c \
 	main.c \
+	pointer.c \
 	uisettings.c \
 	uiviewsettings.c \
 	weakref.c \

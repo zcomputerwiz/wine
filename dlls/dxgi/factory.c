@@ -330,10 +330,37 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForCoreWindow(IWine
         IUnknown *device, IUnknown *window, const DXGI_SWAP_CHAIN_DESC1 *desc,
         IDXGIOutput *output, IDXGISwapChain1 **swapchain)
 {
-    FIXME("iface %p, device %p, window %p, desc %p, output %p, swapchain %p stub!\n",
+    /* ICoreWindowInterop (windows.ui.core.corewindow.interop.idl) */
+    static const GUID iid_core_window_interop =
+            {0x45d64a29, 0xa63e, 0x4cb6, {0xb4, 0x98, 0x57, 0x81, 0xd2, 0x98, 0xcb, 0x4f}};
+    struct core_window_interop_vtbl
+    {
+        HRESULT (STDMETHODCALLTYPE *QueryInterface)(void *iface, REFIID iid, void **out);
+        ULONG (STDMETHODCALLTYPE *AddRef)(void *iface);
+        ULONG (STDMETHODCALLTYPE *Release)(void *iface);
+        HRESULT (STDMETHODCALLTYPE *get_WindowHandle)(void *iface, HWND *hwnd);
+    } **interop;
+    HWND hwnd = NULL;
+    HRESULT hr;
+
+    TRACE("iface %p, device %p, window %p, desc %p, output %p, swapchain %p.\n",
             iface, device, window, desc, output, swapchain);
 
-    return E_NOTIMPL;
+    if (!window || !swapchain)
+        return DXGI_ERROR_INVALID_CALL;
+
+    /* the native window of a CoreWindow is the target of the swap chain */
+    if (FAILED(hr = IUnknown_QueryInterface(window, &iid_core_window_interop, (void **)&interop)))
+    {
+        WARN("The window does not provide ICoreWindowInterop, hr %#lx.\n", hr);
+        return DXGI_ERROR_INVALID_CALL;
+    }
+    hr = (*interop)->get_WindowHandle(interop, &hwnd);
+    (*interop)->Release(interop);
+    if (FAILED(hr) || !hwnd)
+        return FAILED(hr) ? hr : DXGI_ERROR_INVALID_CALL;
+
+    return dxgi_factory_CreateSwapChainForHwnd(iface, device, hwnd, desc, NULL, output, swapchain);
 }
 
 static HRESULT STDMETHODCALLTYPE dxgi_factory_GetSharedResourceAdapterLuid(IWineDXGIFactory *iface,

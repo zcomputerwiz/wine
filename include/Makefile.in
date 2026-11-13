@@ -1101,6 +1101,7 @@ SOURCES = \
 	windows.system.userprofile.idl \
 	windows.ui.composition.idl \
 	windows.ui.composition.interop.idl \
+	windows.ui.core.corewindow.interop.idl \
 	windows.ui.core.idl \
 	windows.ui.idl \
 	windows.ui.input.idl \

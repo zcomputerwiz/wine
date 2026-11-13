@@ -37,10 +37,15 @@
 #include "windows.system.h"
 #define WIDL_using_Windows_UI
 #include "windows.ui.h"
+#define WIDL_using_Windows_Devices_Input
+#define WIDL_using_Windows_UI_Input
 #define WIDL_using_Windows_UI_Core
 #include "windows.ui.core.h"
+#include "windows.devices.input.h"
+#include "windows.ui.input.h"
 #define WIDL_using_Windows_UI_ViewManagement
 #include "windows.ui.viewmanagement.h"
+#include "windows.ui.core.corewindow.interop.h"
 
 extern IActivationFactory *accessibilitysettings_factory;
 extern IActivationFactory *uisettings_factory;
@@ -54,6 +59,21 @@ extern HRESULT ui_handler_remove( struct list *list, CRITICAL_SECTION *cs, Event
 extern IUnknown **ui_handler_snapshot( struct list *list, CRITICAL_SECTION *cs, unsigned int *count );
 extern void ui_handler_snapshot_free( IUnknown **handlers, unsigned int count );
 extern void ui_handler_clear( struct list *list );
+
+/* the arguments of a pointer event (pointer.c) */
+struct ui_pointer_state
+{
+    float x, y;                 /* client coordinates, DIPs */
+    UINT32 pointer_id, frame_id;
+    UINT64 timestamp;
+    BOOL left, right, middle, x1, x2;
+    INT32 wheel_delta;
+    BOOL horizontal_wheel;
+    PointerUpdateKind update_kind;
+    VirtualKeyModifiers modifiers;
+};
+extern IPointerEventArgs *ui_pointer_args_create( const struct ui_pointer_state *state );
+extern BOOL ui_pointer_args_handled( IPointerEventArgs *args );
 
 /* the dispatcher of a window (dispatcher.c) */
 extern HRESULT ui_dispatcher_create( ICoreDispatcher **out );
