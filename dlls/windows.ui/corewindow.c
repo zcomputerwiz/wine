@@ -119,9 +119,10 @@ DEFINE_IINSPECTABLE( corewindow_static, ICoreWindowStatic, struct corewindow_sta
 
 static HRESULT STDMETHODCALLTYPE corewindow_static_GetForCurrentThread( ICoreWindowStatic *iface, ICoreWindow **windows )
 {
-    FIXME( "iface %p, windows %p stub!\n", iface, windows );
+    TRACE( "iface %p, windows %p.\n", iface, windows );
 
-    *windows = NULL;
+    /* a thread without a window gets none, as a program that is not a view does */
+    *windows = ui_window_get_for_current_thread();
     return S_OK;
 }
 

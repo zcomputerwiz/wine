@@ -27,8 +27,11 @@
 #include "appnotify.h"
 #include "activation.h"
 #include "shlobj.h"
+#include "wine/list.h"
 
 #define WIDL_using_Windows_Foundation
+#define WIDL_using_Windows_UI_Core
+#define WIDL_using_Windows_ApplicationModel_Activation
 #define WIDL_using_Windows_Foundation_Collections
 #include "windows.foundation.h"
 #define WIDL_using_Windows_Security_ExchangeActiveSyncProvisioning
@@ -47,6 +50,20 @@
 #include "wine/debug.h"
 
 extern HRESULT activation_manager_get_class_object( REFCLSID clsid, REFIID iid, void **out );
+
+/* event handler lists and views (core_view.c) */
+extern HRESULT handler_list_add( struct list *list, CRITICAL_SECTION *cs, IUnknown *handler, EventRegistrationToken *token );
+extern HRESULT handler_list_remove( struct list *list, CRITICAL_SECTION *cs, EventRegistrationToken token );
+extern IUnknown **handler_list_snapshot( struct list *list, CRITICAL_SECTION *cs, unsigned int *count );
+extern void handler_list_snapshot_free( IUnknown **handlers, unsigned int count );
+extern void handler_list_clear( struct list *list );
+extern HRESULT dispatch_callback( ICoreDispatcher *dispatcher, void (*callback)( void *context ), void *context );
+extern HRESULT core_view_create( ICoreWindow *window, boolean is_main, ICoreApplicationView **out );
+extern ICoreApplicationView *core_view_for_current_thread(void);
+extern ICoreApplicationView *core_view_main(void);
+extern void core_view_detach( ICoreApplicationView *view );
+extern HRESULT core_view_queue_launch( ICoreApplicationView *view, const WCHAR *arguments, const WCHAR *tile_id );
+extern void core_view_for_each( void (*callback)( void *context ), void *context );
 
 extern IActivationFactory *application_view_factory;
 extern IActivationFactory *client_device_information_factory;

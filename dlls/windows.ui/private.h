@@ -28,9 +28,13 @@
 #include "winstring.h"
 
 #include "activation.h"
+#include "wine/list.h"
 
 #define WIDL_using_Windows_Foundation
+#define WIDL_using_Windows_Foundation_Collections
 #include "windows.foundation.h"
+#define WIDL_using_Windows_System
+#include "windows.system.h"
 #define WIDL_using_Windows_UI
 #include "windows.ui.h"
 #define WIDL_using_Windows_UI_Core
@@ -43,6 +47,22 @@ extern IActivationFactory *uisettings_factory;
 extern IActivationFactory *uiviewsettings_factory;
 extern IActivationFactory *inputpane_factory;
 extern IActivationFactory *corewindow_factory;
+
+/* event handler lists (dispatcher.c); the caller's critical section protects the list */
+extern HRESULT ui_handler_add( struct list *list, CRITICAL_SECTION *cs, IUnknown *handler, EventRegistrationToken *token );
+extern HRESULT ui_handler_remove( struct list *list, CRITICAL_SECTION *cs, EventRegistrationToken token );
+extern IUnknown **ui_handler_snapshot( struct list *list, CRITICAL_SECTION *cs, unsigned int *count );
+extern void ui_handler_snapshot_free( IUnknown **handlers, unsigned int count );
+extern void ui_handler_clear( struct list *list );
+
+/* the dispatcher of a window (dispatcher.c) */
+extern HRESULT ui_dispatcher_create( ICoreDispatcher **out );
+extern HRESULT ui_dispatcher_post( ICoreDispatcher *dispatcher, CoreDispatcherPriority priority,
+                                   void (*callback)( void *context ), void *context );
+extern void ui_dispatcher_quit( ICoreDispatcher *dispatcher );
+
+/* the windows of the process (window.c) */
+extern ICoreWindow *ui_window_get_for_current_thread(void);
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

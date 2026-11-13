@@ -5,3 +5,5 @@
 @ stdcall -private DllUnregisterServer()
 @ stub CreateControlInput
 @ stub CreateControlInputEx
+@ stdcall WineUICreateCoreWindow(ptr)
+@ stdcall WineUIDetachCoreWindow(ptr)

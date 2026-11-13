@@ -5,8 +5,10 @@ SOURCES = \
 	accessibilitysettings.c \
 	classes.idl \
 	corewindow.c \
+	dispatcher.c \
 	inputpane.c \
 	main.c \
 	uisettings.c \
 	uiviewsettings.c \
-	weakref.c
+	weakref.c \
+	window.c
