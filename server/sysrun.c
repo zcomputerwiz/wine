@@ -550,12 +550,57 @@ static int get_path_generation( const char *path, struct stat_gen_tracker *track
     return 1;
 }
 
+/* The machine root's generation: a new value whenever the root, or one of the directories the chain's paths go
+ * through, is another object or has another owner or mode (replaced, moved aside, opened up). The root
+ * directory's own size and times are not part of it: with session 0 the machine hives are saved into it, a new
+ * file renamed over the old one, every few seconds while they change, and each save changed the directory's
+ * times and so ended every elevation request in flight (found by the R9 lab cases, 2026-11-13). */
 int sysrun_get_root_generation( unsigned long long *root_gen )
 {
-    static struct stat_gen_tracker root_tracker;
+    static const char * const parts[] = { "", "/drive_c", "/drive_c/windows", "/drive_c/windows/system32",
+                                          "/dosdevices" };
+    static unsigned long long last_hash, tag;
+    static int initialized;
     const char *root = sysrun_machine_root();
-    if (!root) return 0;
-    return get_path_generation( root, &root_tracker, root_gen );
+    unsigned long long hash = 0xcbf29ce484222325ull, values[5], fresh = 0;
+    char path[PATH_MAX];
+    struct stat st;
+    unsigned int i, j, k;
+    int fd;
+
+    if (!root || !root[0] || !root_gen) return 0;
+    for (i = 0; i < ARRAY_SIZE(parts); i++)
+    {
+        if (snprintf( path, sizeof(path), "%s%s", root, parts[i] ) >= (int)sizeof(path)) return 0;
+        /* the root as it is named (it may be reached through a link); below it, the entries themselves */
+        if (i ? lstat( path, &st ) : stat( path, &st ))
+        {
+            if (!i) return 0;
+            memset( &st, 0, sizeof(st) );  /* a missing part is a state of its own */
+        }
+        values[0] = st.st_dev; values[1] = st.st_ino; values[2] = st.st_uid; values[3] = st.st_gid;
+        values[4] = st.st_mode;
+        for (j = 0; j < ARRAY_SIZE(values); j++)
+            for (k = 0; k < 8; k++) hash = (hash ^ ((values[j] >> (8 * k)) & 0xff)) * 0x100000001b3ull;
+    }
+    if (!initialized || hash != last_hash)
+    {
+        if ((fd = open( "/dev/urandom", O_RDONLY | O_CLOEXEC )) < 0) return 0;
+        while (!fresh)
+        {
+            if (read( fd, &fresh, sizeof(fresh) ) != sizeof(fresh))
+            {
+                close( fd );
+                return 0;
+            }
+        }
+        close( fd );
+        last_hash = hash;
+        tag = fresh;
+        initialized = 1;
+    }
+    *root_gen = tag;
+    return 1;
 }
 
 int sysrun_get_policy_generation( unsigned long long *policy_gen )
