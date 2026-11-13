@@ -431,6 +431,7 @@ HKLM,%CurrentVersion%\Installer,"InstallerLocation",,"%11%"
 HKLM,%CurrentVersion%\Policies\System,"EnableLUA",0x10001,1
 HKLM,%CurrentVersion%\PreviewHandlers,,16
 HKLM,%CurrentVersion%\Run,,16
+HKLM,%CurrentVersion%\Group Policy,,16
 HKLM,%CurrentVersion%\Setup,"BootDir",,"%30%"
 HKLM,%CurrentVersion%\Setup,"SharedDir",,"%25%"
 HKLM,%CurrentVersion%\Setup\WindowsFeatures\WindowsMediaVersion,,,"12.0.7601.18840"
