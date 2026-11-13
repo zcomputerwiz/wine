@@ -1,7 +1,8 @@
 MODULE  = windows.storage.applicationdata.dll
-IMPORTS = combase
+IMPORTS = combase advapi32
 
 SOURCES = \
 	applicationdata.c \
 	classes.idl \
-	main.c
+	main.c \
+	propertyset.c

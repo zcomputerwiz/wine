@@ -28,6 +28,8 @@
 #include "winstring.h"
 
 #include "activation.h"
+#include "asyncinfo.h"
+#include "wine/list.h"
 
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_Foundation_Collections
@@ -36,6 +38,14 @@
 #include "windows.storage.h"
 
 extern IActivationFactory *application_data_factory;
+extern IActivationFactory *composite_value_factory;
+
+/* the property set (propertyset.c); the callback runs, under the lock of the set, after every change and may refuse it */
+typedef HRESULT (*property_set_callback)( void *context, IPropertySet *set );
+typedef void (*property_set_enum_callback)( void *context, const WCHAR *key, IInspectable *value );
+extern HRESULT property_set_create( const WCHAR *class_name, property_set_callback callback, void *context, IPropertySet **out );
+extern HRESULT property_set_load( IPropertySet *set, HSTRING key, IInspectable *value );
+extern void property_set_enum( IPropertySet *set, property_set_enum_callback enumerate, void *context );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

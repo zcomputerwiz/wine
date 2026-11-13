@@ -26,3 +26,29 @@ import "windows.storage.idl";
 namespace Windows.Storage {
     runtimeclass ApplicationData;
 }
+
+namespace Windows.Storage {
+    declare {
+        interface Windows.Foundation.Collections.IKeyValuePair<HSTRING, IInspectable *>;
+        interface Windows.Foundation.Collections.IIterable<Windows.Foundation.Collections.IKeyValuePair<HSTRING, IInspectable *> *>;
+        interface Windows.Foundation.Collections.IIterator<Windows.Foundation.Collections.IKeyValuePair<HSTRING, IInspectable *> *>;
+        interface Windows.Foundation.Collections.IMapChangedEventArgs<HSTRING>;
+        interface Windows.Foundation.Collections.MapChangedEventHandler<HSTRING, IInspectable *>;
+        interface Windows.Foundation.Collections.IMap<HSTRING, IInspectable *>;
+        interface Windows.Foundation.Collections.IMapView<HSTRING, IInspectable *>;
+        interface Windows.Foundation.Collections.IObservableMap<HSTRING, IInspectable *>;
+    }
+
+    [
+        activatable(Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass ApplicationDataCompositeValue
+    {
+        [default] interface Windows.Foundation.Collections.IPropertySet;
+        interface Windows.Foundation.Collections.IObservableMap<HSTRING, IInspectable *>;
+        interface Windows.Foundation.Collections.IMap<HSTRING, IInspectable *>;
+        interface Windows.Foundation.Collections.IIterable<Windows.Foundation.Collections.IKeyValuePair<HSTRING, IInspectable *> *>;
+    }
+}
