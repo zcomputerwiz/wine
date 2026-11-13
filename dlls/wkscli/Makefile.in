@@ -1,6 +1,6 @@
 MODULE    = wkscli.dll
 IMPORTLIB = wkscli
-IMPORTS   = netutils
+IMPORTS   = netutils advapi32
 
 SOURCES = \
 	wkscli.c
