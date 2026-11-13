@@ -249,10 +249,12 @@ static struct type_descr named_pipe_type =
     { NULL, 0 },                /* name */
     STANDARD_RIGHTS_ALL,        /* valid_access */
     {                           /* mapping */
-        STANDARD_RIGHTS_READ,
-        STANDARD_RIGHTS_WRITE | FILE_CREATE_PIPE_INSTANCE,
-        STANDARD_RIGHTS_EXECUTE,
-        STANDARD_RIGHTS_ALL
+        /* WineExplorer: the file mapping, as on Windows, so that a generic right in a pipe's descriptor (GA for
+         * SYSTEM) grants the file rights a client asks for; session 0 checks a bridged client against it */
+        FILE_GENERIC_READ,
+        FILE_GENERIC_WRITE | FILE_CREATE_PIPE_INSTANCE,
+        FILE_GENERIC_EXECUTE,
+        FILE_ALL_ACCESS
     }
 };
 
@@ -3316,6 +3318,8 @@ unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_si
     if (!len || len % sizeof(WCHAR) || !(allowed = pipe_bridge_allowed( name, len )) ||
         (allowed == 2 && session < 0))
     {
+        fprintf( stderr, "session0: pipe open refused for uid %u: %s\n", (unsigned int)uid,
+                 allowed == 2 ? "the server has no session link" : "the name is not on the list" );
         close( sock );
         return STATUS_ACCESS_DENIED;
     }
@@ -3346,6 +3350,8 @@ unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_si
     if (!check_object_access( token, &pipe->obj, &access ) ||
         !(pipe->sharing & FILE_SHARE_READ) || !(pipe->sharing & FILE_SHARE_WRITE))
     {
+        fprintf( stderr, "session0: pipe open refused for uid %u: the pipe's descriptor or sharing (%x)\n",
+                 (unsigned int)uid, pipe->sharing );
         release_object( pipe );
         close( sock );
         return STATUS_ACCESS_DENIED;
