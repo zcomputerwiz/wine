@@ -33,6 +33,7 @@
 
 #include "wine/debug.h"
 #include "svcctl.h"
+#include "forward.h"
 
 #include "services.h"
 
@@ -593,6 +594,12 @@ static void scmdatabase_autostart_services(struct scmdatabase *db)
         if (!safeboot_allows(service))
         {
             TRACE("not starting %s in Safe Mode\n", wine_dbgstr_w(service->name));
+            release_service(service);
+            continue;
+        }
+        if (forward_mode && !is_session_service(service->name, service->config.dwServiceType))
+        {
+            TRACE("%s is session 0's\n", wine_dbgstr_w(service->name));
             release_service(service);
             continue;
         }
@@ -1437,6 +1444,38 @@ static DWORD WINAPI process_monitor_thread_proc( void *arg )
     return 0;
 }
 
+/* WineExplorer system tier T5.4. The services that act for one session: drivers and their hosts (each server loads its own),
+ * and Wine's services that work on the session's devices, desktop, processes or user (printing, scanners, smart
+ * cards, WMI, terminal services, scheduled tasks and transfers run as the user, msiexec's installs, E1's broker
+ * until T6). Session 0 runs them for itself too. Every other service, in practice those that programs install,
+ * runs once, in session 0. */
+BOOL is_session_service(const WCHAR *name, DWORD type)
+{
+    static const WCHAR * const session_services[] =
+    {
+        L"BITS", L"EventLog", L"FontCache", L"FontCache3.0.0.0", L"LanmanServer", L"MSIServer", L"PlugPlay",
+        L"RpcSs", L"SamSs", L"scardsvr", L"Schedule", L"Spooler", L"StiSvc", L"TermService", L"Winmgmt",
+        L"wexelevate",
+    };
+    unsigned int i;
+
+    if (type & (SERVICE_KERNEL_DRIVER | SERVICE_FILE_SYSTEM_DRIVER)) return TRUE;
+    if (!wcsnicmp(name, L"Winedevice", 10)) return TRUE;  /* the driver hosts (add_winedevice_service) */
+    for (i = 0; i < ARRAY_SIZE(session_services); i++)
+        if (!wcsicmp(name, session_services[i])) return TRUE;
+    return FALSE;
+}
+
+/* a session whose server reaches session 0 (its service manager answers) forwards; session 0 and a machine
+ * without it serve everything here */
+static void init_forward_mode(void)
+{
+    DWORD session = 0;
+
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &session) || !session) return;
+    if ((forward_mode = forward_available())) WINE_TRACE("services that are not the session's are session 0's\n");
+}
+
 int __cdecl main(int argc, char *argv[])
 {
     static const WCHAR svcctl_started_event[] = SVCCTL_STARTED_EVENT;
@@ -1484,6 +1523,7 @@ int __cdecl main(int argc, char *argv[])
 
     load_registry_parameters();
     load_safeboot_list();
+    init_forward_mode();
     err = scmdatabase_create(&active_database);
     if (err != ERROR_SUCCESS)
         return err;

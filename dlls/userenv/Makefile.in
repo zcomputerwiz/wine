@@ -4,4 +4,5 @@ IMPORTS   = advapi32 bcrypt combase ntdll
 IMPORTLIB = userenv
 
 SOURCES = \
+	gpolicy.c \
 	userenv_main.c

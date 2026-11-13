@@ -169,6 +169,7 @@ struct pipe_end
     struct named_pipe   *pipe;
     struct pipe_end     *connection; /* the other end of the pipe */
     process_id_t         client_pid; /* process that created the client */
+    unsigned int         client_session; /* its session (a bridge: the session of the server that opened it) */
     process_id_t         server_pid; /* process that created the server */
     struct token        *client_token; /* token of the thread that opened the client end (elevation enforced) */
     struct process      *client_process; /* retained opener, not a later PID lookup */
@@ -248,10 +249,12 @@ static struct type_descr named_pipe_type =
     { NULL, 0 },                /* name */
     STANDARD_RIGHTS_ALL,        /* valid_access */
     {                           /* mapping */
-        STANDARD_RIGHTS_READ,
-        STANDARD_RIGHTS_WRITE | FILE_CREATE_PIPE_INSTANCE,
-        STANDARD_RIGHTS_EXECUTE,
-        STANDARD_RIGHTS_ALL
+        /* WineExplorer: the file mapping, as on Windows, so that a generic right in a pipe's descriptor (GA for
+         * SYSTEM) grants the file rights a client asks for; session 0 checks a bridged client against it */
+        FILE_GENERIC_READ,
+        FILE_GENERIC_WRITE | FILE_CREATE_PIPE_INSTANCE,
+        FILE_GENERIC_EXECUTE,
+        FILE_ALL_ACCESS
     }
 };
 
@@ -1450,6 +1453,11 @@ static void pipe_end_get_connection_attribute( struct pipe_end *pipe_end )
         value = &pipe_end->server_pid;
         value_size = sizeof(pipe_end->server_pid);
     }
+    else if (attr_size == sizeof("ClientSessionId") && !memcmp( attr, "ClientSessionId", attr_size ))
+    {
+        value = &pipe_end->client_session;
+        value_size = sizeof(pipe_end->client_session);
+    }
     else
     {
         set_error( STATUS_ILLEGAL_FUNCTION );
@@ -1605,6 +1613,7 @@ static void init_pipe_end( struct pipe_end *pipe_end, struct named_pipe *pipe,
     memset( &pipe_end->client_token_id, 0, sizeof(pipe_end->client_token_id) );
     memset( &pipe_end->client_modified_id, 0, sizeof(pipe_end->client_modified_id) );
     pipe_end->client_impersonated = 0;
+    pipe_end->client_session = 0;
     memset( &pipe_end->consumed_writer, 0, sizeof(pipe_end->consumed_writer) );
     pipe_end->binding_reads = 0;
     pipe_end->consumed_valid = 0;
@@ -1676,6 +1685,7 @@ static struct pipe_end *create_pipe_client( struct named_pipe *pipe, data_size_t
     init_pipe_end( client, pipe, 0, buffer_size );
     client->state = FILE_PIPE_CONNECTED_STATE;
     client->client_pid = get_process_id( current->process );
+    client->client_session = current->process->token ? token_get_session_id( current->process->token ) : 0;
     client->client_process = (struct process *)grab_object( current->process );
     client->client_impersonated = (current->token != NULL);
     if (current->process->token)
@@ -1745,6 +1755,7 @@ static struct object *named_pipe_open_file( struct object *obj, unsigned int acc
         server->pipe_end.connection = client;
         client->connection = &server->pipe_end;
         server->pipe_end.client_pid = client->client_pid;
+        server->pipe_end.client_session = client->client_session;
         client->server_pid = server->pipe_end.server_pid;
         list_remove( &server->entry );
     }
@@ -2186,6 +2197,23 @@ DECL_HANDLER(get_pipe_caller_binding)
     static const unsigned char zero16[16] = {0};
 #endif
 
+#ifdef WEX_E1S6_TRANSPORT_TEST
+    /* E1 R9: session 0's broker B0 registers its S6 channel with the verifier here. It has no caller in this
+     * server to bind (its requests come over the bridge; the verifier binds each attempt to the agent's channel),
+     * so none of the binding below applies: only the endorsement, whose own checks (the broker image mapped by one
+     * of session 0's programs, a LocalSystem primary token with SeTcbPrivilege, no thread token) decide. */
+    if (session0_server)
+    {
+        if (get_req_data_size() < 4 || !memcmp( get_req_data(), "E1R8", 4 ))
+        {
+            E1S6_BINDING_AUDIT( "session0-op" );
+            set_error( STATUS_ACCESS_DENIED );
+            return;
+        }
+        sysrun_e1s6_endorse( get_req_data(), get_req_data_size() );  /* sets the error itself */
+        return;
+    }
+#endif
     /* Keep the same system-role / SeTcbPrivilege gate as create_linked_token. */
     if (!elevation_enforced() || token_service_account( current->process->token ) != SERVICE_ACCOUNT_SYSTEM ||
         !sysrun_process_privileged( current->process ) || !token_has_privilege( current->process->token, SeTcbPrivilege ))
@@ -2973,6 +3001,8 @@ struct pipe_bridge
     struct pipe_end pipe_end;
     struct list     entry;         /* in bridges */
     int             alive;         /* holds its own reference until the connection ends */
+    int             draining;      /* its peer closed: what it wrote is still being sent */
+    struct timeout_user *drain_timeout;
     uid_t           peer_uid;      /* session 0: the account of the session that opened it */
     unsigned char   tx_head[4];    /* the length of the message being sent */
     unsigned int    tx_head_pos;
@@ -3015,16 +3045,40 @@ static const struct fd_ops pipe_bridge_fd_ops =
     .poll_event = pipe_bridge_poll_event,
 };
 
-/* the connection ended: stop polling and drop the bridge's own reference (the last thing its caller does) */
+/* stop polling and drop the bridge's own reference (the last thing its caller does) */
+static void pipe_bridge_finish( struct pipe_bridge *bridge )
+{
+    if (bridge->drain_timeout) remove_timeout_user( bridge->drain_timeout );
+    bridge->drain_timeout = NULL;
+    bridge->alive = 0;
+    if (bridge->pipe_end.fd) set_fd_events( bridge->pipe_end.fd, -1 );
+    release_object( bridge );
+}
+
+static void pipe_bridge_drain_timeout( void *private )
+{
+    struct pipe_bridge *bridge = private;
+
+    bridge->drain_timeout = NULL;
+    pipe_bridge_finish( bridge );
+}
+
+/* the connection ended. What the peer wrote before it closed, and was told was written, is sent before the socket
+ * closes (T5 review); a socket that takes nothing for 10 s ends it anyway */
 static void pipe_bridge_closed( struct pipe_end *end )
 {
     struct pipe_bridge *bridge = (struct pipe_bridge *)end;
 
-    if (!bridge->alive) return;
-    pipe_bridge_flush( end );  /* what the peer wrote before it closed, as far as the socket takes it now */
-    bridge->alive = 0;
-    if (end->fd) set_fd_events( end->fd, -1 );
-    release_object( bridge );
+    if (!bridge->alive || bridge->draining) return;
+    pipe_bridge_flush( end );
+    if (list_empty( &end->message_queue ) || !end->fd)
+    {
+        pipe_bridge_finish( bridge );
+        return;
+    }
+    bridge->draining = 1;
+    set_fd_events( end->fd, POLLOUT );
+    bridge->drain_timeout = add_timeout_user( -10 * TICKS_PER_SEC, pipe_bridge_drain_timeout, bridge );
 }
 
 /* read while the other end has room for more; always watch for the end of the connection */
@@ -3113,6 +3167,13 @@ static void pipe_bridge_poll_event( struct fd *fd, int event )
     int sock = get_unix_fd( fd );
     ssize_t ret;
 
+    if (bridge->draining)
+    {
+        if (event & POLLOUT) pipe_bridge_flush( end );
+        if ((event & (POLLERR | POLLHUP)) || list_empty( &end->message_queue )) pipe_bridge_finish( bridge );
+        else set_fd_events( fd, POLLOUT );
+        return;
+    }
     if (event & POLLOUT) pipe_bridge_flush( end );
     while ((event & POLLIN) && bridge->alive && end->connection &&
            pipe_end_get_avail( end->connection ) < PIPE_BRIDGE_MAX_QUEUED)
@@ -3166,6 +3227,8 @@ static struct pipe_bridge *create_pipe_bridge( struct named_pipe *pipe, int sock
     list_add_tail( &bridges, &bridge->entry );
     bridge->pipe_end.state = FILE_PIPE_CONNECTED_STATE;
     bridge->alive = 1;
+    bridge->draining = 0;
+    bridge->drain_timeout = NULL;
     bridge->peer_uid = (uid_t)-1;
     bridge->tx_head_pos = bridge->rx_head_pos = 0;
     bridge->rx_data = NULL;
@@ -3227,17 +3290,21 @@ static struct object *pipe_bridge_open_remote( struct named_pipe *pipe, unsigned
     return &client->obj;
 }
 
-/* session 0: the pipes that a session may open here */
+/* session 0: the pipes that a session may open here (1), and those only a session with a session link may (2) */
 static int pipe_bridge_allowed( const WCHAR *name, data_size_t len )
 {
     static const WCHAR svcctl[] = {'s','v','c','c','t','l'};
+    static const WCHAR broker[] = {'w','e','x','e','l','e','v','a','t','e','.','r','9'};  /* E1 R9's B0 */
 
-    return len == sizeof(svcctl) && !memicmp_strW( name, svcctl, len );
+    if (len == sizeof(svcctl) && !memicmp_strW( name, svcctl, len )) return 1;
+    if (len == sizeof(broker) && !memicmp_strW( name, broker, len )) return 2;
+    return 0;
 }
 
 /* session 0: connect a session's opener (described by token) to a listening instance of the named pipe, over sock
  * (owned from now on); the status for the session's server */
-unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_size_t len, int sock, uid_t uid )
+unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_size_t len, int sock, uid_t uid,
+                                 int session )
 {
     static const WCHAR device[] = {'\\','D','e','v','i','c','e','\\','N','a','m','e','d','P','i','p','e','\\'};
     struct object_params params = { .ops = &named_pipe_ops, .attr = OBJ_CASE_INSENSITIVE };
@@ -3246,9 +3313,13 @@ unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_si
     struct pipe_server *server;
     struct named_pipe *pipe;
     WCHAR *path;
+    int allowed;
 
-    if (!len || len % sizeof(WCHAR) || !pipe_bridge_allowed( name, len ))
+    if (!len || len % sizeof(WCHAR) || !(allowed = pipe_bridge_allowed( name, len )) ||
+        (allowed == 2 && session < 0))
     {
+        fprintf( stderr, "session0: pipe open refused for uid %u: %s\n", (unsigned int)uid,
+                 allowed == 2 ? "the server has no session link" : "the name is not on the list" );
         close( sock );
         return STATUS_ACCESS_DENIED;
     }
@@ -3279,6 +3350,8 @@ unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_si
     if (!check_object_access( token, &pipe->obj, &access ) ||
         !(pipe->sharing & FILE_SHARE_READ) || !(pipe->sharing & FILE_SHARE_WRITE))
     {
+        fprintf( stderr, "session0: pipe open refused for uid %u: the pipe's descriptor or sharing (%x)\n",
+                 (unsigned int)uid, pipe->sharing );
         release_object( pipe );
         close( sock );
         return STATUS_ACCESS_DENIED;
@@ -3302,6 +3375,8 @@ unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_si
     server->pipe_end.connection = &bridge->pipe_end;
     bridge->pipe_end.connection = &server->pipe_end;
     bridge->pipe_end.server_pid = server->pipe_end.server_pid;
+    bridge->pipe_end.client_session = session > 0 ? session : 0;
+    server->pipe_end.client_session = bridge->pipe_end.client_session;  /* R9: the session of the opener's server */
     list_remove( &server->entry );
     release_object( pipe );
     pipe_bridge_update_events( &bridge->pipe_end );

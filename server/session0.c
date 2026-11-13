@@ -65,6 +65,7 @@
 #include "sysrun.h"
 #include "thread.h"
 #include "e1s_token.h"
+#include "accounts.h"
 #include "session0.h"
 #include "wine/wex_session0.h"
 
@@ -105,6 +106,99 @@ static struct list session_links = LIST_INIT( session_links );
 #define SESSION_ID_BLOCK 64
 static unsigned int next_session_id;      /* 0: the file was not read yet */
 static unsigned int reserved_session_id;
+
+/* R9: the account each session id was given to. An id is given again only to that account, also after a restart
+ * of session 0: the owners are kept in session0.owners ("id uid" lines, appended before the answer; the last
+ * SESSION0_MAX_OWNERS are read at start). An id without a record is not given back. */
+#define SESSION0_MAX_OWNERS 65536
+struct session_id_owner
+{
+    unsigned int id;
+    uid_t        uid;
+};
+static struct session_id_owner *id_owners;
+static unsigned int id_owner_count, id_owner_capacity;
+static int id_owners_loaded;
+
+static int add_id_owner( unsigned int id, uid_t uid )
+{
+    unsigned int i;
+
+    for (i = 0; i < id_owner_count; i++)
+        if (id_owners[i].id == id)
+        {
+            id_owners[i].uid = uid;  /* a later record wins */
+            return 1;
+        }
+    if (id_owner_count == SESSION0_MAX_OWNERS)
+    {
+        memmove( id_owners, id_owners + 1, (id_owner_count - 1) * sizeof(*id_owners) );  /* the oldest goes */
+        id_owner_count--;
+    }
+    if (id_owner_count == id_owner_capacity)
+    {
+        unsigned int capacity = id_owner_capacity ? id_owner_capacity * 2 : 64;
+        struct session_id_owner *grown = realloc( id_owners, capacity * sizeof(*grown) );
+
+        if (!grown) return 0;
+        id_owners = grown;
+        id_owner_capacity = capacity;
+    }
+    id_owners[id_owner_count].id = id;
+    id_owners[id_owner_count].uid = uid;
+    id_owner_count++;
+    return 1;
+}
+
+static void load_id_owners(void)
+{
+    char line[64];
+    unsigned int id, uid;
+    FILE *file;
+    int fd;
+
+    id_owners_loaded = 1;
+    if ((fd = openat( config_dir_fd, "session0.owners", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC )) == -1)
+        return;
+    if (!(file = fdopen( fd, "r" )))
+    {
+        close( fd );
+        return;
+    }
+    while (fgets( line, sizeof(line), file ))
+        if (sscanf( line, "%u %u", &id, &uid ) == 2 && id) add_id_owner( id, uid );
+    fclose( file );
+}
+
+/* record a new id's owner before it is given out; 0 if it cannot be recorded (the id is then not given) */
+static int record_id_owner( unsigned int id, uid_t uid )
+{
+    char line[64];
+    int fd, len, ok;
+
+    if (!id_owners_loaded) load_id_owners();
+    len = snprintf( line, sizeof(line), "%u %u\n", id, (unsigned int)uid );
+    if ((fd = openat( config_dir_fd, "session0.owners", O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC,
+                      0600 )) == -1)
+    {
+        fprintf( stderr, "session0: cannot record the owner of session %u: %s\n", id, strerror( errno ));
+        return 0;
+    }
+    ok = write( fd, line, len ) == len && !fsync( fd );
+    close( fd );
+    return ok && add_id_owner( id, uid );
+}
+
+/* 1 when uid may have id back (it is recorded as that account's), 0 otherwise */
+static int reclaim_session_id( unsigned int id, uid_t uid )
+{
+    unsigned int i;
+
+    if (!id_owners_loaded) load_id_owners();
+    for (i = 0; i < id_owner_count; i++)
+        if (id_owners[i].id == id) return id_owners[i].uid == uid;
+    return 0;
+}
 
 static void reserve_session_ids(void)
 {
@@ -259,11 +353,17 @@ static int read_conf( const char *key, char *value, size_t size )
 }
 
 /* the socket path: the configuration, else (development) the environment */
+static int socket_from_conf;  /* session 0 is named by the machine's configuration, not by the environment */
+
 static int get_socket_path( int conf_only )
 {
     const char *env;
 
-    if (read_conf( "session0_socket", session0_path, sizeof(session0_path) )) return session0_path[0] == '/';
+    if (read_conf( "session0_socket", session0_path, sizeof(session0_path) ))
+    {
+        socket_from_conf = session0_path[0] == '/';
+        return socket_from_conf;
+    }
     if (conf_only || !(env = getenv( "WEX_SESSION0_SOCKET" )) || env[0] != '/' ||
         strlen( env ) >= sizeof(session0_path)) return 0;
     strcpy( session0_path, env );
@@ -472,11 +572,18 @@ void session0_init( int server_mode )
     if (server_mode)
     {
         session0_server = 1;
+        default_session_id = 0;  /* T5.3: session 0's own programs (its services) are in session 0, as on Windows */
         init_listener();
         return;
     }
     /* a launcher-started server uses the configuration only: the user controls the environment */
     if (get_socket_path( sysrun_active )) session0_client = 1;
+    /* The machine's session 0 serves launcher-started servers only (peer_trusted). A server that the launcher did
+     * not start (the setup's skeleton prefix, a prefix of the user's own, a program run with another WINEPREFIX)
+     * is therefore a server of its own, with the files of its prefix, as it was before session 0 existed: as a
+     * client it would be refused, and its programs' machine registry would fail. Development mode (the socket
+     * named by the environment, no configuration) is unchanged. */
+    if (session0_client && !sysrun_active && socket_from_conf) session0_client = 0;
     if (session0_client)
     {
         char name[64];
@@ -595,18 +702,50 @@ static void session0_listen_event( struct fd *fd, int event )
     set_fd_events( link->fd, POLLIN );  /* the link holds its own reference until the message is handled */
 }
 
+/* A token that a session's server describes stands for that server's own user (the account map's SID of the
+ * peer's uid) or for its session's system role (SYSTEM, LocalService, NetworkService). Another user's account is
+ * refused: a session's server cannot act as another user in session 0 (T5 review). What the description says
+ * beyond the user (groups, privileges, elevation) rests on the launcher-started server, as everything since T1. */
+static int described_token_bound( struct token *token, uid_t uid )
+{
+    static const unsigned char nt_authority[6] = { 0, 0, 0, 0, 0, 5 };
+    const struct sid *user = token_get_user_sid( token );
+    unsigned int subauth[5], i;
+
+    if (session0_dev) return 1;
+    if (token_service_account( token ) != -1) return 1;
+    if (!accounts_own_sid( uid, subauth )) return 0;
+    if (user->sub_count != 5 || memcmp( user->id_auth, nt_authority, sizeof(nt_authority) )) return 0;
+    for (i = 0; i < 5; i++) if (user->sub_auth[i] != subauth[i]) return 0;
+    return 1;
+}
+
+/* the described token, if it is bound to the peer; else NULL with *status set */
+static struct token *create_bound_token( const void *desc, data_size_t size, uid_t uid, unsigned int *status )
+{
+    struct token *token = token_create_described( desc, size );
+
+    *status = STATUS_INVALID_PARAMETER;
+    if (!token) return NULL;
+    if (described_token_bound( token, uid )) return token;
+    release_object( token );
+    *status = STATUS_ACCESS_DENIED;
+    return NULL;
+}
+
 /* serve a channel as a registry-only client with the described token */
-static unsigned int start_registry_client( int channel, const void *desc, data_size_t size, unsigned int machine )
+static unsigned int start_registry_client( int channel, const void *desc, data_size_t size, unsigned int machine,
+                                           uid_t uid )
 {
     struct process *process;
     struct thread *thread;
     struct token *token;
     unsigned int status;
 
-    if (!(token = token_create_described( desc, size )))
+    if (!(token = create_bound_token( desc, size, uid, &status )))
     {
         close( channel );
-        return STATUS_INVALID_PARAMETER;
+        return status;
     }
     clear_error();
     process = create_process( channel, NULL, WEX_CREATE_REGISTRY_CLIENT, NULL, NULL, NULL, 0, token );
@@ -727,7 +866,10 @@ static void session0_link_event( struct fd *fd, int event )
             if (wanted && other->session_id == wanted) in_use = 1;
         }
         if (count >= SESSION0_MAX_SESSIONS_PER_USER) reply.status = STATUS_INSUFFICIENT_RESOURCES;
-        else if (wanted && (wanted >= next_session_id || in_use)) reply.status = STATUS_OBJECT_NAME_COLLISION;
+        else if (wanted && (wanted >= next_session_id || in_use || !reclaim_session_id( wanted, link->peer_uid )))
+            reply.status = STATUS_OBJECT_NAME_COLLISION;  /* R9: an id goes back only to its own account */
+        else if (!wanted && !record_id_owner( next_session_id, link->peer_uid ))
+            reply.status = STATUS_INSUFFICIENT_RESOURCES;
         else
         {
             reply.status = STATUS_SUCCESS;
@@ -748,19 +890,27 @@ static void session0_link_event( struct fd *fd, int event )
     else if (hdr->type == WEX_SESSION0_PIPE)
     {
         /* T5.2: join the channel (a stream socket) to the named pipe, as a client with the described token */
-        struct token *token = token_create_described( hdr + 1, hdr->desc_size );
+        struct token *token = create_bound_token( hdr + 1, hdr->desc_size, link->peer_uid, &reply.status );
         WCHAR *name = malloc( hdr->machine ? hdr->machine : 1 );
 
         if (!token || !name)
         {
-            reply.status = STATUS_INVALID_PARAMETER;
+            if (token) reply.status = STATUS_NO_MEMORY;
+            else fprintf( stderr, "session0: pipe open refused for uid %u: the described token (%x)\n",
+                          (unsigned int)link->peer_uid, reply.status );
             close( channel );
         }
         else
         {
+            struct session0_socket *session_link;
+            int session = -1;  /* R9: the session of the bridge's peer server, from its session link */
+
+            LIST_FOR_EACH_ENTRY( session_link, &session_links, struct session0_socket, entry )
+                if (session_link->peer_pid == link->peer_pid && session_link->peer_uid == link->peer_uid)
+                    session = session_link->session_id;
             memcpy( name, (const char *)(hdr + 1) + hdr->desc_size, hdr->machine );
             fcntl( channel, F_SETFL, O_NONBLOCK );
-            reply.status = pipe_bridge_accept( token, name, hdr->machine, channel, link->peer_uid );
+            reply.status = pipe_bridge_accept( token, name, hdr->machine, channel, link->peer_uid, session );
         }
         channel = -1;  /* the bridge owns it now, or it was closed */
         free( name );
@@ -769,10 +919,9 @@ static void session0_link_event( struct fd *fd, int event )
     else if (hdr->type == WEX_SESSION0_USER_HIVE)
     {
         /* T4a: hold the user's hive (channel is the user.reg descriptor, or none) for this link's server */
-        struct token *token = token_create_described( hdr + 1, hdr->desc_size );
+        struct token *token = create_bound_token( hdr + 1, hdr->desc_size, link->peer_uid, &reply.status );
 
-        if (!token) reply.status = STATUS_INVALID_PARAMETER;
-        else
+        if (token)  /* else reply.status says why */
         {
             reply.status = session0_load_user_hive( token_get_user_sid( token ), channel, link );
             channel = -1;
@@ -788,7 +937,7 @@ static void session0_link_event( struct fd *fd, int event )
     else
     {
         fcntl( channel, F_SETFL, O_NONBLOCK );
-        reply.status = start_registry_client( channel, hdr + 1, hdr->desc_size, hdr->machine );
+        reply.status = start_registry_client( channel, hdr + 1, hdr->desc_size, hdr->machine, link->peer_uid );
         channel = -1;  /* the client owns it now, or it was closed */
     }
     if (channel != -1) close( channel );
@@ -1269,6 +1418,14 @@ void session0_client_exit(void)
     struct pollfd pfd;
     int i, sock;
 
+    /* the session link ends with the server: released here, or the leak check at exit prints the object on the
+     * terminal of whoever started the server (found on an installed machine, 2026-11-13) */
+    if (session_link)
+    {
+        struct session0_socket *session = session_link;
+        session_link = NULL;
+        release_object( session );
+    }
     if (!link) return;
     hive_link = NULL;
     sock = get_unix_fd( link->fd );

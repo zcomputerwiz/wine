@@ -221,6 +221,7 @@ static inline struct key *get_parent( const struct key *key );
 static struct key *find_subkey( const struct key *key, struct unicode_str name, int *index );
 static void delete_value( struct key *key, struct unicode_str name );
 static int delete_key( struct key *key, int recurse );
+static struct key *create_key_recursive( struct key *root, struct unicode_str name, timeout_t modif );
 static void make_dirty( struct key *key );
 static void touch_key_ex( struct key *key, unsigned int change, bool mark_dirty );
 
@@ -249,6 +250,7 @@ struct save_branch_info
     struct e1s_hive *managed; /* S14: descriptor-only save, never filename routing */
     void           *agent;    /* system tier T4a: the user's server that saves this hive (session 0) */
     struct security_descriptor *owner_sd; /* T4a: default descriptor of the hive's keys, for its user */
+    struct security_descriptor *policy_sd; /* the same for the hive's policy trees: the user reads */
     struct key     *classes_alias;        /* T4a: \Registry\User\<SID>_Classes */
     unsigned int    save_pending;         /* T4a: saves sent to the agent that it has not yet answered */
     struct list     tombstones;
@@ -1196,6 +1198,104 @@ done:
     return ret;
 }
 
+/* Group Policy (docs/GROUP_POLICY.md): the policy trees of a user's hive held by session 0. Only the system and
+ * administrators write them, as on Windows; the path decides, because a new key inherits no descriptor here. */
+static const char * const policy_tree_paths[] =
+{
+    "Software\\Policies",
+    "Software\\Microsoft\\Windows\\CurrentVersion\\Policies",
+};
+
+/* is the key the root of a policy tree of the hive, or below one (below: 1), or above one (below: 0)? */
+static int key_at_policy_tree( const struct key *key, const struct save_branch_info *info, int below )
+{
+    data_size_t len;
+    unsigned int i;
+    int ret = 0;
+    WCHAR *path = build_relative_key_path( key, info->key, &len );
+
+    if (!path) return 0;
+    for (i = 0; i < ARRAY_SIZE(policy_tree_paths) && !ret; i++)
+    {
+        if (below) ret = match_ascii_prefix_ci( path, len, policy_tree_paths[i] );
+        else ret = is_display_cache_ancestor( path, len, policy_tree_paths[i] );
+    }
+    free( path );
+    return ret;
+}
+
+/* "Volatile Environment" belongs to one logon: wineboot makes it, as a volatile key, for the user who logs on.
+ * A hive file that has it (a copy of a template prefix, or a file written before the key was volatile) would
+ * keep it for ever, with another account's name and paths: a key that is loaded is an ordinary key, and making
+ * it again as volatile does not change that. So it is dropped when a user's hive is loaded. */
+static void drop_saved_volatile_environment( struct key *hive )
+{
+    static const WCHAR nameW[] = {'V','o','l','a','t','i','l','e',' ','E','n','v','i','r','o','n','m','e','n','t'};
+    struct unicode_str name = { nameW, sizeof(nameW) };
+    struct key *key;
+    int index;
+
+    if ((key = find_subkey( hive, name, &index ))) delete_key( key, 1 );
+    clear_error();
+}
+
+/* may the caller write the hive's policy trees? Asked of the first tree's root, which always exists. */
+static int policy_write_allowed( struct key *hive )
+{
+    WCHAR path[64];
+    unsigned int access = KEY_SET_VALUE;
+    size_t j, len = strlen( policy_tree_paths[0] );
+    struct key *key;
+    int ret;
+
+    for (j = 0; j < len; j++) path[j] = (unsigned char)policy_tree_paths[0][j];
+    if (!(key = find_subkey_by_path( hive, path, len * sizeof(WCHAR) ))) return 0;
+    ret = check_object_access( NULL, &key->obj, &access );
+    clear_error();
+    return ret;
+}
+
+/* The hive file is the user's own, so what it says in the policy trees is not policy: a hive that session 0
+ * loads gets the trees empty, and the Group Policy service (wexpolicy) writes the user's policy into them. The
+ * roots always exist; a create below them then meets a parent with the policy descriptor. */
+static void reset_policy_trees( struct key *hive )
+{
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(policy_tree_paths); i++)
+    {
+        WCHAR path[64];
+        struct unicode_str name;
+        struct key *key;
+        size_t j, len = strlen( policy_tree_paths[i] );
+
+        for (j = 0; j < len; j++) path[j] = (unsigned char)policy_tree_paths[i][j];
+        /* a key above the tree that the file made a link would lead the readers of the policy elsewhere: such a
+         * key goes, with all below it, and is made again as a plain key */
+        for (key = hive, name.str = path, name.len = len * sizeof(WCHAR); key && name.len; )
+        {
+            struct unicode_str part = name;
+            int index;
+
+            part.len = get_path_element( name.str, name.len );
+            if (!(key = find_subkey( key, part, &index ))) break;
+            if (key->flags & KEY_SYMLINK)
+            {
+                delete_key( key, 1 );
+                break;
+            }
+            if (part.len < name.len) part.len += sizeof(WCHAR);
+            name.str += part.len / sizeof(WCHAR);
+            name.len -= part.len;
+        }
+        if ((key = find_subkey_by_path( hive, path, len * sizeof(WCHAR) ))) delete_key( key, 1 );
+        name.str = path;
+        name.len = len * sizeof(WCHAR);
+        if ((key = create_key_recursive( hive, name, current_time ))) release_object( key );
+        clear_error();
+    }
+}
+
 /* Default descriptors for keys that have none. A limited token has Administrators deny-only, so the
  * descriptors have to name the user (HKCU) and Users (everywhere else) instead of relying on Administrators:
  * the user and SYSTEM get full control of the user tree; elsewhere Users can read the key itself and
@@ -1209,7 +1309,8 @@ static struct security_descriptor *key_get_sd( struct object *obj )
     if (session0_server)  /* system tier T4a: a user's hive held by session 0 belongs to that user */
     {
         struct save_branch_info *info = find_branch_info( (struct key *)obj );
-        if (info && info->owner_sd) return info->owner_sd;
+        if (info && info->owner_sd)
+            return info->policy_sd && key_at_policy_tree( (struct key *)obj, info, 1 ) ? info->policy_sd : info->owner_sd;
     }
 
     if (key_in_user_tree( (struct key *)obj ))
@@ -3888,6 +3989,7 @@ void init_registry(void)
         fatal_error( "could not create HKEY_CURRENT_USER registry key\n" );
     free( current_user_path );
     load_init_registry_from_file( "user.reg", hkcu, false );
+    drop_saved_volatile_environment( hkcu );
 
     /* set the shared flag on Software\Classes\Wow6432Node for all platforms */
     for (i = 1; i < supported_machines_count; i++)
@@ -4480,6 +4582,12 @@ unsigned int session0_load_user_hive( const struct sid *sid, int fd, void *agent
         { &local_system_sid,   CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
         { &builtin_admins_sid, CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
     };
+    const struct default_ace policy_aces[] =
+    {
+        { sid,                 CONTAINER_INHERIT_ACE, KEY_READ },
+        { &local_system_sid,   CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+        { &builtin_admins_sid, CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+    };
 
     if (save_branch_count >= MAX_SAVE_BRANCH_INFO)
     {
@@ -4546,7 +4654,10 @@ unsigned int session0_load_user_hive( const struct sid *sid, int fd, void *agent
     info->filename = "<user hive>";  /* diagnostics only: the agent saves it */
     info->agent = agent;
     info->owner_sd = key_alloc_default_sd( aces, ARRAY_SIZE(aces) );
+    info->policy_sd = key_alloc_default_sd( policy_aces, ARRAY_SIZE(policy_aces) );
     info->classes_alias = alias ? (struct key *)grab_object( alias ) : NULL;
+    reset_policy_trees( key );
+    drop_saved_volatile_environment( key );
     make_clean( key );
     status = STATUS_SUCCESS;
 
@@ -4580,6 +4691,7 @@ void session0_unload_user_hive( void *agent, int save )
     unlink_named_object( &info->key->obj );
     release_object( info->key );
     free( info->owner_sd );
+    free( info->policy_sd );
     if (i != --save_branch_count) save_branch_info[i] = save_branch_info[save_branch_count];
     list_init( &save_branch_info[i].tombstones );  /* the lists of user hives and managed profiles are empty */
     memset( &save_branch_info[save_branch_count], 0, sizeof(save_branch_info[0]) );
@@ -5047,6 +5159,19 @@ DECL_HANDLER(rename_key)
     key = get_hkey_obj( req->hkey, KEY_WRITE );
     if (key)
     {
+        /* Group Policy: the keys above a policy tree of a user's hive are not moved away by the user, who could
+         * then put a tree of their own in its place. Whoever may write the tree may rename them. */
+        struct save_branch_info *info = session0_server ? find_branch_info( key ) : NULL;
+
+        if (info && info->policy_sd && key_at_policy_tree( key, info, 0 ))
+        {
+            if (!policy_write_allowed( info->key ))
+            {
+                set_error( STATUS_ACCESS_DENIED );
+                release_object( key );
+                return;
+            }
+        }
         rename_key( key, name );
         release_object( key );
     }

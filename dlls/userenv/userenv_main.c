@@ -953,18 +953,6 @@ BOOL WINAPI LoadUserProfileW( HANDLE hToken, LPPROFILEINFOW lpProfileInfo )
     return load_managed_profile( hToken, &lpProfileInfo->hProfile, lpProfileInfo->dwSize == sizeof(*lpProfileInfo) );
 }
 
-BOOL WINAPI RegisterGPNotification( HANDLE event, BOOL machine )
-{
-    FIXME("%p %d\n", event, machine );
-    return TRUE;
-}
-
-BOOL WINAPI UnregisterGPNotification( HANDLE event )
-{
-    FIXME("%p\n", event );
-    return TRUE;
-}
-
 BOOL WINAPI UnloadUserProfile( HANDLE hToken, HANDLE hProfile )
 {
     HANDLE unused;
@@ -982,19 +970,6 @@ BOOL WINAPI UnloadUserProfile( HANDLE hToken, HANDLE hProfile )
     }
     FIXME("(%p, %p): stub\n", hToken, hProfile);
     return FALSE;
-}
-
-HANDLE WINAPI EnterCriticalPolicySection(BOOL bMachine)
-{
-    FIXME("(%x)\n", bMachine);
-    SetLastError(ERROR_ACCESS_DENIED);
-    return NULL;
-}
-
-BOOL WINAPI LeaveCriticalPolicySection(HANDLE hSection)
-{
-    FIXME("(%p)\n", hSection);
-    return TRUE;
 }
 
 DWORD WINAPI GetAppliedGPOListW(DWORD dwFlags, LPCWSTR pMachineName, PSID pSidUser, GUID *pGuidExtension,

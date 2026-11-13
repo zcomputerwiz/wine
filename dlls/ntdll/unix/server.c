@@ -1932,6 +1932,8 @@ static const char *init_server_dir( dev_t dev, ino_t ino )
  *
  * Setup the wine configuration dir.
  */
+static int config_dir_of_root;  /* the prefix is root's: only session 0's running server may serve it */
+
 static int setup_config_dir(void)
 {
     char *p, *dir;
@@ -1956,7 +1958,11 @@ static int setup_config_dir(void)
     }
 
     if (stat( ".", &st ) == -1) fatal_perror( "stat %s", config_dir );
-    if (st.st_uid != getuid()) fatal_error( "'%s' is not owned by you\n", config_dir );
+    /* WineExplorer system tier T5.3: session 0's account runs programs on the machine root, which stays root's.
+     * Only a server already running for it is used (server_connect starts none): a server accepts a prefix of
+     * another owner only as session 0 (wineserver --session0) */
+    if (st.st_uid == 0 && getuid()) config_dir_of_root = 1;
+    else if (st.st_uid != getuid()) fatal_error( "'%s' is not owned by you\n", config_dir );
 
     server_dir = init_server_dir( st.st_dev, st.st_ino );
 
@@ -2012,6 +2018,13 @@ static void server_connect_error( const char *serverdir )
  *
  * Attempt to connect to an existing server socket.
  */
+static void start_server_checked( BOOL debug )
+{
+    if (config_dir_of_root)
+        fatal_error( "'%s' is not owned by you, and no session 0 server is running for it\n", config_dir );
+    start_server( debug );
+}
+
 static int server_connect(void)
 {
     struct sockaddr_un addr;
@@ -2024,7 +2037,7 @@ static int server_connect(void)
     if (chdir( server_dir ) == -1)
     {
         if (errno != ENOENT) fatal_perror( "chdir to %s", server_dir );
-        start_server( TRACE_ON(server) );
+        start_server_checked( TRACE_ON(server) );
         if (chdir( server_dir ) == -1) fatal_perror( "chdir to %s", server_dir );
     }
 
@@ -2039,13 +2052,13 @@ static int server_connect(void)
         if (retry)
         {
             usleep( 100000 * retry * retry );
-            start_server( TRACE_ON(server) );
+            start_server_checked( TRACE_ON(server) );
             if (lstat( SOCKETNAME, &st ) == -1) continue;  /* still no socket, wait a bit more */
         }
         else if (lstat( SOCKETNAME, &st ) == -1) /* check for an already existing socket */
         {
             if (errno != ENOENT) fatal_perror( "lstat %s/%s", server_dir, SOCKETNAME );
-            start_server( TRACE_ON(server) );
+            start_server_checked( TRACE_ON(server) );
             if (lstat( SOCKETNAME, &st ) == -1) continue;  /* still no socket, wait a bit more */
         }
 

@@ -61,6 +61,7 @@
 #include "security.h"
 #include "file.h"
 #include "handle.h"
+#include "session0.h"
 
 #define SYSRUN_CONF "/etc/wineexplorer/sysrun.conf"
 
@@ -393,6 +394,17 @@ void sysrun_main_image( struct process *process, struct fd *fd )
                 !stat( path, &ref ) && ref.st_dev == st.st_dev && ref.st_ino == st.st_ino)
                 process->e1s6_broker_image = 1;
     }
+    /* E1 R9: session 0's broker (B0) is the same image, mapped by one of session 0's own programs; session 0's
+     * directory is the machine root */
+    if (!process->e1s6_image_seen && session0_server && !process->wex_registry_client && fd &&
+        (unix_fd = get_unix_fd( fd )) != -1 && !fstat( unix_fd, &st ) && S_ISREG( st.st_mode ))
+    {
+        static const char *const brokers[] = { "wexelevate.exe", "wexelevate_test.exe" };
+        for (i = 0; i < ARRAY_SIZE(brokers); i++)
+            if ((unsigned int)snprintf( path, sizeof(path), "drive_c/windows/system32/%s", brokers[i] ) < sizeof(path) &&
+                !fstatat( config_dir_fd, path, &ref, 0 ) && ref.st_dev == st.st_dev && ref.st_ino == st.st_ino)
+                process->e1s6_broker_image = 1;
+    }
     process->e1s6_image_seen = 1;
 #endif
     if (!process->sysrun_pending)
@@ -538,12 +550,57 @@ static int get_path_generation( const char *path, struct stat_gen_tracker *track
     return 1;
 }
 
+/* The machine root's generation: a new value whenever the root, or one of the directories the chain's paths go
+ * through, is another object or has another owner or mode (replaced, moved aside, opened up). The root
+ * directory's own size and times are not part of it: with session 0 the machine hives are saved into it, a new
+ * file renamed over the old one, every few seconds while they change, and each save changed the directory's
+ * times and so ended every elevation request in flight (found by the R9 lab cases, 2026-11-13). */
 int sysrun_get_root_generation( unsigned long long *root_gen )
 {
-    static struct stat_gen_tracker root_tracker;
+    static const char * const parts[] = { "", "/drive_c", "/drive_c/windows", "/drive_c/windows/system32",
+                                          "/dosdevices" };
+    static unsigned long long last_hash, tag;
+    static int initialized;
     const char *root = sysrun_machine_root();
-    if (!root) return 0;
-    return get_path_generation( root, &root_tracker, root_gen );
+    unsigned long long hash = 0xcbf29ce484222325ull, values[5], fresh = 0;
+    char path[PATH_MAX];
+    struct stat st;
+    unsigned int i, j, k;
+    int fd;
+
+    if (!root || !root[0] || !root_gen) return 0;
+    for (i = 0; i < ARRAY_SIZE(parts); i++)
+    {
+        if (snprintf( path, sizeof(path), "%s%s", root, parts[i] ) >= (int)sizeof(path)) return 0;
+        /* the root as it is named (it may be reached through a link); below it, the entries themselves */
+        if (i ? lstat( path, &st ) : stat( path, &st ))
+        {
+            if (!i) return 0;
+            memset( &st, 0, sizeof(st) );  /* a missing part is a state of its own */
+        }
+        values[0] = st.st_dev; values[1] = st.st_ino; values[2] = st.st_uid; values[3] = st.st_gid;
+        values[4] = st.st_mode;
+        for (j = 0; j < ARRAY_SIZE(values); j++)
+            for (k = 0; k < 8; k++) hash = (hash ^ ((values[j] >> (8 * k)) & 0xff)) * 0x100000001b3ull;
+    }
+    if (!initialized || hash != last_hash)
+    {
+        if ((fd = open( "/dev/urandom", O_RDONLY | O_CLOEXEC )) < 0) return 0;
+        while (!fresh)
+        {
+            if (read( fd, &fresh, sizeof(fresh) ) != sizeof(fresh))
+            {
+                close( fd );
+                return 0;
+            }
+        }
+        close( fd );
+        last_hash = hash;
+        tag = fresh;
+        initialized = 1;
+    }
+    *root_gen = tag;
+    return 1;
 }
 
 int sysrun_get_policy_generation( unsigned long long *policy_gen )
@@ -590,8 +647,17 @@ int sysrun_e1s6_endorse( const void *data, unsigned int size )
     E1S6_REQUIRE( data_fd >= 0, "endorse-data-fd" );
     E1S6_REQUIRE( !current->token, "endorse-thread-token" );
     E1S6_REQUIRE( p->e1s6_broker_image, "endorse-broker-image" );
-    E1S6_REQUIRE( sysrun_process_is_system( p ), "endorse-system-role" );
-    E1S6_REQUIRE( sysrun_process_privileged( p ), "endorse-sysrun-connection" );
+    if (session0_server)
+    {
+        /* E1 R9: session 0 endorses its broker B0, one of its own LocalSystem programs (checked below); the
+         * launcher's system role does not exist here */
+        E1S6_REQUIRE( !p->wex_registry_client, "endorse-session0-own-program" );
+    }
+    else
+    {
+        E1S6_REQUIRE( sysrun_process_is_system( p ), "endorse-system-role" );
+        E1S6_REQUIRE( sysrun_process_privileged( p ), "endorse-sysrun-connection" );
+    }
     E1S6_REQUIRE( token_service_account( p->token ) == SERVICE_ACCOUNT_SYSTEM, "endorse-system-primary" );
     E1S6_REQUIRE( token_has_privilege( p->token, SeTcbPrivilege ), "endorse-tcb" );
     E1S6_REQUIRE( !getsockopt( pin, SOL_SOCKET, SO_PEERCRED, &peer, &len ) && len == sizeof(peer), "endorse-peercred" );
@@ -646,7 +712,8 @@ int sysrun_e1s6_endorse( const void *data, unsigned int size )
     /* Local sideband encoding is explicitly LE, separate from S1 kind 7. */
     for (i = 0; i < 8; i++) { out[i] = server_generation >> (8 * i); out[8+i] = fresh >> (8 * i); }
     for (i = 0; i < 4; i++) { out[16+i] = peer.pid >> (8 * i); out[20+i] = p->session_id >> (8 * i); }
-    raised = sysrun_raise();
+    /* session 0 runs as its own account with the system group as its group: nothing to raise */
+    raised = session0_server ? 1 : sysrun_raise();
     if (!raised) fprintf( stderr, "E1S6_DENY server site=endorse-raise-group errno=%d\n", errno );
     if (raised)
     {
@@ -665,7 +732,7 @@ int sysrun_e1s6_endorse( const void *data, unsigned int size )
         ret = sendmsg( fd, &msg, MSG_DONTWAIT | MSG_NOSIGNAL ) == (ssize_t)sizeof(out);
         if (!ret) fprintf( stderr, "E1S6_DENY server site=endorse-send errno=%d\n", errno );
     }
-    sysrun_drop( raised );
+    if (!session0_server) sysrun_drop( raised );
     if (ret)
     {
         /* Publish only after the complete seqpacket was delivered. No fallible
