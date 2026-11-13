@@ -884,6 +884,8 @@ static void session0_link_event( struct fd *fd, int event )
         if (!token || !name)
         {
             if (token) reply.status = STATUS_NO_MEMORY;
+            else fprintf( stderr, "session0: pipe open refused for uid %u: the described token (%x)\n",
+                          (unsigned int)link->peer_uid, reply.status );
             close( channel );
         }
         else
