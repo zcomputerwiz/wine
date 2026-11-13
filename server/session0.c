@@ -1418,6 +1418,14 @@ void session0_client_exit(void)
     struct pollfd pfd;
     int i, sock;
 
+    /* the session link ends with the server: released here, or the leak check at exit prints the object on the
+     * terminal of whoever started the server (found on an installed machine, 2026-11-13) */
+    if (session_link)
+    {
+        struct session0_socket *session = session_link;
+        session_link = NULL;
+        release_object( session );
+    }
     if (!link) return;
     hive_link = NULL;
     sock = get_unix_fd( link->fd );
