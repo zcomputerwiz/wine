@@ -6573,7 +6573,9 @@ NTSTATUS WINAPI NtFsControlFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE ap
     switch (code)
     {
     case FSCTL_PIPE_IMPERSONATE:
-        FIXME("FSCTL_PIPE_IMPERSONATE: impersonating self\n");
+        /* WineExplorer: the server impersonates the pipe's client (its recorded token, also for a client
+         * bridged from a session), so this is no stub any more; stock Wine prints a FIXME here */
+        TRACE("FSCTL_PIPE_IMPERSONATE\n");
         return server_ioctl_file( handle, event, apc, apc_context, io, code,
                                   in_buffer, in_size, out_buffer, out_size );
 
