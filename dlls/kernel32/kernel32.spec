@@ -784,7 +784,18 @@
 @ stdcall GetPackageFamilyName(long ptr ptr) kernelbase.GetPackageFamilyName
 @ stdcall GetPackageFullName(long ptr ptr) kernelbase.GetPackageFullName
 @ stdcall GetPackagesByPackageFamily(wstr ptr ptr ptr ptr) kernelbase.GetPackagesByPackageFamily
-@ stdcall GetPackagePathByFullName(wstr ptr wstr) kernelbase.GetPackagePathByFullName
+@ stdcall GetPackagePathByFullName(wstr ptr ptr) kernelbase.GetPackagePathByFullName
+@ stdcall -import ClosePackageInfo(ptr)
+@ stdcall -import FindPackagesByPackageFamily(wstr long ptr ptr ptr ptr ptr)
+@ stdcall -import GetApplicationUserModelId(long ptr ptr)
+@ stdcall -import GetPackageApplicationIds(ptr ptr ptr ptr)
+@ stdcall -import GetPackageInfo(ptr long ptr ptr ptr)
+@ stdcall -import GetStagedPackagePathByFullName(wstr ptr ptr)
+@ stdcall -import OpenPackageInfoByFullName(wstr long ptr)
+@ stdcall -import OpenPackageInfoByFullNameForUser(ptr wstr long ptr)
+@ stdcall -import PackageFamilyNameFromId(ptr ptr ptr)
+@ stdcall -import PackageNameAndPublisherIdFromFamilyName(wstr ptr ptr ptr ptr)
+@ stdcall -import ParseApplicationUserModelId(wstr ptr ptr ptr ptr)
 @ stdcall -import GetPhysicallyInstalledSystemMemory(ptr)
 @ stdcall -import GetPriorityClass(long)
 @ stdcall GetPrivateProfileIntA(str str long str)

@@ -138,7 +138,7 @@
 @ stdcall ClearCommError(long ptr ptr)
 # @ stub CloseGlobalizationUserSettingsKey
 @ stdcall CloseHandle(long)
-# @ stub ClosePackageInfo
+@ stdcall ClosePackageInfo(ptr)
 # @ stub ClosePrivateNamespace
 @ stdcall ClosePseudoConsole(ptr)
 # @ stub CloseState
@@ -380,7 +380,7 @@
 @ stdcall FindNextFileW(long ptr)
 @ stdcall FindNextStreamW(long ptr)
 @ stdcall FindNextVolumeW(long ptr long)
-# @ stub FindPackagesByPackageFamily
+@ stdcall FindPackagesByPackageFamily(wstr long ptr ptr ptr ptr ptr)
 @ stdcall FindResourceExW(long wstr wstr long)
 @ stdcall FindResourceW(long wstr wstr)
 @ stdcall FindStringOrdinal(long wstr long wstr long long)
@@ -425,7 +425,7 @@
 # @ stub GetAppModelVersion
 # @ stub GetApplicationRecoveryCallback
 @ stdcall GetApplicationRestartSettings(long ptr ptr ptr)
-# @ stub GetApplicationUserModelId
+@ stdcall GetApplicationUserModelId(long ptr ptr)
 # @ stub GetApplicationUserModelIdFromToken
 # @ stub GetAppliedGPOListInternalA
 # @ stub GetAppliedGPOListInternalW
@@ -624,7 +624,7 @@
 @ stdcall GetOverlappedResult(long ptr ptr long)
 @ stdcall GetOverlappedResultEx(long ptr ptr long long)
 # @ stub GetPackageApplicationContext
-# @ stub GetPackageApplicationIds
+@ stdcall GetPackageApplicationIds(ptr ptr ptr ptr)
 # @ stub GetPackageApplicationProperty
 # @ stub GetPackageApplicationPropertyString
 # @ stub GetPackageApplicationResourcesContext
@@ -634,11 +634,11 @@
 @ stdcall GetPackageFullName(long ptr ptr)
 @ stdcall GetPackageFullNameFromToken(long ptr ptr)
 # @ stub GetPackageId
-# @ stub GetPackageInfo
+@ stdcall GetPackageInfo(ptr long ptr ptr ptr)
 # @ stub GetPackageInstallTime
 # @ stub GetPackageOSMaxVersionTested
 # @ stub GetPackagePath
-@ stdcall GetPackagePathByFullName(wstr ptr wstr)
+@ stdcall GetPackagePathByFullName(wstr ptr ptr)
 # @ stub GetPackagePathOnVolume
 # @ stub GetPackageProperty
 # @ stub GetPackagePropertyString
@@ -701,7 +701,7 @@
 @ stdcall GetSidSubAuthority(ptr long)
 @ stdcall GetSidSubAuthorityCount(ptr)
 # @ stub GetStagedPackageOrigin
-# @ stub GetStagedPackagePathByFullName
+@ stdcall GetStagedPackagePathByFullName(wstr ptr ptr)
 @ stdcall GetStartupInfoW(ptr)
 # @ stub GetStateContainerDepth
 # @ stub GetStateFolder
@@ -1031,8 +1031,8 @@
 @ stdcall OpenFileMappingW(long long wstr)
 # @ stub OpenGlobalizationUserSettingsKey
 @ stdcall OpenMutexW(long long wstr)
-# @ stub OpenPackageInfoByFullName
-# @ stub OpenPackageInfoByFullNameForUser
+@ stdcall OpenPackageInfoByFullName(wstr long ptr)
+@ stdcall OpenPackageInfoByFullNameForUser(ptr wstr long ptr)
 # @ stub OpenPrivateNamespaceW
 @ stdcall OpenProcess(long long long)
 @ stdcall OpenProcessToken(long long ptr)
@@ -1050,17 +1050,17 @@
 @ stdcall OutputDebugStringW(wstr)
 # @ stub OverrideRoamingDataModificationTimesInRange
 # @ stub PackageFamilyNameFromFullName
-# @ stub PackageFamilyNameFromId
+@ stdcall PackageFamilyNameFromId(ptr ptr ptr)
 # @ stub PackageFamilyNameFromProductId
 @ stdcall PackageFullNameFromId(ptr ptr ptr)
 # @ stub PackageFullNameFromProductId
 @ stdcall PackageIdFromFullName(wstr long ptr ptr)
 # @ stub PackageIdFromProductId
-# @ stub PackageNameAndPublisherIdFromFamilyName
+@ stdcall PackageNameAndPublisherIdFromFamilyName(wstr ptr ptr ptr ptr)
 # @ stub PackageRelativeApplicationIdFromProductId
 # @ stub PackageSidFromFamilyName
 # @ stub PackageSidFromProductId
-# @ stub ParseApplicationUserModelId
+@ stdcall ParseApplicationUserModelId(wstr ptr ptr ptr ptr)
 @ stdcall ParseURLA(str ptr)
 @ stdcall ParseURLW(wstr ptr)
 @ stdcall PathAddBackslashA(str)

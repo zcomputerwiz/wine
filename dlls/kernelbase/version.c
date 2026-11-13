@@ -1741,23 +1741,6 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageId( UINT32 *len, BYTE *buff
 }
 
 /***********************************************************************
- *         GetCurrentPackageInfo   (kernelbase.@)
- */
-LONG WINAPI GetCurrentPackageInfo( const UINT32 flags, UINT32 *buffer_size, BYTE *buffer, UINT32 *count )
-{
-    WCHAR full_name[PACKAGE_FULL_NAME_MAX_LENGTH + 1];
-    UINT32 name_len = ARRAY_SIZE(full_name);
-    LONG err;
-
-    err = get_process_package_string( GetCurrentProcess(), PACKAGE_STRING_FULL_NAME, &name_len, full_name );
-    if (err) return err;
-
-    /* a packaged process: the package graph is not implemented, and it is not reported as absent */
-    FIXME( "(%#x %p %p %p): not implemented for a packaged process\n", flags, buffer_size, buffer, count );
-    return ERROR_CALL_NOT_IMPLEMENTED;
-}
-
-/***********************************************************************
  *         GetCurrentPackagePath   (kernelbase.@)
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackagePath( UINT32 *length, WCHAR *path )
@@ -1834,35 +1817,6 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetPackageFamilyNameFromToken( HANDLE token,
         return ERROR_INVALID_PARAMETER;
 
     return get_token_package_string( token, PACKAGE_STRING_FAMILY_NAME, length, name );
-}
-
-/***********************************************************************
- *         GetPackagesByPackageFamily   (kernelbase.@)
- */
-LONG WINAPI DECLSPEC_HOTPATCH GetPackagesByPackageFamily(const WCHAR *family_name, UINT32 *count,
-                                                         WCHAR *full_names, UINT32 *buffer_len, WCHAR *buffer)
-{
-    FIXME( "(%s %p %p %p %p): stub\n", debugstr_w(family_name), count, full_names, buffer_len, buffer );
-
-    if (!count || !buffer_len)
-        return ERROR_INVALID_PARAMETER;
-
-    *count = 0;
-    *buffer_len = 0;
-    return ERROR_SUCCESS;
-}
-
-/***********************************************************************
- *         GetPackagePathByFullName   (kernelbase.@)
- */
-LONG WINAPI GetPackagePathByFullName(const WCHAR *name, UINT32 *len, WCHAR *path)
-{
-    if (!len || !name)
-        return ERROR_INVALID_PARAMETER;
-
-    FIXME( "(%s %p %p): stub\n", debugstr_w(name), len, path );
-
-    return APPMODEL_ERROR_NO_PACKAGE;
 }
 
 static const struct
@@ -2125,4 +2079,624 @@ LONG WINAPI PackageFullNameFromId(const PACKAGE_ID *id, UINT32 *length, WCHAR *b
 
     wcscpy(buffer, full_name);
     return ERROR_SUCCESS;
+}
+
+/* ---- package information from the catalog of the prefix (WineExplorer UWP U1.2) ------------------------------
+ *
+ * The packages that wexappx installs (or that register-wine.py registers for development) are described by records
+ * in the catalog directory of the prefix: appx-catalog\PackageFullName.wexappx, UTF-16 text, "WEXAPPX 1", then lines
+ * "root<TAB>path", "publisher<TAB>name", "app<TAB>Id<TAB>exe[<TAB>entry point]", "class<TAB>id<TAB>path" and
+ * "dependency<TAB>PackageFullName". The identity of a process comes from its token (server); these functions only
+ * answer questions about packages by name, so they read the records as information.
+ */
+
+
+static void *pkg_alloc( SIZE_T size ) { return HeapAlloc( GetProcessHeap(), 0, size ); }
+static void *pkg_calloc( SIZE_T count, SIZE_T size ) { return HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, count * size ); }
+static void *pkg_realloc( void *ptr, SIZE_T size )
+{
+    return ptr ? HeapReAlloc( GetProcessHeap(), 0, ptr, size ) : HeapAlloc( GetProcessHeap(), 0, size );
+}
+static void pkg_free( void *ptr ) { if (ptr) HeapFree( GetProcessHeap(), 0, ptr ); }
+#define CATALOG_MAX_APPS 64
+#define CATALOG_MAX_DEPENDENCIES 16
+#define CATALOG_RECORD_MAX (256 * 1024)
+#define PACKAGE_INFO_FLAGS 0x10         /* what Windows 11 reports in PACKAGE_INFO.flags for these packages */
+
+#ifndef PACKAGE_FILTER_HEAD
+#define PACKAGE_FILTER_HEAD 0x10
+#define PACKAGE_FILTER_DIRECT 0x20
+#endif
+
+struct package_record
+{
+    WCHAR full_name[PACKAGE_FULL_NAME_MAX_LENGTH + 1];
+    WCHAR root[MAX_PATH];
+    WCHAR publisher[PACKAGE_PUBLISHER_MAX_LENGTH + 1];
+    unsigned int app_count, dependency_count;
+    WCHAR apps[CATALOG_MAX_APPS][PACKAGE_RELATIVE_APPLICATION_ID_MAX_LENGTH + 1];
+    WCHAR dependencies[CATALOG_MAX_DEPENDENCIES][PACKAGE_FULL_NAME_MAX_LENGTH + 1];
+};
+
+/* "Name_1.2.3.4_arch_resource_publisherid": printable name characters and four underscores only */
+static BOOL package_full_name_is_valid( const WCHAR *name )
+{
+    unsigned int len = 0, underscores = 0;
+
+    if (!name) return FALSE;
+    for (; name[len]; len++)
+    {
+        WCHAR c = name[len];
+        if (len >= PACKAGE_FULL_NAME_MAX_LENGTH) return FALSE;
+        if (c == '_') underscores++;
+        else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '.' || c == '-'))
+            return FALSE;
+    }
+    return len >= PACKAGE_FULL_NAME_MIN_LENGTH && underscores == 4;
+}
+
+/* "Name_publisherid": the family name of a package full name */
+static BOOL package_family_from_full_name( const WCHAR *full_name, WCHAR *family, unsigned int size )
+{
+    const WCHAR *first = wcschr( full_name, '_' ), *last = wcsrchr( full_name, '_' );
+    unsigned int name_len;
+
+    if (!first || !last || last == first) return FALSE;
+    name_len = first - full_name;
+    if (name_len + 1 + wcslen( last + 1 ) + 1 > size) return FALSE;
+    memcpy( family, full_name, name_len * sizeof(WCHAR) );
+    family[name_len] = '_';
+    wcscpy( family + name_len + 1, last + 1 );
+    return TRUE;
+}
+
+static BOOL package_family_is_valid( const WCHAR *family )
+{
+    const WCHAR *underscore;
+    unsigned int i;
+
+    if (!family || !(underscore = wcsrchr( family, '_' )) || underscore == family) return FALSE;
+    if (wcslen( underscore + 1 ) != PACKAGE_PUBLISHERID_MAX_LENGTH || wcschr( family, '_' ) != underscore) return FALSE;
+    if (underscore - family < PACKAGE_NAME_MIN_LENGTH || underscore - family > PACKAGE_NAME_MAX_LENGTH) return FALSE;
+    for (i = 0; i < PACKAGE_PUBLISHERID_MAX_LENGTH; i++)
+    {
+        WCHAR c = underscore[1 + i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) return FALSE;
+    }
+    return TRUE;
+}
+
+/* the catalog directory (with a trailing backslash), or with a name the path of that record */
+static BOOL catalog_path( const WCHAR *record_name, WCHAR *path, unsigned int size )
+{
+    WCHAR config[MAX_PATH];
+    DWORD len = GetEnvironmentVariableW( L"WINECONFIGDIR", config, ARRAY_SIZE(config) );
+    int ret;
+
+    if (!len || len >= ARRAY_SIZE(config) || wcsncmp( config, L"\\??\\", 4 )) return FALSE;
+    if (record_name) ret = swprintf( path, size, L"\\\\?\\%s\\appx-catalog\\%s.wexappx", config + 4, record_name );
+    else ret = swprintf( path, size, L"\\\\?\\%s\\appx-catalog\\", config + 4 );
+    return ret > 0;
+}
+
+static BOOL record_set( WCHAR *dest, unsigned int size, const WCHAR *src, unsigned int len )
+{
+    if (len >= size) return FALSE;
+    memcpy( dest, src, len * sizeof(WCHAR) );
+    dest[len] = 0;
+    return TRUE;
+}
+
+/* ERROR_SUCCESS, ERROR_NOT_FOUND for an unknown package, ERROR_INVALID_PARAMETER for a malformed name */
+static LONG package_record_load( const WCHAR *full_name, struct package_record *rec )
+{
+    WCHAR path[MAX_PATH], *text, *line, *next, *end;
+    HANDLE file;
+    DWORD bytes = 0;
+    BOOL first = TRUE, have_root = FALSE;
+
+    if (!package_full_name_is_valid( full_name )) return ERROR_INVALID_PARAMETER;
+    if (!catalog_path( full_name, path, ARRAY_SIZE(path) )) return ERROR_NOT_FOUND;
+    file = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL, NULL );
+    if (file == INVALID_HANDLE_VALUE) return ERROR_NOT_FOUND;
+    if (!(text = pkg_alloc( CATALOG_RECORD_MAX + sizeof(WCHAR) )))
+    {
+        CloseHandle( file );
+        return ERROR_OUTOFMEMORY;
+    }
+    if (!ReadFile( file, text, CATALOG_RECORD_MAX, &bytes, NULL )) bytes = 0;
+    CloseHandle( file );
+    text[bytes / sizeof(WCHAR)] = 0;
+
+    memset( rec, 0, sizeof(*rec) );
+    wcscpy( rec->full_name, full_name );
+    for (line = text; *line; line = next)
+    {
+        WCHAR *fields[4] = { 0 };
+        unsigned int count = 0;
+
+        for (end = line; *end && *end != '\n'; end++) ;
+        next = *end ? end + 1 : end;
+        *end = 0;
+        if (end > line && end[-1] == '\r') end[-1] = 0;
+
+        if (first)
+        {
+            first = FALSE;
+            if (wcscmp( line, L"WEXAPPX 1" )) break;
+            continue;
+        }
+        for (fields[count++] = line; count < ARRAY_SIZE(fields); )
+        {
+            WCHAR *tab = wcschr( fields[count - 1], '\t' );
+            if (!tab) break;
+            *tab = 0;
+            fields[count++] = tab + 1;
+        }
+        if (!wcscmp( fields[0], L"root" ) && count >= 2)
+            have_root = record_set( rec->root, ARRAY_SIZE(rec->root), fields[1], wcslen( fields[1] ) );
+        else if (!wcscmp( fields[0], L"publisher" ) && count >= 2)
+            record_set( rec->publisher, ARRAY_SIZE(rec->publisher), fields[1], wcslen( fields[1] ) );
+        else if (!wcscmp( fields[0], L"app" ) && count >= 2 && rec->app_count < CATALOG_MAX_APPS)
+        {
+            if (record_set( rec->apps[rec->app_count], ARRAY_SIZE(rec->apps[0]), fields[1], wcslen( fields[1] ) ))
+                rec->app_count++;
+        }
+        else if (!wcscmp( fields[0], L"dependency" ) && count >= 2 && rec->dependency_count < CATALOG_MAX_DEPENDENCIES)
+        {
+            if (package_full_name_is_valid( fields[1] ) &&
+                record_set( rec->dependencies[rec->dependency_count], ARRAY_SIZE(rec->dependencies[0]), fields[1],
+                            wcslen( fields[1] ) ))
+                rec->dependency_count++;
+        }
+    }
+    pkg_free( text );
+    return have_root ? ERROR_SUCCESS : ERROR_NOT_FOUND;
+}
+
+/* the full names in the catalog of a family; the array is allocated, the caller frees it */
+static WCHAR (*catalog_family_members( const WCHAR *family, unsigned int *count ))[PACKAGE_FULL_NAME_MAX_LENGTH + 1]
+{
+    WCHAR (*names)[PACKAGE_FULL_NAME_MAX_LENGTH + 1] = NULL;
+    WCHAR dir[MAX_PATH], pattern[MAX_PATH], member_family[PACKAGE_FAMILY_NAME_MAX_LENGTH + 1];
+    WIN32_FIND_DATAW data;
+    HANDLE find;
+    unsigned int capacity = 0;
+
+    *count = 0;
+    if (!catalog_path( NULL, dir, ARRAY_SIZE(dir) ) || swprintf( pattern, ARRAY_SIZE(pattern), L"%s*.wexappx", dir ) < 0)
+        return NULL;
+    if ((find = FindFirstFileW( pattern, &data )) == INVALID_HANDLE_VALUE) return NULL;
+    do
+    {
+        unsigned int len = wcslen( data.cFileName ) - wcslen( L".wexappx" );
+        WCHAR name[PACKAGE_FULL_NAME_MAX_LENGTH + 1];
+
+        if (len > PACKAGE_FULL_NAME_MAX_LENGTH) continue;
+        memcpy( name, data.cFileName, len * sizeof(WCHAR) );
+        name[len] = 0;
+        if (!package_full_name_is_valid( name ) ||
+            !package_family_from_full_name( name, member_family, ARRAY_SIZE(member_family) ) ||
+            wcsicmp( member_family, family ))
+            continue;
+        if (*count == capacity)
+        {
+            void *tmp = pkg_realloc( names, (capacity = capacity ? capacity * 2 : 8) * sizeof(*names) );
+            if (!tmp) break;
+            names = tmp;
+        }
+        wcscpy( names[(*count)++], name );
+    }
+    while (FindNextFileW( find, &data ));
+    FindClose( find );
+    return names;
+}
+
+/* the strings of one PACKAGE_INFO block; with base NULL only the size is computed */
+static WCHAR *pool_add( BYTE *base, SIZE_T *used, const WCHAR *str )
+{
+    SIZE_T bytes = (wcslen( str ) + 1) * sizeof(WCHAR);
+    WCHAR *dest = base ? (WCHAR *)(base + *used) : NULL;
+
+    if (dest) memcpy( dest, str, bytes );
+    *used += bytes;
+    return dest;
+}
+
+/* PACKAGE_INFO array for the given records: the structures, then their strings */
+static LONG package_infos_build( struct package_record **records, unsigned int count, UINT32 *length, BYTE *buffer,
+                                 UINT32 *out_count )
+{
+    SIZE_T used, total;
+    unsigned int i, pass;
+    PACKAGE_INFO *infos = (PACKAGE_INFO *)buffer;
+
+    for (pass = 0; pass < 2; pass++)
+    {
+        BYTE *base = pass ? buffer : NULL;
+
+        used = count * sizeof(PACKAGE_INFO);
+        for (i = 0; i < count; i++)
+        {
+            BYTE id_buffer[sizeof(PACKAGE_ID) + sizeof(WCHAR) * (PACKAGE_FULL_NAME_MAX_LENGTH + 32)];
+            UINT32 id_len = sizeof(id_buffer);
+            PACKAGE_ID *id = (PACKAGE_ID *)id_buffer;
+            WCHAR family[PACKAGE_FAMILY_NAME_MAX_LENGTH + 1];
+            PACKAGE_INFO *info = infos + i;
+
+            if (PackageIdFromFullName( records[i]->full_name, 0, &id_len, id_buffer ) ||
+                !package_family_from_full_name( records[i]->full_name, family, ARRAY_SIZE(family) ))
+                return ERROR_INVALID_DATA;
+            if (pass) memset( info, 0, sizeof(*info) );
+            if (pass) info->flags = PACKAGE_INFO_FLAGS;
+            if (pass) info->packageId.processorArchitecture = id->processorArchitecture;
+            if (pass) info->packageId.version = id->version;
+            if (pass) info->path = pool_add( base, &used, records[i]->root ); else pool_add( NULL, &used, records[i]->root );
+            if (pass) info->packageFullName = pool_add( base, &used, records[i]->full_name ); else pool_add( NULL, &used, records[i]->full_name );
+            if (pass) info->packageFamilyName = pool_add( base, &used, family ); else pool_add( NULL, &used, family );
+            if (pass) info->packageId.name = pool_add( base, &used, id->name ); else pool_add( NULL, &used, id->name );
+            if (records[i]->publisher[0])
+            {
+                if (pass) info->packageId.publisher = pool_add( base, &used, records[i]->publisher );
+                else pool_add( NULL, &used, records[i]->publisher );
+            }
+            if (id->resourceId && id->resourceId[0])
+            {
+                if (pass) info->packageId.resourceId = pool_add( base, &used, id->resourceId );
+                else pool_add( NULL, &used, id->resourceId );
+            }
+            if (pass) info->packageId.publisherId = pool_add( base, &used, id->publisherId ); else pool_add( NULL, &used, id->publisherId );
+        }
+        if (!pass)
+        {
+            total = used;
+            *out_count = count;
+            if (*length < total || !buffer)
+            {
+                *length = total;
+                return ERROR_INSUFFICIENT_BUFFER;
+            }
+            *length = total;
+        }
+    }
+    return ERROR_SUCCESS;
+}
+
+/* the records a PACKAGE_FILTER_* selection of a package covers: the head, then its direct dependencies */
+static LONG package_info_select( const struct package_record *head, UINT32 flags, UINT32 *length, BYTE *buffer,
+                                 UINT32 *count )
+{
+    struct package_record **records = NULL;
+    unsigned int n = 0, i;
+    LONG err = ERROR_SUCCESS;
+    BOOL include_head = (flags & PACKAGE_FILTER_HEAD) || !(flags & PACKAGE_FILTER_DIRECT);
+    BOOL include_direct = !!(flags & PACKAGE_FILTER_DIRECT);
+
+    if (!length || !count || (!buffer && *length)) return ERROR_INVALID_PARAMETER;
+    if (!(records = pkg_calloc( 1 + CATALOG_MAX_DEPENDENCIES, sizeof(*records) ))) return ERROR_OUTOFMEMORY;
+    if (include_head && !(records[n] = pkg_alloc( sizeof(**records) ))) { err = ERROR_OUTOFMEMORY; goto done; }
+    if (include_head) *records[n++] = *head;
+    for (i = 0; include_direct && i < head->dependency_count; i++)
+    {
+        if (!(records[n] = pkg_alloc( sizeof(**records) ))) { err = ERROR_OUTOFMEMORY; goto done; }
+        if (package_record_load( head->dependencies[i], records[n] )) { pkg_free( records[n] ); records[n] = NULL; continue; }
+        n++;
+    }
+    err = n ? package_infos_build( records, n, length, buffer, count ) : ERROR_SUCCESS;
+    if (!n) *length = *count = 0;
+done:
+    for (i = 0; i < 1 + CATALOG_MAX_DEPENDENCIES; i++) pkg_free( records[i] );
+    pkg_free( records );
+    return err;
+}
+
+/***********************************************************************
+ *         OpenPackageInfoByFullName   (kernelbase.@)
+ */
+LONG WINAPI OpenPackageInfoByFullName( const WCHAR *full_name, UINT32 reserved, PACKAGE_INFO_REFERENCE *reference )
+{
+    struct package_record *rec;
+    LONG err;
+
+    TRACE( "(%s %#x %p)\n", debugstr_w( full_name ), reserved, reference );
+
+    if (!full_name || !reference) return ERROR_INVALID_PARAMETER;
+    if (!(rec = pkg_alloc( sizeof(*rec) ))) return ERROR_OUTOFMEMORY;
+    if ((err = package_record_load( full_name, rec )))
+    {
+        pkg_free( rec );
+        return err;
+    }
+    *reference = (PACKAGE_INFO_REFERENCE)rec;
+    return ERROR_SUCCESS;
+}
+
+/***********************************************************************
+ *         OpenPackageInfoByFullNameForUser   (kernelbase.@)
+ */
+LONG WINAPI OpenPackageInfoByFullNameForUser( PSID user, const WCHAR *full_name, UINT32 reserved,
+                                              PACKAGE_INFO_REFERENCE *reference )
+{
+    return OpenPackageInfoByFullName( full_name, reserved, reference );
+}
+
+/***********************************************************************
+ *         ClosePackageInfo   (kernelbase.@)
+ */
+LONG WINAPI ClosePackageInfo( PACKAGE_INFO_REFERENCE reference )
+{
+    TRACE( "(%p)\n", reference );
+
+    if (!reference) return ERROR_INVALID_PARAMETER;
+    pkg_free( reference );
+    return ERROR_SUCCESS;
+}
+
+/***********************************************************************
+ *         GetPackageInfo   (kernelbase.@)
+ */
+LONG WINAPI GetPackageInfo( PACKAGE_INFO_REFERENCE reference, UINT32 flags, UINT32 *length, BYTE *buffer,
+                            UINT32 *count )
+{
+    TRACE( "(%p %#x %p %p %p)\n", reference, flags, length, buffer, count );
+
+    if (!reference) return ERROR_INVALID_PARAMETER;
+    return package_info_select( (struct package_record *)reference, flags, length, buffer, count );
+}
+
+/***********************************************************************
+ *         GetPackageApplicationIds   (kernelbase.@)
+ */
+LONG WINAPI GetPackageApplicationIds( PACKAGE_INFO_REFERENCE reference, UINT32 *length, BYTE *buffer, UINT32 *count )
+{
+    struct package_record *rec = (struct package_record *)reference;
+    WCHAR family[PACKAGE_FAMILY_NAME_MAX_LENGTH + 1];
+    SIZE_T used;
+    unsigned int i;
+
+    TRACE( "(%p %p %p %p)\n", reference, length, buffer, count );
+
+    if (!reference || !length || !count || (!buffer && *length)) return ERROR_INVALID_PARAMETER;
+    if (!package_family_from_full_name( rec->full_name, family, ARRAY_SIZE(family) )) return ERROR_INVALID_DATA;
+
+    /* an array of pointers, then the "Family!Id" strings */
+    used = rec->app_count * sizeof(WCHAR *);
+    for (i = 0; i < rec->app_count; i++) used += (wcslen( family ) + 1 + wcslen( rec->apps[i] ) + 1) * sizeof(WCHAR);
+    *count = rec->app_count;
+    if (*length < used || !buffer)
+    {
+        *length = used;
+        return ERROR_INSUFFICIENT_BUFFER;
+    }
+    *length = used;
+    {
+        WCHAR **ids = (WCHAR **)buffer;
+        WCHAR *text = (WCHAR *)(buffer + rec->app_count * sizeof(WCHAR *));
+
+        for (i = 0; i < rec->app_count; i++)
+        {
+            ids[i] = text;
+            text += swprintf( text, wcslen( family ) + 1 + wcslen( rec->apps[i] ) + 1, L"%s!%s", family, rec->apps[i] ) + 1;
+        }
+    }
+    return ERROR_SUCCESS;
+}
+
+/***********************************************************************
+ *         GetPackagePathByFullName   (kernelbase.@)
+ */
+LONG WINAPI GetPackagePathByFullName( const WCHAR *name, UINT32 *len, WCHAR *path )
+{
+    struct package_record *rec;
+    UINT32 capacity, needed;
+    LONG err;
+
+    TRACE( "(%s %p %p)\n", debugstr_w( name ), len, path );
+
+    if (!len || !name || (!path && *len)) return ERROR_INVALID_PARAMETER;
+    if (!(rec = pkg_alloc( sizeof(*rec) ))) return ERROR_OUTOFMEMORY;
+    if ((err = package_record_load( name, rec )))
+    {
+        pkg_free( rec );
+        return err;
+    }
+    capacity = *len;
+    needed = wcslen( rec->root ) + 1;
+    *len = needed;
+    if (capacity < needed || !path) err = ERROR_INSUFFICIENT_BUFFER;
+    else wcscpy( path, rec->root );
+    pkg_free( rec );
+    return err;
+}
+
+/***********************************************************************
+ *         GetStagedPackagePathByFullName   (kernelbase.@)
+ */
+LONG WINAPI GetStagedPackagePathByFullName( const WCHAR *name, UINT32 *len, WCHAR *path )
+{
+    return GetPackagePathByFullName( name, len, path );
+}
+
+/* the full names of a family: GetPackagesByPackageFamily and FindPackagesByPackageFamily */
+static LONG package_family_names( const WCHAR *family, UINT32 *count, WCHAR **full_names, UINT32 *buffer_len,
+                                  WCHAR *buffer, UINT32 *properties )
+{
+    WCHAR (*members)[PACKAGE_FULL_NAME_MAX_LENGTH + 1];
+    unsigned int n, i;
+    UINT32 chars = 0, capacity_count, capacity_chars;
+    LONG err = ERROR_SUCCESS;
+
+    if (!count || !buffer_len || !package_family_is_valid( family )) return ERROR_INVALID_PARAMETER;
+    capacity_count = *count;
+    capacity_chars = *buffer_len;
+    if ((capacity_count && !full_names) || (capacity_chars && !buffer)) return ERROR_INVALID_PARAMETER;
+
+    members = catalog_family_members( family, &n );
+    for (i = 0; i < n; i++) chars += wcslen( members[i] ) + 1;
+    *count = n;
+    *buffer_len = chars;
+    if (n && (capacity_count < n || capacity_chars < chars)) err = ERROR_INSUFFICIENT_BUFFER;
+    else
+    {
+        WCHAR *text = buffer;
+
+        for (i = 0; i < n; i++)
+        {
+            full_names[i] = text;
+            wcscpy( text, members[i] );
+            text += wcslen( members[i] ) + 1;
+            if (properties) properties[i] = PACKAGE_INFO_FLAGS;
+        }
+    }
+    pkg_free( members );
+    return err;
+}
+
+/***********************************************************************
+ *         GetPackagesByPackageFamily   (kernelbase.@)
+ */
+LONG WINAPI DECLSPEC_HOTPATCH GetPackagesByPackageFamily( const WCHAR *family_name, UINT32 *count, WCHAR **full_names,
+                                                          UINT32 *buffer_len, WCHAR *buffer )
+{
+    TRACE( "(%s %p %p %p %p)\n", debugstr_w( family_name ), count, full_names, buffer_len, buffer );
+    return package_family_names( family_name, count, full_names, buffer_len, buffer, NULL );
+}
+
+/***********************************************************************
+ *         FindPackagesByPackageFamily   (kernelbase.@)
+ */
+LONG WINAPI FindPackagesByPackageFamily( const WCHAR *family_name, UINT32 flags, UINT32 *count, WCHAR **full_names,
+                                         UINT32 *buffer_len, WCHAR *buffer, UINT32 *properties )
+{
+    TRACE( "(%s %#x %p %p %p %p %p)\n", debugstr_w( family_name ), flags, count, full_names, buffer_len, buffer,
+           properties );
+    return package_family_names( family_name, count, full_names, buffer_len, buffer, properties );
+}
+
+/***********************************************************************
+ *         PackageFamilyNameFromId   (kernelbase.@)
+ */
+LONG WINAPI PackageFamilyNameFromId( const PACKAGE_ID *id, UINT32 *length, WCHAR *buffer )
+{
+    WCHAR full_name[PACKAGE_FULL_NAME_MAX_LENGTH + 1], family[PACKAGE_FAMILY_NAME_MAX_LENGTH + 1];
+    UINT32 name_len = ARRAY_SIZE(full_name), capacity, needed;
+    LONG err;
+
+    TRACE( "(%p %p %p)\n", id, length, buffer );
+
+    if (!id || !length || (!buffer && *length)) return ERROR_INVALID_PARAMETER;
+    if ((err = PackageFullNameFromId( id, &name_len, full_name ))) return err;
+    if (!package_family_from_full_name( full_name, family, ARRAY_SIZE(family) )) return ERROR_INVALID_PARAMETER;
+    capacity = *length;
+    needed = wcslen( family ) + 1;
+    *length = needed;
+    if (!buffer || capacity < needed) return ERROR_INSUFFICIENT_BUFFER;
+    wcscpy( buffer, family );
+    return ERROR_SUCCESS;
+}
+
+/***********************************************************************
+ *         PackageNameAndPublisherIdFromFamilyName   (kernelbase.@)
+ */
+LONG WINAPI PackageNameAndPublisherIdFromFamilyName( const WCHAR *family, UINT32 *name_length, WCHAR *name,
+                                                     UINT32 *publisher_id_length, WCHAR *publisher_id )
+{
+    const WCHAR *underscore;
+    UINT32 name_capacity, id_capacity, name_needed, id_needed;
+    BOOL small;
+
+    TRACE( "(%s %p %p %p %p)\n", debugstr_w( family ), name_length, name, publisher_id_length, publisher_id );
+
+    if (!name_length || !publisher_id_length || (!name && *name_length) || (!publisher_id && *publisher_id_length) ||
+        !package_family_is_valid( family ))
+        return ERROR_INVALID_PARAMETER;
+    underscore = wcsrchr( family, '_' );
+    name_needed = underscore - family + 1;
+    id_needed = wcslen( underscore + 1 ) + 1;
+    name_capacity = *name_length;
+    id_capacity = *publisher_id_length;
+    *name_length = name_needed;
+    *publisher_id_length = id_needed;
+    small = !name || !publisher_id || name_capacity < name_needed || id_capacity < id_needed;
+    if (small) return ERROR_INSUFFICIENT_BUFFER;
+    memcpy( name, family, (name_needed - 1) * sizeof(WCHAR) );
+    name[name_needed - 1] = 0;
+    wcscpy( publisher_id, underscore + 1 );
+    return ERROR_SUCCESS;
+}
+
+/* "Family!Id": the relative application id may not be empty and the family has to be valid */
+static BOOL aumid_split( const WCHAR *aumid, WCHAR *family, UINT32 *family_len, const WCHAR **app )
+{
+    const WCHAR *bang;
+
+    if (!aumid || !(bang = wcschr( aumid, '!' )) || bang == aumid || !bang[1] || (size_t)(bang - aumid) > PACKAGE_FAMILY_NAME_MAX_LENGTH)
+        return FALSE;
+    memcpy( family, aumid, (bang - aumid) * sizeof(WCHAR) );
+    family[bang - aumid] = 0;
+    *family_len = bang - aumid;
+    *app = bang + 1;
+    return package_family_is_valid( family ) && wcslen( *app ) < PACKAGE_RELATIVE_APPLICATION_ID_MAX_LENGTH;
+}
+
+/***********************************************************************
+ *         ParseApplicationUserModelId   (kernelbase.@)
+ */
+LONG WINAPI ParseApplicationUserModelId( const WCHAR *aumid, UINT32 *family_length, WCHAR *family, UINT32 *app_length,
+                                         WCHAR *app )
+{
+    WCHAR parsed[PACKAGE_FAMILY_NAME_MAX_LENGTH + 1];
+    const WCHAR *app_id;
+    UINT32 len, family_capacity, app_capacity;
+
+    TRACE( "(%s %p %p %p %p)\n", debugstr_w( aumid ), family_length, family, app_length, app );
+
+    if (!family_length || !app_length || (!family && *family_length) || (!app && *app_length) ||
+        !aumid_split( aumid, parsed, &len, &app_id ))
+        return ERROR_INVALID_PARAMETER;
+    family_capacity = *family_length;
+    app_capacity = *app_length;
+    *family_length = len + 1;
+    *app_length = wcslen( app_id ) + 1;
+    if (!family || !app || family_capacity < *family_length || app_capacity < *app_length) return ERROR_INSUFFICIENT_BUFFER;
+    wcscpy( family, parsed );
+    wcscpy( app, app_id );
+    return ERROR_SUCCESS;
+}
+
+/***********************************************************************
+ *         GetApplicationUserModelId   (kernelbase.@)
+ */
+LONG WINAPI GetApplicationUserModelId( HANDLE process, UINT32 *length, WCHAR *aumid )
+{
+    LONG err;
+
+    TRACE( "(%p %p %p)\n", process, length, aumid );
+
+    if (!process || !length || (!aumid && *length)) return ERROR_INVALID_PARAMETER;
+    err = get_process_package_string( process, PACKAGE_STRING_AUMID, length, aumid );
+    return err == APPMODEL_ERROR_NO_PACKAGE ? APPMODEL_ERROR_NO_APPLICATION : err;
+}
+
+/***********************************************************************
+ *         GetCurrentPackageInfo   (kernelbase.@)
+ */
+LONG WINAPI GetCurrentPackageInfo( const UINT32 flags, UINT32 *buffer_size, BYTE *buffer, UINT32 *count )
+{
+    WCHAR full_name[PACKAGE_FULL_NAME_MAX_LENGTH + 1];
+    UINT32 name_len = ARRAY_SIZE(full_name), dummy;
+    struct package_record *rec;
+    LONG err;
+
+    TRACE( "(%#x %p %p %p)\n", flags, buffer_size, buffer, count );
+
+    if (!buffer_size || (!buffer && *buffer_size) || (buffer && !count)) return ERROR_INVALID_PARAMETER;
+    if ((err = get_process_package_string( GetCurrentProcess(), PACKAGE_STRING_FULL_NAME, &name_len, full_name )))
+        return err;
+    if (!(rec = pkg_alloc( sizeof(*rec) ))) return ERROR_OUTOFMEMORY;
+    if (!(err = package_record_load( full_name, rec )))
+        err = package_info_select( rec, flags, buffer_size, buffer, count ? count : &dummy );
+    pkg_free( rec );
+    return err;
 }

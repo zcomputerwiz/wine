@@ -654,7 +654,7 @@ static BOOL window_ensure_native( struct core_window *window )
                                     rect.right - rect.left, rect.bottom - rect.top, NULL, NULL, NULL, window );
     if (!window->hwnd)
     {
-        ERR( "failed to create the native window, error %lu\n", GetLastError() );
+        WARN( "failed to create the native window, error %lu\n", GetLastError() );
         return FALSE;
     }
     window_get_client_rect( window, &rect );
@@ -1099,7 +1099,9 @@ static HRESULT WINAPI window_Activate( ICoreWindow *iface )
 
     if (impl->thread_id != GetCurrentThreadId()) return RPC_E_WRONG_THREAD;
     if (impl->closed) return S_OK;
-    if (!window_ensure_native( impl )) return E_FAIL;
+    /* without a display (no graphics driver) the window stays invisible, as on Windows with the desktop locked:
+     * nothing is raised and the application carries on */
+    if (!window_ensure_native( impl )) return S_OK;
 
     /* Observed on Windows 11 with an unlocked desktop: Activate shows the window; VisibilityChanged(true),
      * Activated (CodeActivated) and InputEnabled(true) follow, in that order, once events are processed; no
