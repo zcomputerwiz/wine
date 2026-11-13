@@ -391,8 +391,9 @@ NTSTATUS WINAPI NtQueryInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS c
                     package->app_id_len      = reply->app_len;
                     package->root_len        = reply->root_len;
                     package->executable_len  = reply->exe_len;
+                    package->entry_point_len = reply->entry_len;
                     package->classes_len     = reply->total - reply->full_len - reply->family_len -
-                                               reply->app_len - reply->root_len - reply->exe_len;
+                                               reply->app_len - reply->root_len - reply->exe_len - reply->entry_len;
                 }
             }
         }

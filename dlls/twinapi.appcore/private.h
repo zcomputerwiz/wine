@@ -62,7 +62,7 @@ extern HRESULT core_view_create( ICoreWindow *window, boolean is_main, ICoreAppl
 extern ICoreApplicationView *core_view_for_current_thread(void);
 extern ICoreApplicationView *core_view_main(void);
 extern void core_view_detach( ICoreApplicationView *view );
-extern HRESULT core_view_queue_launch( ICoreApplicationView *view, const WCHAR *arguments, const WCHAR *tile_id );
+extern void core_view_raise_launch( ICoreApplicationView *view, const WCHAR *arguments, const WCHAR *tile_id );
 extern void core_view_for_each( void (*callback)( void *context ), void *context );
 
 extern IActivationFactory *application_view_factory;

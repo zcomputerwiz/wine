@@ -3394,6 +3394,7 @@ DECL_HANDLER(get_token_package)
         reply->app_len    = sizes.app_id;
         reply->root_len   = sizes.root;
         reply->exe_len    = sizes.executable;
+        reply->entry_len  = sizes.entry_point;
         if (reply->total <= get_reply_max_size()) set_reply_data( data, reply->total );
         else set_error( STATUS_BUFFER_TOO_SMALL );
     }

@@ -43,7 +43,7 @@ struct fd;
  *
  *   WEXAPPX 1
  *   root <tab> package directory: a path on drive C: ending in PackageFullName
- *   app <tab> ApplicationId <tab> relative path of the executable
+ *   app <tab> ApplicationId <tab> relative path of the executable [<tab> entry point]
  *   class <tab> ActivatableClassId <tab> relative path of the in-process server
  *
  * Paths use backslashes; the relative ones stay inside the package directory.
@@ -61,6 +61,7 @@ struct uwp_context_sizes
     data_size_t app_id;       /* application id */
     data_size_t root;         /* DOS path of the package directory */
     data_size_t executable;   /* executable, relative to the package directory */
+    data_size_t entry_point;  /* the EntryPoint of the application in the manifest, may be empty */
     data_size_t classes;      /* class table: class, NUL, relative path, NUL, ... */
 };
 

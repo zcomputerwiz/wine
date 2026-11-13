@@ -3215,6 +3215,7 @@ static void dump_get_token_package_reply( const struct get_token_package_reply *
     fprintf( stderr, ", app_len=%u", req->app_len );
     fprintf( stderr, ", root_len=%u", req->root_len );
     fprintf( stderr, ", exe_len=%u", req->exe_len );
+    fprintf( stderr, ", entry_len=%u", req->entry_len );
     dump_varargs_bytes( ", data=", cur_size );
 }
 

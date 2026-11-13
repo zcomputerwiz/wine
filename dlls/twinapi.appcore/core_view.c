@@ -187,6 +187,117 @@ HRESULT dispatch_callback( ICoreDispatcher *dispatcher, void (*callback)( void *
     return hr;
 }
 
+/* ---- the splash screen of a launch activation ------------------------------------------------------ */
+
+struct splash_screen
+{
+    ISplashScreen ISplashScreen_iface;
+    LONG ref;
+    CRITICAL_SECTION cs;
+    struct list dismissed_handlers;
+};
+
+static inline struct splash_screen *impl_from_ISplashScreen( ISplashScreen *iface )
+{
+    return CONTAINING_RECORD( iface, struct splash_screen, ISplashScreen_iface );
+}
+
+static HRESULT WINAPI splash_QueryInterface( ISplashScreen *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) || IsEqualGUID( iid, &IID_ISplashScreen ))
+    {
+        *out = iface;
+        ISplashScreen_AddRef( iface );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI splash_AddRef( ISplashScreen *iface )
+{
+    return InterlockedIncrement( &impl_from_ISplashScreen( iface )->ref );
+}
+
+static ULONG WINAPI splash_Release( ISplashScreen *iface )
+{
+    struct splash_screen *impl = impl_from_ISplashScreen( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        handler_list_clear( &impl->dismissed_handlers );
+        DeleteCriticalSection( &impl->cs );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI splash_GetIids( ISplashScreen *iface, ULONG *count, IID **iids )
+{
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI splash_GetRuntimeClassName( ISplashScreen *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.ApplicationModel.Activation.SplashScreen", 49, name );
+}
+
+static HRESULT WINAPI splash_GetTrustLevel( ISplashScreen *iface, TrustLevel *level )
+{
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI splash_get_ImageLocation( ISplashScreen *iface, Rect *value )
+{
+    FIXME( "iface %p, value %p: the splash image is not shown.\n", iface, value );
+    memset( value, 0, sizeof(*value) );
+    return S_OK;
+}
+
+static HRESULT WINAPI splash_add_Dismissed( ISplashScreen *iface, ITypedEventHandler_SplashScreen_IInspectable *handler,
+                                            EventRegistrationToken *token )
+{
+    struct splash_screen *impl = impl_from_ISplashScreen( iface );
+
+    FIXME( "iface %p, handler %p, token %p: never raised.\n", iface, handler, token );
+    return handler_list_add( &impl->dismissed_handlers, &impl->cs, (IUnknown *)handler, token );
+}
+
+static HRESULT WINAPI splash_remove_Dismissed( ISplashScreen *iface, EventRegistrationToken token )
+{
+    struct splash_screen *impl = impl_from_ISplashScreen( iface );
+    return handler_list_remove( &impl->dismissed_handlers, &impl->cs, token );
+}
+
+static const ISplashScreenVtbl splash_vtbl =
+{
+    splash_QueryInterface,
+    splash_AddRef,
+    splash_Release,
+    splash_GetIids,
+    splash_GetRuntimeClassName,
+    splash_GetTrustLevel,
+    splash_get_ImageLocation,
+    splash_add_Dismissed,
+    splash_remove_Dismissed,
+};
+
+static HRESULT splash_create( ISplashScreen **out )
+{
+    struct splash_screen *impl;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->ISplashScreen_iface.lpVtbl = &splash_vtbl;
+    impl->ref = 1;
+    list_init( &impl->dismissed_handlers );
+    InitializeCriticalSectionEx( &impl->cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO );
+    impl->cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": splash_screen.cs");
+    *out = &impl->ISplashScreen_iface;
+    return S_OK;
+}
+
 /* ---- the arguments of a launch activation --------------------------------------------------------- */
 
 struct launch_args
@@ -196,6 +307,7 @@ struct launch_args
     LONG ref;
     HSTRING arguments;
     HSTRING tile_id;
+    ISplashScreen *splash;
 };
 
 static inline struct launch_args *impl_from_IActivatedEventArgs( IActivatedEventArgs *iface )
@@ -232,6 +344,7 @@ static ULONG launch_args_release( struct launch_args *args )
     {
         WindowsDeleteString( args->arguments );
         WindowsDeleteString( args->tile_id );
+        if (args->splash) ISplashScreen_Release( args->splash );
         free( args );
     }
     return ref;
@@ -283,8 +396,10 @@ static HRESULT WINAPI activated_args_get_PreviousExecutionState( IActivatedEvent
 
 static HRESULT WINAPI activated_args_get_SplashScreen( IActivatedEventArgs *iface, ISplashScreen **value )
 {
-    FIXME( "iface %p, value %p: no splash screen.\n", iface, value );
-    *value = NULL;
+    struct launch_args *args = impl_from_IActivatedEventArgs( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+    ISplashScreen_AddRef( *value = args->splash );
     return S_OK;
 }
 
@@ -364,7 +479,8 @@ static HRESULT launch_args_create( const WCHAR *arguments, const WCHAR *tile_id,
     args->ILaunchActivatedEventArgs_iface.lpVtbl = &launch_args_vtbl;
     args->ref = 1;
     if (FAILED(hr = WindowsCreateString( arguments, wcslen( arguments ), &args->arguments )) ||
-        FAILED(hr = WindowsCreateString( tile_id, wcslen( tile_id ), &args->tile_id )))
+        FAILED(hr = WindowsCreateString( tile_id, wcslen( tile_id ), &args->tile_id )) ||
+        FAILED(hr = splash_create( &args->splash )))
     {
         launch_args_release( args );
         return hr;
@@ -660,59 +776,23 @@ void core_view_detach( ICoreApplicationView *iface )
     LeaveCriticalSection( &views_cs );
 }
 
-struct launch_context
+/* Observed on Windows 11: the launch activation is raised on the view thread after Load and before Run,
+ * not while the thread processes events. */
+void core_view_raise_launch( ICoreApplicationView *iface, const WCHAR *arguments, const WCHAR *tile_id )
 {
-    struct core_view *view;
-    WCHAR *arguments;
-    WCHAR *tile_id;
-};
-
-static void raise_launch( void *context )
-{
-    struct launch_context *launch = context;
-    struct core_view *view = launch->view;
+    struct core_view *view = impl_from_ICoreApplicationView( iface );
     IActivatedEventArgs *args;
     IUnknown **handlers;
     unsigned int i, count;
 
-    if (SUCCEEDED(launch_args_create( launch->arguments, launch->tile_id, &args )))
-    {
-        handlers = handler_list_snapshot( &view->activated_handlers, &view->cs, &count );
-        for (i = 0; i < count; i++)
-            ITypedEventHandler_CoreApplicationView_IActivatedEventArgs_Invoke(
-                (ITypedEventHandler_CoreApplicationView_IActivatedEventArgs *)handlers[i],
-                &view->ICoreApplicationView_iface, args );
-        handler_list_snapshot_free( handlers, count );
-        IActivatedEventArgs_Release( args );
-    }
-    ICoreApplicationView_Release( &view->ICoreApplicationView_iface );
-    free( launch->arguments );
-    free( launch->tile_id );
-    free( launch );
-}
-
-/* The launch activation of the view is raised on its thread, while that thread processes events. */
-HRESULT core_view_queue_launch( ICoreApplicationView *iface, const WCHAR *arguments, const WCHAR *tile_id )
-{
-    struct core_view *view = impl_from_ICoreApplicationView( iface );
-    struct launch_context *launch;
-    HRESULT hr;
-
-    if (!(launch = calloc( 1, sizeof(*launch) ))) return E_OUTOFMEMORY;
-    launch->view = view;
-    launch->arguments = wcsdup( arguments );
-    launch->tile_id = wcsdup( tile_id );
-    ICoreApplicationView_AddRef( iface );
-    if (!launch->arguments || !launch->tile_id) hr = E_OUTOFMEMORY;
-    else hr = dispatch_callback( view->dispatcher, raise_launch, launch );
-    if (FAILED(hr))
-    {
-        ICoreApplicationView_Release( iface );
-        free( launch->arguments );
-        free( launch->tile_id );
-        free( launch );
-    }
-    return hr;
+    if (FAILED(launch_args_create( arguments, tile_id, &args ))) return;
+    handlers = handler_list_snapshot( &view->activated_handlers, &view->cs, &count );
+    for (i = 0; i < count; i++)
+        ITypedEventHandler_CoreApplicationView_IActivatedEventArgs_Invoke(
+            (ITypedEventHandler_CoreApplicationView_IActivatedEventArgs *)handlers[i],
+            &view->ICoreApplicationView_iface, args );
+    handler_list_snapshot_free( handlers, count );
+    IActivatedEventArgs_Release( args );
 }
 
 /* Run a function on the thread of every view. */

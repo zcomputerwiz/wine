@@ -4033,6 +4033,7 @@ struct handle_info
     data_size_t    app_len;       /* size of the application id */
     data_size_t    root_len;      /* size of the path of the package directory */
     data_size_t    exe_len;       /* size of the relative path of the executable */
+    data_size_t    entry_len;     /* size of the entry point */
     VARARG(data,bytes);           /* the strings above, then the class table */
 @END
 

@@ -572,25 +572,17 @@ static HRESULT WINAPI window_Activate( ICoreWindow *iface )
 
     if (impl->thread_id != GetCurrentThreadId()) return RPC_E_WRONG_THREAD;
 
-    EnterCriticalSection( &impl->cs );
-    if (!impl->closed)
-    {
-        if (!impl->visible) became_visible = impl->visible = TRUE;
-        if (!impl->active) became_active = impl->active = TRUE;
-    }
-    LeaveCriticalSection( &impl->cs );
-
-    if (became_visible) window_post( impl, OP_VISIBILITY, TRUE );
-    if (became_active) window_post( impl, OP_ACTIVATED, 0 );
+    /* Observed on Windows 11: without a presented frame the window stays invisible and raises neither Activated
+     * nor VisibilityChanged, however long the thread processes events. Presentation (U1.1b) will raise them. */
+    (void)became_visible;
+    (void)became_active;
     return S_OK;
 }
 
-static HRESULT WINAPI window_Close( ICoreWindow *iface )
+/* the window of the view is closed by the system when the application exits */
+static HRESULT window_close_internal( struct core_window *impl )
 {
-    struct core_window *impl = impl_from_ICoreWindow( iface );
     BOOL was_visible = FALSE, already = FALSE;
-
-    TRACE( "iface %p.\n", iface );
 
     if (impl->thread_id != GetCurrentThreadId()) return RPC_E_WRONG_THREAD;
 
@@ -607,6 +599,14 @@ static HRESULT WINAPI window_Close( ICoreWindow *iface )
     if (was_visible) window_post( impl, OP_VISIBILITY, FALSE );
     window_post( impl, OP_CLOSED, 0 );
     return S_OK;
+}
+
+/* Observed on Windows 11: an application cannot close the window of its view; Close throws
+ * E_ILLEGAL_METHOD_CALL. CoreApplication.Exit ends the application and closes the window. */
+static HRESULT WINAPI window_Close( ICoreWindow *iface )
+{
+    TRACE( "iface %p.\n", iface );
+    return E_ILLEGAL_METHOD_CALL;
 }
 
 static HRESULT WINAPI window_GetAsyncKeyState( ICoreWindow *iface, VirtualKey key, CoreVirtualKeyStates *state )
@@ -792,6 +792,12 @@ HRESULT WINAPI WineUICreateCoreWindow( ICoreWindow **out )
     LeaveCriticalSection( &windows_cs );
     *out = &window->ICoreWindow_iface;
     return S_OK;
+}
+
+/* Private to twinapi.appcore: the system closes the window of the view of the calling thread (CoreApplication.Exit). */
+HRESULT WINAPI WineUIExitCoreWindow( ICoreWindow *iface )
+{
+    return window_close_internal( impl_from_ICoreWindow( iface ) );
 }
 
 /* The thread no longer has this window: GetForCurrentThread does not find it any more. */

@@ -7,3 +7,4 @@
 @ stub CreateControlInputEx
 @ stdcall WineUICreateCoreWindow(ptr)
 @ stdcall WineUIDetachCoreWindow(ptr)
+@ stdcall WineUIExitCoreWindow(ptr)

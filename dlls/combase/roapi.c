@@ -98,7 +98,7 @@ static HRESULT get_package_library_for_classid(const WCHAR *classid, UINT32 clas
     root = process_package->data + (process_package->full_name_len + process_package->family_name_len +
                                     process_package->app_id_len) / sizeof(WCHAR);
     root_len = process_package->root_len / sizeof(WCHAR);
-    ptr = root + root_len + process_package->executable_len / sizeof(WCHAR);
+    ptr = root + root_len + (process_package->executable_len + process_package->entry_point_len) / sizeof(WCHAR);
     end = ptr + process_package->classes_len / sizeof(WCHAR);
 
     while (ptr < end)

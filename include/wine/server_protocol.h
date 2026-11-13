@@ -5721,7 +5721,9 @@ struct get_token_package_reply
     data_size_t    app_len;
     data_size_t    root_len;
     data_size_t    exe_len;
+    data_size_t    entry_len;
     /* VARARG(data,bytes); */
+    char __pad_36[4];
 };
 
 
@@ -7633,6 +7635,6 @@ union generic_reply
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 984
+#define SERVER_PROTOCOL_VERSION 985
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

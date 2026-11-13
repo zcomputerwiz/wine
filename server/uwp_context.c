@@ -48,6 +48,7 @@
 #define FULL_NAME_MAX    127   /* PACKAGE_FULL_NAME_MAX_LENGTH */
 #define APP_ID_MAX       64
 #define REL_PATH_MAX     512
+#define ENTRY_POINT_MAX  256
 
 static const char record_magic[] = "WEXAPPX 1";
 
@@ -176,7 +177,7 @@ static int valid_app_id( const struct field *id )
 
 /* split the next line of a record into its tab separated fields; returns the number of fields, 0 at the
  * end and -1 on a malformed line */
-static int next_line( const WCHAR **pos, const WCHAR *end, struct field fields[3] )
+static int next_line( const WCHAR **pos, const WCHAR *end, struct field fields[4] )
 {
     const WCHAR *p = *pos, *start = p;
     int count = 0;
@@ -187,7 +188,7 @@ static int next_line( const WCHAR **pos, const WCHAR *end, struct field fields[3
         if (p == end) return -1;  /* the last line has no line feed */
         if (*p == '\t' || *p == '\n')
         {
-            if (count == 3) return -1;
+            if (count == 4) return -1;
             fields[count].str = start;
             fields[count].len = p - start;
             count++;
@@ -321,7 +322,7 @@ static void append_field( WCHAR **pos, const struct field *field )
 struct uwp_context *uwp_context_from_aumid( const WCHAR *aumid, data_size_t len )
 {
     char full_name[FULL_NAME_MAX + 1], exe_path[2 * REL_PATH_MAX + 2];
-    struct field family, app_id, fields[3], app = { NULL, 0 }, exe = { NULL, 0 }, root, root_rel;
+    struct field family, app_id, fields[4], app = { NULL, 0 }, exe = { NULL, 0 }, entry = { NULL, 0 }, root, root_rel;
     const WCHAR *pos, *end;
     struct uwp_context *ctx = NULL;
     size_t i, count = len / sizeof(WCHAR), full_len, name_len, publisher, text_len, classes = 0;
@@ -365,18 +366,20 @@ struct uwp_context *uwp_context_from_aumid( const WCHAR *aumid, data_size_t len 
 
     while ((ret = next_line( &pos, end, fields )))
     {
-        if (ret != 3 || !valid_relative_path( &fields[2] )) goto corrupt;
+        if (ret < 3 || !valid_relative_path( &fields[2] )) goto corrupt;
         if (is_keyword( &fields[0], "app" ))
         {
             if (!valid_app_id( &fields[1] )) goto corrupt;
+            if (ret == 4 && (!fields[3].len || fields[3].len > ENTRY_POINT_MAX)) goto corrupt;
             if (!equal_field( &fields[1], &app_id )) continue;
             if (app.str) goto corrupt;  /* declared twice */
             app = fields[1];
             exe = fields[2];
+            if (ret == 4) entry = fields[3];
         }
         else if (is_keyword( &fields[0], "class" ))
         {
-            if (!valid_class_id( &fields[1] )) goto corrupt;
+            if (ret != 3 || !valid_class_id( &fields[1] )) goto corrupt;
             classes += (fields[1].len + fields[2].len + 2) * sizeof(WCHAR);
         }
         else goto corrupt;
@@ -402,8 +405,9 @@ struct uwp_context *uwp_context_from_aumid( const WCHAR *aumid, data_size_t len 
     }
     close( fd );
 
-    /* full name, family name (shorter than the full name), application id, root, executable, classes */
-    if (!(ctx = mem_alloc( sizeof(*ctx) + (full_len * 2 + app.len + root.len + exe.len) * sizeof(WCHAR) + classes )))
+    /* full name, family name (shorter than the full name), application id, root, executable, entry point, classes */
+    if (!(ctx = mem_alloc( sizeof(*ctx) + (full_len * 2 + app.len + root.len + exe.len + entry.len) * sizeof(WCHAR) +
+                           classes )))
     {
         free( text );
         return NULL;
@@ -425,6 +429,8 @@ struct uwp_context *uwp_context_from_aumid( const WCHAR *aumid, data_size_t len 
     ctx->sizes.root = root.len * sizeof(WCHAR);
     append_field( &out, &exe );
     ctx->sizes.executable = exe.len * sizeof(WCHAR);
+    if (entry.str) append_field( &out, &entry );
+    ctx->sizes.entry_point = entry.len * sizeof(WCHAR);
 
     pos = text;
     while (next_line( &pos, end, fields ) > 0)
@@ -438,7 +444,7 @@ struct uwp_context *uwp_context_from_aumid( const WCHAR *aumid, data_size_t len 
     ctx->sizes.classes = classes;
     ctx->total = (char *)out - (char *)(ctx + 1);
     assert( ctx->total == ctx->sizes.full_name + ctx->sizes.family_name + ctx->sizes.app_id + ctx->sizes.root +
-            ctx->sizes.executable + ctx->sizes.classes );
+            ctx->sizes.executable + ctx->sizes.entry_point + ctx->sizes.classes );
     free( text );
     return ctx;
 

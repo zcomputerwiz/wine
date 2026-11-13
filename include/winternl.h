@@ -2032,6 +2032,7 @@ typedef struct _WINE_TOKEN_PACKAGE_INFORMATION
     ULONG app_id_len;
     ULONG root_len;         /* path of the package directory */
     ULONG executable_len;   /* executable of the application, relative to the package directory */
+    ULONG entry_point_len;  /* the EntryPoint of the application in the manifest */
     ULONG classes_len;      /* class table: class, NUL, relative path of its server, NUL, ... */
     WCHAR data[1];
 } WINE_TOKEN_PACKAGE_INFORMATION;

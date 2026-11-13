@@ -434,6 +434,7 @@ struct item
     void (*callback)( void *context );   /* an event of the runtime itself */
     void *context;
     struct async_action *action;
+    ULONGLONG serial;             /* order of queueing */
 };
 
 struct dispatcher
@@ -446,6 +447,7 @@ struct dispatcher
     CRITICAL_SECTION cs;
     HANDLE wake;
     BOOL quit;
+    ULONGLONG serial;
     struct list items;
     struct list accelerator_handlers;
 };
@@ -550,7 +552,11 @@ static BOOL dispatcher_queue( struct dispatcher *impl, struct item *item )
     BOOL quit;
 
     EnterCriticalSection( &impl->cs );
-    if (!(quit = impl->quit)) list_add_tail( &impl->items, &item->entry );
+    if (!(quit = impl->quit))
+    {
+        item->serial = ++impl->serial;
+        list_add_tail( &impl->items, &item->entry );
+    }
     LeaveCriticalSection( &impl->cs );
     if (quit)
     {
@@ -564,7 +570,7 @@ static BOOL dispatcher_queue( struct dispatcher *impl, struct item *item )
 
 /* the item to run next: the highest priority, the oldest of those; idle items only when nothing else waits.
  * Items of a canceled action are dropped here. Returns NULL when there is none. */
-static struct item *dispatcher_next( struct dispatcher *impl, BOOL *only_idle_left )
+static struct item *dispatcher_next( struct dispatcher *impl, BOOL *only_idle_left, ULONGLONG max_serial )
 {
     struct item *item, *next, *best = NULL;
 
@@ -583,6 +589,7 @@ static struct item *dispatcher_next( struct dispatcher *impl, BOOL *only_idle_le
                 continue;
             }
         }
+        if (item->serial > max_serial) continue;
         if (!best || item->priority > best->priority) best = item;
     }
     if (best)
@@ -687,10 +694,10 @@ static void item_run( struct item *item, BOOL idle )
 }
 
 /* run one item if there is one; returns whether it ran one */
-static BOOL dispatcher_run_one( struct dispatcher *impl )
+static BOOL dispatcher_run_one( struct dispatcher *impl, ULONGLONG max_serial )
 {
     BOOL idle = FALSE;
-    struct item *item = dispatcher_next( impl, &idle );
+    struct item *item = dispatcher_next( impl, &idle, max_serial );
 
     if (!item) return FALSE;
     item_run( item, idle );
@@ -735,32 +742,40 @@ static HRESULT WINAPI dispatcher_ProcessEvents( ICoreDispatcher *iface, CoreProc
 
     if (impl->thread_id != GetCurrentThreadId()) return RPC_E_WRONG_THREAD;
 
+    /* Observed on Windows 11: ProcessOneIfPresent runs the items that are queued when it is called (two items queued
+     * one after the other both ran in one call), ProcessAllIfPresent also those that running items queue, in
+     * priority order; ProcessOneAndAllPending returned at once with nothing queued, as ProcessAllIfPresent. */
     switch (options)
     {
     case CoreProcessEventsOption_ProcessOneIfPresent:
+    {
+        ULONGLONG limit;
+
         pump_messages( impl );
-        dispatcher_run_one( impl );
+        EnterCriticalSection( &impl->cs );
+        limit = impl->serial;
+        LeaveCriticalSection( &impl->cs );
+        while (dispatcher_run_one( impl, limit )) {}
         return S_OK;
+    }
 
     case CoreProcessEventsOption_ProcessAllIfPresent:
+    case CoreProcessEventsOption_ProcessOneAndAllPending:
         pump_messages( impl );
-        while (dispatcher_run_one( impl )) pump_messages( impl );
+        while (dispatcher_run_one( impl, ~(ULONGLONG)0 )) pump_messages( impl );
         return S_OK;
 
-    case CoreProcessEventsOption_ProcessOneAndAllPending:
     case CoreProcessEventsOption_ProcessUntilQuit:
         for (;;)
         {
             pump_messages( impl );
             ran = FALSE;
-            while (dispatcher_run_one( impl )) ran = TRUE;
+            while (dispatcher_run_one( impl, ~(ULONGLONG)0 )) ran = TRUE;
             if (dispatcher_quit_requested( impl )) break;
-            /* one and all pending: done once something ran, otherwise wait for the next event */
-            if (ran && options == CoreProcessEventsOption_ProcessOneAndAllPending) break;
             if (!ran) MsgWaitForMultipleObjectsEx( 1, &impl->wake, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE );
         }
         /* what was queued before the quit still runs */
-        while (dispatcher_run_one( impl )) {}
+        while (dispatcher_run_one( impl, ~(ULONGLONG)0 )) {}
         return S_OK;
 
     default:

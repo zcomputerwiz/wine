@@ -18,23 +18,40 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include "ntstatus.h"
+#define WIN32_NO_STATUS
 #include "private.h"
+#include "winternl.h"
 #include "appmodel.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(twinapi);
 
 /*
- * CoreApplication.Run for a packaged process (WineExplorer UWP compatibility, U1.1). It runs the view of the
- * IFrameworkViewSource on the calling thread, which becomes the thread of the view, of its CoreWindow and of
- * the dispatcher of that window:
+ * CoreApplication.Run for a packaged process (WineExplorer UWP compatibility, U1.1), as observed on Windows 11
+ * (tests/uwp/u1_1): the caller has to be in a multithreaded apartment (RPC_E_WRONG_THREAD otherwise). The view
+ * runs on a thread of its own, which becomes the thread of its CoreWindow and of the dispatcher of that window:
  *
- *   CreateView, Initialize(view), SetWindow(window), Load(entry point), Run, Uninitialize
+ *   CreateView, Initialize(view), SetWindow(window), Load(entry point of the manifest), launch activation,
+ *   Run, Uninitialize
  *
- * The launch activation of the view is queued first and raised when the thread processes events. A process
- * without a package context gets an error: only a packaged process is an application.
+ * The calling thread waits. When the view is finished (it returned from Run, or CoreApplication.Exit closed
+ * its window) the calling thread raises Exiting, if Exit has not, and the process ends: Run does not return.
+ * A view that fails in one of its steps makes Run return that error instead. A process without a package
+ * context gets an error: only a packaged process is an application.
  * Not implemented: presentation and input (the window has no native window), suspend and resume, more than one
- * view, the entry point string, the application properties.
+ * view, the application properties.
  */
+
+struct run_state
+{
+    IFrameworkViewSource *source;
+    DWORD main_thread;               /* the thread that called Run */
+    HANDLE exit_request;             /* Exit asks the main thread to raise Exiting */
+    HANDLE exiting_done;             /* the main thread has raised it */
+    HRESULT hr;                      /* the first error of the view */
+    BOOL failed;
+    BOOL exiting_raised;
+};
 
 struct core_application
 {
@@ -45,6 +62,7 @@ struct core_application
     LONG ref;
 
     BOOL running;
+    struct run_state *run;
     struct list suspending_handlers, resuming_handlers, exiting_handlers;
 };
 
@@ -237,66 +255,110 @@ static HRESULT WINAPI core_application_GetCurrentView( ICoreApplication *iface, 
     return S_OK;
 }
 
-static HRESULT WINAPI core_application_Run( ICoreApplication *iface, IFrameworkViewSource *source )
+/* the EntryPoint of the application in the manifest, as a new HSTRING (NULL for none) */
+static HSTRING get_entry_point(void)
 {
-    struct core_application *impl = impl_from_ICoreApplication( iface );
+    WINE_TOKEN_PACKAGE_INFORMATION *info = NULL;
+    HSTRING ret = NULL;
+    HANDLE token;
+    ULONG size = 0;
+    NTSTATUS status;
+
+    if (NtOpenProcessToken( GetCurrentProcess(), TOKEN_QUERY, &token )) return NULL;
+    status = NtQueryInformationToken( token, TokenWinePackage, NULL, 0, &size );
+    while (status == STATUS_BUFFER_TOO_SMALL)
+    {
+        free( info );
+        if (!(info = malloc( size ))) break;
+        status = NtQueryInformationToken( token, TokenWinePackage, info, size, &size );
+    }
+    NtClose( token );
+    if (!status && info && info->entry_point_len)
+    {
+        const WCHAR *entry = info->data + (info->full_name_len + info->family_name_len + info->app_id_len +
+                                           info->root_len + info->executable_len) / sizeof(WCHAR);
+        WindowsCreateString( entry, info->entry_point_len / sizeof(WCHAR), &ret );
+    }
+    free( info );
+    return ret;
+}
+
+/* the handlers of Exiting, raised on the thread that called Run */
+static void raise_exiting( struct core_application *impl )
+{
+    IUnknown **handlers;
+    unsigned int i, count;
+
+    handlers = handler_list_snapshot( &impl->exiting_handlers, &app_cs, &count );
+    for (i = 0; i < count; i++)
+        IEventHandler_IInspectable_Invoke( (IEventHandler_IInspectable *)handlers[i], NULL, NULL );
+    handler_list_snapshot_free( handlers, count );
+}
+
+static void remember_error( struct run_state *state, HRESULT hr )
+{
+    if (FAILED(hr) && !state->failed)
+    {
+        state->failed = TRUE;
+        state->hr = hr;
+    }
+}
+
+/* the thread of the view */
+static DWORD WINAPI view_thread( void *param )
+{
+    struct run_state *state = param;
     HRESULT (WINAPI *create_window)( ICoreWindow **window );
     void (WINAPI *detach_window)( ICoreWindow *window );
     ICoreApplicationView *view = NULL;
     IFrameworkView *framework = NULL;
     ICoreWindow *window = NULL;
     WCHAR id[65];
+    HSTRING entry;
     HMODULE ui;
-    HRESULT hr, hr_run;
+    BOOL com;
+    HRESULT hr;
 
-    TRACE( "iface %p, source %p.\n", iface, source );
-
-    if (!source) return E_INVALIDARG;
-    if (!is_packaged()) return HRESULT_FROM_WIN32( APPMODEL_ERROR_NO_PACKAGE );
-
+    com = SUCCEEDED(CoInitializeEx( NULL, COINIT_APARTMENTTHREADED ));
     if (!(ui = LoadLibraryW( L"windows.ui.dll" )) ||
         !(create_window = (void *)GetProcAddress( ui, "WineUICreateCoreWindow" )) ||
         !(detach_window = (void *)GetProcAddress( ui, "WineUIDetachCoreWindow" )))
     {
         ERR( "Cannot find the window creation of windows.ui.\n" );
-        return E_NOTIMPL;
-    }
-
-    EnterCriticalSection( &app_cs );
-    if (impl->running) hr = E_ILLEGAL_METHOD_CALL;
-    else
-    {
-        impl->running = TRUE;
-        hr = S_OK;
-    }
-    LeaveCriticalSection( &app_cs );
-    if (FAILED(hr)) return hr;
-
-    if (FAILED(hr = IFrameworkViewSource_CreateView( source, &framework ))) goto done;
-    if (!framework)
-    {
-        hr = E_POINTER;
+        remember_error( state, E_NOTIMPL );
         goto done;
     }
-    if (FAILED(hr = create_window( &window ))) goto done;
-    if (FAILED(hr = core_view_create( window, TRUE, &view ))) goto done;
 
-    /* the launch activation, raised when the thread processes events */
-    if (!get_application_id( id, ARRAY_SIZE(id) )) id[0] = 0;
-    if (FAILED(hr = core_view_queue_launch( view, launch_arguments(), id ))) goto done;
+    if (FAILED(hr = IFrameworkViewSource_CreateView( state->source, &framework )) || !framework)
+    {
+        remember_error( state, FAILED(hr) ? hr : E_POINTER );
+        goto done;
+    }
+    if (FAILED(hr = create_window( &window )) || FAILED(hr = core_view_create( window, TRUE, &view )))
+    {
+        remember_error( state, hr );
+        goto release;
+    }
 
-    if (FAILED(hr = IFrameworkView_Initialize( framework, view ))) goto uninitialize;
-    if (FAILED(hr = IFrameworkView_SetWindow( framework, window ))) goto uninitialize;
-    if (FAILED(hr = IFrameworkView_Load( framework, NULL ))) goto uninitialize;
-    hr = IFrameworkView_Run( framework );
+    hr = IFrameworkView_Initialize( framework, view );
+    if (SUCCEEDED(hr)) hr = IFrameworkView_SetWindow( framework, window );
+    if (SUCCEEDED(hr))
+    {
+        entry = get_entry_point();
+        hr = IFrameworkView_Load( framework, entry );
+        WindowsDeleteString( entry );
+    }
+    if (SUCCEEDED(hr))
+    {
+        /* raised here, after Load and before Run */
+        if (!get_application_id( id, ARRAY_SIZE(id) )) id[0] = 0;
+        core_view_raise_launch( view, launch_arguments(), id );
+        hr = IFrameworkView_Run( framework );
+    }
+    remember_error( state, hr );
+    remember_error( state, IFrameworkView_Uninitialize( framework ) );
 
-uninitialize:
-    hr_run = hr;
-    hr = IFrameworkView_Uninitialize( framework );
-    if (SUCCEEDED(hr_run)) hr_run = hr;
-    hr = hr_run;
-
-done:
+release:
     if (view)
     {
         core_view_detach( view );
@@ -308,9 +370,74 @@ done:
         ICoreWindow_Release( window );
     }
     if (framework) IFrameworkView_Release( framework );
+done:
+    if (com) CoUninitialize();
+    return 0;
+}
+
+static HRESULT WINAPI core_application_Run( ICoreApplication *iface, IFrameworkViewSource *source )
+{
+    struct core_application *impl = impl_from_ICoreApplication( iface );
+    struct run_state state = { source, GetCurrentThreadId() };
+    APTTYPEQUALIFIER qualifier;
+    APTTYPE apartment;
+    HANDLE thread, handles[2];
+    HRESULT hr;
+
+    TRACE( "iface %p, source %p.\n", iface, source );
+
+    if (!source) return E_INVALIDARG;
+    /* Observed on Windows 11: a single-threaded apartment is refused, nothing is called. */
+    if (FAILED(hr = CoGetApartmentType( &apartment, &qualifier ))) return hr;
+    if (apartment == APTTYPE_STA || apartment == APTTYPE_MAINSTA) return RPC_E_WRONG_THREAD;
+    if (!is_packaged()) return HRESULT_FROM_WIN32( APPMODEL_ERROR_NO_PACKAGE );
+
+    EnterCriticalSection( &app_cs );
+    if (impl->running) hr = E_ILLEGAL_METHOD_CALL;
+    else
+    {
+        impl->running = TRUE;
+        impl->run = &state;
+        hr = S_OK;
+    }
+    LeaveCriticalSection( &app_cs );
+    if (FAILED(hr)) return hr;
+
+    state.exit_request = CreateEventW( NULL, FALSE, FALSE, NULL );
+    state.exiting_done = CreateEventW( NULL, TRUE, FALSE, NULL );
+    thread = state.exit_request && state.exiting_done ? CreateThread( NULL, 0, view_thread, &state, 0, NULL ) : NULL;
+    if (!thread)
+    {
+        hr = E_OUTOFMEMORY;
+        goto done;
+    }
+
+    /* the calling thread raises Exiting, for Exit or when the view is finished */
+    handles[0] = thread;
+    handles[1] = state.exit_request;
+    while (WaitForMultipleObjects( 2, handles, FALSE, INFINITE ) == WAIT_OBJECT_0 + 1)
+    {
+        if (!state.exiting_raised) raise_exiting( impl );
+        state.exiting_raised = TRUE;
+        SetEvent( state.exiting_done );
+    }
+    CloseHandle( thread );
+
+    if (!state.failed)
+    {
+        if (!state.exiting_raised) raise_exiting( impl );
+        /* the application is finished: the process ends, Run does not return */
+        ExitProcess( 0 );
+    }
+    hr = state.hr;
+
+done:
     EnterCriticalSection( &app_cs );
     impl->running = FALSE;
+    impl->run = NULL;
     LeaveCriticalSection( &app_cs );
+    if (state.exit_request) CloseHandle( state.exit_request );
+    if (state.exiting_done) CloseHandle( state.exiting_done );
     return hr;
 }
 
@@ -343,31 +470,42 @@ static const struct ICoreApplicationVtbl core_application_vtbl =
 
 static void close_current_window( void *context )
 {
+    HRESULT (WINAPI *exit_window)( ICoreWindow *window );
     ICoreApplicationView *view = core_view_for_current_thread();
     ICoreWindow *window;
+    HMODULE ui;
 
     if (!view) return;
-    if (SUCCEEDED(ICoreApplicationView_get_CoreWindow( view, &window )))
+    if ((ui = GetModuleHandleW( L"windows.ui.dll" )) && (exit_window = (void *)GetProcAddress( ui, "WineUIExitCoreWindow" )) &&
+        SUCCEEDED(ICoreApplicationView_get_CoreWindow( view, &window )))
     {
-        ICoreWindow_Close( window );
+        exit_window( window );
         ICoreWindow_Release( window );
     }
     ICoreApplicationView_Release( view );
 }
 
-/* Exit raises Exiting, then closes the windows of the views, which ends their Run. */
+/* Observed on Windows 11: Exit raises Exiting on the thread that called Run, then the window of the view is closed
+ * (Closed is raised on the view thread, its event processing ends), the view returns from Run and is uninitialized,
+ * and the process ends. */
 static HRESULT WINAPI core_application_exit_Exit( ICoreApplicationExit *iface )
 {
     struct core_application *impl = impl_from_ICoreApplicationExit( iface );
-    IUnknown **handlers;
-    unsigned int i, count;
+    struct run_state *run;
+    HANDLE exiting_done = NULL;
 
     TRACE( "iface %p.\n", iface );
 
-    handlers = handler_list_snapshot( &impl->exiting_handlers, &app_cs, &count );
-    for (i = 0; i < count; i++)
-        IEventHandler_IInspectable_Invoke( (IEventHandler_IInspectable *)handlers[i], NULL, NULL );
-    handler_list_snapshot_free( handlers, count );
+    EnterCriticalSection( &app_cs );
+    if ((run = impl->run) && !run->exiting_raised && GetCurrentThreadId() != run->main_thread)
+    {
+        exiting_done = run->exiting_done;
+        SetEvent( run->exit_request );
+    }
+    LeaveCriticalSection( &app_cs );
+
+    if (exiting_done) WaitForSingleObject( exiting_done, 10000 );
+    else if (!run) raise_exiting( impl );   /* no view: nothing to close */
 
     core_view_for_each( close_current_window, NULL );
     return S_OK;
@@ -450,6 +588,7 @@ static struct core_application core_application =
     {&core_immersive_vtbl},
     1,
     FALSE,
+    NULL,
     { &core_application.suspending_handlers, &core_application.suspending_handlers },
     { &core_application.resuming_handlers, &core_application.resuming_handlers },
     { &core_application.exiting_handlers, &core_application.exiting_handlers },
