@@ -34,6 +34,7 @@
 #include "winternl.h"
 #include "objbase.h"
 #include "shobjidl.h"
+#include "appmodel.h"
 
 #include "wine/debug.h"
 
@@ -77,6 +78,78 @@ static BOOL uwp_compatibility_enabled(void)
                       RRF_RT_REG_DWORD, &type, &value, &size ))
         return FALSE;
     return type == REG_DWORD && size == sizeof(value) && value == 1;
+}
+
+/*
+ * The environment of the started process: that of the caller, with the folders of the packages the application
+ * depends on (its direct dependencies, the framework packages) in front of PATH, so that the libraries of a framework
+ * are found by name like those of the application. NULL (the caller's environment) when there are none.
+ */
+static WCHAR *build_environment( const WCHAR *full_name )
+{
+    PACKAGE_INFO_REFERENCE reference;
+    UINT32 length = 0, count = 0, i;
+    BYTE *buffer = NULL;
+    WCHAR *env = NULL, *old_env, *new_env = NULL, *p, *dirs = NULL, *old_path = NULL;
+    SIZE_T dirs_len = 0, env_len = 0;
+    PACKAGE_INFO *infos;
+
+    if (OpenPackageInfoByFullName( full_name, 0, &reference )) return NULL;
+    if (GetPackageInfo( reference, PACKAGE_FILTER_DIRECT, &length, NULL, &count ) != ERROR_INSUFFICIENT_BUFFER || !count)
+        goto done;
+    if (!(buffer = malloc( length )) || GetPackageInfo( reference, PACKAGE_FILTER_DIRECT, &length, buffer, &count ))
+        goto done;
+    infos = (PACKAGE_INFO *)buffer;
+    for (i = 0; i < count; i++) dirs_len += wcslen( infos[i].path ) + 1;
+    if (!(dirs = malloc( (dirs_len + 1) * sizeof(WCHAR) ))) goto done;
+    dirs[0] = 0;
+    for (i = 0; i < count; i++)
+    {
+        wcscat( dirs, infos[i].path );
+        wcscat( dirs, L";" );
+    }
+
+    if (!(old_env = GetEnvironmentStringsW())) goto done;
+    for (p = old_env; *p; p += wcslen( p ) + 1)
+    {
+        if (!wcsnicmp( p, L"PATH=", 5 )) old_path = p + 5;
+        env_len += wcslen( p ) + 1;
+    }
+    if ((new_env = malloc( (env_len + dirs_len + 16) * sizeof(WCHAR) )))
+    {
+        WCHAR *out = new_env;
+        BOOL have_path = FALSE;
+
+        for (p = old_env; *p; p += wcslen( p ) + 1)
+        {
+            if (!wcsnicmp( p, L"PATH=", 5 ))
+            {
+                have_path = TRUE;
+                wcscpy( out, L"PATH=" );
+                wcscat( out, dirs );
+                wcscat( out, old_path );
+            }
+            else wcscpy( out, p );
+            out += wcslen( out ) + 1;
+        }
+        if (!have_path)
+        {
+            wcscpy( out, L"PATH=" );
+            wcscat( out, dirs );
+            out += wcslen( out ) + 1;
+        }
+        *out = 0;
+        env = new_env;
+        new_env = NULL;
+    }
+    FreeEnvironmentStringsW( old_env );
+
+done:
+    free( new_env );
+    free( dirs );
+    free( buffer );
+    ClosePackageInfo( reference );
+    return env;
 }
 
 static WINE_TOKEN_PACKAGE_INFORMATION *get_token_package( HANDLE token, NTSTATUS *status )
@@ -142,7 +215,7 @@ static HRESULT WINAPI manager_ActivateApplication( IApplicationActivationManager
 {
     WINE_TOKEN_PACKAGE_INFORMATION *info = NULL;
     HANDLE process_token = NULL, token = NULL;
-    WCHAR *path = NULL, *root = NULL, *cmdline = NULL;
+    WCHAR *path = NULL, *root = NULL, *cmdline = NULL, *environment = NULL;
     const WCHAR *root_str, *exe_str;
     size_t root_len, exe_len, args_len;
     PROCESS_INFORMATION pi;
@@ -225,7 +298,19 @@ static HRESULT WINAPI manager_ActivateApplication( IApplicationActivationManager
     si.cb = sizeof(si);
     /* The server refuses the process unless the image it maps is the executable of the catalog record, so a
      * failure here leaves no process behind. */
-    if (!CreateProcessAsUserW( token, path, cmdline, NULL, NULL, FALSE, 0, NULL, root, &si, &pi ))
+    {
+        WCHAR *full_name = malloc( info->full_name_len + sizeof(WCHAR) );
+
+        if (full_name)
+        {
+            memcpy( full_name, info->data, info->full_name_len );
+            full_name[info->full_name_len / sizeof(WCHAR)] = 0;
+            environment = build_environment( full_name );
+            free( full_name );
+        }
+    }
+    if (!CreateProcessAsUserW( token, path, cmdline, NULL, NULL, FALSE, environment ? CREATE_UNICODE_ENVIRONMENT : 0,
+                               environment, root, &si, &pi ))
     {
         hr = HRESULT_FROM_WIN32( GetLastError() );
         WARN( "Failed to start %s, error %lu.\n", debugstr_w( path ), GetLastError() );
@@ -237,6 +322,7 @@ static HRESULT WINAPI manager_ActivateApplication( IApplicationActivationManager
     hr = S_OK;
 
 done:
+    free( environment );
     free( cmdline );
     free( path );
     free( root );

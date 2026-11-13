@@ -367,7 +367,8 @@ struct uwp_context *uwp_context_from_aumid( const WCHAR *aumid, data_size_t len 
     while ((ret = next_line( &pos, end, fields )))
     {
         /* the publisher and the dependencies are information for the package APIs of kernelbase */
-        if (is_keyword( &fields[0], "publisher" ) || is_keyword( &fields[0], "dependency" ))
+        if (is_keyword( &fields[0], "publisher" ) || is_keyword( &fields[0], "dependency" ) ||
+            is_keyword( &fields[0], "framework" ))
         {
             if (ret != 2 || !fields[1].len) goto corrupt;
             continue;
