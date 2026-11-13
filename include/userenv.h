@@ -31,6 +31,8 @@
 #define PT_TEMPORARY    0x00000001
 #define PT_ROAMING      0x00000002
 #define PT_MANDATORY    0x00000004
+#define RP_FORCE        1
+#define RP_SYNC         2
 
 typedef enum _GPO_LINK {
     GPLinkUnknown = 0,
@@ -106,9 +108,13 @@ USERENVAPI BOOL WINAPI LeaveCriticalPolicySection(HANDLE);
 USERENVAPI BOOL WINAPI LoadUserProfileA(HANDLE,LPPROFILEINFOA);
 USERENVAPI BOOL WINAPI LoadUserProfileW(HANDLE,LPPROFILEINFOW);
 #define                LoadUserProfile WINELIB_NAME_AW(LoadUserProfile)
+USERENVAPI BOOL WINAPI RefreshPolicy(BOOL);
+USERENVAPI BOOL WINAPI RefreshPolicyEx(BOOL,DWORD);
 USERENVAPI BOOL WINAPI RegisterGPNotification(HANDLE,BOOL);
 USERENVAPI BOOL WINAPI UnloadUserProfile(HANDLE,HANDLE);
 USERENVAPI BOOL WINAPI UnregisterGPNotification(HANDLE);
+USERENVAPI BOOL WINAPI WaitForMachinePolicyForegroundProcessing(void);
+USERENVAPI BOOL WINAPI WaitForUserPolicyForegroundProcessing(void);
 
 #ifdef __cplusplus
 }

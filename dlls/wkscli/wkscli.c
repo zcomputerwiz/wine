@@ -20,6 +20,7 @@
 #include "ntstatus.h"
 #include "windef.h"
 #include "winbase.h"
+#include "winreg.h"
 
 #include "lm.h"
 
@@ -36,11 +37,31 @@ NET_API_STATUS NET_API_FUNCTION NetGetJoinInformation(
     PNETSETUP_JOIN_STATUS type)
 {
     static const WCHAR workgroupW[] = L"Workgroup";
+    WCHAR domain[64];
+    DWORD size = sizeof(domain);
+    HKEY key;
 
     FIXME("Semi-stub %s %p %p\n", wine_dbgstr_w(Server), Name, type);
 
     if (!Name || !type)
         return ERROR_INVALID_PARAMETER;
+
+    /* WineExplorer: the host's domain join, written to the machine registry by wex-domain-state
+     * (docs/GROUP_POLICY.md); the name is the domain's flat (NetBIOS) name */
+    domain[0] = 0;
+    if (!RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\WineExplorer\\Domain", 0, KEY_READ | KEY_WOW64_64KEY, &key))
+    {
+        if (RegGetValueW(key, NULL, L"FlatName", RRF_RT_REG_SZ, NULL, domain, &size)) domain[0] = 0;
+        RegCloseKey(key);
+    }
+    if (domain[0])
+    {
+        size = (lstrlenW(domain) + 1) * sizeof(WCHAR);
+        if (NetApiBufferAllocate(size, (LPVOID *)Name)) return ERROR_NOT_ENOUGH_MEMORY;
+        lstrcpyW(*Name, domain);
+        *type = NetSetupDomainName;
+        return NERR_Success;
+    }
 
     NetApiBufferAllocate(sizeof(workgroupW), (LPVOID *)Name);
     lstrcpyW(*Name, workgroupW);

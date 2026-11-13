@@ -27,6 +27,7 @@
 #include "ntstatus.h"
 #include "windef.h"
 #include "winbase.h"
+#include "winreg.h"
 #include "ntsecapi.h"
 
 #include "dsrole.h"
@@ -71,6 +72,39 @@ DWORD WINAPI DsRoleGetPrimaryDomainInformation(
             int logon_domain_sz;
             DWORD size;
             PDSROLE_PRIMARY_DOMAIN_INFO_BASIC basic;
+            WCHAR flat[64], dns[256];
+            DWORD flat_size = sizeof(flat), dns_size = sizeof(dns);
+            HKEY key;
+
+            /* WineExplorer: the host's domain join, written to the machine registry by wex-domain-state
+             * (docs/GROUP_POLICY.md): a member workstation with the domain's flat and DNS names */
+            flat[0] = dns[0] = 0;
+            if (!RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\WineExplorer\\Domain", 0,
+                               KEY_READ | KEY_WOW64_64KEY, &key))
+            {
+                if (RegGetValueW(key, NULL, L"FlatName", RRF_RT_REG_SZ, NULL, flat, &flat_size)) flat[0] = 0;
+                if (RegGetValueW(key, NULL, L"Name", RRF_RT_REG_SZ, NULL, dns, &dns_size)) dns[0] = 0;
+                RegCloseKey(key);
+            }
+            if (flat[0])
+            {
+                flat_size = (lstrlenW(flat) + 1) * sizeof(WCHAR);
+                dns_size = (lstrlenW(dns) + 1) * sizeof(WCHAR);
+                basic = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*basic) + flat_size + 2 * dns_size);
+                if (!basic) return ERROR_OUTOFMEMORY;
+                basic->MachineRole = DsRole_RoleMemberWorkstation;
+                basic->DomainNameFlat = (WCHAR *)(basic + 1);
+                lstrcpyW(basic->DomainNameFlat, flat);
+                if (dns[0])
+                {
+                    basic->DomainNameDns = (WCHAR *)((BYTE *)(basic + 1) + flat_size);
+                    lstrcpyW(basic->DomainNameDns, dns);
+                    basic->DomainForestName = (WCHAR *)((BYTE *)basic->DomainNameDns + dns_size);
+                    lstrcpyW(basic->DomainForestName, dns);
+                }
+                *Buffer = (PBYTE)basic;
+                return ERROR_SUCCESS;
+            }
 
             ZeroMemory(&ObjectAttributes, sizeof(ObjectAttributes));
             NtStatus = LsaOpenPolicy(NULL, &ObjectAttributes,
