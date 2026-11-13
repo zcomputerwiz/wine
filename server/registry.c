@@ -1224,6 +1224,21 @@ static int key_at_policy_tree( const struct key *key, const struct save_branch_i
     return ret;
 }
 
+/* "Volatile Environment" belongs to one logon: wineboot makes it, as a volatile key, for the user who logs on.
+ * A hive file that has it (a copy of a template prefix, or a file written before the key was volatile) would
+ * keep it for ever, with another account's name and paths: a key that is loaded is an ordinary key, and making
+ * it again as volatile does not change that. So it is dropped when a user's hive is loaded. */
+static void drop_saved_volatile_environment( struct key *hive )
+{
+    static const WCHAR nameW[] = {'V','o','l','a','t','i','l','e',' ','E','n','v','i','r','o','n','m','e','n','t'};
+    struct unicode_str name = { nameW, sizeof(nameW) };
+    struct key *key;
+    int index;
+
+    if ((key = find_subkey( hive, name, &index ))) delete_key( key, 1 );
+    clear_error();
+}
+
 /* may the caller write the hive's policy trees? Asked of the first tree's root, which always exists. */
 static int policy_write_allowed( struct key *hive )
 {
@@ -3974,6 +3989,7 @@ void init_registry(void)
         fatal_error( "could not create HKEY_CURRENT_USER registry key\n" );
     free( current_user_path );
     load_init_registry_from_file( "user.reg", hkcu, false );
+    drop_saved_volatile_environment( hkcu );
 
     /* set the shared flag on Software\Classes\Wow6432Node for all platforms */
     for (i = 1; i < supported_machines_count; i++)
@@ -4641,6 +4657,7 @@ unsigned int session0_load_user_hive( const struct sid *sid, int fd, void *agent
     info->policy_sd = key_alloc_default_sd( policy_aces, ARRAY_SIZE(policy_aces) );
     info->classes_alias = alias ? (struct key *)grab_object( alias ) : NULL;
     reset_policy_trees( key );
+    drop_saved_volatile_environment( key );
     make_clean( key );
     status = STATUS_SUCCESS;
 
