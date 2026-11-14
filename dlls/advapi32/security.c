@@ -950,6 +950,37 @@ LookupAccountSidW(
         }
     }
 
+    /* WineExplorer: with the system tier every Unix account has a SID of its own (the accounts map), which the
+     * table above does not know: it has the first user account, RID 1000 of the computer's fixed SID, only. The
+     * account that is always asked for is the caller's own (GetUserName, the profile path, USERNAME): the user
+     * of the process token is WINEUSERNAME on this computer. Other accounts of the map are not resolved here. */
+    if (dm == NULL) {
+        char token_buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+        DWORD token_len;
+        HANDLE token;
+
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+            if (GetTokenInformation(token, TokenUser, token_buffer, sizeof(token_buffer), &token_len) &&
+                EqualSid(sid, ((TOKEN_USER *)token_buffer)->User.Sid)) {
+                DWORD size = MAX_COMPUTERNAME_LENGTH + 1, length;
+
+                free(computer_name);
+                computer_name = malloc(size * sizeof(WCHAR));
+                free(account_name);
+                account_name = malloc((UNLEN + 1) * sizeof(WCHAR));
+                if (computer_name && account_name && GetComputerNameW(computer_name, &size)) {
+                    length = GetEnvironmentVariableW(L"WINEUSERNAME", account_name, UNLEN + 1);
+                    if (length && length < UNLEN + 1) {
+                        ac = account_name;
+                        dm = computer_name;
+                        use = SidTypeUser;
+                    }
+                }
+            }
+            CloseHandle(token);
+        }
+    }
+
     if (dm) {
         DWORD ac_len = lstrlenW(ac);
         DWORD dm_len = lstrlenW(dm);
