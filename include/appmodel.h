@@ -174,6 +174,7 @@ LONG WINAPI ParseApplicationUserModelId(const WCHAR *id, UINT32 *family_length, 
 LONG WINAPI GetCurrentApplicationUserModelId(UINT32 *length, WCHAR *id);
 LONG WINAPI GetCurrentPackageFamilyName(UINT32 *length, WCHAR *name);
 LONG WINAPI GetCurrentPackageFullName(UINT32 *length, WCHAR *name);
+LONG WINAPI GetCurrentPackageId(UINT32 *length, BYTE *buffer);
 LONG WINAPI GetCurrentPackagePath(UINT32 *length, WCHAR *path);
 LONG WINAPI GetPackageFamilyName(HANDLE process, UINT32 *length, WCHAR *name);
 LONG WINAPI GetPackageFamilyNameFromToken(HANDLE token, UINT32 *length, WCHAR *name);

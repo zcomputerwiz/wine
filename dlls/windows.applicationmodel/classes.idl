@@ -25,8 +25,19 @@ import "windows.foundation.idl";
 import "windows.storage.idl";
 import "windows.system.idl";
 import "windows.applicationmodel.idl";
+import "windows.applicationmodel.resources.idl";
+import "windows.applicationmodel.resources.core.idl";
 
 namespace Windows.ApplicationModel {
     runtimeclass Package;
     runtimeclass DesignMode;
+}
+
+namespace Windows.ApplicationModel.Resources {
+    runtimeclass ResourceLoader;
+}
+
+namespace Windows.ApplicationModel.Resources.Core {
+    runtimeclass ResourceContext;
+    runtimeclass ResourceManager;
 }

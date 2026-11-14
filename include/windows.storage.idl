@@ -542,6 +542,29 @@ namespace Windows.Storage {
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Storage.StorageFile),
+        uuid(5984c710-daf2-43c8-8bb4-a4d3eacfd03f)
+    ]
+    interface IStorageFileStatics : IInspectable
+    {
+        HRESULT GetFileFromPathAsync([in] HSTRING path,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+        HRESULT GetFileFromApplicationUriAsync([in] Windows.Foundation.Uri *uri,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+        HRESULT CreateStreamedFileAsync([in] HSTRING name, [in] IInspectable *handler, [in] IInspectable *thumbnail,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+        HRESULT ReplaceWithStreamedFileAsync([in] Windows.Storage.IStorageFile *file, [in] IInspectable *handler,
+                [in] IInspectable *thumbnail,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+        HRESULT CreateStreamedFileFromUriAsync([in] HSTRING name, [in] Windows.Foundation.Uri *uri, [in] IInspectable *thumbnail,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+        HRESULT ReplaceWithStreamedFileFromUriAsync([in] Windows.Storage.IStorageFile *file, [in] Windows.Foundation.Uri *uri,
+                [in] IInspectable *thumbnail,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
         uuid(72d1cb78-b3ef-4f75-a80b-6fd9dae2944b)
     ]
     interface IStorageFolder : IInspectable
@@ -759,7 +782,7 @@ namespace Windows.Storage {
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
-        /* static(Windows.Storage.IStorageFileStatics, Windows.Foundation.UniversalApiContract, 1.0), */
+        static(Windows.Storage.IStorageFileStatics, Windows.Foundation.UniversalApiContract, 1.0),
         /* static(Windows.Storage.IStorageFileStatics2, Windows.Foundation.UniversalApiContract, 10.0) */
     ]
     runtimeclass StorageFile

@@ -21,6 +21,7 @@
 #include "wine/debug.h"
 
 #include "pathcch.h"
+#include "appmodel.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(model);
 
@@ -442,10 +443,190 @@ static HRESULT WINAPI package_GetTrustLevel( IPackage *iface, TrustLevel *trust_
     return E_NOTIMPL;
 }
 
+/* PackageId of the package of the process, from the package identity of kernelbase (WineExplorer UWP U1.6) */
+struct package_id
+{
+    IPackageId IPackageId_iface;
+    LONG ref;
+    PACKAGE_ID *id;     /* in the buffer of GetCurrentPackageId */
+    WCHAR *full_name;
+    WCHAR *family_name;
+};
+
+static inline struct package_id *impl_from_IPackageId( IPackageId *iface )
+{
+    return CONTAINING_RECORD( iface, struct package_id, IPackageId_iface );
+}
+
+static HRESULT WINAPI package_id_QueryInterface( IPackageId *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IPackageId ))
+    {
+        *out = iface;
+        IPackageId_AddRef( iface );
+        return S_OK;
+    }
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI package_id_AddRef( IPackageId *iface )
+{
+    return InterlockedIncrement( &impl_from_IPackageId( iface )->ref );
+}
+
+static ULONG WINAPI package_id_Release( IPackageId *iface )
+{
+    struct package_id *impl = impl_from_IPackageId( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        free( impl->id );
+        free( impl->full_name );
+        free( impl->family_name );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI package_id_GetIids( IPackageId *iface, ULONG *iid_count, IID **iids )
+{
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI package_id_GetRuntimeClassName( IPackageId *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( RuntimeClass_Windows_ApplicationModel_PackageId,
+                                wcslen( RuntimeClass_Windows_ApplicationModel_PackageId ), class_name );
+}
+
+static HRESULT WINAPI package_id_GetTrustLevel( IPackageId *iface, TrustLevel *trust_level )
+{
+    *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT package_id_string( const WCHAR *text, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    if (!text) text = L"";
+    return WindowsCreateString( text, wcslen( text ), value );
+}
+
+static HRESULT WINAPI package_id_get_Name( IPackageId *iface, HSTRING *value )
+{
+    return package_id_string( impl_from_IPackageId( iface )->id->name, value );
+}
+
+static HRESULT WINAPI package_id_get_Version( IPackageId *iface, PackageVersion *value )
+{
+    PACKAGE_ID *id = impl_from_IPackageId( iface )->id;
+
+    if (!value) return E_POINTER;
+    value->Major = id->version.Major;
+    value->Minor = id->version.Minor;
+    value->Build = id->version.Build;
+    value->Revision = id->version.Revision;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_id_get_Architecture( IPackageId *iface, __x_ABI_CWindows_CSystem_CProcessorArchitecture *value )
+{
+    if (!value) return E_POINTER;
+    /* both use the numbers of PROCESSOR_ARCHITECTURE_* (x86 0, arm 5, x64 9, neutral 11, arm64 12) */
+    *value = impl_from_IPackageId( iface )->id->processorArchitecture;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_id_get_ResourceId( IPackageId *iface, HSTRING *value )
+{
+    return package_id_string( impl_from_IPackageId( iface )->id->resourceId, value );
+}
+
+static HRESULT WINAPI package_id_get_Publisher( IPackageId *iface, HSTRING *value )
+{
+    return package_id_string( impl_from_IPackageId( iface )->id->publisher, value );
+}
+
+static HRESULT WINAPI package_id_get_PublisherId( IPackageId *iface, HSTRING *value )
+{
+    return package_id_string( impl_from_IPackageId( iface )->id->publisherId, value );
+}
+
+static HRESULT WINAPI package_id_get_FullName( IPackageId *iface, HSTRING *value )
+{
+    return package_id_string( impl_from_IPackageId( iface )->full_name, value );
+}
+
+static HRESULT WINAPI package_id_get_FamilyName( IPackageId *iface, HSTRING *value )
+{
+    return package_id_string( impl_from_IPackageId( iface )->family_name, value );
+}
+
+static const struct IPackageIdVtbl package_id_vtbl =
+{
+    package_id_QueryInterface,
+    package_id_AddRef,
+    package_id_Release,
+    /* IInspectable methods */
+    package_id_GetIids,
+    package_id_GetRuntimeClassName,
+    package_id_GetTrustLevel,
+    /* IPackageId methods */
+    package_id_get_Name,
+    package_id_get_Version,
+    package_id_get_Architecture,
+    package_id_get_ResourceId,
+    package_id_get_Publisher,
+    package_id_get_PublisherId,
+    package_id_get_FullName,
+    package_id_get_FamilyName,
+};
+
+/* a string of a package API that takes a length and a buffer */
+static WCHAR *package_api_string( LONG (WINAPI *get)( UINT32 *, WCHAR * ) )
+{
+    UINT32 length = 0;
+    WCHAR *text;
+
+    if (get( &length, NULL ) != ERROR_INSUFFICIENT_BUFFER || !(text = malloc( length * sizeof(WCHAR) ))) return NULL;
+    if (get( &length, text )) { free( text ); return NULL; }
+    return text;
+}
+
 static HRESULT WINAPI package_get_Id( IPackage *iface, IPackageId **value )
 {
-    FIXME( "iface %p, value %p stub!\n", iface, value );
-    return E_NOTIMPL;
+    struct package_id *impl;
+    UINT32 length = 0;
+    LONG error;
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    *value = NULL;
+    if ((error = GetCurrentPackageId( &length, NULL )) != ERROR_INSUFFICIENT_BUFFER)
+        return HRESULT_FROM_WIN32( error == ERROR_SUCCESS ? ERROR_INVALID_DATA : error );
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IPackageId_iface.lpVtbl = &package_id_vtbl;
+    impl->ref = 1;
+    if (!(impl->id = malloc( length )))
+    {
+        free( impl );
+        return E_OUTOFMEMORY;
+    }
+    if ((error = GetCurrentPackageId( &length, (BYTE *)impl->id )))
+    {
+        free( impl->id );
+        free( impl );
+        return HRESULT_FROM_WIN32( error );
+    }
+    impl->full_name = package_api_string( GetCurrentPackageFullName );
+    impl->family_name = package_api_string( GetCurrentPackageFamilyName );
+    *value = &impl->IPackageId_iface;
+    return S_OK;
 }
 
 static HRESULT WINAPI package_get_InstalledLocation( IPackage *iface, IStorageFolder **value )

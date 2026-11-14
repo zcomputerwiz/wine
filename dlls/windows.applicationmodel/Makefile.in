@@ -1,8 +1,12 @@
 MODULE  = windows.applicationmodel.dll
-IMPORTS = combase kernelbase
+IMPORTS = combase kernelbase advapi32
 
 SOURCES = \
 	classes.idl \
 	designmode.c \
 	main.c \
-	package.c
+	map.c \
+	package.c \
+	pri.c \
+	resources.c \
+	vector.c
