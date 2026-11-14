@@ -69,7 +69,22 @@ HRESULT async_operation_buffer_create( IUnknown *invoker, IUnknown *param, async
         IAsyncOperation_IBuffer **out );
 HRESULT async_operation_hstring_vector_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback,
         IAsyncOperation_IVector_HSTRING **out );
+HRESULT async_operation_boolean_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback,
+        IAsyncOperation_boolean **out );
+HRESULT async_operation_random_access_stream_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback,
+        IAsyncOperation_IRandomAccessStream **out );
+HRESULT async_operation_typed_stream_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback,
+        IAsyncOperation_IRandomAccessStreamWithContentType **out );
+HRESULT async_operation_input_stream_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback,
+        IAsyncOperation_IInputStream **out );
+HRESULT async_operation_transaction_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback,
+        IAsyncOperation_StorageStreamTransaction **out );
 HRESULT async_action_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback, IAsyncAction **out );
+
+/* filestream.c */
+HRESULT file_stream_create( const WCHAR *path, BOOL writable, DWORD sharing, const WCHAR *content_type,
+        IRandomAccessStreamWithContentType **out );
+HRESULT stream_transaction_create( const WCHAR *path, const WCHAR *content_type, IStorageStreamTransaction **out );
 
 /* vector.c */
 struct vector_iids

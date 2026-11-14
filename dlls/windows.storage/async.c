@@ -605,10 +605,10 @@ static HRESULT WINAPI impl_type##_GetResults( iface_type *iface, result_type *re
     TRACE( "iface %p, results %p.\n", iface, results );                                                             \
                                                                                                                     \
     if (!results) return E_POINTER;                                                                                 \
-    *results = NULL;                                                                                                \
+    memset( results, 0, sizeof(*results) );                                                                         \
     hr = IAsyncInfoImpl_get_Result( impl->IAsyncInfoImpl_inner, &result );                                          \
                                                                                                                     \
-    if (propvar_type == VT_LPWSTR)                                                                                  \
+    if (propvar_type == VT_LPWSTR)                                                                               \
     {                                                                                                               \
         /* a string result is carried as VT_LPWSTR and handed out as an HSTRING */                                  \
         if (SUCCEEDED(hr) && result.pwszVal)                                                                        \
@@ -795,6 +795,63 @@ struct async_hstring_vector
 DEFINE_IASYNCOPERATION( IAsyncOperation_IVector_HSTRING, IAsyncOperationCompletedHandler_IVector_HSTRING,
         "Windows.Foundation.Collections.IVector`1<String>", async_hstring_vector, IVector_HSTRING *, VT_UNKNOWN, punkVal,
         async_operation_hstring_vector_create )
+
+struct async_boolean
+{
+    IAsyncOperation_boolean IAsyncOperation_boolean_iface;
+    IAsyncInfoImpl *IAsyncInfoImpl_inner;
+    LONG ref;
+};
+
+DEFINE_IASYNCOPERATION( IAsyncOperation_boolean, IAsyncOperationCompletedHandler_boolean,
+        "Boolean", async_boolean, boolean, VT_UI1, bVal,
+        async_operation_boolean_create )
+
+struct async_random_access_stream
+{
+    IAsyncOperation_IRandomAccessStream IAsyncOperation_IRandomAccessStream_iface;
+    IAsyncInfoImpl *IAsyncInfoImpl_inner;
+    LONG ref;
+};
+
+DEFINE_IASYNCOPERATION( IAsyncOperation_IRandomAccessStream, IAsyncOperationCompletedHandler_IRandomAccessStream,
+        "Windows.Storage.Streams.IRandomAccessStream", async_random_access_stream, IRandomAccessStream *, VT_UNKNOWN, punkVal,
+        async_operation_random_access_stream_create )
+
+struct async_typed_stream
+{
+    IAsyncOperation_IRandomAccessStreamWithContentType IAsyncOperation_IRandomAccessStreamWithContentType_iface;
+    IAsyncInfoImpl *IAsyncInfoImpl_inner;
+    LONG ref;
+};
+
+DEFINE_IASYNCOPERATION( IAsyncOperation_IRandomAccessStreamWithContentType,
+        IAsyncOperationCompletedHandler_IRandomAccessStreamWithContentType,
+        "Windows.Storage.Streams.IRandomAccessStreamWithContentType", async_typed_stream,
+        IRandomAccessStreamWithContentType *, VT_UNKNOWN, punkVal,
+        async_operation_typed_stream_create )
+
+struct async_input_stream
+{
+    IAsyncOperation_IInputStream IAsyncOperation_IInputStream_iface;
+    IAsyncInfoImpl *IAsyncInfoImpl_inner;
+    LONG ref;
+};
+
+DEFINE_IASYNCOPERATION( IAsyncOperation_IInputStream, IAsyncOperationCompletedHandler_IInputStream,
+        "Windows.Storage.Streams.IInputStream", async_input_stream, IInputStream *, VT_UNKNOWN, punkVal,
+        async_operation_input_stream_create )
+
+struct async_transaction
+{
+    IAsyncOperation_StorageStreamTransaction IAsyncOperation_StorageStreamTransaction_iface;
+    IAsyncInfoImpl *IAsyncInfoImpl_inner;
+    LONG ref;
+};
+
+DEFINE_IASYNCOPERATION( IAsyncOperation_StorageStreamTransaction, IAsyncOperationCompletedHandler_StorageStreamTransaction,
+        "Windows.Storage.StorageStreamTransaction", async_transaction, IStorageStreamTransaction *, VT_UNKNOWN, punkVal,
+        async_operation_transaction_create )
 
 /* IAsyncAction over the same machinery (the result of the callback is not used) */
 struct async_action

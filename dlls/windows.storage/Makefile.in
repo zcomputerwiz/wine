@@ -6,6 +6,7 @@ SOURCES = \
 	async_private.idl \
 	classes.idl \
 	fileio.c \
+	filestream.c \
 	folder.c \
 	main.c \
 	storage_private.idl \

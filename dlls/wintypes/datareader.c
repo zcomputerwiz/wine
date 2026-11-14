@@ -18,8 +18,8 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-/* A reader over a buffer (DataReader.FromBuffer). A reader over a stream can be created, but loading from the stream
- * (LoadAsync) is not implemented. */
+/* A reader over a buffer (DataReader.FromBuffer) or over a stream: LoadAsync reads from the stream into the reader,
+ * the read methods take from what was loaded. */
 
 #include "private.h"
 #include "winnls.h"
@@ -35,6 +35,7 @@ struct data_reader
 
     IInputStream *stream;
     IBuffer *buffer;
+    BYTE *store; /* what was loaded from the stream and is not read yet */
     const BYTE *data;
     UINT32 length;
     UINT32 position;
@@ -89,6 +90,7 @@ static ULONG WINAPI data_reader_Release( IDataReader *iface )
     {
         if (impl->buffer) IBuffer_Release( impl->buffer );
         if (impl->stream) IInputStream_Release( impl->stream );
+        free( impl->store );
         free( impl );
     }
     return ref;
@@ -374,12 +376,273 @@ static HRESULT WINAPI data_reader_ReadTimeSpan( IDataReader *iface, TimeSpan *va
     return data_reader_number( impl_from_IDataReader( iface ), &value->Duration, sizeof(value->Duration) );
 }
 
+/* The operation of LoadAsync: it waits for the read of the stream, then puts the bytes into the reader. The
+ * IAsyncInfo is the one of the read (as the store operation of the data writer does it). */
+struct load_operation
+{
+    IAsyncOperation_UINT32 IAsyncOperation_UINT32_iface;
+    IAsyncOperationWithProgressCompletedHandler_IBuffer_UINT32 handler_iface;
+    LONG ref;
+
+    struct data_reader *reader;
+    IAsyncInfo *async_inner;
+    IAsyncOperationCompletedHandler_UINT32 *outer_handler;
+    AsyncStatus status;
+    HRESULT hr;
+    UINT32 result;
+};
+
+static inline struct load_operation *impl_from_IAsyncOperation_UINT32( IAsyncOperation_UINT32 *iface )
+{
+    return CONTAINING_RECORD( iface, struct load_operation, IAsyncOperation_UINT32_iface );
+}
+
+static inline struct load_operation *impl_from_load_handler( IAsyncOperationWithProgressCompletedHandler_IBuffer_UINT32 *iface )
+{
+    return CONTAINING_RECORD( iface, struct load_operation, handler_iface );
+}
+
+static HRESULT WINAPI load_operation_QueryInterface( IAsyncOperation_UINT32 *iface, REFIID iid, void **out )
+{
+    struct load_operation *impl = impl_from_IAsyncOperation_UINT32( iface );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IAsyncOperation_UINT32 ))
+    {
+        IAsyncOperation_UINT32_AddRef( (*out = &impl->IAsyncOperation_UINT32_iface) );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IAsyncInfo ))
+    {
+        IAsyncInfo_AddRef( (*out = impl->async_inner) );
+        return S_OK;
+    }
+
+    WARN( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI load_operation_AddRef( IAsyncOperation_UINT32 *iface )
+{
+    return InterlockedIncrement( &impl_from_IAsyncOperation_UINT32( iface )->ref );
+}
+
+static ULONG WINAPI load_operation_Release( IAsyncOperation_UINT32 *iface )
+{
+    struct load_operation *impl = impl_from_IAsyncOperation_UINT32( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        IDataReader_Release( &impl->reader->IDataReader_iface );
+        if (impl->async_inner) IAsyncInfo_Release( impl->async_inner );
+        if (impl->outer_handler) IAsyncOperationCompletedHandler_UINT32_Release( impl->outer_handler );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI load_operation_GetIids( IAsyncOperation_UINT32 *iface, ULONG *iid_count, IID **iids )
+{
+    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI load_operation_GetRuntimeClassName( IAsyncOperation_UINT32 *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( RuntimeClass_Windows_Storage_Streams_DataReaderLoadOperation,
+                                wcslen( RuntimeClass_Windows_Storage_Streams_DataReaderLoadOperation ), class_name );
+}
+
+static HRESULT WINAPI load_operation_GetTrustLevel( IAsyncOperation_UINT32 *iface, TrustLevel *trust_level )
+{
+    *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT load_operation_notify( struct load_operation *impl )
+{
+    if (impl->status == Started || !impl->outer_handler) return S_OK;
+    return IAsyncOperationCompletedHandler_UINT32_Invoke( impl->outer_handler, &impl->IAsyncOperation_UINT32_iface, impl->status );
+}
+
+static HRESULT WINAPI load_operation_put_Completed( IAsyncOperation_UINT32 *iface, IAsyncOperationCompletedHandler_UINT32 *handler )
+{
+    struct load_operation *impl = impl_from_IAsyncOperation_UINT32( iface );
+
+    if (impl->outer_handler) return E_ILLEGAL_DELEGATE_ASSIGNMENT;
+    if (!handler) return S_OK;
+    IAsyncOperationCompletedHandler_UINT32_AddRef( (impl->outer_handler = handler) );
+    return load_operation_notify( impl );
+}
+
+static HRESULT WINAPI load_operation_get_Completed( IAsyncOperation_UINT32 *iface, IAsyncOperationCompletedHandler_UINT32 **handler )
+{
+    struct load_operation *impl = impl_from_IAsyncOperation_UINT32( iface );
+
+    if ((*handler = impl->outer_handler)) IAsyncOperationCompletedHandler_UINT32_AddRef( *handler );
+    return S_OK;
+}
+
+static HRESULT WINAPI load_operation_GetResults( IAsyncOperation_UINT32 *iface, UINT32 *results )
+{
+    struct load_operation *impl = impl_from_IAsyncOperation_UINT32( iface );
+
+    if (!results) return E_POINTER;
+    *results = 0;
+    if (impl->status == Started) return E_ILLEGAL_METHOD_CALL;
+    if (impl->status != Completed) return FAILED(impl->hr) ? impl->hr : E_FAIL;
+    *results = impl->result;
+    return S_OK;
+}
+
+static const struct IAsyncOperation_UINT32Vtbl load_operation_vtbl =
+{
+    load_operation_QueryInterface,
+    load_operation_AddRef,
+    load_operation_Release,
+    /* IInspectable methods */
+    load_operation_GetIids,
+    load_operation_GetRuntimeClassName,
+    load_operation_GetTrustLevel,
+    /* IAsyncOperation<UINT32> methods */
+    load_operation_put_Completed,
+    load_operation_get_Completed,
+    load_operation_GetResults,
+};
+
+static HRESULT WINAPI load_handler_QueryInterface( IAsyncOperationWithProgressCompletedHandler_IBuffer_UINT32 *iface,
+                                                   REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IAsyncOperationWithProgressCompletedHandler_IBuffer_UINT32 ))
+    {
+        *out = iface;
+        load_operation_AddRef( &impl_from_load_handler( iface )->IAsyncOperation_UINT32_iface );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI load_handler_AddRef( IAsyncOperationWithProgressCompletedHandler_IBuffer_UINT32 *iface )
+{
+    return load_operation_AddRef( &impl_from_load_handler( iface )->IAsyncOperation_UINT32_iface );
+}
+
+static ULONG WINAPI load_handler_Release( IAsyncOperationWithProgressCompletedHandler_IBuffer_UINT32 *iface )
+{
+    return load_operation_Release( &impl_from_load_handler( iface )->IAsyncOperation_UINT32_iface );
+}
+
+/* add the bytes of a buffer to what the reader holds */
+static HRESULT data_reader_add( struct data_reader *reader, IBuffer *buffer, UINT32 *added )
+{
+    UINT32 length, rest = reader->length - reader->position;
+    IBufferByteAccess *access;
+    BYTE *bytes, *store;
+    HRESULT hr;
+
+    *added = 0;
+    if (FAILED(hr = IBuffer_get_Length( buffer, &length ))) return hr;
+    if (FAILED(hr = IBuffer_QueryInterface( buffer, &IID_IBufferByteAccess, (void **)&access ))) return hr;
+    if (SUCCEEDED(hr = IBufferByteAccess_Buffer( access, &bytes )))
+    {
+        if (!(store = malloc( rest + length + 1 ))) hr = E_OUTOFMEMORY;
+        else
+        {
+            if (rest) memcpy( store, reader->data + reader->position, rest );
+            if (length) memcpy( store + rest, bytes, length );
+            free( reader->store );
+            reader->store = store;
+            reader->data = store;
+            reader->length = rest + length;
+            reader->position = 0;
+            *added = length;
+        }
+    }
+    IBufferByteAccess_Release( access );
+    return hr;
+}
+
+static HRESULT WINAPI load_handler_Invoke( IAsyncOperationWithProgressCompletedHandler_IBuffer_UINT32 *iface,
+                                           IAsyncOperationWithProgress_IBuffer_UINT32 *operation, AsyncStatus status )
+{
+    struct load_operation *impl = impl_from_load_handler( iface );
+    IBuffer *buffer = NULL;
+
+    if (status == Started) return S_OK;
+    if (status == Completed)
+    {
+        if (SUCCEEDED(impl->hr = IAsyncOperationWithProgress_IBuffer_UINT32_GetResults( operation, &buffer )) && buffer)
+        {
+            impl->hr = data_reader_add( impl->reader, buffer, &impl->result );
+            IBuffer_Release( buffer );
+        }
+        if (FAILED(impl->hr)) status = Error;
+    }
+    else if (FAILED(IAsyncInfo_get_ErrorCode( impl->async_inner, &impl->hr )) || SUCCEEDED(impl->hr)) impl->hr = E_FAIL;
+    impl->status = status;
+    return load_operation_notify( impl );
+}
+
+static const struct IAsyncOperationWithProgressCompletedHandler_IBuffer_UINT32Vtbl load_handler_vtbl =
+{
+    load_handler_QueryInterface,
+    load_handler_AddRef,
+    load_handler_Release,
+    load_handler_Invoke,
+};
+
+static HRESULT create_buffer( const BYTE *data, UINT32 size, IBuffer **buffer );
+
 static HRESULT WINAPI data_reader_LoadAsync( IDataReader *iface, UINT32 count, IAsyncOperation_UINT32 **operation )
 {
-    FIXME( "iface %p, count %u, operation %p stub!\n", iface, count, operation );
+    struct data_reader *impl = impl_from_IDataReader( iface );
+    IAsyncOperationWithProgress_IBuffer_UINT32 *read;
+    struct load_operation *load;
+    IBufferFactory *factory;
+    IBuffer *buffer;
+    HRESULT hr;
+
+    TRACE( "iface %p, count %u, operation %p.\n", iface, count, operation );
+
     if (!operation) return E_POINTER;
     *operation = NULL;
-    return E_NOTIMPL;
+    if (!impl->stream) return HRESULT_FROM_WIN32( ERROR_INVALID_OPERATION );
+
+    if (FAILED(hr = IActivationFactory_QueryInterface( buffer_activation_factory, &IID_IBufferFactory, (void **)&factory )))
+        return hr;
+    hr = IBufferFactory_Create( factory, count, &buffer );
+    IBufferFactory_Release( factory );
+    if (FAILED(hr)) return hr;
+
+    hr = IInputStream_ReadAsync( impl->stream, buffer, count, impl->options, &read );
+    IBuffer_Release( buffer );
+    if (FAILED(hr)) return hr;
+
+    if (!(load = calloc( 1, sizeof(*load) )))
+    {
+        IAsyncOperationWithProgress_IBuffer_UINT32_Release( read );
+        return E_OUTOFMEMORY;
+    }
+    load->IAsyncOperation_UINT32_iface.lpVtbl = &load_operation_vtbl;
+    load->handler_iface.lpVtbl = &load_handler_vtbl;
+    load->ref = 1;
+    load->status = Started;
+    IDataReader_AddRef( &(load->reader = impl)->IDataReader_iface );
+
+    if (SUCCEEDED(hr = IAsyncOperationWithProgress_IBuffer_UINT32_QueryInterface( read, &IID_IAsyncInfo, (void **)&load->async_inner )))
+        hr = IAsyncOperationWithProgress_IBuffer_UINT32_put_Completed( read, &load->handler_iface );
+    IAsyncOperationWithProgress_IBuffer_UINT32_Release( read );
+    if (FAILED(hr))
+    {
+        IAsyncOperation_UINT32_Release( &load->IAsyncOperation_UINT32_iface );
+        return hr;
+    }
+    *operation = &load->IAsyncOperation_UINT32_iface;
+    return S_OK;
 }
 
 static HRESULT WINAPI data_reader_DetachBuffer( IDataReader *iface, IBuffer **buffer )
@@ -389,8 +652,13 @@ static HRESULT WINAPI data_reader_DetachBuffer( IDataReader *iface, IBuffer **bu
     TRACE( "iface %p, buffer %p.\n", iface, buffer );
 
     if (!buffer) return E_POINTER;
-    if ((*buffer = impl->buffer)) IBuffer_AddRef( *buffer );
-    return S_OK;
+    if ((*buffer = impl->buffer))
+    {
+        IBuffer_AddRef( *buffer );
+        return S_OK;
+    }
+    /* a reader over a stream gives what it loaded and did not read */
+    return create_buffer( impl->data + impl->position, impl->length - impl->position, buffer );
 }
 
 static HRESULT WINAPI data_reader_DetachStream( IDataReader *iface, IInputStream **stream )

@@ -20,7 +20,7 @@
 
 /* A storage item is a path. The behaviour follows what Windows 11 did with the probe of WineExplorer
  * (tests/uwp/u1_1 in that repository): names that are relative paths, "name (2).ext" for unique names, the
- * error codes. File streams (OpenAsync), thumbnails and the extra properties are not implemented. */
+ * error codes. The streams of a file are in filestream.c. Thumbnails and the extra properties are not implemented. */
 
 #include <assert.h>
 #include <stdlib.h>
@@ -44,6 +44,8 @@ struct storage_item
     IStorageFolder2 IStorageFolder2_iface;
     IStorageItemProperties IStorageItemProperties_iface;
     IStorageFilePropertiesWithAvailability IStorageFilePropertiesWithAvailability_iface;
+    IRandomAccessStreamReference IRandomAccessStreamReference_iface;
+    IInputStreamReference IInputStreamReference_iface;
     LONG ref;
 
     BOOL folder;
@@ -999,6 +1001,10 @@ static HRESULT item_query_interface( struct storage_item *impl, REFIID iid, void
         *out = &impl->IStorageFile_iface;
     else if (!impl->folder && IsEqualGUID( iid, &IID_IStorageFilePropertiesWithAvailability ))
         *out = &impl->IStorageFilePropertiesWithAvailability_iface;
+    else if (!impl->folder && IsEqualGUID( iid, &IID_IRandomAccessStreamReference ))
+        *out = &impl->IRandomAccessStreamReference_iface;
+    else if (!impl->folder && IsEqualGUID( iid, &IID_IInputStreamReference ))
+        *out = &impl->IInputStreamReference_iface;
     else
     {
         WARN( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
@@ -1034,7 +1040,8 @@ static HRESULT item_get_iids( struct storage_item *impl, ULONG *iid_count, IID *
 {
     const IID *folder_iids[] = { &IID_IStorageFolder, &IID_IStorageItem, &IID_IStorageItemProperties, &IID_IStorageFolder2 };
     const IID *file_iids[] = { &IID_IStorageFile, &IID_IStorageItem, &IID_IStorageItemProperties,
-                               &IID_IStorageFilePropertiesWithAvailability };
+                               &IID_IStorageFilePropertiesWithAvailability, &IID_IRandomAccessStreamReference,
+                               &IID_IInputStreamReference };
     const IID **list = impl->folder ? folder_iids : file_iids;
     ULONG i, count = impl->folder ? ARRAY_SIZE(folder_iids) : ARRAY_SIZE(file_iids);
 
@@ -1097,6 +1104,8 @@ DEFINE_ITEM_IFACE( storage_folder, IStorageFolder )
 DEFINE_ITEM_IFACE( storage_folder2, IStorageFolder2 )
 DEFINE_ITEM_IFACE( item_properties, IStorageItemProperties )
 DEFINE_ITEM_IFACE( file_availability, IStorageFilePropertiesWithAvailability )
+DEFINE_ITEM_IFACE( stream_reference, IRandomAccessStreamReference )
+DEFINE_ITEM_IFACE( input_reference, IInputStreamReference )
 
 #define ITEM_OBJECT( impl ) (&(impl)->IStorageItem_iface)
 
@@ -1426,19 +1435,17 @@ static HRESULT WINAPI storage_file_get_FileType( IStorageFile *iface, HSTRING *v
     return hr;
 }
 
-static HRESULT WINAPI storage_file_get_ContentType( IStorageFile *iface, HSTRING *value )
+/* the content type of the extension of a file, or an empty string */
+static void file_content_type( struct storage_item *impl, WCHAR type[128] )
 {
-    struct storage_item *impl = impl_from_IStorageFile( iface );
-    WCHAR extension[64], type[128] = {0};
-    DWORD size = sizeof(type) - sizeof(WCHAR);
+    WCHAR extension[64];
+    DWORD size = 127 * sizeof(WCHAR);
 
-    TRACE( "iface %p, value %p.\n", iface, value );
-
-    if (!value) return E_POINTER;
     AcquireSRWLockShared( &impl->lock );
     lstrcpynW( extension, path_extension( impl->path ), ARRAY_SIZE(extension) );
     ReleaseSRWLockShared( &impl->lock );
 
+    memset( type, 0, 128 * sizeof(WCHAR) );
     if (!extension[0] || RegGetValueW( HKEY_CLASSES_ROOT, extension, L"Content Type", RRF_RT_REG_SZ, NULL, type, &size ))
     {
         /* the registry of Wine has few content types: the common ones are here */
@@ -1465,25 +1472,86 @@ static HRESULT WINAPI storage_file_get_ContentType( IStorageFile *iface, HSTRING
             break;
         }
     }
+}
+
+static HRESULT WINAPI storage_file_get_ContentType( IStorageFile *iface, HSTRING *value )
+{
+    struct storage_item *impl = impl_from_IStorageFile( iface );
+    WCHAR type[128];
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    file_content_type( impl, type );
     return WindowsCreateString( type, wcslen( type ), value );
+}
+
+enum stream_kind { STREAM_RANDOM_ACCESS, STREAM_WITH_CONTENT_TYPE, STREAM_INPUT, STREAM_TRANSACTION };
+
+/* option: nonzero for a stream that can write; flags: the kind of stream the caller wants */
+static HRESULT file_open_run( struct storage_call *call, PROPVARIANT *result )
+{
+    struct storage_item *impl = item_from_call( call );
+    IRandomAccessStreamWithContentType *stream;
+    IStorageStreamTransaction *transaction;
+    WCHAR type[128], *path;
+    void *iface = NULL;
+    HRESULT hr;
+
+    file_content_type( impl, type );
+    if (!(path = item_path( impl ))) return E_OUTOFMEMORY;
+    if (call->flags == STREAM_TRANSACTION)
+    {
+        hr = stream_transaction_create( path, type, &transaction );
+        free( path );
+        if (SUCCEEDED(hr)) set_result( result, transaction );
+        return hr;
+    }
+
+    /* one stream may write at a time; readers share the file with everything */
+    hr = file_stream_create( path, call->option, call->option ? FILE_SHARE_READ
+                             : FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, type, &stream );
+    free( path );
+    if (FAILED(hr)) return hr;
+
+    if (call->flags == STREAM_RANDOM_ACCESS)
+        hr = IRandomAccessStreamWithContentType_QueryInterface( stream, &IID_IRandomAccessStream, &iface );
+    else if (call->flags == STREAM_INPUT)
+        hr = IRandomAccessStreamWithContentType_QueryInterface( stream, &IID_IInputStream, &iface );
+    else
+        IRandomAccessStreamWithContentType_AddRef( (IRandomAccessStreamWithContentType *)(iface = stream) );
+    IRandomAccessStreamWithContentType_Release( stream );
+    if (SUCCEEDED(hr)) set_result( result, iface );
+    return hr;
 }
 
 static HRESULT WINAPI storage_file_OpenAsync( IStorageFile *iface, FileAccessMode mode,
                                               IAsyncOperation_IRandomAccessStream **operation )
 {
-    FIXME( "iface %p, mode %u, operation %p stub!\n", iface, mode, operation );
+    struct storage_item *impl = impl_from_IStorageFile( iface );
+
+    TRACE( "iface %p, mode %u, operation %p.\n", iface, mode, operation );
+
     if (!operation) return E_POINTER;
     *operation = NULL;
-    return E_NOTIMPL;
+    if (mode != FileAccessMode_Read && mode != FileAccessMode_ReadWrite) return E_INVALIDARG;
+    START_CALL( async_operation_random_access_stream_create,
+                storage_call_create( file_open_run, ITEM_OBJECT( impl ), NULL, NULL, mode == FileAccessMode_ReadWrite ),
+                operation );
 }
 
 static HRESULT WINAPI storage_file_OpenTransactedWriteAsync( IStorageFile *iface,
                                                              IAsyncOperation_StorageStreamTransaction **operation )
 {
-    FIXME( "iface %p, operation %p stub!\n", iface, operation );
+    struct storage_item *impl = impl_from_IStorageFile( iface );
+    struct storage_call *call;
+
+    TRACE( "iface %p, operation %p.\n", iface, operation );
+
     if (!operation) return E_POINTER;
     *operation = NULL;
-    return E_NOTIMPL;
+    if ((call = storage_call_create( file_open_run, ITEM_OBJECT( impl ), NULL, NULL, TRUE ))) call->flags = STREAM_TRANSACTION;
+    START_CALL( async_operation_transaction_create, call, operation );
 }
 
 static HRESULT WINAPI storage_file_CopyOverload( IStorageFile *iface, IStorageFolder *folder, HSTRING name,
@@ -1705,6 +1773,63 @@ static const struct IStorageFilePropertiesWithAvailabilityVtbl file_availability
     file_availability_get_IsAvailable,
 };
 
+/* IRandomAccessStreamReference and IInputStreamReference */
+
+static HRESULT WINAPI stream_reference_OpenReadAsync( IRandomAccessStreamReference *iface,
+        IAsyncOperation_IRandomAccessStreamWithContentType **operation )
+{
+    struct storage_item *impl = impl_from_IRandomAccessStreamReference( iface );
+    struct storage_call *call;
+
+    TRACE( "iface %p, operation %p.\n", iface, operation );
+
+    if (!operation) return E_POINTER;
+    *operation = NULL;
+    if ((call = storage_call_create( file_open_run, ITEM_OBJECT( impl ), NULL, NULL, FALSE )))
+        call->flags = STREAM_WITH_CONTENT_TYPE;
+    START_CALL( async_operation_typed_stream_create, call, operation );
+}
+
+static const struct IRandomAccessStreamReferenceVtbl stream_reference_vtbl =
+{
+    stream_reference_QueryInterface,
+    stream_reference_AddRef,
+    stream_reference_Release,
+    /* IInspectable methods */
+    stream_reference_GetIids,
+    stream_reference_GetRuntimeClassName,
+    stream_reference_GetTrustLevel,
+    /* IRandomAccessStreamReference methods */
+    stream_reference_OpenReadAsync,
+};
+
+static HRESULT WINAPI input_reference_OpenSequentialReadAsync( IInputStreamReference *iface,
+        IAsyncOperation_IInputStream **operation )
+{
+    struct storage_item *impl = impl_from_IInputStreamReference( iface );
+    struct storage_call *call;
+
+    TRACE( "iface %p, operation %p.\n", iface, operation );
+
+    if (!operation) return E_POINTER;
+    *operation = NULL;
+    if ((call = storage_call_create( file_open_run, ITEM_OBJECT( impl ), NULL, NULL, FALSE ))) call->flags = STREAM_INPUT;
+    START_CALL( async_operation_input_stream_create, call, operation );
+}
+
+static const struct IInputStreamReferenceVtbl input_reference_vtbl =
+{
+    input_reference_QueryInterface,
+    input_reference_AddRef,
+    input_reference_Release,
+    /* IInspectable methods */
+    input_reference_GetIids,
+    input_reference_GetRuntimeClassName,
+    input_reference_GetTrustLevel,
+    /* IInputStreamReference methods */
+    input_reference_OpenSequentialReadAsync,
+};
+
 static struct storage_item *item_create( const WCHAR *path, BOOL folder )
 {
     struct storage_item *impl;
@@ -1717,6 +1842,8 @@ static struct storage_item *item_create( const WCHAR *path, BOOL folder )
     impl->IStorageFolder2_iface.lpVtbl = &storage_folder2_vtbl;
     impl->IStorageItemProperties_iface.lpVtbl = &item_properties_vtbl;
     impl->IStorageFilePropertiesWithAvailability_iface.lpVtbl = &file_availability_vtbl;
+    impl->IRandomAccessStreamReference_iface.lpVtbl = &stream_reference_vtbl;
+    impl->IInputStreamReference_iface.lpVtbl = &input_reference_vtbl;
     impl->ref = 1;
     impl->folder = folder;
     InitializeSRWLock( &impl->lock );

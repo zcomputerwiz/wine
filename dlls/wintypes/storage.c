@@ -19,6 +19,7 @@
  */
 
 #include "private.h"
+#include "winnls.h"
 #include "robuffer.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(wintypes);
@@ -261,6 +262,8 @@ struct data_writer
     IBuffer *buffer;
     byte *data;
     BOOL storing;
+    UnicodeEncoding encoding;
+    ByteOrder order;
 };
 
 static HRESULT data_writer_async_complete(struct data_writer *impl);
@@ -317,6 +320,60 @@ static HRESULT data_writer_init_buffer(struct data_writer *impl, UINT32 extra_ca
 static struct data_writer *impl_from_IDataWriter(IDataWriter *iface)
 {
     return CONTAINING_RECORD(iface, struct data_writer, IDataWriter_iface);
+}
+
+static HRESULT data_writer_append(struct data_writer *impl, const void *bytes, UINT32 size)
+{
+    UINT32 pos = 0;
+    HRESULT hr;
+
+    if (FAILED(hr = data_writer_init_buffer(impl, size)))
+        return hr;
+
+    IBuffer_get_Length(impl->buffer, &pos);
+    if (size) memcpy(&impl->data[pos], bytes, size);
+    return IBuffer_put_Length(impl->buffer, pos + size);
+}
+
+/* a number of this machine (little endian) in the byte order of the writer */
+static HRESULT data_writer_number(struct data_writer *impl, const void *value, UINT32 size)
+{
+    const BYTE *in = value;
+    BYTE bytes[8];
+    UINT32 i;
+
+    for (i = 0; i < size; i++) bytes[i] = impl->order == ByteOrder_BigEndian ? in[size - 1 - i] : in[i];
+    return data_writer_append(impl, bytes, size);
+}
+
+/* the bytes of a string in the encoding of the writer (malloc); *units is the count the methods report */
+static HRESULT data_writer_encode(struct data_writer *impl, HSTRING value, BYTE **bytes, UINT32 *size, UINT32 *units)
+{
+    UINT32 length, i;
+    const WCHAR *text = WindowsGetStringRawBuffer(value, &length);
+
+    *bytes = NULL;
+    *size = *units = 0;
+    if (impl->encoding == UnicodeEncoding_Utf8)
+    {
+        int count = length ? WideCharToMultiByte(CP_UTF8, 0, text, length, NULL, 0, NULL, NULL) : 0;
+
+        if (length && !count) return HRESULT_FROM_WIN32(ERROR_NO_UNICODE_TRANSLATION);
+        if (!(*bytes = malloc(count + 1))) return E_OUTOFMEMORY;
+        if (length) WideCharToMultiByte(CP_UTF8, 0, text, length, (char *)*bytes, count, NULL, NULL);
+        *size = *units = count;
+        return S_OK;
+    }
+
+    if (!(*bytes = malloc((length + 1) * sizeof(WCHAR)))) return E_OUTOFMEMORY;
+    for (i = 0; i < length; i++)
+    {
+        (*bytes)[2 * i] = impl->encoding == UnicodeEncoding_Utf16LE ? text[i] & 0xff : text[i] >> 8;
+        (*bytes)[2 * i + 1] = impl->encoding == UnicodeEncoding_Utf16LE ? text[i] >> 8 : text[i] & 0xff;
+    }
+    *size = length * sizeof(WCHAR);
+    *units = length;
+    return S_OK;
 }
 
 static HRESULT WINAPI data_writer_QueryInterface(IDataWriter *iface, REFIID iid, void **out)
@@ -399,38 +456,47 @@ static HRESULT WINAPI data_writer_GetTrustLevel(IDataWriter *iface, TrustLevel *
 
 static HRESULT WINAPI data_writer_get_UnstoredBufferLength(IDataWriter *iface, UINT32 *value)
 {
-    FIXME("iface %p, value %p stub!\n", iface, value);
-    return E_NOTIMPL;
+    struct data_writer *impl = impl_from_IDataWriter(iface);
+
+    TRACE("iface %p, value %p.\n", iface, value);
+
+    if (!value) return E_POINTER;
+    *value = 0;
+    return impl->buffer ? IBuffer_get_Length(impl->buffer, value) : S_OK;
 }
 
 static HRESULT WINAPI data_writer_get_UnicodeEncoding(IDataWriter *iface, UnicodeEncoding *value)
 {
-    FIXME("iface %p, value %p stub!\n", iface, value);
-    return E_NOTIMPL;
+    if (!value) return E_POINTER;
+    *value = impl_from_IDataWriter(iface)->encoding;
+    return S_OK;
 }
 
 static HRESULT WINAPI data_writer_put_UnicodeEncoding(IDataWriter *iface, UnicodeEncoding value)
 {
-    FIXME("iface %p, value %u stub!\n", iface, value);
-    return E_NOTIMPL;
+    if (value != UnicodeEncoding_Utf8 && value != UnicodeEncoding_Utf16LE && value != UnicodeEncoding_Utf16BE)
+        return E_INVALIDARG;
+    impl_from_IDataWriter(iface)->encoding = value;
+    return S_OK;
 }
 
 static HRESULT WINAPI data_writer_get_ByteOrder(IDataWriter *iface, ByteOrder *value)
 {
-    FIXME("iface %p, value %p stub!\n", iface, value);
-    return E_NOTIMPL;
+    if (!value) return E_POINTER;
+    *value = impl_from_IDataWriter(iface)->order;
+    return S_OK;
 }
 
 static HRESULT WINAPI data_writer_put_ByteOrder(IDataWriter *iface, ByteOrder value)
 {
-    FIXME("iface %p, value %u stub!\n", iface, value);
-    return E_NOTIMPL;
+    if (value != ByteOrder_LittleEndian && value != ByteOrder_BigEndian) return E_INVALIDARG;
+    impl_from_IDataWriter(iface)->order = value;
+    return S_OK;
 }
 
 static HRESULT WINAPI data_writer_WriteByte(IDataWriter *iface, BYTE value)
 {
-    FIXME("iface %p, value %u stub!\n", iface, value);
-    return E_NOTIMPL;
+    return data_writer_number(impl_from_IDataWriter(iface), &value, sizeof(value));
 }
 
 static HRESULT WINAPI data_writer_WriteBytes(IDataWriter *iface, UINT32 value_size, BYTE *value)
@@ -451,100 +517,140 @@ static HRESULT WINAPI data_writer_WriteBytes(IDataWriter *iface, UINT32 value_si
     return hr;
 }
 
+static HRESULT WINAPI data_writer_WriteBufferRange(IDataWriter *iface, IBuffer *buffer, UINT32 start, UINT32 count);
+
 static HRESULT WINAPI data_writer_WriteBuffer(IDataWriter *iface, IBuffer *buffer)
 {
-    FIXME("iface %p, buffer %p stub!\n", iface, buffer);
-    return E_NOTIMPL;
+    UINT32 length;
+    HRESULT hr;
+
+    TRACE("iface %p, buffer %p.\n", iface, buffer);
+
+    if (!buffer) return E_POINTER;
+    if (FAILED(hr = IBuffer_get_Length(buffer, &length))) return hr;
+    return data_writer_WriteBufferRange(iface, buffer, 0, length);
 }
 
 static HRESULT WINAPI data_writer_WriteBufferRange(IDataWriter *iface, IBuffer *buffer, UINT32 start, UINT32 count)
 {
-    FIXME("iface %p, buffer %p, start %u, count %u stub!\n", iface, buffer, start, count);
-    return E_NOTIMPL;
+    struct data_writer *impl = impl_from_IDataWriter(iface);
+    IBufferByteAccess *access;
+    UINT32 length;
+    HRESULT hr;
+    byte *data;
+
+    TRACE("iface %p, buffer %p, start %u, count %u.\n", iface, buffer, start, count);
+
+    if (!buffer) return E_POINTER;
+    if (FAILED(hr = IBuffer_get_Length(buffer, &length))) return hr;
+    if (start > length || count > length - start) return E_INVALIDARG;
+    if (FAILED(hr = IBuffer_QueryInterface(buffer, &IID_IBufferByteAccess, (void **)&access))) return hr;
+    if (SUCCEEDED(hr = IBufferByteAccess_Buffer(access, &data)))
+        hr = data_writer_append(impl, data + start, count);
+    IBufferByteAccess_Release(access);
+    return hr;
 }
 
 static HRESULT WINAPI data_writer_WriteBoolean(IDataWriter *iface, boolean value)
 {
-    FIXME("iface %p, value %u stub!\n", iface, value);
-    return E_NOTIMPL;
+    BYTE byte = !!value;
+    return data_writer_append(impl_from_IDataWriter(iface), &byte, sizeof(byte));
 }
 
 static HRESULT WINAPI data_writer_WriteGuid(IDataWriter *iface, GUID value)
 {
-    FIXME("iface %p, value %s stub!\n", iface, debugstr_guid(&value));
-    return E_NOTIMPL;
+    struct data_writer *impl = impl_from_IDataWriter(iface);
+    HRESULT hr;
+
+    if (FAILED(hr = data_writer_number(impl, &value.Data1, sizeof(value.Data1)))) return hr;
+    if (FAILED(hr = data_writer_number(impl, &value.Data2, sizeof(value.Data2)))) return hr;
+    if (FAILED(hr = data_writer_number(impl, &value.Data3, sizeof(value.Data3)))) return hr;
+    return data_writer_append(impl, value.Data4, sizeof(value.Data4));
 }
 
 static HRESULT WINAPI data_writer_WriteInt16(IDataWriter *iface, INT16 value)
 {
-    FIXME("iface %p, value %u stub!\n", iface, value);
-    return E_NOTIMPL;
+    return data_writer_number(impl_from_IDataWriter(iface), &value, sizeof(value));
 }
 
 static HRESULT WINAPI data_writer_WriteInt32(IDataWriter *iface, INT32 value)
 {
-    FIXME("iface %p, value %u stub!\n", iface, value);
-    return E_NOTIMPL;
+    return data_writer_number(impl_from_IDataWriter(iface), &value, sizeof(value));
 }
 
 static HRESULT WINAPI data_writer_WriteInt64(IDataWriter *iface, INT64 value)
 {
-    FIXME("iface %p, value %I64d stub!\n", iface, value);
-    return E_NOTIMPL;
+    return data_writer_number(impl_from_IDataWriter(iface), &value, sizeof(value));
 }
 
 static HRESULT WINAPI data_writer_WriteUInt16(IDataWriter *iface, UINT16 value)
 {
-    FIXME("iface %p, value %u stub!\n", iface, value);
-    return E_NOTIMPL;
+    return data_writer_number(impl_from_IDataWriter(iface), &value, sizeof(value));
 }
 
 static HRESULT WINAPI data_writer_WriteUInt32(IDataWriter *iface, UINT32 value)
 {
-    FIXME("iface %p, value %u stub!\n", iface, value);
-    return E_NOTIMPL;
+    return data_writer_number(impl_from_IDataWriter(iface), &value, sizeof(value));
 }
 
 static HRESULT WINAPI data_writer_WriteUInt64(IDataWriter *iface, UINT64 value)
 {
-    FIXME("iface %p, value %I64u stub!\n", iface, value);
-    return E_NOTIMPL;
+    return data_writer_number(impl_from_IDataWriter(iface), &value, sizeof(value));
 }
 
 static HRESULT WINAPI data_writer_WriteSingle(IDataWriter *iface, FLOAT value)
 {
-    FIXME("iface %p, value %.7f stub!\n", iface, value);
-    return E_NOTIMPL;
+    return data_writer_number(impl_from_IDataWriter(iface), &value, sizeof(value));
 }
 
 static HRESULT WINAPI data_writer_WriteDouble(IDataWriter *iface, DOUBLE value)
 {
-    FIXME("iface %p, value %.15f stub!\n", iface, value);
-    return E_NOTIMPL;
+    return data_writer_number(impl_from_IDataWriter(iface), &value, sizeof(value));
 }
 
 static HRESULT WINAPI data_writer_WriteDateTime(IDataWriter *iface, DateTime value)
 {
-    FIXME("iface %p, value %I64u stub!\n", iface, value.UniversalTime);
-    return E_NOTIMPL;
+    return data_writer_number(impl_from_IDataWriter(iface), &value.UniversalTime, sizeof(value.UniversalTime));
 }
 
 static HRESULT WINAPI data_writer_WriteTimeSpan(IDataWriter *iface, TimeSpan value)
 {
-    FIXME("iface %p, value %I64u stub!\n", iface, value.Duration);
-    return E_NOTIMPL;
+    return data_writer_number(impl_from_IDataWriter(iface), &value.Duration, sizeof(value.Duration));
 }
 
 static HRESULT WINAPI data_writer_WriteString(IDataWriter *iface, HSTRING value, UINT32 *code_unit_count)
 {
-    FIXME("iface %p, value %p, code_unit_count %p stub!\n", iface, value, code_unit_count);
-    return E_NOTIMPL;
+    struct data_writer *impl = impl_from_IDataWriter(iface);
+    UINT32 size, units;
+    BYTE *bytes;
+    HRESULT hr;
+
+    TRACE("iface %p, value %s, code_unit_count %p.\n", iface, debugstr_hstring(value), code_unit_count);
+
+    if (!code_unit_count) return E_POINTER;
+    *code_unit_count = 0;
+    if (FAILED(hr = data_writer_encode(impl, value, &bytes, &size, &units))) return hr;
+    hr = data_writer_append(impl, bytes, size);
+    free(bytes);
+    if (SUCCEEDED(hr)) *code_unit_count = units;
+    return hr;
 }
 
 static HRESULT WINAPI data_writer_MeasureString(IDataWriter *iface, HSTRING value, UINT32 *code_unit_count)
 {
-    FIXME("iface %p, value %p, code_unit_count %p stub!\n", iface, value, code_unit_count);
-    return E_NOTIMPL;
+    struct data_writer *impl = impl_from_IDataWriter(iface);
+    UINT32 size, units;
+    BYTE *bytes;
+    HRESULT hr;
+
+    TRACE("iface %p, value %s, code_unit_count %p.\n", iface, debugstr_hstring(value), code_unit_count);
+
+    if (!code_unit_count) return E_POINTER;
+    *code_unit_count = 0;
+    if (FAILED(hr = data_writer_encode(impl, value, &bytes, &size, &units))) return hr;
+    free(bytes);
+    *code_unit_count = units;
+    return S_OK;
 }
 
 static HRESULT data_writer_async_complete(struct data_writer *impl)
@@ -585,14 +691,14 @@ static HRESULT WINAPI data_writer_FlushAsync(IDataWriter *iface, IAsyncOperation
 {
     struct data_writer *impl = impl_from_IDataWriter(iface);
 
-    FIXME("iface %p, operation %p stub!\n", iface, operation);
+    TRACE("iface %p, operation %p.\n", iface, operation);
 
     *operation = NULL;
 
     if (!impl->stream)
         return HRESULT_FROM_WIN32(ERROR_INVALID_OPERATION);
 
-    return E_NOTIMPL;
+    return IOutputStream_FlushAsync(impl->stream, operation);
 }
 
 static HRESULT WINAPI data_writer_DetachBuffer(IDataWriter *iface, IBuffer **buffer)
@@ -674,6 +780,8 @@ static HRESULT data_writer_create(IOutputStream *output_stream, IDataWriter **ou
     impl->IDataWriter_iface.lpVtbl = &data_writer_vtbl;
     impl->stream = output_stream;
     impl->ref = 1;
+    impl->encoding = UnicodeEncoding_Utf8;
+    impl->order = ByteOrder_BigEndian;
 
     if (FAILED(hr = data_writer_init_buffer(impl, 0)))
     {
