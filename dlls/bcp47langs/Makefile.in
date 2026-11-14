@@ -1,5 +1,6 @@
 MODULE    = bcp47langs.dll
 IMPORTLIB = bcp47langs
+IMPORTS   = combase
 
 SOURCES = \
 	main.c

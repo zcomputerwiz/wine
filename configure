@@ -1637,6 +1637,7 @@ enable_wing
 enable_wing32
 enable_winhttp
 enable_wininet
+enable_winlangdb
 enable_winmm
 enable_winnls
 enable_winnls32
@@ -22851,6 +22852,7 @@ wine_fn_config_makefile dlls/winhttp enable_winhttp
 wine_fn_config_makefile dlls/winhttp/tests enable_tests
 wine_fn_config_makefile dlls/wininet enable_wininet
 wine_fn_config_makefile dlls/wininet/tests enable_tests
+wine_fn_config_makefile dlls/winlangdb enable_winlangdb
 wine_fn_config_makefile dlls/winmm enable_winmm
 wine_fn_config_makefile dlls/winmm/tests enable_tests
 wine_fn_config_makefile dlls/winnls.dll16 enable_winnls

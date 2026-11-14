@@ -105,8 +105,8 @@ void destroy_process_classes( struct process *process )
 
 static struct window_class *find_class( struct process *process, atom_t atom, mod_handle_t instance )
 {
-    struct window_class *class;
-    int is_win16;
+    struct window_class *class, *only_local = NULL;
+    int is_win16, local_count = 0;
 
     LIST_FOR_EACH_ENTRY( class, &process->classes, struct window_class, entry )
     {
@@ -115,8 +115,10 @@ static struct window_class *find_class( struct process *process, atom_t atom, mo
         is_win16 = !(shared->info.instance >> 16);
         if (!instance || !shared->local || shared->info.instance == instance ||
             (!is_win16 && ((shared->info.instance & ~0xffff) == (instance & ~0xffff)))) return class;
+        if (is_win16 && !(instance >> 16)) only_local = class, local_count++;
     }
-    return NULL;
+    /* as find_class in win32u: a small instance that is not a module handle finds the one local class of that name */
+    return local_count == 1 ? only_local : NULL;
 }
 
 struct window_class *grab_class( struct process *process, atom_t atom, mod_handle_t instance, struct obj_locator *locator )

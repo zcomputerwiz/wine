@@ -2693,6 +2693,34 @@ static void test_RealGetWindowClass_process( HWND hwnd, const char *expect, BOOL
     check_real_class_name( hwnd, expect, todo );
 }
 
+/* .NET programs (the Win32 runtime of Uno) pass Process.GetCurrentProcess().Handle as the instance, and every call
+ * opens a new handle: the class is registered with one small value and the window created with another. */
+static void test_small_instance(void)
+{
+    WNDCLASSEXW wc = { sizeof(wc) };
+    HANDLE first, second;
+    HWND hwnd;
+    ATOM atom;
+
+    DuplicateHandle( GetCurrentProcess(), GetCurrentProcess(), GetCurrentProcess(), &first, 0, FALSE, DUPLICATE_SAME_ACCESS );
+    DuplicateHandle( GetCurrentProcess(), GetCurrentProcess(), GetCurrentProcess(), &second, 0, FALSE, DUPLICATE_SAME_ACCESS );
+    ok( (ULONG_PTR)first < 0x10000 && (ULONG_PTR)second < 0x10000 && first != second, "handles %p %p\n", first, second );
+
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = first;
+    wc.lpszClassName = L"small_instance_class";
+    atom = RegisterClassExW( &wc );
+    ok( atom != 0, "RegisterClassExW failed, error %lu\n", GetLastError() );
+
+    hwnd = CreateWindowExW( 0, L"small_instance_class", L"", WS_OVERLAPPED, 0, 0, 0, 0, HWND_MESSAGE, NULL, second, NULL );
+    ok( hwnd != NULL, "CreateWindowExW with another small instance failed, error %lu\n", GetLastError() );
+    if (hwnd) DestroyWindow( hwnd );
+
+    ok( UnregisterClassW( L"small_instance_class", first ), "UnregisterClassW failed, error %lu\n", GetLastError() );
+    CloseHandle( first );
+    CloseHandle( second );
+}
+
 START_TEST(class)
 {
     char **argv;
@@ -2733,6 +2761,7 @@ START_TEST(class)
     test_class_name();
     test_class_multithread();
     test_RealGetWindowClass();
+    test_small_instance();
 
     /* this test unregisters the Button class so it should be executed at the end */
     test_instances();

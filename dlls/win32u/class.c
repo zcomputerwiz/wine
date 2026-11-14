@@ -541,8 +541,8 @@ static UINT_PTR get_class_instance( CLASS *class )
 static CLASS *find_class( HINSTANCE module, UNICODE_STRING *name )
 {
     ULONG_PTR instance = (UINT_PTR)module;
-    CLASS *class;
-    int is_win16;
+    CLASS *class, *only_local = NULL;
+    int is_win16, local_count = 0;
 
     user_lock();
     LIST_FOR_EACH_ENTRY( class, &class_list, CLASS, entry )
@@ -556,6 +556,15 @@ static CLASS *find_class( HINSTANCE module, UNICODE_STRING *name )
             TRACE( "%s %lx -> %p\n", debugstr_us(name), instance, class );
             return class;
         }
+        if (is_win16 && !(instance >> 16)) only_local = class, local_count++;
+    }
+    /* Small instance values that are not module handles (a process handle, as .NET programs pass) match exactly
+     * only above. Windows finds the class anyway: take the one local class of that name, when there is just one,
+     * so that 16-bit modules with classes of the same name are not mixed up (WineExplorer: Uno). */
+    if (local_count == 1)
+    {
+        TRACE( "%s %lx -> %p (only local class of that name)\n", debugstr_us(name), instance, only_local );
+        return only_local;
     }
     user_unlock();
     return NULL;

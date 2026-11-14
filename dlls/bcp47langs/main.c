@@ -57,8 +57,26 @@ HRESULT WINAPI GetFontFallbackLanguageList(const WCHAR *lang, size_t buffer_leng
     return S_OK;
 }
 
+/* the preferred UI languages of the user, separated by delim (WineExplorer: Uno reads this at startup) */
 HRESULT WINAPI GetUserLanguages(WCHAR delim, HSTRING *langs)
 {
-    FIXME("%lc, %p\n", delim, langs);
-    return S_OK;
+    WCHAR buffer[512], *p;
+    ULONG count = 0, size = ARRAY_SIZE(buffer);
+
+    TRACE("%lc, %p\n", delim, langs);
+
+    if (!langs) return E_INVALIDARG;
+    *langs = NULL;
+    if (!GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &count, buffer, &size) || !count)
+    {
+        if (!GetUserDefaultLocaleName(buffer, ARRAY_SIZE(buffer) - 1)) return E_FAIL;
+        buffer[wcslen(buffer) + 1] = 0;
+    }
+    /* a list of names, each ended by a zero, ends with an empty name: one string with the delimiter */
+    for (p = buffer; *p; )
+    {
+        p += wcslen(p);
+        if (p[1]) *p++ = delim;
+    }
+    return WindowsCreateString(buffer, p - buffer, langs);
 }

@@ -76,14 +76,13 @@ static void test_GetUserLanguages(void)
 
     hr = GetUserLanguages(';', &usrlangs);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    todo_wine
     ok(!!usrlangs, "Unexpected pointer.\n");
     if (!usrlangs) return;
 
     langs = WindowsGetStringRawBuffer(usrlangs, NULL);
 
     for (WCHAR *p = wcstok(wcsdup(langs), L";"); p; p = wcstok(NULL, L";")) count++;
-    todo_wine ok(count > 0, "Got count=%d.\n", count);
+    ok(count > 0, "Got count=%d.\n", count);
     WindowsDeleteString(usrlangs);
 }
 
