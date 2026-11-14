@@ -103,6 +103,10 @@ namespace Windows.Storage {
         interface Windows.Foundation.Collections.IIterable<Windows.Storage.IStorageItem *>;
         interface Windows.Foundation.Collections.IIterator<Windows.Storage.IStorageItem *>;
         interface Windows.Foundation.Collections.IVectorView<Windows.Storage.IStorageItem *>;
+        interface Windows.Foundation.Collections.IIterable<Windows.Storage.StorageFile *>;
+        interface Windows.Foundation.Collections.IIterator<Windows.Storage.StorageFile *>;
+        interface Windows.Foundation.Collections.IIterable<Windows.Storage.StorageFolder *>;
+        interface Windows.Foundation.Collections.IIterator<Windows.Storage.StorageFolder *>;
         interface Windows.Foundation.Collections.IVectorView<Windows.Storage.StorageFile *>;
         interface Windows.Foundation.Collections.IVectorView<Windows.Storage.StorageFolder *>;
         interface Windows.Foundation.AsyncOperationCompletedHandler<Windows.Foundation.Collections.IVectorView<Windows.Storage.IStorageItem *> *>;

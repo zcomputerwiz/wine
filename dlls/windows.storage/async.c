@@ -608,8 +608,17 @@ static HRESULT WINAPI impl_type##_GetResults( iface_type *iface, result_type *re
     *results = NULL;                                                                                                \
     hr = IAsyncInfoImpl_get_Result( impl->IAsyncInfoImpl_inner, &result );                                          \
                                                                                                                     \
-    *results = (result_type)result.propvar_name;                                                                    \
-    if (propvar_type == VT_UNKNOWN && result.punkVal) IUnknown_AddRef( result.punkVal );                            \
+    if (propvar_type == VT_LPWSTR)                                                                                  \
+    {                                                                                                               \
+        /* a string result is carried as VT_LPWSTR and handed out as an HSTRING */                                  \
+        if (SUCCEEDED(hr) && result.pwszVal)                                                                        \
+            hr = WindowsCreateString( result.pwszVal, wcslen( result.pwszVal ), (HSTRING *)results );               \
+    }                                                                                                               \
+    else                                                                                                            \
+    {                                                                                                               \
+        *results = (result_type)result.propvar_name;                                                                \
+        if (propvar_type == VT_UNKNOWN && result.punkVal) IUnknown_AddRef( result.punkVal );                        \
+    }                                                                                                               \
     PropVariantClear( &result );                                                                                    \
     return hr;                                                                                                      \
 }                                                                                                                   \
@@ -687,3 +696,226 @@ struct async_storage_folder
 DEFINE_IASYNCOPERATION( IAsyncOperation_StorageFolder, \
         IAsyncOperationCompletedHandler_StorageFolder, \
         "Windows.Storage.StorageFolder", async_storage_folder, IStorageFolder*, VT_UNKNOWN, punkVal, async_operation_storage_folder_create )
+
+struct async_storage_file
+{
+    IAsyncOperation_StorageFile IAsyncOperation_StorageFile_iface;
+    IAsyncInfoImpl *IAsyncInfoImpl_inner;
+    LONG ref;
+};
+
+DEFINE_IASYNCOPERATION( IAsyncOperation_StorageFile, IAsyncOperationCompletedHandler_StorageFile,
+        "Windows.Storage.StorageFile", async_storage_file, IStorageFile *, VT_UNKNOWN, punkVal,
+        async_operation_storage_file_create )
+
+struct async_storage_item
+{
+    IAsyncOperation_IStorageItem IAsyncOperation_IStorageItem_iface;
+    IAsyncInfoImpl *IAsyncInfoImpl_inner;
+    LONG ref;
+};
+
+DEFINE_IASYNCOPERATION( IAsyncOperation_IStorageItem, IAsyncOperationCompletedHandler_IStorageItem,
+        "Windows.Storage.IStorageItem", async_storage_item, IStorageItem *, VT_UNKNOWN, punkVal,
+        async_operation_storage_item_create )
+
+struct async_file_view
+{
+    IAsyncOperation_IVectorView_StorageFile IAsyncOperation_IVectorView_StorageFile_iface;
+    IAsyncInfoImpl *IAsyncInfoImpl_inner;
+    LONG ref;
+};
+
+DEFINE_IASYNCOPERATION( IAsyncOperation_IVectorView_StorageFile, IAsyncOperationCompletedHandler_IVectorView_StorageFile,
+        "Windows.Foundation.Collections.IVectorView`1<Windows.Storage.StorageFile>", async_file_view, IVectorView_StorageFile *, VT_UNKNOWN, punkVal,
+        async_operation_file_view_create )
+
+struct async_folder_view
+{
+    IAsyncOperation_IVectorView_StorageFolder IAsyncOperation_IVectorView_StorageFolder_iface;
+    IAsyncInfoImpl *IAsyncInfoImpl_inner;
+    LONG ref;
+};
+
+DEFINE_IASYNCOPERATION( IAsyncOperation_IVectorView_StorageFolder, IAsyncOperationCompletedHandler_IVectorView_StorageFolder,
+        "Windows.Foundation.Collections.IVectorView`1<Windows.Storage.StorageFolder>", async_folder_view, IVectorView_StorageFolder *, VT_UNKNOWN, punkVal,
+        async_operation_folder_view_create )
+
+struct async_item_view
+{
+    IAsyncOperation_IVectorView_IStorageItem IAsyncOperation_IVectorView_IStorageItem_iface;
+    IAsyncInfoImpl *IAsyncInfoImpl_inner;
+    LONG ref;
+};
+
+DEFINE_IASYNCOPERATION( IAsyncOperation_IVectorView_IStorageItem, IAsyncOperationCompletedHandler_IVectorView_IStorageItem,
+        "Windows.Foundation.Collections.IVectorView`1<Windows.Storage.IStorageItem>", async_item_view, IVectorView_IStorageItem *, VT_UNKNOWN, punkVal,
+        async_operation_item_view_create )
+
+struct async_basic_properties
+{
+    IAsyncOperation_BasicProperties IAsyncOperation_BasicProperties_iface;
+    IAsyncInfoImpl *IAsyncInfoImpl_inner;
+    LONG ref;
+};
+
+DEFINE_IASYNCOPERATION( IAsyncOperation_BasicProperties, IAsyncOperationCompletedHandler_BasicProperties,
+        "Windows.Storage.FileProperties.BasicProperties", async_basic_properties, IBasicProperties *, VT_UNKNOWN, punkVal,
+        async_operation_basic_properties_create )
+
+struct async_hstring
+{
+    IAsyncOperation_HSTRING IAsyncOperation_HSTRING_iface;
+    IAsyncInfoImpl *IAsyncInfoImpl_inner;
+    LONG ref;
+};
+
+DEFINE_IASYNCOPERATION( IAsyncOperation_HSTRING, IAsyncOperationCompletedHandler_HSTRING,
+        "String", async_hstring, HSTRING, VT_LPWSTR, pwszVal,
+        async_operation_hstring_create )
+
+struct async_buffer
+{
+    IAsyncOperation_IBuffer IAsyncOperation_IBuffer_iface;
+    IAsyncInfoImpl *IAsyncInfoImpl_inner;
+    LONG ref;
+};
+
+DEFINE_IASYNCOPERATION( IAsyncOperation_IBuffer, IAsyncOperationCompletedHandler_IBuffer,
+        "Windows.Storage.Streams.IBuffer", async_buffer, IBuffer *, VT_UNKNOWN, punkVal,
+        async_operation_buffer_create )
+
+struct async_hstring_vector
+{
+    IAsyncOperation_IVector_HSTRING IAsyncOperation_IVector_HSTRING_iface;
+    IAsyncInfoImpl *IAsyncInfoImpl_inner;
+    LONG ref;
+};
+
+DEFINE_IASYNCOPERATION( IAsyncOperation_IVector_HSTRING, IAsyncOperationCompletedHandler_IVector_HSTRING,
+        "Windows.Foundation.Collections.IVector`1<String>", async_hstring_vector, IVector_HSTRING *, VT_UNKNOWN, punkVal,
+        async_operation_hstring_vector_create )
+
+/* IAsyncAction over the same machinery (the result of the callback is not used) */
+struct async_action
+{
+    IAsyncAction IAsyncAction_iface;
+    IAsyncInfoImpl *IAsyncInfoImpl_inner;
+    LONG ref;
+};
+
+static inline struct async_action *impl_from_IAsyncAction( IAsyncAction *iface )
+{
+    return CONTAINING_RECORD( iface, struct async_action, IAsyncAction_iface );
+}
+
+static HRESULT WINAPI async_action_QueryInterface( IAsyncAction *iface, REFIID iid, void **out )
+{
+    struct async_action *impl = impl_from_IAsyncAction( iface );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IAsyncAction ))
+    {
+        IInspectable_AddRef( (*out = &impl->IAsyncAction_iface) );
+        return S_OK;
+    }
+    return IAsyncInfoImpl_QueryInterface( impl->IAsyncInfoImpl_inner, iid, out );
+}
+
+static ULONG WINAPI async_action_AddRef( IAsyncAction *iface )
+{
+    return InterlockedIncrement( &impl_from_IAsyncAction( iface )->ref );
+}
+
+static ULONG WINAPI async_action_Release( IAsyncAction *iface )
+{
+    struct async_action *impl = impl_from_IAsyncAction( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        /* guard against re-entry if inner releases an outer iface */
+        InterlockedIncrement( &impl->ref );
+        IAsyncInfoImpl_Release( impl->IAsyncInfoImpl_inner );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI async_action_GetIids( IAsyncAction *iface, ULONG *iid_count, IID **iids )
+{
+    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI async_action_GetRuntimeClassName( IAsyncAction *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( L"Windows.Foundation.IAsyncAction", ARRAY_SIZE(L"Windows.Foundation.IAsyncAction") - 1,
+                                class_name );
+}
+
+static HRESULT WINAPI async_action_GetTrustLevel( IAsyncAction *iface, TrustLevel *trust_level )
+{
+    *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI async_action_put_Completed( IAsyncAction *iface, IAsyncActionCompletedHandler *handler )
+{
+    struct async_action *impl = impl_from_IAsyncAction( iface );
+    return IAsyncInfoImpl_put_Completed( impl->IAsyncInfoImpl_inner, (IAsyncOperationCompletedHandlerImpl *)handler );
+}
+
+static HRESULT WINAPI async_action_get_Completed( IAsyncAction *iface, IAsyncActionCompletedHandler **handler )
+{
+    struct async_action *impl = impl_from_IAsyncAction( iface );
+    return IAsyncInfoImpl_get_Completed( impl->IAsyncInfoImpl_inner, (IAsyncOperationCompletedHandlerImpl **)handler );
+}
+
+static HRESULT WINAPI async_action_GetResults( IAsyncAction *iface )
+{
+    struct async_action *impl = impl_from_IAsyncAction( iface );
+    PROPVARIANT result = {.vt = VT_EMPTY};
+    HRESULT hr = IAsyncInfoImpl_get_Result( impl->IAsyncInfoImpl_inner, &result );
+
+    PropVariantClear( &result );
+    return hr;
+}
+
+static const struct IAsyncActionVtbl async_action_vtbl =
+{
+    async_action_QueryInterface,
+    async_action_AddRef,
+    async_action_Release,
+    /* IInspectable methods */
+    async_action_GetIids,
+    async_action_GetRuntimeClassName,
+    async_action_GetTrustLevel,
+    /* IAsyncAction methods */
+    async_action_put_Completed,
+    async_action_get_Completed,
+    async_action_GetResults,
+};
+
+HRESULT async_action_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback, IAsyncAction **out )
+{
+    struct async_action *impl;
+    HRESULT hr;
+
+    *out = NULL;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IAsyncAction_iface.lpVtbl = &async_action_vtbl;
+    impl->ref = 1;
+
+    if (FAILED(hr = async_info_create( invoker, param, callback, (IInspectable *)&impl->IAsyncAction_iface,
+                                       &impl->IAsyncInfoImpl_inner )) ||
+        FAILED(hr = IAsyncInfoImpl_Start( impl->IAsyncInfoImpl_inner )))
+    {
+        if (impl->IAsyncInfoImpl_inner) IAsyncInfoImpl_Release( impl->IAsyncInfoImpl_inner );
+        free( impl );
+        return hr;
+    }
+
+    *out = &impl->IAsyncAction_iface;
+    return S_OK;
+}

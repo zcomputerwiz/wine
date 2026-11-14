@@ -36,10 +36,13 @@
 #include "windows.foundation.h"
 #define WIDL_using_Windows_Storage
 #define WIDL_using_Windows_Storage_Streams
+#define WIDL_using_Windows_Storage_FileProperties
 #include "windows.storage.h"
 #include "windows.storage.streams.h"
+#include "windows.storage.fileproperties.h"
 #include "robuffer.h"
 #include "async_private.h"
+#include "storage_private.h"
 
 HRESULT async_operation_buffer_uint32_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback,
         IAsyncOperationWithProgress_IBuffer_UINT32 **out );
@@ -48,9 +51,70 @@ HRESULT async_operation_uint32_uint32_create( IUnknown *invoker, IUnknown *param
 HRESULT async_operation_storage_folder_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback,
         IAsyncOperation_StorageFolder **out );
 
+HRESULT async_operation_storage_file_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback,
+        IAsyncOperation_StorageFile **out );
+HRESULT async_operation_storage_item_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback,
+        IAsyncOperation_IStorageItem **out );
+HRESULT async_operation_file_view_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback,
+        IAsyncOperation_IVectorView_StorageFile **out );
+HRESULT async_operation_folder_view_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback,
+        IAsyncOperation_IVectorView_StorageFolder **out );
+HRESULT async_operation_item_view_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback,
+        IAsyncOperation_IVectorView_IStorageItem **out );
+HRESULT async_operation_basic_properties_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback,
+        IAsyncOperation_BasicProperties **out );
+HRESULT async_operation_hstring_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback,
+        IAsyncOperation_HSTRING **out );
+HRESULT async_operation_buffer_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback,
+        IAsyncOperation_IBuffer **out );
+HRESULT async_operation_hstring_vector_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback,
+        IAsyncOperation_IVector_HSTRING **out );
+HRESULT async_action_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback, IAsyncAction **out );
+
+/* vector.c */
+struct vector_iids
+{
+    const GUID *iterable;
+    const GUID *iterator;
+    const GUID *vector;
+    const GUID *view;
+};
+HRESULT vector_hstring_create( IVector_HSTRING **out );
+HRESULT vector_hstring_create_copy( IIterable_HSTRING *iterable, IVector_HSTRING **out );
+HRESULT vector_inspectable_create( const struct vector_iids *iids, IVector_IInspectable **out );
+
+/* One call of a storage operation: the arguments are kept in it and run() does the work. The operations finish on
+ * the calling thread (the asynchronous object is already completed when the caller gets it). */
+struct storage_call
+{
+    IUnknown IUnknown_iface;
+    LONG ref;
+
+    HRESULT (*run)( struct storage_call *call, PROPVARIANT *result );
+    IInspectable *object;  /* the item of the call, or NULL */
+    IInspectable *other;   /* a second object: folder, file, buffer or collection */
+    WCHAR *text;           /* a name or a path */
+    WCHAR *contents;       /* text to write */
+    UINT32 contents_length;
+    BYTE *bytes;
+    UINT32 size;
+    UINT32 option;
+    UINT32 flags;
+};
+struct storage_call *storage_call_create( HRESULT (*run)( struct storage_call *call, PROPVARIANT *result ),
+        void *object, void *other, HSTRING text, UINT32 option );
+HRESULT storage_call_async( IUnknown *invoker, IUnknown *param, PROPVARIANT *result, BOOL called_async );
+
+/* folder.c */
+HRESULT storage_item_get_path( void *item, WCHAR **path );
+HRESULT storage_resolve_path( const WCHAR *path, WCHAR **out );
+
 extern IActivationFactory *random_access_stream_reference_factory;
 extern IActivationFactory *memory_stream_activation_factory;
 extern IActivationFactory *storage_folder_factory;
+extern IActivationFactory *storage_file_factory;
+extern IActivationFactory *file_io_factory;
+extern IActivationFactory *path_io_factory;
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

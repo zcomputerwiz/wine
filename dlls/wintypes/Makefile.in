@@ -5,6 +5,7 @@ IMPORTS   = combase kernelbase
 SOURCES = \
 	buffer.c \
 	classes.idl \
+	datareader.c \
 	main.c \
 	map.c \
 	propertyset.c \

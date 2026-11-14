@@ -1,0 +1,97 @@
+/*
+ * Windows.Storage interfaces that include/windows.storage.idl does not declare yet (WineExplorer UWP U1.5)
+ *
+ * Copyright 2026 WineExplorer contributors
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+#pragma makedep header
+
+#ifdef __WIDL__
+#pragma winrt ns_prefix
+#endif
+
+import "inspectable.idl";
+import "asyncinfo.idl";
+import "windowscontracts.idl";
+import "windows.foundation.idl";
+import "windows.storage.idl";
+
+/* The interface identifiers and the order of the methods are those of the public Windows SDK. The methods whose
+ * types Wine does not declare (thumbnails, streamed files) take IInspectable pointers here and are not implemented. */
+namespace Windows.Storage {
+    interface IStorageFileStatics;
+    interface IStorageFolder2;
+    interface IStorageItemProperties;
+    interface IStorageFilePropertiesWithAvailability;
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Storage.StorageFile),
+        uuid(5984c710-daf2-43c8-8bb4-a4d3eacfd03f)
+    ]
+    interface IStorageFileStatics : IInspectable
+    {
+        HRESULT GetFileFromPathAsync([in] HSTRING path,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+        HRESULT GetFileFromApplicationUriAsync([in] Windows.Foundation.Uri *uri,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+        HRESULT CreateStreamedFileAsync([in] HSTRING name, [in] IInspectable *handler, [in] IInspectable *thumbnail,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+        HRESULT ReplaceWithStreamedFileAsync([in] Windows.Storage.IStorageFile *file, [in] IInspectable *handler,
+                [in] IInspectable *thumbnail,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+        HRESULT CreateStreamedFileFromUriAsync([in] HSTRING name, [in] Windows.Foundation.Uri *uri, [in] IInspectable *thumbnail,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+        HRESULT ReplaceWithStreamedFileFromUriAsync([in] Windows.Storage.IStorageFile *file, [in] Windows.Foundation.Uri *uri,
+                [in] IInspectable *thumbnail,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(e827e8b9-08d9-4a8e-a0ac-fe5ed3cbbbd3)
+    ]
+    interface IStorageFolder2 : IInspectable
+    {
+        HRESULT TryGetItemAsync([in] HSTRING name,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.IStorageItem *> **operation);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(86664478-8029-46fe-a789-1c2f3e2ffb5c)
+    ]
+    interface IStorageItemProperties : IInspectable
+    {
+        HRESULT GetThumbnailAsyncOverloadDefaultSizeDefaultOptions([in] INT32 mode, [out, retval] IInspectable **operation);
+        HRESULT GetThumbnailAsyncOverloadDefaultOptions([in] INT32 mode, [in] UINT32 size, [out, retval] IInspectable **operation);
+        HRESULT GetThumbnailAsync([in] INT32 mode, [in] UINT32 size, [in] UINT32 options, [out, retval] IInspectable **operation);
+        [propget] HRESULT DisplayName([out, retval] HSTRING *value);
+        [propget] HRESULT DisplayType([out, retval] HSTRING *value);
+        [propget] HRESULT FolderRelativeId([out, retval] HSTRING *value);
+        [propget] HRESULT Properties([out, retval] IInspectable **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(afcbbe9b-582b-4133-9648-e44ca46ee491)
+    ]
+    interface IStorageFilePropertiesWithAvailability : IInspectable
+    {
+        [propget] HRESULT IsAvailable([out, retval] boolean *value);
+    }
+}

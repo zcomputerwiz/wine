@@ -30,6 +30,9 @@ import "windows.system.idl";
 import "windows.storage.idl";
 
 namespace Windows.Storage {
+    runtimeclass FileIO;
+    runtimeclass PathIO;
+    runtimeclass StorageFile;
     runtimeclass StorageFolder;
 }
 

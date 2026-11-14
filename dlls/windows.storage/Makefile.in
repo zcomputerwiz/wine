@@ -1,10 +1,13 @@
 MODULE  = windows.storage.dll
-IMPORTS = shell32 combase
+IMPORTS = shell32 combase advapi32
 
 SOURCES = \
 	async.c \
 	async_private.idl \
 	classes.idl \
+	fileio.c \
 	folder.c \
 	main.c \
-	streams.c
+	storage_private.idl \
+	streams.c \
+	vector.c
