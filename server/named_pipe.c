@@ -1958,7 +1958,7 @@ DECL_HANDLER(set_named_pipe_info)
 }
 
 /* WineExplorer private: opener and the single complete request message consumed by this server end. */
-#ifdef WEX_E1S6_TRANSPORT_TEST
+#if defined(WEX_E1S6_TRANSPORT_TEST) && defined(WEX_E1_TEST_HOOKS)
 #define E1S6_BINDING_AUDIT(site) fprintf( stderr, "E1S6_DENY pipe site=%s\n", site )
 #else
 #define E1S6_BINDING_AUDIT(site) do {} while (0)
