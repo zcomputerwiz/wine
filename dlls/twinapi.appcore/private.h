@@ -42,6 +42,7 @@
 #include "windows.system.userprofile.h"
 #define WIDL_using_Windows_UI_ViewManagement
 #include "windows.ui.viewmanagement.h"
+#define WIDL_using_Windows_ApplicationModel
 #define WIDL_using_Windows_ApplicationModel_Core
 #include "windows.applicationmodel.core.h"
 #define WIDL_using_Windows_ApplicationModel_DataTransfer
@@ -59,6 +60,14 @@ extern void handler_list_snapshot_free( IUnknown **handlers, unsigned int count 
 extern void handler_list_clear( struct list *list );
 extern HRESULT dispatch_callback( ICoreDispatcher *dispatcher, void (*callback)( void *context ), void *context );
 extern HRESULT core_view_create( ICoreWindow *window, boolean is_main, ICoreApplicationView **out );
+
+/* lifecycle.c: suspend, resume and the background state */
+enum lifecycle_event { LIFECYCLE_SUSPENDING, LIFECYCLE_RESUMING, LIFECYCLE_ENTERED_BACKGROUND, LIFECYCLE_LEAVING_BACKGROUND,
+                       LIFECYCLE_BACKGROUND_ACTIVATED, LIFECYCLE_EVENT_COUNT };
+extern HRESULT lifecycle_add( enum lifecycle_event event, IUnknown *handler, EventRegistrationToken *token );
+extern HRESULT lifecycle_remove( enum lifecycle_event event, EventRegistrationToken token );
+extern void lifecycle_watch_window( ICoreWindow *window );
+extern void lifecycle_stop(void);
 extern ICoreApplicationView *core_view_for_current_thread(void);
 extern ICoreApplicationView *core_view_main(void);
 extern void core_view_detach( ICoreApplicationView *view );

@@ -59,11 +59,12 @@ struct core_application
     ICoreApplication ICoreApplication_iface;
     ICoreApplicationExit ICoreApplicationExit_iface;
     ICoreImmersiveApplication ICoreImmersiveApplication_iface;
+    ICoreApplication2 ICoreApplication2_iface;
     LONG ref;
 
     BOOL running;
     struct run_state *run;
-    struct list suspending_handlers, resuming_handlers, exiting_handlers;
+    struct list exiting_handlers;
 };
 
 static CRITICAL_SECTION app_cs;
@@ -95,6 +96,8 @@ static HRESULT WINAPI activation_factory_QueryInterface( IActivationFactory *ifa
         *out = &impl->ICoreApplication_iface;
     else if (IsEqualGUID( iid, &IID_ICoreApplicationExit ))
         *out = &impl->ICoreApplicationExit_iface;
+    else if (IsEqualGUID( iid, &IID_ICoreApplication2 ))
+        *out = &impl->ICoreApplication2_iface;
     else if (IsEqualGUID( iid, &IID_ICoreImmersiveApplication ))
         *out = &impl->ICoreImmersiveApplication_iface;
     else
@@ -209,35 +212,29 @@ static HRESULT WINAPI core_application_get_Id( ICoreApplication *iface, HSTRING 
     return WindowsCreateString( id, wcslen( id ), value );
 }
 
-/* Suspending, Resuming and Exiting are accepted; suspend and resume are not implemented, so they are not raised. */
+/* Suspending and Resuming are raised by lifecycle.c when the main window is hidden and shown again */
 static HRESULT WINAPI core_application_add_Suspending( ICoreApplication *iface,
         IEventHandler_SuspendingEventArgs *handler, EventRegistrationToken *token )
 {
-    struct core_application *impl = impl_from_ICoreApplication( iface );
-
-    FIXME( "iface %p, handler %p, token %p: never raised.\n", iface, handler, token );
-    return handler_list_add( &impl->suspending_handlers, &app_cs, (IUnknown *)handler, token );
+    TRACE( "iface %p, handler %p, token %p.\n", iface, handler, token );
+    return lifecycle_add( LIFECYCLE_SUSPENDING, (IUnknown *)handler, token );
 }
 
 static HRESULT WINAPI core_application_remove_Suspending( ICoreApplication *iface, EventRegistrationToken token )
 {
-    struct core_application *impl = impl_from_ICoreApplication( iface );
-    return handler_list_remove( &impl->suspending_handlers, &app_cs, token );
+    return lifecycle_remove( LIFECYCLE_SUSPENDING, token );
 }
 
 static HRESULT WINAPI core_application_add_Resuming( ICoreApplication *iface, IEventHandler_IInspectable *handler,
                                                      EventRegistrationToken *token )
 {
-    struct core_application *impl = impl_from_ICoreApplication( iface );
-
-    FIXME( "iface %p, handler %p, token %p: never raised.\n", iface, handler, token );
-    return handler_list_add( &impl->resuming_handlers, &app_cs, (IUnknown *)handler, token );
+    TRACE( "iface %p, handler %p, token %p.\n", iface, handler, token );
+    return lifecycle_add( LIFECYCLE_RESUMING, (IUnknown *)handler, token );
 }
 
 static HRESULT WINAPI core_application_remove_Resuming( ICoreApplication *iface, EventRegistrationToken token )
 {
-    struct core_application *impl = impl_from_ICoreApplication( iface );
-    return handler_list_remove( &impl->resuming_handlers, &app_cs, token );
+    return lifecycle_remove( LIFECYCLE_RESUMING, token );
 }
 
 static HRESULT WINAPI core_application_get_Properties( ICoreApplication *iface, IPropertySet **value )
@@ -289,6 +286,7 @@ static void raise_exiting( struct core_application *impl )
     IUnknown **handlers;
     unsigned int i, count;
 
+    lifecycle_stop();
     handlers = handler_list_snapshot( &impl->exiting_handlers, &app_cs, &count );
     for (i = 0; i < count; i++)
         IEventHandler_IInspectable_Invoke( (IEventHandler_IInspectable *)handlers[i], NULL, NULL );
@@ -339,6 +337,7 @@ static DWORD WINAPI view_thread( void *param )
         remember_error( state, hr );
         goto release;
     }
+    lifecycle_watch_window( window ); /* before the application gets the window: its handlers come after ours */
 
     hr = IFrameworkView_Initialize( framework, view );
     if (SUCCEEDED(hr)) hr = IFrameworkView_SetWindow( framework, window );
@@ -580,17 +579,79 @@ static const struct ICoreImmersiveApplicationVtbl core_immersive_vtbl =
     core_immersive_get_MainView,
 };
 
+DEFINE_IINSPECTABLE( core_application2, ICoreApplication2, struct core_application, IActivationFactory_iface )
+
+static HRESULT WINAPI core_application2_add_BackgroundActivated( ICoreApplication2 *iface,
+        IEventHandler_BackgroundActivatedEventArgs *handler, EventRegistrationToken *token )
+{
+    FIXME( "iface %p, handler %p, token %p: never raised.\n", iface, handler, token );
+    return lifecycle_add( LIFECYCLE_BACKGROUND_ACTIVATED, (IUnknown *)handler, token );
+}
+
+static HRESULT WINAPI core_application2_remove_BackgroundActivated( ICoreApplication2 *iface, EventRegistrationToken token )
+{
+    return lifecycle_remove( LIFECYCLE_BACKGROUND_ACTIVATED, token );
+}
+
+static HRESULT WINAPI core_application2_add_LeavingBackground( ICoreApplication2 *iface,
+        IEventHandler_LeavingBackgroundEventArgs *handler, EventRegistrationToken *token )
+{
+    TRACE( "iface %p, handler %p, token %p.\n", iface, handler, token );
+    return lifecycle_add( LIFECYCLE_LEAVING_BACKGROUND, (IUnknown *)handler, token );
+}
+
+static HRESULT WINAPI core_application2_remove_LeavingBackground( ICoreApplication2 *iface, EventRegistrationToken token )
+{
+    return lifecycle_remove( LIFECYCLE_LEAVING_BACKGROUND, token );
+}
+
+static HRESULT WINAPI core_application2_add_EnteredBackground( ICoreApplication2 *iface,
+        IEventHandler_EnteredBackgroundEventArgs *handler, EventRegistrationToken *token )
+{
+    TRACE( "iface %p, handler %p, token %p.\n", iface, handler, token );
+    return lifecycle_add( LIFECYCLE_ENTERED_BACKGROUND, (IUnknown *)handler, token );
+}
+
+static HRESULT WINAPI core_application2_remove_EnteredBackground( ICoreApplication2 *iface, EventRegistrationToken token )
+{
+    return lifecycle_remove( LIFECYCLE_ENTERED_BACKGROUND, token );
+}
+
+static HRESULT WINAPI core_application2_EnablePrelaunch( ICoreApplication2 *iface, boolean value )
+{
+    TRACE( "iface %p, value %d: there is no prelaunch\n", iface, value );
+    return S_OK;
+}
+
+static const struct ICoreApplication2Vtbl core_application2_vtbl =
+{
+    core_application2_QueryInterface,
+    core_application2_AddRef,
+    core_application2_Release,
+    /* IInspectable methods */
+    core_application2_GetIids,
+    core_application2_GetRuntimeClassName,
+    core_application2_GetTrustLevel,
+    /* ICoreApplication2 methods */
+    core_application2_add_BackgroundActivated,
+    core_application2_remove_BackgroundActivated,
+    core_application2_add_LeavingBackground,
+    core_application2_remove_LeavingBackground,
+    core_application2_add_EnteredBackground,
+    core_application2_remove_EnteredBackground,
+    core_application2_EnablePrelaunch,
+};
+
 static struct core_application core_application =
 {
     {&activation_factory_vtbl},
     {&core_application_vtbl},
     {&core_application_exit_vtbl},
     {&core_immersive_vtbl},
+    {&core_application2_vtbl},
     1,
     FALSE,
     NULL,
-    { &core_application.suspending_handlers, &core_application.suspending_handlers },
-    { &core_application.resuming_handlers, &core_application.resuming_handlers },
     { &core_application.exiting_handlers, &core_application.exiting_handlers },
 };
 

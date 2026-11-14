@@ -12,5 +12,6 @@ SOURCES = \
 	core_application.c \
 	core_view.c \
 	data_transfer.c \
+	lifecycle.c \
 	main.c \
 	twinapi.appcore.rc
