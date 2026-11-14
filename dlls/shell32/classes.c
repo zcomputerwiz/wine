@@ -153,12 +153,20 @@ BOOL HCR_GetDefaultVerbW( HKEY hkeyClass, LPCWSTR szVerb, LPWSTR szDest, DWORD l
             return TRUE;
         }
 
-        /* and then just use the first verb on Windows >= 2000 */
-        if (!RegEnumKeyW(hkeyClass, 0, szDest, len) && *szDest)
+        /* and then just use the first verb on Windows >= 2000: the first key under shell (cplfile's cplopen), not
+         * the class's first key */
+        if (!RegOpenKeyExW(hkeyClass, L"shell", 0, KEY_ENUMERATE_SUB_KEYS, &hkey))
         {
-            TRACE("default verb=first verb=%s\n", debugstr_w(szDest));
-            return TRUE;
+            BOOL found = !RegEnumKeyW(hkey, 0, szDest, len) && *szDest;
+
+            RegCloseKey(hkey);
+            if (found)
+            {
+                TRACE("default verb=first verb=%s\n", debugstr_w(szDest));
+                return TRUE;
+            }
         }
+        *szDest = '\0';
 
         TRACE("no default verb!\n");
 	return FALSE;

@@ -175,6 +175,84 @@ static LPWSTR RunDlg_GetParentDir(LPCWSTR cmdline)
     }
 }
 
+/* Split a command line typed in Run into a program and its parameters, as Windows' Run does (ShellExecCmdLine):
+ * a quoted name ends at its quote; otherwise the shortest start of the line that names a file (in the directory,
+ * on the path, with or without .exe) is the program. Environment strings are expanded first. */
+static BOOL RunDlg_SplitCommand(LPCWSTR cmdline, LPCWSTR dir, WCHAR **program, WCHAR **params)
+{
+    WCHAR found[MAX_PATH], *line, *name, *end;
+    DWORD len;
+
+    *program = *params = NULL;
+    if (!(len = ExpandEnvironmentStringsW(cmdline, NULL, 0)) || !(line = malloc(len * sizeof(WCHAR))))
+        return FALSE;
+    ExpandEnvironmentStringsW(cmdline, line, len);
+    for (name = line; iswspace(*name); name++) ;
+
+    if (*name == '"')
+    {
+        if (!(end = wcschr(++name, '"')))
+        {
+            free(line);
+            return FALSE;
+        }
+        *end++ = 0;
+    }
+    else
+    {
+        BOOL split = FALSE;
+
+        for (end = name; *end; end++)
+        {
+            WCHAR space = *end;
+
+            if (!iswspace(space)) continue;
+            *end = 0;
+            if ((dir && *dir && SearchPathW(dir, name, L".exe", ARRAY_SIZE(found), found, NULL)) ||
+                SearchPathW(NULL, name, L".exe", ARRAY_SIZE(found), found, NULL))
+            {
+                split = TRUE;
+                break;
+            }
+            *end = space;
+        }
+        if (!split)
+        {
+            free(line);
+            return FALSE;
+        }
+        end++;
+    }
+    while (iswspace(*end)) end++;
+    if (!*name)
+    {
+        free(line);
+        return FALSE;
+    }
+    *program = wcsdup(name);
+    *params = wcsdup(end);
+    free(line);
+    if (*program && *params) return TRUE;
+    free(*program);
+    free(*params);
+    *program = *params = NULL;
+    return FALSE;
+}
+
+/* The error ShellExecuteEx shows (do_error_dialog) for a call made without its UI. The call is not made again to
+ * show it: a call that failed may still have done something (a folder opened before its DDE conversation failed). */
+static void RunDlg_ReportError(HWND hwnd, UINT_PTR err, DWORD last_error)
+{
+    WCHAR msg[2048];
+
+    msg[0] = 0;
+    if (err == SE_ERR_NOASSOC)
+        LoadStringW(shell32_hInstance, IDS_SHLEXEC_NOASSOC, msg, ARRAY_SIZE(msg));
+    else
+        FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM, NULL, last_error, 0, msg, ARRAY_SIZE(msg), NULL);
+    MessageBoxW(hwnd, msg, NULL, MB_ICONERROR);
+}
+
 /* Dialog procedure for RunFileDlg */
 static INT_PTR CALLBACK RunDlgProc (HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
     {
@@ -220,8 +298,11 @@ static INT_PTR CALLBACK RunDlgProc (HWND hwnd, UINT message, WPARAM wParam, LPAR
                     HWND htxt = GetDlgItem (hwnd, IDC_RUNDLG_EDITPATH);
                     if ((ic = GetWindowTextLengthW (htxt)))
                         {
-                        WCHAR *psz, *parent=NULL ;
+                        WCHAR *psz, *parent=NULL, *program=NULL, *params=NULL ;
                         SHELLEXECUTEINFOW sei ;
+                        BOOL ok ;
+                        UINT_PTR err ;
+                        DWORD last_error ;
 
                         ZeroMemory (&sei, sizeof(sei)) ;
                         sei.cbSize = sizeof(sei) ;
@@ -240,7 +321,26 @@ static INT_PTR CALLBACK RunDlgProc (HWND hwnd, UINT message, WPARAM wParam, LPAR
                         else
                             sei.lpDirectory = parent = RunDlg_GetParentDir(sei.lpFile);
 
-                        if (!ShellExecuteExW( &sei ))
+                        /* The line as one name first: a file, a folder, a URL, a program whose path has spaces. If
+                         * nothing has that name, the program at its start with the rest as its parameters, as on
+                         * Windows ("control sysdm.cpl,,3", "notepad file.txt"); otherwise the first error stands. */
+                        sei.fMask = SEE_MASK_FLAG_NO_UI;
+                        ok = ShellExecuteExW( &sei );
+                        err = (UINT_PTR)sei.hInstApp;
+                        last_error = GetLastError();
+                        if (!ok && (err == SE_ERR_FNF || err == SE_ERR_PNF) &&
+                            RunDlg_SplitCommand(psz, sei.lpDirectory, &program, &params))
+                        {
+                            sei.fMask = 0;
+                            sei.lpFile = program;
+                            sei.lpParameters = params;
+                            ok = ShellExecuteExW( &sei );
+                        }
+                        else if (!ok)
+                            RunDlg_ReportError(hwnd, err, last_error);
+                        free(program);
+                        free(params);
+                        if (!ok)
                         {
                             free(psz);
                             free(parent);
