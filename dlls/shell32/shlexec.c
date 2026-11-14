@@ -1103,8 +1103,9 @@ static HDDEDATA CALLBACK dde_cb(UINT uType, UINT uFmt, HCONV hConv,
  * Handles both the direct connection (try #1), and if it fails,
  * launching an application and trying (#2) to connect to it
  *
+ * start_has_file: the command line in start carries the file (%1, %l or %L)
  */
-static unsigned dde_connect(const WCHAR* key, const WCHAR* start, WCHAR* ddeexec,
+static unsigned dde_connect(const WCHAR* key, const WCHAR* start, BOOL start_has_file, WCHAR* ddeexec,
                             const WCHAR* lpFile, WCHAR *env,
 			    LPCWSTR szCommandline, LPITEMIDLIST pidl, SHELL_ExecuteW32 execfunc,
                             const SHELLEXECUTEINFOW *psei, LPSHELLEXECUTEINFOW psei_out)
@@ -1237,6 +1238,9 @@ static unsigned dde_connect(const WCHAR* key, const WCHAR* start, WCHAR* ddeexec
         {
             TRACE("Couldn't connect. ret=%d\n", ret);
             DdeUninitialize(ddeInst);
+            /* The application was started with the file on its command line (a folder's "explorer.exe "%1""):
+             * that did what was asked, conversation or not. */
+            if (start_has_file) return ret;
             SetLastError(ERROR_DDE_FAIL);
             return 30; /* whatever */
         }
@@ -1307,6 +1311,7 @@ static UINT_PTR execute_from_key(LPCWSTR key, LPCWSTR lpFile, WCHAR *env, LPCWST
     UINT_PTR retval = SE_ERR_NOASSOC;
     DWORD resultLen;
     LPWSTR tmp;
+    BOOL param_has_file = FALSE;
 
     TRACE("%s %s %s %s %s\n", debugstr_w(key), debugstr_w(lpFile), debugstr_w(env),
            debugstr_w(szCommandline), debugstr_w(executable_name));
@@ -1324,7 +1329,7 @@ static UINT_PTR execute_from_key(LPCWSTR key, LPCWSTR lpFile, WCHAR *env, LPCWST
         if (cmdlen >= ARRAY_SIZE(cmd))
             cmdlen = ARRAY_SIZE(cmd) - 1;
         cmd[cmdlen] = '\0';
-        SHELL_ArgifyW(param, ARRAY_SIZE(parambuffer), cmd, lpFile, psei->lpIDList, szCommandline, &resultLen);
+        param_has_file = SHELL_ArgifyW(param, ARRAY_SIZE(parambuffer), cmd, lpFile, psei->lpIDList, szCommandline, &resultLen);
         if (resultLen > ARRAY_SIZE(parambuffer))
         {
             if ((param = malloc(resultLen * sizeof(*param))))
@@ -1342,7 +1347,7 @@ static UINT_PTR execute_from_key(LPCWSTR key, LPCWSTR lpFile, WCHAR *env, LPCWST
     {
         TRACE("Got ddeexec %s => %s\n", debugstr_w(key), debugstr_w(ddeexec));
         if (!param[0]) lstrcpyW(param, executable_name);
-        retval = dde_connect(key, param, ddeexec, lpFile, env, szCommandline, psei->lpIDList, execfunc, psei, psei_out);
+        retval = dde_connect(key, param, param_has_file, ddeexec, lpFile, env, szCommandline, psei->lpIDList, execfunc, psei, psei_out);
     }
     else if (param[0])
     {
