@@ -637,10 +637,6 @@ static int peer_is_launched_server( pid_t pid, uid_t uid )
     return uid_ok && gid_ok && !strncmp( buf, "Name:\twineserver\n", 17 );
 }
 
-#ifndef SO_PEERPIDFD
-#define SO_PEERPIDFD 77
-#endif
-
 /* the peer is trusted (see the top of this file). The pid of SO_PEERCRED is checked through a pidfd taken
  * before /proc is read: when that process is still alive afterwards, /proc described it and not a later
  * process that was given the same pid. Kernels without SO_PEERPIDFD (before 6.5) get the check without it. */

@@ -22,6 +22,18 @@
 #define __WINE_SERVER_SYSRUN_H
 
 #include <sys/types.h>
+#include <sys/socket.h>
+
+/* Linux pidfd socket options (6.5) and control message, for C libraries older than the kernel */
+#ifndef SO_PASSPIDFD
+#define SO_PASSPIDFD 76
+#endif
+#ifndef SO_PEERPIDFD
+#define SO_PEERPIDFD 77
+#endif
+#ifndef SCM_PIDFD
+#define SCM_PIDFD 0x04
+#endif
 
 struct process;
 

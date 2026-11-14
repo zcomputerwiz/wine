@@ -2045,7 +2045,7 @@ static int install_verifier_receipt( struct pipe_binding *b, obj_handle_t contex
     if (fd < 0 || getsockopt( fd, SOL_SOCKET, SO_PEERCRED, &peer, &len ) || len != sizeof(peer) ||
         peer.uid != 0 || peer.pid <= 0) goto done;
     len = sizeof(pin);
-    if (getsockopt( fd, SOL_SOCKET, 77 /* SO_PEERPIDFD */, &pin, &len ) || len != sizeof(pin) || pin < 0)
+    if (getsockopt( fd, SOL_SOCKET, SO_PEERPIDFD, &pin, &len ) || len != sizeof(pin) || pin < 0)
     { pin = -1; goto done; }
     live.fd = pin;
     if (poll( &live, 1, 0 )) goto done;

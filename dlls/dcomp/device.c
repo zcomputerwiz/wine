@@ -977,7 +977,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_surface_unknown_Unknown3(IDCompositionSur
         UINT width, UINT height)
 {
     struct dcomp_surface *surface = impl_from_IDCompositionSurfaceUnknown(iface);
-    FIXME("iface %p, width %u, height %u.\n", iface, width, height);
+    TRACE("iface %p, width %u, height %u.\n", iface, width, height);
     return dcomp_surface_resize(surface, width, height);
 }
 
@@ -2165,18 +2165,23 @@ static HRESULT dcomp_animation_create(struct dcomp_device *device, IDComposition
     return S_OK;
 }
 
+/* The value of a property at `now_100ns`: its animation's value when one is attached, else the plain value.
+ * Caller holds the device lock. */
+static float dcomp_sample_animation(IDCompositionAnimation *animation, float value, LONGLONG now_100ns)
+{
+    struct dcomp_animation *anim;
+
+    if (!animation) return value;
+    anim = impl_from_IDCompositionAnimation(animation);
+    return dcomp_animation_value_at(anim, (now_100ns - anim->begin_time.QuadPart) / 10000000.0);
+}
+
 /* Sample one clip property (plain value or attached animation) at
  * `now_100ns`. Caller holds the device lock. */
 static float dcomp_clip_sample_value(struct dcomp_rectangle_clip *clip, float value,
         IDCompositionAnimation *animation, LONGLONG now_100ns)
 {
-    if (animation)
-    {
-        struct dcomp_animation *anim = impl_from_IDCompositionAnimation(animation);
-        double elapsed = (now_100ns - anim->begin_time.QuadPart) / 10000000.0;
-        return dcomp_animation_value_at(anim, elapsed);
-    }
-    return value;
+    return dcomp_sample_animation(animation, value, now_100ns);
 }
 
 /* Sample all clip properties at `now_100ns` into the visual state's clip and
@@ -2203,13 +2208,7 @@ static void dcomp_rectangle_clip_sample(struct dcomp_rectangle_clip *clip, LONGL
  * animation if present. Caller holds the device lock. */
 static float dcomp_effect_group_sample_opacity(struct dcomp_effect_group *eg, LONGLONG now_100ns)
 {
-    if (eg->opacity_animation)
-    {
-        struct dcomp_animation *anim = impl_from_IDCompositionAnimation(eg->opacity_animation);
-        double elapsed = (now_100ns - anim->begin_time.QuadPart) / 10000000.0;
-        return dcomp_animation_value_at(anim, elapsed);
-    }
-    return eg->opacity;
+    return dcomp_sample_animation(eg->opacity_animation, eg->opacity, now_100ns);
 }
 
 /* =====================================================================
@@ -2374,13 +2373,7 @@ static HRESULT dcomp_transform_set_animation(struct dcomp_transform *t, struct d
 
 static float dcomp_animated_float_sample(const struct dcomp_animated_float *prop, LONGLONG now_100ns)
 {
-    if (prop->animation)
-    {
-        struct dcomp_animation *anim = impl_from_IDCompositionAnimation(prop->animation);
-        double elapsed = (now_100ns - anim->begin_time.QuadPart) / 10000000.0;
-        return dcomp_animation_value_at(anim, elapsed);
-    }
-    return prop->value;
+    return dcomp_sample_animation(prop->animation, prop->value, now_100ns);
 }
 
 /* Build the 2D matrix of a transform object, sampling its animations at
@@ -2632,68 +2625,26 @@ static HRESULT STDMETHODCALLTYPE dcomp_matrix_SetMatrixElement(IDCompositionMatr
     return dcomp_transform_set_value(t, &t->matrix[row * 2 + column], value);
 }
 
-/* Per-type IUnknown wrappers so each vtable's first three slots match its
- * interface's exact function-pointer types. */
-static HRESULT STDMETHODCALLTYPE dcomp_translate_qi(IDCompositionTranslateTransform *iface, REFIID iid, void **out)
-{
-    return dcomp_transform_qi_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface), iid, out);
+/* Per-type IUnknown wrappers so each vtable's first three slots match its interface's exact function-pointer types. */
+#define DCOMP_TRANSFORM_IUNKNOWN(name, type) \
+static HRESULT STDMETHODCALLTYPE dcomp_##name##_qi(type *iface, REFIID iid, void **out) \
+{ \
+    return dcomp_transform_qi_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface), iid, out); \
+} \
+static ULONG STDMETHODCALLTYPE dcomp_##name##_addref(type *iface) \
+{ \
+    return dcomp_transform_addref_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface)); \
+} \
+static ULONG STDMETHODCALLTYPE dcomp_##name##_release(type *iface) \
+{ \
+    return dcomp_transform_release_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface)); \
 }
-static ULONG STDMETHODCALLTYPE dcomp_translate_addref(IDCompositionTranslateTransform *iface)
-{
-    return dcomp_transform_addref_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface));
-}
-static ULONG STDMETHODCALLTYPE dcomp_translate_release(IDCompositionTranslateTransform *iface)
-{
-    return dcomp_transform_release_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface));
-}
-static HRESULT STDMETHODCALLTYPE dcomp_scale_qi(IDCompositionScaleTransform *iface, REFIID iid, void **out)
-{
-    return dcomp_transform_qi_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface), iid, out);
-}
-static ULONG STDMETHODCALLTYPE dcomp_scale_addref(IDCompositionScaleTransform *iface)
-{
-    return dcomp_transform_addref_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface));
-}
-static ULONG STDMETHODCALLTYPE dcomp_scale_release(IDCompositionScaleTransform *iface)
-{
-    return dcomp_transform_release_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface));
-}
-static HRESULT STDMETHODCALLTYPE dcomp_rotate_qi(IDCompositionRotateTransform *iface, REFIID iid, void **out)
-{
-    return dcomp_transform_qi_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface), iid, out);
-}
-static ULONG STDMETHODCALLTYPE dcomp_rotate_addref(IDCompositionRotateTransform *iface)
-{
-    return dcomp_transform_addref_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface));
-}
-static ULONG STDMETHODCALLTYPE dcomp_rotate_release(IDCompositionRotateTransform *iface)
-{
-    return dcomp_transform_release_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface));
-}
-static HRESULT STDMETHODCALLTYPE dcomp_skew_qi(IDCompositionSkewTransform *iface, REFIID iid, void **out)
-{
-    return dcomp_transform_qi_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface), iid, out);
-}
-static ULONG STDMETHODCALLTYPE dcomp_skew_addref(IDCompositionSkewTransform *iface)
-{
-    return dcomp_transform_addref_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface));
-}
-static ULONG STDMETHODCALLTYPE dcomp_skew_release(IDCompositionSkewTransform *iface)
-{
-    return dcomp_transform_release_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface));
-}
-static HRESULT STDMETHODCALLTYPE dcomp_matrix_qi(IDCompositionMatrixTransform *iface, REFIID iid, void **out)
-{
-    return dcomp_transform_qi_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface), iid, out);
-}
-static ULONG STDMETHODCALLTYPE dcomp_matrix_addref(IDCompositionMatrixTransform *iface)
-{
-    return dcomp_transform_addref_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface));
-}
-static ULONG STDMETHODCALLTYPE dcomp_matrix_release(IDCompositionMatrixTransform *iface)
-{
-    return dcomp_transform_release_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface));
-}
+
+DCOMP_TRANSFORM_IUNKNOWN(translate, IDCompositionTranslateTransform)
+DCOMP_TRANSFORM_IUNKNOWN(scale, IDCompositionScaleTransform)
+DCOMP_TRANSFORM_IUNKNOWN(rotate, IDCompositionRotateTransform)
+DCOMP_TRANSFORM_IUNKNOWN(skew, IDCompositionSkewTransform)
+DCOMP_TRANSFORM_IUNKNOWN(matrix, IDCompositionMatrixTransform)
 
 static const IDCompositionTranslateTransformVtbl dcomp_translate_transform_vtbl =
 {

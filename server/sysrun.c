@@ -473,7 +473,6 @@ int sysrun_process_is_system( struct process *process )
  * caller has already passed the S3 consumed-opener/writer comparisons. This
  * operation neither issues tokens nor accepts authentication results. */
 #if defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
-#define SO_PEERPIDFD_LAB 77
 #ifdef WEX_E1_TEST_HOOKS
 #define E1S6_AUDIT(...) fprintf( stderr, __VA_ARGS__ )
 #else
@@ -687,7 +686,7 @@ int sysrun_e1s6_endorse( const void *data, unsigned int size )
                      len == sizeof(verifier[i]), "endorse-verifier-peercred" );
         E1S6_REQUIRE( verifier[i].uid == 0 && verifier[i].pid > 0, "endorse-verifier-root" );
         len = sizeof(verifier_pins[i].fd);
-        E1S6_REQUIRE( !getsockopt( socket_fd, SOL_SOCKET, SO_PEERPIDFD_LAB, &verifier_pins[i].fd, &len ) &&
+        E1S6_REQUIRE( !getsockopt( socket_fd, SOL_SOCKET, SO_PEERPIDFD, &verifier_pins[i].fd, &len ) &&
                      len == sizeof(verifier_pins[i].fd) && verifier_pins[i].fd >= 0, "endorse-verifier-peerpidfd" );
     }
     E1S6_REQUIRE( verifier[0].pid == verifier[1].pid, "endorse-verifier-same-peer" );

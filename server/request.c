@@ -358,10 +358,6 @@ error:
         fatal_protocol_error( thread, "read: %s\n", strerror( errno ));
 }
 
-#ifndef SCM_PIDFD
-#define SCM_PIDFD 0x04
-#endif
-
 /* pid of the process a pidfd refers to, -1 if it has exited or fd is not a pidfd */
 #ifdef WEX_E1S6_TRANSPORT_TEST
 int pidfd_pid( int pidfd )

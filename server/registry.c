@@ -55,6 +55,7 @@
 #include "unicode.h"
 #include "security.h"
 #include "sysrun.h"
+#include "accounts.h"
 #include "session0.h"
 #include "e1s_token.h"
 #include "e1s_profile.h"
@@ -563,19 +564,6 @@ int elevation_helper_unset(void)
     return !value->len || !*(const WCHAR *)value->data;
 }
 
-/* Group names follow the same rule as valid_name() in accounts.c: 1-63 characters of [A-Za-z0-9_.-], not
- * starting with '-', not "." or "..", and '$' only as the last character. */
-static int valid_name( const char *s )
-{
-    size_t i, len = strlen( s );
-    if (!len || len > 63 || *s == '-' || !strcmp( s, "." ) || !strcmp( s, ".." )) return 0;
-    for (i = 0; i < len; i++)
-        if (!((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') ||
-              (s[i] >= '0' && s[i] <= '9') || s[i] == '_' || s[i] == '-' || s[i] == '.' ||
-              (s[i] == '$' && i == len - 1))) return 0;
-    return 1;
-}
-
 /* The administrator group: "admin_group" of the root-owned sysrun.conf (a user controls its own environment, so
  * the name cannot come from there), else "sudo". A repeated "admin_group=" line or an empty or invalid name
  * makes the configuration invalid and returns NULL, in which case nobody is an administrator; same rule as
@@ -601,7 +589,7 @@ static const char *admin_group_name(void)
     {
         if ((next = strchr( line, '\n' ))) *next++ = 0;
         if (strncmp( line, "admin_group=", 12 )) continue;
-        if (seen++ || !valid_name( line + 12 )) return NULL;
+        if (seen++ || !accounts_valid_name( line + 12 )) return NULL;
         strcpy( name, line + 12 );
     }
     return name;

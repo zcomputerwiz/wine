@@ -23,7 +23,7 @@
 static int hive_unchanged( const struct wex_profile_storage * );
 #endif
 
-static int valid_name( const char *name )
+static int valid_account_name( const char *name )
 {
     static const char * const reserved[] = {
         "con", "prn", "aux", "nul", "clock$", "conin$", "conout$",
@@ -59,7 +59,7 @@ enum wex_profile_status wex_profile_layout( const struct wex_account *a, struct 
     unsigned int i, nonzero = 0;
     if (!out) return WEX_PROFILE_COMPONENT;
     memset( out, 0, sizeof(*out) );
-    if (!a || !valid_name( a->name ) || !a->generation || !a->administrator || !a->uid)
+    if (!a || !valid_account_name( a->name ) || !a->generation || !a->administrator || !a->uid)
         return WEX_PROFILE_COMPONENT;
     for (i = 0; i < 16; i++) nonzero |= a->incarnation[i];
     if (!nonzero || a->sid[0] != 21 || !a->sid[4]) return WEX_PROFILE_COMPONENT;
@@ -647,7 +647,7 @@ static enum wex_profile_status find_existing( const struct chain *c, struct wex_
         else if (!strncasecmp( entry->d_name, p->incarnation, 32 ) && entry->d_name[32] == '-')
         {
             if (*exists || strncmp( entry->d_name, p->incarnation, 32 ) ||
-                strlen( entry->d_name ) >= sizeof(p->leaf) || !valid_name( entry->d_name + 33 ))
+                strlen( entry->d_name ) >= sizeof(p->leaf) || !valid_account_name( entry->d_name + 33 ))
             { s = WEX_PROFILE_IDENTITY; break; }
             strcpy( p->leaf, entry->d_name );
             *exists = 1;
