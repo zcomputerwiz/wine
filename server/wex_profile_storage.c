@@ -98,7 +98,7 @@ enum wex_profile_status wex_profile_layout( const struct wex_account *a, struct 
 #define RENAME_NOREPLACE 1
 #endif
 
-#ifdef WEX_E1S12_PROFILE_TEST
+#if defined(WEX_E1S12_PROFILE_TEST) && defined(WEX_E1_TEST_HOOKS)
 static int test_stop_step; /* set only by the separate lab CLI */
 static void checkpoint( int step )
 {
@@ -110,6 +110,8 @@ static void checkpoint( int step )
     }
 }
 
+#else
+#define checkpoint(step) do { } while (0)
 #endif
 
 struct chain
