@@ -4299,6 +4299,210 @@ done:
  * IDCompositionDevice (1) Implementation
  * ===================================================================== */
 
+/* Methods with the same body in the four device interfaces, written once. */
+#define DCOMP_DEVICE_QUERY_INTERFACE(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_QueryInterface(type *iface, \
+        REFIID iid, void **out) \
+{ \
+    struct dcomp_device *dev = impl(iface); \
+    return IDCompositionDevice_QueryInterface(&dev->IDCompositionDevice_iface, iid, out); \
+}
+
+#define DCOMP_DEVICE_ADDREF(prefix, type, impl) \
+static ULONG STDMETHODCALLTYPE dcomp_##prefix##_AddRef(type *iface) \
+{ \
+    struct dcomp_device *dev = impl(iface); \
+    return IDCompositionDevice_AddRef(&dev->IDCompositionDevice_iface); \
+}
+
+#define DCOMP_DEVICE_RELEASE(prefix, type, impl) \
+static ULONG STDMETHODCALLTYPE dcomp_##prefix##_Release(type *iface) \
+{ \
+    struct dcomp_device *dev = impl(iface); \
+    return IDCompositionDevice_Release(&dev->IDCompositionDevice_iface); \
+}
+
+#define DCOMP_DEVICE_COMMIT(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_Commit(type *iface) \
+{ \
+    struct dcomp_device *dev = impl(iface); \
+    return dcomp_device_internal_commit(dev); \
+}
+
+#define DCOMP_DEVICE_WAIT_FOR_COMMIT_COMPLETION(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_WaitForCommitCompletion(type *iface) \
+{ \
+    struct dcomp_device *dev = impl(iface); \
+    /* Direct binding has completed before Commit releases this lock. */ \
+    EnterCriticalSection(&dev->cs); \
+    LeaveCriticalSection(&dev->cs); \
+    return S_OK; \
+}
+
+#define DCOMP_DEVICE_GET_FRAME_STATISTICS(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_GetFrameStatistics(type *iface, \
+        DCOMPOSITION_FRAME_STATISTICS *statistics) \
+{ \
+    FIXME("iface %p, statistics %p stub!\n", iface, statistics); \
+    if (!statistics) \
+        return E_POINTER; \
+    memset(statistics, 0, sizeof(*statistics)); \
+    return S_OK; \
+}
+
+#define DCOMP_DEVICE_CREATE_VIRTUAL_SURFACE(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateVirtualSurface(type *iface, \
+        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode, \
+        IDCompositionVirtualSurface **surface) \
+{ \
+    struct dcomp_device *dev = impl(iface); \
+    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n", \
+            iface, width, height, pixel_format, alpha_mode, surface); \
+    return dcomp_device_create_virtual_surface(dev, width, height, pixel_format, alpha_mode, surface); \
+}
+
+#define DCOMP_DEVICE_CREATE_TRANSLATE_TRANSFORM(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateTranslateTransform(type *iface, \
+        IDCompositionTranslateTransform **transform) \
+{ \
+    TRACE("iface %p, transform %p.\n", iface, transform); \
+    return dcomp_transform_create(impl(iface), DCOMP_TRANSFORM_TRANSLATE, \
+            (IDCompositionTransform **)transform); \
+}
+
+#define DCOMP_DEVICE_CREATE_SCALE_TRANSFORM(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateScaleTransform(type *iface, \
+        IDCompositionScaleTransform **transform) \
+{ \
+    TRACE("iface %p, transform %p.\n", iface, transform); \
+    return dcomp_transform_create(impl(iface), DCOMP_TRANSFORM_SCALE, \
+            (IDCompositionTransform **)transform); \
+}
+
+#define DCOMP_DEVICE_CREATE_ROTATE_TRANSFORM(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateRotateTransform(type *iface, \
+        IDCompositionRotateTransform **transform) \
+{ \
+    TRACE("iface %p, transform %p.\n", iface, transform); \
+    return dcomp_transform_create(impl(iface), DCOMP_TRANSFORM_ROTATE, \
+            (IDCompositionTransform **)transform); \
+}
+
+#define DCOMP_DEVICE_CREATE_SKEW_TRANSFORM(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateSkewTransform(type *iface, \
+        IDCompositionSkewTransform **transform) \
+{ \
+    TRACE("iface %p, transform %p.\n", iface, transform); \
+    return dcomp_transform_create(impl(iface), DCOMP_TRANSFORM_SKEW, \
+            (IDCompositionTransform **)transform); \
+}
+
+#define DCOMP_DEVICE_CREATE_MATRIX_TRANSFORM(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateMatrixTransform(type *iface, \
+        IDCompositionMatrixTransform **transform) \
+{ \
+    TRACE("iface %p, transform %p.\n", iface, transform); \
+    return dcomp_transform_create(impl(iface), DCOMP_TRANSFORM_MATRIX, \
+            (IDCompositionTransform **)transform); \
+}
+
+#define DCOMP_DEVICE_CREATE_TRANSFORM_GROUP(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateTransformGroup(type *iface, \
+        IDCompositionTransform **transforms, UINT elements, IDCompositionTransform **transform_group) \
+{ \
+    FIXME("iface %p, transforms %p, elements %u, transform_group %p stub!\n", \
+            iface, transforms, elements, transform_group); \
+    return E_NOTIMPL; \
+}
+
+#define DCOMP_DEVICE_CREATE_TRANSLATE_TRANSFORM_3D(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateTranslateTransform3D(type *iface, \
+        IDCompositionTranslateTransform3D **transform_3d) \
+{ \
+    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d); \
+    return E_NOTIMPL; \
+}
+
+#define DCOMP_DEVICE_CREATE_SCALE_TRANSFORM_3D(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateScaleTransform3D(type *iface, \
+        IDCompositionScaleTransform3D **transform_3d) \
+{ \
+    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d); \
+    return E_NOTIMPL; \
+}
+
+#define DCOMP_DEVICE_CREATE_ROTATE_TRANSFORM_3D(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateRotateTransform3D(type *iface, \
+        IDCompositionRotateTransform3D **transform_3d) \
+{ \
+    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d); \
+    return E_NOTIMPL; \
+}
+
+#define DCOMP_DEVICE_CREATE_MATRIX_TRANSFORM_3D(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateMatrixTransform3D(type *iface, \
+        IDCompositionMatrixTransform3D **transform_3d) \
+{ \
+    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d); \
+    return E_NOTIMPL; \
+}
+
+#define DCOMP_DEVICE_CREATE_TRANSFORM_3D_GROUP(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateTransform3DGroup(type *iface, \
+        IDCompositionTransform3D **transforms_3d, UINT elements, IDCompositionTransform3D **transform_3d_group) \
+{ \
+    FIXME("iface %p, transforms_3d %p, elements %u, transform_3d_group %p stub!\n", \
+            iface, transforms_3d, elements, transform_3d_group); \
+    return E_NOTIMPL; \
+}
+
+#define DCOMP_DEVICE_CREATE_EFFECT_GROUP(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateEffectGroup(type *iface, \
+        IDCompositionEffectGroup **effect_group) \
+{ \
+    TRACE("iface %p, effect_group %p.\n", iface, effect_group); \
+    return dcomp_effect_group_create(impl(iface), effect_group); \
+}
+
+#define DCOMP_DEVICE_CREATE_RECTANGLE_CLIP(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateRectangleClip(type *iface, \
+        IDCompositionRectangleClip **clip) \
+{ \
+    TRACE("iface %p, clip %p.\n", iface, clip); \
+    return dcomp_rectangle_clip_create(impl(iface), clip); \
+}
+
+#define DCOMP_DEVICE_CREATE_ANIMATION(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateAnimation(type *iface, \
+        IDCompositionAnimation **animation) \
+{ \
+    TRACE("iface %p, animation %p.\n", iface, animation); \
+    return dcomp_animation_create(impl(iface), animation); \
+}
+
+#define DCOMP_DEVICE_CREATE_SURFACE_FACTORY(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateSurfaceFactory(type *iface, \
+        IUnknown *rendering_device, IDCompositionSurfaceFactory **surface_factory) \
+{ \
+    struct dcomp_device *dev = impl(iface); \
+    TRACE("iface %p, rendering_device %p, surface_factory %p.\n", iface, rendering_device, \
+            surface_factory); \
+    return dcomp_surface_factory_create(&dev->IDCompositionDevice_iface, rendering_device, \
+            surface_factory); \
+}
+
+#define DCOMP_DEVICE_CREATE_SURFACE(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateSurface(type *iface, \
+        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode, \
+        IDCompositionSurface **surface) \
+{ \
+    struct dcomp_device *dev = impl(iface); \
+    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n", \
+            iface, width, height, pixel_format, alpha_mode, surface); \
+    return dcomp_surface_create(&dev->IDCompositionDevice_iface, dev->rendering_device, \
+            &dev->rendering_device_iid, width, height, pixel_format, alpha_mode, surface); \
+}
+
 static HRESULT STDMETHODCALLTYPE dcomp_device_QueryInterface(IDCompositionDevice *iface,
         REFIID iid, void **out)
 {
@@ -4367,30 +4571,11 @@ static ULONG STDMETHODCALLTYPE dcomp_device_Release(IDCompositionDevice *iface)
     return refcount;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_Commit(IDCompositionDevice *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice(iface);
-    return dcomp_device_internal_commit(dev);
-}
+DCOMP_DEVICE_COMMIT(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_WaitForCommitCompletion(IDCompositionDevice *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice(iface);
-    /* Direct binding has completed before Commit releases this lock. */
-    EnterCriticalSection(&dev->cs);
-    LeaveCriticalSection(&dev->cs);
-    return S_OK;
-}
+DCOMP_DEVICE_WAIT_FOR_COMMIT_COMPLETION(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_GetFrameStatistics(IDCompositionDevice *iface,
-        DCOMPOSITION_FRAME_STATISTICS *statistics)
-{
-    FIXME("iface %p, statistics %p stub!\n", iface, statistics);
-    if (!statistics)
-        return E_POINTER;
-    memset(statistics, 0, sizeof(*statistics));
-    return S_OK;
-}
+DCOMP_DEVICE_GET_FRAME_STATISTICS(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
 static HRESULT STDMETHODCALLTYPE dcomp_device_CreateTargetForHwnd(IDCompositionDevice *iface,
         HWND hwnd, BOOL topmost, IDCompositionTarget **target)
@@ -4437,16 +4622,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_CreateSurface(IDCompositionDevice 
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateVirtualSurface(IDCompositionDevice *iface,
-        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
-        IDCompositionVirtualSurface **surface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice(iface);
-
-    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n",
-            iface, width, height, pixel_format, alpha_mode, surface);
-    return dcomp_device_create_virtual_surface(dev, width, height, pixel_format, alpha_mode, surface);
-}
+DCOMP_DEVICE_CREATE_VIRTUAL_SURFACE(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
 static HRESULT STDMETHODCALLTYPE dcomp_device_CreateSurfaceFromHandle(IDCompositionDevice *iface,
         HANDLE handle, IUnknown **surface)
@@ -4462,110 +4638,33 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_CreateSurfaceFromHwnd(IDCompositio
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateTranslateTransform(IDCompositionDevice *iface,
-        IDCompositionTranslateTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice(iface), DCOMP_TRANSFORM_TRANSLATE,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_TRANSLATE_TRANSFORM(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateScaleTransform(IDCompositionDevice *iface,
-        IDCompositionScaleTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice(iface), DCOMP_TRANSFORM_SCALE,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_SCALE_TRANSFORM(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateRotateTransform(IDCompositionDevice *iface,
-        IDCompositionRotateTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice(iface), DCOMP_TRANSFORM_ROTATE,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_ROTATE_TRANSFORM(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateSkewTransform(IDCompositionDevice *iface,
-        IDCompositionSkewTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice(iface), DCOMP_TRANSFORM_SKEW,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_SKEW_TRANSFORM(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateMatrixTransform(IDCompositionDevice *iface,
-        IDCompositionMatrixTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice(iface), DCOMP_TRANSFORM_MATRIX,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_MATRIX_TRANSFORM(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateTransformGroup(IDCompositionDevice *iface,
-        IDCompositionTransform **transforms, UINT elements, IDCompositionTransform **transform_group)
-{
-    FIXME("iface %p, transforms %p, elements %u, transform_group %p stub!\n",
-            iface, transforms, elements, transform_group);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_TRANSFORM_GROUP(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateTranslateTransform3D(IDCompositionDevice *iface,
-        IDCompositionTranslateTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_TRANSLATE_TRANSFORM_3D(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateScaleTransform3D(IDCompositionDevice *iface,
-        IDCompositionScaleTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_SCALE_TRANSFORM_3D(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateRotateTransform3D(IDCompositionDevice *iface,
-        IDCompositionRotateTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_ROTATE_TRANSFORM_3D(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateMatrixTransform3D(IDCompositionDevice *iface,
-        IDCompositionMatrixTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_MATRIX_TRANSFORM_3D(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateTransform3DGroup(IDCompositionDevice *iface,
-        IDCompositionTransform3D **transforms_3d, UINT elements, IDCompositionTransform3D **transform_3d_group)
-{
-    FIXME("iface %p, transforms_3d %p, elements %u, transform_3d_group %p stub!\n",
-            iface, transforms_3d, elements, transform_3d_group);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_TRANSFORM_3D_GROUP(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateEffectGroup(IDCompositionDevice *iface,
-        IDCompositionEffectGroup **effect_group)
-{
-    TRACE("iface %p, effect_group %p.\n", iface, effect_group);
-    return dcomp_effect_group_create(impl_from_IDCompositionDevice(iface), effect_group);
-}
+DCOMP_DEVICE_CREATE_EFFECT_GROUP(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateRectangleClip(IDCompositionDevice *iface,
-        IDCompositionRectangleClip **clip)
-{
-    TRACE("iface %p, clip %p.\n", iface, clip);
-    return dcomp_rectangle_clip_create(impl_from_IDCompositionDevice(iface), clip);
-}
+DCOMP_DEVICE_CREATE_RECTANGLE_CLIP(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateAnimation(IDCompositionDevice *iface,
-        IDCompositionAnimation **animation)
-{
-    TRACE("iface %p, animation %p.\n", iface, animation);
-    return dcomp_animation_create(impl_from_IDCompositionDevice(iface), animation);
-}
+DCOMP_DEVICE_CREATE_ANIMATION(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
 static HRESULT STDMETHODCALLTYPE dcomp_device_CheckDeviceState(IDCompositionDevice *iface,
         BOOL *valid)
@@ -4612,49 +4711,17 @@ static const struct IDCompositionDeviceVtbl dcomp_device_vtbl =
  * IDCompositionDevice2 Implementation
  * ===================================================================== */
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_QueryInterface(IDCompositionDevice2 *iface,
-        REFIID iid, void **out)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice2(iface);
-    return IDCompositionDevice_QueryInterface(&dev->IDCompositionDevice_iface, iid, out);
-}
+DCOMP_DEVICE_QUERY_INTERFACE(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static ULONG STDMETHODCALLTYPE dcomp_device2_AddRef(IDCompositionDevice2 *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice2(iface);
-    return IDCompositionDevice_AddRef(&dev->IDCompositionDevice_iface);
-}
+DCOMP_DEVICE_ADDREF(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static ULONG STDMETHODCALLTYPE dcomp_device2_Release(IDCompositionDevice2 *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice2(iface);
-    return IDCompositionDevice_Release(&dev->IDCompositionDevice_iface);
-}
+DCOMP_DEVICE_RELEASE(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_Commit(IDCompositionDevice2 *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice2(iface);
-    return dcomp_device_internal_commit(dev);
-}
+DCOMP_DEVICE_COMMIT(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_WaitForCommitCompletion(IDCompositionDevice2 *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice2(iface);
-    /* Direct binding has completed before Commit releases this lock. */
-    EnterCriticalSection(&dev->cs);
-    LeaveCriticalSection(&dev->cs);
-    return S_OK;
-}
+DCOMP_DEVICE_WAIT_FOR_COMMIT_COMPLETION(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_GetFrameStatistics(IDCompositionDevice2 *iface,
-        DCOMPOSITION_FRAME_STATISTICS *statistics)
-{
-    FIXME("iface %p, statistics %p stub!\n", iface, statistics);
-    if (!statistics)
-        return E_POINTER;
-    memset(statistics, 0, sizeof(*statistics));
-    return S_OK;
-}
+DCOMP_DEVICE_GET_FRAME_STATISTICS(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
 static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateVisual(IDCompositionDevice2 *iface,
         IDCompositionVisual2 **visual)
@@ -4674,146 +4741,39 @@ static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateVisual(IDCompositionDevice2
     return hr;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateSurfaceFactory(IDCompositionDevice2 *iface,
-        IUnknown *rendering_device, IDCompositionSurfaceFactory **surface_factory)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice2(iface);
+DCOMP_DEVICE_CREATE_SURFACE_FACTORY(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-    TRACE("iface %p, rendering_device %p, surface_factory %p.\n", iface, rendering_device,
-            surface_factory);
+DCOMP_DEVICE_CREATE_SURFACE(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-    return dcomp_surface_factory_create(&dev->IDCompositionDevice_iface, rendering_device,
-            surface_factory);
-}
+DCOMP_DEVICE_CREATE_VIRTUAL_SURFACE(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateSurface(IDCompositionDevice2 *iface,
-        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
-        IDCompositionSurface **surface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice2(iface);
+DCOMP_DEVICE_CREATE_TRANSLATE_TRANSFORM(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n",
-            iface, width, height, pixel_format, alpha_mode, surface);
+DCOMP_DEVICE_CREATE_SCALE_TRANSFORM(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-    return dcomp_surface_create(&dev->IDCompositionDevice_iface, dev->rendering_device,
-            &dev->rendering_device_iid, width, height, pixel_format, alpha_mode, surface);
-}
+DCOMP_DEVICE_CREATE_ROTATE_TRANSFORM(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateVirtualSurface(IDCompositionDevice2 *iface,
-        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
-        IDCompositionVirtualSurface **surface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice2(iface);
+DCOMP_DEVICE_CREATE_SKEW_TRANSFORM(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n",
-            iface, width, height, pixel_format, alpha_mode, surface);
-    return dcomp_device_create_virtual_surface(dev, width, height, pixel_format, alpha_mode, surface);
-}
+DCOMP_DEVICE_CREATE_MATRIX_TRANSFORM(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateTranslateTransform(IDCompositionDevice2 *iface,
-        IDCompositionTranslateTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice2(iface), DCOMP_TRANSFORM_TRANSLATE,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_TRANSFORM_GROUP(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateScaleTransform(IDCompositionDevice2 *iface,
-        IDCompositionScaleTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice2(iface), DCOMP_TRANSFORM_SCALE,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_TRANSLATE_TRANSFORM_3D(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateRotateTransform(IDCompositionDevice2 *iface,
-        IDCompositionRotateTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice2(iface), DCOMP_TRANSFORM_ROTATE,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_SCALE_TRANSFORM_3D(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateSkewTransform(IDCompositionDevice2 *iface,
-        IDCompositionSkewTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice2(iface), DCOMP_TRANSFORM_SKEW,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_ROTATE_TRANSFORM_3D(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateMatrixTransform(IDCompositionDevice2 *iface,
-        IDCompositionMatrixTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice2(iface), DCOMP_TRANSFORM_MATRIX,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_MATRIX_TRANSFORM_3D(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateTransformGroup(IDCompositionDevice2 *iface,
-        IDCompositionTransform **transforms, UINT elements, IDCompositionTransform **transform_group)
-{
-    FIXME("iface %p, transforms %p, elements %u, transform_group %p stub!\n",
-            iface, transforms, elements, transform_group);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_TRANSFORM_3D_GROUP(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateTranslateTransform3D(IDCompositionDevice2 *iface,
-        IDCompositionTranslateTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_EFFECT_GROUP(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateScaleTransform3D(IDCompositionDevice2 *iface,
-        IDCompositionScaleTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_RECTANGLE_CLIP(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateRotateTransform3D(IDCompositionDevice2 *iface,
-        IDCompositionRotateTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateMatrixTransform3D(IDCompositionDevice2 *iface,
-        IDCompositionMatrixTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateTransform3DGroup(IDCompositionDevice2 *iface,
-        IDCompositionTransform3D **transforms_3d, UINT elements, IDCompositionTransform3D **transform_3d_group)
-{
-    FIXME("iface %p, transforms_3d %p, elements %u, transform_3d_group %p stub!\n",
-            iface, transforms_3d, elements, transform_3d_group);
-    return E_NOTIMPL;
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateEffectGroup(IDCompositionDevice2 *iface,
-        IDCompositionEffectGroup **effect_group)
-{
-    TRACE("iface %p, effect_group %p.\n", iface, effect_group);
-    return dcomp_effect_group_create(impl_from_IDCompositionDevice2(iface), effect_group);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateRectangleClip(IDCompositionDevice2 *iface,
-        IDCompositionRectangleClip **clip)
-{
-    TRACE("iface %p, clip %p.\n", iface, clip);
-    return dcomp_rectangle_clip_create(impl_from_IDCompositionDevice2(iface), clip);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateAnimation(IDCompositionDevice2 *iface,
-        IDCompositionAnimation **animation)
-{
-    TRACE("iface %p, animation %p.\n", iface, animation);
-    return dcomp_animation_create(impl_from_IDCompositionDevice2(iface), animation);
-}
+DCOMP_DEVICE_CREATE_ANIMATION(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
 static const struct IDCompositionDevice2Vtbl dcomp_device2_vtbl =
 {
@@ -4847,49 +4807,17 @@ static const struct IDCompositionDevice2Vtbl dcomp_device2_vtbl =
  * IDCompositionDevice3 Implementation
  * ===================================================================== */
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_QueryInterface(IDCompositionDevice3 *iface,
-        REFIID iid, void **out)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice3(iface);
-    return IDCompositionDevice_QueryInterface(&dev->IDCompositionDevice_iface, iid, out);
-}
+DCOMP_DEVICE_QUERY_INTERFACE(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static ULONG STDMETHODCALLTYPE dcomp_device3_AddRef(IDCompositionDevice3 *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice3(iface);
-    return IDCompositionDevice_AddRef(&dev->IDCompositionDevice_iface);
-}
+DCOMP_DEVICE_ADDREF(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static ULONG STDMETHODCALLTYPE dcomp_device3_Release(IDCompositionDevice3 *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice3(iface);
-    return IDCompositionDevice_Release(&dev->IDCompositionDevice_iface);
-}
+DCOMP_DEVICE_RELEASE(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_Commit(IDCompositionDevice3 *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice3(iface);
-    return dcomp_device_internal_commit(dev);
-}
+DCOMP_DEVICE_COMMIT(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_WaitForCommitCompletion(IDCompositionDevice3 *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice3(iface);
-    /* Direct binding has completed before Commit releases this lock. */
-    EnterCriticalSection(&dev->cs);
-    LeaveCriticalSection(&dev->cs);
-    return S_OK;
-}
+DCOMP_DEVICE_WAIT_FOR_COMMIT_COMPLETION(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_GetFrameStatistics(IDCompositionDevice3 *iface,
-        DCOMPOSITION_FRAME_STATISTICS *statistics)
-{
-    FIXME("iface %p, statistics %p stub!\n", iface, statistics);
-    if (!statistics)
-        return E_POINTER;
-    memset(statistics, 0, sizeof(*statistics));
-    return S_OK;
-}
+DCOMP_DEVICE_GET_FRAME_STATISTICS(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
 static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateVisual(IDCompositionDevice3 *iface,
         IDCompositionVisual2 **visual)
@@ -4898,81 +4826,21 @@ static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateVisual(IDCompositionDevice3
     return IDCompositionDevice2_CreateVisual(&dev->IDCompositionDevice2_iface, visual);
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateSurfaceFactory(IDCompositionDevice3 *iface,
-        IUnknown *rendering_device, IDCompositionSurfaceFactory **surface_factory)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice3(iface);
+DCOMP_DEVICE_CREATE_SURFACE_FACTORY(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-    TRACE("iface %p, rendering_device %p, surface_factory %p.\n", iface, rendering_device,
-            surface_factory);
+DCOMP_DEVICE_CREATE_SURFACE(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-    return dcomp_surface_factory_create(&dev->IDCompositionDevice_iface, rendering_device,
-            surface_factory);
-}
+DCOMP_DEVICE_CREATE_VIRTUAL_SURFACE(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateSurface(IDCompositionDevice3 *iface,
-        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
-        IDCompositionSurface **surface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice3(iface);
+DCOMP_DEVICE_CREATE_TRANSLATE_TRANSFORM(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n",
-            iface, width, height, pixel_format, alpha_mode, surface);
+DCOMP_DEVICE_CREATE_SCALE_TRANSFORM(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-    return dcomp_surface_create(&dev->IDCompositionDevice_iface, dev->rendering_device,
-            &dev->rendering_device_iid, width, height, pixel_format, alpha_mode, surface);
-}
+DCOMP_DEVICE_CREATE_ROTATE_TRANSFORM(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateVirtualSurface(IDCompositionDevice3 *iface,
-        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
-        IDCompositionVirtualSurface **surface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice3(iface);
+DCOMP_DEVICE_CREATE_SKEW_TRANSFORM(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n",
-            iface, width, height, pixel_format, alpha_mode, surface);
-    return dcomp_device_create_virtual_surface(dev, width, height, pixel_format, alpha_mode, surface);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateTranslateTransform(IDCompositionDevice3 *iface,
-        IDCompositionTranslateTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice3(iface), DCOMP_TRANSFORM_TRANSLATE,
-            (IDCompositionTransform **)transform);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateScaleTransform(IDCompositionDevice3 *iface,
-        IDCompositionScaleTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice3(iface), DCOMP_TRANSFORM_SCALE,
-            (IDCompositionTransform **)transform);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateRotateTransform(IDCompositionDevice3 *iface,
-        IDCompositionRotateTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice3(iface), DCOMP_TRANSFORM_ROTATE,
-            (IDCompositionTransform **)transform);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateSkewTransform(IDCompositionDevice3 *iface,
-        IDCompositionSkewTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice3(iface), DCOMP_TRANSFORM_SKEW,
-            (IDCompositionTransform **)transform);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateMatrixTransform(IDCompositionDevice3 *iface,
-        IDCompositionMatrixTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice3(iface), DCOMP_TRANSFORM_MATRIX,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_MATRIX_TRANSFORM(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
 static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateTransformGroup(IDCompositionDevice3 *iface,
         IDCompositionTransform **transforms, UINT elements, IDCompositionTransform **transform_group)
@@ -4981,33 +4849,13 @@ static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateTransformGroup(IDCompositio
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateTranslateTransform3D(IDCompositionDevice3 *iface,
-        IDCompositionTranslateTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_TRANSLATE_TRANSFORM_3D(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateScaleTransform3D(IDCompositionDevice3 *iface,
-        IDCompositionScaleTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_SCALE_TRANSFORM_3D(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateRotateTransform3D(IDCompositionDevice3 *iface,
-        IDCompositionRotateTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_ROTATE_TRANSFORM_3D(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateMatrixTransform3D(IDCompositionDevice3 *iface,
-        IDCompositionMatrixTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_MATRIX_TRANSFORM_3D(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
 static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateTransform3DGroup(IDCompositionDevice3 *iface,
         IDCompositionTransform3D **transforms_3d, UINT elements, IDCompositionTransform3D **transform_3d_group)
@@ -5016,26 +4864,11 @@ static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateTransform3DGroup(IDComposit
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateEffectGroup(IDCompositionDevice3 *iface,
-        IDCompositionEffectGroup **effect_group)
-{
-    TRACE("iface %p, effect_group %p.\n", iface, effect_group);
-    return dcomp_effect_group_create(impl_from_IDCompositionDevice3(iface), effect_group);
-}
+DCOMP_DEVICE_CREATE_EFFECT_GROUP(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateRectangleClip(IDCompositionDevice3 *iface,
-        IDCompositionRectangleClip **clip)
-{
-    TRACE("iface %p, clip %p.\n", iface, clip);
-    return dcomp_rectangle_clip_create(impl_from_IDCompositionDevice3(iface), clip);
-}
+DCOMP_DEVICE_CREATE_RECTANGLE_CLIP(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateAnimation(IDCompositionDevice3 *iface,
-        IDCompositionAnimation **animation)
-{
-    TRACE("iface %p, animation %p.\n", iface, animation);
-    return dcomp_animation_create(impl_from_IDCompositionDevice3(iface), animation);
-}
+DCOMP_DEVICE_CREATE_ANIMATION(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
 static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateGaussianBlurEffect(IDCompositionDevice3 *iface,
         IDCompositionGaussianBlurEffect **effect)
@@ -5173,49 +5006,17 @@ static const struct IDCompositionDevice3Vtbl dcomp_device3_vtbl =
  * IDCompositionDesktopDevice Implementation
  * ===================================================================== */
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_QueryInterface(IDCompositionDesktopDevice *iface,
-        REFIID iid, void **out)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDesktopDevice(iface);
-    return IDCompositionDevice_QueryInterface(&dev->IDCompositionDevice_iface, iid, out);
-}
+DCOMP_DEVICE_QUERY_INTERFACE(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static ULONG STDMETHODCALLTYPE dcomp_desktop_device_AddRef(IDCompositionDesktopDevice *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDesktopDevice(iface);
-    return IDCompositionDevice_AddRef(&dev->IDCompositionDevice_iface);
-}
+DCOMP_DEVICE_ADDREF(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static ULONG STDMETHODCALLTYPE dcomp_desktop_device_Release(IDCompositionDesktopDevice *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDesktopDevice(iface);
-    return IDCompositionDevice_Release(&dev->IDCompositionDevice_iface);
-}
+DCOMP_DEVICE_RELEASE(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_Commit(IDCompositionDesktopDevice *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDesktopDevice(iface);
-    return dcomp_device_internal_commit(dev);
-}
+DCOMP_DEVICE_COMMIT(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_WaitForCommitCompletion(IDCompositionDesktopDevice *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDesktopDevice(iface);
-    /* Direct binding has completed before Commit releases this lock. */
-    EnterCriticalSection(&dev->cs);
-    LeaveCriticalSection(&dev->cs);
-    return S_OK;
-}
+DCOMP_DEVICE_WAIT_FOR_COMMIT_COMPLETION(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_GetFrameStatistics(IDCompositionDesktopDevice *iface,
-        DCOMPOSITION_FRAME_STATISTICS *statistics)
-{
-    FIXME("iface %p, statistics %p stub!\n", iface, statistics);
-    if (!statistics)
-        return E_POINTER;
-    memset(statistics, 0, sizeof(*statistics));
-    return S_OK;
-}
+DCOMP_DEVICE_GET_FRAME_STATISTICS(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
 static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateVisual(IDCompositionDesktopDevice *iface,
         IDCompositionVisual2 **visual)
@@ -5224,81 +5025,21 @@ static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateVisual(IDComposition
     return IDCompositionDevice2_CreateVisual(&dev->IDCompositionDevice2_iface, visual);
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateSurfaceFactory(IDCompositionDesktopDevice *iface,
-        IUnknown *rendering_device, IDCompositionSurfaceFactory **surface_factory)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDesktopDevice(iface);
+DCOMP_DEVICE_CREATE_SURFACE_FACTORY(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-    TRACE("iface %p, rendering_device %p, surface_factory %p.\n", iface, rendering_device,
-            surface_factory);
+DCOMP_DEVICE_CREATE_SURFACE(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-    return dcomp_surface_factory_create(&dev->IDCompositionDevice_iface, rendering_device,
-            surface_factory);
-}
+DCOMP_DEVICE_CREATE_VIRTUAL_SURFACE(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateSurface(IDCompositionDesktopDevice *iface,
-        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
-        IDCompositionSurface **surface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDesktopDevice(iface);
+DCOMP_DEVICE_CREATE_TRANSLATE_TRANSFORM(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n",
-            iface, width, height, pixel_format, alpha_mode, surface);
+DCOMP_DEVICE_CREATE_SCALE_TRANSFORM(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-    return dcomp_surface_create(&dev->IDCompositionDevice_iface, dev->rendering_device,
-            &dev->rendering_device_iid, width, height, pixel_format, alpha_mode, surface);
-}
+DCOMP_DEVICE_CREATE_ROTATE_TRANSFORM(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateVirtualSurface(IDCompositionDesktopDevice *iface,
-        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
-        IDCompositionVirtualSurface **surface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDesktopDevice(iface);
+DCOMP_DEVICE_CREATE_SKEW_TRANSFORM(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n",
-            iface, width, height, pixel_format, alpha_mode, surface);
-    return dcomp_device_create_virtual_surface(dev, width, height, pixel_format, alpha_mode, surface);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateTranslateTransform(IDCompositionDesktopDevice *iface,
-        IDCompositionTranslateTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDesktopDevice(iface), DCOMP_TRANSFORM_TRANSLATE,
-            (IDCompositionTransform **)transform);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateScaleTransform(IDCompositionDesktopDevice *iface,
-        IDCompositionScaleTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDesktopDevice(iface), DCOMP_TRANSFORM_SCALE,
-            (IDCompositionTransform **)transform);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateRotateTransform(IDCompositionDesktopDevice *iface,
-        IDCompositionRotateTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDesktopDevice(iface), DCOMP_TRANSFORM_ROTATE,
-            (IDCompositionTransform **)transform);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateSkewTransform(IDCompositionDesktopDevice *iface,
-        IDCompositionSkewTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDesktopDevice(iface), DCOMP_TRANSFORM_SKEW,
-            (IDCompositionTransform **)transform);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateMatrixTransform(IDCompositionDesktopDevice *iface,
-        IDCompositionMatrixTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDesktopDevice(iface), DCOMP_TRANSFORM_MATRIX,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_MATRIX_TRANSFORM(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
 static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateTransformGroup(IDCompositionDesktopDevice *iface,
         IDCompositionTransform **transforms, UINT elements, IDCompositionTransform **transform_group)
@@ -5307,33 +5048,13 @@ static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateTransformGroup(IDCom
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateTranslateTransform3D(IDCompositionDesktopDevice *iface,
-        IDCompositionTranslateTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_TRANSLATE_TRANSFORM_3D(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateScaleTransform3D(IDCompositionDesktopDevice *iface,
-        IDCompositionScaleTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_SCALE_TRANSFORM_3D(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateRotateTransform3D(IDCompositionDesktopDevice *iface,
-        IDCompositionRotateTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_ROTATE_TRANSFORM_3D(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateMatrixTransform3D(IDCompositionDesktopDevice *iface,
-        IDCompositionMatrixTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_MATRIX_TRANSFORM_3D(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
 static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateTransform3DGroup(IDCompositionDesktopDevice *iface,
         IDCompositionTransform3D **transforms_3d, UINT elements, IDCompositionTransform3D **transform_3d_group)
@@ -5342,26 +5063,11 @@ static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateTransform3DGroup(IDC
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateEffectGroup(IDCompositionDesktopDevice *iface,
-        IDCompositionEffectGroup **effect_group)
-{
-    TRACE("iface %p, effect_group %p.\n", iface, effect_group);
-    return dcomp_effect_group_create(impl_from_IDCompositionDesktopDevice(iface), effect_group);
-}
+DCOMP_DEVICE_CREATE_EFFECT_GROUP(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateRectangleClip(IDCompositionDesktopDevice *iface,
-        IDCompositionRectangleClip **clip)
-{
-    TRACE("iface %p, clip %p.\n", iface, clip);
-    return dcomp_rectangle_clip_create(impl_from_IDCompositionDesktopDevice(iface), clip);
-}
+DCOMP_DEVICE_CREATE_RECTANGLE_CLIP(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateAnimation(IDCompositionDesktopDevice *iface,
-        IDCompositionAnimation **animation)
-{
-    TRACE("iface %p, animation %p.\n", iface, animation);
-    return dcomp_animation_create(impl_from_IDCompositionDesktopDevice(iface), animation);
-}
+DCOMP_DEVICE_CREATE_ANIMATION(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
 static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateTargetForHwnd(IDCompositionDesktopDevice *iface,
         HWND hwnd, BOOL topmost, IDCompositionTarget **target)

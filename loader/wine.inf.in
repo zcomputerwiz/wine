@@ -409,6 +409,12 @@ HKCU,%CurrentVersion%\Explorer\Advanced,,16
 HKCU,%CurrentVersion%\Explorer\FileExts,,16
 HKCU,%CurrentVersion%\ImmersiveShell,"TabletMode",0x10003,0
 HKCU,%CurrentVersion%\Run,,16
+HKCU,%CurrentVersion%\Themes\Personalize,"AppsUseLightTheme",0x10003,1
+HKCU,%CurrentVersion%\Themes\Personalize,"SystemUsesLightTheme",0x10003,1
+HKCU,%CurrentVersion%\Themes\Personalize,"EnableTransparency",0x10003,1
+HKCU,%CurrentVersion%\Themes\Personalize,"ColorPrevalence",0x10003,0
+HKCU,"Control Panel\Accessibility\HighContrast","Flags",2,"126"
+HKCU,"Control Panel\Accessibility\HighContrast","High Contrast Scheme",2,""
 HKCU,%CurrentVersionNT%\Winlogon,,16
 HKLM,%CurrentVersion%,"CommonFilesDir",,"%16427%"
 HKLM,%CurrentVersion%,"FirstInstallDateTime",1,21,81,7c,23

@@ -44,6 +44,16 @@ extern int sysrun_active;
 
 extern void sysrun_init(void);
 extern const char *sysrun_machine_root(void);
+
+/* One "key=value" line of /etc/wineexplorer/sysrun.conf, the only reader of that file in the server. The file
+ * must be a regular file owned by root that only root can write (checked on the open descriptor). */
+enum sysrun_conf
+{
+    SYSRUN_CONF_ABSENT,   /* no such file, an unsafe file, or no line for the key */
+    SYSRUN_CONF_VALUE,    /* exactly one line with a value that fits */
+    SYSRUN_CONF_INVALID   /* the key repeated, an empty value, or one longer than size - 1 */
+};
+extern enum sysrun_conf sysrun_conf_get( const char *key, char *value, size_t size );
 extern gid_t sysrun_group(void);
 
 /* raise the effective group to the system group; returns 1 if it was raised, to be passed to sysrun_drop() */

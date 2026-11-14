@@ -571,28 +571,18 @@ int elevation_helper_unset(void)
 static const char *admin_group_name(void)
 {
     static char name[64];
-    char buf[4096], *line, *next;
-    struct stat st;
-    ssize_t n;
-    int fd, seen = 0;
 
-    strcpy( name, "sudo" );
-    if ((fd = open( "/etc/wineexplorer/sysrun.conf", O_RDONLY | O_NOFOLLOW | O_CLOEXEC )) == -1) return name;
-    if (fstat( fd, &st ) || !S_ISREG( st.st_mode ) || st.st_uid != 0 || (st.st_mode & (S_IWGRP | S_IWOTH)))
-        n = 0;
-    else
-        n = read( fd, buf, sizeof(buf) - 1 );
-    close( fd );
-    if (n <= 0) return name;
-    buf[n] = 0;
-    for (line = buf; line; line = next)
+    switch (sysrun_conf_get( "admin_group", name, sizeof(name) ))
     {
-        if ((next = strchr( line, '\n' ))) *next++ = 0;
-        if (strncmp( line, "admin_group=", 12 )) continue;
-        if (seen++ || !accounts_valid_name( line + 12 )) return NULL;
-        strcpy( name, line + 12 );
+    case SYSRUN_CONF_ABSENT:
+        strcpy( name, "sudo" );
+        return name;
+    case SYSRUN_CONF_VALUE:
+        return accounts_valid_name( name ) ? name : NULL;
+    case SYSRUN_CONF_INVALID:
+        break;
     }
-    return name;
+    return NULL;
 }
 
 /* Whether the user of this server is in the administrator group of the group database. Decided once, when the

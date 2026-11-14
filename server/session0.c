@@ -326,30 +326,10 @@ static int session0_send_order( struct session0_socket *link, unsigned int order
     return 1;
 }
 
-/* one "key=value" line of the root-owned configuration; 0 if the file or the key is missing */
+/* one "key=value" line of the root-owned configuration, given exactly once (sysrun_conf_get) */
 static int read_conf( const char *key, char *value, size_t size )
 {
-    char buf[4096], *line, *next;
-    size_t keylen = strlen( key );
-    struct stat st;
-    ssize_t n = 0;
-    int fd;
-
-    if ((fd = open( SESSION0_CONF, O_RDONLY | O_NOFOLLOW | O_CLOEXEC )) == -1) return 0;
-    if (!fstat( fd, &st ) && S_ISREG( st.st_mode ) && !st.st_uid && !(st.st_mode & (S_IWGRP | S_IWOTH)))
-        n = read( fd, buf, sizeof(buf) - 1 );
-    close( fd );
-    if (n <= 0) return 0;
-    buf[n] = 0;
-    for (line = buf; line; line = next)
-    {
-        if ((next = strchr( line, '\n' ))) *next++ = 0;
-        if (strncmp( line, key, keylen ) || line[keylen] != '=') continue;
-        if (strlen( line + keylen + 1 ) >= size) return 0;
-        strcpy( value, line + keylen + 1 );
-        return value[0] != 0;
-    }
-    return 0;
+    return sysrun_conf_get( key, value, size ) == SYSRUN_CONF_VALUE;
 }
 
 /* the socket path: the configuration, else (development) the environment */
@@ -359,10 +339,15 @@ static int get_socket_path( int conf_only )
 {
     const char *env;
 
-    if (read_conf( "session0_socket", session0_path, sizeof(session0_path) ))
+    switch (sysrun_conf_get( "session0_socket", session0_path, sizeof(session0_path) ))
     {
+    case SYSRUN_CONF_VALUE:
         socket_from_conf = session0_path[0] == '/';
         return socket_from_conf;
+    case SYSRUN_CONF_INVALID:
+        return 0;  /* a broken configuration never falls back to the environment */
+    case SYSRUN_CONF_ABSENT:
+        break;
     }
     if (conf_only || !(env = getenv( "WEX_SESSION0_SOCKET" )) || env[0] != '/' ||
         strlen( env ) >= sizeof(session0_path)) return 0;

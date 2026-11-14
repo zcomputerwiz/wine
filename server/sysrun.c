@@ -79,39 +79,48 @@ static void set_not_dumpable(void)
 #endif
 }
 
-/* read "group" and "machine_root" from the configuration, which must be a regular root-owned file that only
- * root can write (checked on the open descriptor) */
-static int read_config( char *group, size_t group_size )
+enum sysrun_conf sysrun_conf_get( const char *key, char *value, size_t size )
 {
+    enum sysrun_conf ret = SYSRUN_CONF_ABSENT;
+    size_t keylen = strlen( key );
     char buf[4096], *line, *next;
     struct stat st;
-    ssize_t n;
+    ssize_t n = 0;
     int fd;
 
-    group[0] = machine_root[0] = 0;
-    if ((fd = open( SYSRUN_CONF, O_RDONLY | O_NOFOLLOW | O_CLOEXEC )) == -1) return 0;
-    if (fstat( fd, &st ) || !S_ISREG( st.st_mode ) || st.st_uid != 0 || (st.st_mode & (S_IWGRP | S_IWOTH)))
-        n = 0;
-    else
+    if (size) value[0] = 0;
+    if ((fd = open( SYSRUN_CONF, O_RDONLY | O_NOFOLLOW | O_CLOEXEC )) == -1) return SYSRUN_CONF_ABSENT;
+    if (!fstat( fd, &st ) && S_ISREG( st.st_mode ) && !st.st_uid && !(st.st_mode & (S_IWGRP | S_IWOTH)))
         n = read( fd, buf, sizeof(buf) - 1 );
     close( fd );
-    if (n <= 0) return 0;
+    if (n <= 0) return SYSRUN_CONF_ABSENT;
     buf[n] = 0;
     for (line = buf; line; line = next)
     {
         if ((next = strchr( line, '\n' ))) *next++ = 0;
-        if (!strncmp( line, "group=", 6 ))
+        if (strncmp( line, key, keylen ) || line[keylen] != '=') continue;
+        if (ret != SYSRUN_CONF_ABSENT || !line[keylen + 1] || strlen( line + keylen + 1 ) >= size)
         {
-            if (strlen( line + 6 ) >= group_size) return 0;
-            strcpy( group, line + 6 );
+            if (size) value[0] = 0;
+            return SYSRUN_CONF_INVALID;
         }
-        else if (!strncmp( line, "machine_root=", 13 ))
-        {
-            if (strlen( line + 13 ) >= sizeof(machine_root)) return 0;
-            strcpy( machine_root, line + 13 );
-        }
+        strcpy( value, line + keylen + 1 );
+        ret = SYSRUN_CONF_VALUE;
     }
-    return group[0] && machine_root[0] == '/';
+    return ret;
+}
+
+/* "group" and "machine_root" of the configuration, each given exactly once */
+static int read_config( char *group, size_t group_size )
+{
+    machine_root[0] = 0;
+    if (sysrun_conf_get( "group", group, group_size ) != SYSRUN_CONF_VALUE ||
+        sysrun_conf_get( "machine_root", machine_root, sizeof(machine_root) ) != SYSRUN_CONF_VALUE)
+    {
+        machine_root[0] = 0;
+        return 0;
+    }
+    return machine_root[0] == '/';
 }
 
 /* called first thing in main() */
