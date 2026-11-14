@@ -972,11 +972,215 @@ BOOL WINAPI UnloadUserProfile( HANDLE hToken, HANDLE hProfile )
     return FALSE;
 }
 
+/* WineExplorer: the applied GPO list. The policy writer of session 0 (wexpolicy) records the objects it applied in
+ * HKLM\Software\Microsoft\Windows\CurrentVersion\Group Policy\State\<Machine|SID>\GPO-List\<n>, in the order they
+ * were applied; an object is listed for an extension when its Extensions value names the extension's GUID. */
+static const WCHAR gp_state_key[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\State\\";
+
+static WCHAR *gp_query_string( HKEY key, const WCHAR *name )
+{
+    DWORD size = 0, type;
+    WCHAR *str;
+
+    if (RegQueryValueExW( key, name, NULL, &type, NULL, &size ) || (type != REG_SZ && type != REG_EXPAND_SZ)) size = 0;
+    if (!(str = malloc( size + sizeof(WCHAR) ))) return NULL;
+    if (size && RegQueryValueExW( key, name, NULL, NULL, (BYTE *)str, &size )) size = 0;
+    str[size / sizeof(WCHAR)] = 0;
+    return str;
+}
+
+static DWORD gp_query_dword( HKEY key, const WCHAR *name )
+{
+    DWORD value = 0, size = sizeof(value), type;
+
+    if (RegQueryValueExW( key, name, NULL, &type, (BYTE *)&value, &size ) || type != REG_DWORD) value = 0;
+    return value;
+}
+
+/* the Extensions value ("[{extension}{tool}...]...", as gPCMachineExtensionNames) names the extension */
+static BOOL gp_names_extension( const WCHAR *list, const WCHAR *guid )
+{
+    size_t len = wcslen( guid );
+
+    for (; *list; list++) if (!_wcsnicmp( list, guid, len )) return TRUE;
+    return FALSE;
+}
+
+/* one object of the list as one LocalAlloc block: the structure, then its strings */
+static GROUP_POLICY_OBJECTW *gp_read_object( HKEY key )
+{
+    WCHAR *ds = gp_query_string( key, L"DSPath" ), *fs = gp_query_string( key, L"FileSysPath" );
+    WCHAR *display = gp_query_string( key, L"DisplayName" ), *name = gp_query_string( key, L"GPOName" );
+    WCHAR *ext = gp_query_string( key, L"Extensions" ), *link = gp_query_string( key, L"Link" );
+    GROUP_POLICY_OBJECTW *gpo = NULL;
+
+    if (ds && fs && display && name && ext && link)
+    {
+        size_t len = wcslen( ds ) + wcslen( fs ) + wcslen( display ) + wcslen( ext ) + wcslen( link ) + 5;
+        if ((gpo = LocalAlloc( LPTR, sizeof(*gpo) + len * sizeof(WCHAR) )))
+        {
+            WCHAR *p = (WCHAR *)(gpo + 1);
+            gpo->dwOptions = gp_query_dword( key, L"Options" );
+            gpo->dwVersion = gp_query_dword( key, L"Version" );
+            gpo->GPOLink = gp_query_dword( key, L"GPOLink" );
+            gpo->lParam = gp_query_dword( key, L"lParam" );
+            lstrcpynW( gpo->szGPOName, name, ARRAY_SIZE(gpo->szGPOName) );
+            gpo->lpDSPath = p;      wcscpy( p, ds );      p += wcslen( p ) + 1;
+            gpo->lpFileSysPath = p; wcscpy( p, fs );      p += wcslen( p ) + 1;
+            gpo->lpDisplayName = p; wcscpy( p, display ); p += wcslen( p ) + 1;
+            gpo->lpExtensions = p;  wcscpy( p, ext );     p += wcslen( p ) + 1;
+            gpo->lpLink = p;        wcscpy( p, link );
+        }
+    }
+    free( ds ); free( fs ); free( display ); free( name ); free( ext ); free( link );
+    return gpo;
+}
+
 DWORD WINAPI GetAppliedGPOListW(DWORD dwFlags, LPCWSTR pMachineName, PSID pSidUser, GUID *pGuidExtension,
         PGROUP_POLICY_OBJECTW *ppGPOList)
 {
-    FIXME("(%lx %s %p %s %p)\n", dwFlags, debugstr_w(pMachineName), pSidUser, debugstr_guid(pGuidExtension), ppGPOList);
-    return ERROR_ACCESS_DENIED;
+    WCHAR path[256], guid[39], index[16], *sid = NULL;
+    GROUP_POLICY_OBJECTW *first = NULL, *last = NULL, *gpo;
+    HKEY list, key;
+    DWORD i, err;
+
+    TRACE("(%lx %s %p %s %p)\n", dwFlags, debugstr_w(pMachineName), pSidUser, debugstr_guid(pGuidExtension), ppGPOList);
+
+    if (!ppGPOList || !pGuidExtension) return ERROR_INVALID_PARAMETER;
+    *ppGPOList = NULL;
+    if (pMachineName && pMachineName[0])
+    {
+        FIXME("remote machine %s not supported\n", debugstr_w(pMachineName));
+        return ERROR_NOT_SUPPORTED;
+    }
+    if (!(dwFlags & GPO_LIST_FLAG_MACHINE))
+    {
+        if (!pSidUser || !ConvertSidToStringSidW( pSidUser, &sid )) return ERROR_INVALID_PARAMETER;
+    }
+    swprintf( path, ARRAY_SIZE(path), L"%s%s\\GPO-List", gp_state_key, sid ? sid : L"Machine" );
+    LocalFree( sid );
+    StringFromGUID2( pGuidExtension, guid, ARRAY_SIZE(guid) );
+
+    /* nothing applied: an empty list */
+    if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, path, 0, KEY_READ | KEY_WOW64_64KEY, &list )) return ERROR_SUCCESS;
+    for (i = 0; ; i++)
+    {
+        swprintf( index, ARRAY_SIZE(index), L"%lu", i );
+        if (RegOpenKeyExW( list, index, 0, KEY_READ, &key )) break;
+        gpo = gp_read_object( key );
+        RegCloseKey( key );
+        if (!gpo)
+        {
+            err = ERROR_NOT_ENOUGH_MEMORY;
+            goto failed;
+        }
+        if (!gp_names_extension( gpo->lpExtensions, guid ))
+        {
+            LocalFree( gpo );
+            continue;
+        }
+        gpo->pPrev = last;
+        if (last) last->pNext = gpo;
+        else first = gpo;
+        last = gpo;
+    }
+    RegCloseKey( list );
+    *ppGPOList = first;
+    return ERROR_SUCCESS;
+
+failed:
+    RegCloseKey( list );
+    while (first) { gpo = first->pNext; LocalFree( first ); first = gpo; }
+    return err;
+}
+
+/* the strings of an object, converted, after the structure */
+DWORD WINAPI GetAppliedGPOListA(DWORD dwFlags, LPCSTR pMachineName, PSID pSidUser, GUID *pGuidExtension,
+        PGROUP_POLICY_OBJECTA *ppGPOList)
+{
+    GROUP_POLICY_OBJECTW *listW = NULL, *w;
+    GROUP_POLICY_OBJECTA *first = NULL, *last = NULL, *a;
+    DWORD err;
+
+    if (!ppGPOList) return ERROR_INVALID_PARAMETER;
+    *ppGPOList = NULL;
+    if (pMachineName && pMachineName[0])
+    {
+        FIXME("remote machine %s not supported\n", debugstr_a(pMachineName));
+        return ERROR_NOT_SUPPORTED;
+    }
+    if ((err = GetAppliedGPOListW( dwFlags, NULL, pSidUser, pGuidExtension, &listW ))) return err;
+    for (w = listW; w; w = w->pNext)
+    {
+        const WCHAR *strs[5] = { w->lpDSPath, w->lpFileSysPath, w->lpDisplayName, w->lpExtensions, w->lpLink };
+        int lens[5], total = 0, k;
+        char *p;
+
+        for (k = 0; k < 5; k++) total += (lens[k] = WideCharToMultiByte( CP_ACP, 0, strs[k], -1, NULL, 0, NULL, NULL ));
+        if (!(a = LocalAlloc( LPTR, sizeof(*a) + total )))
+        {
+            err = ERROR_NOT_ENOUGH_MEMORY;
+            break;
+        }
+        a->dwOptions = w->dwOptions;
+        a->dwVersion = w->dwVersion;
+        a->GPOLink = w->GPOLink;
+        a->lParam = w->lParam;
+        a->lParam2 = w->lParam2;
+        WideCharToMultiByte( CP_ACP, 0, w->szGPOName, -1, a->szGPOName, sizeof(a->szGPOName), NULL, NULL );
+        p = (char *)(a + 1);
+        for (k = 0; k < 5; k++)
+        {
+            WideCharToMultiByte( CP_ACP, 0, strs[k], -1, p, lens[k], NULL, NULL );
+            switch (k)
+            {
+            case 0: a->lpDSPath = p; break;
+            case 1: a->lpFileSysPath = p; break;
+            case 2: a->lpDisplayName = p; break;
+            case 3: a->lpExtensions = p; break;
+            case 4: a->lpLink = p; break;
+            }
+            p += lens[k];
+        }
+        a->pPrev = last;
+        if (last) last->pNext = a;
+        else first = a;
+        last = a;
+    }
+    FreeGPOListW( listW );
+    if (err)
+    {
+        FreeGPOListA( first );
+        return err;
+    }
+    *ppGPOList = first;
+    return ERROR_SUCCESS;
+}
+
+BOOL WINAPI FreeGPOListW(PGROUP_POLICY_OBJECTW pGPOList)
+{
+    GROUP_POLICY_OBJECTW *next;
+
+    while (pGPOList)
+    {
+        next = pGPOList->pNext;
+        LocalFree( pGPOList );
+        pGPOList = next;
+    }
+    return TRUE;
+}
+
+BOOL WINAPI FreeGPOListA(PGROUP_POLICY_OBJECTA pGPOList)
+{
+    GROUP_POLICY_OBJECTA *next;
+
+    while (pGPOList)
+    {
+        next = pGPOList->pNext;
+        LocalFree( pGPOList );
+        pGPOList = next;
+    }
+    return TRUE;
 }
 
 /******************************************************************************
