@@ -1,7 +1,8 @@
 MODULE  = windows.ui.xaml.dll
-IMPORTS = combase
+IMPORTS = combase advapi32
 
 SOURCES = \
 	classes.idl \
 	color_helper.c \
+	component.c \
 	main.c
