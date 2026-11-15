@@ -1094,6 +1094,7 @@ static HRESULT WINAPI dwritefactory_CreateFontFace(IDWriteFactory7 *iface, DWRIT
     desc.index = index;
     desc.simulations = simulations;
     desc.font_data = NULL;
+    desc.instance = 0;
     hr = create_fontface(&desc, fontfaces, (IDWriteFontFace5 **)fontface);
 
 failed:

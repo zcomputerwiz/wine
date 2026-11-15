@@ -523,7 +523,8 @@ static IDWriteFont *get_tahoma_instance(IDWriteFactory *factory, DWRITE_FONT_STY
     return font;
 }
 
-static WCHAR *create_testfontfile(const WCHAR *filename)
+/* resource 1 is wine_test.ttf, 2 is wine_test_var.ttf (a variable font with named instances) */
+static WCHAR *create_testfontfile_from_resource(const WCHAR *filename, int id)
 {
     static WCHAR pathW[MAX_PATH];
     DWORD written;
@@ -538,7 +539,7 @@ static WCHAR *create_testfontfile(const WCHAR *filename)
     ok(file != INVALID_HANDLE_VALUE, "file creation failed, at %s, error %ld\n", wine_dbgstr_w(pathW),
         GetLastError());
 
-    res = FindResourceA(GetModuleHandleA(NULL), (LPCSTR)MAKEINTRESOURCE(1), (LPCSTR)RT_RCDATA);
+    res = FindResourceA(GetModuleHandleA(NULL), (LPCSTR)MAKEINTRESOURCE(id), (LPCSTR)RT_RCDATA);
     ok( res != 0, "couldn't find resource\n" );
     ptr = LockResource( LoadResource( GetModuleHandleA(NULL), res ));
     WriteFile( file, ptr, SizeofResource( GetModuleHandleA(NULL), res ), &written, NULL );
@@ -546,6 +547,11 @@ static WCHAR *create_testfontfile(const WCHAR *filename)
     CloseHandle( file );
 
     return pathW;
+}
+
+static WCHAR *create_testfontfile(const WCHAR *filename)
+{
+    return create_testfontfile_from_resource(filename, 1);
 }
 
 #define DELETE_FONTFILE(filename) _delete_testfontfile(filename, __LINE__)
@@ -10735,6 +10741,107 @@ static void test_font_download_queue(void)
     ok(ref == 0, "factory not released, %lu\n", ref);
 }
 
+static void check_font_name(IDWriteFontCollection2 *collection, UINT32 family_index, UINT32 font_index,
+        const WCHAR *family_name, const WCHAR *face_name, DWRITE_FONT_WEIGHT weight)
+{
+    IDWriteLocalizedStrings *strings;
+    IDWriteFontFamily2 *family;
+    IDWriteFont3 *font;
+    WCHAR buffer[64];
+    HRESULT hr;
+
+    winetest_push_context("family %u font %u", family_index, font_index);
+    hr = IDWriteFontCollection2_GetFontFamily(collection, family_index, &family);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IDWriteFontFamily2_GetFamilyNames(family, &strings);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    get_enus_string(strings, buffer, ARRAY_SIZE(buffer));
+    ok(!wcscmp(buffer, family_name), "Unexpected family name %s.\n", wine_dbgstr_w(buffer));
+    IDWriteLocalizedStrings_Release(strings);
+
+    hr = IDWriteFontFamily2_GetFont(family, font_index, &font);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IDWriteFont3_GetFaceNames(font, &strings);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    get_enus_string(strings, buffer, ARRAY_SIZE(buffer));
+    ok(!wcscmp(buffer, face_name), "Unexpected face name %s.\n", wine_dbgstr_w(buffer));
+    IDWriteLocalizedStrings_Release(strings);
+    ok(IDWriteFont3_GetWeight(font) == weight, "Unexpected weight %d.\n", IDWriteFont3_GetWeight(font));
+    IDWriteFont3_Release(font);
+    IDWriteFontFamily2_Release(family);
+    winetest_pop_context();
+}
+
+/* A variable font with a STAT table gives a font set one entry per named instance. In the weight/stretch/style
+   model the instances' non-WWS axes (here opsz) name families of their own; in the typographic model they are
+   faces of one family. Values as Windows 11 gives them for wine_test_var.ttf. */
+static void test_fontset_named_instances(void)
+{
+    IDWriteFontCollection2 *collection;
+    IDWriteFontSetBuilder2 *builder;
+    IDWriteFactory6 *factory;
+    IDWriteFontSet *fontset;
+    UINT32 count, index;
+    BOOL exists;
+    WCHAR *path;
+    HRESULT hr;
+
+    if (!(factory = create_factory_iid(&IID_IDWriteFactory6)))
+    {
+        win_skip("IDWriteFactory6 is not supported.\n");
+        return;
+    }
+
+    path = create_testfontfile_from_resource(L"wine_test_var.ttf", 2);
+    hr = IDWriteFactory6_CreateFontSetBuilder(factory, &builder);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IDWriteFontSetBuilder2_AddFontFile(builder, path);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IDWriteFontSetBuilder2_CreateFontSet(builder, &fontset);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    count = IDWriteFontSet_GetFontCount(fontset);
+    ok(count == 4, "Unexpected font count %u.\n", count);
+
+    hr = IDWriteFactory6_CreateFontCollectionFromFontSet(factory, fontset,
+            DWRITE_FONT_FAMILY_MODEL_WEIGHT_STRETCH_STYLE, &collection);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    count = IDWriteFontCollection2_GetFontFamilyCount(collection);
+    ok(count == 3, "Unexpected family count %u.\n", count);
+    if (count == 3)
+    {
+        check_font_name(collection, 0, 0, L"Wine Var Test Small", L"Regular", DWRITE_FONT_WEIGHT_NORMAL);
+        check_font_name(collection, 1, 0, L"Wine Var Test Text", L"Regular", DWRITE_FONT_WEIGHT_NORMAL);
+        check_font_name(collection, 1, 1, L"Wine Var Test Text", L"Semibold", DWRITE_FONT_WEIGHT_SEMI_BOLD);
+        check_font_name(collection, 2, 0, L"Wine Var Test Display", L"Regular", DWRITE_FONT_WEIGHT_NORMAL);
+    }
+    exists = FALSE;
+    hr = IDWriteFontCollection2_FindFamilyName(collection, L"Wine Var Test Text", &index, &exists);
+    ok(hr == S_OK && exists, "Unexpected hr %#lx, exists %d.\n", hr, exists);
+    exists = TRUE;
+    hr = IDWriteFontCollection2_FindFamilyName(collection, L"Wine Var Test", &index, &exists);
+    ok(hr == S_OK && !exists, "Unexpected hr %#lx, exists %d.\n", hr, exists);
+    IDWriteFontCollection2_Release(collection);
+
+    hr = IDWriteFactory6_CreateFontCollectionFromFontSet(factory, fontset, DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC,
+            &collection);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    count = IDWriteFontCollection2_GetFontFamilyCount(collection);
+    ok(count == 1, "Unexpected family count %u.\n", count);
+    if (count == 1)
+    {
+        check_font_name(collection, 0, 0, L"Wine Var Test", L"Small", DWRITE_FONT_WEIGHT_NORMAL);
+        check_font_name(collection, 0, 1, L"Wine Var Test", L"Text", DWRITE_FONT_WEIGHT_NORMAL);
+        check_font_name(collection, 0, 2, L"Wine Var Test", L"Display", DWRITE_FONT_WEIGHT_NORMAL);
+        check_font_name(collection, 0, 3, L"Wine Var Test", L"Semibold Text", DWRITE_FONT_WEIGHT_SEMI_BOLD);
+    }
+    IDWriteFontCollection2_Release(collection);
+
+    IDWriteFontSet_Release(fontset);
+    IDWriteFontSetBuilder2_Release(builder);
+    IDWriteFactory6_Release(factory);
+    DELETE_FONTFILE(path);
+}
+
 START_TEST(font)
 {
     IDWriteFactory *factory;
@@ -10753,6 +10860,7 @@ START_TEST(font)
     test_GetMetrics();
     test_system_fontcollection();
     test_system_fontcollection_replacements();
+    test_fontset_named_instances();
     test_ConvertFontFaceToLOGFONT();
     test_CustomFontCollection();
     test_CreateCustomFontFileReference();
