@@ -213,6 +213,8 @@ struct named_pipe
     data_size_t         s0_len;
 };
 
+static int creating_pipe;  /* B17: create_named_pipe is looking the name up (an lrpc\ name stays local) */
+
 struct named_pipe_device
 {
     struct object       obj;         /* object header */
@@ -1869,6 +1871,7 @@ DECL_HANDLER(create_named_pipe)
         if (!(params.root = get_handle_obj( current->process, params.objattr->rootdir, 0, NULL ))) return;
     }
 
+    creating_pipe = 1;  /* B17: an lrpc\ name is this server's own when created here */
     switch (req->disposition)
     {
     case FILE_OPEN:
@@ -1885,6 +1888,7 @@ DECL_HANDLER(create_named_pipe)
         set_error( STATUS_INVALID_PARAMETER );
         break;
     }
+    creating_pipe = 0;
 
     if (params.root) release_object( params.root );
     if (!pipe) return;
@@ -3242,17 +3246,59 @@ static struct pipe_bridge *create_pipe_bridge( struct named_pipe *pipe, int sock
     return bridge;
 }
 
-/* a user's server: a name under WexSession0\ names a pipe of session 0. The object stands for it in the open */
+static const WCHAR lrpc_prefix[] = {'l','r','p','c','\\'};
+
+static int name_starts( const WCHAR *name, data_size_t len, const WCHAR *start, data_size_t start_len )
+{
+    return len >= start_len && !memicmp_strW( name, start, start_len );
+}
+
+/* a name under lrpc\ (rpcrt4's ncalrpc endpoints) that a service names itself. Not the endpoints every session's
+ * own rpcss has (epmapper, irpcss, irot), nor names made from a process id or an OXID (LRPC<pid>.<n>, COM's
+ * \pipe\OLE_<oxid>): process ids are per server, so the same name in session 0 is another process. */
+static int is_lrpc_pipe_name( const WCHAR *name, data_size_t len )
+{
+    static const WCHAR pipe_dir[] = {'\\','p','i','p','e','\\'};
+    static const WCHAR epmapper[] = {'e','p','m','a','p','p','e','r'};
+    static const WCHAR irpcss[] = {'i','r','p','c','s','s'};
+    static const WCHAR irot[] = {'i','r','o','t'};
+    static const WCHAR ole[] = {'O','L','E','_'};
+    static const WCHAR lrpc[] = {'L','R','P','C'};
+
+    if (len <= sizeof(lrpc_prefix) || !name_starts( name, len, lrpc_prefix, sizeof(lrpc_prefix) )) return 0;
+    name += ARRAY_SIZE(lrpc_prefix);
+    len -= sizeof(lrpc_prefix);
+    if (name_starts( name, len, pipe_dir, sizeof(pipe_dir) ))
+    {
+        name += ARRAY_SIZE(pipe_dir);
+        len -= sizeof(pipe_dir);
+    }
+    if (!len) return 0;
+    if ((len == sizeof(epmapper) && name_starts( name, len, epmapper, len )) ||
+        (len == sizeof(irpcss) && name_starts( name, len, irpcss, len )) ||
+        (len == sizeof(irot) && name_starts( name, len, irot, len )))
+        return 0;
+    return !name_starts( name, len, ole, sizeof(ole) ) && !name_starts( name, len, lrpc, sizeof(lrpc) );
+}
+
+/* a user's server: a name under WexSession0\ names a pipe of session 0. So does an ncalrpc endpoint (lrpc\...) that
+ * this server does not have: on Windows one namespace serves every session, and a service in session 0 offers its
+ * RPC interface to the users' programs that way (B17). The object stands for the pipe in the open. */
 static struct object *pipe_bridge_lookup( struct unicode_str *name )
 {
     static const WCHAR prefix[] = {'W','e','x','S','e','s','s','i','o','n','0','\\'};
-    const data_size_t prefix_len = sizeof(prefix);
+    data_size_t prefix_len = sizeof(prefix);
     struct named_pipe_init_data data = { .maxinstances = 1, .outsize = 65536, .insize = 65536,
                                          .sharing = FILE_SHARE_READ | FILE_SHARE_WRITE,
                                          .flags = NAMED_PIPE_MESSAGE_STREAM_WRITE };
     struct named_pipe *pipe;
 
-    if (name->len <= prefix_len || memicmp_strW( name->str, prefix, prefix_len )) return NULL;
+    if (is_lrpc_pipe_name( name->str, name->len ))
+    {
+        if (creating_pipe) return NULL;  /* a server here makes its own endpoint */
+        prefix_len = 0;  /* the same name there */
+    }
+    else if (name->len <= prefix_len || memicmp_strW( name->str, prefix, prefix_len )) return NULL;
     if (!(pipe = alloc_object( &named_pipe_ops ))) return NULL;
     named_pipe_init( &pipe->obj, &data );
     if (!(pipe->s0_name = memdup( (const char *)name->str + prefix_len, name->len - prefix_len )))
@@ -3298,6 +3344,8 @@ static int pipe_bridge_allowed( const WCHAR *name, data_size_t len )
 
     if (len == sizeof(svcctl) && !memicmp_strW( name, svcctl, len )) return 1;
     if (len == sizeof(broker) && !memicmp_strW( name, broker, len )) return 2;
+    /* a service's ncalrpc endpoint: the pipe's descriptor decides, and the service checks its callers itself */
+    if (is_lrpc_pipe_name( name, len )) return 1;
     return 0;
 }
 
