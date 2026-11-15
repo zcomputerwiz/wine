@@ -1041,6 +1041,54 @@ done:
     IActivationFactory_Release( factory );
 }
 
+static void test_LanguageStatics(void)
+{
+    static const struct { const WCHAR *tag; BOOLEAN well_formed; } tags[] =
+    {
+        { L"en-US", TRUE }, { L"en", TRUE }, { L"zh-Hans-CN", TRUE }, { L"xx", TRUE }, { L"x-private", TRUE },
+        { L"de-DE-1996", TRUE }, { L"", FALSE }, { L"not a tag", FALSE }, { L"en_US", FALSE }, { L"e", FALSE },
+        { L"toolongtag", FALSE }, { L"en--US", FALSE }, { L"en-", FALSE }, { L"-en", FALSE },
+    };
+    static const WCHAR *class_name = L"Windows.Globalization.Language";
+    IActivationFactory *factory;
+    ILanguageStatics *statics;
+    BOOLEAN result;
+    HSTRING str;
+    unsigned int i;
+    HRESULT hr;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (hr != S_OK) return;
+    hr = IActivationFactory_QueryInterface( factory, &IID_ILanguageStatics, (void **)&statics );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    IActivationFactory_Release( factory );
+    if (hr != S_OK) return;
+
+    for (i = 0; i < ARRAY_SIZE(tags); i++)
+    {
+        WindowsCreateString( tags[i].tag, wcslen( tags[i].tag ), &str );
+        result = !tags[i].well_formed;
+        hr = ILanguageStatics_IsWellFormed( statics, str, &result );
+        ok( hr == S_OK, "%s: got hr %#lx.\n", wine_dbgstr_w( tags[i].tag ), hr );
+        ok( result == tags[i].well_formed, "%s: got %d.\n", wine_dbgstr_w( tags[i].tag ), result );
+        WindowsDeleteString( str );
+    }
+
+    /* the keyboard layout's language: a well-formed tag */
+    str = NULL;
+    hr = ILanguageStatics_get_CurrentInputMethodLanguageTag( statics, &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    result = FALSE;
+    ILanguageStatics_IsWellFormed( statics, str, &result );
+    ok( result, "got %s.\n", wine_dbgstr_hstring( str ) );
+    WindowsDeleteString( str );
+    ILanguageStatics_Release( statics );
+}
+
 static const char *font_names[] =
 {
     "UIText", "UIHeading", "UITitle", "UICaption", "UINotificationHeading", "TraditionalDocument", "ModernDocument",
@@ -1174,6 +1222,7 @@ START_TEST(globalization)
     test_ApplicationLanguages();
     test_Calendar();
     test_LanguageFontGroup();
+    test_LanguageStatics();
 
     RoUninitialize();
 }
