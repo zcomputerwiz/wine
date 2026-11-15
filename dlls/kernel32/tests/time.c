@@ -1198,6 +1198,73 @@ static void test_processor_idle_cycle_time(void)
     ok( size == cpu_count * sizeof(ULONG64), "got %lu.\n", size );
 }
 
+static void test_TzSpecificLocalTimeEx(void)
+{
+    static const WORD years[] = { 2000, 2024 };
+    static const WORD months[] = { 1, 7 };
+    BOOL (WINAPI *pToLocalEx)(const DYNAMIC_TIME_ZONE_INFORMATION *, const SYSTEMTIME *, SYSTEMTIME *);
+    BOOL (WINAPI *pToSystemEx)(const DYNAMIC_TIME_ZONE_INFORMATION *, const SYSTEMTIME *, SYSTEMTIME *);
+    HMODULE kernel32 = GetModuleHandleA( "kernel32" );
+    DYNAMIC_TIME_ZONE_INFORMATION dyn, fixed;
+    TIME_ZONE_INFORMATION year_info;
+    SYSTEMTIME utc, local, expect, back;
+    unsigned int i, j;
+    BOOL ret;
+
+    pToLocalEx = (void *)GetProcAddress( kernel32, "SystemTimeToTzSpecificLocalTimeEx" );
+    pToSystemEx = (void *)GetProcAddress( kernel32, "TzSpecificLocalTimeToSystemTimeEx" );
+    if (!pToLocalEx || !pToSystemEx || !pGetDynamicTimeZoneInformation || !pGetTimeZoneInformationForYear)
+    {
+        win_skip( "the Ex time zone conversions are not available.\n" );
+        return;
+    }
+    pGetDynamicTimeZoneInformation( &dyn );
+
+    for (i = 0; i < ARRAY_SIZE(years); i++)
+    {
+        ret = pGetTimeZoneInformationForYear( years[i], &dyn, &year_info );
+        ok( ret, "GetTimeZoneInformationForYear(%u) failed, error %lu.\n", years[i], GetLastError() );
+        for (j = 0; j < ARRAY_SIZE(months); j++)
+        {
+            memset( &utc, 0, sizeof(utc) );
+            utc.wYear = years[i];
+            utc.wMonth = months[j];
+            utc.wDay = 15;
+            utc.wHour = 12;
+
+            ret = pSystemTimeToTzSpecificLocalTime( &year_info, &utc, &expect );
+            ok( ret, "got error %lu.\n", GetLastError() );
+            ret = pToLocalEx( &dyn, &utc, &local );
+            ok( ret, "got error %lu.\n", GetLastError() );
+            ok( !memcmp( &local, &expect, sizeof(local) ), "%u-%u: got %02u:%02u, expected %02u:%02u.\n",
+                years[i], months[j], local.wHour, local.wMinute, expect.wHour, expect.wMinute );
+
+            ret = pToSystemEx( &dyn, &local, &back );
+            ok( ret, "got error %lu.\n", GetLastError() );
+            /* the round trip also fills in wDayOfWeek, which the input left 0 */
+            ok( back.wYear == utc.wYear && back.wMonth == utc.wMonth && back.wDay == utc.wDay &&
+                back.wHour == utc.wHour && back.wMinute == utc.wMinute, "%u-%u: round trip gave %u-%u-%u %02u:%02u.\n",
+                years[i], months[j], back.wYear, back.wMonth, back.wDay, back.wHour, back.wMinute );
+
+            ret = pToLocalEx( NULL, &utc, &local );
+            ok( ret, "NULL zone: got error %lu.\n", GetLastError() );
+        }
+    }
+
+    /* a zone without a key name is looked up and not found; its static rules are not used */
+    memset( &fixed, 0, sizeof(fixed) );
+    fixed.Bias = -90;
+    memset( &utc, 0, sizeof(utc) );
+    utc.wYear = 2024;
+    utc.wMonth = 3;
+    utc.wDay = 1;
+    utc.wHour = 10;
+    SetLastError( 0xdeadbeef );
+    ret = pToLocalEx( &fixed, &utc, &local );
+    ok( !ret, "conversion succeeded.\n" );
+    ok( GetLastError() == ERROR_FILE_NOT_FOUND, "got error %lu.\n", GetLastError() );
+}
+
 START_TEST(time)
 {
     HMODULE hKernel = GetModuleHandleA("kernel32");
@@ -1227,6 +1294,7 @@ START_TEST(time)
     test_GetSystemTimeAsFileTime();
     test_GetSystemTimePreciseAsFileTime();
     test_GetTimeZoneInformationForYear();
+    test_TzSpecificLocalTimeEx();
     test_GetTickCount();
     test_QueryUnbiasedInterruptTime();
     test_processor_idle_cycle_time();
