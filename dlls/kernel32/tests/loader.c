@@ -4404,6 +4404,16 @@ static PVOID WINAPI failuredllhook(ULONG ul, DELAYLOAD_INFO* pd)
     return (void*)0xdeadbeef;
 }
 
+static int cb_count_null;
+
+/* a module's failure hook that has no replacement to offer */
+static PVOID WINAPI failuredllhook_null(ULONG ul, DELAYLOAD_INFO* pd)
+{
+    ok(ul == 4, "expected 4, got %lu\n", ul);
+    cb_count_null++;
+    return NULL;
+}
+
 static PVOID WINAPI failuresyshook(const char *dll, const char *function)
 {
     ok(!strcmp(dll, "secur32.dll"), "wrong dll: %s\n", dll);
@@ -4649,6 +4659,16 @@ static void test_ResolveDelayLoadedAPI(void)
                 load = (void *)GetProcAddress(htarget, (char*)iibn->Name);
             }
 
+            /* a failure dll callback without a replacement: the system callback is asked next */
+            if (!td[i].succeeds)
+            {
+                cb_count_null = cb_count_sys = 0;
+                ret = pResolveDelayLoadedAPI(hlib, delaydir, failuredllhook_null, failuresyshook, &itda[i], 0);
+                ok(ret == (void*)0x12345678, "Test %lu: got %p\n", i, ret);
+                ok(cb_count_null == 1, "Test %lu: Wrong callback count: %d\n", i, cb_count_null);
+                ok(cb_count_sys == 1, "Test %lu: Wrong sys callback count: %d\n", i, cb_count_sys);
+            }
+
             /* test without failure dll callback */
             cb_count = cb_count_sys = 0;
             ret = pResolveDelayLoadedAPI(hlib, delaydir, NULL, failuresyshook, &itda[i], 0);
@@ -4665,7 +4685,8 @@ static void test_ResolveDelayLoadedAPI(void)
             {
                 ok(ret == (void*)0x12345678, "Test %lu: ResolveDelayLoadedAPI succeeded with %p\n", i, ret);
                 ok(!cb_count, "Test %lu: Wrong callback count: %d\n", i, cb_count);
-                ok(cb_count_sys == 1, "Test %lu: Wrong sys callback count: %d\n", i, cb_count_sys);
+                /* Win10+ sometimes buffers the address of the stub function the previous call returned */
+                ok(cb_count_sys == 1 || broken(!cb_count_sys), "Test %lu: Wrong sys callback count: %d\n", i, cb_count_sys);
             }
 
             /* test with failure dll callback */

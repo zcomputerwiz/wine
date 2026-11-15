@@ -36,6 +36,7 @@
 #include "ip2string.h"
 #include "sddl.h"
 #include "ddk/ntifs.h"
+#include "delayloadhandler.h"
 #include "wine/test.h"
 #include "wine/asm.h"
 #include "wine/rbtree.h"
@@ -5562,6 +5563,107 @@ static void test_pointer_encoding(void)
     ok( v == expected, "got %p, expected %p.\n", v, expected );
 }
 
+/* A delay-load descriptor for a missing DLL, inside this module's image so that its RVAs are valid. */
+struct delay_image_layout
+{
+    IMAGE_DELAYLOAD_DESCRIPTOR desc;
+    HMODULE module;
+    IMAGE_THUNK_DATA iat[2];
+    IMAGE_THUNK_DATA names[2];
+    char dll[32];
+    WORD hint;
+    char function[32];
+};
+static struct delay_image_layout delay_image;
+
+static int delay_dll_hook_calls, delay_system_hook_calls;
+static void *delay_dll_hook_result;
+static char delay_hook_name[64];
+static DWORD delay_hook_ordinal, delay_hook_error, delay_hook_by_name;
+
+static void * WINAPI delay_dll_hook( ULONG reason, DELAYLOAD_INFO *info )
+{
+    delay_dll_hook_calls++;
+    ok( reason == 4, "got reason %lu.\n", reason );
+    ok( !strcmp( info->TargetDllName, "wine_missing_delay.dll" ), "got dll %s.\n", info->TargetDllName );
+    delay_hook_by_name = info->TargetApiDescriptor.ImportDescribedByName;
+    if (delay_hook_by_name) strcpy( delay_hook_name, info->TargetApiDescriptor.Description.Name );
+    else delay_hook_ordinal = info->TargetApiDescriptor.Description.Ordinal;
+    delay_hook_error = info->LastError;
+    return delay_dll_hook_result;
+}
+
+static void * WINAPI delay_system_hook( const char *dll, const char *function )
+{
+    delay_system_hook_calls++;
+    ok( !strcmp( dll, "wine_missing_delay.dll" ), "got dll %s.\n", dll );
+    return (void *)0x5151;
+}
+
+static void test_LdrResolveDelayLoadedAPI(void)
+{
+    void * (WINAPI *pLdrResolveDelayLoadedAPI)( void *, const IMAGE_DELAYLOAD_DESCRIPTOR *,
+                                                PDELAYLOAD_FAILURE_DLL_CALLBACK, PDELAYLOAD_FAILURE_SYSTEM_ROUTINE,
+                                                IMAGE_THUNK_DATA *, ULONG );
+    BYTE *base = (BYTE *)GetModuleHandleA( NULL );
+    DWORD rva = (BYTE *)&delay_image - base;
+    unsigned int i;
+    void *ret;
+
+    pLdrResolveDelayLoadedAPI = (void *)GetProcAddress( hntdll, "LdrResolveDelayLoadedAPI" );
+    if (!pLdrResolveDelayLoadedAPI)
+    {
+        win_skip( "LdrResolveDelayLoadedAPI is not available.\n" );
+        return;
+    }
+
+    for (i = 0; i < 3; i++)
+    {
+        BOOL by_name = i != 1;
+
+        memset( &delay_image, 0, sizeof(delay_image) );
+        strcpy( delay_image.dll, "wine_missing_delay.dll" );
+        strcpy( delay_image.function, "WineMissingFunction" );
+        delay_image.desc.Attributes.RvaBased = 1;
+        delay_image.desc.DllNameRVA = rva + offsetof( struct delay_image_layout, dll );
+        delay_image.desc.ModuleHandleRVA = rva + offsetof( struct delay_image_layout, module );
+        delay_image.desc.ImportAddressTableRVA = rva + offsetof( struct delay_image_layout, iat );
+        delay_image.desc.ImportNameTableRVA = rva + offsetof( struct delay_image_layout, names );
+        delay_image.names[0].u1.AddressOfData = by_name ? rva + offsetof( struct delay_image_layout, hint )
+                                                        : IMAGE_ORDINAL_FLAG | 42;
+        /* not yet resolved: the entry points into the image */
+        delay_image.iat[0].u1.Function = (ULONG_PTR)test_LdrResolveDelayLoadedAPI;
+        delay_dll_hook_calls = delay_system_hook_calls = 0;
+        delay_dll_hook_result = (i == 2) ? (void *)0x1234 : NULL;
+        delay_hook_name[0] = 0;
+        delay_hook_ordinal = delay_hook_error = 0;
+
+        ret = pLdrResolveDelayLoadedAPI( base, &delay_image.desc, delay_dll_hook, delay_system_hook,
+                                         &delay_image.iat[0], 0 );
+        ok( delay_dll_hook_calls == 1, "%u: dll hook called %d times.\n", i, delay_dll_hook_calls );
+        ok( delay_hook_by_name == by_name, "%u: got by name %lu.\n", i, delay_hook_by_name );
+        if (by_name)
+            ok( !strcmp( delay_hook_name, "WineMissingFunction" ), "%u: got name %s.\n", i, delay_hook_name );
+        else
+            ok( delay_hook_ordinal == 42, "%u: got ordinal %lu.\n", i, delay_hook_ordinal );
+        ok( delay_hook_error == ERROR_MOD_NOT_FOUND, "%u: got error %lu.\n", i, delay_hook_error );
+        if (i == 2)
+        {
+            /* the module's hook resolved it: no system routine */
+            ok( ret == (void *)0x1234, "%u: got %p.\n", i, ret );
+            ok( !delay_system_hook_calls, "%u: system hook called %d times.\n", i, delay_system_hook_calls );
+        }
+        else
+        {
+            /* the module's hook gave up: the system routine runs */
+            ok( ret == (void *)0x5151, "%u: got %p.\n", i, ret );
+            ok( delay_system_hook_calls == 1, "%u: system hook called %d times.\n", i, delay_system_hook_calls );
+        }
+        ok( delay_image.iat[0].u1.Function == (ULONG_PTR)test_LdrResolveDelayLoadedAPI,
+            "%u: IAT entry changed to %#Ix.\n", i, (ULONG_PTR)delay_image.iat[0].u1.Function );
+    }
+}
+
 START_TEST(rtl)
 {
     InitFunctionPtrs();
@@ -5603,6 +5705,7 @@ START_TEST(rtl)
     test_LdrEnumerateLoadedModules();
     test_RtlMakeSelfRelativeSD();
     test_LdrRegisterDllNotification();
+    test_LdrResolveDelayLoadedAPI();
     test_DbgPrint();
     test_RtlDestroyHeap();
     test_RtlCreateHeap();
