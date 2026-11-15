@@ -14,5 +14,6 @@ SOURCES = \
 	data_transfer.c \
 	lifecycle.c \
 	main.c \
+	title_bar.c \
 	twinapi.appcore.rc \
 	user.c

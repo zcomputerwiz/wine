@@ -1144,6 +1144,11 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
         *factory = calendar_factory_iface;
         IUnknown_AddRef(*factory);
     }
+    else if (!wcscmp(name, L"Windows.Globalization.Fonts.LanguageFontGroup"))
+    {
+        *factory = language_font_group_factory;
+        IUnknown_AddRef(*factory);
+    }
 
     if (*factory) return S_OK;
     return CLASS_E_CLASSNOTAVAILABLE;

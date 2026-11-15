@@ -25,4 +25,5 @@ import "windows.ui.idl";
 
 namespace Windows.UI {
     runtimeclass ColorHelper;
+    runtimeclass Colors;
 }

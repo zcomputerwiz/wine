@@ -29,7 +29,11 @@ import "windows.foundation.idl";
 import "windows.system.idl";
 import "windows.globalization.idl";
 import "windows.system.userprofile.idl";
+import "windows.globalization.fonts.idl";
 
+namespace Windows.Globalization.Fonts {
+    runtimeclass LanguageFontGroup;
+}
 namespace Windows.System.UserProfile {
     runtimeclass GlobalizationPreferences;
 }

@@ -1,0 +1,98 @@
+/*
+ * Copyright 2026 WineExplorer contributors
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+#ifdef __WIDL__
+#pragma winrt ns_prefix
+#endif
+
+import "inspectable.idl";
+import "windowscontracts.idl";
+import "windows.foundation.idl";
+import "windows.ui.text.idl";
+
+namespace Windows.Globalization.Fonts {
+    interface ILanguageFont;
+    interface ILanguageFontGroup;
+    interface ILanguageFontGroupFactory;
+    runtimeclass LanguageFont;
+    runtimeclass LanguageFontGroup;
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Globalization.Fonts.LanguageFont),
+        uuid(b12e5c3a-b76d-459b-beeb-901151cd77d1)
+    ]
+    interface ILanguageFont : IInspectable
+    {
+        [propget] HRESULT FontFamily([out, retval] HSTRING *value);
+        [propget] HRESULT FontWeight([out, retval] Windows.UI.Text.FontWeight *weight);
+        [propget] HRESULT FontStretch([out, retval] Windows.UI.Text.FontStretch *stretch);
+        [propget] HRESULT FontStyle([out, retval] Windows.UI.Text.FontStyle *style);
+        [propget] HRESULT ScaleFactor([out, retval] DOUBLE *scale);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Globalization.Fonts.LanguageFontGroup),
+        uuid(f33a7fc3-3a5c-4aea-b9ff-b39fb242f7f6)
+    ]
+    interface ILanguageFontGroup : IInspectable
+    {
+        [propget] HRESULT UITextFont([out, retval] Windows.Globalization.Fonts.LanguageFont **value);
+        [propget] HRESULT UIHeadingFont([out, retval] Windows.Globalization.Fonts.LanguageFont **value);
+        [propget] HRESULT UITitleFont([out, retval] Windows.Globalization.Fonts.LanguageFont **value);
+        [propget] HRESULT UICaptionFont([out, retval] Windows.Globalization.Fonts.LanguageFont **value);
+        [propget] HRESULT UINotificationHeadingFont([out, retval] Windows.Globalization.Fonts.LanguageFont **value);
+        [propget] HRESULT TraditionalDocumentFont([out, retval] Windows.Globalization.Fonts.LanguageFont **value);
+        [propget] HRESULT ModernDocumentFont([out, retval] Windows.Globalization.Fonts.LanguageFont **value);
+        [propget] HRESULT DocumentHeadingFont([out, retval] Windows.Globalization.Fonts.LanguageFont **value);
+        [propget] HRESULT FixedWidthTextFont([out, retval] Windows.Globalization.Fonts.LanguageFont **value);
+        [propget] HRESULT DocumentAlternate1Font([out, retval] Windows.Globalization.Fonts.LanguageFont **value);
+        [propget] HRESULT DocumentAlternate2Font([out, retval] Windows.Globalization.Fonts.LanguageFont **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Globalization.Fonts.LanguageFontGroup),
+        uuid(fcaeac67-4e77-49c7-b856-dde934fc735b)
+    ]
+    interface ILanguageFontGroupFactory : IInspectable
+    {
+        HRESULT CreateLanguageFontGroup([in] HSTRING language_tag,
+                                        [out, retval] Windows.Globalization.Fonts.LanguageFontGroup **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass LanguageFont
+    {
+        [default] interface Windows.Globalization.Fonts.ILanguageFont;
+    }
+
+    [
+        activatable(Windows.Globalization.Fonts.ILanguageFontGroupFactory, Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass LanguageFontGroup
+    {
+        [default] interface Windows.Globalization.Fonts.ILanguageFontGroup;
+    }
+}

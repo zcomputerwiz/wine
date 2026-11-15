@@ -85,6 +85,8 @@ extern IActivationFactory *core_application_factory;
 extern IActivationFactory *data_transfer_manager_statics_factory;
 
 HRESULT user_create( IUser **out );
+HRESULT core_title_bar_create( ICoreApplicationViewTitleBar **out );
+HRESULT view_title_bar_create( IApplicationViewTitleBar **out );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

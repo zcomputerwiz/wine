@@ -1051,6 +1051,7 @@ SOURCES = \
 	windows.gaming.input.forcefeedback.idl \
 	windows.gaming.input.idl \
 	windows.gaming.ui.idl \
+	windows.globalization.fonts.idl \
 	windows.globalization.idl \
 	windows.graphics.capture.idl \
 	windows.graphics.capture.interop.idl \

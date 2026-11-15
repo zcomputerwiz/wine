@@ -31,6 +31,9 @@
 #include "windows.foundation.h"
 #define WIDL_using_Windows_Globalization
 #include "windows.globalization.h"
+#define WIDL_using_Windows_Globalization_Fonts
+#define WIDL_using_Windows_UI_Text
+#include "windows.globalization.fonts.h"
 #define WIDL_using_Windows_System_UserProfile
 #include "windows.system.userprofile.h"
 
@@ -48,7 +51,7 @@ static void check_interface_( unsigned int line, void *obj, const IID *iid )
 
     hr = IUnknown_QueryInterface( iface, iid, (void **)&unk );
     ok_(__FILE__, line)( hr == S_OK, "got hr %#lx.\n", hr );
-    IUnknown_Release( unk );
+    if (SUCCEEDED(hr)) IUnknown_Release( unk );
 }
 
 static void test_GlobalizationPreferences(void)
@@ -1038,6 +1041,122 @@ done:
     IActivationFactory_Release( factory );
 }
 
+static const char *font_names[] =
+{
+    "UIText", "UIHeading", "UITitle", "UICaption", "UINotificationHeading", "TraditionalDocument", "ModernDocument",
+    "DocumentHeading", "FixedWidthText", "DocumentAlternate1", "DocumentAlternate2",
+};
+
+static HRESULT get_language_font( ILanguageFontGroup *group, unsigned int i, ILanguageFont **font )
+{
+    switch (i)
+    {
+    case 0: return ILanguageFontGroup_get_UITextFont( group, font );
+    case 1: return ILanguageFontGroup_get_UIHeadingFont( group, font );
+    case 2: return ILanguageFontGroup_get_UITitleFont( group, font );
+    case 3: return ILanguageFontGroup_get_UICaptionFont( group, font );
+    case 4: return ILanguageFontGroup_get_UINotificationHeadingFont( group, font );
+    case 5: return ILanguageFontGroup_get_TraditionalDocumentFont( group, font );
+    case 6: return ILanguageFontGroup_get_ModernDocumentFont( group, font );
+    case 7: return ILanguageFontGroup_get_DocumentHeadingFont( group, font );
+    case 8: return ILanguageFontGroup_get_FixedWidthTextFont( group, font );
+    case 9: return ILanguageFontGroup_get_DocumentAlternate1Font( group, font );
+    default: return ILanguageFontGroup_get_DocumentAlternate2Font( group, font );
+    }
+}
+
+static void test_LanguageFontGroup(void)
+{
+    static const WCHAR *class_name = RuntimeClass_Windows_Globalization_Fonts_LanguageFontGroup;
+    static const WCHAR *tags[] =
+    {
+        L"en-US", L"en", L"de-DE", L"ru-RU", L"el-GR", L"ja-JP", L"ko-KR", L"zh-Hans", L"zh-CN", L"zh-Hant", L"zh-TW",
+        L"ar-SA", L"he-IL", L"th-TH", L"hi-IN", L"ka-GE", L"am-ET", L"xx", L"", L"not a tag",
+    };
+    ILanguageFontGroupFactory *factory;
+    IActivationFactory *activation;
+    ILanguageFontGroup *group;
+    struct FontWeight weight;
+    enum FontStretch stretch;
+    enum FontStyle style;
+    ILanguageFont *font;
+    unsigned int t, i;
+    HSTRING str, family;
+    double scale;
+    HRESULT hr;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&activation );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (hr != S_OK) return;
+    hr = IActivationFactory_QueryInterface( activation, &IID_ILanguageFontGroupFactory, (void **)&factory );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    group = (void *)0xdeadbeef;
+    hr = IActivationFactory_ActivateInstance( activation, (IInspectable **)&group );
+    ok( hr == E_NOTIMPL, "got hr %#lx.\n", hr );
+
+    /* the fonts differ by script, Windows version and bitness (64-bit Windows 11 gives newer choices than its 32-bit
+     * side); the UI fonts of Latin-script languages are the same, and every language has its five UI fonts */
+    for (t = 0; t < ARRAY_SIZE(tags); t++)
+    {
+        BOOL known = t < ARRAY_SIZE(tags) - 3, latin = t < 5;
+
+        winetest_push_context( "%s", wine_dbgstr_w( tags[t] ) );
+        WindowsCreateString( tags[t], wcslen( tags[t] ), &str );
+        group = NULL;
+        hr = ILanguageFontGroupFactory_CreateLanguageFontGroup( factory, str, &group );
+        WindowsDeleteString( str );
+        ok( hr == (known ? S_OK : HRESULT_FROM_WIN32( ERROR_NOT_FOUND )), "got hr %#lx.\n", hr );
+        if (hr != S_OK) { winetest_pop_context(); continue; }
+        check_interface( group, &IID_IAgileObject );
+        for (i = 0; i < ARRAY_SIZE(font_names); i++)
+        {
+            font = NULL;
+            hr = get_language_font( group, i, &font );
+            ok( hr == S_OK, "%s: got hr %#lx.\n", font_names[i], hr );
+            ok( font != NULL || i > 4, "%s: no font.\n", font_names[i] );
+            if (!font) continue;
+            family = NULL;
+            hr = ILanguageFont_get_FontFamily( font, &family );
+            ok( hr == S_OK && WindowsGetStringLen( family ), "%s: got hr %#lx, family %s.\n", font_names[i], hr,
+                wine_dbgstr_hstring( family ) );
+            weight.Weight = 0;
+            hr = ILanguageFont_get_FontWeight( font, &weight );
+            ok( hr == S_OK && weight.Weight >= 100 && weight.Weight <= 900, "%s: got hr %#lx, weight %u.\n",
+                font_names[i], hr, weight.Weight );
+            hr = ILanguageFont_get_FontStretch( font, &stretch );
+            ok( hr == S_OK && stretch == FontStretch_Normal, "%s: got hr %#lx, stretch %d.\n", font_names[i], hr,
+                stretch );
+            hr = ILanguageFont_get_FontStyle( font, &style );
+            ok( hr == S_OK && style == FontStyle_Normal, "%s: got hr %#lx, style %d.\n", font_names[i], hr, style );
+            scale = 0;
+            hr = ILanguageFont_get_ScaleFactor( font, &scale );
+            ok( hr == S_OK && scale >= 50 && scale <= 200, "%s: got hr %#lx, scale %g.\n", font_names[i], hr, scale );
+            if (latin && i <= 4)
+            {
+                static const UINT16 weights[] = {350, 300, 300, 400, 600};
+                ok( !wcscmp( WindowsGetStringRawBuffer( family, NULL ), L"Segoe UI" ), "%s: got family %s.\n",
+                    font_names[i], wine_dbgstr_hstring( family ) );
+                ok( weight.Weight == weights[i], "%s: got weight %u.\n", font_names[i], weight.Weight );
+                ok( scale == 100, "%s: got scale %g.\n", font_names[i], scale );
+            }
+            if (winetest_debug > 1)
+                trace( "%s: %s, weight %u, scale %g\n", font_names[i], wine_dbgstr_hstring( family ), weight.Weight,
+                       scale );
+            WindowsDeleteString( family );
+            check_interface( font, &IID_IAgileObject );
+            ILanguageFont_Release( font );
+        }
+        ILanguageFontGroup_Release( group );
+        winetest_pop_context();
+    }
+
+    ILanguageFontGroupFactory_Release( factory );
+    IActivationFactory_Release( activation );
+}
+
 START_TEST(globalization)
 {
     HMODULE kernel32;
@@ -1054,6 +1173,7 @@ START_TEST(globalization)
     test_GeographicRegion();
     test_ApplicationLanguages();
     test_Calendar();
+    test_LanguageFontGroup();
 
     RoUninitialize();
 }

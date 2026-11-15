@@ -4598,16 +4598,16 @@ static BOOL fontcollection_add_replacement(struct dwrite_fontcollection *collect
     return TRUE;
 }
 
-/* Add family mappings from HKCU\Software\Wine\Fonts\Replacements. This only affects
-   system font collections. */
-static void fontcollection_add_replacements(struct dwrite_fontcollection *collection)
+/* Add family mappings from one Replacements key. A name that is already a family (a real font, or a mapping
+   added from an earlier key) is left alone. */
+static void fontcollection_add_replacements_from(struct dwrite_fontcollection *collection, HKEY root)
 {
     DWORD max_namelen, max_datalen, i = 0, type, datalen, namelen;
     WCHAR *name;
     void *data;
     HKEY hkey;
 
-    if (RegOpenKeyA(HKEY_CURRENT_USER, "Software\\Wine\\Fonts\\Replacements", &hkey))
+    if (RegOpenKeyExA(root, "Software\\Wine\\Fonts\\Replacements", 0, KEY_READ, &hkey))
         return;
 
     if (RegQueryInfoKeyW(hkey, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &max_namelen, &max_datalen, NULL, NULL)) {
@@ -4644,6 +4644,15 @@ static void fontcollection_add_replacements(struct dwrite_fontcollection *collec
     free(data);
     free(name);
     RegCloseKey(hkey);
+}
+
+/* Add family mappings from HKCU\Software\Wine\Fonts\Replacements, then from the machine's
+   HKLM\Software\Wine\Fonts\Replacements (the user's own mappings win). This only affects system font
+   collections. */
+static void fontcollection_add_replacements(struct dwrite_fontcollection *collection)
+{
+    fontcollection_add_replacements_from(collection, HKEY_CURRENT_USER);
+    fontcollection_add_replacements_from(collection, HKEY_LOCAL_MACHINE);
 }
 
 HRESULT create_font_collection(IDWriteFactory7 *factory, IDWriteFontFileEnumerator *enumerator, IDWriteFontCollection3 **ret)

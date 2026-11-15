@@ -618,6 +618,7 @@ struct core_view
 {
     ICoreApplicationView ICoreApplicationView_iface;
     ICoreApplicationView2 ICoreApplicationView2_iface;
+    ICoreApplicationView3 ICoreApplicationView3_iface;
     LONG ref;
 
     struct list entry;       /* the views of the process */
@@ -625,6 +626,8 @@ struct core_view
     boolean is_main;
     ICoreWindow *window;
     ICoreDispatcher *dispatcher;
+    ICoreApplicationViewTitleBar *title_bar;   /* made on first use, the same object after */
+    LONG token;
 
     CRITICAL_SECTION cs;
     struct list activated_handlers;
@@ -657,6 +660,8 @@ static HRESULT view_query( struct core_view *view, REFIID iid, void **out )
         *out = &view->ICoreApplicationView_iface;
     else if (IsEqualGUID( iid, &IID_ICoreApplicationView2 ))
         *out = &view->ICoreApplicationView2_iface;
+    else if (IsEqualGUID( iid, &IID_ICoreApplicationView3 ))
+        *out = &view->ICoreApplicationView3_iface;
     else
     {
         FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
@@ -677,6 +682,7 @@ static ULONG view_release( struct core_view *view )
         if (view->entry.next) list_remove( &view->entry );
         LeaveCriticalSection( &views_cs );
         handler_list_clear( &view->activated_handlers );
+        if (view->title_bar) ICoreApplicationViewTitleBar_Release( view->title_bar );
         ICoreDispatcher_Release( view->dispatcher );
         ICoreWindow_Release( view->window );
         DeleteCriticalSection( &view->cs );
@@ -821,6 +827,99 @@ static const ICoreApplicationView2Vtbl view2_vtbl =
     view2_get_Dispatcher,
 };
 
+static inline struct core_view *impl_from_ICoreApplicationView3( ICoreApplicationView3 *iface )
+{
+    return CONTAINING_RECORD( iface, struct core_view, ICoreApplicationView3_iface );
+}
+
+static HRESULT WINAPI view3_QueryInterface( ICoreApplicationView3 *iface, REFIID iid, void **out )
+{
+    return view_query( impl_from_ICoreApplicationView3( iface ), iid, out );
+}
+
+static ULONG WINAPI view3_AddRef( ICoreApplicationView3 *iface )
+{
+    return InterlockedIncrement( &impl_from_ICoreApplicationView3( iface )->ref );
+}
+
+static ULONG WINAPI view3_Release( ICoreApplicationView3 *iface )
+{
+    return view_release( impl_from_ICoreApplicationView3( iface ) );
+}
+
+static HRESULT WINAPI view3_GetIids( ICoreApplicationView3 *iface, ULONG *count, IID **iids )
+{
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI view3_GetRuntimeClassName( ICoreApplicationView3 *iface, HSTRING *name )
+{
+    return view_GetRuntimeClassName( &impl_from_ICoreApplicationView3( iface )->ICoreApplicationView_iface, name );
+}
+
+static HRESULT WINAPI view3_GetTrustLevel( ICoreApplicationView3 *iface, TrustLevel *level )
+{
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI view3_get_IsComponent( ICoreApplicationView3 *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+
+/* the view's title bar: one object for the view's lifetime */
+static HRESULT WINAPI view3_get_TitleBar( ICoreApplicationView3 *iface, ICoreApplicationViewTitleBar **value )
+{
+    struct core_view *view = impl_from_ICoreApplicationView3( iface );
+    ICoreApplicationViewTitleBar *bar = NULL;
+    HRESULT hr;
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    EnterCriticalSection( &view->cs );
+    if (!view->title_bar && FAILED(hr = core_title_bar_create( &bar )))
+    {
+        LeaveCriticalSection( &view->cs );
+        return hr;
+    }
+    if (!view->title_bar) view->title_bar = bar;
+    ICoreApplicationViewTitleBar_AddRef( (*value = view->title_bar) );
+    LeaveCriticalSection( &view->cs );
+    return S_OK;
+}
+
+static HRESULT WINAPI view3_add_HostedViewClosing( ICoreApplicationView3 *iface,
+        ITypedEventHandler_CoreApplicationView_HostedViewClosingEventArgs *handler, EventRegistrationToken *token )
+{
+    TRACE( "iface %p, handler %p, token %p: never raised (no hosted views).\n", iface, handler, token );
+    if (!handler || !token) return E_INVALIDARG;
+    token->value = InterlockedIncrement( &impl_from_ICoreApplicationView3( iface )->token );
+    return S_OK;
+}
+
+static HRESULT WINAPI view3_remove_HostedViewClosing( ICoreApplicationView3 *iface, EventRegistrationToken token )
+{
+    return S_OK;
+}
+
+static const ICoreApplicationView3Vtbl view3_vtbl =
+{
+    view3_QueryInterface,
+    view3_AddRef,
+    view3_Release,
+    view3_GetIids,
+    view3_GetRuntimeClassName,
+    view3_GetTrustLevel,
+    view3_get_IsComponent,
+    view3_get_TitleBar,
+    view3_add_HostedViewClosing,
+    view3_remove_HostedViewClosing,
+};
+
 /* The view of a window; the window's thread is the view's thread. */
 HRESULT core_view_create( ICoreWindow *window, boolean is_main, ICoreApplicationView **out )
 {
@@ -830,6 +929,7 @@ HRESULT core_view_create( ICoreWindow *window, boolean is_main, ICoreApplication
     if (!(view = calloc( 1, sizeof(*view) ))) return E_OUTOFMEMORY;
     view->ICoreApplicationView_iface.lpVtbl = &view_vtbl;
     view->ICoreApplicationView2_iface.lpVtbl = &view2_vtbl;
+    view->ICoreApplicationView3_iface.lpVtbl = &view3_vtbl;
     view->ref = 1;
     view->thread_id = GetCurrentThreadId();
     view->is_main = is_main;
