@@ -866,6 +866,46 @@ static void test_IApiInformationStatics(void)
     RoUninitialize();
 }
 
+/* the runtime class name of a property value: Windows.Foundation.IReference`1<T>, IReferenceArray`1<T> for arrays;
+ * type is the PropertyType name (UInt8, PointArray, ...) */
+#define check_property_value_class(value, type) check_property_value_class_(__LINE__, value, type)
+static void check_property_value_class_(int line, IPropertyValue *value, const char *type)
+{
+    static const char *structs[] = {"DateTime", "TimeSpan", "Point", "Size", "Rect"};
+    char element[32], expected[96];
+    const WCHAR *buffer;
+    TrustLevel trust;
+    BOOL array;
+    HSTRING name;
+    HRESULT hr;
+    size_t len;
+    int i;
+
+    len = strlen(type);
+    array = len > 5 && !strcmp(type + len - 5, "Array");
+    snprintf(element, sizeof(element), "%.*s", (int)(array ? len - 5 : len), type);
+    snprintf(expected, sizeof(expected), "Windows.Foundation.IReference%s`1<%s", array ? "Array" : "", element);
+    for (i = 0; i < ARRAY_SIZE(structs); i++)
+        if (!strcmp(element, structs[i]))
+            snprintf(expected, sizeof(expected), "Windows.Foundation.IReference%s`1<Windows.Foundation.%s",
+                     array ? "Array" : "", element);
+    strcat(expected, ">");
+
+    hr = IPropertyValue_GetRuntimeClassName(value, &name);
+    ok_(__FILE__, line)(hr == S_OK, "%s: got hr %#lx.\n", type, hr);
+    if (hr != S_OK) return;
+    buffer = WindowsGetStringRawBuffer(name, NULL);
+    for (i = 0; expected[i] && buffer[i] == expected[i]; i++) ;
+    ok_(__FILE__, line)(!expected[i] && !buffer[i], "%s: got class %s, expected %s.\n",
+                        type, wine_dbgstr_w(buffer), expected);
+    WindowsDeleteString(name);
+
+    trust = -1;
+    hr = IPropertyValue_GetTrustLevel(value, &trust);
+    ok_(__FILE__, line)(hr == S_OK, "%s: got hr %#lx.\n", type, hr);
+    ok_(__FILE__, line)(trust == BaseTrust, "%s: got trust level %d.\n", type, trust);
+}
+
 static void test_IPropertyValueStatics(void)
 {
     static const WCHAR *class_name = L"Windows.Foundation.PropertyValue";
@@ -1053,6 +1093,7 @@ static void test_IPropertyValueStatics(void)
         ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);                                     \
         ok(type == PropertyType_##PROPERTY_TYPE, "Got unexpected type %d.\n",                \
            PropertyType_##PROPERTY_TYPE);                                                    \
+        check_property_value_class(value, #PROPERTY_TYPE);                                   \
                                                                                              \
         ret = TRUE;                                                                          \
         hr = IPropertyValue_get_IsNumericScalar(value, &ret);                                \
@@ -1115,6 +1156,7 @@ static void test_IPropertyValueStatics(void)
         ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);                                        \
         ok(type == PropertyType_##PROPERTY_TYPE, "Got unexpected type %d.\n",                   \
            PropertyType_##PROPERTY_TYPE);                                                       \
+        check_property_value_class(value, #PROPERTY_TYPE);                                      \
                                                                                                 \
         ret = TRUE;                                                                             \
         hr = IPropertyValue_get_IsNumericScalar(value, &ret);                                   \
