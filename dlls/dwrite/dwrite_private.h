@@ -556,6 +556,8 @@ extern BOOL opentype_has_kerning_pairs(struct dwrite_fontface *fontface);
 extern HRESULT opentype_get_font_var_axis(const struct file_stream_desc *stream_desc, struct dwrite_var_axis **axis,
         unsigned int *axis_count);
 extern unsigned int opentype_get_named_instance_count(const struct file_stream_desc *stream_desc);
+extern unsigned int opentype_find_named_instance(const struct file_stream_desc *stream_desc,
+        const DWRITE_FONT_AXIS_VALUE *values, unsigned int count);
 extern HRESULT opentype_get_named_instance(const struct file_stream_desc *stream_desc, unsigned int instance,
         struct dwrite_named_instance *ret);
 extern bool opentype_is_whitespace(unsigned int codepoint);

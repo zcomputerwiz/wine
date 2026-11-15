@@ -8105,6 +8105,7 @@ static HRESULT fontset_builder_add_file(struct dwrite_fontset_builder *builder, 
             instances = opentype_get_named_instance_count(&stream_desc);
             IDWriteFontFileStream_Release(stream_desc.stream);
         }
+        TRACE("file %p face %u of %u: %u named instances.\n", file, i, face_count, instances);
 
         desc.face_index = i;
         desc.instance = 0;
@@ -8155,8 +8156,31 @@ static HRESULT WINAPI dwritefontsetbuilder_AddFontFaceReference(IDWriteFontSetBu
 
         if (SUCCEEDED(hr))
         {
+            struct file_stream_desc stream_desc = { .face_type = desc.face_type };
+            DWRITE_FONT_AXIS_VALUE axis_values[16];
+            IDWriteFontFaceReference1 *reference1;
+            UINT32 axis_count = 0;
+
             desc.face_index = IDWriteFontFaceReference_GetFontFaceIndex(reference);
             desc.simulations = IDWriteFontFaceReference_GetSimulations(reference);
+
+            /* a variable font's face is the named instance at the reference's axis values (B15) */
+            if (SUCCEEDED(IDWriteFontFaceReference_QueryInterface(reference, &IID_IDWriteFontFaceReference1,
+                    (void **)&reference1)))
+            {
+                axis_count = IDWriteFontFaceReference1_GetFontAxisValueCount(reference1);
+                if (axis_count > ARRAY_SIZE(axis_values)
+                        || FAILED(IDWriteFontFaceReference1_GetFontAxisValues(reference1, axis_values, axis_count)))
+                    axis_count = 0;
+                IDWriteFontFaceReference1_Release(reference1);
+            }
+            stream_desc.face_index = desc.face_index;
+            if (SUCCEEDED(get_filestream_from_file(desc.file, &stream_desc.stream)))
+            {
+                desc.instance = opentype_find_named_instance(&stream_desc, axis_values, axis_count);
+                IDWriteFontFileStream_Release(stream_desc.stream);
+            }
+            TRACE("face %u: named instance %u.\n", desc.face_index, desc.instance);
             hr = fontset_builder_add_entry(builder, &desc);
         }
     }

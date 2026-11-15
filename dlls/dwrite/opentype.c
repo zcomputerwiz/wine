@@ -6843,8 +6843,16 @@ static BOOL opentype_get_fvar_layout(const struct file_stream_desc *stream_desc,
 
     memset(fvar, 0, sizeof(*fvar));
     opentype_get_font_table(stream_desc, MS_FVAR_TAG, &fvar->table);
-    if (!(header = table_read_ensure(&fvar->table, 0, sizeof(*header)))) return FALSE;
-    if (GET_BE_WORD(header->major_version) != 1) return FALSE;
+    if (!(header = table_read_ensure(&fvar->table, 0, sizeof(*header))))
+    {
+        TRACE("no fvar table (size %u).\n", fvar->table.size);
+        return FALSE;
+    }
+    if (GET_BE_WORD(header->major_version) != 1)
+    {
+        TRACE("fvar version %u not supported.\n", GET_BE_WORD(header->major_version));
+        return FALSE;
+    }
 
     fvar->axis_count = GET_BE_WORD(header->axis_count);
     fvar->axes_offset = GET_BE_WORD(header->axes_array_offset);
@@ -6852,12 +6860,22 @@ static BOOL opentype_get_fvar_layout(const struct file_stream_desc *stream_desc,
     fvar->instance_size = GET_BE_WORD(header->instance_size);
     fvar->instances_offset = fvar->axes_offset + fvar->axis_count * sizeof(struct var_axis_record);
 
+    TRACE("fvar: %u axes at %#x (size %u), %u instances of size %u at %#x, table size %u.\n", fvar->axis_count,
+            fvar->axes_offset, GET_BE_WORD(header->axis_size), fvar->instance_count, fvar->instance_size,
+            fvar->instances_offset, fvar->table.size);
     /* a record is subfamilyNameID, flags and one Fixed coordinate per axis, maybe followed by postScriptNameID */
     if (!fvar->axis_count || GET_BE_WORD(header->axis_size) != sizeof(struct var_axis_record)
-            || fvar->instance_size < 4 + 4 * fvar->axis_count) return FALSE;
+            || fvar->instance_size < 4 + 4 * fvar->axis_count)
+    {
+        TRACE("fvar layout not supported.\n");
+        return FALSE;
+    }
     if (!table_read_ensure(&fvar->table, fvar->axes_offset, fvar->axis_count * sizeof(struct var_axis_record))
             || !table_read_ensure(&fvar->table, fvar->instances_offset, fvar->instance_count * fvar->instance_size))
+    {
+        TRACE("fvar records outside the table.\n");
         return FALSE;
+    }
     return TRUE;
 }
 
@@ -6872,14 +6890,24 @@ static void release_font_table(const struct file_stream_desc *stream_desc, struc
 static BOOL opentype_stat_is_usable(const struct dwrite_fonttable *stat)
 {
     unsigned int axis_size, axis_count, value_count;
+    BOOL ret;
 
-    if (!table_read_ensure(stat, 0, 18) || table_read_be_word(stat, 0) != 1) return FALSE;
+    if (!table_read_ensure(stat, 0, 18))
+    {
+        TRACE("no STAT table (size %u).\n", stat->size);
+        return FALSE;
+    }
     axis_size = table_read_be_word(stat, 4);
     axis_count = table_read_be_word(stat, 6);
     value_count = table_read_be_word(stat, 12);
-    if (axis_size < 8 || !axis_count || !value_count) return FALSE;
-    return table_read_ensure(stat, table_read_be_dword(stat, 8), axis_size * axis_count)
+    TRACE("STAT %u.%u: %u design axes of size %u at %#lx, %u axis values at %#lx, table size %u.\n",
+            table_read_be_word(stat, 0), table_read_be_word(stat, 2), axis_count, axis_size,
+            table_read_be_dword(stat, 8), value_count, table_read_be_dword(stat, 14), stat->size);
+    if (table_read_be_word(stat, 0) != 1 || axis_size < 8 || !axis_count || !value_count) return FALSE;
+    ret = table_read_ensure(stat, table_read_be_dword(stat, 8), axis_size * axis_count)
             && table_read_ensure(stat, table_read_be_dword(stat, 14), value_count * 2);
+    if (!ret) TRACE("STAT records outside the table.\n");
+    return ret;
 }
 
 unsigned int opentype_get_named_instance_count(const struct file_stream_desc *stream_desc)
@@ -6895,6 +6923,47 @@ unsigned int opentype_get_named_instance_count(const struct file_stream_desc *st
     release_font_table(stream_desc, &fvar.table);
     release_font_table(stream_desc, &stat);
     return count;
+}
+
+/* The named instance (1-based) at the given axis values, the axes not given at their defaults; 0 when no named
+   instance is there or the font has no usable STAT. On Windows a font face reference added to a font set is named
+   as the instance at its position, the default position when it has no axis values. */
+static BOOL axis_value_equal(float a, float b);
+
+unsigned int opentype_find_named_instance(const struct file_stream_desc *stream_desc,
+        const DWRITE_FONT_AXIS_VALUE *values, unsigned int count)
+{
+    struct dwrite_fonttable stat;
+    struct fvar_layout fvar;
+    unsigned int i, j, k, ret = 0;
+
+    memset(&fvar, 0, sizeof(fvar));
+    opentype_get_font_table(stream_desc, MS_STAT_TAG, &stat);
+    if (!opentype_stat_is_usable(&stat) || !opentype_get_fvar_layout(stream_desc, &fvar)) goto done;
+
+    for (i = 0; i < fvar.instance_count && !ret; ++i)
+    {
+        unsigned int record = fvar.instances_offset + i * fvar.instance_size;
+        BOOL match = TRUE;
+
+        for (j = 0; j < fvar.axis_count && match; ++j)
+        {
+            unsigned int axis = fvar.axes_offset + j * sizeof(struct var_axis_record);
+            UINT32 tag = table_read_dword(&fvar.table, axis);
+            float wanted = table_read_be_fixed(&fvar.table, axis + 8); /* the default value */
+
+            for (k = 0; k < count; ++k)
+                if (values[k].axisTag == tag) wanted = values[k].value;
+            match = axis_value_equal(table_read_be_fixed(&fvar.table, record + 4 + 4 * j), wanted);
+        }
+        if (match) ret = i + 1;
+    }
+    TRACE("%u axis values: named instance %u.\n", count, ret);
+
+done:
+    release_font_table(stream_desc, &fvar.table);
+    release_font_table(stream_desc, &stat);
+    return ret;
 }
 
 /* the English string of a name ID (or the first one), empty when there is none */
@@ -7116,6 +7185,8 @@ HRESULT opentype_get_named_instance(const struct file_stream_desc *stream_desc, 
     }
     if (!ret->typographic_face[0])
         wcscpy(ret->typographic_face, ret->wws_face);
+    TRACE("instance %u: typographic face %s, WWS suffix %s, WWS face %s, weight %d.\n", instance,
+            debugstr_w(ret->typographic_face), debugstr_w(ret->wws_suffix), debugstr_w(ret->wws_face), ret->weight);
     hr = S_OK;
 
 done:
