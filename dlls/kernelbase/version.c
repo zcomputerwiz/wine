@@ -2166,17 +2166,34 @@ static BOOL package_family_is_valid( const WCHAR *family )
     return TRUE;
 }
 
+/* The catalogs: the user's, in the prefix directory, and the machine's, %ProgramData%\WineExplorer\appx-catalog, where
+ * framework packages installed for every user are recorded (their files are in C:\Program Files\WindowsApps; in a
+ * WineExplorer system both directories are the machine root's, shared by every prefix and written only by the machine's
+ * administrators). A machine record counts only as a framework: no application is published through it. */
+enum catalog { CATALOG_USER, CATALOG_MACHINE };
+
 /* the catalog directory (with a trailing backslash), or with a name the path of that record */
-static BOOL catalog_path( const WCHAR *record_name, WCHAR *path, unsigned int size )
+static BOOL catalog_path( enum catalog catalog, const WCHAR *record_name, WCHAR *path, unsigned int size )
 {
-    WCHAR config[MAX_PATH];
-    DWORD len = GetEnvironmentVariableW( L"WINECONFIGDIR", config, ARRAY_SIZE(config) );
+    WCHAR dir[MAX_PATH];
+    DWORD len;
     int ret;
 
-    if (!len || len >= ARRAY_SIZE(config) || wcsncmp( config, L"\\??\\", 4 )) return FALSE;
-    if (record_name) ret = swprintf( path, size, L"\\\\?\\%s\\appx-catalog\\%s.wexappx", config + 4, record_name );
-    else ret = swprintf( path, size, L"\\\\?\\%s\\appx-catalog\\", config + 4 );
-    return ret > 0;
+    if (catalog == CATALOG_USER)
+    {
+        len = GetEnvironmentVariableW( L"WINECONFIGDIR", dir, ARRAY_SIZE(dir) );
+        if (!len || len >= ARRAY_SIZE(dir) || wcsncmp( dir, L"\\??\\", 4 )) return FALSE;
+        ret = swprintf( path, size, L"\\\\?\\%s\\appx-catalog\\", dir + 4 );
+    }
+    else
+    {
+        len = GetEnvironmentVariableW( L"ProgramData", dir, ARRAY_SIZE(dir) );
+        if (!len || len >= ARRAY_SIZE(dir) || len < 3 || dir[1] != ':' || dir[2] != '\\') wcscpy( dir, L"C:\\ProgramData" );
+        ret = swprintf( path, size, L"\\\\?\\%s\\WineExplorer\\appx-catalog\\", dir );
+    }
+    if (ret <= 0) return FALSE;
+    if (record_name && swprintf( path + ret, size - ret, L"%s.wexappx", record_name ) <= 0) return FALSE;
+    return TRUE;
 }
 
 static BOOL record_set( WCHAR *dest, unsigned int size, const WCHAR *src, unsigned int len )
@@ -2187,16 +2204,15 @@ static BOOL record_set( WCHAR *dest, unsigned int size, const WCHAR *src, unsign
     return TRUE;
 }
 
-/* ERROR_SUCCESS, ERROR_NOT_FOUND for an unknown package, ERROR_INVALID_PARAMETER for a malformed name */
-static LONG package_record_load( const WCHAR *full_name, struct package_record *rec )
+/* one catalog's record of a package: ERROR_SUCCESS or ERROR_NOT_FOUND */
+static LONG package_record_read( enum catalog catalog, const WCHAR *full_name, struct package_record *rec )
 {
     WCHAR path[MAX_PATH], *text, *line, *next, *end;
     HANDLE file;
     DWORD bytes = 0;
-    BOOL first = TRUE, have_root = FALSE;
+    BOOL first = TRUE, have_root = FALSE, framework = FALSE;
 
-    if (!package_full_name_is_valid( full_name )) return ERROR_INVALID_PARAMETER;
-    if (!catalog_path( full_name, path, ARRAY_SIZE(path) )) return ERROR_NOT_FOUND;
+    if (!catalog_path( catalog, full_name, path, ARRAY_SIZE(path) )) return ERROR_NOT_FOUND;
     file = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
                         FILE_ATTRIBUTE_NORMAL, NULL );
     if (file == INVALID_HANDLE_VALUE) return ERROR_NOT_FOUND;
@@ -2238,6 +2254,8 @@ static LONG package_record_load( const WCHAR *full_name, struct package_record *
             have_root = record_set( rec->root, ARRAY_SIZE(rec->root), fields[1], wcslen( fields[1] ) );
         else if (!wcscmp( fields[0], L"publisher" ) && count >= 2)
             record_set( rec->publisher, ARRAY_SIZE(rec->publisher), fields[1], wcslen( fields[1] ) );
+        else if (!wcscmp( fields[0], L"framework" ) && count >= 2)
+            framework = !wcscmp( fields[1], L"1" );
         else if (!wcscmp( fields[0], L"app" ) && count >= 2 && rec->app_count < CATALOG_MAX_APPS)
         {
             if (record_set( rec->apps[rec->app_count], ARRAY_SIZE(rec->apps[0]), fields[1], wcslen( fields[1] ) ))
@@ -2252,44 +2270,78 @@ static LONG package_record_load( const WCHAR *full_name, struct package_record *
         }
     }
     pkg_free( text );
-    return have_root ? ERROR_SUCCESS : ERROR_NOT_FOUND;
+    if (!have_root) return ERROR_NOT_FOUND;
+    if (catalog == CATALOG_MACHINE)
+    {
+        /* the machine's catalog holds frameworks for every user, nothing to start */
+        if (!framework) return ERROR_NOT_FOUND;
+        rec->app_count = 0;
+    }
+    return ERROR_SUCCESS;
 }
 
-/* the full names in the catalog of a family; the array is allocated, the caller frees it */
+/* ERROR_SUCCESS, ERROR_NOT_FOUND for an unknown package, ERROR_INVALID_PARAMETER for a malformed name; the user's
+ * catalog first, then the machine's frameworks */
+static LONG package_record_load( const WCHAR *full_name, struct package_record *rec )
+{
+    if (!package_full_name_is_valid( full_name )) return ERROR_INVALID_PARAMETER;
+    if (!package_record_read( CATALOG_USER, full_name, rec )) return ERROR_SUCCESS;
+    return package_record_read( CATALOG_MACHINE, full_name, rec );
+}
+
+/* the full names in the catalogs of a family, each once; the array is allocated, the caller frees it */
 static WCHAR (*catalog_family_members( const WCHAR *family, unsigned int *count ))[PACKAGE_FULL_NAME_MAX_LENGTH + 1]
 {
     WCHAR (*names)[PACKAGE_FULL_NAME_MAX_LENGTH + 1] = NULL;
     WCHAR dir[MAX_PATH], pattern[MAX_PATH], member_family[PACKAGE_FAMILY_NAME_MAX_LENGTH + 1];
     WIN32_FIND_DATAW data;
     HANDLE find;
-    unsigned int capacity = 0;
+    unsigned int capacity = 0, i;
+    enum catalog catalog;
 
     *count = 0;
-    if (!catalog_path( NULL, dir, ARRAY_SIZE(dir) ) || swprintf( pattern, ARRAY_SIZE(pattern), L"%s*.wexappx", dir ) < 0)
-        return NULL;
-    if ((find = FindFirstFileW( pattern, &data )) == INVALID_HANDLE_VALUE) return NULL;
-    do
+    for (catalog = CATALOG_USER; catalog <= CATALOG_MACHINE; catalog++)
     {
-        unsigned int len = wcslen( data.cFileName ) - wcslen( L".wexappx" );
-        WCHAR name[PACKAGE_FULL_NAME_MAX_LENGTH + 1];
-
-        if (len > PACKAGE_FULL_NAME_MAX_LENGTH) continue;
-        memcpy( name, data.cFileName, len * sizeof(WCHAR) );
-        name[len] = 0;
-        if (!package_full_name_is_valid( name ) ||
-            !package_family_from_full_name( name, member_family, ARRAY_SIZE(member_family) ) ||
-            wcsicmp( member_family, family ))
+        if (!catalog_path( catalog, NULL, dir, ARRAY_SIZE(dir) ) ||
+            swprintf( pattern, ARRAY_SIZE(pattern), L"%s*.wexappx", dir ) < 0)
             continue;
-        if (*count == capacity)
+        if ((find = FindFirstFileW( pattern, &data )) == INVALID_HANDLE_VALUE) continue;
+        do
         {
-            void *tmp = pkg_realloc( names, (capacity = capacity ? capacity * 2 : 8) * sizeof(*names) );
-            if (!tmp) break;
-            names = tmp;
+            unsigned int len = wcslen( data.cFileName ) - wcslen( L".wexappx" );
+            WCHAR name[PACKAGE_FULL_NAME_MAX_LENGTH + 1];
+            struct package_record *rec;
+            BOOL known = FALSE;
+
+            if (len > PACKAGE_FULL_NAME_MAX_LENGTH) continue;
+            memcpy( name, data.cFileName, len * sizeof(WCHAR) );
+            name[len] = 0;
+            if (!package_full_name_is_valid( name ) ||
+                !package_family_from_full_name( name, member_family, ARRAY_SIZE(member_family) ) ||
+                wcsicmp( member_family, family ))
+                continue;
+            for (i = 0; i < *count && !known; i++) known = !wcsicmp( names[i], name );
+            if (known) continue;
+            if (catalog == CATALOG_MACHINE)
+            {
+                /* only what package_record_load accepts from there */
+                BOOL usable;
+                if (!(rec = pkg_alloc( sizeof(*rec) ))) break;
+                usable = !package_record_read( CATALOG_MACHINE, name, rec );
+                pkg_free( rec );
+                if (!usable) continue;
+            }
+            if (*count == capacity)
+            {
+                void *tmp = pkg_realloc( names, (capacity = capacity ? capacity * 2 : 8) * sizeof(*names) );
+                if (!tmp) break;
+                names = tmp;
+            }
+            wcscpy( names[(*count)++], name );
         }
-        wcscpy( names[(*count)++], name );
+        while (FindNextFileW( find, &data ));
+        FindClose( find );
     }
-    while (FindNextFileW( find, &data ));
-    FindClose( find );
     return names;
 }
 
