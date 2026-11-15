@@ -1,6 +1,6 @@
 EXTRADEFS = -D_CONTRACT_GEN
 MODULE    = twinapi.appcore.dll
-IMPORTS   = combase advapi32 kernelbase
+IMPORTS   = combase advapi32 kernelbase bcrypt user32
 
 SOURCES = \
 	activation_manager.c \
@@ -14,4 +14,5 @@ SOURCES = \
 	data_transfer.c \
 	lifecycle.c \
 	main.c \
-	twinapi.appcore.rc
+	twinapi.appcore.rc \
+	user.c

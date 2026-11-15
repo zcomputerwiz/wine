@@ -18,6 +18,8 @@
  */
 
 #include "private.h"
+#include "initguid.h"
+#include "windows.ui.core.corewindow.interop.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(twinapi);
 
@@ -26,6 +28,7 @@ struct factory
     IActivationFactory IActivationFactory_iface;
     IApplicationViewStatics IApplicationViewStatics_iface;
     IApplicationViewStatics2 IApplicationViewStatics2_iface;
+    IApplicationViewStatics3 IApplicationViewStatics3_iface;
     LONG ref;
 };
 
@@ -60,6 +63,12 @@ static HRESULT WINAPI activation_factory_QueryInterface(IActivationFactory *ifac
     {
         IApplicationViewStatics2_AddRef(&impl->IApplicationViewStatics2_iface);
         *out = &impl->IApplicationViewStatics2_iface;
+        return S_OK;
+    }
+    else if (IsEqualGUID(iid, &IID_IApplicationViewStatics3))
+    {
+        IApplicationViewStatics3_AddRef(&impl->IApplicationViewStatics3_iface);
+        *out = &impl->IApplicationViewStatics3_iface;
         return S_OK;
     }
 
@@ -125,6 +134,403 @@ static const struct IActivationFactoryVtbl activation_factory_vtbl =
     activation_factory_ActivateInstance,
 };
 
+/* ---- the ApplicationView of a CoreApplicationView (WineExplorer UWP compatibility) ----------------------------
+ *
+ * One per view thread, made by GetForCurrentView. As on Windows 11 (tests/uwp/xaml/cx-probe, LaunchProbe.cpp): the
+ * same object for every call on the view's thread, an empty title, not full screen, SetPreferredMinSize accepted and
+ * TryResizeView succeeding before the window is shown. TryResizeView sizes the CoreWindow's client area. */
+
+struct application_view
+{
+    IApplicationView IApplicationView_iface;
+    IApplicationView2 IApplicationView2_iface;
+    IApplicationView3 IApplicationView3_iface;
+    LONG ref;
+    struct list entry;
+    DWORD thread_id;
+    INT32 id;
+    HSTRING title;
+    boolean screen_capture;
+    Size min_size;
+};
+
+static CRITICAL_SECTION application_views_cs;
+static CRITICAL_SECTION_DEBUG application_views_cs_debug =
+{
+    0, 0, &application_views_cs,
+    { &application_views_cs_debug.ProcessLocksList, &application_views_cs_debug.ProcessLocksList },
+    0, 0, { (DWORD_PTR)(__FILE__ ": application_views_cs") }
+};
+static CRITICAL_SECTION application_views_cs = { &application_views_cs_debug, -1, 0, 0, 0, 0 };
+static struct list application_views = LIST_INIT( application_views );
+static INT32 next_view_id = 1;
+
+static inline struct application_view *impl_from_IApplicationView( IApplicationView *iface )
+{
+    return CONTAINING_RECORD( iface, struct application_view, IApplicationView_iface );
+}
+
+static HRESULT WINAPI application_view_QueryInterface( IApplicationView *iface, REFIID iid, void **out )
+{
+    struct application_view *impl = impl_from_IApplicationView( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IApplicationView ))
+        *out = &impl->IApplicationView_iface;
+    else if (IsEqualGUID( iid, &IID_IApplicationView2 ))
+        *out = &impl->IApplicationView2_iface;
+    else if (IsEqualGUID( iid, &IID_IApplicationView3 ))
+        *out = &impl->IApplicationView3_iface;
+    else
+    {
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+
+static ULONG WINAPI application_view_AddRef( IApplicationView *iface )
+{
+    return InterlockedIncrement( &impl_from_IApplicationView( iface )->ref );
+}
+
+/* the views live as long as their thread's view does: the list keeps a reference */
+static ULONG WINAPI application_view_Release( IApplicationView *iface )
+{
+    return InterlockedDecrement( &impl_from_IApplicationView( iface )->ref );
+}
+
+static HRESULT WINAPI application_view_GetIids( IApplicationView *iface, ULONG *iid_count, IID **iids )
+{
+    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI application_view_GetRuntimeClassName( IApplicationView *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( L"Windows.UI.ViewManagement.ApplicationView", 41, class_name );
+}
+
+static HRESULT WINAPI application_view_GetTrustLevel( IApplicationView *iface, TrustLevel *trust_level )
+{
+    *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view_get_Orientation( IApplicationView *iface, ApplicationViewOrientation *value )
+{
+    *value = ApplicationViewOrientation_Landscape;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view_get_AdjacentToLeftDisplayEdge( IApplicationView *iface, boolean *value )
+{
+    *value = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view_get_AdjacentToRightDisplayEdge( IApplicationView *iface, boolean *value )
+{
+    *value = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view_get_IsFullScreen( IApplicationView *iface, boolean *value )
+{
+    *value = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view_get_IsOnLockScreen( IApplicationView *iface, boolean *value )
+{
+    *value = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view_get_IsScreenCaptureEnabled( IApplicationView *iface, boolean *value )
+{
+    *value = impl_from_IApplicationView( iface )->screen_capture;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view_put_IsScreenCaptureEnabled( IApplicationView *iface, boolean value )
+{
+    impl_from_IApplicationView( iface )->screen_capture = value;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view_put_Title( IApplicationView *iface, HSTRING value )
+{
+    struct application_view *impl = impl_from_IApplicationView( iface );
+    HSTRING copy;
+    HRESULT hr;
+
+    TRACE( "iface %p, value %s.\n", iface, debugstr_hstring( value ) );
+    if (FAILED(hr = WindowsDuplicateString( value, &copy ))) return hr;
+    WindowsDeleteString( impl->title );
+    impl->title = copy;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view_get_Title( IApplicationView *iface, HSTRING *value )
+{
+    return WindowsDuplicateString( impl_from_IApplicationView( iface )->title, value );
+}
+
+static HRESULT WINAPI application_view_get_Id( IApplicationView *iface, INT32 *value )
+{
+    *value = impl_from_IApplicationView( iface )->id;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view_add_Consolidated( IApplicationView *iface,
+        ITypedEventHandler_ApplicationView_ApplicationViewConsolidatedEventArgs *handler, EventRegistrationToken *token )
+{
+    FIXME( "iface %p, handler %p, token %p semi-stub!\n", iface, handler, token );
+    token->value = 0;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view_remove_Consolidated( IApplicationView *iface, EventRegistrationToken token )
+{
+    return S_OK;
+}
+
+static const IApplicationViewVtbl application_view_vtbl =
+{
+    application_view_QueryInterface,
+    application_view_AddRef,
+    application_view_Release,
+    /* IInspectable methods */
+    application_view_GetIids,
+    application_view_GetRuntimeClassName,
+    application_view_GetTrustLevel,
+    /* IApplicationView methods */
+    application_view_get_Orientation,
+    application_view_get_AdjacentToLeftDisplayEdge,
+    application_view_get_AdjacentToRightDisplayEdge,
+    application_view_get_IsFullScreen,
+    application_view_get_IsOnLockScreen,
+    application_view_get_IsScreenCaptureEnabled,
+    application_view_put_IsScreenCaptureEnabled,
+    application_view_put_Title,
+    application_view_get_Title,
+    application_view_get_Id,
+    application_view_add_Consolidated,
+    application_view_remove_Consolidated,
+};
+
+DEFINE_IINSPECTABLE( application_view2, IApplicationView2, struct application_view, IApplicationView_iface )
+
+static HRESULT WINAPI application_view2_get_SuppressSystemOverlays( IApplicationView2 *iface, boolean *value )
+{
+    *value = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view2_put_SuppressSystemOverlays( IApplicationView2 *iface, boolean value )
+{
+    return S_OK;
+}
+
+/* the window handle of the calling thread's CoreWindow, or NULL */
+static HWND current_core_hwnd(void)
+{
+    ICoreApplicationView *view = core_view_for_current_thread();
+    ICoreWindowInterop *interop;
+    ICoreWindow *window = NULL;
+    HWND hwnd = NULL;
+
+    if (!view) return NULL;
+    if (SUCCEEDED(ICoreApplicationView_get_CoreWindow( view, &window )) && window &&
+        SUCCEEDED(ICoreWindow_QueryInterface( window, &IID_ICoreWindowInterop, (void **)&interop )))
+    {
+        ICoreWindowInterop_get_WindowHandle( interop, &hwnd );
+        ICoreWindowInterop_Release( interop );
+    }
+    if (window) ICoreWindow_Release( window );
+    ICoreApplicationView_Release( view );
+    return hwnd;
+}
+
+static HRESULT WINAPI application_view2_get_VisibleBounds( IApplicationView2 *iface, Rect *value )
+{
+    HWND hwnd = current_core_hwnd();
+    RECT rect = { 0 };
+
+    if (hwnd) GetClientRect( hwnd, &rect );
+    value->X = 0;
+    value->Y = 0;
+    value->Width = rect.right;
+    value->Height = rect.bottom;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view2_add_VisibleBoundsChanged( IApplicationView2 *iface,
+        ITypedEventHandler_ApplicationView_IInspectable *handler, EventRegistrationToken *token )
+{
+    FIXME( "iface %p, handler %p, token %p semi-stub!\n", iface, handler, token );
+    token->value = 0;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view2_remove_VisibleBoundsChanged( IApplicationView2 *iface, EventRegistrationToken token )
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view2_SetDesiredBoundsMode( IApplicationView2 *iface, ApplicationViewBoundsMode mode,
+                                                              boolean *success )
+{
+    *success = mode == ApplicationViewBoundsMode_UseVisible;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view2_get_DesiredBoundsMode( IApplicationView2 *iface, ApplicationViewBoundsMode *value )
+{
+    *value = ApplicationViewBoundsMode_UseVisible;
+    return S_OK;
+}
+
+static const IApplicationView2Vtbl application_view2_vtbl =
+{
+    application_view2_QueryInterface,
+    application_view2_AddRef,
+    application_view2_Release,
+    /* IInspectable methods */
+    application_view2_GetIids,
+    application_view2_GetRuntimeClassName,
+    application_view2_GetTrustLevel,
+    /* IApplicationView2 methods */
+    application_view2_get_SuppressSystemOverlays,
+    application_view2_put_SuppressSystemOverlays,
+    application_view2_get_VisibleBounds,
+    application_view2_add_VisibleBoundsChanged,
+    application_view2_remove_VisibleBoundsChanged,
+    application_view2_SetDesiredBoundsMode,
+    application_view2_get_DesiredBoundsMode,
+};
+
+DEFINE_IINSPECTABLE( application_view3, IApplicationView3, struct application_view, IApplicationView_iface )
+
+static HRESULT WINAPI application_view3_get_TitleBar( IApplicationView3 *iface, IApplicationViewTitleBar **value )
+{
+    FIXME( "iface %p, value %p stub!\n", iface, value );
+    *value = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI application_view3_get_FullScreenSystemOverlayMode( IApplicationView3 *iface, FullScreenSystemOverlayMode *value )
+{
+    *value = FullScreenSystemOverlayMode_Standard;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view3_put_FullScreenSystemOverlayMode( IApplicationView3 *iface, FullScreenSystemOverlayMode value )
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view3_get_IsFullScreenMode( IApplicationView3 *iface, boolean *value )
+{
+    *value = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view3_TryEnterFullScreenMode( IApplicationView3 *iface, boolean *success )
+{
+    FIXME( "iface %p, success %p stub!\n", iface, success );
+    *success = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view3_ExitFullScreenMode( IApplicationView3 *iface )
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view3_ShowStandardSystemOverlays( IApplicationView3 *iface )
+{
+    return S_OK;
+}
+
+/* sizes the CoreWindow's client area (view pixels at 96 dpi) */
+static HRESULT WINAPI application_view3_TryResizeView( IApplicationView3 *iface, Size value, boolean *success )
+{
+    HWND hwnd = current_core_hwnd();
+    RECT rect = { 0, 0, (LONG)(value.Width + 0.5f), (LONG)(value.Height + 0.5f) };
+
+    TRACE( "iface %p, size %.1fx%.1f, success %p.\n", iface, value.Width, value.Height, success );
+    *success = FALSE;
+    if (!hwnd) return S_OK;
+    AdjustWindowRectEx( &rect, GetWindowLongW( hwnd, GWL_STYLE ), FALSE, GetWindowLongW( hwnd, GWL_EXSTYLE ) );
+    *success = SetWindowPos( hwnd, NULL, 0, 0, rect.right - rect.left, rect.bottom - rect.top,
+                             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE );
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view3_SetPreferredMinSize( IApplicationView3 *iface, Size size )
+{
+    struct application_view *impl = impl_from_IApplicationView3( iface );
+
+    TRACE( "iface %p, size %.1fx%.1f.\n", iface, size.Width, size.Height );
+    impl->min_size = size;
+    return S_OK;
+}
+
+static const IApplicationView3Vtbl application_view3_vtbl =
+{
+    application_view3_QueryInterface,
+    application_view3_AddRef,
+    application_view3_Release,
+    /* IInspectable methods */
+    application_view3_GetIids,
+    application_view3_GetRuntimeClassName,
+    application_view3_GetTrustLevel,
+    /* IApplicationView3 methods */
+    application_view3_get_TitleBar,
+    application_view3_get_FullScreenSystemOverlayMode,
+    application_view3_put_FullScreenSystemOverlayMode,
+    application_view3_get_IsFullScreenMode,
+    application_view3_TryEnterFullScreenMode,
+    application_view3_ExitFullScreenMode,
+    application_view3_ShowStandardSystemOverlays,
+    application_view3_TryResizeView,
+    application_view3_SetPreferredMinSize,
+};
+
+/* the ApplicationView of the calling thread's CoreApplicationView, made on first use */
+static HRESULT application_view_for_current_thread( IApplicationView **out )
+{
+    ICoreApplicationView *core = core_view_for_current_thread();
+    struct application_view *view, *found = NULL;
+
+    *out = NULL;
+    if (!core) return HRESULT_FROM_WIN32( ERROR_NOT_FOUND );
+    ICoreApplicationView_Release( core );
+
+    EnterCriticalSection( &application_views_cs );
+    LIST_FOR_EACH_ENTRY( view, &application_views, struct application_view, entry )
+        if (view->thread_id == GetCurrentThreadId()) { found = view; break; }
+    if (!found && (found = calloc( 1, sizeof(*found) )))
+    {
+        found->IApplicationView_iface.lpVtbl = &application_view_vtbl;
+        found->IApplicationView2_iface.lpVtbl = &application_view2_vtbl;
+        found->IApplicationView3_iface.lpVtbl = &application_view3_vtbl;
+        found->ref = 1;   /* the list's */
+        found->thread_id = GetCurrentThreadId();
+        found->id = next_view_id++;
+        list_add_tail( &application_views, &found->entry );
+    }
+    if (found) IApplicationView_AddRef( (*out = &found->IApplicationView_iface) );
+    LeaveCriticalSection( &application_views_cs );
+    return found ? S_OK : E_OUTOFMEMORY;
+}
+
 DEFINE_IINSPECTABLE(statics, IApplicationViewStatics, struct factory, IActivationFactory_iface)
 
 static HRESULT WINAPI statics_Value(IApplicationViewStatics *iface, ApplicationViewState *value)
@@ -157,8 +563,8 @@ DEFINE_IINSPECTABLE(statics2, IApplicationViewStatics2, struct factory, IActivat
 
 static HRESULT WINAPI statics2_GetForCurrentView(IApplicationViewStatics2 *iface, IApplicationView **current)
 {
-    FIXME("iface %p, current %p stub!\n", iface, current);
-    return 0x80070490;
+    TRACE("iface %p, current %p.\n", iface, current);
+    return application_view_for_current_thread(current);   /* ERROR_NOT_FOUND off a view's thread, as before */
 }
 
 static HRESULT WINAPI statics2_get_TerminateAppOnFinalViewClose(IApplicationViewStatics2 *iface, boolean *value)
@@ -188,11 +594,59 @@ static const struct IApplicationViewStatics2Vtbl statics2_vtbl =
     statics2_put_TerminateAppOnFinalViewClose
 };
 
+DEFINE_IINSPECTABLE(statics3, IApplicationViewStatics3, struct factory, IActivationFactory_iface)
+
+/* the launch preferences: kept as given (Windows 11 starts with Auto and 0x0) */
+static ApplicationViewWindowingMode launch_windowing_mode = ApplicationViewWindowingMode_Auto;
+static Size launch_view_size;
+
+static HRESULT WINAPI statics3_get_PreferredLaunchWindowingMode(IApplicationViewStatics3 *iface, ApplicationViewWindowingMode *value)
+{
+    *value = launch_windowing_mode;
+    return S_OK;
+}
+
+static HRESULT WINAPI statics3_put_PreferredLaunchWindowingMode(IApplicationViewStatics3 *iface, ApplicationViewWindowingMode value)
+{
+    TRACE("iface %p, value %d.\n", iface, value);
+    launch_windowing_mode = value;
+    return S_OK;
+}
+
+static HRESULT WINAPI statics3_get_PreferredLaunchViewSize(IApplicationViewStatics3 *iface, Size *value)
+{
+    *value = launch_view_size;
+    return S_OK;
+}
+
+static HRESULT WINAPI statics3_put_PreferredLaunchViewSize(IApplicationViewStatics3 *iface, Size value)
+{
+    launch_view_size = value;
+    return S_OK;
+}
+
+static const struct IApplicationViewStatics3Vtbl statics3_vtbl =
+{
+    statics3_QueryInterface,
+    statics3_AddRef,
+    statics3_Release,
+    /* IInspectable methods */
+    statics3_GetIids,
+    statics3_GetRuntimeClassName,
+    statics3_GetTrustLevel,
+    /* IApplicationViewStatics3 methods */
+    statics3_get_PreferredLaunchWindowingMode,
+    statics3_put_PreferredLaunchWindowingMode,
+    statics3_get_PreferredLaunchViewSize,
+    statics3_put_PreferredLaunchViewSize,
+};
+
 static struct factory factory =
 {
     {&activation_factory_vtbl},
     {&statics_vtbl},
     {&statics2_vtbl},
+    {&statics3_vtbl},
     1,
 };
 

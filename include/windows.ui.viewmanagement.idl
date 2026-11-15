@@ -49,6 +49,9 @@ namespace Windows.UI.ViewManagement
     typedef enum UserInteractionMode UserInteractionMode;
     typedef enum ViewSizePreference ViewSizePreference;
 
+    interface IActivationViewSwitcher;
+    runtimeclass ActivationViewSwitcher;
+
     interface IAccessibilitySettings;
     interface IApplicationView;
     interface IApplicationView2;
@@ -316,6 +319,30 @@ namespace Windows.UI.ViewManagement
         [propget] HRESULT HighContrastScheme([out, retval] HSTRING *value);
         [eventadd] HRESULT HighContrastChanged([in] Windows.Foundation.TypedEventHandler<Windows.UI.ViewManagement.AccessibilitySettings *, IInspectable *> *handler, [out, retval] EventRegistrationToken *cookie);
         [eventremove] HRESULT HighContrastChanged([in] EventRegistrationToken cookie);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.ViewManagement.ActivationViewSwitcher),
+        uuid(dca71bb6-7350-492b-aac7-c8a13d7224ad)
+    ]
+    interface IActivationViewSwitcher : IInspectable
+    {
+        [overload("ShowAsStandaloneAsync")]
+        HRESULT ShowAsStandaloneAsync([in] INT32 view_id, [out, retval] Windows.Foundation.IAsyncAction **operation);
+        [overload("ShowAsStandaloneAsync")]
+        HRESULT ShowAsStandaloneWithSizePreferenceAsync([in] INT32 view_id, [in] Windows.UI.ViewManagement.ViewSizePreference size_preference,
+                                                        [out, retval] Windows.Foundation.IAsyncAction **operation);
+        HRESULT IsViewPresentedOnActivationVirtualDesktop([in] INT32 view_id, [out, retval] boolean *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass ActivationViewSwitcher
+    {
+        [default] interface Windows.UI.ViewManagement.IActivationViewSwitcher;
     }
 
     [

@@ -32,6 +32,8 @@
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_UI_Core
 #define WIDL_using_Windows_ApplicationModel_Activation
+#define WIDL_using_Windows_System
+#define WIDL_using_Windows_Storage_Streams
 #define WIDL_using_Windows_Foundation_Collections
 #include "windows.foundation.h"
 #define WIDL_using_Windows_Security_ExchangeActiveSyncProvisioning
@@ -47,6 +49,7 @@
 #include "windows.applicationmodel.core.h"
 #define WIDL_using_Windows_ApplicationModel_DataTransfer
 #include "windows.applicationmodel.datatransfer.h"
+#include "windows.ui.notifications.h"   /* TileActivatedInfo, ILaunchActivatedEventArgs2 */
 
 #include "wine/debug.h"
 
@@ -80,6 +83,8 @@ extern IActivationFactory *analytics_info_factory;
 extern IActivationFactory *advertising_manager_factory;
 extern IActivationFactory *core_application_factory;
 extern IActivationFactory *data_transfer_manager_statics_factory;
+
+HRESULT user_create( IUser **out );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \
