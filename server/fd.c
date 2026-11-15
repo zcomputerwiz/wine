@@ -2000,6 +2000,20 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
                 fd->unix_fd = sysrun_open( name, O_RDONLY | (flags & ~(O_TRUNC | O_CREAT | O_EXCL)), *mode );
         }
 
+        /* a link to a file this process may not write (a font that the system setup links into the Fonts
+         * directory) is replaced when the file is to be overwritten, as an existing file is on Windows */
+        if (fd->unix_fd == -1 && errno == EACCES && (flags & O_CREAT) && (flags & O_TRUNC) &&
+            (access & FILE_UNIX_WRITE_ACCESS) && !(options & FILE_DIRECTORY_FILE))
+        {
+            char *link_path = dup_fd_name( root, name );
+            struct stat st_link;
+
+            if (link_path && !lstat( link_path, &st_link ) && S_ISLNK( st_link.st_mode ) && !unlink( link_path ))
+                fd->unix_fd = sysrun_open( name, rw_mode | (flags & ~O_TRUNC) | O_EXCL, *mode );
+            else errno = EACCES;
+            free( link_path );
+        }
+
         if (fd->unix_fd == -1)
         {
             /* check for trailing slash on file path */
