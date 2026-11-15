@@ -1433,7 +1433,7 @@ static HRESULT default_languages( HSTRING **out, UINT32 *count )
     return S_OK;
 }
 
-static HRESULT languages_from_iterable( IIterable_HSTRING *iterable, HSTRING **out, UINT32 *count )
+HRESULT languages_from_iterable( IIterable_HSTRING *iterable, HSTRING **out, UINT32 *count )
 {
     IIterator_HSTRING *iterator;
     HSTRING *list = NULL, *grown;

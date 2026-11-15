@@ -43,6 +43,8 @@ extern IActivationFactory *language_font_group_factory;
 
 /* takes the strings (not the array) */
 HRESULT hstring_vector_create(HSTRING *values, SIZE_T count, IVectorView_HSTRING **out);
+HRESULT languages_from_iterable( IIterable_HSTRING *iterable, HSTRING **out, UINT32 *count );
+extern IActivationFactory *decimal_formatter_factory;
 
 #include "wine/debug.h"
 #include "wine/list.h"

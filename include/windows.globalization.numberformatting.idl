@@ -1,0 +1,167 @@
+/*
+ * Copyright 2026 WineExplorer contributors
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+#ifdef __WIDL__
+#pragma winrt ns_prefix
+#endif
+
+import "inspectable.idl";
+import "windowscontracts.idl";
+import "windows.foundation.idl";
+
+namespace Windows.Globalization.NumberFormatting {
+    interface IDecimalFormatterFactory;
+    interface INumberFormatter;
+    interface INumberFormatter2;
+    interface INumberFormatterOptions;
+    interface INumberParser;
+    interface INumberRounder;
+    interface INumberRounderOption;
+    interface ISignedZeroOption;
+    interface ISignificantDigitsOption;
+
+    runtimeclass DecimalFormatter;
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(a5007c49-7676-4db7-8631-1b6ff265caa9)
+    ]
+    interface INumberFormatter : IInspectable
+    {
+        [overload("Format")] HRESULT FormatInt([in] INT64 value, [out, retval] HSTRING *result);
+        [overload("Format")] HRESULT FormatUInt([in] UINT64 value, [out, retval] HSTRING *result);
+        [default_overload, overload("Format")] HRESULT FormatDouble([in] DOUBLE value, [out, retval] HSTRING *result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(d4a8c1f0-80d0-4b0d-a89e-882c1e8f8310)
+    ]
+    interface INumberFormatter2 : IInspectable
+    {
+        HRESULT FormatInt([in] INT64 value, [out, retval] HSTRING *result);
+        HRESULT FormatUInt([in] UINT64 value, [out, retval] HSTRING *result);
+        HRESULT FormatDouble([in] DOUBLE value, [out, retval] HSTRING *result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(80332d21-aee1-4a39-baa2-07ed8c96daf6)
+    ]
+    interface INumberFormatterOptions : IInspectable
+    {
+        [propget] HRESULT Languages([out, retval] Windows.Foundation.Collections.IVectorView<HSTRING> **value);
+        [propget] HRESULT GeographicRegion([out, retval] HSTRING *value);
+        [propget] HRESULT IntegerDigits([out, retval] INT32 *value);
+        [propput] HRESULT IntegerDigits([in] INT32 value);
+        [propget] HRESULT FractionDigits([out, retval] INT32 *value);
+        [propput] HRESULT FractionDigits([in] INT32 value);
+        [propget] HRESULT IsGrouped([out, retval] boolean *value);
+        [propput] HRESULT IsGrouped([in] boolean value);
+        [propget] HRESULT IsDecimalPointAlwaysDisplayed([out, retval] boolean *value);
+        [propput] HRESULT IsDecimalPointAlwaysDisplayed([in] boolean value);
+        [propget] HRESULT NumeralSystem([out, retval] HSTRING *value);
+        [propput] HRESULT NumeralSystem([in] HSTRING value);
+        [propget] HRESULT ResolvedLanguage([out, retval] HSTRING *value);
+        [propget] HRESULT ResolvedGeographicRegion([out, retval] HSTRING *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(e6659412-4a13-4a53-83a1-392fbe4cff9f)
+    ]
+    interface INumberParser : IInspectable
+    {
+        HRESULT ParseInt([in] HSTRING text, [out, retval] Windows.Foundation.IReference<INT64> **result);
+        HRESULT ParseUInt([in] HSTRING text, [out, retval] Windows.Foundation.IReference<UINT64> **result);
+        HRESULT ParseDouble([in] HSTRING text, [out, retval] Windows.Foundation.IReference<DOUBLE> **result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(5473c375-38ed-4631-b80c-ef34fc48b7f5)
+    ]
+    interface INumberRounder : IInspectable
+    {
+        HRESULT RoundInt32([in] INT32 value, [out, retval] INT32 *result);
+        HRESULT RoundUInt32([in] UINT32 value, [out, retval] UINT32 *result);
+        HRESULT RoundInt64([in] INT64 value, [out, retval] INT64 *result);
+        HRESULT RoundUInt64([in] UINT64 value, [out, retval] UINT64 *result);
+        HRESULT RoundSingle([in] FLOAT value, [out, retval] FLOAT *result);
+        HRESULT RoundDouble([in] DOUBLE value, [out, retval] DOUBLE *result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(3b088433-646f-4efe-8d48-66eb2e49e736)
+    ]
+    interface INumberRounderOption : IInspectable
+    {
+        [propget] HRESULT NumberRounder([out, retval] Windows.Globalization.NumberFormatting.INumberRounder **value);
+        [propput] HRESULT NumberRounder([in] Windows.Globalization.NumberFormatting.INumberRounder *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(fd1cdd31-0a3c-49c4-a642-96a1564f4f30)
+    ]
+    interface ISignedZeroOption : IInspectable
+    {
+        [propget] HRESULT IsZeroSigned([out, retval] boolean *value);
+        [propput] HRESULT IsZeroSigned([in] boolean value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(1d4dfcdd-2d43-4ee8-bbf1-c1b26a711a58)
+    ]
+    interface ISignificantDigitsOption : IInspectable
+    {
+        [propget] HRESULT SignificantDigits([out, retval] INT32 *value);
+        [propput] HRESULT SignificantDigits([in] INT32 value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Globalization.NumberFormatting.DecimalFormatter),
+        uuid(0d018c9a-e393-46b8-b830-7a69c8f89fbb)
+    ]
+    interface IDecimalFormatterFactory : IInspectable
+    {
+        HRESULT CreateDecimalFormatter([in] Windows.Foundation.Collections.IIterable<HSTRING> *languages,
+                                       [in] HSTRING geographic_region,
+                                       [out, retval] Windows.Globalization.NumberFormatting.DecimalFormatter **result);
+    }
+
+    [
+        activatable(Windows.Foundation.UniversalApiContract, 1.0),
+        activatable(Windows.Globalization.NumberFormatting.IDecimalFormatterFactory, Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass DecimalFormatter
+    {
+        interface Windows.Globalization.NumberFormatting.INumberFormatterOptions;
+        [default] interface Windows.Globalization.NumberFormatting.INumberFormatter;
+        interface Windows.Globalization.NumberFormatting.INumberFormatter2;
+        interface Windows.Globalization.NumberFormatting.INumberParser;
+        interface Windows.Globalization.NumberFormatting.ISignificantDigitsOption;
+        interface Windows.Globalization.NumberFormatting.INumberRounderOption;
+        interface Windows.Globalization.NumberFormatting.ISignedZeroOption;
+    }
+}

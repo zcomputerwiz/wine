@@ -17,6 +17,7 @@
  */
 #define COBJMACROS
 #include <stdarg.h>
+#include <math.h>
 
 #include "windef.h"
 #include "winbase.h"
@@ -31,6 +32,8 @@
 #include "windows.foundation.h"
 #define WIDL_using_Windows_Globalization
 #include "windows.globalization.h"
+#define WIDL_using_Windows_Globalization_NumberFormatting
+#include "windows.globalization.numberformatting.h"
 #define WIDL_using_Windows_Globalization_Fonts
 #define WIDL_using_Windows_UI_Text
 #include "windows.globalization.fonts.h"
@@ -1089,6 +1092,224 @@ static void test_LanguageStatics(void)
     ILanguageStatics_Release( statics );
 }
 
+#define check_format( a, b, c ) check_format_( __LINE__, a, b, c )
+static void check_format_( int line, INumberFormatter *formatter, double value, const WCHAR *expected )
+{
+    HSTRING s = NULL;
+    HRESULT hr = INumberFormatter_FormatDouble( formatter, value, &s );
+    ok_(__FILE__, line)( hr == S_OK, "%g: got hr %#lx.\n", value, hr );
+    ok_(__FILE__, line)( !wcscmp( WindowsGetStringRawBuffer( s, NULL ), expected ), "%g: got %s, expected %s.\n", value,
+                         wine_dbgstr_hstring( s ), wine_dbgstr_w( expected ) );
+    WindowsDeleteString( s );
+}
+
+#define check_format_int( a, b, c ) check_format_int_( __LINE__, a, b, c )
+static void check_format_int_( int line, INumberFormatter *formatter, INT64 value, const WCHAR *expected )
+{
+    HSTRING s = NULL;
+    HRESULT hr = INumberFormatter_FormatInt( formatter, value, &s );
+    ok_(__FILE__, line)( hr == S_OK, "%I64d: got hr %#lx.\n", value, hr );
+    ok_(__FILE__, line)( !wcscmp( WindowsGetStringRawBuffer( s, NULL ), expected ), "%I64d: got %s, expected %s.\n", value,
+                         wine_dbgstr_hstring( s ), wine_dbgstr_w( expected ) );
+    WindowsDeleteString( s );
+}
+
+/* ParseDouble, ParseInt and ParseUInt of text; NAN where the result is null */
+#define check_parse( a, b, c, d, e ) check_parse_( __LINE__, a, b, c, d, e )
+static void check_parse_( int line, INumberFormatter *formatter, const WCHAR *text, double d, BOOL has_int, INT64 i )
+{
+    IReference_DOUBLE *rd = NULL;
+    IReference_INT64 *ri = NULL;
+    IReference_UINT64 *ru = NULL;
+    INumberParser *parser;
+    double dv;
+    INT64 iv;
+    HSTRING s;
+    HRESULT hr;
+
+    INumberFormatter_QueryInterface( formatter, &IID_INumberParser, (void **)&parser );
+    WindowsCreateString( text, wcslen( text ), &s );
+    hr = INumberParser_ParseDouble( parser, s, &rd );
+    ok_(__FILE__, line)( hr == S_OK, "%s: got hr %#lx.\n", wine_dbgstr_w( text ), hr );
+    ok_(__FILE__, line)( (rd == NULL) == (isnan( d ) != 0), "%s: got %p.\n", wine_dbgstr_w( text ), rd );
+    if (rd)
+    {
+        IReference_DOUBLE_get_Value( rd, &dv );
+        ok_(__FILE__, line)( dv == d, "%s: got %g.\n", wine_dbgstr_w( text ), dv );
+        IReference_DOUBLE_Release( rd );
+    }
+    hr = INumberParser_ParseInt( parser, s, &ri );
+    ok_(__FILE__, line)( hr == S_OK && !ri == !has_int, "%s: got hr %#lx, %p.\n", wine_dbgstr_w( text ), hr, ri );
+    if (ri)
+    {
+        IReference_INT64_get_Value( ri, &iv );
+        ok_(__FILE__, line)( iv == i, "%s: got %I64d.\n", wine_dbgstr_w( text ), iv );
+        IReference_INT64_Release( ri );
+    }
+    hr = INumberParser_ParseUInt( parser, s, &ru );
+    ok_(__FILE__, line)( hr == S_OK && !ru == !(has_int && i >= 0), "%s: got hr %#lx, %p.\n", wine_dbgstr_w( text ), hr, ru );
+    if (ru) IReference_UINT64_Release( ru );
+    WindowsDeleteString( s );
+    INumberParser_Release( parser );
+}
+
+static INumberFormatter *create_decimal_formatter( IDecimalFormatterFactory *factory, const WCHAR *language,
+                                                   const WCHAR *region )
+{
+    struct hstring_iterable languages;
+    INumberFormatter *formatter = NULL;
+    HSTRING s = NULL;
+    HRESULT hr;
+
+    hstring_iterable_init( &languages, &language, 1 );
+    if (region) WindowsCreateString( region, wcslen( region ), &s );
+    hr = IDecimalFormatterFactory_CreateDecimalFormatter( factory, &languages.IIterable_HSTRING_iface, s, &formatter );
+    WindowsDeleteString( s );
+    ok( hr == (region ? S_OK : E_INVALIDARG), "%s %s: got hr %#lx.\n", wine_dbgstr_w( language ), wine_dbgstr_w( region ), hr );
+    return formatter;
+}
+
+/* values as Windows 11 gives them (x64 and x86) */
+static void test_DecimalFormatter(void)
+{
+    static const WCHAR *class_name = L"Windows.Globalization.NumberFormatting.DecimalFormatter";
+    IDecimalFormatterFactory *decimal_factory;
+    ISignificantDigitsOption *significant;
+    INumberRounderOption *rounder_option;
+    INumberFormatterOptions *options;
+    ISignedZeroOption *signed_zero;
+    IActivationFactory *factory;
+    INumberFormatter *formatter;
+    INumberRounder *rounder;
+    INT32 value;
+    boolean flag;
+    HSTRING str;
+    HRESULT hr;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (hr != S_OK) return;
+    check_interface( factory, &IID_IAgileObject );
+    hr = IActivationFactory_QueryInterface( factory, &IID_IDecimalFormatterFactory, (void **)&decimal_factory );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    ok( !create_decimal_formatter( decimal_factory, L"de-DE", NULL ), "got a formatter without a region.\n" );
+
+    /* en-US: the defaults */
+    formatter = create_decimal_formatter( decimal_factory, L"en-US", L"US" );
+    INumberFormatter_QueryInterface( formatter, &IID_INumberFormatterOptions, (void **)&options );
+    value = -1;
+    INumberFormatterOptions_get_IntegerDigits( options, &value );
+    ok( value == 1, "got integer digits %d.\n", value );
+    INumberFormatterOptions_get_FractionDigits( options, &value );
+    ok( value == 2, "got fraction digits %d.\n", value );
+    flag = TRUE;
+    INumberFormatterOptions_get_IsGrouped( options, &flag );
+    ok( !flag, "got grouped %d.\n", flag );
+    flag = TRUE;
+    INumberFormatterOptions_get_IsDecimalPointAlwaysDisplayed( options, &flag );
+    ok( !flag, "got point %d.\n", flag );
+    INumberFormatterOptions_get_NumeralSystem( options, &str );
+    ok( !wcscmp( WindowsGetStringRawBuffer( str, NULL ), L"Latn" ), "got %s.\n", wine_dbgstr_hstring( str ) );
+    WindowsDeleteString( str );
+    INumberFormatterOptions_get_ResolvedLanguage( options, &str );
+    ok( !wcscmp( WindowsGetStringRawBuffer( str, NULL ), L"en-US" ), "got %s.\n", wine_dbgstr_hstring( str ) );
+    WindowsDeleteString( str );
+    INumberFormatterOptions_get_GeographicRegion( options, &str );
+    ok( !wcscmp( WindowsGetStringRawBuffer( str, NULL ), L"US" ), "got %s.\n", wine_dbgstr_hstring( str ) );
+    WindowsDeleteString( str );
+    INumberFormatterOptions_get_ResolvedGeographicRegion( options, &str );
+    ok( !wcscmp( WindowsGetStringRawBuffer( str, NULL ), L"ZZ" ), "got %s.\n", wine_dbgstr_hstring( str ) );
+    WindowsDeleteString( str );
+    INumberFormatter_QueryInterface( formatter, &IID_ISignificantDigitsOption, (void **)&significant );
+    value = -1;
+    ISignificantDigitsOption_get_SignificantDigits( significant, &value );
+    ok( !value, "got significant digits %d.\n", value );
+    ISignificantDigitsOption_Release( significant );
+    INumberFormatter_QueryInterface( formatter, &IID_ISignedZeroOption, (void **)&signed_zero );
+    flag = TRUE;
+    ISignedZeroOption_get_IsZeroSigned( signed_zero, &flag );
+    ok( !flag, "got signed zero %d.\n", flag );
+    ISignedZeroOption_Release( signed_zero );
+    INumberFormatter_QueryInterface( formatter, &IID_INumberRounderOption, (void **)&rounder_option );
+    rounder = (void *)0xdeadbeef;
+    INumberRounderOption_get_NumberRounder( rounder_option, &rounder );
+    ok( !rounder, "got rounder %p.\n", rounder );
+    INumberRounderOption_Release( rounder_option );
+
+    check_format_int( formatter, 0, L"0.00" );
+    check_format_int( formatter, -1234567, L"-1234567.00" );
+    check_format( formatter, 1234.5678, L"1234.5678" );
+    check_format( formatter, -0.0, L"0.00" );
+    check_format( formatter, 0.5, L"0.50" );
+    check_format( formatter, 1e20, L"100000000000000000000.00" );
+    check_format( formatter, 0.000123, L"0.000123" );
+    check_format( formatter, -2.5, L"-2.50" );
+
+    check_parse( formatter, L"1234.5", 1234.5, FALSE, 0 );
+    check_parse( formatter, L"1,234.5", 1234.5, FALSE, 0 );
+    check_parse( formatter, L"1.234,5", NAN, FALSE, 0 );
+    check_parse( formatter, L"-12", -12, TRUE, -12 );
+    check_parse( formatter, L"12", 12, TRUE, 12 );
+    check_parse( formatter, L"abc", NAN, FALSE, 0 );
+    check_parse( formatter, L" 12", NAN, FALSE, 0 );
+
+    INumberFormatterOptions_put_FractionDigits( options, 0 );
+    check_format_int( formatter, 7, L"7" );
+    check_format( formatter, 0.5, L"0.5" );
+    check_format( formatter, -0.0, L"0" );
+
+    INumberFormatterOptions_put_IsGrouped( options, TRUE );
+    INumberFormatterOptions_put_IntegerDigits( options, 3 );
+    INumberFormatterOptions_put_FractionDigits( options, 2 );
+    INumberFormatterOptions_put_IsDecimalPointAlwaysDisplayed( options, TRUE );
+    check_format_int( formatter, 7, L"007.00" );
+    check_format_int( formatter, -1234567, L"-1,234,567.00" );
+    check_format( formatter, -2.5, L"-002.50" );
+    check_format( formatter, 1e20, L"100,000,000,000,000,000,000.00" );
+
+    hr = INumberFormatterOptions_put_FractionDigits( options, -1 );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+    WindowsCreateString( L"bogus", 5, &str );
+    hr = INumberFormatterOptions_put_NumeralSystem( options, str );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+    WindowsDeleteString( str );
+    /* the Arab numeral system brings the Arabic separators */
+    INumberFormatterOptions_put_IntegerDigits( options, 1 );
+    WindowsCreateString( L"Arab", 4, &str );
+    hr = INumberFormatterOptions_put_NumeralSystem( options, str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    WindowsDeleteString( str );
+    check_format_int( formatter, 1234567, L"\x0661\x066c\x0662\x0663\x0664\x066c\x0665\x0666\x0667\x066b\x0660\x0660" );
+    INumberFormatterOptions_Release( options );
+    INumberFormatter_Release( formatter );
+
+    /* de-DE: its separators */
+    formatter = create_decimal_formatter( decimal_factory, L"de-DE", L"DE" );
+    check_format( formatter, 1234.5678, L"1234,5678" );
+    check_format( formatter, -2.5, L"-2,50" );
+    check_parse( formatter, L"1.234,5", 1234.5, FALSE, 0 );
+    check_parse( formatter, L"1,234.5", NAN, FALSE, 0 );
+    INumberFormatter_Release( formatter );
+
+    /* ar-SA: Arabic-Indic digits */
+    formatter = create_decimal_formatter( decimal_factory, L"ar-SA", L"SA" );
+    INumberFormatter_QueryInterface( formatter, &IID_INumberFormatterOptions, (void **)&options );
+    INumberFormatterOptions_get_NumeralSystem( options, &str );
+    ok( !wcscmp( WindowsGetStringRawBuffer( str, NULL ), L"Arab" ), "got %s.\n", wine_dbgstr_hstring( str ) );
+    WindowsDeleteString( str );
+    INumberFormatterOptions_Release( options );
+    check_format_int( formatter, 7, L"\x0667\x066b\x0660\x0660" );
+    check_format( formatter, -2.5, L"-\x0662\x066b\x0665\x0660" );
+    INumberFormatter_Release( formatter );
+
+    IDecimalFormatterFactory_Release( decimal_factory );
+    IActivationFactory_Release( factory );
+}
+
 static const char *font_names[] =
 {
     "UIText", "UIHeading", "UITitle", "UICaption", "UINotificationHeading", "TraditionalDocument", "ModernDocument",
@@ -1223,6 +1444,7 @@ START_TEST(globalization)
     test_Calendar();
     test_LanguageFontGroup();
     test_LanguageStatics();
+    test_DecimalFormatter();
 
     RoUninitialize();
 }

@@ -30,9 +30,13 @@ import "windows.system.idl";
 import "windows.globalization.idl";
 import "windows.system.userprofile.idl";
 import "windows.globalization.fonts.idl";
+import "windows.globalization.numberformatting.idl";
 
 namespace Windows.Globalization.Fonts {
     runtimeclass LanguageFontGroup;
+}
+namespace Windows.Globalization.NumberFormatting {
+    runtimeclass DecimalFormatter;
 }
 namespace Windows.System.UserProfile {
     runtimeclass GlobalizationPreferences;
