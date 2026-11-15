@@ -33,6 +33,11 @@ import "windows.system.userprofile.idl";
 import "windows.ui.viewmanagement.idl";
 import "windows.applicationmodel.core.idl";
 import "windows.applicationmodel.datatransfer.idl";
+import "windows.applicationmodel.useractivities.idl";
+
+namespace Windows.ApplicationModel.UserActivities {
+    runtimeclass UserActivityRequestManager;
+}
 
 namespace Windows.Security.ExchangeActiveSyncProvisioning {
     runtimeclass EasClientDeviceInformation;

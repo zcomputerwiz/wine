@@ -1028,6 +1028,7 @@ SOURCES = \
 	windows.applicationmodel.datatransfer.dragdrop.idl \
 	windows.applicationmodel.datatransfer.idl \
 	windows.applicationmodel.idl \
+	windows.applicationmodel.useractivities.idl \
 	windows.applicationmodel.resources.core.idl \
 	windows.applicationmodel.resources.idl \
 	windows.data.json.idl \
@@ -1109,6 +1110,7 @@ SOURCES = \
 	windows.ui.core.corewindow.interop.idl \
 	windows.ui.core.idl \
 	windows.ui.idl \
+	windows.ui.shell.idl \
 	windows.ui.input.idl \
 	windows.ui.notifications.idl \
 	windows.ui.text.core.idl \

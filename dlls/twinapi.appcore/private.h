@@ -50,6 +50,8 @@
 #define WIDL_using_Windows_ApplicationModel_DataTransfer
 #include "windows.applicationmodel.datatransfer.h"
 #include "windows.ui.notifications.h"   /* TileActivatedInfo, ILaunchActivatedEventArgs2 */
+#define WIDL_using_Windows_ApplicationModel_UserActivities
+#include "windows.applicationmodel.useractivities.h"
 
 #include "wine/debug.h"
 
@@ -83,6 +85,7 @@ extern IActivationFactory *analytics_info_factory;
 extern IActivationFactory *advertising_manager_factory;
 extern IActivationFactory *core_application_factory;
 extern IActivationFactory *data_transfer_manager_statics_factory;
+extern IActivationFactory *user_activity_request_manager_factory;
 
 HRESULT user_create( IUser **out );
 HRESULT core_title_bar_create( ICoreApplicationViewTitleBar **out );

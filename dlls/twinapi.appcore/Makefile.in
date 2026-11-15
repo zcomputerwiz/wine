@@ -16,4 +16,5 @@ SOURCES = \
 	main.c \
 	title_bar.c \
 	twinapi.appcore.rc \
-	user.c
+	user.c \
+	user_activities.c
