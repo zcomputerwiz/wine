@@ -1,5 +1,5 @@
 TESTDLL = dwrite.dll
-IMPORTS = dwrite gdi32 user32
+IMPORTS = dwrite gdi32 user32 advapi32
 
 SOURCES = \
 	analyzer.c \
