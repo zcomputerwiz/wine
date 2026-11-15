@@ -39,6 +39,7 @@
 
 extern IActivationFactory *geographic_region_factory;
 extern IActivationFactory *calendar_factory_iface;
+extern IActivationFactory *language_font_group_factory;
 
 /* takes the strings (not the array) */
 HRESULT hstring_vector_create(HSTRING *values, SIZE_T count, IVectorView_HSTRING **out);

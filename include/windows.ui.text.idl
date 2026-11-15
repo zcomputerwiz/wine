@@ -30,7 +30,39 @@ import "windows.globalization.idl";
 
 namespace Windows.UI.Text
 {
+    typedef enum FontStretch FontStretch;
+    typedef enum FontStyle FontStyle;
     typedef enum UnderlineType UnderlineType;
+    typedef struct FontWeight FontWeight;
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0)]
+    enum FontStretch
+    {
+        Undefined      = 0,
+        UltraCondensed = 1,
+        ExtraCondensed = 2,
+        Condensed      = 3,
+        SemiCondensed  = 4,
+        Normal         = 5,
+        SemiExpanded   = 6,
+        Expanded       = 7,
+        ExtraExpanded  = 8,
+        UltraExpanded  = 9
+    };
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0)]
+    enum FontStyle
+    {
+        Normal  = 0,
+        Oblique = 1,
+        Italic  = 2
+    };
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0)]
+    struct FontWeight
+    {
+        UINT16 Weight;
+    };
 
     declare
     {
