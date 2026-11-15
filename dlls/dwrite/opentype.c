@@ -6925,6 +6925,47 @@ unsigned int opentype_get_named_instance_count(const struct file_stream_desc *st
     return count;
 }
 
+/* The named instance (1-based) at the given axis values, the axes not given at their defaults; 0 when no named
+   instance is there or the font has no usable STAT. On Windows a font face reference added to a font set is named
+   as the instance at its position, the default position when it has no axis values. */
+static BOOL axis_value_equal(float a, float b);
+
+unsigned int opentype_find_named_instance(const struct file_stream_desc *stream_desc,
+        const DWRITE_FONT_AXIS_VALUE *values, unsigned int count)
+{
+    struct dwrite_fonttable stat;
+    struct fvar_layout fvar;
+    unsigned int i, j, k, ret = 0;
+
+    memset(&fvar, 0, sizeof(fvar));
+    opentype_get_font_table(stream_desc, MS_STAT_TAG, &stat);
+    if (!opentype_stat_is_usable(&stat) || !opentype_get_fvar_layout(stream_desc, &fvar)) goto done;
+
+    for (i = 0; i < fvar.instance_count && !ret; ++i)
+    {
+        unsigned int record = fvar.instances_offset + i * fvar.instance_size;
+        BOOL match = TRUE;
+
+        for (j = 0; j < fvar.axis_count && match; ++j)
+        {
+            unsigned int axis = fvar.axes_offset + j * sizeof(struct var_axis_record);
+            UINT32 tag = table_read_dword(&fvar.table, axis);
+            float wanted = table_read_be_fixed(&fvar.table, axis + 8); /* the default value */
+
+            for (k = 0; k < count; ++k)
+                if (values[k].axisTag == tag) wanted = values[k].value;
+            match = axis_value_equal(table_read_be_fixed(&fvar.table, record + 4 + 4 * j), wanted);
+        }
+        if (match) ret = i + 1;
+    }
+    TRACE("%u axis values: named instance %u.\n", count, ret);
+
+done:
+    release_font_table(stream_desc, &fvar.table);
+    release_font_table(stream_desc, &stat);
+    return ret;
+}
+
 /* the English string of a name ID (or the first one), empty when there is none */
 static void opentype_get_name_string(const struct dwrite_fonttable *name, unsigned int id, WCHAR *buffer,
         unsigned int size)

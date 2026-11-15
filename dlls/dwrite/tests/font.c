@@ -10838,6 +10838,67 @@ static void test_fontset_named_instances(void)
 
     IDWriteFontSet_Release(fontset);
     IDWriteFontSetBuilder2_Release(builder);
+
+    /* A face reference gives one entry, named as the instance at its axis values (the default position, here the
+       "Text" instance, when it has none), as Windows 11 does. */
+    {
+        static const DWRITE_FONT_AXIS_VALUE semibold_text[] =
+        {
+            { DWRITE_FONT_AXIS_TAG_WEIGHT, 600.0f },
+            { DWRITE_MAKE_FONT_AXIS_TAG('o','p','s','z'), 12.0f },
+        };
+        static const struct
+        {
+            const DWRITE_FONT_AXIS_VALUE *axes;
+            UINT32 count;
+            const WCHAR *wws_face, *typographic_face;
+            DWRITE_FONT_WEIGHT weight;
+        }
+        tests[] =
+        {
+            { NULL, 0, L"Regular", L"Text", DWRITE_FONT_WEIGHT_NORMAL },
+            { semibold_text, ARRAY_SIZE(semibold_text), L"Semibold", L"Semibold Text", DWRITE_FONT_WEIGHT_SEMI_BOLD },
+        };
+        IDWriteFontFaceReference1 *reference;
+        IDWriteFontFile *file;
+        unsigned int i;
+
+        hr = IDWriteFactory6_CreateFontFileReference(factory, path, NULL, &file);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        for (i = 0; i < ARRAY_SIZE(tests); ++i)
+        {
+            winetest_push_context("reference %u", i);
+            hr = IDWriteFactory6_CreateFontFaceReference(factory, file, 0, DWRITE_FONT_SIMULATIONS_NONE,
+                    tests[i].axes, tests[i].count, &reference);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            hr = IDWriteFactory6_CreateFontSetBuilder(factory, &builder);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            hr = IDWriteFontSetBuilder2_AddFontFaceReference(builder, (IDWriteFontFaceReference *)reference);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            hr = IDWriteFontSetBuilder2_CreateFontSet(builder, &fontset);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            count = IDWriteFontSet_GetFontCount(fontset);
+            ok(count == 1, "Unexpected font count %u.\n", count);
+
+            hr = IDWriteFactory6_CreateFontCollectionFromFontSet(factory, fontset,
+                    DWRITE_FONT_FAMILY_MODEL_WEIGHT_STRETCH_STYLE, &collection);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            check_font_name(collection, 0, 0, L"Wine Var Test Text", tests[i].wws_face, tests[i].weight);
+            IDWriteFontCollection2_Release(collection);
+            hr = IDWriteFactory6_CreateFontCollectionFromFontSet(factory, fontset,
+                    DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC, &collection);
+            ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+            check_font_name(collection, 0, 0, L"Wine Var Test", tests[i].typographic_face, tests[i].weight);
+            IDWriteFontCollection2_Release(collection);
+
+            IDWriteFontSet_Release(fontset);
+            IDWriteFontSetBuilder2_Release(builder);
+            IDWriteFontFaceReference1_Release(reference);
+            winetest_pop_context();
+        }
+        IDWriteFontFile_Release(file);
+    }
+
     IDWriteFactory6_Release(factory);
     DELETE_FONTFILE(path);
 }
