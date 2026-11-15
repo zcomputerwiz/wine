@@ -152,6 +152,7 @@ struct application_view
     HSTRING title;
     boolean screen_capture;
     Size min_size;
+    IApplicationViewTitleBar *title_bar;    /* made on first use, kept with the view */
 };
 
 static CRITICAL_SECTION application_views_cs;
@@ -419,9 +420,21 @@ DEFINE_IINSPECTABLE( application_view3, IApplicationView3, struct application_vi
 
 static HRESULT WINAPI application_view3_get_TitleBar( IApplicationView3 *iface, IApplicationViewTitleBar **value )
 {
-    FIXME( "iface %p, value %p stub!\n", iface, value );
-    *value = NULL;
-    return E_NOTIMPL;
+    struct application_view *impl = impl_from_IApplicationView3( iface );
+    IApplicationViewTitleBar *bar = NULL;
+    HRESULT hr;
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    if (!impl->title_bar)
+    {
+        if (FAILED(hr = view_title_bar_create( &bar ))) return hr;
+        if (InterlockedCompareExchangePointer( (void **)&impl->title_bar, bar, NULL ))
+            IApplicationViewTitleBar_Release( bar );
+    }
+    IApplicationViewTitleBar_AddRef( (*value = impl->title_bar) );
+    return S_OK;
 }
 
 static HRESULT WINAPI application_view3_get_FullScreenSystemOverlayMode( IApplicationView3 *iface, FullScreenSystemOverlayMode *value )
