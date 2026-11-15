@@ -55,6 +55,7 @@
 #include "unicode.h"
 #include "security.h"
 #include "sysrun.h"
+#include "accounts.h"
 #include "session0.h"
 #include "e1s_token.h"
 #include "e1s_profile.h"
@@ -563,19 +564,6 @@ int elevation_helper_unset(void)
     return !value->len || !*(const WCHAR *)value->data;
 }
 
-/* Group names follow the same rule as valid_name() in accounts.c: 1-63 characters of [A-Za-z0-9_.-], not
- * starting with '-', not "." or "..", and '$' only as the last character. */
-static int valid_name( const char *s )
-{
-    size_t i, len = strlen( s );
-    if (!len || len > 63 || *s == '-' || !strcmp( s, "." ) || !strcmp( s, ".." )) return 0;
-    for (i = 0; i < len; i++)
-        if (!((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') ||
-              (s[i] >= '0' && s[i] <= '9') || s[i] == '_' || s[i] == '-' || s[i] == '.' ||
-              (s[i] == '$' && i == len - 1))) return 0;
-    return 1;
-}
-
 /* The administrator group: "admin_group" of the root-owned sysrun.conf (a user controls its own environment, so
  * the name cannot come from there), else "sudo". A repeated "admin_group=" line or an empty or invalid name
  * makes the configuration invalid and returns NULL, in which case nobody is an administrator; same rule as
@@ -583,28 +571,18 @@ static int valid_name( const char *s )
 static const char *admin_group_name(void)
 {
     static char name[64];
-    char buf[4096], *line, *next;
-    struct stat st;
-    ssize_t n;
-    int fd, seen = 0;
 
-    strcpy( name, "sudo" );
-    if ((fd = open( "/etc/wineexplorer/sysrun.conf", O_RDONLY | O_NOFOLLOW | O_CLOEXEC )) == -1) return name;
-    if (fstat( fd, &st ) || !S_ISREG( st.st_mode ) || st.st_uid != 0 || (st.st_mode & (S_IWGRP | S_IWOTH)))
-        n = 0;
-    else
-        n = read( fd, buf, sizeof(buf) - 1 );
-    close( fd );
-    if (n <= 0) return name;
-    buf[n] = 0;
-    for (line = buf; line; line = next)
+    switch (sysrun_conf_get( "admin_group", name, sizeof(name) ))
     {
-        if ((next = strchr( line, '\n' ))) *next++ = 0;
-        if (strncmp( line, "admin_group=", 12 )) continue;
-        if (seen++ || !valid_name( line + 12 )) return NULL;
-        strcpy( name, line + 12 );
+    case SYSRUN_CONF_ABSENT:
+        strcpy( name, "sudo" );
+        return name;
+    case SYSRUN_CONF_VALUE:
+        return accounts_valid_name( name ) ? name : NULL;
+    case SYSRUN_CONF_INVALID:
+        break;
     }
-    return name;
+    return NULL;
 }
 
 /* Whether the user of this server is in the administrator group of the group database. Decided once, when the

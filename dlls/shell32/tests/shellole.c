@@ -1031,6 +1031,43 @@ static void test_dragdrophelper(void)
     IDropTargetHelper_Release(target);
 }
 
+static void test_virtual_desktop_manager(void)
+{
+    IVirtualDesktopManager *manager;
+    GUID desktop, other = {0x12345678};
+    BOOL on_current;
+    HWND hwnd;
+    HRESULT hr;
+
+    hr = CoCreateInstance(&CLSID_VirtualDesktopManager, NULL, CLSCTX_INPROC_SERVER, &IID_IVirtualDesktopManager,
+                          (void **)&manager);
+    if (FAILED(hr))
+    {
+        win_skip("VirtualDesktopManager not available, %#lx\n", hr);
+        return;
+    }
+    hwnd = CreateWindowA("static", "test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, 100, 100, NULL, NULL, NULL, NULL);
+    ok(hwnd != NULL, "CreateWindow failed\n");
+
+    on_current = FALSE;
+    hr = IVirtualDesktopManager_IsWindowOnCurrentVirtualDesktop(manager, hwnd, &on_current);
+    ok(hr == S_OK, "IsWindowOnCurrentVirtualDesktop returned %#lx\n", hr);
+    ok(on_current, "a new window is not on the current desktop\n");
+
+    memset(&desktop, 0, sizeof(desktop));
+    hr = IVirtualDesktopManager_GetWindowDesktopId(manager, hwnd, &desktop);
+    ok(hr == S_OK, "GetWindowDesktopId returned %#lx\n", hr);
+    ok(!IsEqualGUID(&desktop, &GUID_NULL), "got a null desktop id\n");
+
+    hr = IVirtualDesktopManager_MoveWindowToDesktop(manager, hwnd, &desktop);
+    ok(hr == S_OK, "MoveWindowToDesktop to its own desktop returned %#lx\n", hr);
+    hr = IVirtualDesktopManager_MoveWindowToDesktop(manager, hwnd, &other);
+    ok(FAILED(hr), "MoveWindowToDesktop to an unknown desktop returned %#lx\n", hr);
+
+    DestroyWindow(hwnd);
+    IVirtualDesktopManager_Release(manager);
+}
+
 START_TEST(shellole)
 {
     HRESULT hr;
@@ -1048,6 +1085,7 @@ START_TEST(shellole)
     test_DragQueryFile(FALSE);
     test_SHCreateSessionKey();
     test_dragdrophelper();
+    test_virtual_desktop_manager();
 
     CoUninitialize();
 }

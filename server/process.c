@@ -140,10 +140,6 @@ fail:
     return 0;
 }
 
-#ifndef SO_PASSPIDFD
-#define SO_PASSPIDFD 76
-#endif
-
 /* R8 step 3b: the kernel attaches the sender's credentials and a pidfd to every fd transfer on the
  * server end of the dialog's process socket, so receive_fd can pin the dialog's own loader. Set and
  * checked before the dialog process exists; failure denies the creation. */

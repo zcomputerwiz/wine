@@ -1367,6 +1367,36 @@ UINT msi_set_original_database_property( MSIDATABASE *db, const WCHAR *package )
     return r;
 }
 
+/* The package could not be copied to the local cache (for example a per-machine package run without the right to
+ * write the Windows directory): say so in the log and, unless the UI level is none, in a message box, instead of
+ * failing without a word. No package exists yet, so neither its log nor its error dialog can be used. */
+static void report_local_copy_failure( const WCHAR *file, UINT error )
+{
+    WCHAR dir[MAX_PATH], text[1024];
+    char afile[3 * MAX_PATH], adir[3 * MAX_PATH], line[6 * MAX_PATH + 128];
+    DWORD written, len;
+    HANDLE log;
+
+    WARN( "unable to make a local copy of package %s (%u)\n", debugstr_w(file), error );
+    GetWindowsDirectoryW( dir, MAX_PATH );
+    lstrcatW( dir, L"\\Installer" );
+    if (gszLogFile && (log = CreateFileW( gszLogFile, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                          OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL )) != INVALID_HANDLE_VALUE)
+    {
+        if (!WideCharToMultiByte( CP_ACP, 0, file, -1, afile, sizeof(afile), NULL, NULL )) afile[0] = 0;
+        if (!WideCharToMultiByte( CP_ACP, 0, dir, -1, adir, sizeof(adir), NULL, NULL )) adir[0] = 0;
+        len = snprintf( line, sizeof(line), "MSI (c): cannot copy the package %s to %s (error %u)\n",
+                        afile, adir, error );
+        WriteFile( log, line, min( len, sizeof(line) - 1 ), &written, NULL );
+        CloseHandle( log );
+    }
+    if ((gUILevel & INSTALLUILEVEL_MASK) == INSTALLUILEVEL_NONE) return;
+    if (!FormatMessageW( FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL,
+                         ERROR_INSTALL_PACKAGE_OPEN_FAILED, 0, text, ARRAY_SIZE(text), NULL ))
+        lstrcpyW( text, L"This installation package could not be opened." );
+    MessageBoxW( gUIhwnd, text, L"Windows Installer", MB_OK | MB_ICONERROR );
+}
+
 UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
 {
     MSIDATABASE *db;
@@ -1420,6 +1450,7 @@ UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
             r = msi_create_empty_local_file( localfile, L".msi" );
             if (r != ERROR_SUCCESS)
             {
+                report_local_copy_failure( file, GetLastError() );
                 msiobj_release( &db->hdr );
                 return r;
             }

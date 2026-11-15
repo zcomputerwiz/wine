@@ -79,39 +79,48 @@ static void set_not_dumpable(void)
 #endif
 }
 
-/* read "group" and "machine_root" from the configuration, which must be a regular root-owned file that only
- * root can write (checked on the open descriptor) */
-static int read_config( char *group, size_t group_size )
+enum sysrun_conf sysrun_conf_get( const char *key, char *value, size_t size )
 {
+    enum sysrun_conf ret = SYSRUN_CONF_ABSENT;
+    size_t keylen = strlen( key );
     char buf[4096], *line, *next;
     struct stat st;
-    ssize_t n;
+    ssize_t n = 0;
     int fd;
 
-    group[0] = machine_root[0] = 0;
-    if ((fd = open( SYSRUN_CONF, O_RDONLY | O_NOFOLLOW | O_CLOEXEC )) == -1) return 0;
-    if (fstat( fd, &st ) || !S_ISREG( st.st_mode ) || st.st_uid != 0 || (st.st_mode & (S_IWGRP | S_IWOTH)))
-        n = 0;
-    else
+    if (size) value[0] = 0;
+    if ((fd = open( SYSRUN_CONF, O_RDONLY | O_NOFOLLOW | O_CLOEXEC )) == -1) return SYSRUN_CONF_ABSENT;
+    if (!fstat( fd, &st ) && S_ISREG( st.st_mode ) && !st.st_uid && !(st.st_mode & (S_IWGRP | S_IWOTH)))
         n = read( fd, buf, sizeof(buf) - 1 );
     close( fd );
-    if (n <= 0) return 0;
+    if (n <= 0) return SYSRUN_CONF_ABSENT;
     buf[n] = 0;
     for (line = buf; line; line = next)
     {
         if ((next = strchr( line, '\n' ))) *next++ = 0;
-        if (!strncmp( line, "group=", 6 ))
+        if (strncmp( line, key, keylen ) || line[keylen] != '=') continue;
+        if (ret != SYSRUN_CONF_ABSENT || !line[keylen + 1] || strlen( line + keylen + 1 ) >= size)
         {
-            if (strlen( line + 6 ) >= group_size) return 0;
-            strcpy( group, line + 6 );
+            if (size) value[0] = 0;
+            return SYSRUN_CONF_INVALID;
         }
-        else if (!strncmp( line, "machine_root=", 13 ))
-        {
-            if (strlen( line + 13 ) >= sizeof(machine_root)) return 0;
-            strcpy( machine_root, line + 13 );
-        }
+        strcpy( value, line + keylen + 1 );
+        ret = SYSRUN_CONF_VALUE;
     }
-    return group[0] && machine_root[0] == '/';
+    return ret;
+}
+
+/* "group" and "machine_root" of the configuration, each given exactly once */
+static int read_config( char *group, size_t group_size )
+{
+    machine_root[0] = 0;
+    if (sysrun_conf_get( "group", group, group_size ) != SYSRUN_CONF_VALUE ||
+        sysrun_conf_get( "machine_root", machine_root, sizeof(machine_root) ) != SYSRUN_CONF_VALUE)
+    {
+        machine_root[0] = 0;
+        return 0;
+    }
+    return machine_root[0] == '/';
 }
 
 /* called first thing in main() */
@@ -388,7 +397,11 @@ void sysrun_main_image( struct process *process, struct fd *fd )
     if (!process->e1s6_image_seen && system_role_enabled() && fd && (unix_fd = get_unix_fd( fd )) != -1 &&
         !fstat( unix_fd, &st ) && S_ISREG( st.st_mode ))
     {
-        static const char *const brokers[] = { "wexelevate.exe", "wexelevate_test.exe" };
+        static const char *const brokers[] = { "wexelevate.exe",
+#ifdef WEX_E1_TEST_HOOKS
+                                                "wexelevate_test.exe"
+#endif
+                                              };
         for (i = 0; i < ARRAY_SIZE(brokers); i++)
             if ((unsigned int)snprintf( path, sizeof(path), "%s/drive_c/windows/system32/%s", machine_root, brokers[i] ) < sizeof(path) &&
                 !stat( path, &ref ) && ref.st_dev == st.st_dev && ref.st_ino == st.st_ino)
@@ -399,7 +412,11 @@ void sysrun_main_image( struct process *process, struct fd *fd )
     if (!process->e1s6_image_seen && session0_server && !process->wex_registry_client && fd &&
         (unix_fd = get_unix_fd( fd )) != -1 && !fstat( unix_fd, &st ) && S_ISREG( st.st_mode ))
     {
-        static const char *const brokers[] = { "wexelevate.exe", "wexelevate_test.exe" };
+        static const char *const brokers[] = { "wexelevate.exe",
+#ifdef WEX_E1_TEST_HOOKS
+                                                "wexelevate_test.exe"
+#endif
+                                              };
         for (i = 0; i < ARRAY_SIZE(brokers); i++)
             if ((unsigned int)snprintf( path, sizeof(path), "drive_c/windows/system32/%s", brokers[i] ) < sizeof(path) &&
                 !fstatat( config_dir_fd, path, &ref, 0 ) && ref.st_dev == st.st_dev && ref.st_ino == st.st_ino)
@@ -439,7 +456,7 @@ int sysrun_process_is_broker( struct process *process )
 {
     struct luid id, modified;
 
-#ifdef WEX_E1S6_TRANSPORT_TEST
+#if defined(WEX_E1S6_TRANSPORT_TEST) && defined(WEX_E1_TEST_HOOKS)
     /* lab only: the test broker image; it has no pinned primary */
     if (process->e1s6_broker_image && sysrun_process_is_system( process ) &&
         token_service_account( process->token ) == SERVICE_ACCOUNT_SYSTEM) return 1;
@@ -465,9 +482,13 @@ int sysrun_process_is_system( struct process *process )
  * caller has already passed the S3 consumed-opener/writer comparisons. This
  * operation neither issues tokens nor accepts authentication results. */
 #if defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
-#define SO_PEERPIDFD_LAB 77
+#ifdef WEX_E1_TEST_HOOKS
+#define E1S6_AUDIT(...) fprintf( stderr, __VA_ARGS__ )
+#else
+#define E1S6_AUDIT(...) do { } while (0)
+#endif
 #define E1S6_REQUIRE(c, site) do { if (!(c)) { \
-    fprintf( stderr, "E1S6_DENY server site=%s errno=%d\n", site, errno ); goto done; \
+    E1S6_AUDIT( "E1S6_DENY server site=%s errno=%d\n", site, errno ); goto done; \
 } } while (0)
 
 static int e1s6_get_fd( const unsigned char *p, const char *role )
@@ -478,18 +499,18 @@ static int e1s6_get_fd( const unsigned char *p, const char *role )
     int ret = -1;
     if (!obj)
     {
-        fprintf( stderr, "E1S6_DENY server site=endorse-%s-handle status=%08x\n", role, get_error() );
+        E1S6_AUDIT( "E1S6_DENY server site=endorse-%s-handle status=%08x\n", role, get_error() );
         return -1;
     }
     if ((fd = get_obj_fd( obj )))
     {
         ret = fcntl( get_unix_fd( fd ), F_DUPFD_CLOEXEC, 0 );
         if (ret < 0)
-            fprintf( stderr, "E1S6_DENY server site=endorse-%s-dup-fd errno=%d status=%08x\n",
-                     role, errno, get_error() );
+            E1S6_AUDIT( "E1S6_DENY server site=endorse-%s-dup-fd errno=%d status=%08x\n",
+                        role, errno, get_error() );
         release_object( fd );
     }
-    else fprintf( stderr, "E1S6_DENY server site=endorse-%s-fd-object status=%08x\n", role, get_error() );
+    else E1S6_AUDIT( "E1S6_DENY server site=endorse-%s-fd-object status=%08x\n", role, get_error() );
     release_object( obj );
     return ret;
 }
@@ -674,7 +695,7 @@ int sysrun_e1s6_endorse( const void *data, unsigned int size )
                      len == sizeof(verifier[i]), "endorse-verifier-peercred" );
         E1S6_REQUIRE( verifier[i].uid == 0 && verifier[i].pid > 0, "endorse-verifier-root" );
         len = sizeof(verifier_pins[i].fd);
-        E1S6_REQUIRE( !getsockopt( socket_fd, SOL_SOCKET, SO_PEERPIDFD_LAB, &verifier_pins[i].fd, &len ) &&
+        E1S6_REQUIRE( !getsockopt( socket_fd, SOL_SOCKET, SO_PEERPIDFD, &verifier_pins[i].fd, &len ) &&
                      len == sizeof(verifier_pins[i].fd) && verifier_pins[i].fd >= 0, "endorse-verifier-peerpidfd" );
     }
     E1S6_REQUIRE( verifier[0].pid == verifier[1].pid, "endorse-verifier-same-peer" );
@@ -714,7 +735,7 @@ int sysrun_e1s6_endorse( const void *data, unsigned int size )
     for (i = 0; i < 4; i++) { out[16+i] = peer.pid >> (8 * i); out[20+i] = p->session_id >> (8 * i); }
     /* session 0 runs as its own account with the system group as its group: nothing to raise */
     raised = session0_server ? 1 : sysrun_raise();
-    if (!raised) fprintf( stderr, "E1S6_DENY server site=endorse-raise-group errno=%d\n", errno );
+    if (!raised) E1S6_AUDIT( "E1S6_DENY server site=endorse-raise-group errno=%d\n", errno );
     if (raised)
     {
         /* Automatic SCM_CREDENTIALS uses real IDs on Linux. Explicitly send
@@ -730,7 +751,7 @@ int sysrun_e1s6_endorse( const void *data, unsigned int size )
         cmsg = CMSG_FIRSTHDR( &msg ); cmsg->cmsg_level = SOL_SOCKET; cmsg->cmsg_type = SCM_CREDENTIALS;
         cmsg->cmsg_len = CMSG_LEN(sizeof(sender)); memcpy( CMSG_DATA(cmsg), &sender, sizeof(sender) );
         ret = sendmsg( fd, &msg, MSG_DONTWAIT | MSG_NOSIGNAL ) == (ssize_t)sizeof(out);
-        if (!ret) fprintf( stderr, "E1S6_DENY server site=endorse-send errno=%d\n", errno );
+        if (!ret) E1S6_AUDIT( "E1S6_DENY server site=endorse-send errno=%d\n", errno );
     }
     if (!session0_server) sysrun_drop( raised );
     if (ret)

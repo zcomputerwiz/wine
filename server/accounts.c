@@ -79,7 +79,7 @@ static const char *test_passwd, *test_group;
 static uid_t test_server_uid;
 #endif
 
-static int valid_name( const char *s )
+int accounts_valid_name( const char *s )
 {
     size_t i, len = strlen( s );
     if (!len || len > 63 || *s == '-' || !strcmp( s, "." ) || !strcmp( s, ".." )) return 0;
@@ -285,17 +285,17 @@ static enum wex_account_status read_policy( int dir, struct account_policy *poli
         *next++ = 0;
         if (!strncmp( line, "admin_group=", 12 ))
         {
-            if (seen_admin++ || !valid_name( line + 12 )) goto done;
+            if (seen_admin++ || !accounts_valid_name( line + 12 )) goto done;
             strcpy( policy->admin_group, line + 12 );
         }
         else if (!strncmp( line, "group=", 6 ))
         {
-            if (seen_group++ || !valid_name( line + 6 )) goto done;
+            if (seen_group++ || !accounts_valid_name( line + 6 )) goto done;
             strcpy( policy->system_group, line + 6 );
         }
         else if (!strncmp( line, "builtin_administrator=", 22 ))
         {
-            if (seen_builtin++ || !valid_name( line + 22 )) goto done;
+            if (seen_builtin++ || !accounts_valid_name( line + 22 )) goto done;
             strcpy( policy->builtin_admin, line + 22 );
         }
     }
@@ -357,7 +357,7 @@ static enum wex_account_status parse_map( char *buf, struct account_map *map )
         *next++ = 0;
         if (!fields( line, v, 9 )) return WEX_ACCOUNT_MAP_INVALID;
         r = &map->records[map->count++];
-        if (!valid_name( v[0] ) || !parse_number( v[1], U32_MAX_VALUE - 1, &n ) || !n)
+        if (!accounts_valid_name( v[0] ) || !parse_number( v[1], U32_MAX_VALUE - 1, &n ) || !n)
             return WEX_ACCOUNT_MAP_INVALID;
         strcpy( r->name, v[0] );
         r->uid = n;
@@ -424,7 +424,7 @@ static int native_passwd( const char *name, uid_t uid, struct account_native *ou
 #endif
             err = name ? getpwnam_r( name, &pw, buffer, size, &found ) :
                          getpwuid_r( uid, &pw, buffer, size, &found );
-        if (!err && found && valid_name( pw.pw_name ) && pw.pw_uid &&
+        if (!err && found && accounts_valid_name( pw.pw_name ) && pw.pw_uid &&
             pw.pw_uid != (uid_t)-1 && pw.pw_gid != (gid_t)-1)
         {
             strcpy( out->name, pw.pw_name );
@@ -476,7 +476,7 @@ static enum wex_account_status native_accounts( struct account_native *users, un
             break;
         }
         if (!pw->pw_uid) continue;
-        if (!valid_name( pw->pw_name ) || *count == ACCOUNT_LIMIT || pw->pw_uid == (uid_t)-1 ||
+        if (!accounts_valid_name( pw->pw_name ) || *count == ACCOUNT_LIMIT || pw->pw_uid == (uid_t)-1 ||
             pw->pw_gid == (gid_t)-1) goto done;
         strcpy( u.name, pw->pw_name );
         u.uid = pw->pw_uid;
@@ -557,7 +557,7 @@ enum wex_account_status lookup_account( const char *name, uid_t uid, uint64_t ca
     status = WEX_ACCOUNT_CAPABILITY_MISSING;
     if (!(caps & WEX_ACCOUNT_MAP_V1)) goto done;
     status = WEX_ACCOUNT_UNKNOWN;
-    if (name && !valid_name( name )) goto done;
+    if (name && !accounts_valid_name( name )) goto done;
     if ((dir = protected_directory( account_directory, &status )) == -1) goto done;
     if ((status = read_policy( dir, &policy ))) goto done;
     if ((status = read_protected( dir, "accounts.map", policy.system_gid, &buf, &length ))) goto done;

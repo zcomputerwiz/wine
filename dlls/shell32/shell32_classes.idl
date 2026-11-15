@@ -191,6 +191,12 @@ coclass KnownFolderManager { interface IKnownFolderManager; }
 ] coclass ActiveDesktop { interface IActiveDesktop; }
 
 [
+    helpstring("Virtual Desktop Manager"),
+    threading(both),
+    uuid(aa509086-5ca9-4c25-8f95-589d3c07b48a)
+] coclass VirtualDesktopManager { interface IVirtualDesktopManager; }
+
+[
     threading(apartment),
     uuid(d969a300-e7ff-11d0-a93b-00a0c90f2719)
 ]

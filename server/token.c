@@ -2746,6 +2746,7 @@ static int e1s_install_consumed( struct e1s_token_context *c, const struct e1s_t
     return 1;
 }
 
+#ifdef WEX_E1_TEST_HOOKS
 /* Sole current producer: synthetic lab data. No PAM or S8 redemption is implied.
  * S18 calls the internal handoff above only after actual evidence redemption.
  * These fixture callbacks cannot be selected through a production operation. */
@@ -2784,6 +2785,7 @@ failed:
     c->state = 2;
     return 0;
 }
+#endif
 
 static void e1s_issue( struct e1s_token_context *c, const unsigned char *in, data_size_t size,
                        obj_handle_t *handle, unsigned char *out )
@@ -3082,12 +3084,14 @@ DECL_HANDLER(create_e1s_account_token)
     if (!(c = (struct e1s_token_context *)get_handle_obj( current->process, req->context, 0, &e1s_context_ops ))) return;
     set_error( STATUS_ACCESS_DENIED );
     if (!e1s_context_current( c )) goto done;
+#ifdef WEX_E1_TEST_HOOKS
     if (req->operation == WEX_TOKEN_TEST_INSTALL)
     {
         if (req->caps == c->caps && !get_reply_max_size() &&
             e1s_install_fixture( c, req->caller, get_req_data(), get_req_data_size() )) clear_error();
         goto done;
     }
+#endif
     if (req->operation != WEX_TOKEN_ISSUE) { c->state = 2; goto done; }
     /* Malformed sizing/capability also consumes the installed record. Allocate
      * reply storage before the token handle so no later allocation can leak it. */

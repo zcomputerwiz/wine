@@ -3913,24 +3913,22 @@ fail:
     delayinfo.ThunkAddress = addr;
     delayinfo.TargetDllName = name;
     delayinfo.TargetApiDescriptor.ImportDescribedByName = !IMAGE_SNAP_BY_ORDINAL(pINT[id].u1.Ordinal);
-    delayinfo.TargetApiDescriptor.Description.Ordinal = LOWORD(pINT[id].u1.Ordinal);
+    if (delayinfo.TargetApiDescriptor.ImportDescribedByName)
+        delayinfo.TargetApiDescriptor.Description.Name =
+            (const char *)((const IMAGE_IMPORT_BY_NAME *)get_rva(base, pINT[id].u1.AddressOfData))->Name;
+    else
+        delayinfo.TargetApiDescriptor.Description.Ordinal = LOWORD(pINT[id].u1.Ordinal);
     delayinfo.TargetModuleBase = *phmod;
     delayinfo.Unused = NULL;
-    delayinfo.LastError = nts;
+    delayinfo.LastError = RtlNtStatusToDosError( nts );
 
-    if (dllhook)
-        return dllhook(4, &delayinfo);
+    /* as on Windows, the system routine still runs when the module's hook gives up */
+    if (dllhook && (fp = dllhook(4, &delayinfo))) return fp;
+    if (!syshook) return NULL;
 
-    if (IMAGE_SNAP_BY_ORDINAL(pINT[id].u1.Ordinal))
-    {
-        DWORD_PTR ord = LOWORD(pINT[id].u1.Ordinal);
-        return syshook(name, (const char *)ord);
-    }
-    else
-    {
-        const IMAGE_IMPORT_BY_NAME* iibn = get_rva(base, pINT[id].u1.AddressOfData);
-        return syshook(name, (const char *)iibn->Name);
-    }
+    if (delayinfo.TargetApiDescriptor.ImportDescribedByName)
+        return syshook(name, delayinfo.TargetApiDescriptor.Description.Name);
+    return syshook(name, (const char *)(DWORD_PTR)delayinfo.TargetApiDescriptor.Description.Ordinal);
 }
 
 /******************************************************************

@@ -7425,6 +7425,48 @@ BOOL WINAPI DECLSPEC_HOTPATCH TzSpecificLocalTimeToSystemTime( const TIME_ZONE_I
 }
 
 
+/* the rules of a dynamic time zone for one year, NULL (and the error set) when the zone is unknown; as on
+ * Windows, a zone without a key name is not converted with its static rules */
+static const TIME_ZONE_INFORMATION *dynamic_tz_for_year( const DYNAMIC_TIME_ZONE_INFORMATION *info, USHORT year,
+                                                         TIME_ZONE_INFORMATION *buffer )
+{
+    if (info && info->DynamicDaylightTimeDisabled) return (const TIME_ZONE_INFORMATION *)info;
+    if (info && !info->TimeZoneKeyName[0])
+    {
+        SetLastError( ERROR_FILE_NOT_FOUND );
+        return NULL;
+    }
+    if (!GetTimeZoneInformationForYear( year, (DYNAMIC_TIME_ZONE_INFORMATION *)info, buffer )) return NULL;
+    return buffer;
+}
+
+
+/***********************************************************************
+ *	SystemTimeToTzSpecificLocalTimeEx   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH SystemTimeToTzSpecificLocalTimeEx( const DYNAMIC_TIME_ZONE_INFORMATION *info,
+                                                                 const SYSTEMTIME *system, SYSTEMTIME *local )
+{
+    TIME_ZONE_INFORMATION tzinfo;
+    const TIME_ZONE_INFORMATION *tz = dynamic_tz_for_year( info, system->wYear, &tzinfo );
+
+    return tz && SystemTimeToTzSpecificLocalTime( tz, system, local );
+}
+
+
+/***********************************************************************
+ *	TzSpecificLocalTimeToSystemTimeEx   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH TzSpecificLocalTimeToSystemTimeEx( const DYNAMIC_TIME_ZONE_INFORMATION *info,
+                                                                 const SYSTEMTIME *local, SYSTEMTIME *system )
+{
+    TIME_ZONE_INFORMATION tzinfo;
+    const TIME_ZONE_INFORMATION *tz = dynamic_tz_for_year( info, local->wYear, &tzinfo );
+
+    return tz && TzSpecificLocalTimeToSystemTime( tz, local, system );
+}
+
+
 /***********************************************************************
  *	VerLanguageNameA   (kernelbase.@)
  */

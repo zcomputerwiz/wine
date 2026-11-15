@@ -3892,6 +3892,18 @@ interface IPreviewHandlerVisuals : IUnknown
     HRESULT SetTextColor([in] COLORREF color);
 }
 
+[
+    object,
+    uuid(a5cd92ff-29be-454c-8d04-d82879fb3f1b),
+    pointer_default(unique)
+]
+interface IVirtualDesktopManager : IUnknown
+{
+    HRESULT IsWindowOnCurrentVirtualDesktop([in] HWND toplevel, [out] BOOL *on_current);
+    HRESULT GetWindowDesktopId([in] HWND toplevel, [out] GUID *desktop_id);
+    HRESULT MoveWindowToDesktop([in] HWND toplevel, [in] REFGUID desktop_id);
+}
+
 /*****************************************************************************
  * ShellObjects typelibrary
  */
@@ -4019,6 +4031,14 @@ library ShellObjects
     coclass FileOperation
     {
         interface IFileOperation;
+    }
+
+    [
+        uuid(aa509086-5ca9-4c25-8f95-589d3c07b48a)
+    ]
+    coclass VirtualDesktopManager
+    {
+        interface IVirtualDesktopManager;
     }
 }
 

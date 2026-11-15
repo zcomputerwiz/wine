@@ -232,6 +232,30 @@ static void update_broker_sync( struct dwm_channel *broker )
         reset_sync( broker->sync );
 }
 
+/* a message the broker will not answer: a waiting client gets STATUS_PORT_DISCONNECTED, an orphan is freed */
+static void abort_dwm_message( struct dwm_message *msg )
+{
+    list_remove( &msg->broker_entry );
+    list_init( &msg->broker_entry );
+
+    if (msg->client && !msg->client->closed)
+    {
+        msg->state = DWM_MSG_ABORTED;
+        msg->reply_status = STATUS_PORT_DISCONNECTED;
+        update_client_sync( msg->client );
+    }
+    else
+    {
+        if (msg->client)
+        {
+            list_remove( &msg->client_entry );
+            assert( msg->client->queued_count > 0 );
+            msg->client->queued_count--;
+        }
+        free_dwm_message( msg );
+    }
+}
+
 /* Disconnect a broker or client channel, waking any waiters and cleaning up queues. */
 static void dwm_channel_disconnect( struct dwm_channel *channel )
 {
@@ -262,52 +286,14 @@ static void dwm_channel_disconnect( struct dwm_channel *channel )
         /* Abort all messages waiting in broker_queue */
         LIST_FOR_EACH_ENTRY_SAFE( msg, next_msg, &endpoint->broker_queue, struct dwm_message, broker_entry )
         {
-            list_remove( &msg->broker_entry );
-            list_init( &msg->broker_entry );
             assert( endpoint->broker_queued > 0 );
             endpoint->broker_queued--;
-
-            if (msg->client && !msg->client->closed)
-            {
-                msg->state = DWM_MSG_ABORTED;
-                msg->reply_status = STATUS_PORT_DISCONNECTED;
-                update_client_sync( msg->client );
-            }
-            else
-            {
-                if (msg->client)
-                {
-                    list_remove( &msg->client_entry );
-                    assert( msg->client->queued_count > 0 );
-                    msg->client->queued_count--;
-                }
-                free_dwm_message( msg );
-            }
+            abort_dwm_message( msg );
         }
 
         /* Abort all in-flight messages awaiting dwm_reply */
         LIST_FOR_EACH_ENTRY_SAFE( msg, next_msg, &endpoint->inflight_msgs, struct dwm_message, broker_entry )
-        {
-            list_remove( &msg->broker_entry );
-            list_init( &msg->broker_entry );
-
-            if (msg->client && !msg->client->closed)
-            {
-                msg->state = DWM_MSG_ABORTED;
-                msg->reply_status = STATUS_PORT_DISCONNECTED;
-                update_client_sync( msg->client );
-            }
-            else
-            {
-                if (msg->client)
-                {
-                    list_remove( &msg->client_entry );
-                    assert( msg->client->queued_count > 0 );
-                    msg->client->queued_count--;
-                }
-                free_dwm_message( msg );
-            }
-        }
+            abort_dwm_message( msg );
 
         /* Mark all currently connected client channels on this desktop as disconnected and wake them */
         LIST_FOR_EACH_ENTRY( client, &endpoint->clients, struct dwm_channel, desktop_entry )
@@ -778,6 +764,46 @@ DECL_HANDLER(dwm_broker_register)
     release_object( desktop );
 }
 
+/* a client channel that can no longer send: closed, cut off, or no live broker on its desktop */
+static int dwm_client_channel_dead( const struct dwm_channel *channel, const struct dwm_endpoint *endpoint )
+{
+    return channel->closed || channel->disconnected || channel->revoked || !endpoint || endpoint->revoked ||
+           !endpoint->broker || endpoint->broker->closed || endpoint->broker->revoked;
+}
+
+/* a broker channel that is no longer the desktop's broker */
+static int dwm_broker_channel_dead( const struct dwm_channel *channel, const struct dwm_endpoint *endpoint )
+{
+    return channel->closed || channel->revoked || !endpoint || endpoint->revoked || endpoint->broker != channel;
+}
+
+/* the request data of dwm_send and dwm_reply: a header and its payload. Returns 0 with the error set on a bad
+ * size or header; check_opcode for dwm_send. */
+static int dwm_read_request_header( struct dwm_msg_header *hdr, data_size_t *payload_size, int check_opcode )
+{
+    data_size_t raw_size = get_req_data_size();
+
+    if (raw_size < sizeof(*hdr))
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return 0;
+    }
+    *payload_size = raw_size - sizeof(*hdr);
+    if (*payload_size > DWM_MAX_MESSAGE_SIZE)
+    {
+        set_error( STATUS_PORT_MESSAGE_TOO_LONG );
+        return 0;
+    }
+    memcpy( hdr, get_req_data(), sizeof(*hdr) );
+    if (hdr->version != DWM_PROTOCOL_VERSION || hdr->length != *payload_size ||
+        (check_opcode && (hdr->opcode == 0 || hdr->opcode > DWM_OP_LAST)))
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return 0;
+    }
+    return 1;
+}
+
 /* Send a bounded DWM control message from a client channel to its desktop broker */
 DECL_HANDLER(dwm_send)
 {
@@ -811,9 +837,7 @@ DECL_HANDLER(dwm_send)
      * Fail with STATUS_PORT_DISCONNECTED if the channel was invalidated by a prior
      * broker exit/unregistration or if no broker is currently registered on the desktop.
      */
-    if (channel->closed || channel->disconnected || channel->revoked ||
-        !endpoint || endpoint->revoked ||
-        !endpoint->broker || endpoint->broker->closed || endpoint->broker->revoked)
+    if (dwm_client_channel_dead( channel, endpoint ))
     {
         set_error( STATUS_PORT_DISCONNECTED );
         release_object( desktop );
@@ -822,28 +846,8 @@ DECL_HANDLER(dwm_send)
     }
 
     raw_size = get_req_data_size();
-    if (raw_size < sizeof(struct dwm_msg_header))
+    if (!dwm_read_request_header( &hdr, &payload_size, 1 ))
     {
-        set_error( STATUS_INVALID_PARAMETER );
-        release_object( desktop );
-        release_object( channel );
-        return;
-    }
-
-    payload_size = raw_size - sizeof(struct dwm_msg_header);
-    if (payload_size > DWM_MAX_MESSAGE_SIZE)
-    {
-        set_error( STATUS_PORT_MESSAGE_TOO_LONG );
-        release_object( desktop );
-        release_object( channel );
-        return;
-    }
-
-    memcpy( &hdr, get_req_data(), sizeof(hdr) );
-    if (hdr.version != DWM_PROTOCOL_VERSION || hdr.length != payload_size ||
-        hdr.opcode == 0 || hdr.opcode > DWM_OP_LAST)
-    {
-        set_error( STATUS_INVALID_PARAMETER );
         release_object( desktop );
         release_object( channel );
         return;
@@ -918,6 +922,16 @@ DECL_HANDLER(dwm_send)
     release_object( channel );
 }
 
+static void dwm_fill_reply( struct dwm_recv_reply *reply, const struct dwm_message *msg, unsigned int status )
+{
+    reply->request_id = msg->request_id;
+    reply->sender_pid = msg->sender_pid;
+    reply->sender_tid = msg->sender_tid;
+    reply->desktop_id = msg->desktop_id;
+    reply->status     = status;
+    set_reply_data( msg->data, msg->size );
+}
+
 /* Receive the next queued DWM request (broker) or completed reply (client) */
 DECL_HANDLER(dwm_recv)
 {
@@ -941,7 +955,7 @@ DECL_HANDLER(dwm_recv)
         struct dwm_message *msg;
         struct list *head;
 
-        if (channel->closed || channel->revoked || !endpoint || endpoint->revoked || endpoint->broker != channel)
+        if (dwm_broker_channel_dead( channel, endpoint ))
         {
             set_error( STATUS_PORT_DISCONNECTED );
             release_object( desktop );
@@ -975,12 +989,7 @@ DECL_HANDLER(dwm_recv)
 
         update_broker_sync( channel );
 
-        reply->request_id = msg->request_id;
-        reply->sender_pid = msg->sender_pid;
-        reply->sender_tid = msg->sender_tid;
-        reply->desktop_id = msg->desktop_id;
-        reply->status     = STATUS_SUCCESS;
-        set_reply_data( msg->data, msg->size );
+        dwm_fill_reply( reply, msg, STATUS_SUCCESS );
     }
     else
     {
@@ -997,9 +1006,7 @@ DECL_HANDLER(dwm_recv)
 
         if (!found)
         {
-            if (channel->closed || channel->disconnected || channel->revoked ||
-                !endpoint || endpoint->revoked ||
-                !endpoint->broker || endpoint->broker->closed || endpoint->broker->revoked)
+            if (dwm_client_channel_dead( channel, endpoint ))
             {
                 set_error( STATUS_PORT_DISCONNECTED );
             }
@@ -1038,12 +1045,7 @@ DECL_HANDLER(dwm_recv)
         assert( channel->queued_count > 0 );
         channel->queued_count--;
 
-        reply->request_id = found->request_id;
-        reply->sender_pid = found->sender_pid;
-        reply->sender_tid = found->sender_tid;
-        reply->desktop_id = found->desktop_id;
-        reply->status     = found->reply_status;
-        set_reply_data( found->data, found->size );
+        dwm_fill_reply( reply, found, found->reply_status );
 
         free_dwm_message( found );
         update_client_sync( channel );
@@ -1080,7 +1082,7 @@ DECL_HANDLER(dwm_reply)
     }
 
     endpoint = channel->endpoint;
-    if (channel->closed || channel->revoked || !endpoint || endpoint->revoked || endpoint->broker != channel)
+    if (dwm_broker_channel_dead( channel, endpoint ))
     {
         set_error( STATUS_PORT_DISCONNECTED );
         release_object( desktop );
@@ -1089,27 +1091,8 @@ DECL_HANDLER(dwm_reply)
     }
 
     raw_size = get_req_data_size();
-    if (raw_size < sizeof(struct dwm_msg_header))
+    if (!dwm_read_request_header( &hdr, &payload_size, 0 ))
     {
-        set_error( STATUS_INVALID_PARAMETER );
-        release_object( desktop );
-        release_object( channel );
-        return;
-    }
-
-    payload_size = raw_size - sizeof(struct dwm_msg_header);
-    if (payload_size > DWM_MAX_MESSAGE_SIZE)
-    {
-        set_error( STATUS_PORT_MESSAGE_TOO_LONG );
-        release_object( desktop );
-        release_object( channel );
-        return;
-    }
-
-    memcpy( &hdr, get_req_data(), sizeof(hdr) );
-    if (hdr.version != DWM_PROTOCOL_VERSION || hdr.length != payload_size)
-    {
-        set_error( STATUS_INVALID_PARAMETER );
         release_object( desktop );
         release_object( channel );
         return;

@@ -14630,6 +14630,52 @@ static void test_toolwindow_width_clamping_size(void)
     DestroyWindow( normal );
 }
 
+static int sc_maximize_activations;
+
+static LRESULT WINAPI sc_maximize_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
+{
+    if (msg == WM_ACTIVATE && LOWORD(wparam) != WA_INACTIVE) sc_maximize_activations++;
+    return DefWindowProcA( hwnd, msg, wparam, lparam );
+}
+
+/* SC_MAXIMIZE on a window that is already maximized does nothing: a hidden one stays hidden and inactive.
+ * Chromium-based programs create their frame hidden with WS_MAXIMIZE and send SC_MAXIMIZE during setup. */
+static void test_SC_MAXIMIZE_maximized(void)
+{
+    WNDCLASSA cls = { 0 };
+    HWND hwnd;
+
+    cls.lpfnWndProc = sc_maximize_proc;
+    cls.hInstance = GetModuleHandleA( NULL );
+    cls.lpszClassName = "sc_maximize_class";
+    RegisterClassA( &cls );
+
+    /* hidden, created maximized */
+    hwnd = CreateWindowExA( 0, "sc_maximize_class", "test", WS_OVERLAPPEDWINDOW | WS_MAXIMIZE,
+                            100, 100, 300, 200, NULL, NULL, NULL, NULL );
+    ok( hwnd != NULL, "CreateWindowEx failed, error %lu.\n", GetLastError() );
+    ok( IsZoomed( hwnd ), "window is not maximized.\n" );
+    sc_maximize_activations = 0;
+    SendMessageA( hwnd, WM_SYSCOMMAND, SC_MAXIMIZE, 0 );
+    ok( !IsWindowVisible( hwnd ), "window was shown.\n" );
+    ok( IsZoomed( hwnd ), "window is not maximized.\n" );
+    ok( GetActiveWindow() != hwnd, "window was activated.\n" );
+    ok( !sc_maximize_activations, "got %d WM_ACTIVATE.\n", sc_maximize_activations );
+    DestroyWindow( hwnd );
+
+    /* hidden, not maximized: shown, maximized and activated */
+    hwnd = CreateWindowExA( 0, "sc_maximize_class", "test", WS_OVERLAPPEDWINDOW,
+                            100, 100, 300, 200, NULL, NULL, NULL, NULL );
+    sc_maximize_activations = 0;
+    SendMessageA( hwnd, WM_SYSCOMMAND, SC_MAXIMIZE, 0 );
+    ok( IsWindowVisible( hwnd ), "window was not shown.\n" );
+    ok( IsZoomed( hwnd ), "window is not maximized.\n" );
+    ok( sc_maximize_activations == 1, "got %d WM_ACTIVATE.\n", sc_maximize_activations );
+    DestroyWindow( hwnd );
+
+    UnregisterClassA( "sc_maximize_class", GetModuleHandleA( NULL ) );
+}
+
 START_TEST(win)
 {
     char **argv;
@@ -14795,6 +14841,7 @@ START_TEST(win)
     test_SetWindowLong();
     test_set_window_style();
     test_ShowWindow();
+    test_SC_MAXIMIZE_maximized();
     test_ShowWindow_owned(hwndMain);
     test_ShowWindow_child(hwndMain);
     test_ShowWindow_mdichild();

@@ -51,6 +51,10 @@ enum wex_account_status lookup_account( const char *name, uid_t uid, uint64_t ne
 /* System tier T4-0: the mapped SID (subauthorities after S-1-5) of the local account with this uid */
 int accounts_own_sid( uid_t uid, unsigned int subauth[5] );
 
+/* a Unix user or group name the account map accepts: 1-63 characters of [A-Za-z0-9_.-], not starting with '-',
+ * not "." or "..", '$' only as the last character */
+int accounts_valid_name( const char *s );
+
 #ifdef WEX_E1S6_TRANSPORT_TEST
 int accounts_get_map_generation( unsigned long long *gen );
 #endif

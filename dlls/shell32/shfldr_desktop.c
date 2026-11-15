@@ -1152,6 +1152,88 @@ static const IActiveDesktopVtbl active_desktop_vtbl =
     active_desktop_GetDesktopItemBySource,
 };
 
+/* IVirtualDesktopManager: one desktop, every top-level window is on it. Chromium-based programs (Edge) ask for it
+ * when they create their windows. */
+static const GUID wine_virtual_desktop_id = {0x8b0d1f6c,0x52a1,0x4c6e,{0x9b,0x0e,0x3f,0x6a,0x1d,0x27,0x5c,0x41}};
+
+static HRESULT WINAPI virtual_desktop_manager_QueryInterface(IVirtualDesktopManager *iface, REFIID riid, void **obj)
+{
+    TRACE("%p, %s, %p.\n", iface, debugstr_guid(riid), obj);
+
+    if (IsEqualIID(riid, &IID_IVirtualDesktopManager) || IsEqualIID(riid, &IID_IUnknown))
+    {
+        *obj = iface;
+        IUnknown_AddRef((IUnknown *)*obj);
+        return S_OK;
+    }
+    *obj = NULL;
+    WARN("Unsupported interface %s.\n", debugstr_guid(riid));
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI virtual_desktop_manager_AddRef(IVirtualDesktopManager *iface)
+{
+    return 2;
+}
+
+static ULONG WINAPI virtual_desktop_manager_Release(IVirtualDesktopManager *iface)
+{
+    return 1;
+}
+
+static HRESULT WINAPI virtual_desktop_manager_IsWindowOnCurrentVirtualDesktop(IVirtualDesktopManager *iface,
+        HWND toplevel, BOOL *on_current)
+{
+    TRACE("%p, %p, %p.\n", iface, toplevel, on_current);
+
+    if (!on_current) return E_POINTER;
+    if (!IsWindow(toplevel)) return E_INVALIDARG;
+    *on_current = TRUE;
+    return S_OK;
+}
+
+static HRESULT WINAPI virtual_desktop_manager_GetWindowDesktopId(IVirtualDesktopManager *iface,
+        HWND toplevel, GUID *desktop_id)
+{
+    TRACE("%p, %p, %p.\n", iface, toplevel, desktop_id);
+
+    if (!desktop_id) return E_POINTER;
+    if (!IsWindow(toplevel)) return E_INVALIDARG;
+    *desktop_id = wine_virtual_desktop_id;
+    return S_OK;
+}
+
+static HRESULT WINAPI virtual_desktop_manager_MoveWindowToDesktop(IVirtualDesktopManager *iface,
+        HWND toplevel, REFGUID desktop_id)
+{
+    TRACE("%p, %p, %s.\n", iface, toplevel, debugstr_guid(desktop_id));
+
+    if (!desktop_id) return E_POINTER;
+    if (!IsWindow(toplevel)) return E_INVALIDARG;
+    return IsEqualGUID(desktop_id, &wine_virtual_desktop_id) ? S_OK : E_INVALIDARG;
+}
+
+static const IVirtualDesktopManagerVtbl virtual_desktop_manager_vtbl =
+{
+    virtual_desktop_manager_QueryInterface,
+    virtual_desktop_manager_AddRef,
+    virtual_desktop_manager_Release,
+    virtual_desktop_manager_IsWindowOnCurrentVirtualDesktop,
+    virtual_desktop_manager_GetWindowDesktopId,
+    virtual_desktop_manager_MoveWindowToDesktop,
+};
+
+HRESULT WINAPI VirtualDesktopManager_Constructor(IUnknown *outer, REFIID riid, void **obj)
+{
+    static IVirtualDesktopManager object = { &virtual_desktop_manager_vtbl };
+
+    TRACE("%p, %s, %p.\n", outer, debugstr_guid(riid), obj);
+
+    if (outer)
+        return CLASS_E_NOAGGREGATION;
+    return IVirtualDesktopManager_QueryInterface(&object, riid, obj);
+}
+
 HRESULT WINAPI ActiveDesktop_Constructor(IUnknown *outer, REFIID riid, void **obj)
 {
     static IActiveDesktop object = { &active_desktop_vtbl };

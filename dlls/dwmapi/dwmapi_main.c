@@ -928,6 +928,18 @@ static BOOL clock_read(struct dwm_clock_page *out)
     return FALSE;
 }
 
+/* a rate in the 32-bit fields of UNSIGNED_RATIO, both halves shifted until they fit */
+static void set_unsigned_ratio(UNSIGNED_RATIO *ratio, ULONGLONG num, ULONGLONG den)
+{
+    while (num > 0xFFFFFFFF || den > 0xFFFFFFFF)
+    {
+        num >>= 1;
+        den >>= 1;
+    }
+    ratio->uiNumerator = num;
+    ratio->uiDenominator = den;
+}
+
 /**********************************************************************
  *           DwmGetCompositionTimingInfo         (DWMAPI.@)
  */
@@ -962,13 +974,7 @@ HRESULT WINAPI DwmGetCompositionTimingInfo(HWND hwnd, DWM_TIMING_INFO *info)
     /* like Windows 10 and later: the rates are the counter frequency over the refresh period in counter ticks */
     numerator = (ULONGLONG)performance_frequency.QuadPart;
     denominator = qpc_refresh_period;
-    while ((numerator > 0xFFFFFFFFULL) || (denominator > 0xFFFFFFFFULL))
-    {
-        numerator >>= 1;
-        denominator >>= 1;
-    }
-    info->rateRefresh.uiNumerator = (UINT32)numerator;
-    info->rateRefresh.uiDenominator = (UINT32)denominator;
+    set_unsigned_ratio(&info->rateRefresh, numerator, denominator);
     info->rateCompose = info->rateRefresh;
 
     QueryPerformanceCounter(&qpc);
@@ -983,13 +989,7 @@ HRESULT WINAPI DwmGetCompositionTimingInfo(HWND hwnd, DWM_TIMING_INFO *info)
         info->qpcRefreshPeriod = snapshot.qpc_period;
         numerator = (ULONGLONG)performance_frequency.QuadPart;
         denominator = (ULONGLONG)snapshot.qpc_period;
-        while ((numerator > 0xFFFFFFFFULL) || (denominator > 0xFFFFFFFFULL))
-        {
-            numerator >>= 1;
-            denominator >>= 1;
-        }
-        info->rateRefresh.uiNumerator = (UINT32)numerator;
-        info->rateRefresh.uiDenominator = (UINT32)denominator;
+        set_unsigned_ratio(&info->rateRefresh, numerator, denominator);
         info->rateCompose = info->rateRefresh;
     }
 
@@ -1291,14 +1291,9 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
     return TRUE;
 }
 
-/**********************************************************************
- *           DwmSetIconicLivePreviewBitmap         (DWMAPI.@)
- */
-HRESULT WINAPI DwmSetIconicLivePreviewBitmap(HWND hwnd, HBITMAP hbmp, POINT *pos, DWORD flags)
+static HRESULT check_iconic_setters(HWND hwnd, HBITMAP hbmp, DWORD flags)
 {
     DWORD value;
-
-    TRACE("(%p %p %p %lx)\n", hwnd, hbmp, pos, flags);
 
     if (!IsWindow(hwnd))
         return E_HANDLE;
@@ -1310,6 +1305,21 @@ HRESULT WINAPI DwmSetIconicLivePreviewBitmap(HWND hwnd, HBITMAP hbmp, POINT *pos
         return E_INVALIDARG;
     if (flags & ~DWM_SIT_DISPLAYFRAME)
         return E_INVALIDARG;
+
+    return S_OK;
+}
+
+/**********************************************************************
+ *           DwmSetIconicLivePreviewBitmap         (DWMAPI.@)
+ */
+HRESULT WINAPI DwmSetIconicLivePreviewBitmap(HWND hwnd, HBITMAP hbmp, POINT *pos, DWORD flags)
+{
+    HRESULT hr;
+
+    TRACE("(%p %p %p %lx)\n", hwnd, hbmp, pos, flags);
+
+    if ((hr = check_iconic_setters(hwnd, hbmp, flags)) != S_OK)
+        return hr;
 
     return store_iconic(hwnd, 1, hbmp, pos, flags);
 }
@@ -1319,20 +1329,12 @@ HRESULT WINAPI DwmSetIconicLivePreviewBitmap(HWND hwnd, HBITMAP hbmp, POINT *pos
  */
 HRESULT WINAPI DwmSetIconicThumbnail(HWND hwnd, HBITMAP hbmp, DWORD flags)
 {
-    DWORD value;
+    HRESULT hr;
 
     TRACE("(%p %p %lx)\n", hwnd, hbmp, flags);
 
-    if (!IsWindow(hwnd))
-        return E_HANDLE;
-    if (!get_stored_attribute(hwnd, DWMWA_FORCE_ICONIC_REPRESENTATION, &value) || !value)
-        return E_INVALIDARG;
-    if (!hbmp)
-        return E_INVALIDARG;
-    if (GetObjectType(hbmp) != OBJ_BITMAP)
-        return E_INVALIDARG;
-    if (flags & ~DWM_SIT_DISPLAYFRAME)
-        return E_INVALIDARG;
+    if ((hr = check_iconic_setters(hwnd, hbmp, flags)) != S_OK)
+        return hr;
 
     return store_iconic(hwnd, 0, hbmp, NULL, flags);
 }
