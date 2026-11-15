@@ -972,10 +972,12 @@ BOOL WINAPI UnloadUserProfile( HANDLE hToken, HANDLE hProfile )
     return FALSE;
 }
 
-/* WineExplorer: the applied GPO list. The policy writer of session 0 (wexpolicy) records the objects it applied in
- * HKLM\Software\Microsoft\Windows\CurrentVersion\Group Policy\State\<Machine|SID>\GPO-List\<n>, in the order they
- * were applied; an object is listed for an extension when its Extensions value names the extension's GUID. */
-static const WCHAR gp_state_key[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\State\\";
+/* WineExplorer: the applied GPO list. The policy writer of session 0 (wexpolicy) records the objects it applied per
+ * extension, in the order they were applied, as Windows does:
+ * HKLM\Software\Microsoft\Windows\CurrentVersion\Group Policy\History\{extension}\<n> for the machine and
+ * ...\Group Policy\<SID>\History\{extension}\<n> for a user (Windows reads the user's from the user's hive; here
+ * the machine registry's copy is the one only session 0 writes). */
+static const WCHAR gp_key[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Group Policy";
 
 static WCHAR *gp_query_string( HKEY key, const WCHAR *name )
 {
@@ -995,15 +997,6 @@ static DWORD gp_query_dword( HKEY key, const WCHAR *name )
 
     if (RegQueryValueExW( key, name, NULL, &type, (BYTE *)&value, &size ) || type != REG_DWORD) value = 0;
     return value;
-}
-
-/* the Extensions value ("[{extension}{tool}...]...", as gPCMachineExtensionNames) names the extension */
-static BOOL gp_names_extension( const WCHAR *list, const WCHAR *guid )
-{
-    size_t len = wcslen( guid );
-
-    for (; *list; list++) if (!_wcsnicmp( list, guid, len )) return TRUE;
-    return FALSE;
 }
 
 /* one object of the list as one LocalAlloc block: the structure, then its strings */
@@ -1039,7 +1032,7 @@ static GROUP_POLICY_OBJECTW *gp_read_object( HKEY key )
 DWORD WINAPI GetAppliedGPOListW(DWORD dwFlags, LPCWSTR pMachineName, PSID pSidUser, GUID *pGuidExtension,
         PGROUP_POLICY_OBJECTW *ppGPOList)
 {
-    WCHAR path[256], guid[39], index[16], *sid = NULL;
+    WCHAR path[384], guid[39], index[16], *sid = NULL;
     GROUP_POLICY_OBJECTW *first = NULL, *last = NULL, *gpo;
     HKEY list, key;
     DWORD i, err;
@@ -1057,9 +1050,10 @@ DWORD WINAPI GetAppliedGPOListW(DWORD dwFlags, LPCWSTR pMachineName, PSID pSidUs
     {
         if (!pSidUser || !ConvertSidToStringSidW( pSidUser, &sid )) return ERROR_INVALID_PARAMETER;
     }
-    swprintf( path, ARRAY_SIZE(path), L"%s%s\\GPO-List", gp_state_key, sid ? sid : L"Machine" );
-    LocalFree( sid );
     StringFromGUID2( pGuidExtension, guid, ARRAY_SIZE(guid) );
+    if (sid) swprintf( path, ARRAY_SIZE(path), L"%s\\%s\\History\\%s", gp_key, sid, guid );
+    else swprintf( path, ARRAY_SIZE(path), L"%s\\History\\%s", gp_key, guid );
+    LocalFree( sid );
 
     /* nothing applied: an empty list */
     if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, path, 0, KEY_READ | KEY_WOW64_64KEY, &list )) return ERROR_SUCCESS;
@@ -1073,11 +1067,6 @@ DWORD WINAPI GetAppliedGPOListW(DWORD dwFlags, LPCWSTR pMachineName, PSID pSidUs
         {
             err = ERROR_NOT_ENOUGH_MEMORY;
             goto failed;
-        }
-        if (!gp_names_extension( gpo->lpExtensions, guid ))
-        {
-            LocalFree( gpo );
-            continue;
         }
         gpo->pPrev = last;
         if (last) last->pNext = gpo;
