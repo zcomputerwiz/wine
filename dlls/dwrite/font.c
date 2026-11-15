@@ -8105,6 +8105,7 @@ static HRESULT fontset_builder_add_file(struct dwrite_fontset_builder *builder, 
             instances = opentype_get_named_instance_count(&stream_desc);
             IDWriteFontFileStream_Release(stream_desc.stream);
         }
+        TRACE("file %p face %u of %u: %u named instances.\n", file, i, face_count, instances);
 
         desc.face_index = i;
         desc.instance = 0;
