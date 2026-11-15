@@ -29,6 +29,7 @@ struct factory
     IApplicationViewStatics IApplicationViewStatics_iface;
     IApplicationViewStatics2 IApplicationViewStatics2_iface;
     IApplicationViewStatics3 IApplicationViewStatics3_iface;
+    IApplicationViewInteropStatics IApplicationViewInteropStatics_iface;
     LONG ref;
 };
 
@@ -69,6 +70,12 @@ static HRESULT WINAPI activation_factory_QueryInterface(IActivationFactory *ifac
     {
         IApplicationViewStatics3_AddRef(&impl->IApplicationViewStatics3_iface);
         *out = &impl->IApplicationViewStatics3_iface;
+        return S_OK;
+    }
+    else if (IsEqualGUID(iid, &IID_IApplicationViewInteropStatics))
+    {
+        IApplicationViewInteropStatics_AddRef(&impl->IApplicationViewInteropStatics_iface);
+        *out = &impl->IApplicationViewInteropStatics_iface;
         return S_OK;
     }
 
@@ -654,12 +661,65 @@ static const struct IApplicationViewStatics3Vtbl statics3_vtbl =
     statics3_put_PreferredLaunchViewSize,
 };
 
+DEFINE_IINSPECTABLE(interop_statics, IApplicationViewInteropStatics, struct factory, IActivationFactory_iface)
+
+/* the id of the ApplicationView of a CoreWindow's thread: the view GetForCurrentView gives on that thread */
+static HRESULT WINAPI interop_statics_GetApplicationViewIdForWindow(IApplicationViewInteropStatics *iface,
+                                                                    ICoreWindow *window, INT32 *id)
+{
+    struct application_view *view, *found = NULL;
+    ICoreWindowInterop *interop;
+    IApplicationView *current;
+    DWORD thread = 0;
+    HWND hwnd = 0;
+    HRESULT hr;
+
+    TRACE("iface %p, window %p, id %p.\n", iface, window, id);
+
+    if (!window || !id) return E_INVALIDARG;
+    if (SUCCEEDED(ICoreWindow_QueryInterface(window, &IID_ICoreWindowInterop, (void **)&interop)))
+    {
+        ICoreWindowInterop_get_WindowHandle(interop, &hwnd);
+        ICoreWindowInterop_Release(interop);
+    }
+    if (hwnd) thread = GetWindowThreadProcessId(hwnd, NULL);
+    if (!thread) return E_INVALIDARG;
+
+    if (thread == GetCurrentThreadId())
+    {
+        if (FAILED(hr = application_view_for_current_thread(&current))) return hr;
+        hr = IApplicationView_get_Id(current, id);
+        IApplicationView_Release(current);
+        return hr;
+    }
+    EnterCriticalSection(&application_views_cs);
+    LIST_FOR_EACH_ENTRY(view, &application_views, struct application_view, entry)
+        if (view->thread_id == thread) { found = view; break; }
+    if (found) *id = found->id;
+    LeaveCriticalSection(&application_views_cs);
+    return found ? S_OK : HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+}
+
+static const struct IApplicationViewInteropStaticsVtbl interop_statics_vtbl =
+{
+    interop_statics_QueryInterface,
+    interop_statics_AddRef,
+    interop_statics_Release,
+    /* IInspectable methods */
+    interop_statics_GetIids,
+    interop_statics_GetRuntimeClassName,
+    interop_statics_GetTrustLevel,
+    /* IApplicationViewInteropStatics methods */
+    interop_statics_GetApplicationViewIdForWindow,
+};
+
 static struct factory factory =
 {
     {&activation_factory_vtbl},
     {&statics_vtbl},
     {&statics2_vtbl},
     {&statics3_vtbl},
+    {&interop_statics_vtbl},
     1,
 };
 
