@@ -38,6 +38,10 @@
 #include "windows.system.userprofile.h"
 
 extern IActivationFactory *geographic_region_factory;
+extern IActivationFactory *calendar_factory_iface;
+
+/* takes the strings (not the array) */
+HRESULT hstring_vector_create(HSTRING *values, SIZE_T count, IVectorView_HSTRING **out);
 
 #include "wine/debug.h"
 #include "wine/list.h"

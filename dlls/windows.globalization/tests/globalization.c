@@ -493,6 +493,551 @@ done:
     ok( ref == 1, "got ref %ld.\n", ref );
 }
 
+/* IIterable<HSTRING> over a list of strings, for the Calendar factories */
+struct hstring_iterable
+{
+    IIterable_HSTRING IIterable_HSTRING_iface;
+    IIterator_HSTRING IIterator_HSTRING_iface;
+    const WCHAR **items;
+    UINT32 count, pos;
+};
+
+static struct hstring_iterable *iterable_from_IIterable( IIterable_HSTRING *iface )
+{
+    return CONTAINING_RECORD( iface, struct hstring_iterable, IIterable_HSTRING_iface );
+}
+
+static struct hstring_iterable *iterable_from_IIterator( IIterator_HSTRING *iface )
+{
+    return CONTAINING_RECORD( iface, struct hstring_iterable, IIterator_HSTRING_iface );
+}
+
+static HRESULT WINAPI iterable_QueryInterface( IIterable_HSTRING *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IIterable_HSTRING ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI iterable_AddRef( IIterable_HSTRING *iface ) { return 2; }
+static ULONG WINAPI iterable_Release( IIterable_HSTRING *iface ) { return 1; }
+static HRESULT WINAPI iterable_GetIids( IIterable_HSTRING *iface, ULONG *count, IID **iids ) { return E_NOTIMPL; }
+static HRESULT WINAPI iterable_GetRuntimeClassName( IIterable_HSTRING *iface, HSTRING *name ) { return E_NOTIMPL; }
+static HRESULT WINAPI iterable_GetTrustLevel( IIterable_HSTRING *iface, TrustLevel *level ) { return E_NOTIMPL; }
+
+static HRESULT WINAPI iterable_First( IIterable_HSTRING *iface, IIterator_HSTRING **value )
+{
+    struct hstring_iterable *impl = iterable_from_IIterable( iface );
+    impl->pos = 0;
+    *value = &impl->IIterator_HSTRING_iface;
+    return S_OK;
+}
+
+static const IIterable_HSTRINGVtbl iterable_vtbl =
+{
+    iterable_QueryInterface, iterable_AddRef, iterable_Release,
+    iterable_GetIids, iterable_GetRuntimeClassName, iterable_GetTrustLevel,
+    iterable_First,
+};
+
+static HRESULT WINAPI iterator_QueryInterface( IIterator_HSTRING *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IIterator_HSTRING ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI iterator_AddRef( IIterator_HSTRING *iface ) { return 2; }
+static ULONG WINAPI iterator_Release( IIterator_HSTRING *iface ) { return 1; }
+static HRESULT WINAPI iterator_GetIids( IIterator_HSTRING *iface, ULONG *count, IID **iids ) { return E_NOTIMPL; }
+static HRESULT WINAPI iterator_GetRuntimeClassName( IIterator_HSTRING *iface, HSTRING *name ) { return E_NOTIMPL; }
+static HRESULT WINAPI iterator_GetTrustLevel( IIterator_HSTRING *iface, TrustLevel *level ) { return E_NOTIMPL; }
+
+static HRESULT WINAPI iterator_get_Current( IIterator_HSTRING *iface, HSTRING *value )
+{
+    struct hstring_iterable *impl = iterable_from_IIterator( iface );
+    if (impl->pos >= impl->count) return E_BOUNDS;
+    return WindowsCreateString( impl->items[impl->pos], wcslen( impl->items[impl->pos] ), value );
+}
+
+static HRESULT WINAPI iterator_get_HasCurrent( IIterator_HSTRING *iface, boolean *value )
+{
+    struct hstring_iterable *impl = iterable_from_IIterator( iface );
+    *value = impl->pos < impl->count;
+    return S_OK;
+}
+
+static HRESULT WINAPI iterator_MoveNext( IIterator_HSTRING *iface, boolean *value )
+{
+    struct hstring_iterable *impl = iterable_from_IIterator( iface );
+    if (impl->pos < impl->count) impl->pos++;
+    *value = impl->pos < impl->count;
+    return S_OK;
+}
+
+static HRESULT WINAPI iterator_GetMany( IIterator_HSTRING *iface, UINT32 size, HSTRING *items, UINT32 *count )
+{
+    return E_NOTIMPL;
+}
+
+static const IIterator_HSTRINGVtbl iterator_vtbl =
+{
+    iterator_QueryInterface, iterator_AddRef, iterator_Release,
+    iterator_GetIids, iterator_GetRuntimeClassName, iterator_GetTrustLevel,
+    iterator_get_Current, iterator_get_HasCurrent, iterator_MoveNext, iterator_GetMany,
+};
+
+static void hstring_iterable_init( struct hstring_iterable *iterable, const WCHAR **items, UINT32 count )
+{
+    iterable->IIterable_HSTRING_iface.lpVtbl = &iterable_vtbl;
+    iterable->IIterator_HSTRING_iface.lpVtbl = &iterator_vtbl;
+    iterable->items = items;
+    iterable->count = count;
+    iterable->pos = 0;
+}
+
+/* 100 ns units since 1601-01-01 UTC (Windows.Foundation.DateTime) */
+static INT64 datetime( WORD year, WORD month, WORD day, WORD hour, WORD minute, WORD second, INT64 extra )
+{
+    SYSTEMTIME st = { year, month, 0, day, hour, minute, second, 0 };
+    FILETIME ft;
+    SystemTimeToFileTime( &st, &ft );
+    return (((INT64)ft.dwHighDateTime << 32) | ft.dwLowDateTime) + extra;
+}
+
+static HSTRING hstr( const WCHAR *s )
+{
+    HSTRING h = NULL;
+    WindowsCreateString( s, wcslen( s ), &h );
+    return h;
+}
+
+#define check_str( call, expect ) check_str_( __LINE__, #call, call, &str, expect )
+static void check_str_( int line, const char *what, HRESULT hr, HSTRING *str, const WCHAR *expect )
+{
+    ok_( __FILE__, line )( hr == S_OK, "%s: got hr %#lx.\n", what, hr );
+    if (FAILED(hr)) return;
+    ok_( __FILE__, line )( !wcscmp( WindowsGetStringRawBuffer( *str, NULL ), expect ), "%s: got %s, expected %s.\n",
+                           what, debugstr_hstring( *str ), debugstr_w( expect ) );
+    WindowsDeleteString( *str );
+}
+
+#define trace_str( call ) trace_str_( #call, call, &str )
+static void trace_str_( const char *what, HRESULT hr, HSTRING *str )
+{
+    trace( "%s: %#lx %s\n", what, hr, SUCCEEDED(hr) ? debugstr_hstring( *str ) : "" );
+    if (SUCCEEDED(hr)) WindowsDeleteString( *str );
+}
+
+#define check_int( call, expect ) check_int_( __LINE__, #call, (call), expect )
+static INT32 int_value;
+#define get_int( getter ) (int_value = -12345, getter( calendar, &int_value ), int_value)
+static void check_int_( int line, const char *what, INT32 value, INT32 expect )
+{
+    ok_( __FILE__, line )( value == expect, "%s: got %d, expected %d.\n", what, value, expect );
+}
+
+#define check_ymd( calendar, y, mo, d, h, mi, s, ns ) check_ymd_( __LINE__, calendar, y, mo, d, h, mi, s, ns )
+static void check_ymd_( int line, ICalendar *calendar, INT32 ey, INT32 emo, INT32 ed, INT32 eh, INT32 emi, INT32 es, INT32 ens )
+{
+    INT32 y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0, ns = 0;
+    ICalendar_get_Year( calendar, &y );
+    ICalendar_get_Month( calendar, &mo );
+    ICalendar_get_Day( calendar, &d );
+    ICalendar_get_Hour( calendar, &h );
+    ICalendar_get_Minute( calendar, &mi );
+    ICalendar_get_Second( calendar, &s );
+    ICalendar_get_Nanosecond( calendar, &ns );
+    ok_( __FILE__, line )( y == ey && mo == emo && d == ed && h == eh && mi == emi && s == es && ns == ens,
+                           "got %04d-%02d-%02d %02d:%02d:%02d.%09d, expected %04d-%02d-%02d %02d:%02d:%02d.%09d.\n",
+                           y, mo, d, h, mi, s, ns, ey, emo, ed, eh, emi, es, ens );
+}
+
+static void test_Calendar(void)
+{
+    static const WCHAR *class_name = RuntimeClass_Windows_Globalization_Calendar;
+    static const WCHAR *en_us[] = { L"en-US" };
+    static const WCHAR *de_de[] = { L"de-DE" };
+    struct hstring_iterable languages, german;
+    ICalendarFactory2 *factory2;
+    ICalendarFactory *factory1;
+    ICalendar *calendar, *other;
+    ITimeZoneOnCalendar *tz;
+    IActivationFactory *factory;
+    IVectorView_HSTRING *view;
+    HSTRING str, s1, s2, s3, s4;
+    DateTime when;
+    DayOfWeek dow;
+    boolean dst;
+    UINT32 size;
+    INT32 res, ns;
+    HRESULT hr;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK || broken( hr == REGDB_E_CLASSNOTREG ), "got hr %#lx.\n", hr );
+    if (FAILED( hr ))
+    {
+        win_skip( "%s runtimeclass not found, skipping tests.\n", wine_dbgstr_w( class_name ) );
+        return;
+    }
+    check_interface( factory, &IID_IAgileObject );
+    check_interface( factory, &IID_ICalendarFactory );
+    check_interface( factory, &IID_ICalendarFactory2 );
+
+    /* the default calendar: the user's settings */
+    hr = IActivationFactory_ActivateInstance( factory, (IInspectable **)&calendar );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    check_interface( calendar, &IID_ICalendar );
+    check_interface( calendar, &IID_ITimeZoneOnCalendar );
+    check_interface( calendar, &IID_IAgileObject );
+    check_str( ICalendar_GetCalendarSystem( calendar, &str ), L"GregorianCalendar" );
+    check_str( ICalendar_get_NumeralSystem( calendar, &str ), L"Latn" );
+    trace_str( ICalendar_GetClock( calendar, &str ) );
+    trace_str( ICalendar_get_ResolvedLanguage( calendar, &str ) );
+    hr = ICalendar_get_Languages( calendar, &view );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    size = 0;
+    if (SUCCEEDED(hr))
+    {
+        IVectorView_HSTRING_get_Size( view, &size );
+        IVectorView_HSTRING_Release( view );
+    }
+    ok( size >= 1, "got %u languages.\n", size );
+    hr = ICalendar_QueryInterface( calendar, &IID_ITimeZoneOnCalendar, (void **)&tz );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    trace_str( ITimeZoneOnCalendar_GetTimeZone( tz, &str ) );
+    ITimeZoneOnCalendar_Release( tz );
+    ICalendar_Release( calendar );
+
+    /* en-US, Gregorian, 24 hours, UTC: deterministic */
+    hr = IActivationFactory_QueryInterface( factory, &IID_ICalendarFactory2, (void **)&factory2 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hstring_iterable_init( &languages, en_us, 1 );
+    s1 = hstr( L"GregorianCalendar" );
+    s2 = hstr( L"24HourClock" );
+    s3 = hstr( L"UTC" );
+    hr = ICalendarFactory2_CreateCalendarWithTimeZone( factory2, &languages.IIterable_HSTRING_iface, s1, s2, s3, &calendar );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (FAILED(hr)) goto done;
+
+    when.UniversalTime = datetime( 2024, 2, 29, 13, 45, 30, 1234567 );
+    hr = ICalendar_SetDateTime( calendar, when );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    check_ymd( calendar, 2024, 2, 29, 13, 45, 30, 123456700 );
+    check_int( get_int( ICalendar_get_Era ), 1 );
+    check_int( get_int( ICalendar_get_FirstEra ), 1 );
+    check_int( get_int( ICalendar_get_LastEra ), 1 );
+    check_int( get_int( ICalendar_get_NumberOfEras ), 1 );
+    check_int( get_int( ICalendar_get_FirstYearInThisEra ), 1 );
+    check_int( get_int( ICalendar_get_LastYearInThisEra ), 9999 );
+    check_int( get_int( ICalendar_get_NumberOfYearsInThisEra ), 9999 );
+    check_int( get_int( ICalendar_get_FirstMonthInThisYear ), 1 );
+    check_int( get_int( ICalendar_get_LastMonthInThisYear ), 12 );
+    check_int( get_int( ICalendar_get_NumberOfMonthsInThisYear ), 12 );
+    check_int( get_int( ICalendar_get_FirstDayInThisMonth ), 1 );
+    check_int( get_int( ICalendar_get_LastDayInThisMonth ), 29 );
+    check_int( get_int( ICalendar_get_NumberOfDaysInThisMonth ), 29 );
+    check_int( get_int( ICalendar_get_Period ), 1 );
+    check_int( get_int( ICalendar_get_FirstPeriodInThisDay ), 1 );
+    check_int( get_int( ICalendar_get_LastPeriodInThisDay ), 1 );
+    check_int( get_int( ICalendar_get_NumberOfPeriodsInThisDay ), 1 );
+    check_int( get_int( ICalendar_get_FirstHourInThisPeriod ), 0 );
+    check_int( get_int( ICalendar_get_LastHourInThisPeriod ), 23 );
+    check_int( get_int( ICalendar_get_NumberOfHoursInThisPeriod ), 24 );
+    check_int( get_int( ICalendar_get_FirstMinuteInThisHour ), 0 );
+    check_int( get_int( ICalendar_get_LastMinuteInThisHour ), 59 );
+    check_int( get_int( ICalendar_get_NumberOfMinutesInThisHour ), 60 );
+    check_int( get_int( ICalendar_get_FirstSecondInThisMinute ), 0 );
+    check_int( get_int( ICalendar_get_LastSecondInThisMinute ), 59 );
+    check_int( get_int( ICalendar_get_NumberOfSecondsInThisMinute ), 60 );
+    dow = 99;
+    hr = ICalendar_get_DayOfWeek( calendar, &dow );
+    ok( hr == S_OK && dow == DayOfWeek_Thursday, "got hr %#lx, day %d.\n", hr, dow );
+    dst = 9;
+    hr = ICalendar_get_IsDaylightSavingTime( calendar, &dst );
+    ok( hr == S_OK && !dst, "got hr %#lx, dst %d.\n", hr, dst );
+    check_str( ICalendar_get_ResolvedLanguage( calendar, &str ), L"en-US" );
+    check_str( ICalendar_get_NumeralSystem( calendar, &str ), L"Latn" );
+    check_str( ICalendar_GetCalendarSystem( calendar, &str ), L"GregorianCalendar" );
+    check_str( ICalendar_GetClock( calendar, &str ), L"24HourClock" );
+    hr = ICalendar_EraAsFullString( calendar, &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    /* Wine's locale data has "AD" */
+    todo_wine ok( !wcscmp( WindowsGetStringRawBuffer( str, NULL ), L"A.D." ), "got %s.\n", debugstr_hstring( str ) );
+    WindowsDeleteString( str );
+    check_str( ICalendar_EraAsString( calendar, 1, &str ), L"AD" );
+    check_str( ICalendar_YearAsString( calendar, &str ), L"2024" );
+    check_str( ICalendar_YearAsTruncatedString( calendar, 2, &str ), L"24" );
+    check_str( ICalendar_YearAsPaddedString( calendar, 6, &str ), L"002024" );
+    check_str( ICalendar_MonthAsFullString( calendar, &str ), L"February" );
+    check_str( ICalendar_MonthAsString( calendar, 3, &str ), L"Feb" );
+    check_str( ICalendar_MonthAsFullSoloString( calendar, &str ), L"February" );
+    check_str( ICalendar_MonthAsSoloString( calendar, 3, &str ), L"Feb" );
+    check_str( ICalendar_MonthAsNumericString( calendar, &str ), L"2" );
+    check_str( ICalendar_MonthAsPaddedNumericString( calendar, 2, &str ), L"02" );
+    check_str( ICalendar_DayAsString( calendar, &str ), L"29" );
+    check_str( ICalendar_DayAsPaddedString( calendar, 3, &str ), L"029" );
+    check_str( ICalendar_DayOfWeekAsFullString( calendar, &str ), L"Thursday" );
+    check_str( ICalendar_DayOfWeekAsString( calendar, 3, &str ), L"Thu" );
+    check_str( ICalendar_DayOfWeekAsFullSoloString( calendar, &str ), L"Thursday" );
+    check_str( ICalendar_DayOfWeekAsSoloString( calendar, 2, &str ), L"Th" );
+    check_str( ICalendar_PeriodAsFullString( calendar, &str ), L"" );
+    check_str( ICalendar_PeriodAsString( calendar, 1, &str ), L"" );
+    check_str( ICalendar_HourAsString( calendar, &str ), L"13" );
+    check_str( ICalendar_HourAsPaddedString( calendar, 3, &str ), L"013" );
+    check_str( ICalendar_MinuteAsString( calendar, &str ), L"45" );
+    check_str( ICalendar_MinuteAsPaddedString( calendar, 3, &str ), L"045" );
+    check_str( ICalendar_SecondAsString( calendar, &str ), L"30" );
+    check_str( ICalendar_SecondAsPaddedString( calendar, 3, &str ), L"030" );
+    check_str( ICalendar_NanosecondAsString( calendar, &str ), L"123456700" );
+    check_str( ICalendar_NanosecondAsPaddedString( calendar, 12, &str ), L"000123456700" );
+    hr = ICalendar_QueryInterface( calendar, &IID_ITimeZoneOnCalendar, (void **)&tz );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    check_str( ITimeZoneOnCalendar_GetTimeZone( tz, &str ), L"Etc/UTC" );
+    check_str( ITimeZoneOnCalendar_TimeZoneAsFullString( tz, &str ), L"Coordinated Universal Time" );
+    check_str( ITimeZoneOnCalendar_TimeZoneAsString( tz, 3, &str ), L"UTC" );
+
+    /* arithmetic: dates keep the time of day and clamp the day; times move the instant */
+    ICalendar_AddYears( calendar, 1 );
+    check_ymd( calendar, 2025, 2, 28, 13, 45, 30, 123456700 );
+    ICalendar_SetDateTime( calendar, when );
+    ICalendar_AddMonths( calendar, -1 );
+    ICalendar_AddDays( calendar, 2 );
+    check_ymd( calendar, 2024, 1, 31, 13, 45, 30, 123456700 );
+    when.UniversalTime = datetime( 2024, 1, 31, 23, 30, 0, 0 );
+    ICalendar_SetDateTime( calendar, when );
+    ICalendar_AddMonths( calendar, 1 );
+    check_ymd( calendar, 2024, 2, 29, 23, 30, 0, 0 );
+    ICalendar_AddHours( calendar, 25 );
+    check_ymd( calendar, 2024, 3, 2, 0, 30, 0, 0 );
+    ICalendar_AddMinutes( calendar, -90 );
+    ICalendar_AddSeconds( calendar, 3601 );
+    ICalendar_AddNanoseconds( calendar, 1500000000 );
+    check_ymd( calendar, 2024, 3, 2, 0, 0, 2, 500000000 );
+    ICalendar_AddWeeks( calendar, 2 );
+    hr = ICalendar_AddEras( calendar, 0 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    check_ymd( calendar, 2024, 3, 16, 0, 0, 2, 500000000 );
+    ICalendar_AddPeriods( calendar, 1 );
+    check_ymd( calendar, 2024, 3, 17, 0, 0, 2, 500000000 );
+
+    /* setters */
+    when.UniversalTime = datetime( 2024, 1, 31, 10, 0, 0, 0 );
+    ICalendar_SetDateTime( calendar, when );
+    hr = ICalendar_put_Month( calendar, 2 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    check_ymd( calendar, 2024, 2, 29, 10, 0, 0, 0 );
+    hr = ICalendar_put_Month( calendar, 13 );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+    hr = ICalendar_put_Day( calendar, 31 );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+    hr = ICalendar_put_Day( calendar, 0 );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+    hr = ICalendar_put_Hour( calendar, 24 );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+    hr = ICalendar_put_Minute( calendar, 60 );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+    hr = ICalendar_put_Nanosecond( calendar, 1000000000 );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+    hr = ICalendar_put_Year( calendar, 0 );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+    check_ymd( calendar, 2024, 2, 29, 10, 0, 0, 0 );
+    hr = ICalendar_put_Year( calendar, 2023 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ICalendar_put_Day( calendar, 15 );
+    ICalendar_put_Hour( calendar, 7 );
+    ICalendar_put_Minute( calendar, 8 );
+    ICalendar_put_Second( calendar, 9 );
+    hr = ICalendar_put_Nanosecond( calendar, 100 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    check_ymd( calendar, 2023, 2, 15, 7, 8, 9, 100 );
+    hr = ICalendar_GetDateTime( calendar, &when );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( when.UniversalTime == datetime( 2023, 2, 15, 7, 8, 9, 1 ), "got %I64d.\n", when.UniversalTime );
+    hr = ICalendar_put_Era( calendar, 1 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ICalendar_put_Era( calendar, 2 );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+    hr = ICalendar_put_Period( calendar, 2 );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+
+    /* min, max */
+    ICalendar_SetToMin( calendar );
+    check_ymd( calendar, 1, 1, 1, 0, 0, 0, 0 );
+    ICalendar_GetDateTime( calendar, &when );
+    ok( when.UniversalTime == -504911232000000000, "got %I64d.\n", when.UniversalTime );
+    ICalendar_SetToMax( calendar );
+    ICalendar_GetDateTime( calendar, &when );
+    ok( when.UniversalTime == 2650467743999999999, "got %I64d.\n", when.UniversalTime );
+    ns = get_int( ICalendar_get_Nanosecond );
+    todo_wine ok( ns == 999999999, "got %d.\n", ns );
+    check_int( get_int( ICalendar_get_Year ), 9999 );
+    check_int( get_int( ICalendar_get_Month ), 12 );
+    check_int( get_int( ICalendar_get_Day ), 31 );
+    check_int( get_int( ICalendar_get_Second ), 59 );
+
+    /* compare, clone, copy */
+    when.UniversalTime = datetime( 2024, 6, 1, 0, 0, 0, 0 );
+    ICalendar_SetDateTime( calendar, when );
+    hr = ICalendar_Clone( calendar, &other );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    res = 9;
+    hr = ICalendar_Compare( calendar, other, &res );
+    ok( hr == S_OK && res == 0, "got hr %#lx, %d.\n", hr, res );
+    ICalendar_AddDays( other, 1 );
+    hr = ICalendar_Compare( calendar, other, &res );
+    ok( hr == S_OK && res == -1, "got hr %#lx, %d.\n", hr, res );
+    when.UniversalTime -= 1;
+    hr = ICalendar_CompareDateTime( calendar, when, &res );
+    ok( hr == S_OK && res == 1, "got hr %#lx, %d.\n", hr, res );
+    hr = ICalendar_CopyTo( calendar, other );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ICalendar_Compare( calendar, other, &res );
+    ok( hr == S_OK && res == 0, "got hr %#lx, %d.\n", hr, res );
+    ICalendar_Release( other );
+
+    /* 12 hours */
+    s4 = hstr( L"12HourClock" );
+    hr = ICalendar_ChangeClock( calendar, s4 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    WindowsDeleteString( s4 );
+    when.UniversalTime = datetime( 2024, 6, 1, 0, 30, 0, 0 );
+    ICalendar_SetDateTime( calendar, when );
+    check_ymd( calendar, 2024, 6, 1, 12, 30, 0, 0 );
+    check_int( get_int( ICalendar_get_Period ), 1 );
+    check_int( get_int( ICalendar_get_NumberOfPeriodsInThisDay ), 2 );
+    check_int( get_int( ICalendar_get_FirstHourInThisPeriod ), 12 );
+    check_int( get_int( ICalendar_get_LastHourInThisPeriod ), 11 );
+    check_int( get_int( ICalendar_get_NumberOfHoursInThisPeriod ), 12 );
+    check_str( ICalendar_PeriodAsFullString( calendar, &str ), L"AM" );
+    check_str( ICalendar_HourAsString( calendar, &str ), L"12" );
+    when.UniversalTime = datetime( 2024, 6, 1, 13, 5, 0, 0 );
+    ICalendar_SetDateTime( calendar, when );
+    check_ymd( calendar, 2024, 6, 1, 1, 5, 0, 0 );
+    check_int( get_int( ICalendar_get_Period ), 2 );
+    check_str( ICalendar_PeriodAsFullString( calendar, &str ), L"PM" );
+    hr = ICalendar_put_Hour( calendar, 12 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ICalendar_GetDateTime( calendar, &when );
+    ok( when.UniversalTime == datetime( 2024, 6, 1, 12, 5, 0, 0 ), "got %I64d.\n", when.UniversalTime );
+    hr = ICalendar_put_Hour( calendar, 0 );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+    hr = ICalendar_put_Period( calendar, 1 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ICalendar_GetDateTime( calendar, &when );
+    ok( when.UniversalTime == datetime( 2024, 6, 1, 0, 5, 0, 0 ), "got %I64d.\n", when.UniversalTime );
+    check_ymd( calendar, 2024, 6, 1, 12, 5, 0, 0 );
+    hr = ICalendar_put_Period( calendar, 3 );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+
+    /* other calendar systems, clocks and time zones */
+    s4 = hstr( L"JapaneseCalendar" );
+    hr = ICalendar_ChangeCalendarSystem( calendar, s4 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    WindowsDeleteString( s4 );
+    check_str( ICalendar_GetCalendarSystem( calendar, &str ), L"JapaneseCalendar" );
+    res = get_int( ICalendar_get_Era );
+    todo_wine ok( res == 5, "got era %d.\n", res );
+    res = get_int( ICalendar_get_Year );
+    todo_wine ok( res == 6, "got year %d.\n", res );
+    s4 = hstr( L"NoSuchCalendar" );
+    hr = ICalendar_ChangeCalendarSystem( calendar, s4 );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+    WindowsDeleteString( s4 );
+    s4 = hstr( L"NoSuchClock" );
+    hr = ICalendar_ChangeClock( calendar, s4 );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+    WindowsDeleteString( s4 );
+    s4 = hstr( L"GregorianCalendar" );
+    ICalendar_ChangeCalendarSystem( calendar, s4 );
+    WindowsDeleteString( s4 );
+    s4 = hstr( L"America/Los_Angeles" );
+    hr = ITimeZoneOnCalendar_ChangeTimeZone( tz, s4 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    WindowsDeleteString( s4 );
+    /* 2024-06-01 00:05 UTC is 17:05 the day before in Los Angeles (UTC-7 in summer) */
+    check_ymd( calendar, 2024, 5, 31, 5, 5, 0, 0 );
+    check_int( get_int( ICalendar_get_Period ), 2 );
+    dst = 9;
+    hr = ICalendar_get_IsDaylightSavingTime( calendar, &dst );
+    ok( hr == S_OK && dst == 1, "got hr %#lx, dst %d.\n", hr, dst );
+    check_str( ITimeZoneOnCalendar_GetTimeZone( tz, &str ), L"America/Los_Angeles" );
+    check_str( ITimeZoneOnCalendar_TimeZoneAsFullString( tz, &str ), L"Pacific Daylight Time" );
+    check_str( ITimeZoneOnCalendar_TimeZoneAsString( tz, 3, &str ), L"PDT" );
+    /* local fields are set in the calendar's time zone */
+    hr = ICalendar_put_Hour( calendar, 6 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ICalendar_GetDateTime( calendar, &when );
+    ok( when.UniversalTime == datetime( 2024, 6, 1, 1, 5, 0, 0 ), "got %I64d.\n", when.UniversalTime );
+    s4 = hstr( L"Pacific Standard Time" );
+    hr = ITimeZoneOnCalendar_ChangeTimeZone( tz, s4 );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+    WindowsDeleteString( s4 );
+    s4 = hstr( L"No/Such_Zone" );
+    hr = ITimeZoneOnCalendar_ChangeTimeZone( tz, s4 );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+    WindowsDeleteString( s4 );
+    ITimeZoneOnCalendar_Release( tz );
+    ICalendar_Release( calendar );
+
+    /* the factory without a time zone, and other languages */
+    hr = IActivationFactory_QueryInterface( factory, &IID_ICalendarFactory, (void **)&factory1 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hstring_iterable_init( &languages, en_us, 1 );
+    hr = ICalendarFactory_CreateCalendar( factory1, &languages.IIterable_HSTRING_iface, s1, s2, &calendar );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED(hr))
+    {
+        check_str( ICalendar_GetClock( calendar, &str ), L"24HourClock" );
+        ICalendar_Release( calendar );
+    }
+    hstring_iterable_init( &german, de_de, 1 );
+    hr = ICalendarFactory_CreateCalendarDefaultCalendarAndClock( factory1, &german.IIterable_HSTRING_iface, &calendar );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED(hr))
+    {
+        when.UniversalTime = datetime( 2024, 3, 5, 12, 0, 0, 0 );
+        ICalendar_SetDateTime( calendar, when );
+        check_str( ICalendar_get_ResolvedLanguage( calendar, &str ), L"de-DE" );
+        check_str( ICalendar_GetClock( calendar, &str ), L"24HourClock" );
+        check_str( ICalendar_MonthAsFullString( calendar, &str ), L"März" );
+        check_str( ICalendar_DayOfWeekAsFullString( calendar, &str ), L"Dienstag" );
+        hr = ICalendar_MonthAsString( calendar, 3, &str );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        /* Wine's locale data has "Mär" */
+        todo_wine ok( !wcscmp( WindowsGetStringRawBuffer( str, NULL ), L"Mrz" ), "got %s.\n", debugstr_hstring( str ) );
+        WindowsDeleteString( str );
+        hr = ICalendar_DayOfWeekAsString( calendar, 2, &str );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        /* Wine's locale data has no form shorter than "Di." */
+        todo_wine ok( !wcscmp( WindowsGetStringRawBuffer( str, NULL ), L"Di" ), "got %s.\n", debugstr_hstring( str ) );
+        WindowsDeleteString( str );
+        check_str( ICalendar_EraAsFullString( calendar, &str ), L"n. Chr." );
+        ICalendar_Release( calendar );
+    }
+    ICalendarFactory_Release( factory1 );
+
+done:
+    WindowsDeleteString( s1 );
+    WindowsDeleteString( s2 );
+    WindowsDeleteString( s3 );
+    ICalendarFactory2_Release( factory2 );
+    IActivationFactory_Release( factory );
+}
+
 START_TEST(globalization)
 {
     HMODULE kernel32;
@@ -508,6 +1053,7 @@ START_TEST(globalization)
     test_Language();
     test_GeographicRegion();
     test_ApplicationLanguages();
+    test_Calendar();
 
     RoUninitialize();
 }
