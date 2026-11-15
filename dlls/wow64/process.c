@@ -766,6 +766,7 @@ NTSTATUS WINAPI wow64_NtQueryInformationThread( UINT *args )
     case ThreadIsTerminated: /* ULONG */
     case ThreadHideFromDebugger:  /* BOOLEAN */
     case ThreadSuspendCount:  /* ULONG */
+    case ThreadIoPriority:  /* ULONG */
     case ThreadPriorityBoost:   /* ULONG */
     case ThreadIdealProcessorEx: /* PROCESSOR_NUMBER */
     case ThreadPagePriority: /* ULONG */
@@ -1065,6 +1066,7 @@ NTSTATUS WINAPI wow64_NtSetInformationThread( UINT *args )
     case ThreadEnableAlignmentFaultFixup:   /* BOOLEAN */
     case ThreadPowerThrottlingState:  /* THREAD_POWER_THROTTLING_STATE */
     case ThreadIdealProcessor:   /* ULONG */
+    case ThreadIoPriority:   /* ULONG */
     case ThreadPriorityBoost:   /* ULONG */
     case ThreadPagePriority:    /* ULONG */
         return NtSetInformationThread( handle, class, ptr, len );

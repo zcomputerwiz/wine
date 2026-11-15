@@ -4138,6 +4138,28 @@ static void test_thread_info(void)
     ok( data == 0 || data == 1, "wrong data %lx\n", data );
     ok( len == sizeof(data), "wrong len %lu\n", len );
 
+    /* ThreadIoPriority: the length must be exactly 4, the default is the normal priority (2) */
+    len = 0xdeadbeef;
+    data = 0xcccccccc;
+    status = pNtQueryInformationThread( GetCurrentThread(), ThreadIoPriority, &data, sizeof(data) - 1, &len );
+    ok( status == STATUS_INFO_LENGTH_MISMATCH, "failed %lx\n", status );
+    ok( len == 0xdeadbeef, "wrong len %lu\n", len );
+    status = pNtQueryInformationThread( GetCurrentThread(), ThreadIoPriority, &data, sizeof(data) * 2, &len );
+    ok( status == STATUS_INFO_LENGTH_MISMATCH, "failed %lx\n", status );
+    status = pNtQueryInformationThread( GetCurrentThread(), ThreadIoPriority, &data, sizeof(data), &len );
+    ok( !status, "failed %lx\n", status );
+    ok( data == 2, "wrong data %lx\n", data );
+    ok( len == sizeof(data), "wrong len %lu\n", len );
+
+    data = 2;
+    status = pNtSetInformationThread( GetCurrentThread(), ThreadIoPriority, &data, sizeof(data) - 1 );
+    ok( status == STATUS_INFO_LENGTH_MISMATCH, "failed %lx\n", status );
+    status = pNtSetInformationThread( GetCurrentThread(), ThreadIoPriority, &data, sizeof(data) );
+    ok( !status, "failed %lx\n", status );
+    data = 4;
+    status = pNtSetInformationThread( GetCurrentThread(), ThreadIoPriority, &data, sizeof(data) );
+    ok( status == STATUS_INVALID_PARAMETER, "failed %lx\n", status );
+
     len = 0xdeadbeef;
     data = 0xcccccccc;
     status = pNtQueryInformationThread( GetCurrentThread(), ThreadAmILastThread,

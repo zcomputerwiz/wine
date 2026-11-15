@@ -2348,6 +2348,16 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
         if (ret_len) *ret_len = sizeof(BOOL);
         return STATUS_SUCCESS;
 
+    case ThreadIoPriority:
+    {
+        /* the I/O priority hint of the thread; there is no per-thread setting, so every thread has the normal one */
+        if (length != sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+        if (!data) return STATUS_ACCESS_VIOLATION;
+        *(ULONG *)data = 2; /* IoPriorityNormal */
+        if (ret_len) *ret_len = sizeof(ULONG);
+        return STATUS_SUCCESS;
+    }
+
     case ThreadIsTerminated:
     {
         ULONG terminated;
@@ -2698,6 +2708,18 @@ NTSTATUS WINAPI NtSetInformationThread( HANDLE handle, THREADINFOCLASS class,
         if (length != sizeof(*number)) return STATUS_INFO_LENGTH_MISMATCH;
         if (*number > MAXIMUM_PROCESSORS) return STATUS_INVALID_PARAMETER;
         FIXME( "ThreadIdealProcessor stub!\n" );
+        return STATUS_SUCCESS;
+    }
+
+    case ThreadIoPriority:
+    {
+        /* values 0 to 2 (very low, low, normal) are accepted, 3 (high) needs a privilege, others are invalid;
+         * ponytail: the value is not kept, the query always returns the normal priority; keep it per thread if
+         * a program is found to read back what it set */
+        if (length < sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
+        if (!data) return STATUS_ACCESS_VIOLATION;
+        if (*(const ULONG *)data == 3) return STATUS_PRIVILEGE_NOT_HELD;
+        if (*(const ULONG *)data > 3) return STATUS_INVALID_PARAMETER;
         return STATUS_SUCCESS;
     }
 
