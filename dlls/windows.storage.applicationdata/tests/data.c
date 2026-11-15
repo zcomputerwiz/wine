@@ -87,6 +87,39 @@ static void test_ApplicationDataStatics(void)
     ok( ref == 1, "got ref %ld.\n", ref );
 }
 
+/* a composite value (and a settings container, the same on Windows) gives null for a key never set, not E_BOUNDS */
+static void test_ApplicationDataCompositeValue(void)
+{
+    static const WCHAR *class_name = L"Windows.Storage.ApplicationDataCompositeValue";
+    IMap_HSTRING_IInspectable *map;
+    IInspectable *inspectable, *value;
+    boolean found;
+    HSTRING str;
+    HRESULT hr;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoActivateInstance( str, &inspectable );
+    WindowsDeleteString( str );
+    ok( hr == S_OK || broken( hr == REGDB_E_CLASSNOTREG ), "got hr %#lx.\n", hr );
+    if (hr != S_OK) return;
+    hr = IInspectable_QueryInterface( inspectable, &IID_IMap_HSTRING_IInspectable, (void **)&map );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    IInspectable_Release( inspectable );
+    if (hr != S_OK) return;
+
+    WindowsCreateString( L"never set", 9, &str );
+    found = TRUE;
+    hr = IMap_HSTRING_IInspectable_HasKey( map, str, &found );
+    ok( hr == S_OK && !found, "got hr %#lx, found %d.\n", hr, found );
+    value = (void *)0xdeadbeef;
+    hr = IMap_HSTRING_IInspectable_Lookup( map, str, &value );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !value, "got value %p.\n", value );
+    WindowsDeleteString( str );
+    IMap_HSTRING_IInspectable_Release( map );
+}
+
 START_TEST(data)
 {
     HRESULT hr;
@@ -95,6 +128,7 @@ START_TEST(data)
     ok( hr == S_OK, "RoInitialize failed, hr %#lx\n", hr );
 
     test_ApplicationDataStatics();
+    test_ApplicationDataCompositeValue();
 
     RoUninitialize();
 }
