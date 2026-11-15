@@ -4062,7 +4062,9 @@ static UINT publish_product_properties(MSIPACKAGE *package, HKEY hkey)
         free(buffer);
     }
 
-    msi_reg_set_val_dword(hkey, L"Assignment", 0);
+    /* 1 for a per-machine install, as on Windows: MsiGetProductInfo(AssignmentType) reports it, and callers such
+     * as Office's setup choose the context of the source list by it */
+    msi_reg_set_val_dword(hkey, L"Assignment", package->Context == MSIINSTALLCONTEXT_MACHINE);
     msi_reg_set_val_dword(hkey, L"AdvertiseFlags", 0x184);
     msi_reg_set_val_dword(hkey, INSTALLPROPERTY_INSTANCETYPEW, 0);
     msi_reg_set_val_multi_str(hkey, L"Clients", L":\0");

@@ -2451,6 +2451,52 @@ static void test_GetMetrics(void)
     ok(ref == 0, "factory not released, %lu\n", ref);
 }
 
+/* Wine only: the system collection takes family mappings from Wine's Replacements keys, the user's (HKCU) and
+   the machine's (HKLM). Windows has neither key. */
+static void test_system_fontcollection_replacements(void)
+{
+    static const WCHAR alias[] = L"Wine Replacement Test Family";
+    IDWriteFontCollection *collection;
+    IDWriteFactory *factory;
+    UINT32 index;
+    BOOL exists;
+    HKEY key;
+    LONG res;
+    HRESULT hr;
+
+    if (strcmp(winetest_platform, "wine"))
+    {
+        skip("Wine's Replacements keys only exist in Wine.\n");
+        return;
+    }
+
+    res = RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Wine\\Fonts\\Replacements", 0, NULL, 0,
+                          KEY_SET_VALUE | KEY_QUERY_VALUE, NULL, &key, NULL);
+    if (res == ERROR_ACCESS_DENIED)
+    {
+        skip("HKLM is not writable.\n");
+        return;
+    }
+    ok(!res, "Failed to create the key, error %ld.\n", res);
+    res = RegSetValueExW(key, alias, 0, REG_SZ, (const BYTE *)L"Tahoma", sizeof(L"Tahoma"));
+    ok(!res, "Failed to set the value, error %ld.\n", res);
+
+    factory = create_factory();
+    hr = IDWriteFactory_GetSystemFontCollection(factory, &collection, FALSE);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    exists = FALSE;
+    index = ~0u;
+    hr = IDWriteFontCollection_FindFamilyName(collection, alias, &index, &exists);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(exists, "A mapping from HKLM's Replacements was not found.\n");
+    ok(index != ~0u, "Unexpected index %u.\n", index);
+    IDWriteFontCollection_Release(collection);
+    IDWriteFactory_Release(factory);
+
+    RegDeleteValueW(key, alias);
+    RegCloseKey(key);
+}
+
 static void test_system_fontcollection(void)
 {
     IDWriteFontCollection *collection, *coll2;
@@ -10706,6 +10752,7 @@ START_TEST(font)
     test_CreateFontFace();
     test_GetMetrics();
     test_system_fontcollection();
+    test_system_fontcollection_replacements();
     test_ConvertFontFaceToLOGFONT();
     test_CustomFontCollection();
     test_CreateCustomFontFileReference();
