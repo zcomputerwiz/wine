@@ -275,7 +275,7 @@ static INT64 time_zone_offset( const struct time_zone *tz, INT64 utc )
         ms = utc - utc % 10000;
         ft.dwLowDateTime = (DWORD)ms;
         ft.dwHighDateTime = (DWORD)(ms >> 32);
-        if (FileTimeToSystemTime( &ft, &st ) && SystemTimeToTzSpecificLocalTime( (TIME_ZONE_INFORMATION *)&tz->info, &st, &local ) &&
+        if (FileTimeToSystemTime( &ft, &st ) && SystemTimeToTzSpecificLocalTimeEx( &tz->info, &st, &local ) &&
             SystemTimeToFileTime( &local, &lt ))
             return (((INT64)lt.dwHighDateTime << 32) | lt.dwLowDateTime) - ms;
     }
