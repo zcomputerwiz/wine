@@ -2800,6 +2800,68 @@ done:
     return hr;
 }
 
+static void test_interface_group(void)
+{
+    static WCHAR protseq[] = L"ncalrpc", endpoint[] = L"wine_test_if_group";
+    RPC_STATUS (WINAPI *pRpcServerInterfaceGroupCreateW)( RPC_INTERFACE_TEMPLATEW *, ULONG, RPC_ENDPOINT_TEMPLATEW *,
+            ULONG, ULONG, RPC_INTERFACE_GROUP_IDLE_CALLBACK_FN, void *, PRPC_INTERFACE_GROUP );
+    RPC_STATUS (WINAPI *pRpcServerInterfaceGroupActivate)( RPC_INTERFACE_GROUP );
+    RPC_STATUS (WINAPI *pRpcServerInterfaceGroupDeactivate)( RPC_INTERFACE_GROUP, ULONG );
+    RPC_STATUS (WINAPI *pRpcServerInterfaceGroupClose)( RPC_INTERFACE_GROUP );
+    RPC_STATUS (WINAPI *pRpcServerInterfaceGroupInqBindings)( RPC_INTERFACE_GROUP, RPC_BINDING_VECTOR ** );
+    HMODULE module = GetModuleHandleA( "rpcrt4.dll" );
+    RPC_ENDPOINT_TEMPLATEW endpoints[1] = { { 0, protseq, endpoint, NULL, 0 } };
+    RPC_BINDING_VECTOR *bindings;
+    RPC_INTERFACE_GROUP group = NULL;
+    RPC_STATUS status;
+
+#define GET(name) p##name = (void *)GetProcAddress( module, #name )
+    GET(RpcServerInterfaceGroupCreateW);
+    GET(RpcServerInterfaceGroupActivate);
+    GET(RpcServerInterfaceGroupDeactivate);
+    GET(RpcServerInterfaceGroupClose);
+    GET(RpcServerInterfaceGroupInqBindings);
+#undef GET
+    if (!pRpcServerInterfaceGroupCreateW)
+    {
+        win_skip( "interface groups are not supported\n" );
+        return;
+    }
+
+    status = pRpcServerInterfaceGroupCreateW( NULL, 0, endpoints, 1, INFINITE, NULL, NULL, NULL );
+    ok( status == RPC_S_INVALID_ARG, "got %lu\n", status );
+    status = pRpcServerInterfaceGroupCreateW( NULL, 0, endpoints, 1, 0, NULL, NULL, &group );
+    ok( status == RPC_S_INVALID_ARG, "got %lu\n", status );
+    status = pRpcServerInterfaceGroupCreateW( NULL, 1, endpoints, 1, INFINITE, NULL, NULL, &group );
+    ok( status == RPC_S_INVALID_ARG, "got %lu\n", status );
+
+    status = pRpcServerInterfaceGroupCreateW( NULL, 0, endpoints, 1, INFINITE, NULL, NULL, &group );
+    ok( status == RPC_S_OK, "got %lu\n", status );
+    ok( group != NULL, "no group\n" );
+
+    status = pRpcServerInterfaceGroupActivate( group );
+    ok( status == RPC_S_OK, "got %lu\n", status );
+    status = pRpcServerInterfaceGroupActivate( group );
+    ok( status == RPC_S_OK, "got %lu\n", status );
+
+    bindings = NULL;
+    status = pRpcServerInterfaceGroupInqBindings( group, &bindings );
+    ok( status == RPC_S_OK, "got %lu\n", status );
+    if (!status) RpcBindingVectorFree( &bindings );
+
+    status = pRpcServerInterfaceGroupDeactivate( group, TRUE );
+    ok( status == RPC_S_OK, "got %lu\n", status );
+    status = pRpcServerInterfaceGroupDeactivate( group, FALSE );
+    ok( status == RPC_S_OK, "got %lu\n", status );
+
+    status = pRpcServerInterfaceGroupClose( group );
+    ok( status == RPC_S_OK, "got %lu\n", status );
+    status = pRpcServerInterfaceGroupClose( group );
+    ok( status == RPC_S_INVALID_ARG, "got %lu\n", status );
+    status = pRpcServerInterfaceGroupActivate( group );
+    ok( status == RPC_S_INVALID_ARG, "got %lu\n", status );
+}
+
 START_TEST(server)
 {
   ULONG size = 0;
@@ -2864,6 +2926,8 @@ START_TEST(server)
           trace("no privileges, skipping tests to avoid firewall dialog\n");
       }
     }
+
+    test_interface_group();
 
     if (!firewall_enabled) server();
 

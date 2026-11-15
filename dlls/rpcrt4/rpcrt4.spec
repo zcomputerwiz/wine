@@ -429,6 +429,12 @@
 @ stdcall RpcRevertToSelf()
 @ stdcall RpcRevertToSelfEx(ptr)
 @ stdcall RpcServerInqBindings(ptr)
+@ stdcall RpcServerInterfaceGroupActivate(ptr)
+@ stdcall RpcServerInterfaceGroupClose(ptr)
+@ stdcall RpcServerInterfaceGroupCreateA(ptr long ptr long long ptr ptr ptr)
+@ stdcall RpcServerInterfaceGroupCreateW(ptr long ptr long long ptr ptr ptr)
+@ stdcall RpcServerInterfaceGroupDeactivate(ptr long)
+@ stdcall RpcServerInterfaceGroupInqBindings(ptr ptr)
 @ stub RpcServerInqCallAttributesA
 @ stub RpcServerInqCallAttributesW
 @ stdcall RpcServerInqDefaultPrincNameA(long ptr)

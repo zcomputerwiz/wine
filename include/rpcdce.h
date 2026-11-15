@@ -220,6 +220,59 @@ typedef struct _RPC_POLICY
   ULONG NICFlags;
 } RPC_POLICY,  *PRPC_POLICY;
 
+typedef void *RPC_INTERFACE_GROUP, **PRPC_INTERFACE_GROUP;
+
+typedef void (RPC_ENTRY *RPC_INTERFACE_GROUP_IDLE_CALLBACK_FN)( RPC_INTERFACE_GROUP IfGroup,
+                                                              void *IdleCallbackContext, ULONG IsGroupIdle );
+
+typedef struct
+{
+  ULONG               Version;
+  RPC_IF_HANDLE       IfSpec;
+  UUID               *MgrTypeUuid;
+  RPC_MGR_EPV        *MgrEpv;
+  unsigned int        Flags;
+  unsigned int        MaxCalls;
+  unsigned int        MaxRpcSize;
+  RPC_IF_CALLBACK_FN *IfCallback;
+  UUID_VECTOR        *UuidVector;
+  RPC_CSTR            Annotation;
+  void               *SecurityDescriptor;
+} RPC_INTERFACE_TEMPLATEA, *PRPC_INTERFACE_TEMPLATEA;
+
+typedef struct
+{
+  ULONG               Version;
+  RPC_IF_HANDLE       IfSpec;
+  UUID               *MgrTypeUuid;
+  RPC_MGR_EPV        *MgrEpv;
+  unsigned int        Flags;
+  unsigned int        MaxCalls;
+  unsigned int        MaxRpcSize;
+  RPC_IF_CALLBACK_FN *IfCallback;
+  UUID_VECTOR        *UuidVector;
+  RPC_WSTR            Annotation;
+  void               *SecurityDescriptor;
+} RPC_INTERFACE_TEMPLATEW, *PRPC_INTERFACE_TEMPLATEW;
+
+typedef struct
+{
+  ULONG     Version;
+  RPC_CSTR  ProtSeq;
+  RPC_CSTR  Endpoint;
+  void     *SecurityDescriptor;
+  ULONG     Backlog;
+} RPC_ENDPOINT_TEMPLATEA, *PRPC_ENDPOINT_TEMPLATEA;
+
+typedef struct
+{
+  ULONG     Version;
+  RPC_WSTR  ProtSeq;
+  RPC_WSTR  Endpoint;
+  void     *SecurityDescriptor;
+  ULONG     Backlog;
+} RPC_ENDPOINT_TEMPLATEW, *PRPC_ENDPOINT_TEMPLATEW;
+
 typedef struct _SEC_WINNT_AUTH_IDENTITY_W
 {
     unsigned short* User;
@@ -406,6 +459,30 @@ RPCRTAPI RPC_STATUS RPC_ENTRY
 
 RPCRTAPI RPC_STATUS RPC_ENTRY
   RpcServerInqBindings( RPC_BINDING_VECTOR** BindingVector );
+
+RPCRTAPI RPC_STATUS RPC_ENTRY
+  RpcServerInterfaceGroupActivate( RPC_INTERFACE_GROUP IfGroup );
+
+RPCRTAPI RPC_STATUS RPC_ENTRY
+  RpcServerInterfaceGroupClose( RPC_INTERFACE_GROUP IfGroup );
+
+RPCRTAPI RPC_STATUS RPC_ENTRY
+  RpcServerInterfaceGroupCreateA( RPC_INTERFACE_TEMPLATEA *Interfaces, ULONG NumIfs,
+                                  RPC_ENDPOINT_TEMPLATEA *Endpoints, ULONG NumEndpoints, ULONG IdlePeriod,
+                                  RPC_INTERFACE_GROUP_IDLE_CALLBACK_FN IdleCallbackFn, void *IdleCallbackContext,
+                                  PRPC_INTERFACE_GROUP IfGroup );
+
+RPCRTAPI RPC_STATUS RPC_ENTRY
+  RpcServerInterfaceGroupCreateW( RPC_INTERFACE_TEMPLATEW *Interfaces, ULONG NumIfs,
+                                  RPC_ENDPOINT_TEMPLATEW *Endpoints, ULONG NumEndpoints, ULONG IdlePeriod,
+                                  RPC_INTERFACE_GROUP_IDLE_CALLBACK_FN IdleCallbackFn, void *IdleCallbackContext,
+                                  PRPC_INTERFACE_GROUP IfGroup );
+
+RPCRTAPI RPC_STATUS RPC_ENTRY
+  RpcServerInterfaceGroupDeactivate( RPC_INTERFACE_GROUP IfGroup, ULONG ForceDeactivation );
+
+RPCRTAPI RPC_STATUS RPC_ENTRY
+  RpcServerInterfaceGroupInqBindings( RPC_INTERFACE_GROUP IfGroup, RPC_BINDING_VECTOR **BindingVector );
 
 RPCRTAPI RPC_STATUS RPC_ENTRY
   RpcServerListen( unsigned int MinimumCallThreads, unsigned int MaxCalls, unsigned int DontWait );

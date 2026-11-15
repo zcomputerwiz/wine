@@ -1745,3 +1745,247 @@ RPC_BINDING_HANDLE WINAPI I_RpcGetCurrentCallHandle(void)
     TRACE("\n");
     return RPCRT4_GetThreadCurrentCallHandle();
 }
+
+/* Interface groups: a set of interfaces and endpoints that is registered and unregistered as one.  This
+ * implementation registers them with the process-wide server functions, so, unlike on Windows, an interface of a
+ * group can also be called over the endpoints of other groups or of the process, and the idle callback is
+ * never called. */
+struct if_group
+{
+    struct list entry;
+    RPC_INTERFACE_TEMPLATEW *ifs;
+    ULONG if_count;
+    RPC_ENDPOINT_TEMPLATEW *endpoints;
+    ULONG endpoint_count;
+    BOOL active;
+};
+
+static struct list if_groups = LIST_INIT( if_groups );
+
+static struct if_group *find_if_group( RPC_INTERFACE_GROUP handle )
+{
+    struct if_group *group;
+
+    LIST_FOR_EACH_ENTRY( group, &if_groups, struct if_group, entry )
+        if (group == handle) return group;
+    return NULL;
+}
+
+static void unregister_group_interfaces( struct if_group *group, ULONG count )
+{
+    ULONG i;
+
+    for (i = 0; i < count; i++)
+        RpcServerUnregisterIf( group->ifs[i].IfSpec, group->ifs[i].MgrTypeUuid, FALSE );
+}
+
+static RPC_STATUS deactivate_group( struct if_group *group )
+{
+    if (!group->active) return RPC_S_OK;
+    unregister_group_interfaces( group, group->if_count );
+    group->active = FALSE;
+    return RPC_S_OK;
+}
+
+/***********************************************************************
+ *             RpcServerInterfaceGroupCreateW (RPCRT4.@)
+ */
+RPC_STATUS WINAPI RpcServerInterfaceGroupCreateW( RPC_INTERFACE_TEMPLATEW *interfaces, ULONG if_count,
+                                                  RPC_ENDPOINT_TEMPLATEW *endpoints, ULONG endpoint_count,
+                                                  ULONG idle_period, RPC_INTERFACE_GROUP_IDLE_CALLBACK_FN idle_fn,
+                                                  void *idle_context, PRPC_INTERFACE_GROUP handle )
+{
+    struct if_group *group;
+    ULONG i;
+
+    TRACE( "(%p,%lu,%p,%lu,%lu,%p,%p,%p)\n", interfaces, if_count, endpoints, endpoint_count, idle_period,
+           idle_fn, idle_context, handle );
+
+    if (!handle || (if_count && !interfaces) || (endpoint_count && !endpoints) ||
+        (!idle_fn && idle_period != INFINITE))
+        return RPC_S_INVALID_ARG;
+    for (i = 0; i < if_count; i++)
+        if (!interfaces[i].IfSpec) return RPC_S_INVALID_ARG;
+    for (i = 0; i < endpoint_count; i++)
+        if (!endpoints[i].ProtSeq) return RPC_S_INVALID_RPC_PROTSEQ;
+
+    if (!(group = calloc( 1, sizeof(*group) ))) return RPC_S_OUT_OF_MEMORY;
+    group->ifs = calloc( if_count + 1, sizeof(*group->ifs) );
+    group->endpoints = calloc( endpoint_count + 1, sizeof(*group->endpoints) );
+    if (!group->ifs || !group->endpoints) goto error;
+    memcpy( group->ifs, interfaces, if_count * sizeof(*group->ifs) );
+    group->if_count = if_count;
+    for (i = 0; i < endpoint_count; i++)
+    {
+        group->endpoints[i] = endpoints[i];
+        group->endpoints[i].ProtSeq = (RPC_WSTR)RPCRT4_strndupW( (const WCHAR *)endpoints[i].ProtSeq, -1 );
+        group->endpoints[i].Endpoint = endpoints[i].Endpoint ?
+                                       (RPC_WSTR)RPCRT4_strndupW( (const WCHAR *)endpoints[i].Endpoint, -1 ) : NULL;
+        group->endpoint_count = i + 1;
+        if (!group->endpoints[i].ProtSeq || (endpoints[i].Endpoint && !group->endpoints[i].Endpoint)) goto error;
+    }
+
+    EnterCriticalSection( &server_cs );
+    list_add_tail( &if_groups, &group->entry );
+    LeaveCriticalSection( &server_cs );
+    *handle = group;
+    return RPC_S_OK;
+
+error:
+    for (i = 0; i < group->endpoint_count; i++)
+    {
+        free( group->endpoints[i].ProtSeq );
+        free( group->endpoints[i].Endpoint );
+    }
+    free( group->endpoints );
+    free( group->ifs );
+    free( group );
+    return RPC_S_OUT_OF_MEMORY;
+}
+
+/***********************************************************************
+ *             RpcServerInterfaceGroupCreateA (RPCRT4.@)
+ */
+RPC_STATUS WINAPI RpcServerInterfaceGroupCreateA( RPC_INTERFACE_TEMPLATEA *interfaces, ULONG if_count,
+                                                  RPC_ENDPOINT_TEMPLATEA *endpoints, ULONG endpoint_count,
+                                                  ULONG idle_period, RPC_INTERFACE_GROUP_IDLE_CALLBACK_FN idle_fn,
+                                                  void *idle_context, PRPC_INTERFACE_GROUP handle )
+{
+    RPC_ENDPOINT_TEMPLATEW *wide = NULL;
+    RPC_STATUS status;
+    ULONG i;
+
+    TRACE( "(%p,%lu,%p,%lu,%lu,%p,%p,%p)\n", interfaces, if_count, endpoints, endpoint_count, idle_period,
+           idle_fn, idle_context, handle );
+
+    if (endpoint_count && !endpoints) return RPC_S_INVALID_ARG;
+    if (endpoint_count && !(wide = calloc( endpoint_count, sizeof(*wide) ))) return RPC_S_OUT_OF_MEMORY;
+    for (i = 0; i < endpoint_count; i++)
+    {
+        wide[i].Version = endpoints[i].Version;
+        wide[i].ProtSeq = endpoints[i].ProtSeq ? (RPC_WSTR)RPCRT4_strdupAtoW( (const char *)endpoints[i].ProtSeq ) : NULL;
+        wide[i].Endpoint = endpoints[i].Endpoint ? (RPC_WSTR)RPCRT4_strdupAtoW( (const char *)endpoints[i].Endpoint ) : NULL;
+        wide[i].SecurityDescriptor = endpoints[i].SecurityDescriptor;
+        wide[i].Backlog = endpoints[i].Backlog;
+    }
+    /* the interface templates differ only in the type of the annotation, which is not used */
+    status = RpcServerInterfaceGroupCreateW( (RPC_INTERFACE_TEMPLATEW *)interfaces, if_count, wide, endpoint_count,
+                                             idle_period, idle_fn, idle_context, handle );
+    for (i = 0; i < endpoint_count; i++)
+    {
+        free( wide[i].ProtSeq );
+        free( wide[i].Endpoint );
+    }
+    free( wide );
+    return status;
+}
+
+/***********************************************************************
+ *             RpcServerInterfaceGroupActivate (RPCRT4.@)
+ */
+RPC_STATUS WINAPI RpcServerInterfaceGroupActivate( RPC_INTERFACE_GROUP handle )
+{
+    RPC_POLICY policy = { sizeof(policy), 0, 0 };
+    struct if_group *group;
+    RPC_STATUS status = RPC_S_OK;
+    ULONG i;
+
+    TRACE( "(%p)\n", handle );
+
+    EnterCriticalSection( &server_cs );
+    if (!(group = find_if_group( handle ))) status = RPC_S_INVALID_ARG;
+    else if (!group->active)
+    {
+        for (i = 0; i < group->endpoint_count && !status; i++)
+        {
+            RPC_ENDPOINT_TEMPLATEW *ep = &group->endpoints[i];
+            UINT max_calls = ep->Backlog ? ep->Backlog : RPC_C_PROTSEQ_MAX_REQS_DEFAULT;
+
+            if (ep->SecurityDescriptor) FIXME( "security descriptor of endpoint %s ignored\n", debugstr_w(ep->Endpoint) );
+            if (ep->Endpoint)
+                status = RpcServerUseProtseqEpExW( ep->ProtSeq, max_calls, ep->Endpoint, ep->SecurityDescriptor, &policy );
+            else
+                status = RpcServerUseProtseqW( ep->ProtSeq, max_calls, ep->SecurityDescriptor );
+        }
+        /* ponytail: a protocol sequence cannot be unregistered here, so a failure keeps the endpoints that were
+         * added; only the interfaces are rolled back */
+        for (i = 0; i < group->if_count && !status; i++)
+        {
+            RPC_INTERFACE_TEMPLATEW *tmpl = &group->ifs[i];
+
+            status = RpcServerRegisterIf3( tmpl->IfSpec, tmpl->MgrTypeUuid, tmpl->MgrEpv,
+                                           tmpl->Flags | RPC_IF_AUTOLISTEN, tmpl->MaxCalls, tmpl->MaxRpcSize,
+                                           tmpl->IfCallback, tmpl->SecurityDescriptor );
+            if (status) unregister_group_interfaces( group, i );
+        }
+        if (!status) group->active = TRUE;
+    }
+    LeaveCriticalSection( &server_cs );
+    return status;
+}
+
+/***********************************************************************
+ *             RpcServerInterfaceGroupDeactivate (RPCRT4.@)
+ */
+RPC_STATUS WINAPI RpcServerInterfaceGroupDeactivate( RPC_INTERFACE_GROUP handle, ULONG force )
+{
+    struct if_group *group;
+    RPC_STATUS status;
+
+    TRACE( "(%p,%lu)\n", handle, force );
+
+    EnterCriticalSection( &server_cs );
+    if (!(group = find_if_group( handle ))) status = RPC_S_INVALID_ARG;
+    else status = deactivate_group( group );
+    LeaveCriticalSection( &server_cs );
+    return status;
+}
+
+/***********************************************************************
+ *             RpcServerInterfaceGroupClose (RPCRT4.@)
+ */
+RPC_STATUS WINAPI RpcServerInterfaceGroupClose( RPC_INTERFACE_GROUP handle )
+{
+    struct if_group *group;
+    ULONG i;
+
+    TRACE( "(%p)\n", handle );
+
+    EnterCriticalSection( &server_cs );
+    if (!(group = find_if_group( handle )))
+    {
+        LeaveCriticalSection( &server_cs );
+        return RPC_S_INVALID_ARG;
+    }
+    deactivate_group( group );
+    list_remove( &group->entry );
+    LeaveCriticalSection( &server_cs );
+
+    for (i = 0; i < group->endpoint_count; i++)
+    {
+        free( group->endpoints[i].ProtSeq );
+        free( group->endpoints[i].Endpoint );
+    }
+    free( group->endpoints );
+    free( group->ifs );
+    free( group );
+    return RPC_S_OK;
+}
+
+/***********************************************************************
+ *             RpcServerInterfaceGroupInqBindings (RPCRT4.@)
+ */
+RPC_STATUS WINAPI RpcServerInterfaceGroupInqBindings( RPC_INTERFACE_GROUP handle, RPC_BINDING_VECTOR **bindings )
+{
+    BOOL valid;
+
+    TRACE( "(%p,%p)\n", handle, bindings );
+
+    if (!bindings) return RPC_S_INVALID_ARG;
+    EnterCriticalSection( &server_cs );
+    valid = find_if_group( handle ) != NULL;
+    LeaveCriticalSection( &server_cs );
+    if (!valid) return RPC_S_INVALID_ARG;
+    /* ponytail: all the bindings of the process, not only those of the group's endpoints */
+    return RpcServerInqBindings( bindings );
+}
