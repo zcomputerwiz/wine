@@ -32,6 +32,9 @@
 #include "shellscalingapi.h"
 #include "shcore.h"
 #include "appmodel.h"
+#include "lmcons.h"
+#include "lmjoin.h"
+#include "lmapibuf.h"
 #define WINSHLWAPI
 #include "shlwapi.h"
 
@@ -2503,8 +2506,14 @@ BOOL WINAPI IsOS(DWORD feature)
         FIXME("(OS_WELCOMELOGONUI) What should we return here?\n");
         return FALSE;
     case OS_DOMAINMEMBER:
-        FIXME("(OS_DOMAINMEMBER) What should we return here?\n");
-        return TRUE;
+    {
+        NETSETUP_JOIN_STATUS status = NetSetupUnknownStatus;
+        WCHAR *name = NULL;
+
+        if (NetGetJoinInformation( NULL, &name, &status )) return FALSE;
+        NetApiBufferFree( name );
+        return status == NetSetupDomainName;
+    }
     case OS_ANYSERVER:
         ISOS_RETURN(platform == VER_PLATFORM_WIN32_NT);
     case OS_WOW6432:

@@ -1001,6 +1001,8 @@ static LRESULT handle_sys_command( HWND hwnd, WPARAM wparam, LPARAM lparam )
         break;
 
     case SC_MAXIMIZE:
+        /* as on Windows, an already maximized window is left alone: a hidden one is neither shown nor activated */
+        if (is_zoomed( hwnd )) break;
         if (is_iconic(hwnd)) NtUserShowOwnedPopups( hwnd, TRUE );
         NtUserShowWindow( hwnd, SW_MAXIMIZE );
         break;
