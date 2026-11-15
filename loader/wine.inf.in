@@ -321,6 +321,10 @@ HKCR,MSCFile\shell\open\command,,2,"""%11%\mmc.exe"" ""%1"" %*"
 HKCR,cplfile,,2,"Control Panel Item"
 HKCR,cplfile\shell\cplopen,,2,"Open with Control Panel"
 HKCR,cplfile\shell\cplopen\command,,2,"rundll32.exe shell32.dll,Control_RunDLL ""%1"",%*"
+HKCR,.theme,,2,"themefile"
+HKCR,themefile,,2,"Windows Theme File"
+HKCR,themefile\DefaultIcon,,2,"%11%\themeui.dll,0"
+HKCR,themefile\shell\open\command,,2,"""%11%\rundll32.exe"" %11%\shell32.dll,Control_RunDLL %11%\desk.cpl desk,@Themes /Action:OpenTheme /file:""%1"""
 HKCR,Directory\Background\shellex\ContextMenuHandlers\New,,,"{d969a300-e7ff-11d0-a93b-00a0c90f2719}"
 HKCR,DirectShow,,16
 HKCR,exefile,,2,"Application"
@@ -775,6 +779,7 @@ HKLM,SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86,"Version",2,"14.51.362
 ;;some dlls have to be registered first
 11,,shell32.dll,1
 11,,stobject.dll,1
+11,,acppage.dll,1
 11,,netshell.dll,1
 11,,quartz.dll,1
 
