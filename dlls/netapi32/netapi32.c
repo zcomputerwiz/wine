@@ -1877,6 +1877,51 @@ static DWORD lockout_value( HKEY key, const WCHAR *name, DWORD def, DWORD max )
     return value > max ? max : value;
 }
 
+/* WineExplorer: the password policy (level 0) is kept in the same key and read back, so that "net accounts" and the
+ * security templates round-trip; nothing enforces it (the host's PAM owns password length and age). Ages are stored
+ * in days, the forced logoff in minutes, 0xffffffff meaning "never" and "unlimited"; the defaults are Windows's. */
+#define WEX_FOREVER 0xffffffff
+#define WEX_DAY 86400
+
+static NET_API_STATUS modals_set_0( const USER_MODALS_INFO_0 *umi, DWORD *parm_err )
+{
+    DWORD max_days, min_days, logoff;
+    LSTATUS ret;
+    HKEY key;
+
+    if (!umi) return ERROR_INVALID_PARAMETER;
+    if (umi->usrmod0_min_passwd_len > 256) { if (parm_err) *parm_err = 1; return ERROR_INVALID_PARAMETER; }
+    if (umi->usrmod0_max_passwd_age != WEX_FOREVER && umi->usrmod0_max_passwd_age < WEX_DAY)
+    {
+        if (parm_err) *parm_err = 2;
+        return ERROR_INVALID_PARAMETER;
+    }
+    if (umi->usrmod0_min_passwd_age != WEX_FOREVER && umi->usrmod0_min_passwd_age / WEX_DAY > 998)
+    {
+        if (parm_err) *parm_err = 3;
+        return ERROR_INVALID_PARAMETER;
+    }
+    max_days = umi->usrmod0_max_passwd_age == WEX_FOREVER ? WEX_FOREVER : umi->usrmod0_max_passwd_age / WEX_DAY;
+    min_days = umi->usrmod0_min_passwd_age / WEX_DAY;
+    if (max_days != WEX_FOREVER && min_days >= max_days && min_days)
+    {
+        if (parm_err) *parm_err = 3;   /* the minimum age has to be below the maximum */
+        return ERROR_INVALID_PARAMETER;
+    }
+    if (umi->usrmod0_password_hist_len > 24) { if (parm_err) *parm_err = 5; return ERROR_INVALID_PARAMETER; }
+    logoff = umi->usrmod0_force_logoff == WEX_FOREVER ? WEX_FOREVER : umi->usrmod0_force_logoff / 60;
+
+    if ((ret = RegCreateKeyExW( HKEY_LOCAL_MACHINE, lockout_keyW, 0, NULL, 0, KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &key, NULL )))
+        return ret;
+    ret = RegSetValueExW( key, L"MinPasswordLength", 0, REG_DWORD, (const BYTE *)&umi->usrmod0_min_passwd_len, sizeof(DWORD) );
+    if (!ret) ret = RegSetValueExW( key, L"MaxPasswordAge", 0, REG_DWORD, (const BYTE *)&max_days, sizeof(DWORD) );
+    if (!ret) ret = RegSetValueExW( key, L"MinPasswordAge", 0, REG_DWORD, (const BYTE *)&min_days, sizeof(DWORD) );
+    if (!ret) ret = RegSetValueExW( key, L"ForceLogoff", 0, REG_DWORD, (const BYTE *)&logoff, sizeof(DWORD) );
+    if (!ret) ret = RegSetValueExW( key, L"PasswordHistoryLength", 0, REG_DWORD, (const BYTE *)&umi->usrmod0_password_hist_len, sizeof(DWORD) );
+    RegCloseKey( key );
+    return ret;
+}
+
 NET_API_STATUS WINAPI NetUserModalsSet(
     LPCWSTR server, DWORD level, LPBYTE buffer, LPDWORD parm_err)
 {
@@ -1888,6 +1933,9 @@ NET_API_STATUS WINAPI NetUserModalsSet(
     TRACE("(%s %ld %p %p)\n", debugstr_w(server), level, buffer, parm_err);
 
     if (parm_err) *parm_err = 0;
+    if (level == 0) return modals_set_0( (const USER_MODALS_INFO_0 *)buffer, parm_err );
+    /* the role and the domain name and identifier belong to a domain controller */
+    if (level == 1 || level == 2) return NERR_NotPrimary;
     if (level != 3)
     {
         if (level > 2 && (level < 1001 || level > 1007)) return ERROR_INVALID_LEVEL;
@@ -1920,15 +1968,45 @@ NET_API_STATUS WINAPI NetUserModalsGet(
     switch (level)
     {
         case 0:
-            /* return global passwords parameters */
-            FIXME("level 0 not implemented!\n");
-            *pbuffer = NULL;
-            return NERR_InternalError;
+        {
+            /* return global passwords parameters (WineExplorer: stored by NetUserModalsSet, not enforced) */
+            USER_MODALS_INFO_0 *umi;
+            HKEY key = NULL;
+            DWORD max_days, min_days, logoff;
+            NET_API_STATUS status;
+
+            RegOpenKeyExW( HKEY_LOCAL_MACHINE, lockout_keyW, 0, KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key );
+            if ((status = NetApiBufferAllocate( sizeof(*umi), (void **)pbuffer )))
+            {
+                if (key) RegCloseKey( key );
+                return status;
+            }
+            umi = (USER_MODALS_INFO_0 *)*pbuffer;
+            umi->usrmod0_min_passwd_len = lockout_value( key, L"MinPasswordLength", 0, 256 );
+            max_days = lockout_value( key, L"MaxPasswordAge", 42, WEX_FOREVER );
+            min_days = lockout_value( key, L"MinPasswordAge", 0, 998 );
+            logoff = lockout_value( key, L"ForceLogoff", WEX_FOREVER, WEX_FOREVER );
+            umi->usrmod0_password_hist_len = lockout_value( key, L"PasswordHistoryLength", 0, 24 );
+            if (key) RegCloseKey( key );
+            umi->usrmod0_max_passwd_age = max_days == WEX_FOREVER ? WEX_FOREVER : max_days * WEX_DAY;
+            umi->usrmod0_min_passwd_age = min_days * WEX_DAY;
+            umi->usrmod0_force_logoff = logoff == WEX_FOREVER ? WEX_FOREVER : logoff * 60;
+            return NERR_Success;
+        }
         case 1:
-            /* return logon server and domain controller info */
-            FIXME("level 1 not implemented!\n");
-            *pbuffer = NULL;
-            return NERR_InternalError;
+        {
+            /* return logon server and domain controller info: a standalone workstation, no primary controller */
+            USER_MODALS_INFO_1 *umi;
+            NET_API_STATUS status;
+
+            if ((status = NetApiBufferAllocate( sizeof(*umi) + sizeof(WCHAR), (void **)pbuffer )))
+                return status;
+            umi = (USER_MODALS_INFO_1 *)*pbuffer;
+            umi->usrmod1_role = 0;   /* UAS_ROLE_STANDALONE */
+            umi->usrmod1_primary = (WCHAR *)(umi + 1);
+            umi->usrmod1_primary[0] = 0;
+            return NERR_Success;
+        }
         case 2:
         {
             /* return domain name and identifier */
