@@ -824,3 +824,27 @@ int sysrun_unlink( const char *path )
     sysrun_drop( raised );
     return ret;
 }
+
+/* name lookups of the same paths (B28): a directory only the system group can search hides its files' names from
+ * the user's rights, so a file opened there had no name and could not be renamed */
+int sysrun_stat( const char *path, struct stat *st )
+{
+    int raised = sysrun_raise_for_current(), ret = stat( path, st );
+    sysrun_drop( raised );
+    return ret;
+}
+
+int sysrun_lstat( const char *path, struct stat *st )
+{
+    int raised = sysrun_raise_for_current(), ret = lstat( path, st );
+    sysrun_drop( raised );
+    return ret;
+}
+
+char *sysrun_realpath( const char *path )
+{
+    int raised = sysrun_raise_for_current();
+    char *ret = realpath( path, NULL );
+    sysrun_drop( raised );
+    return ret;
+}

@@ -99,5 +99,9 @@ extern int sysrun_open( const char *path, int flags, mode_t mode );
 extern int sysrun_rename( const char *old, const char *new );
 extern int sysrun_link( const char *old, const char *new );
 extern int sysrun_unlink( const char *path );
+struct stat;
+extern int sysrun_stat( const char *path, struct stat *st );
+extern int sysrun_lstat( const char *path, struct stat *st );
+extern char *sysrun_realpath( const char *path );
 
 #endif  /* __WINE_SERVER_SYSRUN_H */

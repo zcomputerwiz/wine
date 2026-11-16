@@ -1055,15 +1055,16 @@ static void device_destroy( struct object *obj )
 
 static void unlink_closed_fd( struct inode *inode, struct closed_fd *fd )
 {
-    /* make sure it is still the same file */
+    /* make sure it is still the same file; the check needs the same rights as the unlink (B28: in a directory only
+     * the system group can search, the user's rights do not see the file and nothing was deleted) */
     struct stat st;
+    int raised = fd->sysrun ? sysrun_raise() : 0;  /* only a file that a system group client opened */
     if (!stat( fd->unix_name, &st ) && st.st_dev == inode->device->dev && st.st_ino == inode->ino)
     {
-        int raised = fd->sysrun ? sysrun_raise() : 0;  /* only a file that a system group client opened */
         if (S_ISDIR(st.st_mode)) rmdir( fd->unix_name );
         else unlink( fd->unix_name );
-        sysrun_drop( raised );
     }
+    sysrun_drop( raised );
 }
 
 /* close all pending file descriptors in the closed list */
@@ -2008,7 +2009,8 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
             char *link_path = dup_fd_name( root, name );
             struct stat st_link;
 
-            if (link_path && !lstat( link_path, &st_link ) && S_ISLNK( st_link.st_mode ) && !unlink( link_path ))
+            if (link_path && !sysrun_lstat( link_path, &st_link ) && S_ISLNK( st_link.st_mode ) &&
+                !sysrun_unlink( link_path ))
                 fd->unix_fd = sysrun_open( name, rw_mode | (flags & ~O_TRUNC) | O_EXCL, *mode );
             else errno = EACCES;
             free( link_path );
@@ -2052,7 +2054,7 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
         if ((path = dup_fd_name( root, name )))
         {
             struct stat st_link;
-            if (lstat( path, &st_link ) == 0 && S_ISLNK( st_link.st_mode ))
+            if (sysrun_lstat( path, &st_link ) == 0 && S_ISLNK( st_link.st_mode ))
             {
                 char *dir = strdup( path );
                 char *slash = strrchr( dir, '/' );
@@ -2060,7 +2062,7 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
                 if (slash && slash != dir)
                 {
                     *slash = 0;
-                    if ((can_dir = realpath( dir, NULL )))
+                    if ((can_dir = sysrun_realpath( dir )))
                     {
                         if (asprintf( &fd->unix_name, "%s/%s", can_dir, slash + 1 ) == -1)
                             fd->unix_name = NULL;
@@ -2069,7 +2071,7 @@ struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_nam
                 }
                 free( dir );
             }
-            if (!fd->unix_name) fd->unix_name = realpath( path, NULL );
+            if (!fd->unix_name) fd->unix_name = sysrun_realpath( path );
             free( path );
         }
 
@@ -2873,7 +2875,7 @@ static void set_fd_name( struct fd *fd, struct fd *root, const char *nameptr, da
         goto failed;
     }
 
-    if (!stat( name, &st ))
+    if (!sysrun_stat( name, &st ))
     {
         if (!fstat( fd->unix_fd, &st2 ) && st.st_ino == st2.st_ino && st.st_dev == st2.st_dev)
         {
@@ -2954,7 +2956,7 @@ static void set_fd_name( struct fd *fd, struct fd *root, const char *nameptr, da
     free( fd->nt_name );
     fd->nt_name = dup_nt_name( root, nt_name, &fd->nt_namelen );
     free( fd->unix_name );
-    fd->closed->unix_name = fd->unix_name = realpath( name, NULL );
+    fd->closed->unix_name = fd->unix_name = sysrun_realpath( name );
     free( name );
     if (!fd->unix_name)
         set_error( STATUS_NO_MEMORY );
