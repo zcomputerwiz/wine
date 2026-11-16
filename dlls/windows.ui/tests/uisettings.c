@@ -32,6 +32,7 @@
 #include "windows.ui.h"
 #define WIDL_using_Windows_UI_ViewManagement
 #include "windows.ui.viewmanagement.h"
+#include "uiviewsettingsinterop.h"
 
 #include "wine/test.h"
 
@@ -558,6 +559,40 @@ static void test_AccessibilitySettings(void)
     ok( ref == 1, "got ref %ld.\n", ref );
 }
 
+static void test_UIViewSettings(void)
+{
+    static const WCHAR *class_name = RuntimeClass_Windows_UI_ViewManagement_UIViewSettings;
+    enum UserInteractionMode mode;
+    IUIViewSettingsInterop *interop;
+    IUIViewSettings *settings;
+    HSTRING str;
+    HRESULT hr;
+    HWND hwnd;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IUIViewSettingsInterop, (void **)&interop );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (FAILED(hr)) return;
+
+    hwnd = CreateWindowExW( 0, L"static", L"uiviewsettings", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, NULL, NULL, NULL, NULL );
+    ok( !!hwnd, "CreateWindowExW failed, error %lu.\n", GetLastError() );
+    hr = IUIViewSettingsInterop_GetForWindow( interop, hwnd, &IID_IUIViewSettings, (void **)&settings );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED(hr))
+    {
+        /* a desktop without tablet mode */
+        mode = 0xdeadbeef;
+        hr = IUIViewSettings_get_UserInteractionMode( settings, &mode );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( mode == UserInteractionMode_Mouse, "got mode %d.\n", mode );
+        IUIViewSettings_Release( settings );
+    }
+    DestroyWindow( hwnd );
+    IUIViewSettingsInterop_Release( interop );
+}
+
 START_TEST(uisettings)
 {
     HRESULT hr;
@@ -568,6 +603,7 @@ START_TEST(uisettings)
     test_UISettings();
     test_UISettings_weak_ref();
     test_AccessibilitySettings();
+    test_UIViewSettings();
 
     RoUninitialize();
 }

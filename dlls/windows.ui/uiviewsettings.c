@@ -99,10 +99,13 @@ static HRESULT WINAPI uiviewsettings_GetTrustLevel( IUIViewSettings *iface, Trus
     return E_NOTIMPL;
 }
 
+/* a desktop has no tablet mode: the mouse, as Windows 11 reports it */
 static HRESULT WINAPI uiviewsettings_get_UserInteractionMode( IUIViewSettings *iface, enum UserInteractionMode *value )
 {
-    FIXME( "iface %p, value %p stub!\n", iface, value );
-    return E_NOTIMPL;
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    *value = UserInteractionMode_Mouse;
+    return S_OK;
 }
 
 static const struct IUIViewSettingsVtbl uiviewsettings_vtbl =
