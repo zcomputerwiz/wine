@@ -3254,14 +3254,17 @@ static int name_starts( const WCHAR *name, data_size_t len, const WCHAR *start, 
 }
 
 /* a name under lrpc\ (rpcrt4's ncalrpc endpoints) that a service names itself. Not the endpoints every session's
- * own rpcss has (epmapper, irpcss, irot), nor names made from a process id or an OXID (LRPC<pid>.<n>, COM's
- * \pipe\OLE_<oxid>): process ids are per server, so the same name in session 0 is another process. */
+ * own rpcss has (epmapper, irpcss, irot), nor Wine's lsass (lsasspirpc: it reads and writes its callers' memory by
+ * process id, so it serves its own server's processes only; bridged, it made secur32's DllMain wait for ever), nor
+ * names made from a process id or an OXID (LRPC<pid>.<n>, COM's \pipe\OLE_<oxid>): process ids are per server, so
+ * the same name in session 0 is another process. */
 static int is_lrpc_pipe_name( const WCHAR *name, data_size_t len )
 {
     static const WCHAR pipe_dir[] = {'\\','p','i','p','e','\\'};
     static const WCHAR epmapper[] = {'e','p','m','a','p','p','e','r'};
     static const WCHAR irpcss[] = {'i','r','p','c','s','s'};
     static const WCHAR irot[] = {'i','r','o','t'};
+    static const WCHAR lsass[] = {'l','s','a','s','s','p','i','r','p','c'};
     static const WCHAR ole[] = {'O','L','E','_'};
     static const WCHAR lrpc[] = {'L','R','P','C'};
 
@@ -3276,7 +3279,8 @@ static int is_lrpc_pipe_name( const WCHAR *name, data_size_t len )
     if (!len) return 0;
     if ((len == sizeof(epmapper) && name_starts( name, len, epmapper, len )) ||
         (len == sizeof(irpcss) && name_starts( name, len, irpcss, len )) ||
-        (len == sizeof(irot) && name_starts( name, len, irot, len )))
+        (len == sizeof(irot) && name_starts( name, len, irot, len )) ||
+        (len == sizeof(lsass) && name_starts( name, len, lsass, len )))
         return 0;
     return !name_starts( name, len, ole, sizeof(ole) ) && !name_starts( name, len, lrpc, sizeof(lrpc) );
 }
@@ -3423,6 +3427,10 @@ unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_si
     server->pipe_end.connection = &bridge->pipe_end;
     bridge->pipe_end.connection = &server->pipe_end;
     bridge->pipe_end.server_pid = server->pipe_end.server_pid;
+    /* the opener is a process of another server: no process id here (process ids are per server), so that no
+       service of session 0 opens a process of its own by the client's number; also no stale id of an earlier client */
+    bridge->pipe_end.client_pid = 0;
+    server->pipe_end.client_pid = 0;
     bridge->pipe_end.client_session = session > 0 ? session : 0;
     server->pipe_end.client_session = bridge->pipe_end.client_session;  /* R9: the session of the opener's server */
     list_remove( &server->entry );
