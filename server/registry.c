@@ -599,6 +599,10 @@ int user_is_administrator(void)
 
     if (is_admin != -1) return is_admin;
     is_admin = 0;
+    /* a domain account in the domain's Domain Admins (RID 512, recorded by the root step at logon) is an
+     * administrator as a member of admin_group is: the limited token at logon, elevation through the broker
+     * (docs/DOMAIN_LOGON.md, WO 2, condition 3) */
+    if (security_server_user_in_domain_group( 512 )) return is_admin = 1;
     if (!(group = admin_group_name()) || !(pw = getpwuid( getuid() )) || !(gr = getgrnam( group ))) return 0;
     for (;;)
     {
