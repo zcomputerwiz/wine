@@ -238,9 +238,41 @@ void security_set_thread_token( struct thread *thread, obj_handle_t handle )
 static struct sid mapped_user_sid;
 static const struct sid *server_user_sid = &local_user_sid;
 
+/* WineExplorer domain logon WO 2 (docs/DOMAIN_LOGON.md): when the server's user is a domain account of the map,
+ * its Domain Users (the domain SID and RID 513, in place of the fixed S-1-5-21-0-0-0-513) and the domain groups
+ * the root step recorded at logon; none of it comes from the user's processes. */
+#define DOMAIN_GROUPS_MAX 1024
+static int server_user_domain;
+static struct sid server_domain_users_sid;
+static struct sid *server_domain_groups;
+static unsigned int server_domain_group_count;
+
+static void make_domain_sid( struct sid *sid, const unsigned int subauth[5], unsigned int rid )
+{
+    unsigned int i;
+
+    sid->revision = SID_REVISION;
+    sid->sub_count = 5;
+    memcpy( sid->id_auth, local_user_sid.id_auth, sizeof(sid->id_auth) );
+    for (i = 0; i < 4; i++) sid->sub_auth[i] = subauth[i];
+    sid->sub_auth[4] = rid;
+}
+
+/* the server's user is a domain account in the domain group rid (Domain Admins: 512) */
+int security_server_user_in_domain_group( unsigned int rid )
+{
+    unsigned int i;
+
+    if (!server_user_domain) return 0;
+    for (i = 0; i < server_domain_group_count; i++)
+        if (server_domain_groups[i].sub_auth[4] == rid) return 1;
+    return 0;
+}
+
 void security_init_server_user(void)
 {
-    unsigned int subauth[5], i;
+    unsigned int subauth[5], i, count;
+    uint32_t *rids;
 
     if (session0_server)
     {
@@ -248,7 +280,20 @@ void security_init_server_user(void)
         server_user_sid = &local_system_sid;
         return;
     }
-    if (!session0_client || !accounts_own_sid( getuid(), subauth )) return;
+    if (!session0_client) return;
+    if ((rids = malloc( DOMAIN_GROUPS_MAX * sizeof(*rids) )) &&
+        accounts_own_domain( getuid(), subauth, rids, DOMAIN_GROUPS_MAX, &count ))
+    {
+        server_user_domain = 1;
+        make_domain_sid( &server_domain_users_sid, subauth, DOMAIN_GROUP_RID_USERS );
+        if (count && (server_domain_groups = malloc( count * sizeof(*server_domain_groups) )))
+        {
+            for (i = 0; i < count; i++) make_domain_sid( &server_domain_groups[i], subauth, rids[i] );
+            server_domain_group_count = count;
+        }
+    }
+    free( rids );
+    if (!accounts_own_sid( getuid(), subauth )) return;
     mapped_user_sid.revision = SID_REVISION;
     mapped_user_sid.sub_count = 5;
     memcpy( mapped_user_sid.id_auth, local_user_sid.id_auth, sizeof(mapped_user_sid.id_auth) );
@@ -1001,9 +1046,41 @@ struct token *token_create_admin( unsigned primary, int impersonation_level, int
         { &logon_sid, SE_GROUP_ENABLED|SE_GROUP_ENABLED_BY_DEFAULT|SE_GROUP_MANDATORY|SE_GROUP_LOGON_ID },
     };
 
-    token = create_token( primary, session_id, user_sid, &domain_users_sid, &domain_users_sid,
-                          admin_groups, ARRAY_SIZE( admin_groups ), admin_privs, ARRAY_SIZE( admin_privs ),
-                          default_dacl, NULL, impersonation_level, elevation );
+    if (server_user_domain && user_sid == server_user_sid)
+    {
+        /* a domain account (WO 2): the domain's Domain Users is owner and primary group, and the recorded domain
+         * groups are enabled groups of the token; everything else is the list above (Administrators included,
+         * which the logon filters to deny-only or removes as for any account, process.c) */
+        struct sid_attrs *groups;
+        unsigned int i, n = 0;
+
+        if (!(groups = malloc( (ARRAY_SIZE( admin_groups ) + server_domain_group_count) * sizeof(*groups) )))
+        {
+            free( default_dacl );
+            return NULL;
+        }
+        for (i = 0; i < ARRAY_SIZE( admin_groups ); i++)
+        {
+            groups[n] = admin_groups[i];
+            if (admin_groups[i].sid == &domain_users_sid) groups[n].sid = &server_domain_users_sid;
+            n++;
+        }
+        for (i = 0; i < server_domain_group_count; i++)
+        {
+            if (equal_sid( &server_domain_groups[i], &server_domain_users_sid )) continue;
+            groups[n].sid = &server_domain_groups[i];
+            groups[n].attrs = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY;
+            n++;
+        }
+        token = create_token( primary, session_id, user_sid, &server_domain_users_sid, &server_domain_users_sid,
+                              groups, n, admin_privs, ARRAY_SIZE( admin_privs ),
+                              default_dacl, NULL, impersonation_level, elevation );
+        free( groups );
+    }
+    else
+        token = create_token( primary, session_id, user_sid, &domain_users_sid, &domain_users_sid,
+                              admin_groups, ARRAY_SIZE( admin_groups ), admin_privs, ARRAY_SIZE( admin_privs ),
+                              default_dacl, NULL, impersonation_level, elevation );
 
     /* Assign a high security label to the token. The default would be medium
      * but Wine provides admin access to all applications right now so high

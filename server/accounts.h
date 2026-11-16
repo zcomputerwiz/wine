@@ -50,6 +50,8 @@ enum wex_account_status lookup_account( const char *name, uid_t uid, uint64_t ne
 
 /* System tier T4-0: the mapped SID (subauthorities after S-1-5) of the local account with this uid */
 int accounts_own_sid( uid_t uid, unsigned int subauth[5] );
+/* WO 2 (docs/DOMAIN_LOGON.md): the user's SID, and its recorded domain groups (RIDs), when it is a domain account */
+int accounts_own_domain( uid_t uid, unsigned int subauth[5], uint32_t *rids, unsigned int max, unsigned int *count );
 
 /* a Unix user or group name the account map accepts: 1-63 characters of [A-Za-z0-9_.-], not starting with '-',
  * not "." or "..", '$' only as the last character */

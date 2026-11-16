@@ -620,6 +620,8 @@ static enum wex_account_status administrator_member( const struct account_native
     }
 }
 
+static int domain_admins_member( int dir, gid_t gid, const struct account_record *r );
+
 enum wex_account_status lookup_account( const char *name, uid_t uid, uint64_t caps,
                                         struct wex_account *result )
 {
@@ -671,6 +673,9 @@ enum wex_account_status lookup_account( const char *name, uid_t uid, uint64_t ca
     if (u->uid == getuid() && !r->legacy) goto done;
 #endif
     if ((status = administrator_member( u, policy.admin_group, &value.administrator ))) goto done;
+    /* a domain account in Domain Admins is an administrator as a member of admin_group is (WO 2): the same limited
+     * token at logon, elevation through the broker and consent */
+    if (!value.administrator && domain_admins_member( dir, policy.system_gid, r )) value.administrator = 1;
     strcpy( value.name, r->name );
     value.uid = u->uid;
     value.primary_gid = u->gid;
@@ -695,7 +700,108 @@ done:
     return status;
 }
 
+/* The domain groups recorded at a domain account's logon (docs/DOMAIN_LOGON.md, WO 2, condition 4): the file
+ * domain-groups beside the map, written only by the root tool (wex-accounts admit, under the map lock), protected
+ * as the map is:
+ *   WEXGROUPS 1
+ *   <incarnation key> <rid> [<rid>...]
+ * one line per active domain record, the RIDs of the groups in the map's domain the account is a member of.
+ * The groups of the record with key: their number, or -1 when there is no line for it; a missing file is no
+ * groups; anything malformed is no groups either (the account is then no member of Domain Admins: fails closed). */
+#define GROUPS_MAX 1024
+static int read_domain_groups( int dir, gid_t gid, const char *key, uint32_t *rids, unsigned int max )
+{
+    char *buf = NULL, *line, *next, *field, *end;
+    size_t length;
+    unsigned int count;
+    uint64_t n;
+    int found = -1;
+
+    if (read_protected( dir, "domain-groups", gid, &buf, &length )) return -1;
+    line = buf;
+    next = strchr( line, '\n' );
+    *next++ = 0;
+    if (strcmp( line, "WEXGROUPS 1" )) goto done;
+    for (line = next; *line; line = next)
+    {
+        next = strchr( line, '\n' );
+        *next++ = 0;
+        if (strlen( line ) < 33 || line[32] != ' ' || strspn( line, "0123456789abcdef" ) != 32) { found = -1; goto done; }
+        if (strncmp( line, key, 32 )) continue;
+        if (found != -1) { found = -1; goto done; }   /* a key twice */
+        count = 0;
+        for (field = line + 33; *field; field = end)
+        {
+            char number[16];
+            size_t len = strcspn( field, " " );
+            if (!len || len >= sizeof(number) || count == max) { found = -1; goto done; }
+            memcpy( number, field, len );
+            number[len] = 0;
+            if (!parse_number( number, U32_MAX_VALUE, &n ) || n < 500) { found = -1; goto done; }
+            rids[count++] = n;
+            end = field + len;
+            if (*end == ' ' && !*++end) { found = -1; goto done; }
+        }
+        found = count;
+    }
+done:
+    free( buf );
+    return found;
+}
+
+#define DOMAIN_GROUP_RID_ADMINS_VALUE 512
+
+/* a domain account in the domain's Domain Admins (RID 512, as the root step recorded it at logon) */
+static int domain_admins_member( int dir, gid_t gid, const struct account_record *r )
+{
+    uint32_t rids[GROUPS_MAX];
+    int count, i;
+
+    if (!r->domain || (count = read_domain_groups( dir, gid, r->key, rids, GROUPS_MAX )) <= 0) return 0;
+    for (i = 0; i < count; i++) if (rids[i] == DOMAIN_GROUP_RID_ADMINS_VALUE) return 1;
+    return 0;
+}
+
 #ifndef WEX_ACCOUNTS_STANDALONE
+/* WO 2: for a server whose user is an active domain record: its SID (as accounts_own_sid), the domain SID's
+ * three subauthorities and the recorded domain groups. 1 when the user is a domain account. */
+int accounts_own_domain( uid_t uid, unsigned int subauth[5], uint32_t *rids, unsigned int max, unsigned int *count )
+{
+    struct account_map *map = NULL;
+    struct account_policy policy;
+    enum wex_account_status status;
+    char *buf = NULL;
+    size_t length;
+    unsigned int i;
+    int dir, found = 0, n, raised = sysrun_raise();
+
+    *count = 0;
+    if ((dir = protected_directory( account_directory, &status )) == -1) goto done;
+    if (read_policy( dir, &policy ) || read_protected( dir, "accounts.map", policy.system_gid, &buf, &length ))
+        goto done;
+    if (!(map = malloc( sizeof(*map) )) || parse_map( buf, map )) goto done;
+    for (i = 0; i < map->count; i++)
+    {
+        const struct account_record *r = &map->records[i];
+
+        if (!r->active || r->uid != uid || !r->domain) continue;
+        subauth[0] = 21;
+        subauth[1] = r->sid[0];
+        subauth[2] = r->sid[1];
+        subauth[3] = r->sid[2];
+        subauth[4] = r->rid;
+        if ((n = read_domain_groups( dir, policy.system_gid, r->key, rids, max )) > 0) *count = n;
+        found = 1;
+        break;
+    }
+done:
+    free( map );
+    free( buf );
+    if (dir != -1) close( dir );
+    sysrun_drop( raised );
+    return found;
+}
+
 /* System tier (docs/SYSTEM_TIER_WORK_ORDERS.md, T4-0): the SID subauthorities after S-1-5 of a local account's
  * active record, the legacy record included (21 0 0 0 1000), for a server that takes its user's SID from the map.
  * 1 when found; 0 without a valid protected map or record. Unlike lookup_account, the server's own uid is the

@@ -76,6 +76,7 @@ extern int token_protect_elevated( struct token *token );
 extern void token_make_filtered( struct token *token );
 extern void token_make_standard( struct token *token );
 extern int user_is_administrator(void);
+extern int security_server_user_in_domain_group( unsigned int rid );
 extern int standard_user_session;
 extern int token_assign_label( struct token *token, const struct sid *label );
 extern struct token *token_duplicate( struct token *src_token, unsigned primary,
