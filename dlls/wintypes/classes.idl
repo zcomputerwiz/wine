@@ -30,6 +30,7 @@ namespace Windows.Foundation {
     runtimeclass PropertyValue;
 }
 namespace Windows.Foundation.Diagnostics {
+    runtimeclass AsyncCausalityTracer;
     runtimeclass LoggingActivity;
     runtimeclass LoggingChannel;
     runtimeclass LoggingChannelOptions;

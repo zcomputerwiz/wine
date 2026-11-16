@@ -27,10 +27,16 @@ import "windowscontracts.idl";
 import "windows.foundation.idl";
 
 namespace Windows.Foundation.Diagnostics {
+    typedef enum CausalityRelation CausalityRelation;
+    typedef enum CausalitySource CausalitySource;
+    typedef enum CausalitySynchronousWork CausalitySynchronousWork;
+    typedef enum CausalityTraceLevel CausalityTraceLevel;
     typedef enum LoggingFieldFormat LoggingFieldFormat;
     typedef enum LoggingLevel LoggingLevel;
     typedef enum LoggingOpcode LoggingOpcode;
 
+    interface IAsyncCausalityTracerStatics;
+    interface ITracingStatusChangedEventArgs;
     interface ILoggingActivity;
     interface ILoggingActivity2;
     interface ILoggingActivityFactory;
@@ -45,6 +51,8 @@ namespace Windows.Foundation.Diagnostics {
     interface ILoggingOptionsFactory;
     interface ILoggingTarget;
 
+    runtimeclass AsyncCausalityTracer;
+    runtimeclass TracingStatusChangedEventArgs;
     runtimeclass LoggingActivity;
     runtimeclass LoggingChannel;
     runtimeclass LoggingChannelOptions;
@@ -53,11 +61,54 @@ namespace Windows.Foundation.Diagnostics {
 
     declare
     {
+        interface Windows.Foundation.EventHandler<Windows.Foundation.Diagnostics.TracingStatusChangedEventArgs *>;
         interface Windows.Foundation.TypedEventHandler<Windows.Foundation.Diagnostics.ILoggingChannel *, IInspectable *>;
     }
 }
 
 namespace Windows.Foundation.Diagnostics {
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum CausalityRelation
+    {
+        AssignDelegate = 0,
+        Join           = 1,
+        Choice         = 2,
+        Cancel         = 3,
+        Error          = 4,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum CausalitySource
+    {
+        Application = 0,
+        Library     = 1,
+        System      = 2,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum CausalitySynchronousWork
+    {
+        CompletionNotification = 0,
+        ProgressNotification   = 1,
+        Execution              = 2,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum CausalityTraceLevel
+    {
+        Required  = 0,
+        Important = 1,
+        Verbose   = 2,
+    };
+
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0)
     ]
@@ -109,6 +160,33 @@ namespace Windows.Foundation.Diagnostics {
         Suspend = 8,
         Send    = 9,
     };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Foundation.Diagnostics.AsyncCausalityTracer),
+        uuid(50850b26-267e-451b-a890-ab6a370245ee)
+    ]
+    interface IAsyncCausalityTracerStatics : IInspectable
+    {
+        HRESULT TraceOperationCreation([in] Windows.Foundation.Diagnostics.CausalityTraceLevel traceLevel, [in] Windows.Foundation.Diagnostics.CausalitySource source, [in] GUID platformId, [in] UINT64 operationId, [in] HSTRING operationName, [in] UINT64 relatedContext);
+        HRESULT TraceOperationCompletion([in] Windows.Foundation.Diagnostics.CausalityTraceLevel traceLevel, [in] Windows.Foundation.Diagnostics.CausalitySource source, [in] GUID platformId, [in] UINT64 operationId, [in] AsyncStatus status);
+        HRESULT TraceOperationRelation([in] Windows.Foundation.Diagnostics.CausalityTraceLevel traceLevel, [in] Windows.Foundation.Diagnostics.CausalitySource source, [in] GUID platformId, [in] UINT64 operationId, [in] Windows.Foundation.Diagnostics.CausalityRelation relation);
+        HRESULT TraceSynchronousWorkStart([in] Windows.Foundation.Diagnostics.CausalityTraceLevel traceLevel, [in] Windows.Foundation.Diagnostics.CausalitySource source, [in] GUID platformId, [in] UINT64 operationId, [in] Windows.Foundation.Diagnostics.CausalitySynchronousWork work);
+        HRESULT TraceSynchronousWorkCompletion([in] Windows.Foundation.Diagnostics.CausalityTraceLevel traceLevel, [in] Windows.Foundation.Diagnostics.CausalitySource source, [in] Windows.Foundation.Diagnostics.CausalitySynchronousWork work);
+        [eventadd] HRESULT TracingStatusChanged([in] Windows.Foundation.EventHandler<Windows.Foundation.Diagnostics.TracingStatusChangedEventArgs *> *handler, [out, retval] EventRegistrationToken *cookie);
+        [eventremove] HRESULT TracingStatusChanged([in] EventRegistrationToken cookie);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Foundation.Diagnostics.TracingStatusChangedEventArgs),
+        uuid(410b7711-ff3b-477f-9c9a-d2efda302dc3)
+    ]
+    interface ITracingStatusChangedEventArgs : IInspectable
+    {
+        [propget] HRESULT Enabled([out, retval] boolean *enabled);
+        [propget] HRESULT TraceLevel([out, retval] Windows.Foundation.Diagnostics.CausalityTraceLevel *value);
+    }
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
@@ -390,6 +468,24 @@ namespace Windows.Foundation.Diagnostics {
         [overload("StartActivity")] HRESULT StartActivityWithFields([in] HSTRING startEventName, [in] Windows.Foundation.Diagnostics.LoggingFields *fields, [out, retval] Windows.Foundation.Diagnostics.LoggingActivity ** result);
         [overload("StartActivity")] HRESULT StartActivityWithFieldsAndLevel([in] HSTRING startEventName, [in] Windows.Foundation.Diagnostics.LoggingFields *fields, [in] Windows.Foundation.Diagnostics.LoggingLevel level, [out, retval] Windows.Foundation.Diagnostics.LoggingActivity ** result);
         [overload("StartActivity")] HRESULT StartActivityWithFieldsAndOptions([in] HSTRING startEventName, [in] Windows.Foundation.Diagnostics.LoggingFields *fields, [in] Windows.Foundation.Diagnostics.LoggingLevel level, [in] Windows.Foundation.Diagnostics.LoggingOptions *options, [out, retval] Windows.Foundation.Diagnostics.LoggingActivity ** result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.Foundation.Diagnostics.IAsyncCausalityTracerStatics, Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    runtimeclass AsyncCausalityTracer
+    {
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass TracingStatusChangedEventArgs
+    {
+        [default] interface Windows.Foundation.Diagnostics.ITracingStatusChangedEventArgs;
     }
 
     [

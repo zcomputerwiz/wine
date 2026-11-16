@@ -288,6 +288,74 @@ static void test_LoggingChannel(void)
     WindowsDeleteString( name );
 }
 
+static HRESULT WINAPI status_handler_QueryInterface( IEventHandler_TracingStatusChangedEventArgs *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IEventHandler_TracingStatusChangedEventArgs ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI status_handler_AddRef( IEventHandler_TracingStatusChangedEventArgs *iface ) { return 2; }
+static ULONG WINAPI status_handler_Release( IEventHandler_TracingStatusChangedEventArgs *iface ) { return 1; }
+
+static HRESULT WINAPI status_handler_Invoke( IEventHandler_TracingStatusChangedEventArgs *iface, IInspectable *sender,
+                                             ITracingStatusChangedEventArgs *args )
+{
+    return S_OK;
+}
+
+static const IEventHandler_TracingStatusChangedEventArgsVtbl status_handler_vtbl =
+{
+    status_handler_QueryInterface,
+    status_handler_AddRef,
+    status_handler_Release,
+    status_handler_Invoke,
+};
+
+static IEventHandler_TracingStatusChangedEventArgs status_handler = {&status_handler_vtbl};
+
+static void test_AsyncCausalityTracer(void)
+{
+    static const GUID platform = {0x12345678, 0x1234, 0x5678, {1, 2, 3, 4, 5, 6, 7, 8}};
+    IAsyncCausalityTracerStatics *statics;
+    EventRegistrationToken token;
+    HSTRING name;
+    HRESULT hr;
+
+    if (!(statics = factory( L"Windows.Foundation.Diagnostics.AsyncCausalityTracer", &IID_IAsyncCausalityTracerStatics ))) return;
+    name = string( L"operation" );
+    hr = IAsyncCausalityTracerStatics_TraceOperationCreation( statics, CausalityTraceLevel_Required, CausalitySource_Application,
+                                                               platform, 1, name, 0 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IAsyncCausalityTracerStatics_TraceOperationRelation( statics, CausalityTraceLevel_Important, CausalitySource_Library,
+                                                               platform, 1, CausalityRelation_Join );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IAsyncCausalityTracerStatics_TraceSynchronousWorkStart( statics, CausalityTraceLevel_Verbose, CausalitySource_System,
+                                                                  platform, 1, CausalitySynchronousWork_Execution );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IAsyncCausalityTracerStatics_TraceSynchronousWorkCompletion( statics, CausalityTraceLevel_Verbose, CausalitySource_System,
+                                                                       CausalitySynchronousWork_Execution );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IAsyncCausalityTracerStatics_TraceOperationCompletion( statics, CausalityTraceLevel_Required, CausalitySource_Application,
+                                                                 platform, 1, Completed );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    WindowsDeleteString( name );
+
+    token.value = 0;
+    hr = IAsyncCausalityTracerStatics_add_TracingStatusChanged( statics, &status_handler, &token );
+    ok( hr == S_OK && token.value, "got hr %#lx, token %#I64x.\n", hr, token.value );
+    hr = IAsyncCausalityTracerStatics_remove_TracingStatusChanged( statics, token );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IAsyncCausalityTracerStatics_add_TracingStatusChanged( statics, NULL, &token );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+    IAsyncCausalityTracerStatics_Release( statics );
+}
+
 START_TEST(diagnostics)
 {
     HRESULT hr;
@@ -298,5 +366,6 @@ START_TEST(diagnostics)
     test_LoggingOptions();
     test_LoggingFields();
     test_LoggingChannel();
+    test_AsyncCausalityTracer();
     RoUninitialize();
 }

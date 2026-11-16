@@ -1531,6 +1531,164 @@ static HRESULT activity_create( HSTRING name, ILoggingChannel *channel, ILogging
     return S_OK;
 }
 
+/* ---- AsyncCausalityTracer: the causality of asynchronous operations, traced to ETW on Windows; no session listens on
+ * Wine, so every trace is accepted and goes nowhere ---- */
+
+struct causality_tracer
+{
+    IActivationFactory IActivationFactory_iface;
+    IAsyncCausalityTracerStatics IAsyncCausalityTracerStatics_iface;
+    LONG ref;
+};
+
+static inline struct causality_tracer *causality_from_IActivationFactory( IActivationFactory *iface )
+{
+    return CONTAINING_RECORD( iface, struct causality_tracer, IActivationFactory_iface );
+}
+
+static HRESULT WINAPI causality_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+{
+    struct causality_tracer *impl = causality_from_IActivationFactory( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IActivationFactory ))
+        *out = &impl->IActivationFactory_iface;
+    else if (IsEqualGUID( iid, &IID_IAsyncCausalityTracerStatics ))
+        *out = &impl->IAsyncCausalityTracerStatics_iface;
+    else
+    {
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+
+static ULONG WINAPI causality_factory_AddRef( IActivationFactory *iface )
+{
+    return InterlockedIncrement( &causality_from_IActivationFactory( iface )->ref );
+}
+
+static ULONG WINAPI causality_factory_Release( IActivationFactory *iface )
+{
+    return InterlockedDecrement( &causality_from_IActivationFactory( iface )->ref );
+}
+
+static HRESULT WINAPI causality_factory_GetIids( IActivationFactory *iface, ULONG *count, IID **iids )
+{
+    return inspectable_GetIids( (IInspectable *)iface, count, iids );
+}
+
+static HRESULT WINAPI causality_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *name )
+{
+    FIXME( "iface %p, name %p stub!\n", iface, name );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI causality_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *level )
+{
+    FIXME( "iface %p, level %p stub!\n", iface, level );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI causality_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    TRACE( "iface %p, instance %p.\n", iface, instance );
+    return E_NOTIMPL;
+}
+
+static const IActivationFactoryVtbl causality_factory_vtbl =
+{
+    causality_factory_QueryInterface,
+    causality_factory_AddRef,
+    causality_factory_Release,
+    /* IInspectable methods */
+    causality_factory_GetIids,
+    causality_factory_GetRuntimeClassName,
+    causality_factory_GetTrustLevel,
+    /* IActivationFactory methods */
+    causality_factory_ActivateInstance,
+};
+
+DEFINE_IINSPECTABLE_( causality_statics, IAsyncCausalityTracerStatics, struct causality_tracer, causality_statics_impl,
+                      IAsyncCausalityTracerStatics_iface, &impl->IActivationFactory_iface )
+
+static HRESULT WINAPI causality_statics_TraceOperationCreation( IAsyncCausalityTracerStatics *iface, CausalityTraceLevel level,
+        CausalitySource source, GUID platform, UINT64 operation, HSTRING name, UINT64 related )
+{
+    TRACE( "iface %p, level %d, source %d, operation %#I64x, name %s.\n", iface, level, source, operation, debugstr_hstring( name ) );
+    return S_OK;
+}
+
+static HRESULT WINAPI causality_statics_TraceOperationCompletion( IAsyncCausalityTracerStatics *iface, CausalityTraceLevel level,
+        CausalitySource source, GUID platform, UINT64 operation, AsyncStatus status )
+{
+    TRACE( "iface %p, level %d, source %d, operation %#I64x, status %d.\n", iface, level, source, operation, status );
+    return S_OK;
+}
+
+static HRESULT WINAPI causality_statics_TraceOperationRelation( IAsyncCausalityTracerStatics *iface, CausalityTraceLevel level,
+        CausalitySource source, GUID platform, UINT64 operation, CausalityRelation relation )
+{
+    TRACE( "iface %p, level %d, source %d, operation %#I64x, relation %d.\n", iface, level, source, operation, relation );
+    return S_OK;
+}
+
+static HRESULT WINAPI causality_statics_TraceSynchronousWorkStart( IAsyncCausalityTracerStatics *iface, CausalityTraceLevel level,
+        CausalitySource source, GUID platform, UINT64 operation, CausalitySynchronousWork work )
+{
+    TRACE( "iface %p, level %d, source %d, operation %#I64x, work %d.\n", iface, level, source, operation, work );
+    return S_OK;
+}
+
+static HRESULT WINAPI causality_statics_TraceSynchronousWorkCompletion( IAsyncCausalityTracerStatics *iface, CausalityTraceLevel level,
+        CausalitySource source, CausalitySynchronousWork work )
+{
+    TRACE( "iface %p, level %d, source %d, work %d.\n", iface, level, source, work );
+    return S_OK;
+}
+
+/* never raised: no session starts or stops tracing on Wine */
+static HRESULT WINAPI causality_statics_add_TracingStatusChanged( IAsyncCausalityTracerStatics *iface,
+        IEventHandler_TracingStatusChangedEventArgs *handler, EventRegistrationToken *cookie )
+{
+    static LONG next;
+
+    TRACE( "iface %p, handler %p, cookie %p.\n", iface, handler, cookie );
+    if (!handler) return E_INVALIDARG;
+    cookie->value = InterlockedIncrement( &next );
+    return S_OK;
+}
+
+static HRESULT WINAPI causality_statics_remove_TracingStatusChanged( IAsyncCausalityTracerStatics *iface, EventRegistrationToken cookie )
+{
+    TRACE( "iface %p, cookie %#I64x.\n", iface, cookie.value );
+    return S_OK;
+}
+
+static const IAsyncCausalityTracerStaticsVtbl causality_statics_vtbl =
+{
+    causality_statics_QueryInterface,
+    causality_statics_AddRef,
+    causality_statics_Release,
+    /* IInspectable methods */
+    causality_statics_GetIids,
+    causality_statics_GetRuntimeClassName,
+    causality_statics_GetTrustLevel,
+    /* IAsyncCausalityTracerStatics methods */
+    causality_statics_TraceOperationCreation,
+    causality_statics_TraceOperationCompletion,
+    causality_statics_TraceOperationRelation,
+    causality_statics_TraceSynchronousWorkStart,
+    causality_statics_TraceSynchronousWorkCompletion,
+    causality_statics_add_TracingStatusChanged,
+    causality_statics_remove_TracingStatusChanged,
+};
+
+static struct causality_tracer causality_tracer = {{&causality_factory_vtbl}, {&causality_statics_vtbl}, 1};
+
 /* ---- the factories ---- */
 
 enum diag_class { DIAG_CHANNEL, DIAG_ACTIVITY, DIAG_FIELDS, DIAG_OPTIONS, DIAG_CHANNEL_OPTIONS };
@@ -1780,6 +1938,8 @@ DIAG_FACTORY( channel_options_statics, DIAG_CHANNEL_OPTIONS )
 /* the factory of a Windows.Foundation.Diagnostics logging class, or null */
 IActivationFactory *diagnostics_factory( const WCHAR *name )
 {
+    if (!wcscmp( name, RuntimeClass_Windows_Foundation_Diagnostics_AsyncCausalityTracer ))
+        return &causality_tracer.IActivationFactory_iface;
     if (!wcscmp( name, RuntimeClass_Windows_Foundation_Diagnostics_LoggingChannel )) return &channel_statics.IActivationFactory_iface;
     if (!wcscmp( name, RuntimeClass_Windows_Foundation_Diagnostics_LoggingActivity )) return &activity_statics.IActivationFactory_iface;
     if (!wcscmp( name, RuntimeClass_Windows_Foundation_Diagnostics_LoggingFields )) return &fields_statics.IActivationFactory_iface;
