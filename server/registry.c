@@ -1633,6 +1633,16 @@ static void touch_key( struct key *key, unsigned int change )
     touch_key_ex( key, change, true );
 }
 
+/* a hive was loaded or unloaded below this key: as on Windows, the subkey-name watchers of the key and its
+ * ancestors are told (nothing is marked for saving, the parent's own data did not change) */
+static void notify_hive_mount( struct key *parent )
+{
+    if (!parent) return;
+    check_notify( parent, REG_NOTIFY_CHANGE_NAME, 1 );
+    for (parent = get_parent( parent ); parent; parent = get_parent( parent ))
+        check_notify( parent, REG_NOTIFY_CHANGE_NAME, 0 );
+}
+
 /* get the wow6432node key if any, grabbing it and releasing the original key */
 static struct key *grab_wow6432node( struct key *key )
 {
@@ -4641,6 +4651,7 @@ unsigned int session0_load_user_hive( const struct sid *sid, int fd, void *agent
     reset_policy_trees( key );
     drop_saved_volatile_environment( key );
     make_clean( key );
+    notify_hive_mount( get_parent( key ) );  /* gpsvc (wexpolicy) waits for a user's hive under HKEY_USERS */
     status = STATUS_SUCCESS;
 
 done:
@@ -4670,6 +4681,7 @@ void session0_unload_user_hive( void *agent, int save )
         release_object( info->classes_alias );
     }
     info->key->flags |= KEY_DELETED;
+    notify_hive_mount( get_parent( info->key ) );
     unlink_named_object( &info->key->obj );
     release_object( info->key );
     free( info->owner_sd );
@@ -4993,7 +5005,11 @@ DECL_HANDLER(load_registry)
     if ((key = create_named_object( &params )))
     {
         if (key->e1s_sd) set_error( STATUS_ACCESS_DENIED );
-        else load_registry( key, req->file );
+        else
+        {
+            load_registry( key, req->file );
+            if (!get_error()) notify_hive_mount( get_parent( key ) );
+        }
         release_object( key );
     }
     if (parent) release_object( parent );
