@@ -4286,6 +4286,89 @@ static void test_monitor_dpi(void)
     pSetThreadDpiAwarenessContext( old_ctx );
 }
 
+static void test_CalculatePopupWindowPosition(void)
+{
+    MONITORINFO info = { sizeof(info) };
+    POINT anchor, centre;
+    RECT work, exclude, rect;
+    SIZE size = { 100, 50 };
+    BOOL ret;
+
+    /* positions relative to the primary monitor's work area, with anchors inside it */
+    GetMonitorInfoW( MonitorFromPoint( (POINT){ 0, 0 }, MONITOR_DEFAULTTOPRIMARY ), &info );
+    work = info.rcWork;
+    if (work.right - work.left < 640 || work.bottom - work.top < 480)
+    {
+        skip( "work area too small\n" );
+        return;
+    }
+    centre.x = work.left + 400;
+    centre.y = work.top + 300;
+
+#define check_popup( pt, flags, ex, l, t ) \
+    do { \
+        SetRect( &rect, -1, -1, -1, -1 ); \
+        ret = CalculatePopupWindowPosition( &(pt), &size, (flags), (ex), &rect ); \
+        ok( ret, "flags %#x: failed, error %lu\n", (flags), GetLastError() ); \
+        ok( rect.left == (l) && rect.top == (t) && rect.right == (l) + size.cx && rect.bottom == (t) + size.cy, \
+            "flags %#x: got %s, expected (%ld,%ld)\n", (flags), wine_dbgstr_rect( &rect ), (LONG)(l), (LONG)(t) ); \
+    } while (0)
+
+    /* alignment at the anchor */
+    check_popup( centre, 0, NULL, centre.x, centre.y );
+    check_popup( centre, TPM_CENTERALIGN, NULL, centre.x - 50, centre.y );
+    check_popup( centre, TPM_RIGHTALIGN | TPM_BOTTOMALIGN, NULL, centre.x - 100, centre.y - 50 );
+    check_popup( centre, TPM_CENTERALIGN | TPM_VCENTERALIGN, NULL, centre.x - 50, centre.y - 25 );
+    check_popup( centre, TPM_WORKAREA | TPM_LAYOUTRTL | TPM_RETURNCMD, NULL, centre.x, centre.y );
+
+    /* moved into the work area, never flipped */
+    anchor.x = work.right - 30; anchor.y = centre.y;
+    check_popup( anchor, 0, NULL, work.right - 100, centre.y );
+    anchor.x = work.left + 30;
+    check_popup( anchor, TPM_RIGHTALIGN, NULL, work.left, centre.y );
+    anchor.x = centre.x; anchor.y = work.bottom - 20;
+    check_popup( anchor, 0, NULL, centre.x, work.bottom - 50 );
+    size.cx = work.right - work.left + 200;
+    check_popup( centre, 0, NULL, work.left, centre.y );
+    size.cx = 100;
+
+    /* clear of the exclude rectangle when the anchor is in it */
+    SetRect( &exclude, centre.x - 50, centre.y - 20, centre.x + 50, centre.y + 20 );
+    check_popup( centre, TPM_HORIZONTAL, &exclude, centre.x + 50, centre.y );
+    check_popup( centre, TPM_HORIZONTAL | TPM_RIGHTALIGN, &exclude, centre.x - 150, centre.y );
+    check_popup( centre, TPM_HORIZONTAL | TPM_CENTERALIGN, &exclude, centre.x + 50, centre.y );
+    check_popup( centre, TPM_VERTICAL, &exclude, centre.x, centre.y + 20 );
+    check_popup( centre, TPM_VERTICAL | TPM_BOTTOMALIGN, &exclude, centre.x, centre.y - 70 );
+    check_popup( centre, TPM_VERTICAL | TPM_VCENTERALIGN | TPM_CENTERALIGN, &exclude, centre.x - 50, centre.y + 20 );
+    /* the other side when the first does not fit; the plain alignment when neither does */
+    anchor.x = work.right - 70; anchor.y = centre.y;
+    SetRect( &exclude, work.right - 120, centre.y - 20, work.right - 20, centre.y + 20 );
+    check_popup( anchor, TPM_HORIZONTAL, &exclude, work.right - 220, centre.y );
+    exclude = work;
+    check_popup( centre, TPM_VERTICAL, &exclude, centre.x, centre.y );
+    /* not used when the anchor is outside it (the right and bottom edges are outside) */
+    SetRect( &exclude, centre.x - 50, centre.y - 20, centre.x, centre.y );
+    check_popup( centre, TPM_VERTICAL, &exclude, centre.x, centre.y );
+#undef check_popup
+
+    /* arguments */
+    SetLastError( 0xdeadbeef );
+    ret = CalculatePopupWindowPosition( &centre, &size, 0x200, NULL, &rect );
+    ok( !ret && GetLastError() == ERROR_INVALID_FLAGS, "got %d, error %lu\n", ret, GetLastError() );
+    SetLastError( 0xdeadbeef );
+    ret = CalculatePopupWindowPosition( &centre, &size, 0x20000, NULL, &rect );
+    ok( !ret && GetLastError() == ERROR_INVALID_FLAGS, "got %d, error %lu\n", ret, GetLastError() );
+    size.cx = -10;
+    SetLastError( 0xdeadbeef );
+    ret = CalculatePopupWindowPosition( &centre, &size, 0, NULL, &rect );
+    ok( !ret && GetLastError() == ERROR_INVALID_PARAMETER, "got %d, error %lu\n", ret, GetLastError() );
+    size.cx = 0; size.cy = 0;
+    ret = CalculatePopupWindowPosition( &centre, &size, 0, NULL, &rect );
+    ok( ret && rect.left == centre.x && rect.right == centre.x, "got %d, %s\n", ret, wine_dbgstr_rect( &rect ) );
+    ret = CalculatePopupWindowPosition( &centre, &size, 0, NULL, NULL );
+    ok( !ret, "got %d\n", ret );
+}
+
 START_TEST(monitor)
 {
     char** myARGV;
@@ -4315,6 +4398,7 @@ START_TEST(monitor)
     test_monitor_dpi();
     test_monitors();
     test_work_area();
+    test_CalculatePopupWindowPosition();
     test_display_config();
     test_handles();
     test_display_dc();
