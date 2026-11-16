@@ -458,8 +458,41 @@ static void test_UISettings_weak_ref(void)
     ok( ref == 1, "got ref %ld.\n", ref );
 }
 
+static HRESULT WINAPI contrast_handler_QueryInterface( ITypedEventHandler_AccessibilitySettings_IInspectable *iface,
+                                                       REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_ITypedEventHandler_AccessibilitySettings_IInspectable ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI contrast_handler_AddRef( ITypedEventHandler_AccessibilitySettings_IInspectable *iface ) { return 2; }
+static ULONG WINAPI contrast_handler_Release( ITypedEventHandler_AccessibilitySettings_IInspectable *iface ) { return 1; }
+
+static HRESULT WINAPI contrast_handler_Invoke( ITypedEventHandler_AccessibilitySettings_IInspectable *iface,
+                                               IAccessibilitySettings *sender, IInspectable *args )
+{
+    return S_OK;
+}
+
+static const ITypedEventHandler_AccessibilitySettings_IInspectableVtbl contrast_handler_vtbl =
+{
+    contrast_handler_QueryInterface,
+    contrast_handler_AddRef,
+    contrast_handler_Release,
+    contrast_handler_Invoke,
+};
+
+static ITypedEventHandler_AccessibilitySettings_IInspectable contrast_handler = {&contrast_handler_vtbl};
+
 static void test_AccessibilitySettings(void)
 {
+    EventRegistrationToken token;
     static const WCHAR *class_name = RuntimeClass_Windows_UI_ViewManagement_AccessibilitySettings;
     HIGHCONTRASTW high_contrast = {0};
     IAccessibilitySettings *settings;
@@ -508,6 +541,16 @@ static void test_AccessibilitySettings(void)
     ret = SystemParametersInfoW( SPI_GETHIGHCONTRAST, sizeof(high_contrast), &high_contrast, 0 );
     ok( ret, "SystemParametersInfoW failed, error %lu.\n", GetLastError() );
     ok( value == !!(high_contrast.dwFlags & HCF_HIGHCONTRASTON), "Got unexpected high contrast value.\n" );
+
+    /* a thread without a core window cannot subscribe; unsubscribing always succeeds */
+    token.value = 0;
+    hr = IAccessibilitySettings_add_HighContrastChanged( settings, &contrast_handler, &token );
+    ok( hr == HRESULT_FROM_WIN32(ERROR_NOT_FOUND), "Got unexpected hr %#lx.\n", hr );
+    ok( !token.value, "got token %#I64x.\n", token.value );
+    hr = IAccessibilitySettings_remove_HighContrastChanged( settings, token );
+    ok( hr == S_OK, "Got unexpected hr %#lx.\n", hr );
+    hr = IAccessibilitySettings_add_HighContrastChanged( settings, NULL, &token );
+    ok( hr == HRESULT_FROM_WIN32(ERROR_NOT_FOUND), "Got unexpected hr %#lx.\n", hr );
 
     IAccessibilitySettings_Release( settings );
     IInspectable_Release( inspectable );

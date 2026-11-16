@@ -121,15 +121,24 @@ static HRESULT WINAPI accessibilitysettings_add_HighContrastChanged(IAccessibili
                                                                     ITypedEventHandler_AccessibilitySettings_IInspectable *handler,
                                                                     EventRegistrationToken *cookie)
 {
-    FIXME("iface %p, handler %p, cookie %p stub!\n", iface, handler, cookie);
-    return E_NOTIMPL;
+    static LONG next_cookie;
+    ICoreWindow *window;
+
+    FIXME("iface %p, handler %p, cookie %p semi-stub: never raised.\n", iface, handler, cookie);
+
+    /* as on Windows, only a thread with a core window (a view's UI thread) can subscribe */
+    if (!(window = ui_window_get_for_current_thread())) return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+    ICoreWindow_Release(window);
+    if (!handler) return E_INVALIDARG;
+    cookie->value = InterlockedIncrement(&next_cookie);
+    return S_OK;
 }
 
 static HRESULT WINAPI accessibilitysettings_remove_HighContrastChanged(IAccessibilitySettings *iface,
                                                                        EventRegistrationToken cookie)
 {
-    FIXME("iface %p, cookie %I64x stub!\n", iface, cookie.value);
-    return E_NOTIMPL;
+    TRACE("iface %p, cookie %I64x.\n", iface, cookie.value);
+    return S_OK;
 }
 
 static const struct IAccessibilitySettingsVtbl accessibilitysettings_vtbl =
