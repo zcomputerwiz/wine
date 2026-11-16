@@ -1831,6 +1831,8 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
         IActivationFactory_AddRef((*factory = data_reader_activation_factory));
     if (!wcscmp(buffer, L"Windows.Storage.Streams.DataWriter"))
         IActivationFactory_AddRef((*factory = data_writer_activation_factory));
+    if (!*factory && (*factory = diagnostics_factory(buffer)))
+        IActivationFactory_AddRef(*factory);
 
     if (*factory) return S_OK;
     return CLASS_E_CLASSNOTAVAILABLE;
