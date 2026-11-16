@@ -152,7 +152,9 @@ struct application_view
     IApplicationView IApplicationView_iface;
     IApplicationView2 IApplicationView2_iface;
     IApplicationView3 IApplicationView3_iface;
+    IApplicationView4 IApplicationView4_iface;
     LONG ref;
+    ApplicationViewMode view_mode;
     struct list entry;
     DWORD thread_id;
     INT32 id;
@@ -191,6 +193,8 @@ static HRESULT WINAPI application_view_QueryInterface( IApplicationView *iface, 
         *out = &impl->IApplicationView2_iface;
     else if (IsEqualGUID( iid, &IID_IApplicationView3 ))
         *out = &impl->IApplicationView3_iface;
+    else if (IsEqualGUID( iid, &IID_IApplicationView4 ))
+        *out = &impl->IApplicationView4_iface;
     else
     {
         FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
@@ -523,6 +527,73 @@ static const IApplicationView3Vtbl application_view3_vtbl =
     application_view3_SetPreferredMinSize,
 };
 
+DEFINE_IINSPECTABLE( application_view4, IApplicationView4, struct application_view, IApplicationView_iface )
+
+static HRESULT WINAPI application_view4_get_ViewMode( IApplicationView4 *iface, ApplicationViewMode *value )
+{
+    TRACE( "iface %p, value %p.\n", iface, value );
+    *value = impl_from_IApplicationView4( iface )->view_mode;
+    return S_OK;
+}
+
+/* as on Windows 11: the default mode and compact overlay; spanning needs a dual-screen device */
+static HRESULT WINAPI application_view4_IsViewModeSupported( IApplicationView4 *iface, ApplicationViewMode mode, boolean *supported )
+{
+    TRACE( "iface %p, mode %d, supported %p.\n", iface, mode, supported );
+    *supported = mode == ApplicationViewMode_Default || mode == ApplicationViewMode_CompactOverlay;
+    return S_OK;
+}
+
+/* compact overlay: the view's window stays above the others; the default mode: no longer */
+static HRESULT WINAPI application_view4_TryEnterViewModeWithPreferencesAsync( IApplicationView4 *iface, ApplicationViewMode mode,
+                                                                              IViewModePreferences *preferences,
+                                                                              IAsyncOperation_boolean **operation )
+{
+    struct application_view *impl = impl_from_IApplicationView4( iface );
+    HWND hwnd = current_core_hwnd();
+    BOOL done = FALSE;
+
+    TRACE( "iface %p, mode %d, preferences %p, operation %p.\n", iface, mode, preferences, operation );
+
+    if (mode == ApplicationViewMode_Default || mode == ApplicationViewMode_CompactOverlay)
+    {
+        done = !hwnd || SetWindowPos( hwnd, mode == ApplicationViewMode_CompactOverlay ? HWND_TOPMOST : HWND_NOTOPMOST,
+                                      0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE );
+        if (done) impl->view_mode = mode;
+    }
+    return async_bool_completed( done, operation );
+}
+
+static HRESULT WINAPI application_view4_TryEnterViewModeAsync( IApplicationView4 *iface, ApplicationViewMode mode,
+                                                               IAsyncOperation_boolean **operation )
+{
+    return application_view4_TryEnterViewModeWithPreferencesAsync( iface, mode, NULL, operation );
+}
+
+/* a view is not consolidated (closed in favour of another) on Wine */
+static HRESULT WINAPI application_view4_TryConsolidateAsync( IApplicationView4 *iface, IAsyncOperation_boolean **operation )
+{
+    FIXME( "iface %p, operation %p semi-stub!\n", iface, operation );
+    return async_bool_completed( FALSE, operation );
+}
+
+static const IApplicationView4Vtbl application_view4_vtbl =
+{
+    application_view4_QueryInterface,
+    application_view4_AddRef,
+    application_view4_Release,
+    /* IInspectable methods */
+    application_view4_GetIids,
+    application_view4_GetRuntimeClassName,
+    application_view4_GetTrustLevel,
+    /* IApplicationView4 methods */
+    application_view4_get_ViewMode,
+    application_view4_IsViewModeSupported,
+    application_view4_TryEnterViewModeAsync,
+    application_view4_TryEnterViewModeWithPreferencesAsync,
+    application_view4_TryConsolidateAsync,
+};
+
 /* the ApplicationView of the calling thread's CoreApplicationView, made on first use */
 static HRESULT application_view_for_current_thread( IApplicationView **out )
 {
@@ -541,6 +612,7 @@ static HRESULT application_view_for_current_thread( IApplicationView **out )
         found->IApplicationView_iface.lpVtbl = &application_view_vtbl;
         found->IApplicationView2_iface.lpVtbl = &application_view2_vtbl;
         found->IApplicationView3_iface.lpVtbl = &application_view3_vtbl;
+        found->IApplicationView4_iface.lpVtbl = &application_view4_vtbl;
         found->ref = 1;   /* the list's */
         found->thread_id = GetCurrentThreadId();
         found->id = next_view_id++;

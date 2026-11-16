@@ -7,6 +7,7 @@ SOURCES = \
 	advertising_manager.c \
 	analytics_info.c \
 	application_view.c \
+	async.c \
 	classes.idl \
 	client_device_information.c \
 	core_application.c \

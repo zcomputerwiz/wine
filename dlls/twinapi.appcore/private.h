@@ -94,6 +94,7 @@ HSTRING user_get_id( IUser *user );
 extern IActivationFactory *user_factory;
 extern IActivationFactory *named_policy_factory;
 extern IActivationFactory *memory_manager_factory;
+HRESULT async_bool_completed( boolean result, IAsyncOperation_boolean **out );
 HRESULT core_title_bar_create( ICoreApplicationViewTitleBar **out );
 HRESULT view_title_bar_create( IApplicationViewTitleBar **out );
 
