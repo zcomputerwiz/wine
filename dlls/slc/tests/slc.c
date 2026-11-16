@@ -60,8 +60,83 @@ static void test_SLGetWindowsInformationDWORD(void)
     ok(value != 0xdeadbeef, "expected value != 0xdeadbeef\n");
 }
 
+static void test_SLRegisterEvent(void)
+{
+    static const SLID windows_app = {0x55c92734, 0xd682, 0x4d71, {0x98, 0x3e, 0xd6, 0xec, 0x3f, 0x16, 0x05, 0x9f}};
+    static const SLID other_app = {0x12345678, 0x1234, 0x1234, {1, 2, 3, 4, 5, 6, 7, 8}};
+    HANDLE event, event2;
+    HSLC slc;
+    HRESULT hr;
+
+    hr = SLOpen(&slc);
+    ok(hr == S_OK, "SLOpen returned %08lx\n", hr);
+    event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    event2 = CreateEventW(NULL, FALSE, FALSE, NULL);
+
+    hr = SLRegisterEvent(NULL, SL_EVENT_USER_NOTIFICATION, &windows_app, event2);
+    ok(hr == S_OK, "no session handle: got %08lx\n", hr);
+    hr = SLUnregisterEvent(NULL, SL_EVENT_USER_NOTIFICATION, &windows_app, event2);
+    ok(hr == S_OK, "no session handle: got %08lx\n", hr);
+
+    hr = SLRegisterEvent(slc, SL_EVENT_LICENSING_STATE_CHANGED, &windows_app, event);
+    /* 32-bit slc on 64-bit Windows 11 refuses a registration through an SLOpen handle */
+    ok(hr == S_OK || broken(hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)), "got %08lx\n", hr);
+    if (hr != S_OK)
+    {
+        win_skip("SLRegisterEvent with a session handle is not available\n");
+        CloseHandle(event);
+        CloseHandle(event2);
+        SLClose(slc);
+        return;
+    }
+    hr = SLRegisterEvent(slc, SL_EVENT_LICENSING_STATE_CHANGED, &windows_app, event);
+    ok(hr == S_OK, "second registration: got %08lx\n", hr);
+    hr = SLRegisterEvent(slc, SL_EVENT_POLICY_CHANGED, &other_app, event2);
+    ok(hr == S_OK, "got %08lx\n", hr);
+    hr = SLRegisterEvent(slc, SL_EVENT_USER_NOTIFICATION, &windows_app, event2);
+    ok(hr == S_OK, "got %08lx\n", hr);
+
+    hr = SLRegisterEvent(slc, L"msft:rm/event/nonexistent", &windows_app, event);
+    ok(hr == SL_E_INVALID_EVENT_ID, "got %08lx\n", hr);
+    hr = SLRegisterEvent(slc, L"MSFT:RM/EVENT/LICENSINGSTATECHANGED", &windows_app, event);
+    ok(hr == SL_E_INVALID_EVENT_ID, "upper case: got %08lx\n", hr);
+    hr = SLRegisterEvent(slc, L"", &windows_app, event);
+    ok(hr == SL_E_INVALID_EVENT_ID, "got %08lx\n", hr);
+    hr = SLRegisterEvent(slc, NULL, &windows_app, event);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLRegisterEvent(slc, SL_EVENT_LICENSING_STATE_CHANGED, NULL, event);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLRegisterEvent(slc, SL_EVENT_LICENSING_STATE_CHANGED, &windows_app, NULL);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLRegisterEvent(slc, SL_EVENT_LICENSING_STATE_CHANGED, &windows_app, (HANDLE)0xdead);
+    ok(hr == HRESULT_FROM_WIN32(ERROR_INVALID_HANDLE), "got %08lx\n", hr);
+
+    hr = SLUnregisterEvent(slc, SL_EVENT_LICENSING_STATE_CHANGED, &windows_app, event);
+    ok(hr == S_OK, "got %08lx\n", hr);
+    hr = SLUnregisterEvent(slc, SL_EVENT_LICENSING_STATE_CHANGED, &windows_app, event);
+    ok(hr == SL_E_EVENT_NOT_REGISTERED, "second unregistration: got %08lx\n", hr);
+    hr = SLUnregisterEvent(slc, SL_EVENT_POLICY_CHANGED, &windows_app, event2);
+    ok(hr == SL_E_EVENT_NOT_REGISTERED, "other application: got %08lx\n", hr);
+    hr = SLUnregisterEvent(slc, SL_EVENT_POLICY_CHANGED, &other_app, event2);
+    ok(hr == S_OK, "got %08lx\n", hr);
+    hr = SLUnregisterEvent(slc, SL_EVENT_USER_NOTIFICATION, &windows_app, event2);
+    ok(hr == S_OK, "got %08lx\n", hr);
+    hr = SLUnregisterEvent(slc, L"msft:rm/event/nonexistent", &windows_app, event);
+    ok(hr == SL_E_INVALID_EVENT_ID, "got %08lx\n", hr);
+    hr = SLUnregisterEvent(slc, NULL, &windows_app, event);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLUnregisterEvent(slc, SL_EVENT_LICENSING_STATE_CHANGED, NULL, event);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLUnregisterEvent(slc, SL_EVENT_LICENSING_STATE_CHANGED, &windows_app, NULL);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+
+    CloseHandle(event);
+    CloseHandle(event2);
+    SLClose(slc);
+}
 
 START_TEST(slc)
 {
     test_SLGetWindowsInformationDWORD();
+    test_SLRegisterEvent();
 }

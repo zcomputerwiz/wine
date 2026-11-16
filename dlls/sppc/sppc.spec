@@ -55,7 +55,7 @@
 @ stdcall SLPersistApplicationPolicies(ptr ptr long)
 @ stub SLPersistRTSPayloadOverride
 @ stub SLReArm
-@ stub SLRegisterEvent
+@ stdcall SLRegisterEvent(ptr wstr ptr ptr)
 @ stub SLRegisterPlugin
 @ stub SLSetAuthenticationData
 @ stub SLSetCurrentProductKey
@@ -63,5 +63,5 @@
 @ stub SLUninstallLicense
 @ stub SLUninstallProofOfPurchase
 @ stub SLUnloadApplicationPolicies
-@ stub SLUnregisterEvent
+@ stdcall SLUnregisterEvent(ptr wstr ptr ptr)
 @ stub SLUnregisterPlugin
