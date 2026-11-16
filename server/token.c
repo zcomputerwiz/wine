@@ -2087,7 +2087,28 @@ DECL_HANDLER(duplicate_token)
     if (params.root) release_object( params.root );
 }
 
-/* native filter_token: DISABLE_MAX_PRIVILEGE keeps only SeChangeNotify; LUA_TOKEN: Administrators deny-only, Limited, Medium label */
+/* the groups that a UAC filtered token keeps for deny only: Administrators, the privileged domain groups
+ * (S-1-5-21-a-b-c-RID) and the privileged builtin aliases */
+static int sid_is_uac_filtered( const struct sid *sid )
+{
+    static const unsigned int domain_rids[] = { 512, 516, 517, 518, 519, 520, 521, 526, 527 };
+    static const unsigned int alias_rids[] = { 544, 548, 549, 550, 551, 556, 569 };
+    unsigned int i;
+
+    if (memcmp( sid->id_auth, local_user_sid.id_auth, sizeof(sid->id_auth) )) return 0;
+    if (sid->sub_count == 5 && sid->sub_auth[0] == SECURITY_NT_NON_UNIQUE)
+    {
+        for (i = 0; i < ARRAY_SIZE(domain_rids); i++) if (sid->sub_auth[4] == domain_rids[i]) return 1;
+    }
+    else if (sid->sub_count == 2 && sid->sub_auth[0] == SECURITY_BUILTIN_DOMAIN_RID)
+    {
+        for (i = 0; i < ARRAY_SIZE(alias_rids); i++) if (sid->sub_auth[1] == alias_rids[i]) return 1;
+    }
+    return 0;
+}
+
+/* native filter_token: DISABLE_MAX_PRIVILEGE keeps only SeChangeNotify; LUA_TOKEN: Administrators and the other
+ * UAC filtered groups deny-only, Limited, Medium label */
 static void token_apply_filter( struct token *token, unsigned int flags )
 {
     if (flags & (DISABLE_MAX_PRIVILEGE | LUA_TOKEN)) allocate_luid( &token->modified_id );
@@ -2108,7 +2129,7 @@ static void token_apply_filter( struct token *token, unsigned int flags )
         token->elevation = TokenElevationTypeLimited;
         LIST_FOR_EACH_ENTRY( group, &token->groups, struct group, entry )
         {
-            if (equal_sid( &group->sid, &builtin_admins_sid ))
+            if (sid_is_uac_filtered( &group->sid ))
             {
                 group->attrs &= ~(SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT);
                 group->attrs |= SE_GROUP_USE_FOR_DENY_ONLY;
@@ -2149,7 +2170,8 @@ void token_make_filtered( struct token *token )
 int standard_user_session;
 
 /* a standard user (not in the administrator group): the filtered token without Administrators and without a
- * split, so TokenElevationType is Default as for a non-split token on Windows */
+ * split, so TokenElevationType is Default as for a non-split token on Windows; the other UAC filtered groups stay
+ * for deny only */
 void token_make_standard( struct token *token )
 {
     struct group *group, *next;
@@ -2158,9 +2180,16 @@ void token_make_standard( struct token *token )
 
     LIST_FOR_EACH_ENTRY_SAFE( group, next, &token->groups, struct group, entry )
     {
-        if (!equal_sid( &group->sid, &builtin_admins_sid )) continue;
-        list_remove( &group->entry );
-        free( group );
+        if (equal_sid( &group->sid, &builtin_admins_sid ))
+        {
+            list_remove( &group->entry );
+            free( group );
+        }
+        else if (sid_is_uac_filtered( &group->sid ))
+        {
+            group->attrs &= ~(SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT);
+            group->attrs |= SE_GROUP_USE_FOR_DENY_ONLY;
+        }
     }
     token->elevation = TokenElevationTypeDefault;
     allocate_luid( &token->modified_id );
