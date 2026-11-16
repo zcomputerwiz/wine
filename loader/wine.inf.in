@@ -1393,6 +1393,7 @@ winexinput.inf,"@%12%\winexinput.sys,-1"
 
 [MscFiles]
 devmgmt.msc,"@%11%\mmc.exe,-1"
+gpedit.msc,"@%11%\mmc.exe,-2"
 
 [NlsFiles]
 c_037.nls
