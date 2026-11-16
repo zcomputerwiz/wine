@@ -4156,9 +4156,17 @@ UINT WINAPI MsiAdvertiseScriptA( const char *szScriptFile, DWORD dwFlags, HKEY *
  */
 UINT WINAPI MsiIsProductElevatedW( LPCWSTR szProduct, BOOL *pfElevated )
 {
-    FIXME("%s %p - stub\n",
-          debugstr_w( szProduct ), pfElevated );
-    *pfElevated = TRUE;
+    WCHAR squashed[SQUASHED_GUID_SIZE];
+    MSIINSTALLCONTEXT context;
+
+    TRACE( "%s, %p\n", debugstr_w( szProduct ), pfElevated );
+
+    if (!szProduct || !pfElevated || !squash_guid( szProduct, squashed )) return ERROR_INVALID_PARAMETER;
+
+    /* a per-machine or managed product is elevated, a per-user unmanaged one is not */
+    *pfElevated = FALSE;
+    if (msi_locate_product( szProduct, &context )) return ERROR_UNKNOWN_PRODUCT;
+    *pfElevated = context == MSIINSTALLCONTEXT_MACHINE || context == MSIINSTALLCONTEXT_USERMANAGED;
     return ERROR_SUCCESS;
 }
 
@@ -4167,10 +4175,15 @@ UINT WINAPI MsiIsProductElevatedW( LPCWSTR szProduct, BOOL *pfElevated )
  */
 UINT WINAPI MsiIsProductElevatedA( LPCSTR szProduct, BOOL *pfElevated )
 {
-    FIXME("%s %p - stub\n",
-          debugstr_a( szProduct ), pfElevated );
-    *pfElevated = TRUE;
-    return ERROR_SUCCESS;
+    WCHAR *product = NULL;
+    UINT r;
+
+    TRACE( "%s, %p\n", debugstr_a( szProduct ), pfElevated );
+
+    if (szProduct && !(product = strdupAtoW( szProduct ))) return ERROR_OUTOFMEMORY;
+    r = MsiIsProductElevatedW( product, pfElevated );
+    free( product );
+    return r;
 }
 
 /***********************************************************************
