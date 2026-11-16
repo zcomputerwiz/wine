@@ -416,6 +416,8 @@ static HRESULT WINAPI manager_statics_FindAccountAsync( IWebAuthenticationCoreMa
     if (!asyncInfo) return E_POINTER;
     *asyncInfo = NULL;
 
+    if (diagnostic_provider_enabled())
+        FIXME( "diagnostic: FindAccountAsync provider %p, account id %s: no account.\n", provider, debugstr_hstring( webAccountId ) );
     no_provider_fixme();
 
     return create_completed_operation( &IID_IAsyncOperation_WebAccount, NULL, (void **)asyncInfo );
@@ -516,6 +518,7 @@ static HRESULT WINAPI manager_statics4_FindAllAccountsAsync( IWebAuthenticationC
     if (!operation) return E_POINTER;
     *operation = NULL;
 
+    if (diagnostic_provider_enabled()) FIXME( "diagnostic: FindAllAccountsAsync provider %p: no accounts.\n", provider );
     no_provider_fixme();
 
     if (FAILED(hr = create_find_all_result( &result ))) return hr;
@@ -536,6 +539,9 @@ static HRESULT WINAPI manager_statics4_FindAllAccountsWithClientIdAsync( IWebAut
     if (!operation) return E_POINTER;
     *operation = NULL;
 
+    if (diagnostic_provider_enabled())
+        FIXME( "diagnostic: FindAllAccountsWithClientIdAsync provider %p, client id %s: no accounts.\n", provider,
+               debugstr_hstring( clientId ) );
     no_provider_fixme();
 
     if (FAILED(hr = create_find_all_result( &result ))) return hr;
