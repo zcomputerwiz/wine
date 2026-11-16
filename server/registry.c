@@ -1633,8 +1633,8 @@ static void touch_key( struct key *key, unsigned int change )
     touch_key_ex( key, change, true );
 }
 
-/* a hive was loaded or unloaded below this key: as on Windows, the subkey-name watchers of the key and its
- * ancestors are told (nothing is marked for saving, the parent's own data did not change) */
+/* a hive was loaded below this key: as on Windows, the subkey-name watchers of the key and its ancestors are told
+ * (nothing is marked for saving, the parent's own data did not change). Windows tells nobody of an unload. */
 static void notify_hive_mount( struct key *parent )
 {
     if (!parent) return;
@@ -4681,7 +4681,6 @@ void session0_unload_user_hive( void *agent, int save )
         release_object( info->classes_alias );
     }
     info->key->flags |= KEY_DELETED;
-    notify_hive_mount( get_parent( info->key ) );
     unlink_named_object( &info->key->obj );
     release_object( info->key );
     free( info->owner_sd );

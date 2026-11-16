@@ -1629,7 +1629,8 @@ static void test_reg_load_key(void)
     ok(ret == ERROR_SUCCESS, "RegNotifyChangeKeyValue failed: %ld\n", ret);
     ret = RegUnLoadKeyA(HKEY_LOCAL_MACHINE, "Test");
     ok(ret == ERROR_SUCCESS, "expected ERROR_SUCCESS, got %ld\n", ret);
-    ok(!WaitForSingleObject(event, 1000), "unloading a hive did not signal the parent's watchers\n");
+    /* but unloading one is not */
+    todo_wine ok(WaitForSingleObject(event, 1000) == WAIT_TIMEOUT, "unloading a hive signalled the parent's watchers\n");
     CloseHandle(event);
 
     ret = RegLoadKeyA(HKEY_LOCAL_MACHINE, "Test", "");
