@@ -1982,6 +1982,7 @@ static BOOL WINAPI dwritefontface5_Equals(IDWriteFontFace5 *iface, IDWriteFontFa
     /* TODO: add variations support */
 
     return fontface->index == other_face->index &&
+            fontface->instance == other_face->instance &&
             fontface->simulations == other_face->simulations &&
             is_same_fontfile(fontface->file, other_face->file);
 }
@@ -2234,7 +2235,7 @@ static HRESULT get_fontface_from_font(struct dwrite_font *font, IDWriteFontFace5
     *fontface = NULL;
 
     hr = factory_get_cached_fontface(font->family->collection->factory, &data->file, data->face_index,
-            font->data->simulations, &cached_list, &IID_IDWriteFontFace4, (void **)fontface);
+            font->data->simulations, data->instance, &cached_list, &IID_IDWriteFontFace4, (void **)fontface);
     if (hr == S_OK)
         return hr;
 
@@ -5239,7 +5240,8 @@ static UINT64 dwrite_fontface_get_font_object(struct dwrite_fontface *fontface)
         {
             create_params.data = data_ptr;
             create_params.size = size;
-            create_params.index = fontface->index;
+            /* FreeType takes a named instance in the upper 16 bits of the face index */
+            create_params.index = fontface->index | (fontface->instance << 16);
             create_params.object = &font_object;
 
             UNIX_CALL(create_font_object, &create_params);
@@ -5290,6 +5292,7 @@ HRESULT create_fontface(const struct fontface_desc *desc, struct list *cached_li
     fontface->colr.exists = TRUE;
     fontface->kern.exists = TRUE;
     fontface->index = desc->index;
+    fontface->instance = desc->instance;
     fontface->simulations = desc->simulations;
     fontface->factory = desc->factory;
     IDWriteFactory7_AddRef(fontface->factory);
@@ -6673,6 +6676,7 @@ static HRESULT WINAPI fontfacereference_CreateFontFaceWithSimulations(IDWriteFon
     IDWriteFontFace *fontface;
     BOOL is_supported;
     UINT32 face_num;
+    unsigned int instance = 0;
     HRESULT hr;
 
     TRACE("%p, %#x, %p.\n", iface, simulations, ret);
@@ -6681,8 +6685,24 @@ static HRESULT WINAPI fontfacereference_CreateFontFaceWithSimulations(IDWriteFon
     if (FAILED(hr))
         return hr;
 
-    hr = IDWriteFactory7_CreateFontFace(reference->factory, face_type, 1, &reference->file, reference->index,
-            simulations, &fontface);
+    /* axis values of a named instance give that instance's face; other values are not supported yet */
+    if (reference->axis_values_count)
+    {
+        struct file_stream_desc stream_desc;
+
+        if (SUCCEEDED(get_filestream_from_file(reference->file, &stream_desc.stream)))
+        {
+            stream_desc.face_type = face_type;
+            stream_desc.face_index = reference->index;
+            instance = opentype_find_named_instance(&stream_desc, reference->axis_values,
+                    reference->axis_values_count);
+            IDWriteFontFileStream_Release(stream_desc.stream);
+        }
+        if (!instance) FIXME("Axis values that are not a named instance are not supported.\n");
+    }
+
+    hr = factory_create_fontface(reference->factory, face_type, 1, &reference->file, reference->index,
+            simulations, instance, &fontface);
     if (SUCCEEDED(hr))
     {
         hr = IDWriteFontFace_QueryInterface(fontface, &IID_IDWriteFontFace3, (void **)ret);
@@ -7580,6 +7600,32 @@ static HRESULT WINAPI dwritefontset_GetFontFaceReference(IDWriteFontSet3 *iface,
 
     if (index >= set->count)
         return E_INVALIDARG;
+
+    /* a named instance of a variable font: a reference to its axis values */
+    if (set->entries[index]->instance)
+    {
+        const struct dwrite_fontset_entry *entry = set->entries[index];
+        DWRITE_FONT_AXIS_VALUE values[16];
+        struct file_stream_desc stream_desc;
+        IDWriteFontFaceReference1 *ref1;
+        unsigned int count;
+        HRESULT hr;
+
+        if (FAILED(hr = get_filestream_from_file(entry->file, &stream_desc.stream)))
+            return hr;
+        stream_desc.face_type = entry->face_type;
+        stream_desc.face_index = entry->face_index;
+        count = opentype_get_named_instance_values(&stream_desc, entry->instance - 1, values, ARRAY_SIZE(values));
+        IDWriteFontFileStream_Release(stream_desc.stream);
+        if (count)
+        {
+            if (FAILED(hr = create_fontfacereference(set->factory, entry->file, entry->face_index, entry->simulations,
+                    values, count, &ref1)))
+                return hr;
+            *reference = (IDWriteFontFaceReference *)ref1;
+            return S_OK;
+        }
+    }
 
     return IDWriteFactory7_CreateFontFaceReference_(set->factory, set->entries[index]->file,
             set->entries[index]->face_index, set->entries[index]->simulations, reference);

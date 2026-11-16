@@ -10903,6 +10903,98 @@ static void test_fontset_named_instances(void)
     DELETE_FONTFILE(path);
 }
 
+static BOOL fontfaces_equal(IDWriteFontFace3 *face, IDWriteFontFace3 *other)
+{
+    IDWriteFontFace5 *face5;
+    BOOL ret;
+
+    if (FAILED(IDWriteFontFace3_QueryInterface(face, &IID_IDWriteFontFace5, (void **)&face5))) return FALSE;
+    ret = IDWriteFontFace5_Equals(face5, (IDWriteFontFace *)other);
+    IDWriteFontFace5_Release(face5);
+    return ret;
+}
+
+/* A named instance's face draws at its own axis values: glyph 1 of the test font is 500 units wide at the default
+ * weight and gains 400 at wght 900, so "Semibold Text" (wght 600) is 660 wide and the other three 500. */
+static void test_fontface_named_instances(void)
+{
+    IDWriteFontFace3 *faces[4], *again;
+    IDWriteFontFaceReference *reference;
+    DWRITE_GLYPH_METRICS metrics;
+    IDWriteFontSetBuilder2 *builder;
+    IDWriteFactory6 *factory;
+    IDWriteFontSet *fontset;
+    unsigned int i, wide = 0, narrow = 0, wide_index = 0;
+    UINT16 glyph = 1;
+    UINT32 count;
+    WCHAR *path;
+    HRESULT hr;
+
+    if (!(factory = create_factory_iid(&IID_IDWriteFactory6)))
+    {
+        win_skip("IDWriteFactory6 is not supported.\n");
+        return;
+    }
+
+    path = create_testfontfile_from_resource(L"wine_test_var.ttf", 2);
+    hr = IDWriteFactory6_CreateFontSetBuilder(factory, &builder);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IDWriteFontSetBuilder2_AddFontFile(builder, path);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IDWriteFontSetBuilder2_CreateFontSet(builder, &fontset);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    count = IDWriteFontSet_GetFontCount(fontset);
+    ok(count == 4, "Unexpected font count %u.\n", count);
+
+    for (i = 0; i < 4 && i < count; i++)
+    {
+        winetest_push_context("instance %u", i);
+        hr = IDWriteFontSet_GetFontFaceReference(fontset, i, &reference);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = IDWriteFontFaceReference_CreateFontFace(reference, &faces[i]);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+        memset(&metrics, 0, sizeof(metrics));
+        hr = IDWriteFontFace3_GetDesignGlyphMetrics(faces[i], &glyph, 1, &metrics, FALSE);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        if (metrics.advanceWidth == 660)
+        {
+            wide++;
+            wide_index = i;
+        }
+        else
+        {
+            ok(metrics.advanceWidth == 500, "Unexpected advance %u.\n", metrics.advanceWidth);
+            narrow++;
+        }
+
+        /* the same instance again is the same face */
+        hr = IDWriteFontFaceReference_CreateFontFace(reference, &again);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(fontfaces_equal(again, faces[i]), "Expected the same face.\n");
+        IDWriteFontFace3_Release(again);
+        IDWriteFontFaceReference_Release(reference);
+        winetest_pop_context();
+    }
+    ok(wide == 1 && narrow == 3, "Unexpected advances: %u at 660, %u at 500.\n", wide, narrow);
+
+    if (wide == 1 && count >= 4)
+    {
+        for (i = 0; i < 4; i++)
+        {
+            if (i == wide_index) continue;
+            ok(!fontfaces_equal(faces[wide_index], faces[i]),
+                    "Instance %u equals instance %u.\n", wide_index, i);
+        }
+    }
+    for (i = 0; i < 4 && i < count; i++) IDWriteFontFace3_Release(faces[i]);
+
+    IDWriteFontSet_Release(fontset);
+    IDWriteFontSetBuilder2_Release(builder);
+    IDWriteFactory6_Release(factory);
+    DELETE_FONTFILE(path);
+}
+
 START_TEST(font)
 {
     IDWriteFactory *factory;
@@ -10922,6 +11014,7 @@ START_TEST(font)
     test_system_fontcollection();
     test_system_fontcollection_replacements();
     test_fontset_named_instances();
+    test_fontface_named_instances();
     test_ConvertFontFaceToLOGFONT();
     test_CustomFontCollection();
     test_CreateCustomFontFileReference();

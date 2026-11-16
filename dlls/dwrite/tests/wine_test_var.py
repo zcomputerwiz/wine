@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # Generates wine_test_var.ttf, a minimal variable TrueType font for the DirectWrite tests: axes wght (100-900)
-# and opsz (8-36), four fvar named instances and a STAT table. It has no outlines (two empty glyphs) and no gvar:
-# the tests are about how DirectWrite names the named instances (font sets and the WWS and typographic family
-# models), not about rendering. Only the Python standard library is used.
+# and opsz (8-36), four fvar named instances and a STAT table. The tests are mostly about how DirectWrite names the
+# named instances (font sets and the WWS and typographic family models); glyph 1 (mapped from U+0020) is a
+# triangle with a gvar variation along wght, so that a named instance's face shows its own advance (500 at the
+# default weight, 900 at wght 900). Only the Python standard library is used.
 #
 # Copyright 2026 WineExplorer contributors
 #
@@ -60,7 +61,7 @@ def table_hhea():
 
 
 def table_maxp():
-    return struct.pack(">IHHHHHHHHHHHHHH", 0x00010000, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0)
+    return struct.pack(">IHHHHHHHHHHHHHH", 0x00010000, 2, 3, 1, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0)
 
 
 def table_os2():
@@ -71,7 +72,7 @@ def table_os2():
 
 
 def table_hmtx():
-    return struct.pack(">HhHh", 500, 0, 500, 0)
+    return struct.pack(">HhHh", 500, 0, 500, 50)
 
 
 def table_cmap():
@@ -85,8 +86,34 @@ def table_post():
     return struct.pack(">IiHhIIIII", 0x00030000, 0, 0, 0, 0, 0, 0, 0, 0)
 
 
+# glyph 1: one contour of three on-curve points (50,0) (450,0) (250,700); glyph 0 is empty
+def glyph1():
+    data = struct.pack(">hhhhh", 1, 50, 0, 450, 700) + struct.pack(">HH", 2, 0) + bytes([1, 1, 1])
+    data += struct.pack(">hhh", 50, 400, -200) + struct.pack(">hhh", 0, 0, 700)
+    return data + b"\0" * (len(data) % 2)
+
+
+def table_glyf():
+    return glyph1()
+
+
 def table_loca():
-    return struct.pack(">HHH", 0, 0, 0)
+    return struct.pack(">HHH", 0, 0, len(glyph1()) // 2)
+
+
+# gvar: one tuple of glyph 1 at wght 900 (peak 1.0, opsz 0): the second and third points move right by 400 and
+# 200, and the advance phantom point (the fifth point after the three of the outline) by 400
+def table_gvar():
+    points = b"\0"                                        # private point numbers: all points
+    xdeltas = bytes([0x40 | 6]) + struct.pack(">7h", 0, 400, 200, 0, 400, 0, 0)
+    ydeltas = bytes([0x80 | 6])                           # seven zero deltas
+    serialized = points + xdeltas + ydeltas
+    header = struct.pack(">HH", len(serialized), 0x8000 | 0x2000) + struct.pack(">hh", 0x4000, 0)
+    glyph = struct.pack(">HH", 1, 4 + len(header)) + header + serialized
+    glyph += b"\0" * (len(glyph) % 2)
+    offsets = struct.pack(">HHH", 0, 0, len(glyph) // 2)
+    first = 20 + len(offsets)
+    return struct.pack(">HHHHIHHI", 1, 0, len(AXES), 0, first, 2, 0, first) + offsets + glyph
 
 
 def table_name():
@@ -136,7 +163,7 @@ def checksum(data):
 def build():
     tables = {
         b"OS/2": table_os2(), b"STAT": table_stat(), b"cmap": table_cmap(), b"fvar": table_fvar(),
-        b"glyf": b"", b"head": table_head(), b"hhea": table_hhea(), b"hmtx": table_hmtx(),
+        b"glyf": table_glyf(), b"gvar": table_gvar(), b"head": table_head(), b"hhea": table_hhea(), b"hmtx": table_hmtx(),
         b"loca": table_loca(), b"maxp": table_maxp(), b"name": table_name(), b"post": table_post(),
     }
     tags = sorted(tables)

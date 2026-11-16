@@ -6966,6 +6966,31 @@ done:
     return ret;
 }
 
+/* the axis values of a named instance (0-based), one per fvar axis; returns how many were written */
+unsigned int opentype_get_named_instance_values(const struct file_stream_desc *stream_desc, unsigned int instance,
+        DWRITE_FONT_AXIS_VALUE *values, unsigned int max_count)
+{
+    struct fvar_layout fvar;
+    unsigned int j, record, ret = 0;
+
+    memset(&fvar, 0, sizeof(fvar));
+    if (!opentype_get_fvar_layout(stream_desc, &fvar) || instance >= fvar.instance_count) goto done;
+
+    record = fvar.instances_offset + instance * fvar.instance_size;
+    for (j = 0; j < fvar.axis_count && ret < max_count; ++j)
+    {
+        unsigned int axis = fvar.axes_offset + j * sizeof(struct var_axis_record);
+
+        values[ret].axisTag = table_read_dword(&fvar.table, axis);
+        values[ret].value = table_read_be_fixed(&fvar.table, record + 4 + 4 * j);
+        ret++;
+    }
+
+done:
+    release_font_table(stream_desc, &fvar.table);
+    return ret;
+}
+
 /* the English string of a name ID (or the first one), empty when there is none */
 static void opentype_get_name_string(const struct dwrite_fonttable *name, unsigned int id, WCHAR *buffer,
         unsigned int size)

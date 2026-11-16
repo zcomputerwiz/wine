@@ -266,6 +266,7 @@ struct dwrite_fontface
     IDWriteFontFileStream *stream;
     IDWriteFontFile *file;
     UINT32 index;
+    unsigned int instance; /* a variable font's named instance, 1-based; 0 for the font itself */
 
     IDWriteFactory7 *factory;
     struct fontfacecached *cached;
@@ -361,8 +362,11 @@ extern HRESULT create_matching_font(IDWriteFontCollection *collection, const WCH
 extern HRESULT create_fontfacereference(IDWriteFactory7 *factory, IDWriteFontFile *file, UINT32 face_index,
         DWRITE_FONT_SIMULATIONS simulations, DWRITE_FONT_AXIS_VALUE const *axis_values, UINT32 axis_values_count,
         IDWriteFontFaceReference1 **reference);
+extern HRESULT factory_create_fontface(IDWriteFactory7 *factory, DWRITE_FONT_FACE_TYPE face_type, UINT32 files_number,
+        IDWriteFontFile * const *files, UINT32 index, DWRITE_FONT_SIMULATIONS simulations, unsigned int instance,
+        IDWriteFontFace **fontface);
 extern HRESULT factory_get_cached_fontface(IDWriteFactory7 *factory, IDWriteFontFile * const *files, UINT32 num_files,
-        DWRITE_FONT_SIMULATIONS simulations, struct list **cache, REFIID riid, void **obj);
+        DWRITE_FONT_SIMULATIONS simulations, unsigned int instance, struct list **cache, REFIID riid, void **obj);
 extern void factory_detach_fontcollection(IDWriteFactory7 *factory, IDWriteFontCollection3 *collection);
 extern void factory_detach_gdiinterop(IDWriteFactory7 *factory, IDWriteGdiInterop1 *interop);
 extern struct fontfacecached *factory_cache_fontface(IDWriteFactory7 *factory, struct list *fontfaces,
@@ -560,6 +564,8 @@ extern unsigned int opentype_find_named_instance(const struct file_stream_desc *
         const DWRITE_FONT_AXIS_VALUE *values, unsigned int count);
 extern HRESULT opentype_get_named_instance(const struct file_stream_desc *stream_desc, unsigned int instance,
         struct dwrite_named_instance *ret);
+extern unsigned int opentype_get_named_instance_values(const struct file_stream_desc *stream_desc,
+        unsigned int instance, DWRITE_FONT_AXIS_VALUE *values, unsigned int max_count);
 extern bool opentype_is_whitespace(unsigned int codepoint);
 extern float opentype_get_width_axis_value(DWRITE_FONT_STRETCH stretch);
 

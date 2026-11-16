@@ -942,7 +942,7 @@ void factory_unlock(IDWriteFactory7 *iface)
 }
 
 HRESULT factory_get_cached_fontface(IDWriteFactory7 *iface, IDWriteFontFile * const *font_files, UINT32 index,
-        DWRITE_FONT_SIMULATIONS simulations, struct list **cached_list, REFIID riid, void **obj)
+        DWRITE_FONT_SIMULATIONS simulations, unsigned int instance, struct list **cached_list, REFIID riid, void **obj)
 {
     struct dwritefactory *factory = impl_from_IDWriteFactory7(iface);
     struct fontfacecached *cached;
@@ -992,6 +992,9 @@ HRESULT factory_get_cached_fontface(IDWriteFactory7 *iface, IDWriteFontFile * co
         /* skip earlier */
         if (cached_face_index != index || cached_simulations != simulations)
             continue;
+        /* each named instance of a variable font is a face of its own */
+        if (unsafe_impl_from_IDWriteFontFace((IDWriteFontFace *)cached->fontface)->instance != instance)
+            continue;
 
         hr = IDWriteFontFace5_GetFiles(cached->fontface, &count, &file);
         if (FAILED(hr))
@@ -1035,9 +1038,10 @@ struct fontfacecached *factory_cache_fontface(IDWriteFactory7 *iface, struct lis
     return cached;
 }
 
-static HRESULT WINAPI dwritefactory_CreateFontFace(IDWriteFactory7 *iface, DWRITE_FONT_FACE_TYPE req_facetype,
+/* CreateFontFace, and the face of a variable font's named instance (1-based; 0 for the font itself) */
+HRESULT factory_create_fontface(IDWriteFactory7 *iface, DWRITE_FONT_FACE_TYPE req_facetype,
     UINT32 files_number, IDWriteFontFile* const* font_files, UINT32 index, DWRITE_FONT_SIMULATIONS simulations,
-    IDWriteFontFace **fontface)
+    unsigned int instance, IDWriteFontFace **fontface)
 {
     DWRITE_FONT_FILE_TYPE file_type;
     DWRITE_FONT_FACE_TYPE face_type;
@@ -1082,7 +1086,7 @@ static HRESULT WINAPI dwritefactory_CreateFontFace(IDWriteFactory7 *iface, DWRIT
         goto failed;
     }
 
-    hr = factory_get_cached_fontface(iface, font_files, index, simulations, &fontfaces,
+    hr = factory_get_cached_fontface(iface, font_files, index, simulations, instance, &fontfaces,
             &IID_IDWriteFontFace, (void **)fontface);
     if (hr != S_FALSE)
         goto failed;
@@ -1094,12 +1098,19 @@ static HRESULT WINAPI dwritefactory_CreateFontFace(IDWriteFactory7 *iface, DWRIT
     desc.index = index;
     desc.simulations = simulations;
     desc.font_data = NULL;
-    desc.instance = 0;
+    desc.instance = instance;
     hr = create_fontface(&desc, fontfaces, (IDWriteFontFace5 **)fontface);
 
 failed:
     IDWriteFontFileStream_Release(stream);
     return hr;
+}
+
+static HRESULT WINAPI dwritefactory_CreateFontFace(IDWriteFactory7 *iface, DWRITE_FONT_FACE_TYPE req_facetype,
+    UINT32 files_number, IDWriteFontFile* const* font_files, UINT32 index, DWRITE_FONT_SIMULATIONS simulations,
+    IDWriteFontFace **fontface)
+{
+    return factory_create_fontface(iface, req_facetype, files_number, font_files, index, simulations, 0, fontface);
 }
 
 static HRESULT WINAPI dwritefactory_CreateRenderingParams(IDWriteFactory7 *iface, IDWriteRenderingParams **params)
