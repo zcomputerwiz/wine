@@ -69,6 +69,10 @@ HRESULT async_operation_inspectable_create_completed( const GUID *iid, IInspecta
  */
 
 HRESULT map_hstring_create( IMap_HSTRING_HSTRING **out );
+void map_hstring_dump( IMap_HSTRING_HSTRING *iface, const char *prefix );
+BOOL diagnostic_provider_enabled( void );
+HRESULT diagnostic_provider_create( HSTRING id, HSTRING authority, IWebAccountProvider **out );
+void diagnostic_dump_request( const char *method, IInspectable *request );
 
 /*
  *

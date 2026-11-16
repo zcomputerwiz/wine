@@ -104,6 +104,61 @@ static HRESULT request_token_not_available( REFIID riid, void **out )
     return hr;
 }
 
+/* a token request: "no provider", or with the diagnostic provider on, the request in the log and the given status
+ * (silent requests: UserInteractionRequired, so that the program goes on to an interactive one) */
+static HRESULT request_token( const char *method, IInspectable *request, WebTokenRequestStatus status,
+                              REFIID riid, void **out )
+{
+    IVectorView_WebTokenResponse *response_data;
+    IWebProviderError *response_error;
+    IWebTokenRequestResult *result;
+    HSTRING message;
+    HRESULT hr;
+
+    if (!diagnostic_provider_enabled()) return request_token_not_available( riid, out );
+
+    diagnostic_dump_request( method, request );
+    if (FAILED(hr = WindowsCreateString( L"Wine's diagnostic provider gives no token.",
+                                         ARRAY_SIZE(L"Wine's diagnostic provider gives no token.") - 1, &message )))
+        return hr;
+    if (FAILED(hr = vector_view_webtokenresponse_create_empty( &response_data )))
+    {
+        WindowsDeleteString( message );
+        return hr;
+    }
+    hr = webprovidererror_create( E_NOTIMPL, message, &response_error );
+    WindowsDeleteString( message );
+    if (FAILED(hr))
+    {
+        IVectorView_WebTokenResponse_Release( response_data );
+        return hr;
+    }
+    hr = webtokenrequestresult_create( status, response_data, response_error, &result );
+    IVectorView_WebTokenResponse_Release( response_data );
+    IWebProviderError_Release( response_error );
+    if (FAILED(hr)) return hr;
+    hr = create_completed_operation_riid( &IID_IAsyncOperation_WebTokenRequestResult, (IInspectable *)result, riid, out );
+    IWebTokenRequestResult_Release( result );
+    return hr;
+}
+
+/* a provider lookup: none, or the diagnostic provider for the id and authority asked for */
+static HRESULT find_provider( HSTRING id, HSTRING authority, IAsyncOperation_WebAccountProvider **out )
+{
+    IWebAccountProvider *provider;
+    HRESULT hr;
+
+    if (!diagnostic_provider_enabled())
+    {
+        no_provider_fixme();
+        return create_completed_operation( &IID_IAsyncOperation_WebAccountProvider, NULL, (void **)out );
+    }
+    if (FAILED(hr = diagnostic_provider_create( id, authority, &provider ))) return hr;
+    hr = create_completed_operation( &IID_IAsyncOperation_WebAccountProvider, (IInspectable *)provider, (void **)out );
+    IWebAccountProvider_Release( provider );
+    return hr;
+}
+
 struct manager
 {
     IActivationFactory IActivationFactory_iface;
@@ -306,7 +361,8 @@ static HRESULT WINAPI manager_statics_GetTokenSilentlyAsync( IWebAuthenticationC
     *asyncInfo = NULL;
     if (!request) return E_INVALIDARG;
 
-    return request_token_not_available( &IID_IAsyncOperation_WebTokenRequestResult, (void **)asyncInfo );
+    return request_token( __func__, (IInspectable *)request, WebTokenRequestStatus_UserInteractionRequired,
+                          &IID_IAsyncOperation_WebTokenRequestResult, (void **)asyncInfo );
 }
 
 static HRESULT WINAPI manager_statics_GetTokenSilentlyWithWebAccountAsync( IWebAuthenticationCoreManagerStatics *iface,
@@ -319,7 +375,8 @@ static HRESULT WINAPI manager_statics_GetTokenSilentlyWithWebAccountAsync( IWebA
     *asyncInfo = NULL;
     if (!request) return E_INVALIDARG;
 
-    return request_token_not_available( &IID_IAsyncOperation_WebTokenRequestResult, (void **)asyncInfo );
+    return request_token( __func__, (IInspectable *)request, WebTokenRequestStatus_UserInteractionRequired,
+                          &IID_IAsyncOperation_WebTokenRequestResult, (void **)asyncInfo );
 }
 
 static HRESULT WINAPI manager_statics_RequestTokenAsync( IWebAuthenticationCoreManagerStatics *iface,
@@ -332,7 +389,8 @@ static HRESULT WINAPI manager_statics_RequestTokenAsync( IWebAuthenticationCoreM
     *asyncInfo = NULL;
     if (!request) return E_INVALIDARG;
 
-    return request_token_not_available( &IID_IAsyncOperation_WebTokenRequestResult, (void **)asyncInfo );
+    return request_token( __func__, (IInspectable *)request, WebTokenRequestStatus_ProviderError,
+                          &IID_IAsyncOperation_WebTokenRequestResult, (void **)asyncInfo );
 }
 
 static HRESULT WINAPI manager_statics_RequestTokenWithWebAccountAsync( IWebAuthenticationCoreManagerStatics *iface,
@@ -345,7 +403,8 @@ static HRESULT WINAPI manager_statics_RequestTokenWithWebAccountAsync( IWebAuthe
     *asyncInfo = NULL;
     if (!request) return E_INVALIDARG;
 
-    return request_token_not_available( &IID_IAsyncOperation_WebTokenRequestResult, (void **)asyncInfo );
+    return request_token( __func__, (IInspectable *)request, WebTokenRequestStatus_ProviderError,
+                          &IID_IAsyncOperation_WebTokenRequestResult, (void **)asyncInfo );
 }
 
 static HRESULT WINAPI manager_statics_FindAccountAsync( IWebAuthenticationCoreManagerStatics *iface,
@@ -373,9 +432,7 @@ static HRESULT WINAPI manager_statics_FindAccountProviderAsync( IWebAuthenticati
     if (!asyncInfo) return E_POINTER;
     *asyncInfo = NULL;
 
-    no_provider_fixme();
-
-    return create_completed_operation( &IID_IAsyncOperation_WebAccountProvider, NULL, (void **)asyncInfo );
+    return find_provider( webAccountProviderId, NULL, asyncInfo );
 }
 
 static HRESULT WINAPI manager_statics_FindAccountProviderWithAuthorityAsync( IWebAuthenticationCoreManagerStatics *iface,
@@ -389,9 +446,7 @@ static HRESULT WINAPI manager_statics_FindAccountProviderWithAuthorityAsync( IWe
     if (!asyncInfo) return E_POINTER;
     *asyncInfo = NULL;
 
-    no_provider_fixme();
-
-    return create_completed_operation( &IID_IAsyncOperation_WebAccountProvider, NULL, (void **)asyncInfo );
+    return find_provider( webAccountProviderId, authority, asyncInfo );
 }
 
 static const struct IWebAuthenticationCoreManagerStaticsVtbl manager_statics_vtbl =
@@ -498,9 +553,7 @@ static HRESULT WINAPI manager_statics4_FindSystemAccountProviderAsync( IWebAuthe
     if (!operation) return E_POINTER;
     *operation = NULL;
 
-    no_provider_fixme();
-
-    return create_completed_operation( &IID_IAsyncOperation_WebAccountProvider, NULL, (void **)operation );
+    return find_provider( webAccountProviderId, NULL, operation );
 }
 
 static HRESULT WINAPI manager_statics4_FindSystemAccountProviderWithAuthorityAsync( IWebAuthenticationCoreManagerStatics4 *iface,
@@ -513,9 +566,7 @@ static HRESULT WINAPI manager_statics4_FindSystemAccountProviderWithAuthorityAsy
     if (!operation) return E_POINTER;
     *operation = NULL;
 
-    no_provider_fixme();
-
-    return create_completed_operation( &IID_IAsyncOperation_WebAccountProvider, NULL, (void **)operation );
+    return find_provider( webAccountProviderId, authority, operation );
 }
 
 static HRESULT WINAPI manager_statics4_FindSystemAccountProviderWithAuthorityForUserAsync( IWebAuthenticationCoreManagerStatics4 *iface,
@@ -529,9 +580,7 @@ static HRESULT WINAPI manager_statics4_FindSystemAccountProviderWithAuthorityFor
     if (!operation) return E_POINTER;
     *operation = NULL;
 
-    no_provider_fixme();
-
-    return create_completed_operation( &IID_IAsyncOperation_WebAccountProvider, NULL, (void **)operation );
+    return find_provider( webAccountProviderId, authority, operation );
 }
 
 static const struct IWebAuthenticationCoreManagerStatics4Vtbl manager_statics4_vtbl =
@@ -597,7 +646,7 @@ static HRESULT WINAPI manager_interop_RequestTokenForWindowAsync( IWebAuthentica
     *asyncInfo = NULL;
     if (!request) return E_INVALIDARG;
 
-    return request_token_not_available( riid, asyncInfo );
+    return request_token( __func__, request, WebTokenRequestStatus_ProviderError, riid, asyncInfo );
 }
 
 static HRESULT WINAPI manager_interop_RequestTokenWithWebAccountForWindowAsync( IWebAuthenticationCoreManagerInterop *iface,
@@ -612,7 +661,7 @@ static HRESULT WINAPI manager_interop_RequestTokenWithWebAccountForWindowAsync( 
     *asyncInfo = NULL;
     if (!request) return E_INVALIDARG;
 
-    return request_token_not_available( riid, asyncInfo );
+    return request_token( __func__, request, WebTokenRequestStatus_ProviderError, riid, asyncInfo );
 }
 
 static const struct IWebAuthenticationCoreManagerInteropVtbl manager_interop_vtbl =

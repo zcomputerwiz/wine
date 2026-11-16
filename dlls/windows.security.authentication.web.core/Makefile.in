@@ -1,5 +1,5 @@
 MODULE = windows.security.authentication.web.core.dll
-IMPORTS = combase
+IMPORTS = combase advapi32
 
 SOURCES = \
 	async.c \
@@ -8,5 +8,6 @@ SOURCES = \
 	main.c \
 	manager.c \
 	map.c \
+	provider.c \
 	request.c \
 	response.c

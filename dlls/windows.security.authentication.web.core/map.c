@@ -268,6 +268,18 @@ static const struct IMap_HSTRING_HSTRINGVtbl hstring_map_vtbl =
     hstring_map_Clear,
 };
 
+/* the pairs of a map made by map_hstring_create, one line each (the diagnostic provider's request trace) */
+void map_hstring_dump( IMap_HSTRING_HSTRING *iface, const char *prefix )
+{
+    struct hstring_map *impl;
+    UINT32 i;
+
+    if (!iface || iface->lpVtbl != &hstring_map_vtbl) return;
+    impl = impl_from_IMap_HSTRING_HSTRING( iface );
+    for (i = 0; i < impl->count; i++)
+        FIXME( "%s%s = %s\n", prefix, debugstr_hstring( impl->entries[i].key ), debugstr_hstring( impl->entries[i].value ) );
+}
+
 HRESULT map_hstring_create( IMap_HSTRING_HSTRING **out )
 {
     struct hstring_map *impl;

@@ -21,6 +21,7 @@
 
 #include "windef.h"
 #include "winbase.h"
+#include "winreg.h"
 #include "winstring.h"
 
 #include "roapi.h"
@@ -254,6 +255,124 @@ static void test_manager(void)
     IWebAuthenticationCoreManagerStatics_Release( statics );
 }
 
+static WebTokenRequestStatus request_status( IAsyncOperation_WebTokenRequestResult *op )
+{
+    WebTokenRequestStatus status = 0xdead;
+    IWebTokenRequestResult *result;
+    HRESULT hr;
+
+    wait_async( op );
+    hr = IAsyncOperation_WebTokenRequestResult_GetResults( op, &result );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED(hr))
+    {
+        IWebTokenRequestResult_get_ResponseStatus( result, &status );
+        IWebTokenRequestResult_Release( result );
+    }
+    IAsyncOperation_WebTokenRequestResult_Release( op );
+    return status;
+}
+
+/* Wine's diagnostic provider (HKCU\Software\Wine\WebAuthentication "DiagnosticProvider" = 1): a provider object for
+ * any id and authority, token requests that fail; Wine only */
+static void test_diagnostic_provider(void)
+{
+    IWebAuthenticationCoreManagerStatics *statics;
+    IAsyncOperation_WebAccountProvider *provider_op;
+    IAsyncOperation_WebTokenRequestResult *result_op;
+    IWebTokenRequestFactory *request_factory;
+    IWebAccountProvider *provider = NULL;
+    IWebAccountProvider2 *provider2;
+    IActivationFactory *factory;
+    IWebTokenRequest *request;
+    HSTRING id, authority, got, scope, client;
+    DWORD one = 1;
+    HKEY key;
+    INT32 cmp;
+    HRESULT hr;
+    LONG res;
+
+    if (!winetest_platform_is_wine)
+    {
+        skip( "Wine's diagnostic provider.\n" );
+        return;
+    }
+    if (!(factory = get_factory( L"Windows.Security.Authentication.Web.Core.WebAuthenticationCoreManager" ))) return;
+    hr = IActivationFactory_QueryInterface( factory, &IID_IWebAuthenticationCoreManagerStatics, (void **)&statics );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    IActivationFactory_Release( factory );
+
+    res = RegCreateKeyExW( HKEY_CURRENT_USER, L"Software\\Wine\\WebAuthentication", 0, NULL, 0, KEY_ALL_ACCESS, NULL,
+                           &key, NULL );
+    ok( !res, "got %ld.\n", res );
+    res = RegSetValueExW( key, L"DiagnosticProvider", 0, REG_DWORD, (BYTE *)&one, sizeof(one) );
+    ok( !res, "got %ld.\n", res );
+
+    id = hstring( L"https://login.microsoft.com" );
+    authority = hstring( L"consumers" );
+    hr = IWebAuthenticationCoreManagerStatics_FindAccountProviderWithAuthorityAsync( statics, id, authority, &provider_op );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    wait_async( provider_op );
+    hr = IAsyncOperation_WebAccountProvider_GetResults( provider_op, &provider );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( provider != NULL, "got no provider.\n" );
+    IAsyncOperation_WebAccountProvider_Release( provider_op );
+    if (provider)
+    {
+        hr = IWebAccountProvider_get_Id( provider, &got );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        WindowsCompareStringOrdinal( got, id, &cmp );
+        ok( !cmp, "got id %s.\n", debugstr_hstring( got ) );
+        WindowsDeleteString( got );
+        hr = IWebAccountProvider_QueryInterface( provider, &IID_IWebAccountProvider2, (void **)&provider2 );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        hr = IWebAccountProvider2_get_Authority( provider2, &got );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        WindowsCompareStringOrdinal( got, authority, &cmp );
+        ok( !cmp, "got authority %s.\n", debugstr_hstring( got ) );
+        WindowsDeleteString( got );
+        IWebAccountProvider2_Release( provider2 );
+
+        factory = get_factory( L"Windows.Security.Authentication.Web.Core.WebTokenRequest" );
+        hr = IActivationFactory_QueryInterface( factory, &IID_IWebTokenRequestFactory, (void **)&request_factory );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        IActivationFactory_Release( factory );
+        scope = hstring( L"service::ssl.live.com::MBI_SSL" );
+        client = hstring( L"00000000-0000-0000-0000-000000000000" );
+        hr = IWebTokenRequestFactory_Create( request_factory, provider, scope, client, &request );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        WindowsDeleteString( scope );
+        WindowsDeleteString( client );
+        IWebTokenRequestFactory_Release( request_factory );
+
+        hr = IWebAuthenticationCoreManagerStatics_GetTokenSilentlyAsync( statics, request, &result_op );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( request_status( result_op ) == WebTokenRequestStatus_UserInteractionRequired, "wrong silent status.\n" );
+        hr = IWebAuthenticationCoreManagerStatics_RequestTokenAsync( statics, request, &result_op );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( request_status( result_op ) == WebTokenRequestStatus_ProviderError, "wrong interactive status.\n" );
+        IWebTokenRequest_Release( request );
+        IWebAccountProvider_Release( provider );
+    }
+
+    /* off again: no provider */
+    RegDeleteValueW( key, L"DiagnosticProvider" );
+    RegCloseKey( key );
+    RegDeleteKeyW( HKEY_CURRENT_USER, L"Software\\Wine\\WebAuthentication" );
+    provider = (void *)0xdeadbeef;
+    hr = IWebAuthenticationCoreManagerStatics_FindAccountProviderWithAuthorityAsync( statics, id, authority, &provider_op );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    wait_async( provider_op );
+    hr = IAsyncOperation_WebAccountProvider_GetResults( provider_op, &provider );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !provider, "got provider %p.\n", provider );
+    IAsyncOperation_WebAccountProvider_Release( provider_op );
+
+    WindowsDeleteString( id );
+    WindowsDeleteString( authority );
+    IWebAuthenticationCoreManagerStatics_Release( statics );
+}
+
 START_TEST(web_core)
 {
     HRESULT hr;
@@ -262,6 +381,7 @@ START_TEST(web_core)
     ok( hr == S_OK, "RoInitialize failed, hr %#lx\n", hr );
 
     test_manager();
+    test_diagnostic_provider();
 
     RoUninitialize();
 }
