@@ -185,19 +185,219 @@ static HRESULT user_id( HSTRING *out )
     return WindowsCreateString( id, j, out );
 }
 
+static IUser *current_user;
+
+/* the user of the process: one object, as on Windows (User.GetDefault and GetFromId give the same object) */
 HRESULT user_create( IUser **out )
 {
     struct user *impl;
     HRESULT hr;
 
+    if (current_user)
+    {
+        IUser_AddRef( (*out = current_user) );
+        return S_OK;
+    }
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IUser_iface.lpVtbl = &user_vtbl;
-    impl->ref = 1;
+    impl->ref = 2;
     if (FAILED(hr = user_id( &impl->id )))
     {
         free( impl );
         return hr;
     }
+    if (InterlockedCompareExchangePointer( (void **)&current_user, &impl->IUser_iface, NULL ))
+    {
+        WindowsDeleteString( impl->id );
+        free( impl );
+        IUser_AddRef( (*out = current_user) );
+        return S_OK;
+    }
     *out = &impl->IUser_iface;
     return S_OK;
+}
+
+/* ---- the statics of Windows.System.User ---- */
+
+struct user_statics
+{
+    IActivationFactory IActivationFactory_iface;
+    IUserStatics IUserStatics_iface;
+    IUserStatics2 IUserStatics2_iface;
+    LONG ref;
+};
+
+static inline struct user_statics *impl_from_IActivationFactory( IActivationFactory *iface )
+{
+    return CONTAINING_RECORD( iface, struct user_statics, IActivationFactory_iface );
+}
+
+static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+{
+    struct user_statics *impl = impl_from_IActivationFactory( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IActivationFactory ))
+        *out = &impl->IActivationFactory_iface;
+    else if (IsEqualGUID( iid, &IID_IUserStatics ))
+        *out = &impl->IUserStatics_iface;
+    else if (IsEqualGUID( iid, &IID_IUserStatics2 ))
+        *out = &impl->IUserStatics2_iface;
+    else
+    {
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+
+static ULONG WINAPI factory_AddRef( IActivationFactory *iface )
+{
+    return InterlockedIncrement( &impl_from_IActivationFactory( iface )->ref );
+}
+
+static ULONG WINAPI factory_Release( IActivationFactory *iface )
+{
+    return InterlockedDecrement( &impl_from_IActivationFactory( iface )->ref );
+}
+
+static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
+{
+    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
+{
+    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
+{
+    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    TRACE( "iface %p, instance %p.\n", iface, instance );
+    return E_NOTIMPL;
+}
+
+static const IActivationFactoryVtbl factory_vtbl =
+{
+    factory_QueryInterface,
+    factory_AddRef,
+    factory_Release,
+    /* IInspectable methods */
+    factory_GetIids,
+    factory_GetRuntimeClassName,
+    factory_GetTrustLevel,
+    /* IActivationFactory methods */
+    factory_ActivateInstance,
+};
+
+DEFINE_IINSPECTABLE( statics, IUserStatics, struct user_statics, IActivationFactory_iface )
+
+static HRESULT WINAPI statics_CreateWatcher( IUserStatics *iface, IUserWatcher **result )
+{
+    FIXME( "iface %p, result %p stub!\n", iface, result );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI statics_FindAllAsync( IUserStatics *iface, IAsyncOperation_IVectorView_User **operation )
+{
+    FIXME( "iface %p, operation %p stub!\n", iface, operation );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI statics_FindAllAsyncByType( IUserStatics *iface, UserType type, IAsyncOperation_IVectorView_User **operation )
+{
+    FIXME( "iface %p, type %d, operation %p stub!\n", iface, type, operation );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI statics_FindAllAsyncByTypeAndStatus( IUserStatics *iface, UserType type, UserAuthenticationStatus status,
+                                                           IAsyncOperation_IVectorView_User **operation )
+{
+    FIXME( "iface %p, type %d, status %d, operation %p stub!\n", iface, type, status, operation );
+    return E_NOTIMPL;
+}
+
+/* the user of that id, or null (S_OK) for another or no id, as on Windows */
+static HRESULT WINAPI statics_GetFromId( IUserStatics *iface, HSTRING id, IUser **result )
+{
+    IUser *user;
+    HRESULT hr;
+    INT32 order;
+
+    TRACE( "iface %p, id %s, result %p.\n", iface, debugstr_hstring( id ), result );
+
+    if (!result) return E_POINTER;
+    *result = NULL;
+    if (!WindowsGetStringLen( id )) return S_OK;
+    if (FAILED(hr = user_create( &user ))) return hr;
+    if (SUCCEEDED(WindowsCompareStringOrdinal( impl_from_IUser( user )->id, id, &order )) && !order) *result = user;
+    else IUser_Release( user );
+    return S_OK;
+}
+
+static const IUserStaticsVtbl statics_vtbl =
+{
+    statics_QueryInterface,
+    statics_AddRef,
+    statics_Release,
+    /* IInspectable methods */
+    statics_GetIids,
+    statics_GetRuntimeClassName,
+    statics_GetTrustLevel,
+    /* IUserStatics methods */
+    statics_CreateWatcher,
+    statics_FindAllAsync,
+    statics_FindAllAsyncByType,
+    statics_FindAllAsyncByTypeAndStatus,
+    statics_GetFromId,
+};
+
+DEFINE_IINSPECTABLE( statics2, IUserStatics2, struct user_statics, IActivationFactory_iface )
+
+static HRESULT WINAPI statics2_GetDefault( IUserStatics2 *iface, IUser **result )
+{
+    TRACE( "iface %p, result %p.\n", iface, result );
+    if (!result) return E_POINTER;
+    return user_create( result );
+}
+
+static const IUserStatics2Vtbl statics2_vtbl =
+{
+    statics2_QueryInterface,
+    statics2_AddRef,
+    statics2_Release,
+    /* IInspectable methods */
+    statics2_GetIids,
+    statics2_GetRuntimeClassName,
+    statics2_GetTrustLevel,
+    /* IUserStatics2 methods */
+    statics2_GetDefault,
+};
+
+static struct user_statics user_statics =
+{
+    {&factory_vtbl},
+    {&statics_vtbl},
+    {&statics2_vtbl},
+    1,
+};
+
+IActivationFactory *user_factory = &user_statics.IActivationFactory_iface;
+
+/* the id of a user object of this module (not AddRef'd), or null for another object */
+HSTRING user_get_id( IUser *user )
+{
+    return user && user->lpVtbl == &user_vtbl ? impl_from_IUser( user )->id : NULL;
 }

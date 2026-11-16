@@ -34,7 +34,14 @@ import "windows.ui.viewmanagement.idl";
 import "windows.applicationmodel.core.idl";
 import "windows.applicationmodel.datatransfer.idl";
 import "windows.applicationmodel.useractivities.idl";
+import "windows.management.policies.idl";
 
+namespace Windows.Management.Policies {
+    runtimeclass NamedPolicy;
+}
+namespace Windows.System {
+    runtimeclass User;
+}
 namespace Windows.ApplicationModel.UserActivities {
     runtimeclass UserActivityRequestManager;
 }

@@ -34,6 +34,10 @@
 #include "windows.foundation.h"
 #define WIDL_using_Windows_Security_ExchangeActiveSyncProvisioning
 #include "windows.security.exchangeactivesyncprovisioning.h"
+#define WIDL_using_Windows_System
+#include "windows.system.h"
+#define WIDL_using_Windows_Management_Policies
+#include "windows.management.policies.h"
 #define WIDL_using_Windows_System_Profile
 #include "windows.system.profile.h"
 #define WIDL_using_Windows_System_UserProfile
@@ -339,6 +343,128 @@ static void test_DataTransferManager(void)
     IActivationFactory_Release( factory );
 }
 
+static void *get_statics( const WCHAR *class_name, REFIID iid )
+{
+    IActivationFactory *factory;
+    HSTRING str;
+    void *out = NULL;
+    HRESULT hr;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "%s: got hr %#lx.\n", debugstr_w( class_name ), hr );
+    if (hr != S_OK) return NULL;
+    hr = IActivationFactory_QueryInterface( factory, iid, &out );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    IActivationFactory_Release( factory );
+    return out;
+}
+
+/* Education/AllowGraphingCalculator, unmanaged: a user policy (Int32, 1), without a value when read without a user */
+static void check_graphing_policy( INamedPolicyData *data, IUser *expect_user )
+{
+    NamedPolicyKind kind = -1;
+    boolean flag = 2;
+    HSTRING str;
+    IUser *user = (void *)0xdeadbeef;
+    INT32 number = -1;
+    HRESULT hr;
+
+    hr = INamedPolicyData_get_Area( data, &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !wcscmp( WindowsGetStringRawBuffer( str, NULL ), L"Education" ), "got area %s.\n", debugstr_hstring( str ) );
+    WindowsDeleteString( str );
+    hr = INamedPolicyData_get_Name( data, &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !wcscmp( WindowsGetStringRawBuffer( str, NULL ), L"AllowGraphingCalculator" ), "got name %s.\n", debugstr_hstring( str ) );
+    WindowsDeleteString( str );
+    hr = INamedPolicyData_get_Kind( data, &kind );
+    ok( hr == S_OK && kind == NamedPolicyKind_Int32, "got hr %#lx, kind %d.\n", hr, kind );
+    /* without a value, IsManaged is false but fails */
+    hr = INamedPolicyData_get_IsManaged( data, &flag );
+    ok( hr == (expect_user ? S_OK : E_UNEXPECTED) && !flag, "got hr %#lx, managed %d.\n", hr, flag );
+    hr = INamedPolicyData_get_IsUserPolicy( data, &flag );
+    ok( hr == S_OK && flag == !!expect_user, "got hr %#lx, user policy %d.\n", hr, flag );
+    hr = INamedPolicyData_get_User( data, &user );
+    ok( hr == S_OK && user == expect_user, "got hr %#lx, user %p.\n", hr, user );
+    if (user) IUser_Release( user );
+    flag = 2;
+    hr = INamedPolicyData_GetBoolean( data, &flag );
+    if (expect_user) ok( hr == S_OK && flag == TRUE, "got hr %#lx, value %d.\n", hr, flag );
+    else ok( hr == E_UNEXPECTED, "got hr %#lx.\n", hr );
+    hr = INamedPolicyData_GetInt32( data, &number );
+    if (expect_user) ok( hr == S_OK && number == 1, "got hr %#lx, value %d.\n", hr, number );
+    else ok( hr == E_UNEXPECTED, "got hr %#lx.\n", hr );
+    INamedPolicyData_Release( data );
+}
+
+static void test_User(void)
+{
+    INamedPolicyStatics *policies;
+    IUserStatics2 *statics2;
+    IUserStatics *statics;
+    IUser *user = NULL, *found;
+    INamedPolicyData *data;
+    HSTRING id = NULL, str, area, name;
+    HRESULT hr;
+
+    if (!(statics = get_statics( L"Windows.System.User", &IID_IUserStatics ))) return;
+    statics2 = get_statics( L"Windows.System.User", &IID_IUserStatics2 );
+    ok( !!statics2, "no IUserStatics2.\n" );
+    if (!statics2) { IUserStatics_Release( statics ); return; }
+    hr = IUserStatics2_GetDefault( statics2, &user );
+    ok( hr == S_OK && user, "got hr %#lx, user %p.\n", hr, user );
+    IUserStatics2_Release( statics2 );
+    if (!user) { IUserStatics_Release( statics ); return; }
+
+    /* the user of an id is the same object; another or no id has none */
+    hr = IUser_get_NonRoamableId( user, &id );
+    ok( hr == S_OK && WindowsGetStringLen( id ), "got hr %#lx, id %s.\n", hr, debugstr_hstring( id ) );
+    found = (void *)0xdeadbeef;
+    hr = IUserStatics_GetFromId( statics, id, &found );
+    ok( hr == S_OK && found == user, "got hr %#lx, user %p, expected %p.\n", hr, found, user );
+    if (hr == S_OK && found) IUser_Release( found );
+    WindowsCreateString( L"bogus", 5, &str );
+    found = (void *)0xdeadbeef;
+    hr = IUserStatics_GetFromId( statics, str, &found );
+    ok( hr == S_OK && !found, "got hr %#lx, user %p.\n", hr, found );
+    WindowsDeleteString( str );
+    found = (void *)0xdeadbeef;
+    hr = IUserStatics_GetFromId( statics, NULL, &found );
+    ok( hr == S_OK && !found, "got hr %#lx, user %p.\n", hr, found );
+    IUserStatics_Release( statics );
+
+    if (!(policies = get_statics( L"Windows.Management.Policies.NamedPolicy", &IID_INamedPolicyStatics ))) goto done;
+    WindowsCreateString( L"Education", 9, &area );
+    WindowsCreateString( L"AllowGraphingCalculator", 23, &name );
+    data = NULL;
+    hr = INamedPolicyStatics_GetPolicyFromPath( policies, area, name, &data );
+    ok( hr == S_OK && data, "got hr %#lx, data %p.\n", hr, data );
+    if (data) check_graphing_policy( data, NULL );
+    data = NULL;
+    hr = INamedPolicyStatics_GetPolicyFromPathForUser( policies, user, area, name, &data );
+    ok( hr == S_OK && data, "got hr %#lx, data %p.\n", hr, data );
+    if (data) check_graphing_policy( data, user );
+    data = (void *)0xdeadbeef;
+    hr = INamedPolicyStatics_GetPolicyFromPathForUser( policies, NULL, area, name, &data );
+    ok( hr == E_INVALIDARG && data == (void *)0xdeadbeef, "got hr %#lx, data %p.\n", hr, data );
+    WindowsDeleteString( area );
+    WindowsDeleteString( name );
+    WindowsCreateString( L"Bogus", 5, &area );
+    WindowsCreateString( L"Nothing", 7, &name );
+    data = (void *)0xdeadbeef;
+    hr = INamedPolicyStatics_GetPolicyFromPath( policies, area, name, &data );
+    ok( hr == E_UNEXPECTED && !data, "got hr %#lx, data %p.\n", hr, data );
+    WindowsDeleteString( area );
+    WindowsDeleteString( name );
+    INamedPolicyStatics_Release( policies );
+done:
+    WindowsDeleteString( id );
+    IUser_Release( user );
+}
+
 START_TEST(twinapi)
 {
     HRESULT hr;
@@ -352,6 +478,7 @@ START_TEST(twinapi)
     test_ApplicationView();
     test_CoreApplication();
     test_DataTransferManager();
+    test_User();
 
     RoUninitialize();
 }

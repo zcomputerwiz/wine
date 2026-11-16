@@ -44,6 +44,7 @@ namespace Windows.System
     typedef enum UserAuthenticationStatus UserAuthenticationStatus;
     typedef enum UserPictureSize UserPictureSize;
     typedef enum UserType UserType;
+    typedef enum UserWatcherStatus UserWatcherStatus;
     typedef enum VirtualKey VirtualKey;
     typedef enum VirtualKeyModifiers VirtualKeyModifiers;
 
@@ -55,19 +56,34 @@ namespace Windows.System
     interface IDispatcherQueueStatics;
     interface IDispatcherQueueTimer;
     interface IUser;
+    interface IUserAuthenticationStatusChangeDeferral;
+    interface IUserAuthenticationStatusChangingEventArgs;
     interface IUserStatics;
+    interface IUserStatics2;
     interface IUserChangedEventArgs;
     interface IUserChangedEventArgs2;
+    interface IUserWatcher;
 
     runtimeclass DispatcherQueue;
     runtimeclass DispatcherQueueController;
     runtimeclass DispatcherQueueShutdownStartingEventArgs;
     runtimeclass DispatcherQueueTimer;
     runtimeclass User;
+    runtimeclass UserAuthenticationStatusChangeDeferral;
+    runtimeclass UserAuthenticationStatusChangingEventArgs;
     runtimeclass UserChangedEventArgs;
+    runtimeclass UserWatcher;
 
     declare
     {
+        interface Windows.Foundation.Collections.IIterable<Windows.System.User *>;
+        interface Windows.Foundation.Collections.IIterator<Windows.System.User *>;
+        interface Windows.Foundation.Collections.IVectorView<Windows.System.User *>;
+        interface Windows.Foundation.AsyncOperationCompletedHandler<Windows.Foundation.Collections.IVectorView<Windows.System.User *> *>;
+        interface Windows.Foundation.IAsyncOperation<Windows.Foundation.Collections.IVectorView<Windows.System.User *> *>;
+        interface Windows.Foundation.TypedEventHandler<Windows.System.UserWatcher *, IInspectable *>;
+        interface Windows.Foundation.TypedEventHandler<Windows.System.UserWatcher *, Windows.System.UserAuthenticationStatusChangingEventArgs *>;
+        interface Windows.Foundation.TypedEventHandler<Windows.System.UserWatcher *, Windows.System.UserChangedEventArgs *>;
         interface Windows.Foundation.AsyncOperationCompletedHandler<Windows.Foundation.Collections.IPropertySet *>;
         interface Windows.Foundation.AsyncOperationCompletedHandler<Windows.Storage.Streams.IRandomAccessStreamReference *>;
         interface Windows.Foundation.IAsyncOperation<Windows.Foundation.Collections.IPropertySet *>;
@@ -122,6 +138,19 @@ namespace Windows.System
         Size208x208   = 1,
         Size424x424   = 2,
         Size1080x1080 = 3,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum UserWatcherStatus
+    {
+        Created              = 0,
+        Started              = 1,
+        EnumerationCompleted = 2,
+        Stopping             = 3,
+        Stopped              = 4,
+        Aborted              = 5,
     };
 
     [
@@ -489,6 +518,84 @@ namespace Windows.System
     }
 
     [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.System.UserAuthenticationStatusChangeDeferral),
+        uuid(88b59568-bb30-42fb-a270-e9902e40efa7)
+    ]
+    interface IUserAuthenticationStatusChangeDeferral : IInspectable
+    {
+        HRESULT Complete();
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.System.UserAuthenticationStatusChangingEventArgs),
+        uuid(8c030f28-a711-4c1e-ab48-04179c15938f)
+    ]
+    interface IUserAuthenticationStatusChangingEventArgs : IInspectable
+    {
+        HRESULT GetDeferral([out, retval] Windows.System.UserAuthenticationStatusChangeDeferral **result);
+        [propget] HRESULT User([out, retval] Windows.System.User **value);
+        [propget] HRESULT NewStatus([out, retval] Windows.System.UserAuthenticationStatus *value);
+        [propget] HRESULT CurrentStatus([out, retval] Windows.System.UserAuthenticationStatus *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.System.UserWatcher),
+        uuid(155eb23b-242a-45e0-a2e9-3171fc6a7fbb)
+    ]
+    interface IUserWatcher : IInspectable
+    {
+        [propget] HRESULT Status([out, retval] Windows.System.UserWatcherStatus *value);
+        HRESULT Start();
+        HRESULT Stop();
+        [eventadd] HRESULT Added([in] Windows.Foundation.TypedEventHandler<Windows.System.UserWatcher *, Windows.System.UserChangedEventArgs *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT Added([in] EventRegistrationToken token);
+        [eventadd] HRESULT Removed([in] Windows.Foundation.TypedEventHandler<Windows.System.UserWatcher *, Windows.System.UserChangedEventArgs *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT Removed([in] EventRegistrationToken token);
+        [eventadd] HRESULT Updated([in] Windows.Foundation.TypedEventHandler<Windows.System.UserWatcher *, Windows.System.UserChangedEventArgs *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT Updated([in] EventRegistrationToken token);
+        [eventadd] HRESULT AuthenticationStatusChanged([in] Windows.Foundation.TypedEventHandler<Windows.System.UserWatcher *, Windows.System.UserChangedEventArgs *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT AuthenticationStatusChanged([in] EventRegistrationToken token);
+        [eventadd] HRESULT AuthenticationStatusChanging([in] Windows.Foundation.TypedEventHandler<Windows.System.UserWatcher *, Windows.System.UserAuthenticationStatusChangingEventArgs *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT AuthenticationStatusChanging([in] EventRegistrationToken token);
+        [eventadd] HRESULT EnumerationCompleted([in] Windows.Foundation.TypedEventHandler<Windows.System.UserWatcher *, IInspectable *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT EnumerationCompleted([in] EventRegistrationToken token);
+        [eventadd] HRESULT Stopped([in] Windows.Foundation.TypedEventHandler<Windows.System.UserWatcher *, IInspectable *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT Stopped([in] EventRegistrationToken token);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.System.User),
+        uuid(155eb23b-242a-45e0-a2e9-3171fc6a7fdd)
+    ]
+    interface IUserStatics : IInspectable
+    {
+        HRESULT CreateWatcher([out, retval] Windows.System.UserWatcher **result);
+        [default_overload, overload("FindAllAsync")]
+        HRESULT FindAllAsync([out, retval] Windows.Foundation.IAsyncOperation<Windows.Foundation.Collections.IVectorView<Windows.System.User *> *> **operation);
+        [overload("FindAllAsync")]
+        HRESULT FindAllAsyncByType([in] Windows.System.UserType type,
+                                   [out, retval] Windows.Foundation.IAsyncOperation<Windows.Foundation.Collections.IVectorView<Windows.System.User *> *> **operation);
+        [overload("FindAllAsync")]
+        HRESULT FindAllAsyncByTypeAndStatus([in] Windows.System.UserType type, [in] Windows.System.UserAuthenticationStatus status,
+                                            [out, retval] Windows.Foundation.IAsyncOperation<Windows.Foundation.Collections.IVectorView<Windows.System.User *> *> **operation);
+        HRESULT GetFromId([in] HSTRING id, [out, retval] Windows.System.User **result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 11.0),
+        exclusiveto(Windows.System.User),
+        uuid(74a37e11-2eb5-4487-b0d5-2c6790e013e9)
+    ]
+    interface IUserStatics2 : IInspectable
+    {
+        HRESULT GetDefault([out, retval] Windows.System.User **result);
+    }
+
+    [
         contract(Windows.Foundation.UniversalApiContract, 5.0),
         marshaling_behavior(agile),
         static(Windows.System.IDispatcherQueueStatics, Windows.Foundation.UniversalApiContract, 5.0),
@@ -532,12 +639,40 @@ namespace Windows.System
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
         marshaling_behavior(agile),
-        /* static(Windows.System.IUserStatics, Windows.Foundation.UniversalApiContract, 1.0), */
+        static(Windows.System.IUserStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        static(Windows.System.IUserStatics2, Windows.Foundation.UniversalApiContract, 11.0),
         threading(both),
     ]
     runtimeclass User
     {
         [default] interface Windows.System.IUser;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass UserAuthenticationStatusChangeDeferral
+    {
+        [default] interface Windows.System.IUserAuthenticationStatusChangeDeferral;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass UserAuthenticationStatusChangingEventArgs
+    {
+        [default] interface Windows.System.IUserAuthenticationStatusChangingEventArgs;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass UserWatcher
+    {
+        [default] interface Windows.System.IUserWatcher;
     }
 
     [

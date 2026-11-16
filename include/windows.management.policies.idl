@@ -1,0 +1,112 @@
+/*
+ * Copyright 2026 WineExplorer contributors
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+#ifdef __WIDL__
+#pragma winrt ns_prefix
+#endif
+
+import "inspectable.idl";
+import "asyncinfo.idl";
+import "eventtoken.idl";
+import "windowscontracts.idl";
+import "windows.foundation.idl";
+import "windows.storage.streams.idl";
+import "windows.system.idl";
+
+namespace Windows.Management.Policies {
+    typedef enum NamedPolicyKind NamedPolicyKind;
+
+    interface INamedPolicyData;
+    interface INamedPolicyStatics;
+
+    runtimeclass NamedPolicy;
+    runtimeclass NamedPolicyData;
+
+    declare
+    {
+        interface Windows.Foundation.TypedEventHandler<Windows.Management.Policies.NamedPolicyData *, IInspectable *>;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 4.0)
+    ]
+    enum NamedPolicyKind
+    {
+        Invalid = 0,
+        Binary  = 1,
+        Boolean = 2,
+        Int32   = 3,
+        Int64   = 4,
+        String  = 5,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 4.0),
+        exclusiveto(Windows.Management.Policies.NamedPolicyData),
+        uuid(38dcb198-95ac-4077-a643-8078cae26400)
+    ]
+    interface INamedPolicyData : IInspectable
+    {
+        [propget] HRESULT Area([out, retval] HSTRING *value);
+        [propget] HRESULT Name([out, retval] HSTRING *value);
+        [propget] HRESULT Kind([out, retval] Windows.Management.Policies.NamedPolicyKind *value);
+        [propget] HRESULT IsManaged([out, retval] boolean *value);
+        [propget] HRESULT IsUserPolicy([out, retval] boolean *value);
+        [propget] HRESULT User([out, retval] Windows.System.User **value);
+        HRESULT GetBoolean([out, retval] boolean *result);
+        HRESULT GetBinary([out, retval] Windows.Storage.Streams.IBuffer **result);
+        HRESULT GetInt32([out, retval] INT32 *result);
+        HRESULT GetInt64([out, retval] INT64 *result);
+        HRESULT GetString([out, retval] HSTRING *result);
+        [eventadd] HRESULT Changed([in] Windows.Foundation.TypedEventHandler<Windows.Management.Policies.NamedPolicyData *, IInspectable *> *handler,
+                                   [out, retval] EventRegistrationToken *cookie);
+        [eventremove] HRESULT Changed([in] EventRegistrationToken cookie);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 4.0),
+        exclusiveto(Windows.Management.Policies.NamedPolicy),
+        uuid(7f793be7-76c4-4058-8cad-67662cd05f0d)
+    ]
+    interface INamedPolicyStatics : IInspectable
+    {
+        HRESULT GetPolicyFromPath([in] HSTRING area, [in] HSTRING name, [out, retval] Windows.Management.Policies.NamedPolicyData **result);
+        HRESULT GetPolicyFromPathForUser([in] Windows.System.User *user, [in] HSTRING area, [in] HSTRING name,
+                                         [out, retval] Windows.Management.Policies.NamedPolicyData **result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 4.0),
+        marshaling_behavior(agile),
+        static(Windows.Management.Policies.INamedPolicyStatics, Windows.Foundation.UniversalApiContract, 4.0),
+        threading(both)
+    ]
+    runtimeclass NamedPolicy
+    {
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 4.0),
+        marshaling_behavior(agile),
+        threading(both)
+    ]
+    runtimeclass NamedPolicyData
+    {
+        [default] interface Windows.Management.Policies.INamedPolicyData;
+    }
+}

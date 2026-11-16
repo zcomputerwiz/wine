@@ -52,6 +52,8 @@
 #include "windows.ui.notifications.h"   /* TileActivatedInfo, ILaunchActivatedEventArgs2 */
 #define WIDL_using_Windows_ApplicationModel_UserActivities
 #include "windows.applicationmodel.useractivities.h"
+#define WIDL_using_Windows_Management_Policies
+#include "windows.management.policies.h"
 
 #include "wine/debug.h"
 
@@ -88,6 +90,9 @@ extern IActivationFactory *data_transfer_manager_statics_factory;
 extern IActivationFactory *user_activity_request_manager_factory;
 
 HRESULT user_create( IUser **out );
+HSTRING user_get_id( IUser *user );
+extern IActivationFactory *user_factory;
+extern IActivationFactory *named_policy_factory;
 HRESULT core_title_bar_create( ICoreApplicationViewTitleBar **out );
 HRESULT view_title_bar_create( IApplicationViewTitleBar **out );
 
