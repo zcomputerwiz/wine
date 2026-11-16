@@ -541,7 +541,11 @@ static int request_session_id( unsigned int wanted )
     if ((sock = connect_session0( 0 )) == -1) return 0;
     pfd.fd = sock;
     pfd.events = POLLIN;
-    if (send( sock, &hdr, sizeof(hdr), MSG_NOSIGNAL ) == sizeof(hdr) && poll( &pfd, 1, 2000 ) == 1 &&
+    /* a new server waits for session 0 as long as a logon may take (B26: session 0 is one thread, and writing a
+     * user's policy or hive can keep it busy for seconds); linking again runs in the server's own loop, so it
+     * waits briefly and tries again later */
+    if (send( sock, &hdr, sizeof(hdr), MSG_NOSIGNAL ) == sizeof(hdr) &&
+        poll( &pfd, 1, wanted ? 2000 : 30000 ) == 1 &&
         recv( sock, &answer, sizeof(answer), 0 ) == sizeof(answer) && answer.magic == WEX_SESSION0_MAGIC &&
         !answer.status && answer.value && (!wanted || answer.value == wanted))
     {
