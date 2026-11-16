@@ -212,6 +212,43 @@ static void test_manager(void)
     hr = IMap_HSTRING_HSTRING_Lookup( props, key, &got );
     ok( hr == E_BOUNDS, "got hr %#lx.\n", hr );
     WindowsDeleteString( key );
+
+    /* the properties can be iterated (OneAuth reads them so) */
+    {
+        IIterable_IKeyValuePair_HSTRING_HSTRING *iterable;
+        IIterator_IKeyValuePair_HSTRING_HSTRING *iterator;
+        IKeyValuePair_HSTRING_HSTRING *pair;
+        boolean has;
+
+        hr = IMap_HSTRING_HSTRING_QueryInterface( props, &IID_IIterable_IKeyValuePair_HSTRING_HSTRING, (void **)&iterable );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        if (SUCCEEDED(hr))
+        {
+            hr = IIterable_IKeyValuePair_HSTRING_HSTRING_First( iterable, &iterator );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            hr = IIterator_IKeyValuePair_HSTRING_HSTRING_get_HasCurrent( iterator, &has );
+            ok( hr == S_OK && has, "got hr %#lx, has %d.\n", hr, has );
+            hr = IIterator_IKeyValuePair_HSTRING_HSTRING_get_Current( iterator, &pair );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            hr = IKeyValuePair_HSTRING_HSTRING_get_Key( pair, &got );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            key = hstring( L"authority" );
+            WindowsCompareStringOrdinal( got, key, &cmp );
+            ok( !cmp, "got key %s.\n", debugstr_hstring( got ) );
+            WindowsDeleteString( key );
+            WindowsDeleteString( got );
+            hr = IKeyValuePair_HSTRING_HSTRING_get_Value( pair, &got );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            WindowsCompareStringOrdinal( got, value, &cmp );
+            ok( !cmp, "got value %s.\n", debugstr_hstring( got ) );
+            WindowsDeleteString( got );
+            IKeyValuePair_HSTRING_HSTRING_Release( pair );
+            hr = IIterator_IKeyValuePair_HSTRING_HSTRING_MoveNext( iterator, &has );
+            ok( hr == S_OK && !has, "got hr %#lx, has %d.\n", hr, has );
+            IIterator_IKeyValuePair_HSTRING_HSTRING_Release( iterator );
+            IIterable_IKeyValuePair_HSTRING_HSTRING_Release( iterable );
+        }
+    }
     WindowsDeleteString( value );
     IMap_HSTRING_HSTRING_Release( props );
 

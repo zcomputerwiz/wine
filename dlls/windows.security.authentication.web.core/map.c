@@ -31,6 +31,7 @@ struct hstring_map_entry
 struct hstring_map
 {
     IMap_HSTRING_HSTRING IMap_HSTRING_HSTRING_iface;
+    IIterable_IKeyValuePair_HSTRING_HSTRING IIterable_IKeyValuePair_HSTRING_HSTRING_iface;
     LONG ref;
     struct hstring_map_entry *entries;
     UINT32 count;
@@ -71,6 +72,12 @@ static HRESULT WINAPI hstring_map_QueryInterface( IMap_HSTRING_HSTRING *iface, R
         IsEqualGUID( iid, &IID_IMap_HSTRING_HSTRING ))
     {
         *out = &impl->IMap_HSTRING_HSTRING_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IIterable_IKeyValuePair_HSTRING_HSTRING ))
+    {
+        *out = &impl->IIterable_IKeyValuePair_HSTRING_HSTRING_iface;
         IInspectable_AddRef( *out );
         return S_OK;
     }
@@ -268,6 +275,330 @@ static const struct IMap_HSTRING_HSTRINGVtbl hstring_map_vtbl =
     hstring_map_Clear,
 };
 
+/* IKeyValuePair<HSTRING, HSTRING>: one entry, copied */
+struct hstring_pair
+{
+    IKeyValuePair_HSTRING_HSTRING IKeyValuePair_HSTRING_HSTRING_iface;
+    LONG ref;
+    HSTRING key;
+    HSTRING value;
+};
+
+static inline struct hstring_pair *impl_from_IKeyValuePair_HSTRING_HSTRING( IKeyValuePair_HSTRING_HSTRING *iface )
+{
+    return CONTAINING_RECORD( iface, struct hstring_pair, IKeyValuePair_HSTRING_HSTRING_iface );
+}
+
+static HRESULT WINAPI hstring_pair_QueryInterface( IKeyValuePair_HSTRING_HSTRING *iface, REFIID iid, void **out )
+{
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IKeyValuePair_HSTRING_HSTRING ))
+    {
+        IInspectable_AddRef( (*out = iface) );
+        return S_OK;
+    }
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI hstring_pair_AddRef( IKeyValuePair_HSTRING_HSTRING *iface )
+{
+    return InterlockedIncrement( &impl_from_IKeyValuePair_HSTRING_HSTRING( iface )->ref );
+}
+
+static ULONG WINAPI hstring_pair_Release( IKeyValuePair_HSTRING_HSTRING *iface )
+{
+    struct hstring_pair *impl = impl_from_IKeyValuePair_HSTRING_HSTRING( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        WindowsDeleteString( impl->key );
+        WindowsDeleteString( impl->value );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI hstring_pair_GetIids( IKeyValuePair_HSTRING_HSTRING *iface, ULONG *iid_count, IID **iids )
+{
+    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI hstring_pair_GetRuntimeClassName( IKeyValuePair_HSTRING_HSTRING *iface, HSTRING *class_name )
+{
+    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI hstring_pair_GetTrustLevel( IKeyValuePair_HSTRING_HSTRING *iface, TrustLevel *trust_level )
+{
+    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI hstring_pair_get_Key( IKeyValuePair_HSTRING_HSTRING *iface, HSTRING *key )
+{
+    TRACE( "iface %p, key %p.\n", iface, key );
+    if (!key) return E_POINTER;
+    return WindowsDuplicateString( impl_from_IKeyValuePair_HSTRING_HSTRING( iface )->key, key );
+}
+
+static HRESULT WINAPI hstring_pair_get_Value( IKeyValuePair_HSTRING_HSTRING *iface, HSTRING *value )
+{
+    TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl_from_IKeyValuePair_HSTRING_HSTRING( iface )->value, value );
+}
+
+static const struct IKeyValuePair_HSTRING_HSTRINGVtbl hstring_pair_vtbl =
+{
+    hstring_pair_QueryInterface,
+    hstring_pair_AddRef,
+    hstring_pair_Release,
+    hstring_pair_GetIids,
+    hstring_pair_GetRuntimeClassName,
+    hstring_pair_GetTrustLevel,
+    hstring_pair_get_Key,
+    hstring_pair_get_Value,
+};
+
+static HRESULT hstring_pair_create( HSTRING key, HSTRING value, IKeyValuePair_HSTRING_HSTRING **out )
+{
+    struct hstring_pair *impl;
+    HRESULT hr;
+
+    *out = NULL;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IKeyValuePair_HSTRING_HSTRING_iface.lpVtbl = &hstring_pair_vtbl;
+    impl->ref = 1;
+    if (FAILED(hr = hstring_copy( key, &impl->key )) || FAILED(hr = hstring_copy( value, &impl->value )))
+    {
+        hstring_pair_Release( &impl->IKeyValuePair_HSTRING_HSTRING_iface );
+        return hr;
+    }
+    *out = &impl->IKeyValuePair_HSTRING_HSTRING_iface;
+    return S_OK;
+}
+
+/* IIterator<IKeyValuePair<HSTRING, HSTRING>>: over a copy of the map's entries taken by First */
+struct hstring_iterator
+{
+    IIterator_IKeyValuePair_HSTRING_HSTRING IIterator_IKeyValuePair_HSTRING_HSTRING_iface;
+    LONG ref;
+    IKeyValuePair_HSTRING_HSTRING **pairs;
+    UINT32 count;
+    UINT32 index;
+};
+
+static inline struct hstring_iterator *impl_from_IIterator_IKeyValuePair_HSTRING_HSTRING( IIterator_IKeyValuePair_HSTRING_HSTRING *iface )
+{
+    return CONTAINING_RECORD( iface, struct hstring_iterator, IIterator_IKeyValuePair_HSTRING_HSTRING_iface );
+}
+
+static HRESULT WINAPI hstring_iterator_QueryInterface( IIterator_IKeyValuePair_HSTRING_HSTRING *iface, REFIID iid, void **out )
+{
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IIterator_IKeyValuePair_HSTRING_HSTRING ))
+    {
+        IInspectable_AddRef( (*out = iface) );
+        return S_OK;
+    }
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI hstring_iterator_AddRef( IIterator_IKeyValuePair_HSTRING_HSTRING *iface )
+{
+    return InterlockedIncrement( &impl_from_IIterator_IKeyValuePair_HSTRING_HSTRING( iface )->ref );
+}
+
+static ULONG WINAPI hstring_iterator_Release( IIterator_IKeyValuePair_HSTRING_HSTRING *iface )
+{
+    struct hstring_iterator *impl = impl_from_IIterator_IKeyValuePair_HSTRING_HSTRING( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    UINT32 i;
+
+    if (!ref)
+    {
+        for (i = 0; i < impl->count; i++) IKeyValuePair_HSTRING_HSTRING_Release( impl->pairs[i] );
+        free( impl->pairs );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI hstring_iterator_GetIids( IIterator_IKeyValuePair_HSTRING_HSTRING *iface, ULONG *iid_count, IID **iids )
+{
+    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI hstring_iterator_GetRuntimeClassName( IIterator_IKeyValuePair_HSTRING_HSTRING *iface, HSTRING *class_name )
+{
+    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI hstring_iterator_GetTrustLevel( IIterator_IKeyValuePair_HSTRING_HSTRING *iface, TrustLevel *trust_level )
+{
+    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI hstring_iterator_get_Current( IIterator_IKeyValuePair_HSTRING_HSTRING *iface,
+                                                    IKeyValuePair_HSTRING_HSTRING **value )
+{
+    struct hstring_iterator *impl = impl_from_IIterator_IKeyValuePair_HSTRING_HSTRING( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    *value = NULL;
+    if (impl->index >= impl->count) return E_BOUNDS;
+    IKeyValuePair_HSTRING_HSTRING_AddRef( (*value = impl->pairs[impl->index]) );
+    return S_OK;
+}
+
+static HRESULT WINAPI hstring_iterator_get_HasCurrent( IIterator_IKeyValuePair_HSTRING_HSTRING *iface, boolean *value )
+{
+    struct hstring_iterator *impl = impl_from_IIterator_IKeyValuePair_HSTRING_HSTRING( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    *value = impl->index < impl->count;
+    return S_OK;
+}
+
+static HRESULT WINAPI hstring_iterator_MoveNext( IIterator_IKeyValuePair_HSTRING_HSTRING *iface, boolean *value )
+{
+    struct hstring_iterator *impl = impl_from_IIterator_IKeyValuePair_HSTRING_HSTRING( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    if (impl->index < impl->count) impl->index++;
+    *value = impl->index < impl->count;
+    return S_OK;
+}
+
+static HRESULT WINAPI hstring_iterator_GetMany( IIterator_IKeyValuePair_HSTRING_HSTRING *iface, UINT32 items_size,
+                                                IKeyValuePair_HSTRING_HSTRING **items, UINT32 *count )
+{
+    struct hstring_iterator *impl = impl_from_IIterator_IKeyValuePair_HSTRING_HSTRING( iface );
+    UINT32 i;
+
+    TRACE( "iface %p, items_size %u, items %p, count %p.\n", iface, items_size, items, count );
+
+    if (!count) return E_POINTER;
+    for (i = 0; i < items_size && impl->index < impl->count; i++, impl->index++)
+        IKeyValuePair_HSTRING_HSTRING_AddRef( (items[i] = impl->pairs[impl->index]) );
+    *count = i;
+    return S_OK;
+}
+
+static const struct IIterator_IKeyValuePair_HSTRING_HSTRINGVtbl hstring_iterator_vtbl =
+{
+    hstring_iterator_QueryInterface,
+    hstring_iterator_AddRef,
+    hstring_iterator_Release,
+    hstring_iterator_GetIids,
+    hstring_iterator_GetRuntimeClassName,
+    hstring_iterator_GetTrustLevel,
+    hstring_iterator_get_Current,
+    hstring_iterator_get_HasCurrent,
+    hstring_iterator_MoveNext,
+    hstring_iterator_GetMany,
+};
+
+/* IIterable<IKeyValuePair<HSTRING, HSTRING>> of the map */
+static inline struct hstring_map *impl_from_IIterable_IKeyValuePair_HSTRING_HSTRING( IIterable_IKeyValuePair_HSTRING_HSTRING *iface )
+{
+    return CONTAINING_RECORD( iface, struct hstring_map, IIterable_IKeyValuePair_HSTRING_HSTRING_iface );
+}
+
+static HRESULT WINAPI hstring_map_iterable_QueryInterface( IIterable_IKeyValuePair_HSTRING_HSTRING *iface, REFIID iid, void **out )
+{
+    return hstring_map_QueryInterface( &impl_from_IIterable_IKeyValuePair_HSTRING_HSTRING( iface )->IMap_HSTRING_HSTRING_iface, iid, out );
+}
+
+static ULONG WINAPI hstring_map_iterable_AddRef( IIterable_IKeyValuePair_HSTRING_HSTRING *iface )
+{
+    return hstring_map_AddRef( &impl_from_IIterable_IKeyValuePair_HSTRING_HSTRING( iface )->IMap_HSTRING_HSTRING_iface );
+}
+
+static ULONG WINAPI hstring_map_iterable_Release( IIterable_IKeyValuePair_HSTRING_HSTRING *iface )
+{
+    return hstring_map_Release( &impl_from_IIterable_IKeyValuePair_HSTRING_HSTRING( iface )->IMap_HSTRING_HSTRING_iface );
+}
+
+static HRESULT WINAPI hstring_map_iterable_GetIids( IIterable_IKeyValuePair_HSTRING_HSTRING *iface, ULONG *iid_count, IID **iids )
+{
+    return hstring_map_GetIids( &impl_from_IIterable_IKeyValuePair_HSTRING_HSTRING( iface )->IMap_HSTRING_HSTRING_iface, iid_count, iids );
+}
+
+static HRESULT WINAPI hstring_map_iterable_GetRuntimeClassName( IIterable_IKeyValuePair_HSTRING_HSTRING *iface, HSTRING *class_name )
+{
+    return hstring_map_GetRuntimeClassName( &impl_from_IIterable_IKeyValuePair_HSTRING_HSTRING( iface )->IMap_HSTRING_HSTRING_iface, class_name );
+}
+
+static HRESULT WINAPI hstring_map_iterable_GetTrustLevel( IIterable_IKeyValuePair_HSTRING_HSTRING *iface, TrustLevel *trust_level )
+{
+    return hstring_map_GetTrustLevel( &impl_from_IIterable_IKeyValuePair_HSTRING_HSTRING( iface )->IMap_HSTRING_HSTRING_iface, trust_level );
+}
+
+static HRESULT WINAPI hstring_map_iterable_First( IIterable_IKeyValuePair_HSTRING_HSTRING *iface,
+                                                  IIterator_IKeyValuePair_HSTRING_HSTRING **value )
+{
+    struct hstring_map *map = impl_from_IIterable_IKeyValuePair_HSTRING_HSTRING( iface );
+    struct hstring_iterator *impl;
+    HRESULT hr;
+    UINT32 i;
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    *value = NULL;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IIterator_IKeyValuePair_HSTRING_HSTRING_iface.lpVtbl = &hstring_iterator_vtbl;
+    impl->ref = 1;
+    if (map->count && !(impl->pairs = calloc( map->count, sizeof(*impl->pairs) )))
+    {
+        free( impl );
+        return E_OUTOFMEMORY;
+    }
+    for (i = 0; i < map->count; i++)
+    {
+        if (FAILED(hr = hstring_pair_create( map->entries[i].key, map->entries[i].value, &impl->pairs[i] )))
+        {
+            hstring_iterator_Release( &impl->IIterator_IKeyValuePair_HSTRING_HSTRING_iface );
+            return hr;
+        }
+        impl->count++;
+    }
+    *value = &impl->IIterator_IKeyValuePair_HSTRING_HSTRING_iface;
+    return S_OK;
+}
+
+static const struct IIterable_IKeyValuePair_HSTRING_HSTRINGVtbl hstring_map_iterable_vtbl =
+{
+    hstring_map_iterable_QueryInterface,
+    hstring_map_iterable_AddRef,
+    hstring_map_iterable_Release,
+    hstring_map_iterable_GetIids,
+    hstring_map_iterable_GetRuntimeClassName,
+    hstring_map_iterable_GetTrustLevel,
+    hstring_map_iterable_First,
+};
+
 /* the pairs of a map made by map_hstring_create, one line each (the diagnostic provider's request trace) */
 void map_hstring_dump( IMap_HSTRING_HSTRING *iface, const char *prefix )
 {
@@ -287,6 +618,7 @@ HRESULT map_hstring_create( IMap_HSTRING_HSTRING **out )
     *out = NULL;
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IMap_HSTRING_HSTRING_iface.lpVtbl = &hstring_map_vtbl;
+    impl->IIterable_IKeyValuePair_HSTRING_HSTRING_iface.lpVtbl = &hstring_map_iterable_vtbl;
     impl->ref = 1;
 
     *out = &impl->IMap_HSTRING_HSTRING_iface;
