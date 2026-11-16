@@ -1218,6 +1218,16 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
         *factory = calendar_factory_iface;
         IUnknown_AddRef(*factory);
     }
+    else if (!wcscmp(name, RuntimeClass_Windows_Globalization_CalendarIdentifiers))
+    {
+        *factory = calendar_identifiers_factory;
+        IUnknown_AddRef(*factory);
+    }
+    else if (!wcscmp(name, RuntimeClass_Windows_Globalization_ClockIdentifiers))
+    {
+        *factory = clock_identifiers_factory;
+        IUnknown_AddRef(*factory);
+    }
     else if (!wcscmp(name, L"Windows.Globalization.NumberFormatting.DecimalFormatter"))
     {
         *factory = decimal_formatter_factory;

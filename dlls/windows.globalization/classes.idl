@@ -46,4 +46,6 @@ namespace Windows.Globalization {
     runtimeclass GeographicRegion;
     runtimeclass ApplicationLanguages;
     runtimeclass Calendar;
+    runtimeclass CalendarIdentifiers;
+    runtimeclass ClockIdentifiers;
 }

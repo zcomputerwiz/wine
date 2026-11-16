@@ -1426,6 +1426,100 @@ static void test_LanguageFontGroup(void)
     IActivationFactory_Release( activation );
 }
 
+#define check_identifier( hr, str, expect ) check_identifier_( __LINE__, hr, str, expect )
+static void check_identifier_( unsigned int line, HRESULT hr, HSTRING str, const WCHAR *expect )
+{
+    ok_(__FILE__, line)( hr == S_OK, "got hr %#lx.\n", hr );
+    if (hr != S_OK) return;
+    ok_(__FILE__, line)( !wcscmp( WindowsGetStringRawBuffer( str, NULL ), expect ), "got %s, expected %s.\n",
+                         debugstr_hstring( str ), debugstr_w( expect ) );
+    WindowsDeleteString( str );
+}
+
+static IActivationFactory *identifier_factory( const WCHAR *class_name )
+{
+    IActivationFactory *factory;
+    IInspectable *instance;
+    HSTRING str;
+    HRESULT hr;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (hr != S_OK) return NULL;
+    instance = (void *)0xdeadbeef;
+    hr = IActivationFactory_ActivateInstance( factory, &instance );
+    ok( hr == E_NOTIMPL, "got hr %#lx.\n", hr );
+    return factory;
+}
+
+static void test_CalendarIdentifiers(void)
+{
+    ICalendarIdentifiersStatics3 *statics3;
+    ICalendarIdentifiersStatics2 *statics2;
+    ICalendarIdentifiersStatics *statics;
+    IClockIdentifiersStatics *clock;
+    IActivationFactory *factory;
+    HSTRING str;
+    HRESULT hr;
+
+    if (!(factory = identifier_factory( RuntimeClass_Windows_Globalization_CalendarIdentifiers ))) return;
+    hr = IActivationFactory_QueryInterface( factory, &IID_ICalendarIdentifiersStatics, (void **)&statics );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ICalendarIdentifiersStatics_get_Gregorian( statics, &str );
+    check_identifier( hr, str, L"GregorianCalendar" );
+    hr = ICalendarIdentifiersStatics_get_Hebrew( statics, &str );
+    check_identifier( hr, str, L"HebrewCalendar" );
+    hr = ICalendarIdentifiersStatics_get_Hijri( statics, &str );
+    check_identifier( hr, str, L"HijriCalendar" );
+    hr = ICalendarIdentifiersStatics_get_Japanese( statics, &str );
+    check_identifier( hr, str, L"JapaneseCalendar" );
+    hr = ICalendarIdentifiersStatics_get_Julian( statics, &str );
+    check_identifier( hr, str, L"JulianCalendar" );
+    hr = ICalendarIdentifiersStatics_get_Korean( statics, &str );
+    check_identifier( hr, str, L"KoreanCalendar" );
+    hr = ICalendarIdentifiersStatics_get_Taiwan( statics, &str );
+    check_identifier( hr, str, L"TaiwanCalendar" );
+    hr = ICalendarIdentifiersStatics_get_Thai( statics, &str );
+    check_identifier( hr, str, L"ThaiCalendar" );
+    hr = ICalendarIdentifiersStatics_get_UmAlQura( statics, &str );
+    check_identifier( hr, str, L"UmAlQuraCalendar" );
+    ICalendarIdentifiersStatics_Release( statics );
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_ICalendarIdentifiersStatics2, (void **)&statics2 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ICalendarIdentifiersStatics2_get_Persian( statics2, &str );
+    check_identifier( hr, str, L"PersianCalendar" );
+    ICalendarIdentifiersStatics2_Release( statics2 );
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_ICalendarIdentifiersStatics3, (void **)&statics3 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ICalendarIdentifiersStatics3_get_ChineseLunar( statics3, &str );
+    check_identifier( hr, str, L"ChineseLunarCalendar" );
+    hr = ICalendarIdentifiersStatics3_get_JapaneseLunar( statics3, &str );
+    check_identifier( hr, str, L"JapaneseLunarCalendar" );
+    hr = ICalendarIdentifiersStatics3_get_KoreanLunar( statics3, &str );
+    check_identifier( hr, str, L"KoreanLunarCalendar" );
+    hr = ICalendarIdentifiersStatics3_get_TaiwanLunar( statics3, &str );
+    check_identifier( hr, str, L"TaiwanLunarCalendar" );
+    hr = ICalendarIdentifiersStatics3_get_VietnameseLunar( statics3, &str );
+    check_identifier( hr, str, L"VietnameseLunarCalendar" );
+    ICalendarIdentifiersStatics3_Release( statics3 );
+    IActivationFactory_Release( factory );
+
+    if (!(factory = identifier_factory( RuntimeClass_Windows_Globalization_ClockIdentifiers ))) return;
+    hr = IActivationFactory_QueryInterface( factory, &IID_IClockIdentifiersStatics, (void **)&clock );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IClockIdentifiersStatics_get_TwelveHour( clock, &str );
+    check_identifier( hr, str, L"12HourClock" );
+    hr = IClockIdentifiersStatics_get_TwentyFourHour( clock, &str );
+    check_identifier( hr, str, L"24HourClock" );
+    IClockIdentifiersStatics_Release( clock );
+    IActivationFactory_Release( factory );
+}
+
 START_TEST(globalization)
 {
     HMODULE kernel32;
@@ -1445,6 +1539,7 @@ START_TEST(globalization)
     test_LanguageFontGroup();
     test_LanguageStatics();
     test_DecimalFormatter();
+    test_CalendarIdentifiers();
 
     RoUninitialize();
 }

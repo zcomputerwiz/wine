@@ -6,5 +6,6 @@ SOURCES = \
 	classes.idl \
 	font_group.c \
 	geographic_region.c \
+	identifiers.c \
 	main.c \
 	number_formatter.c
