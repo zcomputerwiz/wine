@@ -110,14 +110,27 @@ static HRESULT request_token( const char *method, IInspectable *request, WebToke
                               REFIID riid, void **out )
 {
     IVectorView_WebTokenResponse *response_data;
-    IWebProviderError *response_error;
+    IWebProviderError *response_error = NULL;
     IWebTokenRequestResult *result;
     HSTRING message;
+    DWORD mode;
     HRESULT hr;
 
-    if (!diagnostic_provider_enabled()) return request_token_not_available( riid, out );
+    if (!(mode = diagnostic_provider_mode())) return request_token_not_available( riid, out );
 
     diagnostic_dump_request( method, request );
+    if (mode == 2)
+    {
+        /* the status alone, as a provider that has no account to offer */
+        FIXME( "diagnostic: status %d, no provider error.\n", status );
+        if (FAILED(hr = vector_view_webtokenresponse_create_empty( &response_data ))) return hr;
+        hr = webtokenrequestresult_create( status, response_data, NULL, &result );
+        IVectorView_WebTokenResponse_Release( response_data );
+        if (FAILED(hr)) return hr;
+        hr = create_completed_operation_riid( &IID_IAsyncOperation_WebTokenRequestResult, (IInspectable *)result, riid, out );
+        IWebTokenRequestResult_Release( result );
+        return hr;
+    }
     if (FAILED(hr = WindowsCreateString( L"Wine's diagnostic provider gives no token.",
                                          ARRAY_SIZE(L"Wine's diagnostic provider gives no token.") - 1, &message )))
         return hr;
