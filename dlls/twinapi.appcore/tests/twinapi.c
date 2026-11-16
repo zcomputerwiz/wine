@@ -465,6 +465,73 @@ done:
     IUser_Release( user );
 }
 
+static void test_MemoryManager(void)
+{
+    UINT64 usage = 0, limit = 0, expected = 0;
+    IMemoryManagerStatics2 *statics2;
+    IMemoryManagerStatics3 *statics3;
+    IMemoryManagerStatics4 *statics4;
+    IMemoryManagerStatics *statics;
+    IProcessMemoryReport *process;
+    IAppMemoryReport *app;
+    AppMemoryUsageLevel level = 0x55;
+    boolean done = 2;
+    HRESULT hr;
+
+    UINT64 private_usage = 0, peak = 0, total = 0, total_limit = 0, working = 0, private_working = 0;
+
+    /* a process without a resource policy: its commit charge against the system's commit limit */
+    if (!(statics = get_statics( L"Windows.System.MemoryManager", &IID_IMemoryManagerStatics ))) return;
+    hr = IMemoryManagerStatics_get_AppMemoryUsage( statics, &usage );
+    ok( hr == S_OK && usage, "got hr %#lx, usage %I64u.\n", hr, usage );
+    hr = IMemoryManagerStatics_get_AppMemoryUsageLimit( statics, &limit );
+    ok( hr == S_OK && limit > usage, "got hr %#lx, limit %I64u.\n", hr, limit );
+    /* a usage level only for a packaged process */
+    hr = IMemoryManagerStatics_get_AppMemoryUsageLevel( statics, &level );
+    ok( hr == HRESULT_FROM_NT( 0xc0000225 /* STATUS_NOT_FOUND */ ), "got hr %#lx, level %d.\n", hr, level );
+    IMemoryManagerStatics_Release( statics );
+
+    if (!(statics2 = get_statics( L"Windows.System.MemoryManager", &IID_IMemoryManagerStatics2 ))) return;
+    hr = IMemoryManagerStatics2_GetAppMemoryReport( statics2, &app );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED(hr))
+    {
+        IAppMemoryReport_get_PrivateCommitUsage( app, &private_usage );
+        IAppMemoryReport_get_PeakPrivateCommitUsage( app, &peak );
+        IAppMemoryReport_get_TotalCommitUsage( app, &total );
+        IAppMemoryReport_get_TotalCommitLimit( app, &total_limit );
+        ok( private_usage && private_usage <= peak && private_usage <= total, "got private %I64u, peak %I64u, total %I64u.\n",
+            private_usage, peak, total );
+        ok( total_limit == limit, "got limit %I64u, expected %I64u.\n", total_limit, limit );
+        IAppMemoryReport_Release( app );
+    }
+    hr = IMemoryManagerStatics2_GetProcessMemoryReport( statics2, &process );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED(hr))
+    {
+        IProcessMemoryReport_get_PrivateWorkingSetUsage( process, &private_working );
+        IProcessMemoryReport_get_TotalWorkingSetUsage( process, &working );
+        ok( private_working && private_working <= working, "got private %I64u, total %I64u.\n", private_working, working );
+        IProcessMemoryReport_Release( process );
+    }
+    IMemoryManagerStatics2_Release( statics2 );
+
+    /* the limit cannot be set, and none is expected */
+    if ((statics3 = get_statics( L"Windows.System.MemoryManager", &IID_IMemoryManagerStatics3 )))
+    {
+        hr = IMemoryManagerStatics3_TrySetAppMemoryUsageLimit( statics3, 1024 * 1024 * 1024, &done );
+        ok( hr == S_OK && !done, "got hr %#lx, result %d.\n", hr, done );
+        IMemoryManagerStatics3_Release( statics3 );
+    }
+    if ((statics4 = get_statics( L"Windows.System.MemoryManager", &IID_IMemoryManagerStatics4 )))
+    {
+        expected = 0xdeadbeef;
+        hr = IMemoryManagerStatics4_get_ExpectedAppMemoryUsageLimit( statics4, &expected );
+        ok( hr == S_OK && !expected, "got hr %#lx, limit %I64u.\n", hr, expected );
+        IMemoryManagerStatics4_Release( statics4 );
+    }
+}
+
 START_TEST(twinapi)
 {
     HRESULT hr;
@@ -479,6 +546,7 @@ START_TEST(twinapi)
     test_CoreApplication();
     test_DataTransferManager();
     test_User();
+    test_MemoryManager();
 
     RoUninitialize();
 }

@@ -45,6 +45,7 @@ namespace Windows.System
     typedef enum UserPictureSize UserPictureSize;
     typedef enum UserType UserType;
     typedef enum UserWatcherStatus UserWatcherStatus;
+    typedef enum AppMemoryUsageLevel AppMemoryUsageLevel;
     typedef enum VirtualKey VirtualKey;
     typedef enum VirtualKeyModifiers VirtualKeyModifiers;
 
@@ -63,6 +64,14 @@ namespace Windows.System
     interface IUserChangedEventArgs;
     interface IUserChangedEventArgs2;
     interface IUserWatcher;
+    interface IAppMemoryReport;
+    interface IAppMemoryReport2;
+    interface IAppMemoryUsageLimitChangingEventArgs;
+    interface IMemoryManagerStatics;
+    interface IMemoryManagerStatics2;
+    interface IMemoryManagerStatics3;
+    interface IMemoryManagerStatics4;
+    interface IProcessMemoryReport;
 
     runtimeclass DispatcherQueue;
     runtimeclass DispatcherQueueController;
@@ -73,6 +82,10 @@ namespace Windows.System
     runtimeclass UserAuthenticationStatusChangingEventArgs;
     runtimeclass UserChangedEventArgs;
     runtimeclass UserWatcher;
+    runtimeclass AppMemoryReport;
+    runtimeclass AppMemoryUsageLimitChangingEventArgs;
+    runtimeclass MemoryManager;
+    runtimeclass ProcessMemoryReport;
 
     declare
     {
@@ -84,6 +97,7 @@ namespace Windows.System
         interface Windows.Foundation.TypedEventHandler<Windows.System.UserWatcher *, IInspectable *>;
         interface Windows.Foundation.TypedEventHandler<Windows.System.UserWatcher *, Windows.System.UserAuthenticationStatusChangingEventArgs *>;
         interface Windows.Foundation.TypedEventHandler<Windows.System.UserWatcher *, Windows.System.UserChangedEventArgs *>;
+        interface Windows.Foundation.EventHandler<Windows.System.AppMemoryUsageLimitChangingEventArgs *>;
         interface Windows.Foundation.AsyncOperationCompletedHandler<Windows.Foundation.Collections.IPropertySet *>;
         interface Windows.Foundation.AsyncOperationCompletedHandler<Windows.Storage.Streams.IRandomAccessStreamReference *>;
         interface Windows.Foundation.IAsyncOperation<Windows.Foundation.Collections.IPropertySet *>;
@@ -138,6 +152,18 @@ namespace Windows.System
         Size208x208   = 1,
         Size424x424   = 2,
         Size1080x1080 = 3,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum AppMemoryUsageLevel
+    {
+        Low       = 0,
+        Medium    = 1,
+        High      = 2,
+        [contract(Windows.Foundation.UniversalApiContract, 3.0)]
+        OverLimit = 3,
     };
 
     [
@@ -593,6 +619,143 @@ namespace Windows.System
     interface IUserStatics2 : IInspectable
     {
         HRESULT GetDefault([out, retval] Windows.System.User **result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.System.AppMemoryReport),
+        uuid(6d65339b-4d6f-45bc-9c5e-e49b3ff2758d)
+    ]
+    interface IAppMemoryReport : IInspectable
+    {
+        [propget] HRESULT PrivateCommitUsage([out, retval] UINT64 *value);
+        [propget] HRESULT PeakPrivateCommitUsage([out, retval] UINT64 *value);
+        [propget] HRESULT TotalCommitUsage([out, retval] UINT64 *value);
+        [propget] HRESULT TotalCommitLimit([out, retval] UINT64 *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        exclusiveto(Windows.System.AppMemoryReport),
+        uuid(5f7f3738-51b7-42dc-b7ed-79ba46d28857)
+    ]
+    interface IAppMemoryReport2 : IInspectable
+    {
+        [propget] HRESULT ExpectedTotalCommitLimit([out, retval] UINT64 *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.System.AppMemoryUsageLimitChangingEventArgs),
+        uuid(79f86664-feca-4da5-9e40-2bc63efdc979)
+    ]
+    interface IAppMemoryUsageLimitChangingEventArgs : IInspectable
+    {
+        [propget] HRESULT OldLimit([out, retval] UINT64 *value);
+        [propget] HRESULT NewLimit([out, retval] UINT64 *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.System.ProcessMemoryReport),
+        uuid(087305a8-9b70-4782-8741-3a982b6ce5e4)
+    ]
+    interface IProcessMemoryReport : IInspectable
+    {
+        [propget] HRESULT PrivateWorkingSetUsage([out, retval] UINT64 *value);
+        [propget] HRESULT TotalWorkingSetUsage([out, retval] UINT64 *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.System.MemoryManager),
+        uuid(5c6c279c-d7ca-4779-9188-4057219ce64c)
+    ]
+    interface IMemoryManagerStatics : IInspectable
+    {
+        [propget] HRESULT AppMemoryUsage([out, retval] UINT64 *value);
+        [propget] HRESULT AppMemoryUsageLimit([out, retval] UINT64 *value);
+        [propget] HRESULT AppMemoryUsageLevel([out, retval] Windows.System.AppMemoryUsageLevel *value);
+        [eventadd] HRESULT AppMemoryUsageIncreased([in] Windows.Foundation.EventHandler<IInspectable *> *handler,
+                                                   [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT AppMemoryUsageIncreased([in] EventRegistrationToken token);
+        [eventadd] HRESULT AppMemoryUsageDecreased([in] Windows.Foundation.EventHandler<IInspectable *> *handler,
+                                                   [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT AppMemoryUsageDecreased([in] EventRegistrationToken token);
+        [eventadd] HRESULT AppMemoryUsageLimitChanging([in] Windows.Foundation.EventHandler<Windows.System.AppMemoryUsageLimitChangingEventArgs *> *handler,
+                                                       [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT AppMemoryUsageLimitChanging([in] EventRegistrationToken token);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.System.MemoryManager),
+        uuid(6eee351f-6d62-423f-9479-b01f9c9f7669)
+    ]
+    interface IMemoryManagerStatics2 : IInspectable
+    {
+        HRESULT GetAppMemoryReport([out, retval] Windows.System.AppMemoryReport **report);
+        HRESULT GetProcessMemoryReport([out, retval] Windows.System.ProcessMemoryReport **report);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 2.0),
+        exclusiveto(Windows.System.MemoryManager),
+        uuid(149b59ce-92ad-4e35-89eb-50dfb4c0d91c)
+    ]
+    interface IMemoryManagerStatics3 : IInspectable
+    {
+        HRESULT TrySetAppMemoryUsageLimit([in] UINT64 value, [out, retval] boolean *result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        exclusiveto(Windows.System.MemoryManager),
+        uuid(c5a94828-e84e-4886-8a0d-44b3190e3b72)
+    ]
+    interface IMemoryManagerStatics4 : IInspectable
+    {
+        [propget] HRESULT ExpectedAppMemoryUsageLimit([out, retval] UINT64 *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass AppMemoryReport
+    {
+        [default] interface Windows.System.IAppMemoryReport;
+        [contract(Windows.Foundation.UniversalApiContract, 5.0)] interface Windows.System.IAppMemoryReport2;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass AppMemoryUsageLimitChangingEventArgs
+    {
+        [default] interface Windows.System.IAppMemoryUsageLimitChangingEventArgs;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass ProcessMemoryReport
+    {
+        [default] interface Windows.System.IProcessMemoryReport;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.System.IMemoryManagerStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        static(Windows.System.IMemoryManagerStatics2, Windows.Foundation.UniversalApiContract, 1.0),
+        static(Windows.System.IMemoryManagerStatics3, Windows.Foundation.UniversalApiContract, 2.0),
+        static(Windows.System.IMemoryManagerStatics4, Windows.Foundation.UniversalApiContract, 5.0)
+    ]
+    runtimeclass MemoryManager
+    {
     }
 
     [

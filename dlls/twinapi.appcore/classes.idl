@@ -40,6 +40,7 @@ namespace Windows.Management.Policies {
     runtimeclass NamedPolicy;
 }
 namespace Windows.System {
+    runtimeclass MemoryManager;
     runtimeclass User;
 }
 namespace Windows.ApplicationModel.UserActivities {
