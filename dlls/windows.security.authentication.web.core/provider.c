@@ -20,8 +20,8 @@
 /* Wine has no account provider. With HKCU\Software\Wine\WebAuthentication "DiagnosticProvider" (REG_DWORD 1),
  * FindAccountProvider* answers with a provider object for the id and authority asked for, and a token request
  * that names it is written to the log (client id, scope, prompt type, provider, properties) and finishes with
- * ProviderError (value 2: the same, with no WebProviderError in the result). It shows what a program asks a broker
- * for; it never gives a token. Off by default: programs that
+ * ProviderError; a silent request finishes with UserInteractionRequired and the error Windows gives for it. It shows
+ * what a program asks a broker for; it never gives a token. Off by default: programs that
  * fall back to their own browser sign-in when there is no provider would otherwise stop at the error. */
 
 #include "private.h"
@@ -30,24 +30,63 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(webcore);
 
-/* the switch's value: 0 off; 1 on; 2 on, and failed token requests carry no WebProviderError. Read at each call:
- * these calls are rare, and the switch can then be changed without a restart */
-DWORD diagnostic_provider_mode( void )
+/* read at each call: these calls are rare, and the switch can then be turned on and off without a restart */
+BOOL diagnostic_provider_enabled( void )
 {
     static LONG reported;
     DWORD value = 0, size = sizeof(value);
 
     if (RegGetValueW( HKEY_CURRENT_USER, L"Software\\Wine\\WebAuthentication", L"DiagnosticProvider",
-                      RRF_RT_REG_DWORD, NULL, &value, &size ) || (value != 1 && value != 2))
-        return 0;
+                      RRF_RT_REG_DWORD, NULL, &value, &size ) || value != 1)
+        return FALSE;
     if (!InterlockedExchange( &reported, 1 ))
-        FIXME( "the diagnostic account provider is on (mode %lu): token requests are logged and fail.\n", value );
-    return value;
+        FIXME( "the diagnostic account provider is on: token requests are logged and fail.\n" );
+    return TRUE;
 }
 
-BOOL diagnostic_provider_enabled( void )
+/* the error of a silent request that needs the user, as Windows 11's Microsoft account provider gives it (checked
+ * with a client id that is not registered): 0x80860006 "Error" for the consumers authority, 0xcaa10001 "Need user
+ * interaction to continue." for organizations. Programs read it without a check for NULL. */
+void diagnostic_interaction_error( IInspectable *request, UINT32 *code, const WCHAR **message )
 {
-    return diagnostic_provider_mode() != 0;
+    IWebAccountProvider *provider = NULL;
+    IWebAccountProvider2 *provider2;
+    IWebTokenRequest *token_request;
+    HSTRING authority = NULL;
+    INT32 cmp = 1;
+
+    if (request && SUCCEEDED(IInspectable_QueryInterface( request, &IID_IWebTokenRequest, (void **)&token_request )))
+    {
+        if (SUCCEEDED(IWebTokenRequest_get_WebAccountProvider( token_request, &provider )) && provider)
+        {
+            if (SUCCEEDED(IWebAccountProvider_QueryInterface( provider, &IID_IWebAccountProvider2, (void **)&provider2 )))
+            {
+                if (SUCCEEDED(IWebAccountProvider2_get_Authority( provider2, &authority )))
+                {
+                    HSTRING consumers;
+                    if (SUCCEEDED(WindowsCreateString( L"consumers", 9, &consumers )))
+                    {
+                        WindowsCompareStringOrdinal( authority, consumers, &cmp );
+                        WindowsDeleteString( consumers );
+                    }
+                    WindowsDeleteString( authority );
+                }
+                IWebAccountProvider2_Release( provider2 );
+            }
+            IWebAccountProvider_Release( provider );
+        }
+        IWebTokenRequest_Release( token_request );
+    }
+    if (!cmp)
+    {
+        *code = 0x80860006;
+        *message = L"Error";
+    }
+    else
+    {
+        *code = 0xcaa10001;
+        *message = L"Need user interaction to continue.";
+    }
 }
 
 struct provider

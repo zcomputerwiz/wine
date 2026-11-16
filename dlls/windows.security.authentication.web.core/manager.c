@@ -109,37 +109,28 @@ static HRESULT request_token_not_available( REFIID riid, void **out )
 static HRESULT request_token( const char *method, IInspectable *request, WebTokenRequestStatus status,
                               REFIID riid, void **out )
 {
+    const WCHAR *text = L"Wine's diagnostic provider gives no token.";
     IVectorView_WebTokenResponse *response_data;
     IWebProviderError *response_error = NULL;
     IWebTokenRequestResult *result;
+    UINT32 code = E_NOTIMPL;
     HSTRING message;
-    DWORD mode;
     HRESULT hr;
 
-    if (!(mode = diagnostic_provider_mode())) return request_token_not_available( riid, out );
+    if (!diagnostic_provider_enabled()) return request_token_not_available( riid, out );
 
     diagnostic_dump_request( method, request );
-    if (mode == 2)
-    {
-        /* the status alone, as a provider that has no account to offer */
-        FIXME( "diagnostic: status %d, no provider error.\n", status );
-        if (FAILED(hr = vector_view_webtokenresponse_create_empty( &response_data ))) return hr;
-        hr = webtokenrequestresult_create( status, response_data, NULL, &result );
-        IVectorView_WebTokenResponse_Release( response_data );
-        if (FAILED(hr)) return hr;
-        hr = create_completed_operation_riid( &IID_IAsyncOperation_WebTokenRequestResult, (IInspectable *)result, riid, out );
-        IWebTokenRequestResult_Release( result );
-        return hr;
-    }
-    if (FAILED(hr = WindowsCreateString( L"Wine's diagnostic provider gives no token.",
-                                         ARRAY_SIZE(L"Wine's diagnostic provider gives no token.") - 1, &message )))
+    /* the answer Windows gives a silent request that needs the user; programs read its error without a NULL check */
+    if (status == WebTokenRequestStatus_UserInteractionRequired) diagnostic_interaction_error( request, &code, &text );
+    FIXME( "diagnostic: status %d, error %#x %s.\n", status, code, debugstr_w( text ) );
+    if (FAILED(hr = WindowsCreateString( text, wcslen( text ), &message )))
         return hr;
     if (FAILED(hr = vector_view_webtokenresponse_create_empty( &response_data )))
     {
         WindowsDeleteString( message );
         return hr;
     }
-    hr = webprovidererror_create( E_NOTIMPL, message, &response_error );
+    hr = webprovidererror_create( code, message, &response_error );
     WindowsDeleteString( message );
     if (FAILED(hr))
     {

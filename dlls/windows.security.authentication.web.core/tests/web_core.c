@@ -255,18 +255,28 @@ static void test_manager(void)
     IWebAuthenticationCoreManagerStatics_Release( statics );
 }
 
+static UINT32 last_error_code;
+
+/* the result's status; its provider error's code in last_error_code (0xdead when there is none) */
 static WebTokenRequestStatus request_status( IAsyncOperation_WebTokenRequestResult *op )
 {
     WebTokenRequestStatus status = 0xdead;
     IWebTokenRequestResult *result;
+    IWebProviderError *error;
     HRESULT hr;
 
+    last_error_code = 0xdead;
     wait_async( op );
     hr = IAsyncOperation_WebTokenRequestResult_GetResults( op, &result );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
     if (SUCCEEDED(hr))
     {
         IWebTokenRequestResult_get_ResponseStatus( result, &status );
+        if (SUCCEEDED(IWebTokenRequestResult_get_ResponseError( result, &error )) && error)
+        {
+            IWebProviderError_get_ErrorCode( error, &last_error_code );
+            IWebProviderError_Release( error );
+        }
         IWebTokenRequestResult_Release( result );
     }
     IAsyncOperation_WebTokenRequestResult_Release( op );
@@ -348,6 +358,8 @@ static void test_diagnostic_provider(void)
         hr = IWebAuthenticationCoreManagerStatics_GetTokenSilentlyAsync( statics, request, &result_op );
         ok( hr == S_OK, "got hr %#lx.\n", hr );
         ok( request_status( result_op ) == WebTokenRequestStatus_UserInteractionRequired, "wrong silent status.\n" );
+        /* Windows 11's Microsoft account provider, consumers authority (its error is always there) */
+        ok( last_error_code == 0x80860006, "got error %#x.\n", last_error_code );
         hr = IWebAuthenticationCoreManagerStatics_RequestTokenAsync( statics, request, &result_op );
         ok( hr == S_OK, "got hr %#lx.\n", hr );
         ok( request_status( result_op ) == WebTokenRequestStatus_ProviderError, "wrong interactive status.\n" );
