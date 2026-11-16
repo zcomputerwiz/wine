@@ -910,21 +910,28 @@ static void create_computer_name_keys(void)
     RegCloseKey( key );
 }
 
-/* WineExplorer: the domain of the process token's user (LookupAccountSidW) */
+/* WineExplorer: the domain of the process token's user (LookupAccountSidW), for an account of an account domain
+ * (S-1-5-21-...) only: SYSTEM, LocalService and NetworkService keep the computer name, never "NT AUTHORITY" */
 static BOOL get_user_domain( WCHAR *domain, DWORD len )
 {
+    static const SID_IDENTIFIER_AUTHORITY nt_authority = { SECURITY_NT_AUTHORITY };
     BYTE buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
     WCHAR name[256];
     DWORD size, name_len = ARRAY_SIZE(name);
     SID_NAME_USE use;
     HANDLE token;
+    PSID sid;
     BOOL ret;
 
     if (!OpenProcessToken( GetCurrentProcess(), TOKEN_QUERY, &token )) return FALSE;
     ret = GetTokenInformation( token, TokenUser, buffer, sizeof(buffer), &size );
     CloseHandle( token );
-    return ret && LookupAccountSidW( NULL, ((TOKEN_USER *)buffer)->User.Sid, name, &name_len, domain, &len, &use ) &&
-           domain[0];
+    if (!ret) return FALSE;
+    sid = ((TOKEN_USER *)buffer)->User.Sid;
+    if (memcmp( GetSidIdentifierAuthority( sid ), &nt_authority, sizeof(nt_authority) ) ||
+        !*GetSidSubAuthorityCount( sid ) || *GetSidSubAuthority( sid, 0 ) != SECURITY_NT_NON_UNIQUE)
+        return FALSE;
+    return LookupAccountSidW( NULL, sid, name, &name_len, domain, &len, &use ) && domain[0];
 }
 
 static void create_volatile_environment_registry_key(void)
