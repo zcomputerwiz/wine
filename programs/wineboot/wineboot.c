@@ -910,6 +910,23 @@ static void create_computer_name_keys(void)
     RegCloseKey( key );
 }
 
+/* WineExplorer: the domain of the process token's user (LookupAccountSidW) */
+static BOOL get_user_domain( WCHAR *domain, DWORD len )
+{
+    BYTE buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    WCHAR name[256];
+    DWORD size, name_len = ARRAY_SIZE(name);
+    SID_NAME_USE use;
+    HANDLE token;
+    BOOL ret;
+
+    if (!OpenProcessToken( GetCurrentProcess(), TOKEN_QUERY, &token )) return FALSE;
+    ret = GetTokenInformation( token, TokenUser, buffer, sizeof(buffer), &size );
+    CloseHandle( token );
+    return ret && LookupAccountSidW( NULL, ((TOKEN_USER *)buffer)->User.Sid, name, &name_len, domain, &len, &use ) &&
+           domain[0];
+}
+
 static void create_volatile_environment_registry_key(void)
 {
     WCHAR path[MAX_PATH];
@@ -950,7 +967,11 @@ static void create_volatile_environment_registry_key(void)
     size = ARRAY_SIZE(computername) - 2;
     if (GetComputerNameW(&computername[2], &size))
     {
-        set_reg_value( hkey, L"USERDOMAIN", &computername[2] );
+        /* WineExplorer: the user's domain as LookupAccountSidW names it, the joined domain's flat name for a domain
+         * account (docs/DOMAIN_LOGON.md), else this computer */
+        WCHAR domain[256];
+        if (get_user_domain( domain, ARRAY_SIZE(domain) )) set_reg_value( hkey, L"USERDOMAIN", domain );
+        else set_reg_value( hkey, L"USERDOMAIN", &computername[2] );
         computername[0] = computername[1] = '\\';
         set_reg_value( hkey, L"LOGONSERVER", computername );
     }
