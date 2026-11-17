@@ -852,15 +852,20 @@ static void create_safeboot_option_key(void)
     else if (!strcmp( buffer, "safecmd" )) option = alternate_shell = 1;
     safeboot_option = option;
 
-    if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, safeboot_keyW, 0, KEY_ALL_ACCESS, &key ))
+    /* SafeBoot itself is the machine's (session 0 holds it where there is one): only read access is asked for. Option
+     * is a key of each session (wine/wex_session0.h) and is created or deleted by its full path, so that it goes to
+     * this session's server; write access to SafeBoot is not needed for it. */
+    if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, safeboot_keyW, 0, KEY_READ, &key ))
     {
         /* a volatile parent would refuse the lists wine.inf adds under SafeBoot */
-        if (!option || RegCreateKeyExW( HKEY_LOCAL_MACHINE, safeboot_keyW, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &key, NULL ))
+        if (!option || RegCreateKeyExW( HKEY_LOCAL_MACHINE, safeboot_keyW, 0, NULL, 0, KEY_READ, NULL, &key, NULL ))
             return;
     }
+    RegCloseKey( key );
     if (!option)
-        RegDeleteKeyW( key, L"Option" );
-    else if (!RegCreateKeyExW( key, L"Option", 0, NULL, REG_OPTION_VOLATILE, KEY_ALL_ACCESS, NULL, &option_key, NULL ))
+        RegDeleteKeyW( HKEY_LOCAL_MACHINE, L"System\\CurrentControlSet\\Control\\SafeBoot\\Option" );
+    else if (!RegCreateKeyExW( HKEY_LOCAL_MACHINE, L"System\\CurrentControlSet\\Control\\SafeBoot\\Option", 0, NULL,
+                               REG_OPTION_VOLATILE, KEY_SET_VALUE, NULL, &option_key, NULL ))
     {
         RegSetValueExW( option_key, L"OptionValue", 0, REG_DWORD, (const BYTE *)&option, sizeof(option) );
         if (alternate_shell)
@@ -868,7 +873,6 @@ static void create_safeboot_option_key(void)
                             sizeof(alternate_shell) );
         RegCloseKey( option_key );
     }
-    RegCloseKey( key );
 }
 
 /* create the ComputerName registry keys */
