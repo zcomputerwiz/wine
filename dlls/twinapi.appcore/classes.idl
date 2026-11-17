@@ -63,5 +63,9 @@ namespace Windows.ApplicationModel.Core {
     runtimeclass CoreApplication;
 }
 namespace Windows.ApplicationModel.DataTransfer {
+    runtimeclass Clipboard;
+    runtimeclass DataPackage;
     runtimeclass DataTransferManager;
+    runtimeclass HtmlFormatHelper;
+    runtimeclass StandardDataFormats;
 }

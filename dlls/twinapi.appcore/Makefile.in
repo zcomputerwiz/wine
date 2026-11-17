@@ -8,15 +8,23 @@ SOURCES = \
 	analytics_info.c \
 	application_view.c \
 	async.c \
+	async_value.c \
+	boxed_string.c \
+	clipboard.c \
 	classes.idl \
 	client_device_information.c \
 	core_application.c \
 	core_view.c \
 	data_transfer.c \
+	datapackage.c \
+	datapackage_props.c \
+	hstring_vector.c \
+	htmlformathelper.c \
 	lifecycle.c \
 	main.c \
 	memory.c \
 	policies.c \
+	standarddataformats.c \
 	title_bar.c \
 	twinapi.appcore.rc \
 	user.c \

@@ -30,6 +30,8 @@
 #include "wine/list.h"
 
 #define WIDL_using_Windows_Foundation
+#define WIDL_using_Windows_UI
+#define WIDL_using_Windows_Security_EnterpriseData
 #define WIDL_using_Windows_UI_Core
 #define WIDL_using_Windows_ApplicationModel_Activation
 #define WIDL_using_Windows_System
@@ -95,6 +97,47 @@ extern IActivationFactory *user_factory;
 extern IActivationFactory *named_policy_factory;
 extern IActivationFactory *memory_manager_factory;
 HRESULT async_bool_completed( boolean result, IAsyncOperation_boolean **out );
+
+#define create_name( str, name ) WindowsCreateString( str, ARRAY_SIZE(str) - 1, name )
+
+/* Windows.ApplicationModel.DataTransfer */
+extern IActivationFactory *clipboard_factory;
+extern IActivationFactory *data_package_factory;
+extern IActivationFactory *html_format_helper_factory;
+extern IActivationFactory *standard_data_formats_factory;
+
+/* async_value.c: operations that are done when made. The value is copied; with a failed hr the operation is in
+ * the Error state and GetResults returns hr. */
+HRESULT async_hstring_completed( HSTRING value, HRESULT hr, IAsyncOperation_HSTRING **out );
+HRESULT async_inspectable_completed( IInspectable *value, HRESULT hr, IAsyncOperation_IInspectable **out );
+HRESULT async_uri_completed( IUriRuntimeClass *value, HRESULT hr, IAsyncOperation_Uri **out );
+
+/* hstring_vector.c: a vector of strings (IVector<HSTRING>) or a read-only view of one (IVectorView<HSTRING>) */
+HRESULT hstring_vector_create( BOOL mutable, const HSTRING *items, UINT32 count, void **out );
+
+/* boxed_string.c: an IReference<HSTRING> that is also an IPropertyValue */
+HRESULT boxed_string_create( HSTRING value, IInspectable **out );
+HRESULT inspectable_get_string( IInspectable *object, HSTRING *value );
+
+/* datapackage.c: the formats of a data package, shared by the package, its views and the clipboard */
+struct data_store;
+HRESULT data_store_create( struct data_store **out );
+void data_store_addref( struct data_store *store );
+void data_store_release( struct data_store *store );
+HRESULT data_store_set_string( struct data_store *store, const WCHAR *format, const WCHAR *value );
+HRESULT data_package_view_create( struct data_store *store, IDataPackageView **out );
+
+/* datapackage_props.c: DataPackagePropertySet and its view */
+HRESULT data_props_create( IDataPackagePropertySet **out );
+HRESULT data_props_view_create( IDataPackagePropertySet *props, IDataPackagePropertySetView **out );
+
+/* the well-known format names */
+#define DATA_FORMAT_TEXT      L"Text"
+#define DATA_FORMAT_HTML      L"HTML Format"
+#define DATA_FORMAT_RTF       L"Rich Text Format"
+#define DATA_FORMAT_URI       L"UniformResourceLocatorW"
+#define DATA_FORMAT_BITMAP    L"Bitmap"
+#define DATA_FORMAT_STORAGE   L"Shell IDList Array"
 HRESULT core_title_bar_create( ICoreApplicationViewTitleBar **out );
 HRESULT view_title_bar_create( IApplicationViewTitleBar **out );
 
