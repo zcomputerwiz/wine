@@ -285,8 +285,205 @@ static void test_RunAsync(void)
     RoUninitialize();
 }
 
+struct timer_handlers
+{
+    ITimerElapsedHandler elapsed;
+    ITimerDestroyedHandler destroyed;
+    LONG refcount;
+    LONG fired;
+    LONG destroyed_count;
+    HANDLE elapsed_event;
+    HANDLE destroyed_event;
+};
+
+static struct timer_handlers *impl_from_ITimerElapsedHandler(ITimerElapsedHandler *iface)
+{
+    return CONTAINING_RECORD(iface, struct timer_handlers, elapsed);
+}
+
+static struct timer_handlers *impl_from_ITimerDestroyedHandler(ITimerDestroyedHandler *iface)
+{
+    return CONTAINING_RECORD(iface, struct timer_handlers, destroyed);
+}
+
+static HRESULT STDMETHODCALLTYPE elapsed_QueryInterface(ITimerElapsedHandler *iface, REFIID riid, void **obj)
+{
+    if (IsEqualIID(riid, &IID_ITimerElapsedHandler) || IsEqualIID(riid, &IID_IUnknown)
+            || IsEqualIID(riid, &IID_IAgileObject))
+    {
+        *obj = iface;
+        ITimerElapsedHandler_AddRef(iface);
+        return S_OK;
+    }
+    *obj = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG STDMETHODCALLTYPE elapsed_AddRef(ITimerElapsedHandler *iface)
+{
+    return InterlockedIncrement(&impl_from_ITimerElapsedHandler(iface)->refcount);
+}
+
+static ULONG STDMETHODCALLTYPE elapsed_Release(ITimerElapsedHandler *iface)
+{
+    return InterlockedDecrement(&impl_from_ITimerElapsedHandler(iface)->refcount);
+}
+
+static HRESULT STDMETHODCALLTYPE elapsed_Invoke(ITimerElapsedHandler *iface, IThreadPoolTimer *timer)
+{
+    struct timer_handlers *handlers = impl_from_ITimerElapsedHandler(iface);
+
+    ok(!!timer, "Expected a timer.\n");
+    InterlockedIncrement(&handlers->fired);
+    SetEvent(handlers->elapsed_event);
+    return S_OK;
+}
+
+static const ITimerElapsedHandlerVtbl elapsed_vtbl =
+{
+    elapsed_QueryInterface,
+    elapsed_AddRef,
+    elapsed_Release,
+    elapsed_Invoke,
+};
+
+static HRESULT STDMETHODCALLTYPE destroyed_QueryInterface(ITimerDestroyedHandler *iface, REFIID riid, void **obj)
+{
+    if (IsEqualIID(riid, &IID_ITimerDestroyedHandler) || IsEqualIID(riid, &IID_IUnknown)
+            || IsEqualIID(riid, &IID_IAgileObject))
+    {
+        *obj = iface;
+        ITimerDestroyedHandler_AddRef(iface);
+        return S_OK;
+    }
+    *obj = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG STDMETHODCALLTYPE destroyed_AddRef(ITimerDestroyedHandler *iface)
+{
+    return InterlockedIncrement(&impl_from_ITimerDestroyedHandler(iface)->refcount);
+}
+
+static ULONG STDMETHODCALLTYPE destroyed_Release(ITimerDestroyedHandler *iface)
+{
+    return InterlockedDecrement(&impl_from_ITimerDestroyedHandler(iface)->refcount);
+}
+
+static HRESULT STDMETHODCALLTYPE destroyed_Invoke(ITimerDestroyedHandler *iface, IThreadPoolTimer *timer)
+{
+    struct timer_handlers *handlers = impl_from_ITimerDestroyedHandler(iface);
+
+    InterlockedIncrement(&handlers->destroyed_count);
+    SetEvent(handlers->destroyed_event);
+    return S_OK;
+}
+
+static const ITimerDestroyedHandlerVtbl destroyed_vtbl =
+{
+    destroyed_QueryInterface,
+    destroyed_AddRef,
+    destroyed_Release,
+    destroyed_Invoke,
+};
+
+static void test_ThreadPoolTimer(void)
+{
+    static const WCHAR *timer_class_name = L"Windows.System.Threading.ThreadPoolTimer";
+    IThreadPoolTimerStatics *statics;
+    struct timer_handlers handlers = {{&elapsed_vtbl}, {&destroyed_vtbl}, 1};
+    IThreadPoolTimer *timer;
+    IActivationFactory *factory;
+    TimeSpan span, value;
+    HSTRING classid;
+    LONG fired;
+    DWORD ret;
+    HRESULT hr;
+
+    hr = RoInitialize(RO_INIT_MULTITHREADED);
+    ok(SUCCEEDED(hr), "Unexpected hr %#lx.\n", hr);
+
+    hr = WindowsCreateString(timer_class_name, wcslen(timer_class_name), &classid);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = RoGetActivationFactory(classid, &IID_IActivationFactory, (void **)&factory);
+    ok(hr == S_OK || broken(hr == REGDB_E_CLASSNOTREG), "Unexpected hr %#lx.\n", hr);
+    if (hr == REGDB_E_CLASSNOTREG)
+    {
+        win_skip("%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w(timer_class_name));
+        WindowsDeleteString(classid);
+        RoUninitialize();
+        return;
+    }
+
+    check_interface(factory, &IID_IInspectable, TRUE);
+    check_interface(factory, &IID_IAgileObject, TRUE);
+    check_interface(factory, &IID_IThreadPoolTimerStatics, TRUE);
+    hr = IActivationFactory_QueryInterface(factory, &IID_IThreadPoolTimerStatics, (void **)&statics);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    handlers.elapsed_event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    handlers.destroyed_event = CreateEventW(NULL, FALSE, FALSE, NULL);
+
+    /* a one-shot timer fires once, then is done (the destroyed handler runs) */
+    span.Duration = 200000;   /* 20 ms */
+    hr = IThreadPoolTimerStatics_CreateTimerWithCompletion(statics, &handlers.elapsed, span, &handlers.destroyed, &timer);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    check_interface(timer, &IID_IInspectable, TRUE);
+    check_interface(timer, &IID_IAgileObject, TRUE);
+    hr = IThreadPoolTimer_get_Delay(timer, &value);
+    ok(hr == S_OK && value.Duration == span.Duration, "Unexpected hr %#lx, delay %I64d.\n", hr, value.Duration);
+    hr = IThreadPoolTimer_get_Period(timer, &value);
+    ok(hr == S_OK && !value.Duration, "Unexpected hr %#lx, period %I64d.\n", hr, value.Duration);
+    ret = WaitForSingleObject(handlers.elapsed_event, 2000);
+    ok(!ret, "Unexpected wait result %lu.\n", ret);
+    ret = WaitForSingleObject(handlers.destroyed_event, 2000);
+    ok(!ret, "Unexpected wait result %lu.\n", ret);
+    Sleep(100);
+    ok(handlers.fired == 1, "Unexpected fire count %ld.\n", handlers.fired);
+    ok(handlers.destroyed_count == 1, "Unexpected destroyed count %ld.\n", handlers.destroyed_count);
+    IThreadPoolTimer_Release(timer);
+
+    /* a periodic timer fires repeatedly until it is cancelled */
+    handlers.fired = 0;
+    handlers.destroyed_count = 0;
+    span.Duration = 100000;   /* 10 ms */
+    hr = IThreadPoolTimerStatics_CreatePeriodicTimerWithCompletion(statics, &handlers.elapsed, span, &handlers.destroyed, &timer);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IThreadPoolTimer_get_Period(timer, &value);
+    ok(hr == S_OK && value.Duration == span.Duration, "Unexpected hr %#lx, period %I64d.\n", hr, value.Duration);
+    Sleep(300);
+    hr = IThreadPoolTimer_Cancel(timer);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(handlers.fired >= 3, "Unexpected fire count %ld.\n", handlers.fired);
+    ok(handlers.destroyed_count == 1, "Unexpected destroyed count %ld.\n", handlers.destroyed_count);
+    fired = handlers.fired;
+    Sleep(100);
+    ok(handlers.fired == fired, "The timer fired after Cancel.\n");
+    hr = IThreadPoolTimer_Cancel(timer);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(handlers.destroyed_count == 1, "Unexpected destroyed count %ld.\n", handlers.destroyed_count);
+    IThreadPoolTimer_Release(timer);
+
+    /* the arguments are checked */
+    span.Duration = 0;
+    hr = IThreadPoolTimerStatics_CreatePeriodicTimer(statics, &handlers.elapsed, span, &timer);
+    ok(hr == E_INVALIDARG, "Unexpected hr %#lx.\n", hr);
+    span.Duration = 100000;
+    hr = IThreadPoolTimerStatics_CreateTimer(statics, NULL, span, &timer);
+    ok(hr == E_INVALIDARG, "Unexpected hr %#lx.\n", hr);
+
+    CloseHandle(handlers.elapsed_event);
+    CloseHandle(handlers.destroyed_event);
+    IThreadPoolTimerStatics_Release(statics);
+    IActivationFactory_Release(factory);
+    WindowsDeleteString(classid);
+
+    RoUninitialize();
+}
+
 START_TEST(threadpool)
 {
     test_interfaces();
     test_RunAsync();
+    test_ThreadPoolTimer();
 }
