@@ -31,6 +31,7 @@ import "windows.applicationmodel.resources.core.idl";
 namespace Windows.ApplicationModel {
     runtimeclass Package;
     runtimeclass DesignMode;
+    runtimeclass LimitedAccessFeatures;
 }
 
 namespace Windows.ApplicationModel.Resources {

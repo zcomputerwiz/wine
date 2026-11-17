@@ -1179,6 +1179,26 @@ static struct application_languages application_languages =
     1
 };
 
+/* IInspectable::GetIids: the IIDs of the interfaces an object implements, in a CoTaskMem array */
+HRESULT inspectable_get_iids( const GUID *const *list, ULONG count, ULONG *iid_count, IID **iids )
+{
+    ULONG i;
+
+    if (!iid_count || !iids) return E_POINTER;
+    *iid_count = 0;
+    if (!(*iids = CoTaskMemAlloc( count * sizeof(IID) ))) return E_OUTOFMEMORY;
+    for (i = 0; i < count; i++) (*iids)[i] = *list[i];
+    *iid_count = count;
+    return S_OK;
+}
+
+/* IInspectable::GetRuntimeClassName */
+HRESULT inspectable_get_class_name( const WCHAR *name, HSTRING *class_name )
+{
+    if (!class_name) return E_POINTER;
+    return WindowsCreateString( name, wcslen( name ), class_name );
+}
+
 HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void **out)
 {
     FIXME("clsid %s, riid %s, out %p stub!\n", debugstr_guid(clsid), debugstr_guid(riid), out);
@@ -1231,6 +1251,16 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
     else if (!wcscmp(name, L"Windows.Globalization.NumberFormatting.DecimalFormatter"))
     {
         *factory = decimal_formatter_factory;
+        IUnknown_AddRef(*factory);
+    }
+    else if (!wcscmp(name, L"Windows.Globalization.NumberFormatting.CurrencyFormatter"))
+    {
+        *factory = currency_formatter_factory;
+        IUnknown_AddRef(*factory);
+    }
+    else if (!wcscmp(name, L"Windows.Globalization.DateTimeFormatting.DateTimeFormatter"))
+    {
+        *factory = date_time_formatter_factory;
         IUnknown_AddRef(*factory);
     }
     else if (!wcscmp(name, L"Windows.Globalization.Fonts.LanguageFontGroup"))

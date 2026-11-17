@@ -34,6 +34,8 @@
 #include "windows.globalization.h"
 #define WIDL_using_Windows_Globalization_NumberFormatting
 #include "windows.globalization.numberformatting.h"
+#define WIDL_using_Windows_Globalization_DateTimeFormatting
+#include "windows.globalization.datetimeformatting.h"
 #define WIDL_using_Windows_Globalization_Fonts
 #define WIDL_using_Windows_UI_Text
 #include "windows.globalization.fonts.h"
@@ -1520,6 +1522,346 @@ static void test_CalendarIdentifiers(void)
     IActivationFactory_Release( factory );
 }
 
+static void check_inspectable( IUnknown *unk, ULONG count, const WCHAR *class_name )
+{
+    IInspectable *inspectable;
+    HSTRING name;
+    IID *iids;
+    ULONG n;
+    HRESULT hr;
+
+    hr = IUnknown_QueryInterface( unk, &IID_IInspectable, (void **)&inspectable );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (FAILED(hr)) return;
+    n = 0;
+    hr = IInspectable_GetIids( inspectable, &n, &iids );
+    ok( hr == S_OK, "%s: GetIids got hr %#lx.\n", wine_dbgstr_w( class_name ), hr );
+    if (SUCCEEDED(hr))
+    {
+        ok( n == count, "%s: got %lu iids.\n", wine_dbgstr_w( class_name ), n );
+        CoTaskMemFree( iids );
+    }
+    hr = IInspectable_GetRuntimeClassName( inspectable, &name );
+    ok( hr == S_OK, "%s: GetRuntimeClassName got hr %#lx.\n", wine_dbgstr_w( class_name ), hr );
+    if (SUCCEEDED(hr))
+    {
+        ok( !wcscmp( WindowsGetStringRawBuffer( name, NULL ), class_name ), "got %s.\n", debugstr_hstring( name ) );
+        WindowsDeleteString( name );
+    }
+    IInspectable_Release( inspectable );
+}
+
+static IDateTimeFormatter *create_date_time_formatter( IDateTimeFormatterFactory *factory, const WCHAR *template,
+                                                       const WCHAR *clock )
+{
+    static const WCHAR *en_us[] = { L"en-US" };
+    struct hstring_iterable languages;
+    IDateTimeFormatter *formatter = NULL;
+    HSTRING t = hstr( template ), region = hstr( L"US" ), calendar = hstr( L"GregorianCalendar" ), c = hstr( clock );
+    HRESULT hr;
+
+    hstring_iterable_init( &languages, en_us, 1 );
+    hr = IDateTimeFormatterFactory_CreateDateTimeFormatterContext( factory, t, &languages.IIterable_HSTRING_iface, region,
+                                                                   calendar, c, &formatter );
+    ok( hr == S_OK, "%s: got hr %#lx.\n", wine_dbgstr_w( template ), hr );
+    WindowsDeleteString( t );
+    WindowsDeleteString( region );
+    WindowsDeleteString( calendar );
+    WindowsDeleteString( c );
+    return formatter;
+}
+
+#define check_datetime( formatter, template, expect ) check_datetime_( __LINE__, formatter, template, expect )
+static void check_datetime_( int line, IDateTimeFormatterFactory *factory, const WCHAR *template, const WCHAR *expect )
+{
+    IDateTimeFormatter2 *formatter2;
+    IDateTimeFormatter *formatter;
+    DateTime when;
+    HSTRING zone, str;
+    HRESULT hr;
+
+    formatter = create_date_time_formatter( factory, template, L"12HourClock" );
+    if (!formatter) return;
+    hr = IDateTimeFormatter_QueryInterface( formatter, &IID_IDateTimeFormatter2, (void **)&formatter2 );
+    ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+    when.UniversalTime = datetime( 2026, 11, 17, 15, 45, 30, 0 );
+    zone = hstr( L"UTC" );
+    hr = IDateTimeFormatter2_FormatUsingTimeZone( formatter2, when, zone, &str );
+    ok_( __FILE__, line )( hr == S_OK, "%s: got hr %#lx.\n", wine_dbgstr_w( template ), hr );
+    if (SUCCEEDED(hr))
+    {
+        ok_( __FILE__, line )( !wcscmp( WindowsGetStringRawBuffer( str, NULL ), expect ), "%s: got %s, expected %s.\n",
+                               wine_dbgstr_w( template ), debugstr_hstring( str ), debugstr_w( expect ) );
+        WindowsDeleteString( str );
+    }
+    WindowsDeleteString( zone );
+    IDateTimeFormatter2_Release( formatter2 );
+    IDateTimeFormatter_Release( formatter );
+}
+
+static void test_DateTimeFormatter(void)
+{
+    static const WCHAR *class_name = L"Windows.Globalization.DateTimeFormatting.DateTimeFormatter";
+    IDateTimeFormatterStatics *statics;
+    IDateTimeFormatterFactory *creator;
+    IDateTimeFormatter *formatter;
+    IActivationFactory *factory;
+    IInspectable *instance;
+    DateTime when;
+    HSTRING str;
+    HRESULT hr;
+    YearFormat year;
+
+    str = hstr( class_name );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK || broken(hr == REGDB_E_CLASSNOTREG), "got hr %#lx.\n", hr );
+    if (hr != S_OK) return;
+    check_interface( factory, &IID_IAgileObject );
+    check_inspectable( (IUnknown *)factory, 2, class_name );
+    hr = IActivationFactory_QueryInterface( factory, &IID_IDateTimeFormatterFactory, (void **)&creator );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IActivationFactory_QueryInterface( factory, &IID_IDateTimeFormatterStatics, (void **)&statics );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    /* en-US, 12 hours, UTC */
+    check_datetime( creator, L"shortdate", L"11/17/2026" );
+    check_datetime( creator, L"longdate", L"Tuesday, November 17, 2026" );
+    check_datetime( creator, L"shorttime", L"3:45 PM" );
+    check_datetime( creator, L"longtime", L"3:45:30 PM" );
+    check_datetime( creator, L"year", L"2026" );
+    check_datetime( creator, L"year.abbreviated", L"26" );
+    check_datetime( creator, L"month.full", L"November" );
+    check_datetime( creator, L"month.abbreviated day", L"Nov 17" );
+    check_datetime( creator, L"month.numeric day", L"11/17" );
+    check_datetime( creator, L"day", L"17" );
+    check_datetime( creator, L"dayofweek.full", L"Tuesday" );
+    check_datetime( creator, L"dayofweek.abbreviated", L"Tue" );
+    check_datetime( creator, L"day dayofweek.full month year", L"Tuesday, November 17, 2026" );
+    check_datetime( creator, L"shortdate shorttime", L"11/17/2026 3:45 PM" );
+    check_datetime( creator, L"hour", L"3 PM" );
+    check_datetime( creator, L"minute second", L"45:30" );
+    check_datetime( creator, L"nonsense", L"11/17/2026" );
+
+    formatter = create_date_time_formatter( creator, L"shorttime", L"24HourClock" );
+    if (formatter)
+    {
+        IDateTimeFormatter2 *formatter2;
+        HSTRING zone = hstr( L"UTC" );
+
+        IDateTimeFormatter_QueryInterface( formatter, &IID_IDateTimeFormatter2, (void **)&formatter2 );
+        when.UniversalTime = datetime( 2026, 11, 17, 15, 45, 30, 0 );
+        check_str( IDateTimeFormatter2_FormatUsingTimeZone( formatter2, when, zone, &str ), L"15:45" );
+        check_str( IDateTimeFormatter_get_Clock( formatter, &str ), L"24HourClock" );
+        check_str( IDateTimeFormatter_get_Calendar( formatter, &str ), L"GregorianCalendar" );
+        check_str( IDateTimeFormatter_get_Template( formatter, &str ), L"shorttime" );
+        check_str( IDateTimeFormatter_get_ResolvedLanguage( formatter, &str ), L"en-US" );
+        check_str( IDateTimeFormatter_get_GeographicRegion( formatter, &str ), L"US" );
+        check_inspectable( (IUnknown *)formatter, 2, class_name );
+        WindowsDeleteString( zone );
+        IDateTimeFormatter2_Release( formatter2 );
+        IDateTimeFormatter_Release( formatter );
+    }
+
+    /* local time, user locale */
+    hr = IDateTimeFormatterFactory_CreateDateTimeFormatter( creator, hstr( L"year month day" ), (IDateTimeFormatter **)&formatter );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED(hr))
+    {
+        MonthFormat month;
+
+        when.UniversalTime = datetime( 2026, 6, 15, 12, 0, 0, 0 );
+        hr = IDateTimeFormatter_Format( formatter, when, &str );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        if (SUCCEEDED(hr))
+        {
+            ok( !!wcsstr( WindowsGetStringRawBuffer( str, NULL ), L"2026" ), "got %s.\n", debugstr_hstring( str ) );
+            WindowsDeleteString( str );
+        }
+        hr = IDateTimeFormatter_get_IncludeYear( formatter, &year );
+        ok( hr == S_OK && year == YearFormat_Default, "got hr %#lx, %d.\n", hr, year );
+        hr = IDateTimeFormatter_get_IncludeMonth( formatter, &month );
+        ok( hr == S_OK && month == MonthFormat_Default, "got hr %#lx, %d.\n", hr, month );
+        IDateTimeFormatter_Release( formatter );
+    }
+
+    hr = IDateTimeFormatterFactory_CreateDateTimeFormatterDate( creator, YearFormat_Full, MonthFormat_Full,
+                                                                DayFormat_Default, DayOfWeekFormat_None,
+                                                                (IDateTimeFormatter **)&formatter );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED(hr))
+    {
+        check_str( IDateTimeFormatter_get_Template( formatter, &str ), L"year.full month.full day" );
+        IDateTimeFormatter_Release( formatter );
+    }
+
+    hr = IDateTimeFormatterStatics_get_LongDate( statics, (IDateTimeFormatter **)&formatter );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED(hr))
+    {
+        check_str( IDateTimeFormatter_get_Template( formatter, &str ), L"longdate" );
+        IDateTimeFormatter_Release( formatter );
+    }
+    hr = IDateTimeFormatterStatics_get_ShortTime( statics, (IDateTimeFormatter **)&formatter );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED(hr))
+    {
+        check_str( IDateTimeFormatter_get_Template( formatter, &str ), L"shorttime" );
+        IDateTimeFormatter_Release( formatter );
+    }
+
+    hr = IActivationFactory_ActivateInstance( factory, &instance );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED(hr)) IInspectable_Release( instance );
+
+    IDateTimeFormatterStatics_Release( statics );
+    IDateTimeFormatterFactory_Release( creator );
+    IActivationFactory_Release( factory );
+}
+
+static void check_currency( INumberFormatter *formatter, double value, const WCHAR *expect )
+{
+    HSTRING str;
+    HRESULT hr;
+
+    hr = INumberFormatter_FormatDouble( formatter, value, &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (FAILED(hr)) return;
+    ok( !wcscmp( WindowsGetStringRawBuffer( str, NULL ), expect ), "%g: got %s, expected %s.\n", value,
+        debugstr_hstring( str ), debugstr_w( expect ) );
+    WindowsDeleteString( str );
+}
+
+static ICurrencyFormatter *create_currency_formatter( ICurrencyFormatterFactory *creator, const WCHAR *code )
+{
+    static const WCHAR *en_us[] = { L"en-US" };
+    struct hstring_iterable languages;
+    ICurrencyFormatter *formatter = NULL;
+    HSTRING c = hstr( code ), region = hstr( L"US" );
+    HRESULT hr;
+
+    hstring_iterable_init( &languages, en_us, 1 );
+    hr = ICurrencyFormatterFactory_CreateCurrencyFormatterCodeContext( creator, c, &languages.IIterable_HSTRING_iface, region,
+                                                                       (ICurrencyFormatter **)&formatter );
+    ok( hr == S_OK || (wcslen( code ) != 3 && hr == E_INVALIDARG), "%s: got hr %#lx.\n", wine_dbgstr_w( code ), hr );
+    WindowsDeleteString( c );
+    WindowsDeleteString( region );
+    return formatter;
+}
+
+static void test_CurrencyFormatter(void)
+{
+    static const WCHAR *class_name = L"Windows.Globalization.NumberFormatting.CurrencyFormatter";
+    ICurrencyFormatterFactory *creator;
+    ICurrencyFormatter2 *currency2;
+    IActivationFactory *factory;
+    ICurrencyFormatter *currency;
+    INumberFormatterOptions *options;
+    INumberFormatter *formatter;
+    INumberParser *parser;
+    IReference_DOUBLE *number;
+    CurrencyFormatterMode mode;
+    IInspectable *instance;
+    boolean flag;
+    INT32 digits;
+    double dbl;
+    HSTRING str;
+    HRESULT hr;
+
+    str = hstr( class_name );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK || broken(hr == REGDB_E_CLASSNOTREG), "got hr %#lx.\n", hr );
+    if (hr != S_OK) return;
+    check_interface( factory, &IID_IAgileObject );
+    check_inspectable( (IUnknown *)factory, 1, class_name );
+    hr = IActivationFactory_QueryInterface( factory, &IID_ICurrencyFormatterFactory, (void **)&creator );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IActivationFactory_ActivateInstance( factory, &instance );
+    ok( hr == E_NOTIMPL, "got hr %#lx.\n", hr );
+
+    ok( !create_currency_formatter( creator, L"US" ), "got a formatter for a bad code.\n" );
+
+    currency = create_currency_formatter( creator, L"USD" );
+    if (currency)
+    {
+        check_interface( currency, &IID_INumberFormatter );
+        check_interface( currency, &IID_INumberFormatter2 );
+        check_interface( currency, &IID_INumberFormatterOptions );
+        check_interface( currency, &IID_INumberParser );
+        check_interface( currency, &IID_ICurrencyFormatter2 );
+        check_interface( currency, &IID_ISignificantDigitsOption );
+        check_inspectable( (IUnknown *)currency, 9, class_name );
+        ICurrencyFormatter_QueryInterface( currency, &IID_INumberFormatter, (void **)&formatter );
+        ICurrencyFormatter_QueryInterface( currency, &IID_INumberFormatterOptions, (void **)&options );
+        ICurrencyFormatter_QueryInterface( currency, &IID_ICurrencyFormatter2, (void **)&currency2 );
+        ICurrencyFormatter_QueryInterface( currency, &IID_INumberParser, (void **)&parser );
+
+        check_str( ICurrencyFormatter_get_Currency( currency, &str ), L"USD" );
+        INumberFormatterOptions_get_FractionDigits( options, &digits );
+        ok( digits == 2, "got %d.\n", digits );
+        INumberFormatterOptions_get_IsGrouped( options, &flag );
+        ok( flag, "not grouped.\n" );
+        check_currency( formatter, 1234.5, L"$1,234.50" );
+        check_currency( formatter, -1.5, L"-$1.50" );
+        check_currency( formatter, 0, L"$0.00" );
+
+        str = hstr( L"$1,234.50" );
+        hr = INumberParser_ParseDouble( parser, str, &number );
+        ok( hr == S_OK && number, "got hr %#lx.\n", hr );
+        if (number)
+        {
+            IReference_DOUBLE_get_Value( number, &dbl );
+            ok( dbl == 1234.5, "got %g.\n", dbl );
+            IReference_DOUBLE_Release( number );
+        }
+        WindowsDeleteString( str );
+
+        hr = ICurrencyFormatter2_get_Mode( currency2, &mode );
+        ok( hr == S_OK && mode == CurrencyFormatterMode_UseSymbol, "got hr %#lx, %d.\n", hr, mode );
+        hr = ICurrencyFormatter2_put_Mode( currency2, CurrencyFormatterMode_UseCurrencyCode );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        check_currency( formatter, 1234.5, L"USD\xa0" L"1,234.50" );
+        ICurrencyFormatter2_put_Mode( currency2, CurrencyFormatterMode_UseSymbol );
+
+        str = hstr( L"eur" );
+        hr = ICurrencyFormatter_put_Currency( currency, str );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        WindowsDeleteString( str );
+        check_str( ICurrencyFormatter_get_Currency( currency, &str ), L"EUR" );
+        check_currency( formatter, 1234.5, L"\x20ac" L"1,234.50" );
+        str = hstr( L"EU" );
+        hr = ICurrencyFormatter_put_Currency( currency, str );
+        ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+        WindowsDeleteString( str );
+
+        INumberParser_Release( parser );
+        ICurrencyFormatter2_Release( currency2 );
+        INumberFormatterOptions_Release( options );
+        INumberFormatter_Release( formatter );
+        ICurrencyFormatter_Release( currency );
+    }
+
+    currency = create_currency_formatter( creator, L"JPY" );
+    if (currency)
+    {
+        ICurrencyFormatter_QueryInterface( currency, &IID_INumberFormatter, (void **)&formatter );
+        ICurrencyFormatter_QueryInterface( currency, &IID_ICurrencyFormatter2, (void **)&currency2 );
+        check_currency( formatter, 1234, L"\xa5" L"1,234" );
+        hr = ICurrencyFormatter2_ApplyRoundingForCurrency( currency2, RoundingAlgorithm_RoundHalfAwayFromZero );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        check_currency( formatter, 2.5, L"\xa5" L"3" );
+        ICurrencyFormatter2_ApplyRoundingForCurrency( currency2, RoundingAlgorithm_RoundHalfToEven );
+        check_currency( formatter, 2.5, L"\xa5" L"2" );
+        ICurrencyFormatter2_Release( currency2 );
+        INumberFormatter_Release( formatter );
+        ICurrencyFormatter_Release( currency );
+    }
+
+    ICurrencyFormatterFactory_Release( creator );
+    IActivationFactory_Release( factory );
+}
+
 START_TEST(globalization)
 {
     HMODULE kernel32;
@@ -1540,6 +1882,8 @@ START_TEST(globalization)
     test_LanguageStatics();
     test_DecimalFormatter();
     test_CalendarIdentifiers();
+    test_DateTimeFormatter();
+    test_CurrencyFormatter();
 
     RoUninitialize();
 }

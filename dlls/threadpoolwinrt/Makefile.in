@@ -3,4 +3,6 @@ IMPORTS = combase uuid
 
 SOURCES = \
 	classes.idl \
-	main.c
+	main.c \
+	timer.c \
+	timer_statics.c

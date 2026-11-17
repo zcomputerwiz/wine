@@ -1053,6 +1053,7 @@ SOURCES = \
 	windows.gaming.input.forcefeedback.idl \
 	windows.gaming.input.idl \
 	windows.gaming.ui.idl \
+	windows.globalization.datetimeformatting.idl \
 	windows.globalization.fonts.idl \
 	windows.globalization.numberformatting.idl \
 	windows.globalization.idl \

@@ -34,9 +34,15 @@ import "windows.ui.core.idl";
 import "windows.ui.input.idl";
 import "windows.ui.windowmanagement.idl";
 import "windows.ui.viewmanagement.idl";
+import "windows.ui.text.idl";
 
 namespace Windows.UI.Core {
     runtimeclass CoreWindow;
+    runtimeclass SystemNavigationManager;
+}
+
+namespace Windows.UI.Text {
+    runtimeclass FontWeights;
 }
 
 namespace Windows.UI.ViewManagement {

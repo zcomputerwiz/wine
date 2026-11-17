@@ -25,6 +25,12 @@ import "windowscontracts.idl";
 import "windows.foundation.idl";
 
 namespace Windows.Globalization.NumberFormatting {
+    typedef enum CurrencyFormatterMode CurrencyFormatterMode;
+    typedef enum RoundingAlgorithm RoundingAlgorithm;
+
+    interface ICurrencyFormatter;
+    interface ICurrencyFormatter2;
+    interface ICurrencyFormatterFactory;
     interface IDecimalFormatterFactory;
     interface INumberFormatter;
     interface INumberFormatter2;
@@ -35,7 +41,35 @@ namespace Windows.Globalization.NumberFormatting {
     interface ISignedZeroOption;
     interface ISignificantDigitsOption;
 
+    runtimeclass CurrencyFormatter;
     runtimeclass DecimalFormatter;
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum CurrencyFormatterMode
+    {
+        UseSymbol = 0,
+        UseCurrencyCode = 1,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum RoundingAlgorithm
+    {
+        None = 0,
+        RoundDown = 1,
+        RoundUp = 2,
+        RoundTowardsZero = 3,
+        RoundAwayFromZero = 4,
+        RoundHalfDown = 5,
+        RoundHalfUp = 6,
+        RoundHalfTowardsZero = 7,
+        RoundHalfAwayFromZero = 8,
+        RoundHalfToEven = 9,
+        RoundHalfToOdd = 10,
+    };
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
@@ -160,6 +194,66 @@ namespace Windows.Globalization.NumberFormatting {
         [default] interface Windows.Globalization.NumberFormatting.INumberFormatter;
         interface Windows.Globalization.NumberFormatting.INumberFormatter2;
         interface Windows.Globalization.NumberFormatting.INumberParser;
+        interface Windows.Globalization.NumberFormatting.ISignificantDigitsOption;
+        interface Windows.Globalization.NumberFormatting.INumberRounderOption;
+        interface Windows.Globalization.NumberFormatting.ISignedZeroOption;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Globalization.NumberFormatting.CurrencyFormatter),
+        uuid(11730ca5-4b00-41b2-b332-73b12a497d54)
+    ]
+    interface ICurrencyFormatter : IInspectable
+        requires Windows.Globalization.NumberFormatting.INumberFormatterOptions,
+                 Windows.Globalization.NumberFormatting.INumberFormatter,
+                 Windows.Globalization.NumberFormatting.INumberFormatter2,
+                 Windows.Globalization.NumberFormatting.INumberParser
+    {
+        [propget] HRESULT Currency([out, retval] HSTRING *value);
+        [propput] HRESULT Currency([in] HSTRING value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Globalization.NumberFormatting.CurrencyFormatter),
+        uuid(072c2f1d-e7ba-4197-920e-247c92f7dea6)
+    ]
+    interface ICurrencyFormatter2 : IInspectable
+    {
+        [propget] HRESULT Mode([out, retval] Windows.Globalization.NumberFormatting.CurrencyFormatterMode *value);
+        [propput] HRESULT Mode([in] Windows.Globalization.NumberFormatting.CurrencyFormatterMode value);
+        HRESULT ApplyRoundingForCurrency([in] Windows.Globalization.NumberFormatting.RoundingAlgorithm roundingAlgorithm);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Globalization.NumberFormatting.CurrencyFormatter),
+        uuid(86c7537e-b938-4aa2-84b0-2c33dc5b1450)
+    ]
+    interface ICurrencyFormatterFactory : IInspectable
+    {
+        HRESULT CreateCurrencyFormatterCode([in] HSTRING currencyCode,
+                                            [out, retval] Windows.Globalization.NumberFormatting.CurrencyFormatter **result);
+        HRESULT CreateCurrencyFormatterCodeContext([in] HSTRING currencyCode,
+                                                   [in] Windows.Foundation.Collections.IIterable<HSTRING> *languages,
+                                                   [in] HSTRING geographicRegion,
+                                                   [out, retval] Windows.Globalization.NumberFormatting.CurrencyFormatter **result);
+    }
+
+    [
+        activatable(Windows.Globalization.NumberFormatting.ICurrencyFormatterFactory, Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass CurrencyFormatter
+    {
+        [default] interface Windows.Globalization.NumberFormatting.ICurrencyFormatter;
+        interface Windows.Globalization.NumberFormatting.INumberParser;
+        interface Windows.Globalization.NumberFormatting.INumberFormatter2;
+        interface Windows.Globalization.NumberFormatting.INumberFormatter;
+        interface Windows.Globalization.NumberFormatting.INumberFormatterOptions;
+        interface Windows.Globalization.NumberFormatting.ICurrencyFormatter2;
         interface Windows.Globalization.NumberFormatting.ISignificantDigitsOption;
         interface Windows.Globalization.NumberFormatting.INumberRounderOption;
         interface Windows.Globalization.NumberFormatting.ISignedZeroOption;

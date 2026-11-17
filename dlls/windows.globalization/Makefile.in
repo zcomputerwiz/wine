@@ -4,6 +4,7 @@ IMPORTS = combase uuid advapi32 user32
 SOURCES = \
 	calendar.c \
 	classes.idl \
+	date_time_formatter.c \
 	font_group.c \
 	geographic_region.c \
 	identifiers.c \

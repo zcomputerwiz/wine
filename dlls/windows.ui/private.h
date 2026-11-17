@@ -46,12 +46,20 @@
 #define WIDL_using_Windows_UI_ViewManagement
 #include "windows.ui.viewmanagement.h"
 #include "windows.ui.core.corewindow.interop.h"
+#define WIDL_using_Windows_UI_Text
+#include "windows.ui.text.h"
+#define WIDL_using_Windows_UI_Text
+#include "windows.ui.text.h"
 
 extern IActivationFactory *accessibilitysettings_factory;
 extern IActivationFactory *uisettings_factory;
 extern IActivationFactory *uiviewsettings_factory;
 extern IActivationFactory *inputpane_factory;
 extern IActivationFactory *corewindow_factory;
+extern IActivationFactory *systemnavigation_factory;
+extern IActivationFactory *fontweights_factory;
+extern IActivationFactory *systemnavigation_factory;
+extern IActivationFactory *fontweights_factory;
 
 /* event handler lists (dispatcher.c); the caller's critical section protects the list */
 extern HRESULT ui_handler_add( struct list *list, CRITICAL_SECTION *cs, IUnknown *handler, EventRegistrationToken *token );

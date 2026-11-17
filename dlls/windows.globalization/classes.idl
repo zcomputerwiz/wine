@@ -31,11 +31,16 @@ import "windows.globalization.idl";
 import "windows.system.userprofile.idl";
 import "windows.globalization.fonts.idl";
 import "windows.globalization.numberformatting.idl";
+import "windows.globalization.datetimeformatting.idl";
 
+namespace Windows.Globalization.DateTimeFormatting {
+    runtimeclass DateTimeFormatter;
+}
 namespace Windows.Globalization.Fonts {
     runtimeclass LanguageFontGroup;
 }
 namespace Windows.Globalization.NumberFormatting {
+    runtimeclass CurrencyFormatter;
     runtimeclass DecimalFormatter;
 }
 namespace Windows.System.UserProfile {
