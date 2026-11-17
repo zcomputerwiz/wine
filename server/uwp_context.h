@@ -27,6 +27,10 @@ struct fd;
 
 /* the largest catalog record, in bytes */
 #define UWP_RECORD_MAX_BYTES 65536
+/* the largest class table of a context (the classes of the package and of its dependencies), in bytes */
+#define UWP_CLASSES_MAX_BYTES (256 * 1024)
+/* the dependencies of a package whose classes are taken */
+#define UWP_MAX_DEPENDENCIES 16
 
 /*
  * An immutable package context. The server builds it from a record of the
@@ -46,6 +50,14 @@ struct fd;
  *   app <tab> ApplicationId <tab> relative path of the executable [<tab> entry point]
  *   class <tab> ActivatableClassId <tab> relative path of the in-process server
  *
+ *   dependency <tab> PackageFullName of a package this one depends on (a framework package)
+ *
+ * The class table of a context holds the classes of the package, then those of its dependencies: the "class" lines
+ * of the dependencies' own records (frameworks only), each with the path made absolute (the dependency's directory
+ * and the relative path). A class the package declares itself is never taken from a dependency, a dependency that is
+ * missing, malformed or would make the table too large is left out, and the first dependency that declares a class
+ * wins.
+ *
  * Paths use backslashes; the relative ones stay inside the package directory.
  * The package directory is in the user's profile for a per-user package
  * (Program Files belongs to the machine and is not writable by a standard
@@ -62,7 +74,8 @@ struct uwp_context_sizes
     data_size_t root;         /* DOS path of the package directory */
     data_size_t executable;   /* executable, relative to the package directory */
     data_size_t entry_point;  /* the EntryPoint of the application in the manifest, may be empty */
-    data_size_t classes;      /* class table: class, NUL, relative path, NUL, ... */
+    data_size_t classes;      /* class table: class, NUL, path, NUL, ...; the path is relative to the package
+                               * directory, or absolute (X:\...) for a class of a dependency */
 };
 
 /* build the context of an application ("FamilyName!ApplicationId") from the catalog; NULL with the error set */

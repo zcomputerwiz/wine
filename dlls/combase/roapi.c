@@ -108,12 +108,22 @@ static HRESULT get_package_library_for_classid(const WCHAR *classid, UINT32 clas
         /* the counted name is compared, so a name with an embedded NUL matches nothing */
         if (class_len == classid_len && !memcmp(ptr, classid, class_len * sizeof(WCHAR)))
         {
+            const WCHAR *server = ptr + class_len + 1;
             WCHAR *path;
 
+            /* the class of a dependency of the package: its path is absolute (X:\...); the package's own are
+             * relative to the package directory, and the server allows no ':' in them */
+            if (path_len > 2 && server[1] == ':')
+            {
+                if (!(path = malloc((path_len + 1) * sizeof(WCHAR)))) return E_OUTOFMEMORY;
+                memcpy(path, server, (path_len + 1) * sizeof(WCHAR));
+                *out = path;
+                return S_OK;
+            }
             if (!(path = malloc((root_len + 1 + path_len + 1) * sizeof(WCHAR)))) return E_OUTOFMEMORY;
             memcpy(path, root, root_len * sizeof(WCHAR));
             path[root_len] = '\\';
-            memcpy(path + root_len + 1, ptr + class_len + 1, (path_len + 1) * sizeof(WCHAR));
+            memcpy(path + root_len + 1, server, (path_len + 1) * sizeof(WCHAR));
             *out = path;
             return S_OK;
         }
