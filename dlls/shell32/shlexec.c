@@ -387,13 +387,15 @@ static enum elevation_helper_status get_elevation_helper(WCHAR *helper, DWORD si
     return HELPER_CONFIGURED;
 }
 
-static BOOL is_full_token(void)
+/* Is the caller elevated already? A full token, and also a token of the default type that holds the Administrators
+ * group (LocalSystem, the built-in Administrator): Windows starts a "runas" of those directly, without a prompt. */
+static BOOL is_elevated_token(void)
 {
-    TOKEN_ELEVATION_TYPE type;
+    TOKEN_ELEVATION elevation;
     DWORD size;
 
-    return GetTokenInformation(GetCurrentThreadEffectiveToken(), TokenElevationType, &type, sizeof(type), &size)
-            && type == TokenElevationTypeFull;
+    return GetTokenInformation(GetCurrentThreadEffectiveToken(), TokenElevation, &elevation, sizeof(elevation), &size)
+            && elevation.TokenIsElevated;
 }
 
 /* The image CreateProcess would run for this command line: a quoted name, or the shortest prefix up to a blank
@@ -555,7 +557,7 @@ static UINT_PTR SHELL_ExecuteW(const WCHAR *lpCmd, WCHAR *env, BOOL shWait,
         {
             /* Elevation is enforced: the broker starts the program, never a linked token of ours. A process
              * that is elevated already runs it directly, as on Windows. */
-            if (!is_full_token())
+            if (!is_elevated_token())
             {
                 retval = execute_with_broker(lpCmd, env, psei, psei_out);
                 goto finish;
