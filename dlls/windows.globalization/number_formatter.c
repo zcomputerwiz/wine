@@ -42,6 +42,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <wctype.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(locale);
 
@@ -74,7 +75,15 @@ struct decimal_formatter
     ISignificantDigitsOption ISignificantDigitsOption_iface;
     INumberRounderOption INumberRounderOption_iface;
     ISignedZeroOption ISignedZeroOption_iface;
+    ICurrencyFormatter ICurrencyFormatter_iface;
+    ICurrencyFormatter2 ICurrencyFormatter2_iface;
     LONG ref;
+
+    /* CurrencyFormatter only */
+    BOOL is_currency;
+    WCHAR currency[4];
+    CurrencyFormatterMode mode;
+    RoundingAlgorithm rounding;
 
     HSTRING *languages;
     UINT32 language_count;
@@ -110,6 +119,144 @@ static void separators( struct decimal_formatter *impl, WCHAR *decimal, WCHAR *g
         *decimal = 0x066b;
         *group = 0x066c;
     }
+}
+
+/* ---- currencies ---- */
+
+static const struct currency_info
+{
+    const WCHAR *code;
+    const WCHAR *symbol;
+    int digits;
+} currencies[] =
+{
+    { L"USD", L"$", 2 }, { L"EUR", L"\x20ac", 2 }, { L"GBP", L"\xa3", 2 }, { L"JPY", L"\xa5", 0 },
+    { L"CNY", L"CN\xa5", 2 }, { L"INR", L"\x20b9", 2 }, { L"KRW", L"\x20a9", 0 }, { L"RUB", L"\x20bd", 2 },
+    { L"CAD", L"CA$", 2 }, { L"AUD", L"A$", 2 }, { L"NZD", L"NZ$", 2 }, { L"BRL", L"R$", 2 },
+    { L"MXN", L"MX$", 2 }, { L"HKD", L"HK$", 2 }, { L"ILS", L"\x20aa", 2 }, { L"VND", L"\x20ab", 0 },
+    { L"TWD", L"NT$", 2 }, { L"PHP", L"\x20b1", 2 }, { L"XAF", L"FCFA", 0 }, { L"XOF", L"F\x202f" L"CFA", 0 },
+    { L"CLP", L"CLP", 0 }, { L"ISK", L"ISK", 0 }, { L"UGX", L"UGX", 0 }, { L"PYG", L"PYG", 0 },
+    { L"RWF", L"RWF", 0 }, { L"XPF", L"CFPF", 0 },
+    { L"BHD", L"BHD", 3 }, { L"KWD", L"KWD", 3 }, { L"OMR", L"OMR", 3 }, { L"JOD", L"JOD", 3 },
+    { L"TND", L"TND", 3 }, { L"IQD", L"IQD", 3 }, { L"LYD", L"LYD", 3 },
+};
+
+static const struct currency_info *find_currency( const WCHAR *code )
+{
+    unsigned int i;
+    for (i = 0; i < ARRAY_SIZE(currencies); i++)
+        if (!wcsicmp( currencies[i].code, code )) return &currencies[i];
+    return NULL;
+}
+
+static int currency_digits( const WCHAR *code )
+{
+    const struct currency_info *info = find_currency( code );
+    return info ? info->digits : 2;
+}
+
+/* the text that stands for the currency: its code, the locale's symbol when the locale's currency is it, else the
+ * well-known symbol, else the code */
+static void currency_symbol( struct decimal_formatter *impl, WCHAR *symbol, unsigned int size )
+{
+    const struct currency_info *info;
+    WCHAR code[16];
+
+    wcscpy( symbol, impl->currency );
+    if (impl->mode == CurrencyFormatterMode_UseCurrencyCode) return;
+    if (GetLocaleInfoEx( impl->locale, LOCALE_SINTLSYMBOL, code, ARRAY_SIZE(code) ) && !wcsicmp( code, impl->currency ) &&
+        GetLocaleInfoEx( impl->locale, LOCALE_SCURRENCY, code, ARRAY_SIZE(code) ) && code[0])
+    {
+        wcscpy( symbol, code );
+        return;
+    }
+    if ((info = find_currency( impl->currency ))) wcscpy( symbol, info->symbol );
+}
+
+/* the text of a formatted number (optional leading '-') with the currency placed as the locale does */
+static HRESULT currency_text( struct decimal_formatter *impl, const WCHAR *number, HSTRING *result )
+{
+    WCHAR symbol[16], text[256], *p = text;
+    DWORD pattern = 0;
+    BOOL negative = number[0] == '-', space, suffix;
+
+    if (negative) number++;
+    currency_symbol( impl, symbol, ARRAY_SIZE(symbol) );
+    GetLocaleInfoEx( impl->locale, LOCALE_ICURRENCY | LOCALE_RETURN_NUMBER, (WCHAR *)&pattern, sizeof(pattern) / sizeof(WCHAR) );
+    suffix = pattern == 1 || pattern == 3;
+    space = pattern >= 2 || impl->mode == CurrencyFormatterMode_UseCurrencyCode || iswalpha( symbol[wcslen( symbol ) - 1] );
+    if (wcslen( number ) + wcslen( symbol ) + 4 > ARRAY_SIZE(text)) return E_FAIL;
+
+    if (negative) *p++ = '-';
+    if (!suffix)
+    {
+        wcscpy( p, symbol );
+        p += wcslen( p );
+        if (space) *p++ = 0xa0;
+    }
+    wcscpy( p, number );
+    p += wcslen( p );
+    if (suffix)
+    {
+        if (space) *p++ = 0xa0;
+        wcscpy( p, symbol );
+        p += wcslen( p );
+    }
+    return WindowsCreateString( text, p - text, result );
+}
+
+/* rounds to a number of fraction digits with a RoundingAlgorithm */
+static double round_to_digits( double value, RoundingAlgorithm algorithm, int digits )
+{
+    double scale = pow( 10, digits ), y = value * scale, f = floor( y ), diff = y - f, r;
+    BOOL positive = y > 0;
+
+    switch (algorithm)
+    {
+    case RoundingAlgorithm_RoundDown: r = f; break;
+    case RoundingAlgorithm_RoundUp: r = ceil( y ); break;
+    case RoundingAlgorithm_RoundTowardsZero: r = trunc( y ); break;
+    case RoundingAlgorithm_RoundAwayFromZero: r = positive ? ceil( y ) : f; break;
+    case RoundingAlgorithm_RoundHalfDown:
+    case RoundingAlgorithm_RoundHalfUp:
+    case RoundingAlgorithm_RoundHalfTowardsZero:
+    case RoundingAlgorithm_RoundHalfAwayFromZero:
+    case RoundingAlgorithm_RoundHalfToEven:
+    case RoundingAlgorithm_RoundHalfToOdd:
+        if (diff < 0.5) r = f;
+        else if (diff > 0.5) r = f + 1;
+        else if (algorithm == RoundingAlgorithm_RoundHalfDown) r = f;
+        else if (algorithm == RoundingAlgorithm_RoundHalfUp) r = f + 1;
+        else if (algorithm == RoundingAlgorithm_RoundHalfTowardsZero) r = positive ? f : f + 1;
+        else if (algorithm == RoundingAlgorithm_RoundHalfAwayFromZero) r = positive ? f + 1 : f;
+        else if (algorithm == RoundingAlgorithm_RoundHalfToEven) r = fmod( f, 2 ) == 0 ? f : f + 1;
+        else r = fmod( f, 2 ) == 0 ? f + 1 : f;
+        break;
+    default: return value;
+    }
+    return r / scale;
+}
+
+/* the text of a currency amount without its currency: the symbol, code and spaces are removed */
+static UINT32 strip_currency( struct decimal_formatter *impl, const WCHAR *text, UINT32 len, WCHAR *out, UINT32 size )
+{
+    WCHAR symbol[16], locale_symbol[16] = {0};
+    UINT32 i, n = 0, l1, l2, l3 = wcslen( impl->currency );
+
+    currency_symbol( impl, symbol, ARRAY_SIZE(symbol) );
+    GetLocaleInfoEx( impl->locale, LOCALE_SCURRENCY, locale_symbol, ARRAY_SIZE(locale_symbol) );
+    l1 = wcslen( symbol );
+    l2 = wcslen( locale_symbol );
+    for (i = 0; i < len && n < size - 1; )
+    {
+        if (l1 && i + l1 <= len && !wcsncmp( text + i, symbol, l1 )) { i += l1; continue; }
+        if (l2 && i + l2 <= len && !wcsncmp( text + i, locale_symbol, l2 )) { i += l2; continue; }
+        if (i + l3 <= len && !wcsnicmp( text + i, impl->currency, l3 )) { i += l3; continue; }
+        if (text[i] == ' ' || text[i] == 0xa0 || text[i] == 0x202f) { i++; continue; }
+        out[n++] = text[i++];
+    }
+    out[n] = 0;
+    return n;
 }
 
 /* the shortest decimal digits of a double that read back as it: digits and the position of the decimal point
@@ -176,7 +323,8 @@ static HRESULT format_digits( struct decimal_formatter *impl, BOOL negative, con
     if (total || impl->point) *p++ = decimal;
     for (i = 0; i < total; i++) *p++ = impl->numerals->zero + ((i < frac_len ? fraction[i] : '0') - '0');
     *p = 0;
-    hr = WindowsCreateString( text, p - text, result );
+    if (impl->is_currency) hr = currency_text( impl, text, result );
+    else hr = WindowsCreateString( text, p - text, result );
     free( text );
     return hr;
 }
@@ -215,6 +363,8 @@ static HRESULT format_double( struct decimal_formatter *impl, double value, HSTR
     if (isnan( value )) return WindowsCreateString( L"NaN", 3, result );
     if (isinf( value )) return WindowsCreateString( negative ? L"-\x221e" : L"\x221e", negative ? 2 : 1, result );
     if (impl->rounder) INumberRounder_RoundDouble( impl->rounder, value, &value );
+    if (impl->is_currency && impl->rounding != RoundingAlgorithm_None)
+        value = round_to_digits( value, impl->rounding, currency_digits( impl->currency ) );
     if (value == 0)
         return format_digits( impl, negative, "0", "", result );
 
@@ -250,7 +400,13 @@ static BOOL normalize( struct decimal_formatter *impl, const WCHAR *text, UINT32
     WCHAR decimal, group, locale_decimal = '.', locale_group = ',', buffer[16];
     unsigned int group_size, i, n = 0, digits = 0;
     BOOL seen_point = FALSE;
+    WCHAR stripped[128];
 
+    if (impl->is_currency)
+    {
+        len = strip_currency( impl, text, len, stripped, ARRAY_SIZE(stripped) );
+        text = stripped;
+    }
     separators( impl, &decimal, &group, &group_size );
     if (GetLocaleInfoEx( impl->locale, LOCALE_SDECIMAL, buffer, ARRAY_SIZE(buffer) ) && buffer[0]) locale_decimal = buffer[0];
     if (GetLocaleInfoEx( impl->locale, LOCALE_STHOUSAND, buffer, ARRAY_SIZE(buffer) ) && buffer[0]) locale_group = buffer[0];
@@ -298,6 +454,8 @@ static HRESULT WINAPI formatter_QueryInterface( INumberFormatter *iface, REFIID 
     else if (IsEqualGUID( iid, &IID_ISignificantDigitsOption )) *out = &impl->ISignificantDigitsOption_iface;
     else if (IsEqualGUID( iid, &IID_INumberRounderOption )) *out = &impl->INumberRounderOption_iface;
     else if (IsEqualGUID( iid, &IID_ISignedZeroOption )) *out = &impl->ISignedZeroOption_iface;
+    else if (impl->is_currency && IsEqualGUID( iid, &IID_ICurrencyFormatter )) *out = &impl->ICurrencyFormatter_iface;
+    else if (impl->is_currency && IsEqualGUID( iid, &IID_ICurrencyFormatter2 )) *out = &impl->ICurrencyFormatter2_iface;
     else
     {
         FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
@@ -332,14 +490,31 @@ static ULONG WINAPI formatter_Release( INumberFormatter *iface )
 
 static HRESULT WINAPI formatter_GetIids( INumberFormatter *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const GUID *const decimal_iids[] =
+    {
+        &IID_INumberFormatterOptions, &IID_INumberFormatter, &IID_INumberFormatter2, &IID_INumberParser,
+        &IID_ISignificantDigitsOption, &IID_INumberRounderOption, &IID_ISignedZeroOption,
+    };
+    static const GUID *const currency_iids[] =
+    {
+        &IID_ICurrencyFormatter, &IID_INumberParser, &IID_INumberFormatter2, &IID_INumberFormatter,
+        &IID_INumberFormatterOptions, &IID_ICurrencyFormatter2, &IID_ISignificantDigitsOption,
+        &IID_INumberRounderOption, &IID_ISignedZeroOption,
+    };
+    struct decimal_formatter *impl = impl_from_INumberFormatter( iface );
+
+    TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
+    if (impl->is_currency) return inspectable_get_iids( currency_iids, ARRAY_SIZE(currency_iids), iid_count, iids );
+    return inspectable_get_iids( decimal_iids, ARRAY_SIZE(decimal_iids), iid_count, iids );
 }
 
 static HRESULT WINAPI formatter_GetRuntimeClassName( INumberFormatter *iface, HSTRING *class_name )
 {
-    const WCHAR *name = RuntimeClass_Windows_Globalization_NumberFormatting_DecimalFormatter;
-    return WindowsCreateString( name, wcslen( name ), class_name );
+    struct decimal_formatter *impl = impl_from_INumberFormatter( iface );
+
+    if (impl->is_currency)
+        return inspectable_get_class_name( L"Windows.Globalization.NumberFormatting.CurrencyFormatter", class_name );
+    return inspectable_get_class_name( RuntimeClass_Windows_Globalization_NumberFormatting_DecimalFormatter, class_name );
 }
 
 static HRESULT WINAPI formatter_GetTrustLevel( INumberFormatter *iface, TrustLevel *trust_level )
@@ -751,6 +926,100 @@ static const ISignedZeroOptionVtbl signed_zero_vtbl =
     signed_zero_put_IsZeroSigned,
 };
 
+/* ---- ICurrencyFormatter, ICurrencyFormatter2 ---- */
+
+DEFINE_IINSPECTABLE( currency, ICurrencyFormatter, struct decimal_formatter, INumberFormatter_iface )
+
+static HRESULT WINAPI currency_get_Currency( ICurrencyFormatter *iface, HSTRING *value )
+{
+    struct decimal_formatter *impl = impl_from_ICurrencyFormatter( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_POINTER;
+    return WindowsCreateString( impl->currency, wcslen( impl->currency ), value );
+}
+
+static BOOL parse_currency_code( HSTRING code, WCHAR out[4] )
+{
+    UINT32 len, i;
+    const WCHAR *str = WindowsGetStringRawBuffer( code, &len );
+
+    if (len != 3) return FALSE;
+    for (i = 0; i < 3; i++)
+    {
+        if (!iswalpha( str[i] ) || str[i] > 0x7f) return FALSE;
+        out[i] = towupper( str[i] );
+    }
+    out[3] = 0;
+    return TRUE;
+}
+
+static HRESULT WINAPI currency_put_Currency( ICurrencyFormatter *iface, HSTRING value )
+{
+    struct decimal_formatter *impl = impl_from_ICurrencyFormatter( iface );
+    WCHAR code[4];
+
+    TRACE( "iface %p, value %s.\n", iface, debugstr_hstring( value ) );
+    if (!parse_currency_code( value, code )) return E_INVALIDARG;
+    wcscpy( impl->currency, code );
+    impl->fraction_digits = currency_digits( code );
+    return S_OK;
+}
+
+static const ICurrencyFormatterVtbl currency_vtbl =
+{
+    currency_QueryInterface,
+    currency_AddRef,
+    currency_Release,
+    /* IInspectable methods */
+    currency_GetIids,
+    currency_GetRuntimeClassName,
+    currency_GetTrustLevel,
+    /* ICurrencyFormatter methods */
+    currency_get_Currency,
+    currency_put_Currency,
+};
+
+DEFINE_IINSPECTABLE( currency2, ICurrencyFormatter2, struct decimal_formatter, INumberFormatter_iface )
+
+static HRESULT WINAPI currency2_get_Mode( ICurrencyFormatter2 *iface, CurrencyFormatterMode *value )
+{
+    if (!value) return E_POINTER;
+    *value = impl_from_ICurrencyFormatter2( iface )->mode;
+    return S_OK;
+}
+
+static HRESULT WINAPI currency2_put_Mode( ICurrencyFormatter2 *iface, CurrencyFormatterMode value )
+{
+    TRACE( "iface %p, value %d.\n", iface, value );
+    if (value != CurrencyFormatterMode_UseSymbol && value != CurrencyFormatterMode_UseCurrencyCode) return E_INVALIDARG;
+    impl_from_ICurrencyFormatter2( iface )->mode = value;
+    return S_OK;
+}
+
+static HRESULT WINAPI currency2_ApplyRoundingForCurrency( ICurrencyFormatter2 *iface, RoundingAlgorithm algorithm )
+{
+    TRACE( "iface %p, algorithm %d.\n", iface, algorithm );
+    if (algorithm < RoundingAlgorithm_None || algorithm > RoundingAlgorithm_RoundHalfToOdd) return E_INVALIDARG;
+    impl_from_ICurrencyFormatter2( iface )->rounding = algorithm;
+    return S_OK;
+}
+
+static const ICurrencyFormatter2Vtbl currency2_vtbl =
+{
+    currency2_QueryInterface,
+    currency2_AddRef,
+    currency2_Release,
+    /* IInspectable methods */
+    currency2_GetIids,
+    currency2_GetRuntimeClassName,
+    currency2_GetTrustLevel,
+    /* ICurrencyFormatter2 methods */
+    currency2_get_Mode,
+    currency2_put_Mode,
+    currency2_ApplyRoundingForCurrency,
+};
+
 /* ---- creation ---- */
 
 /* the numeral system of a locale: Arab when an Arabic-script language's native digits are Arabic-Indic */
@@ -781,6 +1050,8 @@ static HRESULT decimal_formatter_create( HSTRING *languages, UINT32 count, HSTRI
     impl->ISignificantDigitsOption_iface.lpVtbl = &significant_vtbl;
     impl->INumberRounderOption_iface.lpVtbl = &rounder_option_vtbl;
     impl->ISignedZeroOption_iface.lpVtbl = &signed_zero_vtbl;
+    impl->ICurrencyFormatter_iface.lpVtbl = &currency_vtbl;
+    impl->ICurrencyFormatter2_iface.lpVtbl = &currency2_vtbl;
     impl->ref = 1;
     impl->languages = languages;
     impl->language_count = count;
@@ -856,44 +1127,52 @@ static ULONG WINAPI factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const GUID *const list[] = { &IID_IDecimalFormatterFactory };
+
+    TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
+    return inspectable_get_iids( list, ARRAY_SIZE(list), iid_count, iids );
 }
 
 static HRESULT WINAPI factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
 {
-    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
-    return E_NOTIMPL;
+    return inspectable_get_class_name( RuntimeClass_Windows_Globalization_NumberFormatting_DecimalFormatter, class_name );
 }
 
 static HRESULT WINAPI factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
 {
-    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    *trust_level = BaseTrust;
+    return S_OK;
 }
 
-/* the user's language and region */
-static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+/* the user's language (one string, created here) and region */
+static HRESULT user_context( HSTRING **languages, HSTRING *region )
 {
     WCHAR locale[LOCALE_NAME_MAX_LENGTH];
+    HRESULT hr;
+
+    if (!GetUserDefaultLocaleName( locale, ARRAY_SIZE(locale) )) wcscpy( locale, L"en-US" );
+    if (!(*languages = calloc( 1, sizeof(**languages) ))) return E_OUTOFMEMORY;
+    if (FAILED(hr = WindowsCreateString( locale, wcslen( locale ), &(*languages)[0] )))
+    {
+        free( *languages );
+        return hr;
+    }
+    if (FAILED(hr = user_region( region )))
+    {
+        WindowsDeleteString( (*languages)[0] );
+        free( *languages );
+    }
+    return hr;
+}
+
+static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
     HSTRING *languages, region;
     HRESULT hr;
 
     TRACE( "iface %p, instance %p.\n", iface, instance );
 
-    if (!GetUserDefaultLocaleName( locale, ARRAY_SIZE(locale) )) wcscpy( locale, L"en-US" );
-    if (!(languages = calloc( 1, sizeof(*languages) ))) return E_OUTOFMEMORY;
-    if (FAILED(hr = WindowsCreateString( locale, wcslen( locale ), &languages[0] )))
-    {
-        free( languages );
-        return hr;
-    }
-    if (FAILED(hr = user_region( &region )))
-    {
-        WindowsDeleteString( languages[0] );
-        free( languages );
-        return hr;
-    }
+    if (FAILED(hr = user_context( &languages, &region ))) return hr;
     if (FAILED(hr = decimal_formatter_create( languages, 1, region, (INumberFormatter **)instance )))
     {
         WindowsDeleteString( languages[0] );
@@ -966,3 +1245,182 @@ static struct factory factory =
 };
 
 IActivationFactory *decimal_formatter_factory = &factory.IActivationFactory_iface;
+
+/* ---- CurrencyFormatter factory ---- */
+
+/* takes the language strings and the region */
+static HRESULT currency_formatter_create( HSTRING code, HSTRING *languages, UINT32 count, HSTRING region,
+                                          ICurrencyFormatter **out )
+{
+    struct decimal_formatter *impl;
+    INumberFormatter *formatter;
+    WCHAR currency[4];
+    HRESULT hr;
+
+    if (!parse_currency_code( code, currency )) return E_INVALIDARG;
+    if (FAILED(hr = decimal_formatter_create( languages, count, region, &formatter ))) return hr;
+    impl = impl_from_INumberFormatter( formatter );
+    impl->is_currency = TRUE;
+    wcscpy( impl->currency, currency );
+    impl->fraction_digits = currency_digits( currency );
+    impl->grouped = TRUE;
+    *out = (ICurrencyFormatter *)&impl->ICurrencyFormatter_iface;
+    return S_OK;
+}
+
+struct currency_factory
+{
+    IActivationFactory IActivationFactory_iface;
+    ICurrencyFormatterFactory ICurrencyFormatterFactory_iface;
+    LONG ref;
+};
+
+static inline struct currency_factory *impl_from_currency_IActivationFactory( IActivationFactory *iface )
+{
+    return CONTAINING_RECORD( iface, struct currency_factory, IActivationFactory_iface );
+}
+
+static HRESULT WINAPI currency_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+{
+    struct currency_factory *impl = impl_from_currency_IActivationFactory( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IActivationFactory ))
+        *out = &impl->IActivationFactory_iface;
+    else if (IsEqualGUID( iid, &IID_ICurrencyFormatterFactory ))
+        *out = &impl->ICurrencyFormatterFactory_iface;
+    else
+    {
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+
+static ULONG WINAPI currency_factory_AddRef( IActivationFactory *iface )
+{
+    return InterlockedIncrement( &impl_from_currency_IActivationFactory( iface )->ref );
+}
+
+static ULONG WINAPI currency_factory_Release( IActivationFactory *iface )
+{
+    return InterlockedDecrement( &impl_from_currency_IActivationFactory( iface )->ref );
+}
+
+static HRESULT WINAPI currency_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
+{
+    static const GUID *const list[] = { &IID_ICurrencyFormatterFactory };
+
+    TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
+    return inspectable_get_iids( list, ARRAY_SIZE(list), iid_count, iids );
+}
+
+static HRESULT WINAPI currency_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
+{
+    return inspectable_get_class_name( L"Windows.Globalization.NumberFormatting.CurrencyFormatter", class_name );
+}
+
+static HRESULT WINAPI currency_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
+{
+    *trust_level = BaseTrust;
+    return S_OK;
+}
+
+/* the class has no default constructor */
+static HRESULT WINAPI currency_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    TRACE( "iface %p, instance %p.\n", iface, instance );
+    *instance = NULL;
+    return E_NOTIMPL;
+}
+
+static const IActivationFactoryVtbl currency_factory_vtbl =
+{
+    currency_factory_QueryInterface,
+    currency_factory_AddRef,
+    currency_factory_Release,
+    /* IInspectable methods */
+    currency_factory_GetIids,
+    currency_factory_GetRuntimeClassName,
+    currency_factory_GetTrustLevel,
+    /* IActivationFactory methods */
+    currency_factory_ActivateInstance,
+};
+
+DEFINE_IINSPECTABLE( currency_creator, ICurrencyFormatterFactory, struct currency_factory, IActivationFactory_iface )
+
+static HRESULT WINAPI currency_creator_CreateCurrencyFormatterCode( ICurrencyFormatterFactory *iface, HSTRING code,
+                                                                    ICurrencyFormatter **result )
+{
+    HSTRING *languages, region;
+    HRESULT hr;
+
+    TRACE( "iface %p, code %s, result %p.\n", iface, debugstr_hstring( code ), result );
+
+    if (!result) return E_POINTER;
+    *result = NULL;
+    if (FAILED(hr = user_context( &languages, &region ))) return hr;
+    if (FAILED(hr = currency_formatter_create( code, languages, 1, region, result )))
+    {
+        WindowsDeleteString( languages[0] );
+        free( languages );
+        WindowsDeleteString( region );
+    }
+    return hr;
+}
+
+static HRESULT WINAPI currency_creator_CreateCurrencyFormatterCodeContext( ICurrencyFormatterFactory *iface, HSTRING code,
+                                                                           IIterable_HSTRING *languages, HSTRING region,
+                                                                           ICurrencyFormatter **result )
+{
+    HSTRING *list, copy;
+    UINT32 count, i;
+    HRESULT hr;
+
+    TRACE( "iface %p, code %s, languages %p, region %s, result %p.\n", iface, debugstr_hstring( code ), languages,
+           debugstr_hstring( region ), result );
+
+    if (!result) return E_POINTER;
+    *result = NULL;
+    if (!languages || !WindowsGetStringLen( region )) return E_INVALIDARG;
+    if (FAILED(hr = languages_from_iterable( languages, &list, &count ))) return hr;
+    if (FAILED(hr = WindowsDuplicateString( region, &copy ))) goto failed;
+    if (FAILED(hr = currency_formatter_create( code, list, count, copy, result )))
+    {
+        WindowsDeleteString( copy );
+        goto failed;
+    }
+    return S_OK;
+
+failed:
+    for (i = 0; i < count; i++) WindowsDeleteString( list[i] );
+    free( list );
+    return hr;
+}
+
+static const ICurrencyFormatterFactoryVtbl currency_creator_vtbl =
+{
+    currency_creator_QueryInterface,
+    currency_creator_AddRef,
+    currency_creator_Release,
+    /* IInspectable methods */
+    currency_creator_GetIids,
+    currency_creator_GetRuntimeClassName,
+    currency_creator_GetTrustLevel,
+    /* ICurrencyFormatterFactory methods */
+    currency_creator_CreateCurrencyFormatterCode,
+    currency_creator_CreateCurrencyFormatterCodeContext,
+};
+
+static struct currency_factory currency_factory =
+{
+    {&currency_factory_vtbl},
+    {&currency_creator_vtbl},
+    1,
+};
+
+IActivationFactory *currency_formatter_factory = &currency_factory.IActivationFactory_iface;

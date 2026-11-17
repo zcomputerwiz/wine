@@ -45,6 +45,10 @@ extern IActivationFactory *language_font_group_factory;
 HRESULT hstring_vector_create(HSTRING *values, SIZE_T count, IVectorView_HSTRING **out);
 HRESULT languages_from_iterable( IIterable_HSTRING *iterable, HSTRING **out, UINT32 *count );
 extern IActivationFactory *decimal_formatter_factory;
+extern IActivationFactory *currency_formatter_factory;
+extern IActivationFactory *date_time_formatter_factory;
+HRESULT inspectable_get_iids( const GUID *const *list, ULONG count, ULONG *iid_count, IID **iids );
+HRESULT inspectable_get_class_name( const WCHAR *name, HSTRING *class_name );
 extern IActivationFactory *calendar_identifiers_factory;
 extern IActivationFactory *clock_identifiers_factory;
 
