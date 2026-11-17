@@ -9,6 +9,7 @@ SOURCES = \
 	analytics_info.c \
 	application_view.c \
 	async.c \
+	async_action.c \
 	async_value.c \
 	boxed_string.c \
 	clipboard.c \
@@ -17,18 +18,24 @@ SOURCES = \
 	core_application.c \
 	core_view.c \
 	data_transfer.c \
+	device_capabilities.c \
 	datapackage.c \
 	datapackage_props.c \
+	display_request.c \
 	hstring_vector.c \
 	htmlformathelper.c \
+	jumplist.c \
+	jumplist_vector.c \
 	launcher.c \
 	lifecycle.c \
 	main.c \
 	memory.c \
 	policies.c \
 	standarddataformats.c \
+	static_factory.c \
 	title_bar.c \
 	twinapi.appcore.rc \
 	user.c \
 	user_activities.c \
+	user_activity.c \
 	view_mode_preferences.c

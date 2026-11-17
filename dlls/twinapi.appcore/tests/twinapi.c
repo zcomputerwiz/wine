@@ -48,6 +48,14 @@
 #include "windows.applicationmodel.core.h"
 #define WIDL_using_Windows_ApplicationModel_DataTransfer
 #include "windows.applicationmodel.datatransfer.h"
+#define WIDL_using_Windows_ApplicationModel_UserActivities
+#include "windows.applicationmodel.useractivities.h"
+#define WIDL_using_Windows_UI_StartScreen
+#include "windows.ui.startscreen.h"
+#define WIDL_using_Windows_Devices_Input
+#include "windows.devices.input.h"
+#define WIDL_using_Windows_System_Display
+#include "windows.system.display.h"
 
 #include "wine/test.h"
 
