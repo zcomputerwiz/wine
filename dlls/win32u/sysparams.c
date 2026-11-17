@@ -1839,6 +1839,32 @@ static void add_gpu( const char *name, const struct pci_id *pci_id, const GUID *
     if (opengl_gpu) free_gpu_info( opengl_gpu );
 }
 
+/* Create a volatile symbolic link key, or open the link itself when it exists already, so that it can be pointed
+ * at another target. NtCreateKey ignores REG_OPTION_OPEN_LINK, as on Windows: only OBJ_OPENLINK opens the link
+ * rather than its target. Without it the SymbolicLinkValue lands in the old target and the link keeps pointing
+ * there, which matters when the keys outlive the wineserver that made them (a registry held by session 0). */
+static HKEY reg_create_link_key( HKEY root, const char *name )
+{
+    WCHAR nameW[MAX_PATH];
+    UNICODE_STRING str;
+    OBJECT_ATTRIBUTES attr;
+    HANDLE ret;
+    HKEY hkey;
+
+    if ((hkey = reg_create_ascii_key( root, name, REG_OPTION_VOLATILE | REG_OPTION_CREATE_LINK, NULL ))) return hkey;
+
+    str.Buffer = nameW;
+    str.Length = str.MaximumLength = asciiz_to_unicode( nameW, name ) - sizeof(WCHAR);
+    attr.Length = sizeof(attr);
+    attr.RootDirectory = root;
+    attr.ObjectName = &str;
+    attr.Attributes = OBJ_OPENLINK;
+    attr.SecurityDescriptor = NULL;
+    attr.SecurityQualityOfService = NULL;
+    if (NtOpenKeyEx( &ret, MAXIMUM_ALLOWED, &attr, 0 )) return 0;
+    return ret;
+}
+
 static BOOL write_source_to_registry( struct source *source )
 {
     struct gpu *gpu = source->gpu;
@@ -1850,8 +1876,7 @@ static BOOL write_source_to_registry( struct source *source )
     snprintf( buffer, sizeof(buffer), "%s\\Video\\%s\\%04x", control_keyA, gpu->guid, source_index );
     len = asciiz_to_unicode( bufferW, buffer ) - sizeof(WCHAR);
 
-    hkey = reg_create_ascii_key( NULL, buffer, REG_OPTION_VOLATILE | REG_OPTION_CREATE_LINK, NULL );
-    if (!hkey) hkey = reg_create_ascii_key( NULL, buffer, REG_OPTION_VOLATILE | REG_OPTION_OPEN_LINK, NULL );
+    hkey = reg_create_link_key( NULL, buffer );
 
     snprintf( name, sizeof(name), "\\Device\\Video%u", source->id );
     set_reg_ascii_value( video_key, name, buffer );
@@ -1871,8 +1896,7 @@ static BOOL write_source_to_registry( struct source *source )
     set_reg_value( source->key, dpiW, REG_DWORD, &source->dpi, sizeof(source->dpi) );
 
     snprintf( buffer, sizeof(buffer), "System\\CurrentControlSet\\Control\\Video\\%s\\%04x", gpu->guid, source_index );
-    hkey = reg_create_ascii_key( config_key, buffer, REG_OPTION_VOLATILE | REG_OPTION_CREATE_LINK, NULL );
-    if (!hkey) hkey = reg_create_ascii_key( config_key, buffer, REG_OPTION_VOLATILE | REG_OPTION_OPEN_LINK, NULL );
+    hkey = reg_create_link_key( config_key, buffer );
 
     len = asciiz_to_unicode( bufferW, source->path ) - sizeof(WCHAR);
     set_reg_value( hkey, symbolic_link_valueW, REG_LINK, bufferW, len );
