@@ -56,6 +56,8 @@
 #include "windows.devices.input.h"
 #define WIDL_using_Windows_System_Display
 #include "windows.system.display.h"
+#define WIDL_using_Windows_Web_Http
+#include "windows.web.http.h"
 
 #include "wine/test.h"
 

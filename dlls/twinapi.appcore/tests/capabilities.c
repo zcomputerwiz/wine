@@ -36,6 +36,8 @@
 #include "windows.devices.input.h"
 #define WIDL_using_Windows_System_Display
 #include "windows.system.display.h"
+#define WIDL_using_Windows_Web_Http
+#include "windows.web.http.h"
 
 #include "wine/test.h"
 
@@ -136,6 +138,38 @@ static void test_DisplayRequest(void)
     IDisplayRequest_Release( request );
 }
 
+static void test_HttpClient(void)
+{
+    IInspectable *instance, *operation = (void *)0xdeadbeef;
+    IClosable *closable;
+    IHttpClient *client;
+    HSTRING name;
+    HRESULT hr;
+
+    if (!(instance = activate( L"Windows.Web.Http.HttpClient" )))
+    {
+        win_skip( "HttpClient runtimeclass not registered, skipping tests.\n" );
+        return;
+    }
+    hr = IInspectable_QueryInterface( instance, &IID_IHttpClient, (void **)&client );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IInspectable_QueryInterface( instance, &IID_IClosable, (void **)&closable );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IClosable_Close( closable );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    IClosable_Release( closable );
+
+    hr = IHttpClient_GetRuntimeClassName( client, &name );
+    ok( hr == S_OK && !wcscmp( WindowsGetStringRawBuffer( name, NULL ), L"Windows.Web.Http.HttpClient" ), "got hr %#lx.\n", hr );
+    WindowsDeleteString( name );
+
+    /* the requests are not implemented */
+    hr = IHttpClient_GetStringAsync( client, NULL, &operation );
+    ok( hr == E_NOTIMPL && !operation, "got hr %#lx, operation %p.\n", hr, operation );
+    IHttpClient_Release( client );
+    IInspectable_Release( instance );
+}
+
 START_TEST(capabilities)
 {
     HRESULT hr;
@@ -145,6 +179,7 @@ START_TEST(capabilities)
 
     test_capabilities();
     test_DisplayRequest();
+    test_HttpClient();
 
     RoUninitialize();
 }
