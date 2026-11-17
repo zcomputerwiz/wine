@@ -215,6 +215,7 @@ HRESULT SHELL_RegisterUserShellFolders(void);
 
 /* Detect Shell Links */
 BOOL SHELL_IsShortcut(LPCITEMIDLIST);
+BOOL SHELL_FileAssociationsRestricted(void);
 
 
 /* IEnumIDList stuff */
