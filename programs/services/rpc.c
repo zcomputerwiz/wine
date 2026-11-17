@@ -112,6 +112,9 @@ static DWORD check_client_access(struct service_entry *entry, BOOL service, cons
     RpcRevertToSelf();
     if (!have_token) return ERROR_ACCESS_DENIED;
 
+    /* AccessCheck takes specific rights only: GENERIC_READ, GENERIC_ALL and the others are mapped first, as the
+     * service manager on Windows does (a GENERIC_ALL open of the manager is SC_MANAGER_ALL_ACCESS) */
+    MapGenericMask(access, (GENERIC_MAPPING *)mapping);
     if (entry) service_lock(entry);
     if (AccessCheck(service ? (entry && entry->security ? entry->security : svc_sd) : scm_sd, token, *access,
                     (GENERIC_MAPPING *)mapping, &privs, &privs_size, &granted, &ok) && ok)
