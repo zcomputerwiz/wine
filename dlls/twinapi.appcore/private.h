@@ -38,6 +38,7 @@
 #define WIDL_using_Windows_Storage_Streams
 #define WIDL_using_Windows_Foundation_Collections
 #define WIDL_using_Windows_Web_Http
+#define WIDL_using_Windows_System_Power
 #define WIDL_using_Windows_System_Display
 #define WIDL_using_Windows_Devices_Input
 #include "windows.foundation.h"
@@ -62,6 +63,7 @@
 #define WIDL_using_Windows_UI_StartScreen
 #include "windows.system.display.h"
 #include "windows.web.http.h"
+#include "windows.system.power.h"
 #include "windows.devices.input.h"
 #include "windows.ui.startscreen.h"
 #define WIDL_using_Windows_Management_Policies
@@ -108,6 +110,7 @@ extern IActivationFactory *jump_list_factory;
 extern IActivationFactory *jump_list_item_factory;
 extern IActivationFactory *display_request_factory;
 extern IActivationFactory *http_client_factory;
+extern IActivationFactory *power_manager_factory;
 extern IActivationFactory *keyboard_capabilities_factory;
 extern IActivationFactory *mouse_capabilities_factory;
 extern IActivationFactory *touch_capabilities_factory;

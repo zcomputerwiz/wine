@@ -38,6 +38,8 @@
 #include "windows.system.display.h"
 #define WIDL_using_Windows_Web_Http
 #include "windows.web.http.h"
+#define WIDL_using_Windows_System_Power
+#include "windows.system.power.h"
 
 #include "wine/test.h"
 
@@ -138,6 +140,47 @@ static void test_DisplayRequest(void)
     IDisplayRequest_Release( request );
 }
 
+static void test_PowerManager(void)
+{
+    IPowerManagerStatics *statics = NULL;
+    EventRegistrationToken token;
+    SYSTEM_POWER_STATUS status;
+    EnergySaverStatus saver;
+    PowerSupplyStatus supply;
+    BatteryStatus battery;
+    HSTRING name;
+    TimeSpan span;
+    INT32 percent;
+    HRESULT hr;
+
+    WindowsCreateString( L"Windows.System.Power.PowerManager", 33, &name );
+    hr = RoGetActivationFactory( name, &IID_IPowerManagerStatics, (void **)&statics );
+    WindowsDeleteString( name );
+    ok( hr == S_OK || broken( hr == REGDB_E_CLASSNOTREG ), "got hr %#lx.\n", hr );
+    if (!statics)
+    {
+        win_skip( "PowerManager runtimeclass not registered, skipping tests.\n" );
+        return;
+    }
+
+    ok( GetSystemPowerStatus( &status ), "GetSystemPowerStatus failed.\n" );
+    hr = IPowerManagerStatics_get_BatteryStatus( statics, &battery );
+    ok( hr == S_OK && battery >= BatteryStatus_NotPresent && battery <= BatteryStatus_Charging, "got hr %#lx, %d.\n", hr, battery );
+    hr = IPowerManagerStatics_get_EnergySaverStatus( statics, &saver );
+    ok( hr == S_OK && saver >= EnergySaverStatus_Disabled && saver <= EnergySaverStatus_On, "got hr %#lx, %d.\n", hr, saver );
+    hr = IPowerManagerStatics_get_PowerSupplyStatus( statics, &supply );
+    ok( hr == S_OK && (supply == PowerSupplyStatus_Adequate) == (status.ACLineStatus == 1), "got hr %#lx, %d.\n", hr, supply );
+    hr = IPowerManagerStatics_get_RemainingChargePercent( statics, &percent );
+    ok( hr == S_OK && percent >= 0 && percent <= 100, "got hr %#lx, %d.\n", hr, percent );
+    hr = IPowerManagerStatics_get_RemainingDischargeTime( statics, &span );
+    ok( hr == S_OK && span.Duration > 0, "got hr %#lx.\n", hr );
+
+    /* the events are accepted and removed again */
+    hr = IPowerManagerStatics_add_BatteryStatusChanged( statics, NULL, &token );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+    IPowerManagerStatics_Release( statics );
+}
+
 static void test_HttpClient(void)
 {
     IInspectable *instance, *operation = (void *)0xdeadbeef;
@@ -180,6 +223,7 @@ START_TEST(capabilities)
     test_capabilities();
     test_DisplayRequest();
     test_HttpClient();
+    test_PowerManager();
 
     RoUninitialize();
 }
