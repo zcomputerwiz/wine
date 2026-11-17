@@ -42,6 +42,8 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
         IActivationFactory_QueryInterface( package_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_DesignMode ))
         IActivationFactory_QueryInterface( design_mode_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_LimitedAccessFeatures ))
+        IActivationFactory_QueryInterface( limited_access_features_factory, &IID_IActivationFactory, (void **)factory );
 
     else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_Resources_ResourceLoader ))
         IActivationFactory_QueryInterface( resource_loader_factory, &IID_IActivationFactory, (void **)factory );

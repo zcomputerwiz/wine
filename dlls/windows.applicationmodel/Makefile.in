@@ -4,6 +4,7 @@ IMPORTS = combase kernelbase advapi32
 SOURCES = \
 	classes.idl \
 	designmode.c \
+	limitedaccess.c \
 	main.c \
 	map.c \
 	package.c \

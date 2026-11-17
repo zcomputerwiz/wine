@@ -622,6 +622,65 @@ static void test_DesignMode(void)
     ok( ref == 1, "got ref %ld.\n", ref );
 }
 
+static void test_LimitedAccessFeatures(void)
+{
+    static const WCHAR *class_name = RuntimeClass_Windows_ApplicationModel_LimitedAccessFeatures;
+    ILimitedAccessFeatureRequestResult *result;
+    ILimitedAccessFeaturesStatics *statics;
+    IActivationFactory *factory;
+    LimitedAccessFeatureStatus status;
+    IReference_DateTime *date;
+    HSTRING str, feature;
+    HRESULT hr;
+    LONG ref;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK || broken( hr == REGDB_E_CLASSNOTREG ), "got hr %#lx.\n", hr );
+    if (FAILED( hr ))
+    {
+        win_skip( "%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w( class_name ) );
+        return;
+    }
+
+    check_interface( factory, &IID_IUnknown, TRUE, FALSE );
+    check_interface( factory, &IID_IInspectable, TRUE, FALSE );
+    check_interface( factory, &IID_IAgileObject, TRUE, FALSE );
+    check_interface( factory, &IID_IActivationFactory, TRUE, FALSE );
+    check_interface( factory, &IID_ILimitedAccessFeaturesStatics, TRUE, FALSE );
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_ILimitedAccessFeaturesStatics, (void **)&statics );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    /* no token unlocks a feature of this machine */
+    WindowsCreateString( L"com.example.feature", 19, &feature );
+    hr = ILimitedAccessFeaturesStatics_TryUnlockFeature( statics, feature, feature, feature, &result );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    check_interface( result, &IID_IInspectable, TRUE, FALSE );
+    check_interface( result, &IID_IAgileObject, TRUE, FALSE );
+    hr = ILimitedAccessFeatureRequestResult_get_Status( result, &status );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( status == LimitedAccessFeatureStatus_Unavailable, "got status %d.\n", status );
+    hr = ILimitedAccessFeatureRequestResult_get_FeatureId( result, &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !wcscmp( WindowsGetStringRawBuffer( str, NULL ), L"com.example.feature" ), "got feature id %s.\n",
+        debugstr_hstring( str ) );
+    WindowsDeleteString( str );
+    date = (void *)0xdeadbeef;
+    hr = ILimitedAccessFeatureRequestResult_get_EstimatedRemovalDate( result, &date );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !date, "got date %p.\n", date );
+    ILimitedAccessFeatureRequestResult_Release( result );
+    WindowsDeleteString( feature );
+
+    ILimitedAccessFeaturesStatics_Release( statics );
+    ref = IActivationFactory_Release( factory );
+    ok( ref == 1, "got ref %ld.\n", ref );
+}
+
 START_TEST(model)
 {
     HRESULT hr;
@@ -632,6 +691,7 @@ START_TEST(model)
     test_PackageManager();
     test_PackageStatics();
     test_DesignMode();
+    test_LimitedAccessFeatures();
 
     RoUninitialize();
 }
