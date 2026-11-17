@@ -30,11 +30,17 @@ namespace Windows.Devices.Input {
     typedef enum PointerDeviceType PointerDeviceType;
     typedef struct PointerDeviceUsage PointerDeviceUsage;
 
+    interface IKeyboardCapabilities;
+    interface IMouseCapabilities;
     interface IPointerDevice;
     interface IPointerDevice2;
     interface IPointerDeviceStatics;
+    interface ITouchCapabilities;
 
+    runtimeclass KeyboardCapabilities;
+    runtimeclass MouseCapabilities;
     runtimeclass PointerDevice;
+    runtimeclass TouchCapabilities;
 
     declare {
         interface Windows.Foundation.Collections.IVectorView<Windows.Devices.Input.PointerDevice *>;
@@ -111,5 +117,70 @@ namespace Windows.Devices.Input {
     {
         [default] interface Windows.Devices.Input.IPointerDevice;
         [contract(Windows.Foundation.UniversalApiContract, 1.0)] interface Windows.Devices.Input.IPointerDevice2;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Devices.Input.KeyboardCapabilities),
+        uuid(3a3f9b56-6798-4bbc-833e-0f34b17c65ff)
+    ]
+    interface IKeyboardCapabilities : IInspectable
+    {
+        [propget] HRESULT KeyboardPresent([out, retval] INT32 *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Devices.Input.MouseCapabilities),
+        uuid(bca5e023-7dd9-4b6b-9a92-55d43cb38f73)
+    ]
+    interface IMouseCapabilities : IInspectable
+    {
+        [propget] HRESULT MousePresent([out, retval] INT32 *value);
+        [propget] HRESULT VerticalWheelPresent([out, retval] INT32 *value);
+        [propget] HRESULT HorizontalWheelPresent([out, retval] INT32 *value);
+        [propget] HRESULT SwapButtons([out, retval] INT32 *value);
+        [propget] HRESULT NumberOfButtons([out, retval] UINT32 *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Devices.Input.TouchCapabilities),
+        uuid(20dd55f9-13f1-46c8-9285-2c05fa3eda6f)
+    ]
+    interface ITouchCapabilities : IInspectable
+    {
+        [propget] HRESULT TouchPresent([out, retval] INT32 *value);
+        [propget] HRESULT Contacts([out, retval] UINT32 *value);
+    }
+
+    [
+        activatable(Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass KeyboardCapabilities
+    {
+        [default] interface Windows.Devices.Input.IKeyboardCapabilities;
+    }
+
+    [
+        activatable(Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass MouseCapabilities
+    {
+        [default] interface Windows.Devices.Input.IMouseCapabilities;
+    }
+
+    [
+        activatable(Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass TouchCapabilities
+    {
+        [default] interface Windows.Devices.Input.ITouchCapabilities;
     }
 }

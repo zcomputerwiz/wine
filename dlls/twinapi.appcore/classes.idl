@@ -35,6 +35,8 @@ import "windows.applicationmodel.core.idl";
 import "windows.applicationmodel.datatransfer.idl";
 import "windows.applicationmodel.useractivities.idl";
 import "windows.ui.startscreen.idl";
+import "windows.system.display.idl";
+import "windows.devices.input.idl";
 import "windows.management.policies.idl";
 
 namespace Windows.Management.Policies {
@@ -51,6 +53,14 @@ namespace Windows.ApplicationModel.UserActivities {
     runtimeclass UserActivityChannel;
     runtimeclass UserActivityContentInfo;
     runtimeclass UserActivityRequestManager;
+}
+namespace Windows.System.Display {
+    runtimeclass DisplayRequest;
+}
+namespace Windows.Devices.Input {
+    runtimeclass KeyboardCapabilities;
+    runtimeclass MouseCapabilities;
+    runtimeclass TouchCapabilities;
 }
 namespace Windows.UI.StartScreen {
     runtimeclass JumpList;

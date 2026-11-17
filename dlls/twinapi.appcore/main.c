@@ -109,6 +109,14 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
         IActivationFactory_QueryInterface( jump_list_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, RuntimeClass_Windows_UI_StartScreen_JumpListItem ))
         IActivationFactory_QueryInterface( jump_list_item_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_System_Display_DisplayRequest ))
+        IActivationFactory_QueryInterface( display_request_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Devices_Input_KeyboardCapabilities ))
+        IActivationFactory_QueryInterface( keyboard_capabilities_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Devices_Input_MouseCapabilities ))
+        IActivationFactory_QueryInterface( mouse_capabilities_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Devices_Input_TouchCapabilities ))
+        IActivationFactory_QueryInterface( touch_capabilities_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, RuntimeClass_Windows_System_Launcher ))
         IActivationFactory_QueryInterface( launcher_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, RuntimeClass_Windows_UI_ViewManagement_ViewModePreferences ))

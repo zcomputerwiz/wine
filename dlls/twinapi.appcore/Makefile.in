@@ -18,8 +18,10 @@ SOURCES = \
 	core_application.c \
 	core_view.c \
 	data_transfer.c \
+	device_capabilities.c \
 	datapackage.c \
 	datapackage_props.c \
+	display_request.c \
 	hstring_vector.c \
 	htmlformathelper.c \
 	jumplist.c \

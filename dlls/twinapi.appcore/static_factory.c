@@ -84,9 +84,11 @@ HRESULT WINAPI static_factory_GetIids( IActivationFactory *iface, ULONG *count, 
     IID *list;
     UINT32 i;
 
-    if (!impl->count || !(list = CoTaskMemAlloc( impl->count * sizeof(*list) ))) return impl->count ? E_OUTOFMEMORY : E_NOTIMPL;
+    /* a factory without statics has the activation factory interface only */
+    if (!(list = CoTaskMemAlloc( max( impl->count, 1 ) * sizeof(*list) ))) return E_OUTOFMEMORY;
     for (i = 0; i < impl->count; i++) list[i] = *impl->statics[i].iid;
-    *count = impl->count;
+    if (!impl->count) list[0] = IID_IActivationFactory;
+    *count = max( impl->count, 1 );
     *iids = list;
     return S_OK;
 }
@@ -126,3 +128,79 @@ const struct IActivationFactoryVtbl static_factory_vtbl =
     /* IActivationFactory methods */
     static_factory_ActivateInstance,
 };
+
+/* ---- an object with one interface (and no state to share) ---- */
+
+HRESULT WINAPI simple_object_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    struct simple_object *impl = (struct simple_object *)iface;
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, impl->iid ))
+    {
+        IInspectable_AddRef( (*out = iface) );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+ULONG WINAPI simple_object_AddRef( IInspectable *iface )
+{
+    return InterlockedIncrement( &((struct simple_object *)iface)->ref );
+}
+
+ULONG WINAPI simple_object_Release( IInspectable *iface )
+{
+    struct simple_object *impl = (struct simple_object *)iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        if (impl->destroy) impl->destroy( impl );
+        free( impl );
+    }
+    return ref;
+}
+
+HRESULT WINAPI simple_object_GetIids( IInspectable *iface, ULONG *count, IID **iids )
+{
+    IID *list;
+
+    if (!(list = CoTaskMemAlloc( sizeof(*list) ))) return E_OUTOFMEMORY;
+    *list = *((struct simple_object *)iface)->iid;
+    *count = 1;
+    *iids = list;
+    return S_OK;
+}
+
+HRESULT WINAPI simple_object_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
+{
+    const WCHAR *class_name = ((struct simple_object *)iface)->class_name;
+
+    return WindowsCreateString( class_name, wcslen( class_name ), name );
+}
+
+HRESULT WINAPI simple_object_GetTrustLevel( IInspectable *iface, TrustLevel *level )
+{
+    *level = BaseTrust;
+    return S_OK;
+}
+
+/* SIZE is the size of the whole object, which starts with the simple_object; the memory is zeroed */
+HRESULT simple_object_create( SIZE_T size, const void *vtbl, const GUID *iid, const WCHAR *class_name,
+                              void (*destroy)( struct simple_object * ), struct simple_object **out )
+{
+    struct simple_object *impl;
+
+    if (!(impl = calloc( 1, size ))) return E_OUTOFMEMORY;
+    impl->lpVtbl = vtbl;
+    impl->ref = 1;
+    impl->iid = iid;
+    impl->class_name = class_name;
+    impl->destroy = destroy;
+    *out = impl;
+    return S_OK;
+}

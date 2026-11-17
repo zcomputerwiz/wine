@@ -1,8 +1,9 @@
 TESTDLL = twinapi.appcore.dll
-IMPORTS = combase advapi32
+IMPORTS = combase advapi32 user32
 
 SOURCES = \
 	activities.c \
+	capabilities.c \
 	datatransfer.c \
 	twinapi.c \
 	viewmode.c
