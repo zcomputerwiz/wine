@@ -1,6 +1,7 @@
 EXTRADEFS = -D_CONTRACT_GEN
 MODULE    = twinapi.appcore.dll
 IMPORTS   = combase advapi32 kernelbase bcrypt user32
+DELAYIMPORTS = shell32
 
 SOURCES = \
 	activation_manager.c \
@@ -20,6 +21,7 @@ SOURCES = \
 	datapackage_props.c \
 	hstring_vector.c \
 	htmlformathelper.c \
+	launcher.c \
 	lifecycle.c \
 	main.c \
 	memory.c \
@@ -28,4 +30,5 @@ SOURCES = \
 	title_bar.c \
 	twinapi.appcore.rc \
 	user.c \
-	user_activities.c
+	user_activities.c \
+	view_mode_preferences.c

@@ -3,4 +3,5 @@ IMPORTS = combase advapi32
 
 SOURCES = \
 	datatransfer.c \
-	twinapi.c
+	twinapi.c \
+	viewmode.c

@@ -96,6 +96,8 @@ HSTRING user_get_id( IUser *user );
 extern IActivationFactory *user_factory;
 extern IActivationFactory *named_policy_factory;
 extern IActivationFactory *memory_manager_factory;
+extern IActivationFactory *launcher_factory;
+extern IActivationFactory *view_mode_preferences_factory;
 HRESULT async_bool_completed( boolean result, IAsyncOperation_boolean **out );
 
 #define create_name( str, name ) WindowsCreateString( str, ARRAY_SIZE(str) - 1, name )
