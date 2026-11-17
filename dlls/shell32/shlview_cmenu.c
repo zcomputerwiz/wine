@@ -1055,6 +1055,8 @@ static INT_PTR CALLBACK file_properties_proc(HWND hwndDlg, UINT uMsg, WPARAM wPa
             LPPROPSHEETPAGEW page = (LPPROPSHEETPAGEW)lParam;
             SetWindowLongPtrW(hwndDlg, DWLP_USER, (LONG_PTR)page->lParam);
             init_file_properties_dlg(hwndDlg, (struct file_properties_info *)page->lParam);
+            /* Group Policy "Do not allow changing file associations" */
+            if (SHELL_FileAssociationsRestricted()) ShowWindow(GetDlgItem(hwndDlg, IDC_FPROP_PROG_CHANGE), SW_HIDE);
             break;
         }
 
