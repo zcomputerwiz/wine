@@ -2165,6 +2165,16 @@ void token_make_filtered( struct token *token )
     allocate_luid( &token->modified_id );
 }
 
+/* an administrator's token that is not split, as in Safe Mode where User Account Control does not run: all its
+ * groups and privileges stay, and it is the full (elevated) one, with the filtered half as its linked token, as the
+ * full token the broker hands out (docs/SAFE_MODE_ELEVATED_DESKTOP.md) */
+void token_make_full( struct token *token )
+{
+    token->elevation = TokenElevationTypeFull;
+    token_assign_label( token, &high_label_sid );
+    allocate_luid( &token->modified_id );
+}
+
 /* set when this server gave its user a standard token: tokens derived from it (a filtered copy is Limited
  * again) must not get a linked full token or an administrator grant */
 int standard_user_session;

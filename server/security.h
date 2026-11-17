@@ -74,6 +74,7 @@ extern int token_service_account( const struct token *token );
 extern int token_is_elevated( const struct token *token );
 extern int token_protect_elevated( struct token *token );
 extern void token_make_filtered( struct token *token );
+extern void token_make_full( struct token *token );
 extern void token_make_standard( struct token *token );
 extern int user_is_administrator(void);
 extern int security_server_user_in_domain_group( unsigned int rid );

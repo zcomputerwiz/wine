@@ -863,8 +863,14 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
         /* the registry is loaded before the first client connects, so the helper setting is known here */
         if (process->token && elevation_enforced())
         {
-            token_make_filtered( process->token );
-            if (!user_is_administrator()) token_make_standard( process->token );
+            /* Safe Mode, as Windows: User Account Control does not run, an administrator's token is not split and
+             * is the full one (docs/SAFE_MODE_ELEVATED_DESKTOP.md); a standard user's is the standard token */
+            if (user_is_administrator() && sysrun_safe_boot()) token_make_full( process->token );
+            else
+            {
+                token_make_filtered( process->token );
+                if (!user_is_administrator()) token_make_standard( process->token );
+            }
         }
         process->affinity = ~0;
     }

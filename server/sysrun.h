@@ -61,6 +61,8 @@ extern void sysrun_drop( int raised );
 
 /* does this client run with the system group (SO_PEERCRED at connect time)? */
 extern int sysrun_process_privileged( const struct process *process );
+/* is this a Safe Mode start (the root-owned boot mode file)? */
+extern int sysrun_safe_boot(void);
 extern int sysrun_raise_for_current(void);
 
 /* The system role (C3). Only while sysrun is active and elevation is enforced; otherwise these do nothing. */

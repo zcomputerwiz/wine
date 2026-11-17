@@ -179,6 +179,33 @@ static int system_role_enabled(void)
     return sysrun_active && elevation_enforced();
 }
 
+/* Safe Mode (docs/SAFE_MODE.md): /run/wineexplorer/bootmode, a regular file that root owns and others cannot write,
+ * in a root-owned directory that others cannot write, says safe, safenet or safecmd. Read once: the mode does not
+ * change during a start. The same source of truth as the launcher's and the broker's; SafeBoot\Option is not used
+ * (an elevated program can write it). */
+int sysrun_safe_boot(void)
+{
+    static int safe = -1;
+    struct stat st;
+    char buf[16];
+    ssize_t n;
+    int fd;
+
+    if (safe != -1) return safe;
+    safe = 0;
+    if (lstat( "/run/wineexplorer", &st ) || !S_ISDIR( st.st_mode ) || st.st_uid || (st.st_mode & 022)) return 0;
+    if ((fd = open( "/run/wineexplorer/bootmode", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC )) == -1) return 0;
+    if (!fstat( fd, &st ) && S_ISREG( st.st_mode ) && !st.st_uid && !(st.st_mode & 022) &&
+        (n = read( fd, buf, sizeof(buf) - 1 )) > 0)
+    {
+        buf[n] = 0;
+        buf[strcspn( buf, "\r\n" )] = 0;
+        safe = !strcmp( buf, "safe" ) || !strcmp( buf, "safenet" ) || !strcmp( buf, "safecmd" );
+    }
+    close( fd );
+    return safe;
+}
+
 static const struct sid authenticated_users_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_AUTHENTICATED_USER_RID } };
 static const struct sid local_service_account_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_LOCAL_SERVICE_RID } };
 static const struct sid network_service_account_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_NETWORK_SERVICE_RID } };
@@ -419,6 +446,25 @@ void sysrun_main_image( struct process *process, struct fd *fd )
     /* device and inode of the mapped file, never the NT path: that goes through the user's prefix links */
     if (fd && (unix_fd = get_unix_fd( fd )) != -1 && !fstat( unix_fd, &st ) && S_ISREG( st.st_mode ))
     {
+        /* An administrator's elevated desktop in Safe Mode (the launcher's safe-shell): the machine root's
+         * explorer.exe, with the full token this server gives an administrator's programs only in Safe Mode. It keeps
+         * that token (not SYSTEM's) and is protected as an elevated process, as one the broker starts
+         * (docs/SAFE_MODE_ELEVATED_DESKTOP.md). Without both, it is ended below as any other image. */
+        if (sysrun_safe_boot() && token_is_elevated( process->token ) &&
+            snprintf( path, sizeof(path), "%s/drive_c/windows/explorer.exe", machine_root ) < sizeof(path) &&
+            !stat( path, &ref ) && ref.st_dev == st.st_dev && ref.st_ino == st.st_ino)
+        {
+            struct thread *thread;
+            int ok;
+
+            process->sysrun_account = SYSRUN_ACCOUNT_ELEVATED;
+            ok = token_protect_elevated( process->token ) &&
+                 protect_object( &process->obj, process->token, SYSRUN_ACCOUNT_ELEVATED, 0 );
+            /* the threads it has were protected as SYSTEM's when it was created: they get the elevated descriptor */
+            LIST_FOR_EACH_ENTRY( thread, &process->thread_list, struct thread, proc_entry )
+                if (ok) ok = protect_object( &thread->obj, process->token, SYSRUN_ACCOUNT_ELEVATED, 1 );
+            if (ok) return;
+        }
         for (i = 0; i < ARRAY_SIZE(system_images); i++)
         {
             if (snprintf( path, sizeof(path), "%s%s", machine_root, system_images[i] ) >= sizeof(path)) continue;

@@ -209,6 +209,21 @@ BOOL sysrun_must_drop_group( HANDLE token )
              !memcmp( &sid->IdentifierAuthority, &nt_authority, sizeof(nt_authority) ));
 }
 
+/* The launcher's safe-shell (an administrator's elevated desktop in Safe Mode, docs/SAFE_MODE_ELEVATED_DESKTOP.md):
+ * the second gate, before anything of the prefix is loaded. The desktop keeps the system group only with the full
+ * token, which the server gives an administrator's programs in Safe Mode alone; otherwise it drops the group for good
+ * now (and the server ends it once its image is mapped). */
+void sysrun_safe_shell_gate(void)
+{
+    ULONG elevation, len;
+    gid_t gid = getgid();
+
+    if (!NtQueryInformationToken( (HANDLE)~(ULONG_PTR)3 /* the process token */, TokenElevationType, &elevation,
+                                  sizeof(elevation), &len ) && elevation == TokenElevationTypeFull)
+        return;
+    if (setresgid( gid, gid, gid )) _exit( 1 );
+}
+
 /* In the forked child, before the exec of the loader. Returns FALSE if the child must not run. */
 BOOL sysrun_prepare_child( BOOL drop_group )
 {

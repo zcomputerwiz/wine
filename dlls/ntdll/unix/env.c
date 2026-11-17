@@ -1561,8 +1561,16 @@ static void run_wineboot( WCHAR *env, SIZE_T size )
     pid_t sysrun_pid = 0;
     int tries;
 
-    /* a process with the system group started by the launcher is the wineboot --init already */
-    if (sysrun_client_is_system()) return;
+    /* a process with the system group started by the launcher in its wineboot-init mode is the wineboot --init
+     * already; one it started as an administrator's Safe Mode desktop (safe-shell) boots the session as any first
+     * program does (docs/SAFE_MODE_ELEVATED_DESKTOP.md) */
+    if (sysrun_client_is_system())
+    {
+        const char *mode = getenv( "WEXSYSRUN_MODE" );
+
+        if (!mode || strcmp( mode, "safe-shell" )) return;
+        sysrun_safe_shell_gate();
+    }
 
     init_unicode_string( &nameW, eventW );
     InitializeObjectAttributes( &attr, &nameW, OBJ_OPENIF, 0, NULL );
