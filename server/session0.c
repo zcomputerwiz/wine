@@ -40,6 +40,7 @@
 #include <limits.h>
 #include <poll.h>
 #include <pwd.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,6 +51,9 @@
 #include <sys/uio.h>
 #include <sys/un.h>
 #include <unistd.h>
+#ifdef HAVE_SYS_INOTIFY_H
+#include <sys/inotify.h>
+#endif
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -355,6 +359,33 @@ static int get_socket_path( int conf_only )
     return 1;
 }
 
+/* Under systemd (wex-session0.service, Type=notify): tell it that the socket listens, so units ordered after session 0
+ * start when it can serve them (they used to poll for the socket). The sd_notify protocol without libsystemd: one
+ * datagram "READY=1" to $NOTIFY_SOCKET (a path, or "@" for the abstract namespace). Nothing to do without it. The
+ * variable is dropped afterwards, so that no process started from here reports in session 0's name. */
+static void notify_service_ready(void)
+{
+    const char *path = getenv( "NOTIFY_SOCKET" );
+    struct sockaddr_un addr;
+    size_t len;
+    int fd;
+
+    if (!path || (path[0] != '/' && path[0] != '@') || (len = strlen( path )) < 2 || len >= sizeof(addr.sun_path))
+        return;
+    memset( &addr, 0, sizeof(addr) );
+    addr.sun_family = AF_UNIX;
+    memcpy( addr.sun_path, path, len );
+    if (path[0] == '@') addr.sun_path[0] = 0;
+    if ((fd = socket( AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0 )) != -1)
+    {
+        if (sendto( fd, "READY=1", 7, MSG_NOSIGNAL, (struct sockaddr *)&addr,
+                    offsetof( struct sockaddr_un, sun_path ) + len ) != 7)
+            fprintf( stderr, "wineserver: --session0: cannot tell systemd it is ready: %s\n", strerror( errno ));
+        close( fd );
+    }
+    unsetenv( "NOTIFY_SOCKET" );
+}
+
 static void init_listener(void)
 {
     struct sockaddr_un addr;
@@ -393,6 +424,7 @@ static void init_listener(void)
         fatal_error( "--session0: no listener object\n" );
     set_fd_events( listener->fd, POLLIN );  /* the listener keeps its reference for the life of the server */
     master_socket_timeout = TIMEOUT_INFINITE;  /* session 0 runs until it is stopped */
+    notify_service_ready();
 }
 
 /* T6.2, a user's server: who must serve session 0's socket. With the configuration, session 0's account and
@@ -460,6 +492,64 @@ static void schedule_relink( unsigned int delay )
     relink_timeout = add_timeout_user( -(timeout_t)delay * TICKS_PER_SEC, relink, NULL );
 }
 
+/* While the link is down, session 0's socket directory is watched: when session 0 (restarted) makes its socket again,
+ * this server links within a second instead of at its next try, which backs off up to a minute (the machine registry is
+ * missing until then). The directory stays when session 0 stops (RuntimeDirectoryPreserve). The socket is bound
+ * before it listens, so the try is a second after the event, and a failed one falls back to the backoff. Linux only;
+ * elsewhere the backoff alone. */
+static struct fd *relink_watch;
+
+static void relink_watch_event( struct fd *fd, int event )
+{
+#ifdef HAVE_SYS_INOTIFY_H
+    union { struct inotify_event ev; char buf[sizeof(struct inotify_event) + NAME_MAX + 1]; } u;
+    const char *name = strrchr( session0_path, '/' ) + 1;
+    int created = 0;
+    ssize_t n, i;
+
+    while ((n = read( get_unix_fd( fd ), u.buf, sizeof(u.buf) )) > 0)
+    {
+        for (i = 0; i + (ssize_t)sizeof(struct inotify_event) <= n;
+             i += sizeof(struct inotify_event) + ((struct inotify_event *)(u.buf + i))->len)
+        {
+            const struct inotify_event *ev = (const struct inotify_event *)(u.buf + i);
+            if (ev->len && !strcmp( ev->name, name )) created = 1;
+        }
+    }
+    if (!created || session_link) return;
+    if (relink_timeout)
+    {
+        remove_timeout_user( relink_timeout );
+        relink_timeout = NULL;
+    }
+    schedule_relink( 1 );
+#endif
+}
+
+static const struct fd_ops relink_watch_fd_ops = { .poll_event = relink_watch_event };
+
+static void watch_session0_directory(void)
+{
+#ifdef HAVE_SYS_INOTIFY_H
+    char dir[sizeof(session0_path)], *slash;
+    int unix_fd;
+
+    if (relink_watch) return;
+    strcpy( dir, session0_path );
+    if (!(slash = strrchr( dir, '/' )) || slash == dir) return;
+    *slash = 0;
+    if ((unix_fd = inotify_init1( IN_NONBLOCK | IN_CLOEXEC )) == -1) return;
+    if (inotify_add_watch( unix_fd, dir, IN_CREATE | IN_MOVED_TO ) == -1)
+    {
+        close( unix_fd );
+        return;
+    }
+    /* kept for the life of the server: cheap, and the link may drop again */
+    if ((relink_watch = create_anonymous_fd( &relink_watch_fd_ops, unix_fd, NULL, 0 )))
+        set_fd_events( relink_watch, POLLIN );
+#endif
+}
+
 static void session_link_event( struct fd *fd, int event );
 static const struct fd_ops session_link_fd_ops = { .poll_event = session_link_event };
 
@@ -508,6 +598,7 @@ static void session_link_event( struct fd *fd, int event )
         release_object( link );
     }
     fprintf( stderr, "wineserver: session 0 closed the session link; linking again\n" );
+    watch_session0_directory();
     schedule_relink( 2 );
 }
 
