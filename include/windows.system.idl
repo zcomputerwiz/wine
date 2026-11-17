@@ -49,6 +49,7 @@ namespace Windows.System
     typedef enum VirtualKey VirtualKey;
     typedef enum VirtualKeyModifiers VirtualKeyModifiers;
 
+    interface ILauncherStatics;
     interface IDispatcherQueue;
     interface IDispatcherQueue2;
     interface IDispatcherQueueController;
@@ -73,6 +74,7 @@ namespace Windows.System
     interface IMemoryManagerStatics4;
     interface IProcessMemoryReport;
 
+    runtimeclass Launcher;
     runtimeclass DispatcherQueue;
     runtimeclass DispatcherQueueController;
     runtimeclass DispatcherQueueShutdownStartingEventArgs;
@@ -846,5 +848,28 @@ namespace Windows.System
     {
         [default] interface Windows.System.IUserChangedEventArgs;
         /* [contract(Windows.Foundation.UniversalApiContract, 10.0)] interface Windows.System.IUserChangedEventArgs2; */
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.System.Launcher),
+        uuid(277151c3-9e3e-42f6-91a4-5dfdeb232451)
+    ]
+    interface ILauncherStatics : IInspectable
+    {
+        /* the options parameters are Windows.System.LauncherOptions, passed as IInspectable: the class is not defined here */
+        [overload("LaunchFileAsync")] HRESULT LaunchFileAsync([in] Windows.Storage.IStorageFile *file, [out, retval] Windows.Foundation.IAsyncOperation<boolean> **operation);
+        [overload("LaunchFileAsync")] HRESULT LaunchFileWithOptionsAsync([in] Windows.Storage.IStorageFile *file, [in] IInspectable *options, [out, retval] Windows.Foundation.IAsyncOperation<boolean> **operation);
+        [overload("LaunchUriAsync")] HRESULT LaunchUriAsync([in] Windows.Foundation.Uri *uri, [out, retval] Windows.Foundation.IAsyncOperation<boolean> **operation);
+        [overload("LaunchUriAsync")] HRESULT LaunchUriWithOptionsAsync([in] Windows.Foundation.Uri *uri, [in] IInspectable *options, [out, retval] Windows.Foundation.IAsyncOperation<boolean> **operation);
+    }
+
+    [
+        static(Windows.System.ILauncherStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(standard),
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    runtimeclass Launcher
+    {
     }
 }

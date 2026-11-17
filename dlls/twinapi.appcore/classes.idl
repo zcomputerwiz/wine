@@ -40,6 +40,7 @@ namespace Windows.Management.Policies {
     runtimeclass NamedPolicy;
 }
 namespace Windows.System {
+    runtimeclass Launcher;
     runtimeclass MemoryManager;
     runtimeclass User;
 }
@@ -58,10 +59,15 @@ namespace Windows.System.UserProfile {
 }
 namespace Windows.UI.ViewManagement {
     runtimeclass ApplicationView;
+    runtimeclass ViewModePreferences;
 }
 namespace Windows.ApplicationModel.Core {
     runtimeclass CoreApplication;
 }
 namespace Windows.ApplicationModel.DataTransfer {
+    runtimeclass Clipboard;
+    runtimeclass DataPackage;
     runtimeclass DataTransferManager;
+    runtimeclass HtmlFormatHelper;
+    runtimeclass StandardDataFormats;
 }
