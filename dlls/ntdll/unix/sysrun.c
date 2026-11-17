@@ -109,6 +109,9 @@ BOOL sysrun_launcher_usable(void)
     if (get_system_gid() == (gid_t)-1) return FALSE;
     if (lstat( SYSRUN_LAUNCHER, &st ) || !S_ISREG( st.st_mode ) || st.st_uid != 0 || !(st.st_mode & S_ISGID))
         return FALSE;  /* not installed: stock behavior, nothing to report */
+    /* session 0's own programs (another account on the root-owned machine root) have no use for the launcher:
+     * nothing to report for them */
+    if (!stat( config_dir, &st ) && st.st_uid == 0 && getuid()) return FALSE;
     if (!(pwd = getpwuid( getuid() )) || pwd->pw_dir[0] != '/' || asprintf( &prefix, "%s/.wine", pwd->pw_dir ) < 0)
         return FALSE;
     if (strcmp( config_dir, prefix ))
