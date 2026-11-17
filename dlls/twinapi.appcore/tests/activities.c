@@ -149,17 +149,26 @@ static void test_UserActivityChannel(void)
     hr = IAsyncAction_GetResults( action );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
     IAsyncAction_Release( action );
+    /* saving leaves the activity New and the channel gives a new one; a session publishes it */
     hr = IUserActivity_get_State( activity, &state );
-    ok( hr == S_OK && state == UserActivityState_Published, "got hr %#lx, state %d.\n", hr, state );
+    ok( hr == S_OK && state == UserActivityState_New, "got hr %#lx, state %d.\n", hr, state );
+    hr = IUserActivityChannel_GetOrCreateUserActivityAsync( channel, id, &operation );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IAsyncOperation_UserActivity_GetResults( operation, &again );
+    ok( hr == S_OK && again != activity, "got hr %#lx, %p.\n", hr, again );
+    IUserActivity_Release( again );
+    IAsyncOperation_UserActivity_Release( operation );
 
     hr = IUserActivity_CreateSession( activity, &session );
     ok( hr == S_OK && session, "got hr %#lx.\n", hr );
+    hr = IUserActivity_get_State( activity, &state );
+    ok( hr == S_OK && state == UserActivityState_Published, "got hr %#lx, state %d.\n", hr, state );
     hr = IUserActivitySession_get_ActivityId( session, &text );
     ok( hr == S_OK && hstr_equals( text, L"wine-test-activity" ), "got hr %#lx.\n", hr );
     WindowsDeleteString( text );
     IUserActivitySession_Release( session );
 
-    /* a saved activity is returned again */
+    /* a published activity is returned again */
     hr = IUserActivityChannel_GetOrCreateUserActivityAsync( channel, id, &operation );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
     hr = IAsyncOperation_UserActivity_GetResults( operation, &again );
@@ -257,7 +266,9 @@ static void test_JumpList(void)
     ok( hr == E_BOUNDS, "got hr %#lx.\n", hr );
     IVector_JumpListItem_Release( items );
 
-    hr = IJumpList_put_SystemGroupKind( list, JumpListSystemGroupKind_Recent );
+    hr = IJumpList_get_SystemGroupKind( list, &group );
+    ok( hr == S_OK && group == JumpListSystemGroupKind_Recent, "got hr %#lx, group %d.\n", hr, group );
+    hr = IJumpList_put_SystemGroupKind( list, JumpListSystemGroupKind_Frequent );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
     hr = IJumpList_SaveAsync( list, &action );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
@@ -273,7 +284,7 @@ static void test_JumpList(void)
     ok( hr == S_OK && list, "got hr %#lx.\n", hr );
     IAsyncOperation_JumpList_Release( operation );
     hr = IJumpList_get_SystemGroupKind( list, &group );
-    ok( hr == S_OK && group == JumpListSystemGroupKind_Recent, "got hr %#lx, group %d.\n", hr, group );
+    ok( hr == S_OK && group == JumpListSystemGroupKind_Frequent, "got hr %#lx, group %d.\n", hr, group );
     hr = IJumpList_get_Items( list, &items2 );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
     hr = IVector_JumpListItem_get_Size( items2, &size );

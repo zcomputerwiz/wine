@@ -21,7 +21,8 @@
  * An application describes what the user is doing as a UserActivity (an id, the visual elements a timeline would
  * show, the URIs that bring the activity back) and saves it to its channel. There is no timeline and no
  * synchronisation in WineExplorer, so the channel keeps the saved activities of the process: GetOrCreate returns
- * a saved activity again, Delete removes one. The JSON forms of an activity (ToJson, TryParseFromJson, ToJsonArray) and
+ * a published activity again (an activity is published when a session is made, as measured on Windows 11), Delete
+ * removes one. The JSON forms of an activity (ToJson, TryParseFromJson, ToJsonArray) and
  * the session history belong to the timeline and are not implemented: they report E_NOTIMPL or nothing found.
  */
 
@@ -964,19 +965,31 @@ static HRESULT saved_store( IUserActivity *activity )
 
 static HRESULT WINAPI activity_SaveAsync( IUserActivity *iface, IAsyncAction **operation )
 {
+    TRACE( "iface %p, operation %p.\n", iface, operation );
+
+    /* measured on Windows 11: the state stays New after SaveAsync, and the channel gives a new activity (State New) for
+     * the id again; only a session publishes the activity (see CreateSession) */
+    return async_action_completed( S_OK, operation );
+}
+
+/* Windows 11 failed CreateSession with E_ILLEGAL_METHOD_CALL for a saved activity on the machine it was measured on
+ * (the activity history may have been off); here a session publishes the activity, which the channel then returns. */
+static HRESULT WINAPI activity_CreateSession( IUserActivity *iface, IUserActivitySession **result )
+{
     struct user_activity *impl = impl_from_IUserActivity( iface );
     HRESULT hr;
 
-    TRACE( "iface %p, operation %p.\n", iface, operation );
-
-    if (SUCCEEDED(hr = saved_store( iface ))) impl->state = UserActivityState_Published;
-    return async_action_completed( hr, operation );
-}
-
-static HRESULT WINAPI activity_CreateSession( IUserActivity *iface, IUserActivitySession **result )
-{
     TRACE( "iface %p, result %p.\n", iface, result );
-    return session_create( impl_from_IUserActivity( iface )->activity_id, result );
+
+    if (FAILED(hr = session_create( impl->activity_id, result ))) return hr;
+    if (FAILED(hr = saved_store( iface )))
+    {
+        IUserActivitySession_Release( *result );
+        *result = NULL;
+        return hr;
+    }
+    impl->state = UserActivityState_Published;
+    return S_OK;
 }
 
 static const IUserActivityVtbl activity_vtbl =

@@ -123,13 +123,11 @@ static HRESULT WINAPI item_get_RemovedByUser( IJumpListItem *iface, boolean *val
     return S_OK;
 }
 
-/* a separator has no description, name or logo to set */
 static HRESULT item_set_string( struct jump_list_item *impl, HSTRING *field, HSTRING value )
 {
     HSTRING copy;
     HRESULT hr;
 
-    if (impl->kind == JumpListItemKind_Separator) return E_NOTIMPL;
     if (FAILED(hr = WindowsDuplicateString( value, &copy ))) return hr;
     WindowsDeleteString( *field );
     *field = copy;
@@ -179,7 +177,6 @@ static HRESULT WINAPI item_put_Logo( IJumpListItem *iface, IUriRuntimeClass *val
 {
     struct jump_list_item *impl = impl_from_IJumpListItem( iface );
 
-    if (impl->kind == JumpListItemKind_Separator) return E_NOTIMPL;
     if (value) IUriRuntimeClass_AddRef( value );
     if (impl->logo) IUriRuntimeClass_Release( impl->logo );
     impl->logo = value;
@@ -236,7 +233,6 @@ static HRESULT WINAPI item_statics_CreateWithArguments( IJumpListItemStatics *if
            debugstr_hstring( display_name ), result );
 
     *result = NULL;
-    if (!WindowsGetStringLen( display_name )) return E_INVALIDARG;     /* the arguments may be empty */
     return item_create( JumpListItemKind_Arguments, arguments, display_name, result );
 }
 
@@ -296,7 +292,8 @@ static CRITICAL_SECTION_DEBUG saved_cs_debug =
 static CRITICAL_SECTION saved_cs = { &saved_cs_debug, -1, 0, 0, 0, 0 };
 static struct saved_item *saved_items;
 static UINT32 saved_count;
-static JumpListSystemGroupKind saved_group_kind;
+/* measured on Windows 11: a list never saved has the Recent group */
+static JumpListSystemGroupKind saved_group_kind = JumpListSystemGroupKind_Recent;
 
 static void saved_item_clear( struct saved_item *saved )
 {
