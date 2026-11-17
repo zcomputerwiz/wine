@@ -58,6 +58,8 @@
 #include "windows.system.display.h"
 #define WIDL_using_Windows_Web_Http
 #include "windows.web.http.h"
+#define WIDL_using_Windows_System_Power
+#include "windows.system.power.h"
 
 #include "wine/test.h"
 

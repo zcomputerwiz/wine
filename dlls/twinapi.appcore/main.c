@@ -119,6 +119,8 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
         IActivationFactory_QueryInterface( touch_capabilities_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, RuntimeClass_Windows_Web_Http_HttpClient ))
         IActivationFactory_QueryInterface( http_client_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_System_Power_PowerManager ))
+        IActivationFactory_QueryInterface( power_manager_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, RuntimeClass_Windows_System_Launcher ))
         IActivationFactory_QueryInterface( launcher_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, RuntimeClass_Windows_UI_ViewManagement_ViewModePreferences ))
