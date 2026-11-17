@@ -43,6 +43,7 @@ namespace Windows.UI.Input {
 }
 
 namespace Windows.UI.Core {
+    typedef enum AppViewBackButtonVisibility AppViewBackButtonVisibility;
     typedef enum CoreAcceleratorKeyEventType CoreAcceleratorKeyEventType;
     typedef enum CoreCursorType CoreCursorType;
     typedef enum CoreDispatcherPriority CoreDispatcherPriority;
@@ -55,6 +56,10 @@ namespace Windows.UI.Core {
     typedef struct CoreProximityEvaluation CoreProximityEvaluation;
 
     interface IAcceleratorKeyEventArgs;
+    interface IBackRequestedEventArgs;
+    interface ISystemNavigationManager;
+    interface ISystemNavigationManager2;
+    interface ISystemNavigationManagerStatics;
     interface IAutomationProviderRequestedEventArgs;
     interface ICharacterReceivedEventArgs;
     interface IClosestInteractiveBoundsRequestedEventArgs;
@@ -83,6 +88,8 @@ namespace Windows.UI.Core {
 
     runtimeclass AutomationProviderRequestedEventArgs;
     runtimeclass AcceleratorKeyEventArgs;
+    runtimeclass BackRequestedEventArgs;
+    runtimeclass SystemNavigationManager;
     runtimeclass CharacterReceivedEventArgs;
     runtimeclass ClosestInteractiveBoundsRequestedEventArgs;
     runtimeclass CoreCursor;
@@ -99,6 +106,7 @@ namespace Windows.UI.Core {
     runtimeclass WindowSizeChangedEventArgs;
 
     declare {
+        interface Windows.Foundation.EventHandler<Windows.UI.Core.BackRequestedEventArgs *>;
         interface Windows.Foundation.TypedEventHandler<Windows.UI.Core.CoreDispatcher *, Windows.UI.Core.AcceleratorKeyEventArgs *>;
         interface Windows.Foundation.TypedEventHandler<Windows.UI.Core.CoreWindow *, IInspectable *>;
         interface Windows.Foundation.TypedEventHandler<Windows.UI.Core.CoreWindow *, Windows.UI.Core.AutomationProviderRequestedEventArgs *>;
@@ -745,5 +753,78 @@ namespace Windows.UI.Core {
     {
         [default] interface Windows.UI.Core.IWindowSizeChangedEventArgs;
         interface Windows.UI.Core.ICoreWindowEventArgs;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum AppViewBackButtonVisibility
+    {
+        Visible = 0,
+        Collapsed = 1,
+        Disabled = 2,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.Core.BackRequestedEventArgs),
+        uuid(d603d28a-e411-4a4e-ba41-6a327a8675bc)
+    ]
+    interface IBackRequestedEventArgs : IInspectable
+    {
+        [propget] HRESULT Handled([out, retval] boolean *value);
+        [propput] HRESULT Handled([in] boolean value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.Core.SystemNavigationManager),
+        uuid(93023118-cf50-42a6-9706-69107fa122e1)
+    ]
+    interface ISystemNavigationManager : IInspectable
+    {
+        [eventadd] HRESULT BackRequested([in] Windows.Foundation.EventHandler<Windows.UI.Core.BackRequestedEventArgs *> * handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT BackRequested([in] EventRegistrationToken token);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.Core.SystemNavigationManager),
+        uuid(8c510401-67be-49ae-9509-671c1e54a389)
+    ]
+    interface ISystemNavigationManager2 : IInspectable
+    {
+        [propget] HRESULT AppViewBackButtonVisibility([out, retval] Windows.UI.Core.AppViewBackButtonVisibility *value);
+        [propput] HRESULT AppViewBackButtonVisibility([in] Windows.UI.Core.AppViewBackButtonVisibility value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.Core.SystemNavigationManager),
+        uuid(dc52b5ce-bee0-4305-8c54-68228ed683b5)
+    ]
+    interface ISystemNavigationManagerStatics : IInspectable
+    {
+        HRESULT GetForCurrentView([out, retval] Windows.UI.Core.SystemNavigationManager * *result);
+    }
+
+    [
+        marshaling_behavior(agile),
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    runtimeclass BackRequestedEventArgs
+    {
+        [default] interface Windows.UI.Core.IBackRequestedEventArgs;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.UI.Core.ISystemNavigationManagerStatics, Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    runtimeclass SystemNavigationManager
+    {
+        [default] interface Windows.UI.Core.ISystemNavigationManager;
+        interface Windows.UI.Core.ISystemNavigationManager2;
     }
 }

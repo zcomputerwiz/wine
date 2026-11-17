@@ -53,6 +53,12 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     if (!wcscmp( buffer, RuntimeClass_Windows_UI_Core_CoreWindow ))
         IActivationFactory_QueryInterface( corewindow_factory, &IID_IActivationFactory, (void **)factory );
 
+    if (!wcscmp( buffer, RuntimeClass_Windows_UI_Core_SystemNavigationManager ))
+        IActivationFactory_QueryInterface( systemnavigation_factory, &IID_IActivationFactory, (void **)factory );
+
+    if (!wcscmp( buffer, RuntimeClass_Windows_UI_Text_FontWeights ))
+        IActivationFactory_QueryInterface( fontweights_factory, &IID_IActivationFactory, (void **)factory );
+
     if (*factory) return S_OK;
     return CLASS_E_CLASSNOTAVAILABLE;
 }

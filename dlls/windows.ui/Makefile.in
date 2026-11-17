@@ -6,9 +6,11 @@ SOURCES = \
 	classes.idl \
 	corewindow.c \
 	dispatcher.c \
+	fontweights.c \
 	inputpane.c \
 	main.c \
 	pointer.c \
+	systemnavigation.c \
 	uisettings.c \
 	uiviewsettings.c \
 	weakref.c \
