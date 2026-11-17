@@ -53,45 +53,23 @@
 #include "windef.h"
 #include "winternl.h"
 #include "unix_private.h"
+#include "wine/wex_sysrun_conf.h"
 
 #define SYSRUN_CONF     "/etc/wineexplorer/sysrun.conf"
 #define SYSRUN_LAUNCHER "/usr/local/libexec/wineexplorer/wex-sysrun"
 
 extern char **environ;
 
-/* the group and the machine root of the configuration, which must be a regular root-owned file that only root
- * can write (checked on the open descriptor) */
+/* Both keys must come from one valid protected configuration snapshot. */
 static BOOL read_config( char *group, size_t size )
 {
-    char buf[4096], *line, *next, root[8] = "";
-    struct stat st;
-    ssize_t n;
-    int fd;
+    struct wex_sysrun_conf conf;
+    char root[PATH_MAX];
 
-    group[0] = 0;
-    if ((fd = open( SYSRUN_CONF, O_RDONLY | O_NOFOLLOW | O_CLOEXEC )) == -1) return FALSE;
-    if (fstat( fd, &st ) || !S_ISREG( st.st_mode ) || st.st_uid != 0 || (st.st_mode & (S_IWGRP | S_IWOTH)))
-        n = 0;
-    else
-        n = read( fd, buf, sizeof(buf) - 1 );
-    close( fd );
-    if (n <= 0) return FALSE;
-    buf[n] = 0;
-    for (line = buf; line; line = next)
-    {
-        if ((next = strchr( line, '\n' ))) *next++ = 0;
-        if (!strncmp( line, "group=", 6 ))
-        {
-            if (strlen( line + 6 ) >= size) return FALSE;
-            strcpy( group, line + 6 );
-        }
-        else if (!strncmp( line, "machine_root=", 13 ))
-        {
-            if (line[13] != '/') return FALSE;
-            strcpy( root, "set" );
-        }
-    }
-    return group[0] && root[0];
+    return wex_sysrun_conf_load( SYSRUN_CONF, &conf ) &&
+           wex_sysrun_conf_get( &conf, "group", group, size ) == WEX_SYSRUN_CONF_VALUE &&
+           wex_sysrun_conf_get( &conf, "machine_root", root, sizeof(root) ) == WEX_SYSRUN_CONF_VALUE &&
+           root[0] == '/';
 }
 
 /* the group id of the system group, or -1 if there is no valid configuration */

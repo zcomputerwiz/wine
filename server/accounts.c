@@ -22,6 +22,7 @@
 #include <sys/xattr.h>
 #endif
 
+#include "../include/wine/wex_sysrun_conf.h"
 #include "accounts.h"
 #ifndef WEX_ACCOUNTS_STANDALONE
 #include "sysrun.h"
@@ -87,13 +88,7 @@ static uid_t test_server_uid;
 
 int accounts_valid_name( const char *s )
 {
-    size_t i, len = strlen( s );
-    if (!len || len > 63 || *s == '-' || !strcmp( s, "." ) || !strcmp( s, ".." )) return 0;
-    for (i = 0; i < len; i++)
-        if (!((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') ||
-              (s[i] >= '0' && s[i] <= '9') || s[i] == '_' || s[i] == '-' || s[i] == '.' ||
-              (s[i] == '$' && i == len - 1))) return 0;
-    return 1;
+    return wex_sysrun_conf_valid_name( s );
 }
 
 /* a domain's flat (NetBIOS) name: 1 to 15 of the characters of an account name */
@@ -302,49 +297,35 @@ static int native_group( const char *name, struct native_group_result *out )
 
 static enum wex_account_status read_policy( int dir, struct account_policy *policy )
 {
-    char *buf, *line, *next;
-    size_t len;
-    int seen_admin = 0, seen_group = 0, seen_builtin = 0;
+    struct wex_sysrun_conf conf;
     struct native_group_result gr;
     enum wex_account_status status;
+    char *buf;
+    size_t len;
 
-    strcpy( policy->admin_group, "sudo" );
     strcpy( policy->system_group, "wexsys" );
     policy->builtin_admin[0] = 0;
+    /* the provider's own protection check first: its status (unreadable, unprotected) and diagnostic say why; the
+     * shared reader then parses the same file under the same rules */
     if ((status = read_protected( dir, "sysrun.conf", (gid_t)-1, &buf, &len ))) return status;
-    status = WEX_ACCOUNT_MAP_INVALID;
-    for (line = buf; *line; line = next)
-    {
-        next = strchr( line, '\n' );
-        *next++ = 0;
-        if (!strncmp( line, "admin_group=", 12 ))
-        {
-            if (seen_admin++ || !accounts_valid_name( line + 12 )) goto done;
-            strcpy( policy->admin_group, line + 12 );
-        }
-        else if (!strncmp( line, "group=", 6 ))
-        {
-            if (seen_group++ || !accounts_valid_name( line + 6 )) goto done;
-            strcpy( policy->system_group, line + 6 );
-        }
-        else if (!strncmp( line, "builtin_administrator=", 22 ))
-        {
-            if (seen_builtin++ || !accounts_valid_name( line + 22 )) goto done;
-            strcpy( policy->builtin_admin, line + 22 );
-        }
-    }
-    status = WEX_ACCOUNT_ADMIN_GROUP_MISSING;
-    if (!native_group( policy->admin_group, &gr )) goto done;
+    free( buf );
+    if (!wex_sysrun_conf_load_at( dir, &conf ) ||
+        !wex_sysrun_conf_admin_group( &conf, policy->admin_group, sizeof(policy->admin_group) ))
+        return WEX_ACCOUNT_MAP_INVALID;
+    if (wex_sysrun_conf_get( &conf, "group", policy->system_group, sizeof(policy->system_group) ) == WEX_SYSRUN_CONF_INVALID ||
+        wex_sysrun_conf_get( &conf, "builtin_administrator", policy->builtin_admin,
+                             sizeof(policy->builtin_admin) ) == WEX_SYSRUN_CONF_INVALID)
+        return WEX_ACCOUNT_MAP_INVALID;
+    /* get clears its output for ABSENT, so restore the system-group default. */
+    if (!policy->system_group[0]) strcpy( policy->system_group, "wexsys" );
+    if (!accounts_valid_name( policy->system_group ) ||
+        (policy->builtin_admin[0] && !accounts_valid_name( policy->builtin_admin ))) return WEX_ACCOUNT_MAP_INVALID;
+    if (!native_group( policy->admin_group, &gr )) return WEX_ACCOUNT_ADMIN_GROUP_MISSING;
     free( gr.buffer );
-    status = WEX_ACCOUNT_MAP_INVALID;
-    if (!native_group( policy->system_group, &gr )) goto done;
+    if (!native_group( policy->system_group, &gr )) return WEX_ACCOUNT_MAP_INVALID;
     policy->system_gid = gr.gr.gr_gid;
     free( gr.buffer );
-    if (policy->system_gid == (gid_t)-1) goto done;
-    status = WEX_ACCOUNT_OK;
-done:
-    free( buf );
-    return status;
+    return policy->system_gid == (gid_t)-1 ? WEX_ACCOUNT_MAP_INVALID : WEX_ACCOUNT_OK;
 }
 
 /* Split exact single-space fields. No ignored lines, trailing fields, signs,

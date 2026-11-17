@@ -58,6 +58,7 @@
 #include "request.h"
 #include "thread.h"
 #include "sysrun.h"
+#include "wine/wex_sysrun_conf.h"
 #include "security.h"
 #include "file.h"
 #include "handle.h"
@@ -81,41 +82,26 @@ static void set_not_dumpable(void)
 
 enum sysrun_conf sysrun_conf_get( const char *key, char *value, size_t size )
 {
-    enum sysrun_conf ret = SYSRUN_CONF_ABSENT;
-    size_t keylen = strlen( key );
-    char buf[4096], *line, *next;
-    struct stat st;
-    ssize_t n = 0;
-    int fd;
+    struct wex_sysrun_conf conf;
 
-    if (size) value[0] = 0;
-    if ((fd = open( SYSRUN_CONF, O_RDONLY | O_NOFOLLOW | O_CLOEXEC )) == -1) return SYSRUN_CONF_ABSENT;
-    if (!fstat( fd, &st ) && S_ISREG( st.st_mode ) && !st.st_uid && !(st.st_mode & (S_IWGRP | S_IWOTH)))
-        n = read( fd, buf, sizeof(buf) - 1 );
-    close( fd );
-    if (n <= 0) return SYSRUN_CONF_ABSENT;
-    buf[n] = 0;
-    for (line = buf; line; line = next)
+    wex_sysrun_conf_load( SYSRUN_CONF, &conf );
+    switch (wex_sysrun_conf_get( &conf, key, value, size ))
     {
-        if ((next = strchr( line, '\n' ))) *next++ = 0;
-        if (strncmp( line, key, keylen ) || line[keylen] != '=') continue;
-        if (ret != SYSRUN_CONF_ABSENT || !line[keylen + 1] || strlen( line + keylen + 1 ) >= size)
-        {
-            if (size) value[0] = 0;
-            return SYSRUN_CONF_INVALID;
-        }
-        strcpy( value, line + keylen + 1 );
-        ret = SYSRUN_CONF_VALUE;
+    case WEX_SYSRUN_CONF_ABSENT: return SYSRUN_CONF_ABSENT;
+    case WEX_SYSRUN_CONF_VALUE: return SYSRUN_CONF_VALUE;
+    default: return SYSRUN_CONF_INVALID;
     }
-    return ret;
 }
 
 /* "group" and "machine_root" of the configuration, each given exactly once */
 static int read_config( char *group, size_t group_size )
 {
+    struct wex_sysrun_conf conf;
+
     machine_root[0] = 0;
-    if (sysrun_conf_get( "group", group, group_size ) != SYSRUN_CONF_VALUE ||
-        sysrun_conf_get( "machine_root", machine_root, sizeof(machine_root) ) != SYSRUN_CONF_VALUE)
+    if (!wex_sysrun_conf_load( SYSRUN_CONF, &conf ) ||
+        wex_sysrun_conf_get( &conf, "group", group, group_size ) != WEX_SYSRUN_CONF_VALUE ||
+        wex_sysrun_conf_get( &conf, "machine_root", machine_root, sizeof(machine_root) ) != WEX_SYSRUN_CONF_VALUE)
     {
         machine_root[0] = 0;
         return 0;

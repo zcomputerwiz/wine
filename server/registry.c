@@ -55,6 +55,7 @@
 #include "unicode.h"
 #include "security.h"
 #include "sysrun.h"
+#include "wine/wex_sysrun_conf.h"
 #include "accounts.h"
 #include "session0.h"
 #include "e1s_token.h"
@@ -564,25 +565,15 @@ int elevation_helper_unset(void)
     return !value->len || !*(const WCHAR *)value->data;
 }
 
-/* The administrator group: "admin_group" of the root-owned sysrun.conf (a user controls its own environment, so
- * the name cannot come from there), else "sudo". A repeated "admin_group=" line or an empty or invalid name
- * makes the configuration invalid and returns NULL, in which case nobody is an administrator; same rule as
- * read_policy() in accounts.c. An unsafe file keeps the "sudo" default. */
+/* Same administrator-group policy as accounts.c: an unsafe or invalid file
+ * denies everyone; only a missing key in a valid file defaults to sudo. */
 static const char *admin_group_name(void)
 {
+    struct wex_sysrun_conf conf;
     static char name[64];
 
-    switch (sysrun_conf_get( "admin_group", name, sizeof(name) ))
-    {
-    case SYSRUN_CONF_ABSENT:
-        strcpy( name, "sudo" );
-        return name;
-    case SYSRUN_CONF_VALUE:
-        return accounts_valid_name( name ) ? name : NULL;
-    case SYSRUN_CONF_INVALID:
-        break;
-    }
-    return NULL;
+    wex_sysrun_conf_load( "/etc/wineexplorer/sysrun.conf", &conf );
+    return wex_sysrun_conf_admin_group( &conf, name, sizeof(name) ) ? name : NULL;
 }
 
 /* Whether the user of this server is in the administrator group of the group database. Decided once, when the
@@ -602,8 +593,9 @@ int user_is_administrator(void)
     /* a domain account in the domain's Domain Admins (RID 512, recorded by the root step at logon) is an
      * administrator as a member of admin_group is: the limited token at logon, elevation through the broker
      * (docs/DOMAIN_LOGON.md, WO 2, condition 3) */
+    if (!(group = admin_group_name())) return 0;
     if (security_server_user_in_domain_group( 512 )) return is_admin = 1;
-    if (!(group = admin_group_name()) || !(pw = getpwuid( getuid() )) || !(gr = getgrnam( group ))) return 0;
+    if (!(pw = getpwuid( getuid() )) || !(gr = getgrnam( group ))) return 0;
     for (;;)
     {
         int n = count;
