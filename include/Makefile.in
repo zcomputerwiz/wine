@@ -1115,6 +1115,7 @@ SOURCES = \
 	windows.ui.core.idl \
 	windows.ui.idl \
 	windows.ui.shell.idl \
+	windows.ui.startscreen.idl \
 	windows.ui.input.idl \
 	windows.ui.notifications.idl \
 	windows.ui.text.core.idl \

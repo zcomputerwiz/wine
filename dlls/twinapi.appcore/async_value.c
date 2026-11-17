@@ -30,7 +30,7 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(twinapi);
 
-enum async_kind { ASYNC_HSTRING, ASYNC_OBJECT, ASYNC_URI };
+enum async_kind { ASYNC_HSTRING, ASYNC_OBJECT, ASYNC_URI, ASYNC_USER_ACTIVITY, ASYNC_JUMP_LIST };
 
 struct async_value
 {
@@ -57,6 +57,8 @@ static const GUID *async_iid( enum async_kind kind )
     {
     case ASYNC_HSTRING: return &IID_IAsyncOperation_HSTRING;
     case ASYNC_URI: return &IID_IAsyncOperation_Uri;
+    case ASYNC_USER_ACTIVITY: return &IID_IAsyncOperation_UserActivity;
+    case ASYNC_JUMP_LIST: return &IID_IAsyncOperation_JumpList;
     default: return &IID_IAsyncOperation_IInspectable;
     }
 }
@@ -122,6 +124,10 @@ static HRESULT WINAPI async_GetRuntimeClassName( IAsyncOperation_IInspectable *i
         return create_name( L"Windows.Foundation.IAsyncOperation`1<String>", name );
     case ASYNC_URI:
         return create_name( L"Windows.Foundation.IAsyncOperation`1<Windows.Foundation.Uri>", name );
+    case ASYNC_USER_ACTIVITY:
+        return create_name( L"Windows.Foundation.IAsyncOperation`1<Windows.ApplicationModel.UserActivities.UserActivity>", name );
+    case ASYNC_JUMP_LIST:
+        return create_name( L"Windows.Foundation.IAsyncOperation`1<Windows.UI.StartScreen.JumpList>", name );
     default:
         return create_name( L"Windows.Foundation.IAsyncOperation`1<Object>", name );
     }
@@ -282,4 +288,14 @@ HRESULT async_inspectable_completed( IInspectable *value, HRESULT hr, IAsyncOper
 HRESULT async_uri_completed( IUriRuntimeClass *value, HRESULT hr, IAsyncOperation_Uri **out )
 {
     return async_create( ASYNC_URI, NULL, (IUnknown *)value, hr, (void **)out );
+}
+
+HRESULT async_user_activity_completed( IUserActivity *value, HRESULT hr, IAsyncOperation_UserActivity **out )
+{
+    return async_create( ASYNC_USER_ACTIVITY, NULL, (IUnknown *)value, hr, (void **)out );
+}
+
+HRESULT async_jump_list_completed( IJumpList *value, HRESULT hr, IAsyncOperation_JumpList **out )
+{
+    return async_create( ASYNC_JUMP_LIST, NULL, (IUnknown *)value, hr, (void **)out );
 }
