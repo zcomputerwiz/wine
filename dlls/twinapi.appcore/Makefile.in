@@ -23,6 +23,7 @@ SOURCES = \
 	datapackage_props.c \
 	display_request.c \
 	hstring_vector.c \
+	http_client.c \
 	htmlformathelper.c \
 	jumplist.c \
 	jumplist_vector.c \
