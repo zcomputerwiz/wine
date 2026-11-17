@@ -1811,8 +1811,15 @@ static void named_pipe_dir_ioctl( struct fd *fd, ioctl_code_t code, struct async
             params.name.str = buffer->Name;
             params.name.len = (buffer->NameLength / sizeof(WCHAR)) * sizeof(WCHAR);
             if (!(pipe = open_named_object( &params ))) return;
-            if (pipe->s0_name)  /* T5.2: whether session 0 has an instance free shows at the open */
+            if (pipe->s0_name)
             {
+                /* T5.2: a pipe of session 0. A missing one is not found, as on Windows, else an RPC client's
+                 * connect loop (open fails, wait succeeds) spins for ever; whether an instance is free shows at
+                 * the open */
+                struct token *token = current->token ? current->token : current->process->token;
+                unsigned int status = session0_wait_pipe( token, pipe->s0_name, pipe->s0_len );
+
+                if (status) set_error( status );
                 release_object( pipe );
                 return;
             }
@@ -3355,37 +3362,29 @@ static int pipe_bridge_allowed( const WCHAR *name, data_size_t len )
 
 /* session 0: connect a session's opener (described by token) to a listening instance of the named pipe, over sock
  * (owned from now on); the status for the session's server */
-unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_size_t len, int sock, uid_t uid,
-                                 int session )
+/* session 0: the pipe NAME that a session's program may reach (a name on the list, or an ncalrpc endpoint of a
+ * linked session's server); NULL with *status set */
+static struct named_pipe *pipe_bridge_find( const WCHAR *name, data_size_t len, uid_t uid, int session,
+                                            unsigned int *status )
 {
     static const WCHAR device[] = {'\\','D','e','v','i','c','e','\\','N','a','m','e','d','P','i','p','e','\\'};
     struct object_params params = { .ops = &named_pipe_ops, .attr = OBJ_CASE_INSENSITIVE };
-    unsigned int access = FILE_GENERIC_READ | FILE_GENERIC_WRITE, count = 0;
-    struct pipe_bridge *bridge, *other;
-    struct pipe_server *server;
     struct named_pipe *pipe;
     WCHAR *path;
-    int allowed;
+    int allowed = 0;
 
     if (!len || len % sizeof(WCHAR) || !(allowed = pipe_bridge_allowed( name, len )) ||
         (allowed == 2 && session < 0))
     {
         fprintf( stderr, "session0: pipe open refused for uid %u: %s\n", (unsigned int)uid,
                  allowed == 2 ? "the server has no session link" : "the name is not on the list" );
-        close( sock );
-        return STATUS_ACCESS_DENIED;
-    }
-    LIST_FOR_EACH_ENTRY( other, &bridges, struct pipe_bridge, entry )
-        if (other->peer_uid == uid) count++;
-    if (count >= PIPE_BRIDGE_MAX_PER_USER)
-    {
-        close( sock );
-        return STATUS_INSUFFICIENT_RESOURCES;
+        *status = STATUS_ACCESS_DENIED;
+        return NULL;
     }
     if (!(path = malloc( sizeof(device) + len )))
     {
-        close( sock );
-        return STATUS_NO_MEMORY;
+        *status = STATUS_NO_MEMORY;
+        return NULL;
     }
     memcpy( path, device, sizeof(device) );
     memcpy( (char *)path + sizeof(device), name, len );
@@ -3394,10 +3393,39 @@ unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_si
     clear_error();
     pipe = open_named_object( &params );
     free( path );
-    if (!pipe)
+    if (!pipe) *status = get_error() ? get_error() : STATUS_OBJECT_NAME_NOT_FOUND;
+    return pipe;
+}
+
+/* session 0: whether a session's program waiting for the pipe NAME finds it here (no instance is taken) */
+unsigned int pipe_bridge_query( const WCHAR *name, data_size_t len, uid_t uid, int session )
+{
+    unsigned int status = STATUS_SUCCESS;
+    struct named_pipe *pipe = pipe_bridge_find( name, len, uid, session, &status );
+
+    if (pipe) release_object( pipe );
+    return status;
+}
+
+unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_size_t len, int sock, uid_t uid,
+                                 int session )
+{
+    unsigned int access = FILE_GENERIC_READ | FILE_GENERIC_WRITE, count = 0, status = STATUS_SUCCESS;
+    struct pipe_bridge *bridge, *other;
+    struct pipe_server *server;
+    struct named_pipe *pipe;
+
+    LIST_FOR_EACH_ENTRY( other, &bridges, struct pipe_bridge, entry )
+        if (other->peer_uid == uid) count++;
+    if (count >= PIPE_BRIDGE_MAX_PER_USER)
     {
         close( sock );
-        return get_error() ? get_error() : STATUS_OBJECT_NAME_NOT_FOUND;
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    if (!(pipe = pipe_bridge_find( name, len, uid, session, &status )))
+    {
+        close( sock );
+        return status;
     }
     if (!check_object_access( token, &pipe->obj, &access ) ||
         !(pipe->sharing & FILE_SHARE_READ) || !(pipe->sharing & FILE_SHARE_WRITE))

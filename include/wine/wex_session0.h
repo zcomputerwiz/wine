@@ -65,6 +65,9 @@ struct wex_session0_request
  * a stream socket, on which session 0 joins the pipe (each message: a 4-byte length, then the data). One
  * message, then the link closes. */
 #define WEX_SESSION0_PIPE         6
+/* PIPE_WAIT: a program of the session waits for a pipe of session 0 (FSCTL_PIPE_WAIT); the same message as PIPE,
+ * without a socket. The status says whether session 0 has the pipe; no instance is taken. */
+#define WEX_SESSION0_PIPE_WAIT    7
 
 /* orders */
 #define WEX_SESSION0_ORDER_PING   1   /* answered with the server's session id */

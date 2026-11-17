@@ -75,6 +75,12 @@
 
 #define SESSION0_CONF "/etc/wineexplorer/sysrun.conf"
 
+/* the requests about a pipe: the token description, then the pipe's name */
+static inline int is_pipe_request( unsigned int type )
+{
+    return type == WEX_SESSION0_PIPE || type == WEX_SESSION0_PIPE_WAIT;
+}
+
 int session0_server;
 int session0_client;
 
@@ -103,6 +109,17 @@ struct session0_socket
  * their own (one per prefix), each with its link; more than that per account are refused. */
 #define SESSION0_MAX_SESSIONS_PER_USER 32
 static struct list session_links = LIST_INIT( session_links );
+
+/* session 0: the session of the server at the other end of LINK, from that server's session link; -1 without one */
+static int peer_session( const struct session0_socket *link )
+{
+    struct session0_socket *other;
+    int session = -1;
+
+    LIST_FOR_EACH_ENTRY( other, &session_links, struct session0_socket, entry )
+        if (other->peer_pid == link->peer_pid && other->peer_uid == link->peer_uid) session = other->session_id;
+    return session;
+}
 
 /* Session ids are never given twice, also across restarts of session 0, while servers of the old session 0 still
  * run: the next id is kept in session0.ids in session 0's directory, reserved in blocks so that the file is
@@ -918,12 +935,13 @@ static void session0_link_event( struct fd *fd, int event )
     }
     if (n < (ssize_t)sizeof(*hdr) || (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) || extra != -1 ||
         hdr->magic != WEX_SESSION0_MAGIC || hdr->version != WEX_SESSION0_VERSION ||
-        (hdr->type != WEX_SESSION0_PIPE && hdr->desc_size != n - sizeof(*hdr)) ||
-        (hdr->type == WEX_SESSION0_PIPE && (hdr->desc_size > n - sizeof(*hdr) ||
-                                            hdr->machine != n - sizeof(*hdr) - hdr->desc_size)) ||
+        (!is_pipe_request( hdr->type ) && hdr->desc_size != n - sizeof(*hdr)) ||
+        (is_pipe_request( hdr->type ) && (hdr->desc_size > n - sizeof(*hdr) ||
+                                          hdr->machine != n - sizeof(*hdr) - hdr->desc_size)) ||
         (hdr->type != WEX_SESSION0_CHANNEL && hdr->type != WEX_SESSION0_USER_HIVE &&
-         hdr->type != WEX_SESSION0_SESSION_ID && hdr->type != WEX_SESSION0_PIPE) ||
-        ((hdr->type == WEX_SESSION0_CHANNEL || hdr->type == WEX_SESSION0_PIPE) && channel == -1))
+         hdr->type != WEX_SESSION0_SESSION_ID && !is_pipe_request( hdr->type )) ||
+        ((hdr->type == WEX_SESSION0_CHANNEL || hdr->type == WEX_SESSION0_PIPE) && channel == -1) ||
+        (hdr->type == WEX_SESSION0_PIPE_WAIT && channel != -1))
         reply.status = STATUS_INVALID_PARAMETER;
     else if (!link->trusted)
         reply.status = STATUS_ACCESS_DENIED;
@@ -963,6 +981,12 @@ static void session0_link_event( struct fd *fd, int event )
             return;
         }
     }
+    else if (hdr->type == WEX_SESSION0_PIPE_WAIT)
+    {
+        /* whether the pipe exists here, for a wait in a session (the token is not needed: a wait checks no access) */
+        reply.status = pipe_bridge_query( (const WCHAR *)((const char *)(hdr + 1) + hdr->desc_size), hdr->machine,
+                                          link->peer_uid, peer_session( link ) );
+    }
     else if (hdr->type == WEX_SESSION0_PIPE)
     {
         /* T5.2: join the channel (a stream socket) to the named pipe, as a client with the described token */
@@ -978,12 +1002,8 @@ static void session0_link_event( struct fd *fd, int event )
         }
         else
         {
-            struct session0_socket *session_link;
-            int session = -1;  /* R9: the session of the bridge's peer server, from its session link */
+            int session = peer_session( link );  /* R9: the session of the bridge's peer server */
 
-            LIST_FOR_EACH_ENTRY( session_link, &session_links, struct session0_socket, entry )
-                if (session_link->peer_pid == link->peer_pid && session_link->peer_uid == link->peer_uid)
-                    session = session_link->session_id;
             memcpy( name, (const char *)(hdr + 1) + hdr->desc_size, hdr->machine );
             fcntl( channel, F_SETFL, O_NONBLOCK );
             reply.status = pipe_bridge_accept( token, name, hdr->machine, channel, link->peer_uid, session );
@@ -1514,9 +1534,10 @@ void session0_client_exit(void)
     release_object( link );
 }
 
-/* T5.2, a user's server: ask session 0 to join one end of a stream socket to its named pipe, for the token; the
- * other end, or -1 with the error set */
-int session0_open_pipe( struct token *token, const WCHAR *name, data_size_t len )
+/* T5.2, a user's server: a pipe request to session 0 (TYPE: PIPE with SOCK, one end of a stream socket that
+ * session 0 joins to the pipe, or PIPE_WAIT without), for the token; session 0's status */
+static unsigned int pipe_request( unsigned int type, struct token *token, const WCHAR *name, data_size_t len,
+                                  int sock )
 {
     struct wex_session0_request hdr;
     struct wex_session0_reply answer;
@@ -1526,32 +1547,24 @@ int session0_open_pipe( struct token *token, const WCHAR *name, data_size_t len 
     struct iovec vec[3];
     struct pollfd pfd;
     data_size_t size;
+    unsigned int status;
     void *desc;
-    int sv[2], link;
+    int link;
 
-    if (!session0_client)
-    {
-        set_error( STATUS_OBJECT_NAME_NOT_FOUND );
-        return -1;
-    }
+    if (!session0_client) return STATUS_OBJECT_NAME_NOT_FOUND;
     size = token_describe( token, NULL, 0 );
-    if (size + len > WEX_SESSION0_MAX_MSG - sizeof(hdr) || !(desc = mem_alloc( size ))) return -1;
+    if (size + len > WEX_SESSION0_MAX_MSG - sizeof(hdr)) return STATUS_NAME_TOO_LONG;
+    if (!(desc = mem_alloc( size ))) return STATUS_NO_MEMORY;
     token_describe( token, desc, size );
-    if (socketpair( AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv ) == -1)
-    {
-        free( desc );
-        file_set_error();
-        return -1;
-    }
     if ((link = connect_session0( 1 )) == -1)
     {
-        set_error( STATUS_PIPE_NOT_AVAILABLE );
-        goto failed;
+        free( desc );
+        return STATUS_PIPE_NOT_AVAILABLE;
     }
     hdr.magic = WEX_SESSION0_MAGIC;
     hdr.version = WEX_SESSION0_VERSION;
     hdr.desc_size = size;
-    hdr.type = WEX_SESSION0_PIPE;
+    hdr.type = type;
     hdr.machine = len;
     vec[0].iov_base = &hdr;
     vec[0].iov_len = sizeof(hdr);
@@ -1562,43 +1575,57 @@ int session0_open_pipe( struct token *token, const WCHAR *name, data_size_t len 
     memset( &msg, 0, sizeof(msg) );
     msg.msg_iov = vec;
     msg.msg_iovlen = 3;
-    msg.msg_control = cmsg_buffer;
-    msg.msg_controllen = sizeof(cmsg_buffer);
-    cmsg = CMSG_FIRSTHDR( &msg );
-    cmsg->cmsg_len = CMSG_LEN( sizeof(int) );
-    cmsg->cmsg_level = SOL_SOCKET;
-    cmsg->cmsg_type = SCM_RIGHTS;
-    memcpy( CMSG_DATA( cmsg ), &sv[0], sizeof(int) );
-    if (sendmsg( link, &msg, MSG_NOSIGNAL ) != (ssize_t)(sizeof(hdr) + size + len))
+    if (sock != -1)
     {
-        set_error( STATUS_PIPE_NOT_AVAILABLE );
-        goto failed;
+        msg.msg_control = cmsg_buffer;
+        msg.msg_controllen = sizeof(cmsg_buffer);
+        cmsg = CMSG_FIRSTHDR( &msg );
+        cmsg->cmsg_len = CMSG_LEN( sizeof(int) );
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_RIGHTS;
+        memcpy( CMSG_DATA( cmsg ), &sock, sizeof(int) );
     }
     pfd.fd = link;
     pfd.events = POLLIN;
-    if (poll( &pfd, 1, 2000 ) != 1 || recv( link, &answer, sizeof(answer), 0 ) != sizeof(answer) ||
+    if (sendmsg( link, &msg, MSG_NOSIGNAL ) != (ssize_t)(sizeof(hdr) + size + len) ||
+        poll( &pfd, 1, 2000 ) != 1 || recv( link, &answer, sizeof(answer), 0 ) != sizeof(answer) ||
         answer.magic != WEX_SESSION0_MAGIC)
-    {
-        set_error( STATUS_PIPE_NOT_AVAILABLE );
-        goto failed;
-    }
-    if (answer.status)
-    {
-        set_error( answer.status );
-        goto failed;
-    }
+        status = STATUS_PIPE_NOT_AVAILABLE;
+    else
+        status = answer.status;
     close( link );
-    close( sv[0] );
     free( desc );
+    return status;
+}
+
+/* a user's server: whether session 0 has the pipe, for a wait (FSCTL_PIPE_WAIT) of a program in the session */
+unsigned int session0_wait_pipe( struct token *token, const WCHAR *name, data_size_t len )
+{
+    return pipe_request( WEX_SESSION0_PIPE_WAIT, token, name, len, -1 );
+}
+
+/* T5.2, a user's server: ask session 0 to join one end of a stream socket to its named pipe, for the token; the
+ * other end, or -1 with the error set */
+int session0_open_pipe( struct token *token, const WCHAR *name, data_size_t len )
+{
+    unsigned int status;
+    int sv[2];
+
+    if (socketpair( AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv ) == -1)
+    {
+        file_set_error();
+        return -1;
+    }
+    status = pipe_request( WEX_SESSION0_PIPE, token, name, len, sv[0] );
+    close( sv[0] );
+    if (status)
+    {
+        set_error( status );
+        close( sv[1] );
+        return -1;
+    }
     fcntl( sv[1], F_SETFL, O_NONBLOCK );
     return sv[1];
-
-failed:
-    if (link != -1) close( link );
-    close( sv[0] );
-    close( sv[1] );
-    free( desc );
-    return -1;
 }
 
 /* a registry channel to session 0 for the calling program, with its primary token */
