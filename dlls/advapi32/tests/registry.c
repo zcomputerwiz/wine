@@ -5246,6 +5246,54 @@ static void test_reg_create_key_security(void)
         "the inherit-only ACE is missing\n" );
     LocalFree( got_sd );
 
+    /* an installer's "add an ACE" (Omaha's ClientStateMedium): the default DACL of a key under HKLM\Software read and
+     * set again with one ACE more; its creator may still create and open the keys below */
+    {
+        HKEY medium, medium_child = NULL, reopened;
+        PSID interactive;
+        SID_IDENTIFIER_AUTHORITY nt_auth = { SECURITY_NT_AUTHORITY };
+        EXPLICIT_ACCESSA ea = {0};
+        ACL *old_dacl, *new_dacl = NULL;
+        PSECURITY_DESCRIPTOR old_sd;
+
+        ret = RegCreateKeyExA( HKEY_LOCAL_MACHINE, "Software\\Wine\\WexAddAceTest", 0, NULL, 0, KEY_ALL_ACCESS, NULL,
+                               &medium, NULL );
+        if (ret == ERROR_ACCESS_DENIED) skip( "not an administrator\n" );
+        else
+        {
+            ok( !ret, "RegCreateKeyExA failed %ld\n", ret );
+            ret = GetSecurityInfo( medium, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, &old_dacl, NULL,
+                                   &old_sd );
+            ok( !ret, "GetSecurityInfo failed %ld\n", ret );
+            AllocateAndInitializeSid( &nt_auth, 1, SECURITY_INTERACTIVE_RID, 0, 0, 0, 0, 0, 0, 0, &interactive );
+            ea.grfAccessPermissions = KEY_READ | KEY_SET_VALUE | KEY_CREATE_SUB_KEY;
+            ea.grfAccessMode = GRANT_ACCESS;
+            ea.grfInheritance = CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE | OBJECT_INHERIT_ACE;
+            ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+            ea.Trustee.ptstrName = interactive;
+            ret = SetEntriesInAclA( 1, &ea, old_dacl, &new_dacl );
+            ok( !ret, "SetEntriesInAclA failed %ld\n", ret );
+            ret = SetSecurityInfo( medium, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, new_dacl, NULL );
+            ok( !ret, "SetSecurityInfo failed %ld\n", ret );
+            ret = RegCreateKeyExA( medium, "child", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &medium_child, NULL );
+            ok( !ret, "RegCreateKeyExA below the key with an added ACE failed %ld\n", ret );
+            ret = RegOpenKeyExA( HKEY_LOCAL_MACHINE, "Software\\Wine\\WexAddAceTest\\child", 0, KEY_ALL_ACCESS,
+                                 &reopened );
+            ok( !ret, "the creator cannot open the subkey of a key with an added ACE: %ld\n", ret );
+            if (!ret) RegCloseKey( reopened );
+            if (medium_child)
+            {
+                RegDeleteKeyA( medium_child, "" );
+                RegCloseKey( medium_child );
+            }
+            RegDeleteKeyA( medium, "" );
+            RegCloseKey( medium );
+            LocalFree( new_dacl );
+            LocalFree( old_sd );
+            FreeSid( interactive );
+        }
+    }
+
     /* a parent with a descriptor of its own but nothing inheritable: a new subkey keeps the default, its creator
      * may open it */
     {

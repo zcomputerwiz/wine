@@ -1319,11 +1319,18 @@ static struct security_descriptor *key_get_sd( struct object *obj )
 
     if (!key_default_sd)
     {
+        /* as HKLM\SOFTWARE on Windows: the creator of a subkey, SYSTEM and Administrators get full control of the keys
+         * below too. It matters once a program reads this DACL and sets it on a key with one ACE more (an installer's
+         * "add an ACE"): the subkeys of that key then inherit what is here, and SYSTEM and Administrators must keep
+         * their access to them (Omaha's ClientStateMedium and PersistedPings, WebView2's setup) */
+        static const struct sid creator_owner = { SID_REVISION, 1, SECURITY_CREATOR_SID_AUTHORITY,
+                                                  { SECURITY_CREATOR_OWNER_RID } };
         const struct default_ace aces[] =
         {
+            { &creator_owner,      INHERIT_ONLY_ACE | CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
             { &builtin_users_sid,  0, KEY_READ },
-            { &local_system_sid,   0, KEY_ALL_ACCESS },
-            { &builtin_admins_sid, 0, KEY_ALL_ACCESS },
+            { &local_system_sid,   CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+            { &builtin_admins_sid, CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
             /* the old inherit-only ACE stays last: advapi32 security.c looks for the last Users ACE */
             { &builtin_users_sid,  INHERIT_ONLY_ACE | CONTAINER_INHERIT_ACE, GENERIC_READ },
         };

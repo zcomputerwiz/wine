@@ -4133,13 +4133,15 @@ static void test_GetNamedSecurityInfoA(void)
         bret = GetAce(pDacl, admins_ace_id, (VOID **)&ace);
         ok(bret, "Failed to get Builtin Admins ACE.\n");
         flags = ((ACE_HEADER *)ace)->AceFlags;
-        ok(flags == 0x0
+        /* Windows 10 and 11: full control of the key and the keys below (WineExplorer follows them, so that a DACL read
+         * from SOFTWARE and set on a key again leaves Administrators their subkeys) */
+        ok(flags == CONTAINER_INHERIT_ACE
+           || broken(flags == 0x0) /* xp */
            || broken(flags == (INHERIT_ONLY_ACE|CONTAINER_INHERIT_ACE|INHERITED_ACE)) /* w2k8 */
            || broken(flags == (OBJECT_INHERIT_ACE|CONTAINER_INHERIT_ACE)) /* win7 */
            || broken(flags == (INHERIT_ONLY_ACE|CONTAINER_INHERIT_ACE)) /* win8+ */
-           || broken(flags == (CONTAINER_INHERIT_ACE|INHERITED_ACE)) /* win 10 wow64 */
-           || broken(flags == CONTAINER_INHERIT_ACE), /* win 10 */
-           "Builtin Admins ACE has unexpected flags (0x%x != 0x0)\n", flags);
+           || broken(flags == (CONTAINER_INHERIT_ACE|INHERITED_ACE)), /* win 10 wow64 */
+           "Builtin Admins ACE has unexpected flags (0x%x != 0x%x)\n", flags, CONTAINER_INHERIT_ACE);
         ok(ace->Mask == KEY_ALL_ACCESS || broken(ace->Mask == GENERIC_ALL) /* w2k8 */,
            "Builtin Admins ACE has unexpected mask (0x%lx != 0x%x)\n", ace->Mask, KEY_ALL_ACCESS);
     }
