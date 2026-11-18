@@ -2,16 +2,16 @@
 @ stub NetEnumerateComputerNames
 @ stdcall NetGetJoinInformation( wstr ptr ptr )
 @ stub NetGetJoinableOUs
-@ stub NetJoinDomain
+@ stdcall NetJoinDomain(wstr wstr wstr wstr wstr long) wexjoin.NetJoinDomain
 @ stub NetRemoveAlternateComputerName
-@ stub NetRenameMachineInDomain
+@ stdcall NetRenameMachineInDomain(wstr wstr wstr wstr long) wexjoin.NetRenameMachineInDomain
 @ stub NetSetPrimaryComputerName
-@ stub NetUnjoinDomain
+@ stdcall NetUnjoinDomain(wstr wstr wstr long) wexjoin.NetUnjoinDomain
 @ stdcall NetUseAdd( str long ptr ptr )
 @ stdcall NetUseDel( str str long )
 @ stdcall NetUseEnum( str long ptr long ptr ptr ptr )
 @ stdcall NetUseGetInfo( str str long ptr )
-@ stub NetValidateName
+@ stdcall NetValidateName(wstr wstr wstr wstr long) wexjoin.NetValidateName
 @ stub NetWkstaGetInfo( str long ptr )
 @ stub NetWkstaSetInfo
 @ stub NetWkstaStatisticsGet
