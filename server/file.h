@@ -163,6 +163,8 @@ extern struct file *create_file_for_fd_obj( struct fd *fd, unsigned int access, 
 extern void file_set_error(void);
 extern struct security_descriptor *mode_to_sd( mode_t mode, const struct sid *user, const struct sid *group );
 extern mode_t sd_to_mode( const struct security_descriptor *sd, const struct sid *owner );
+extern mode_t sd_system_group_mode( const struct security_descriptor *sd, gid_t gid, mode_t mode );
+extern int sysrun_fchmod( int fd, mode_t mode );
 extern int is_file_executable( const char *name );
 
 /* file mapping functions */

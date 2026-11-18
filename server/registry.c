@@ -4772,6 +4772,101 @@ static int check_create_subkey( const struct object_params *params )
 }
 
 /* create a registry key */
+/* Inheritance for a new key, as on Windows: the inheritable ACEs of the parent's own descriptor follow the explicit
+ * ACEs given at creation (unless that DACL is protected). Only a parent with a descriptor of its own takes part; keys
+ * under the built-in default descriptors keep them. A container-inheritable ACE that holds generic rights becomes an
+ * effective ACE with the rights mapped plus an inherit-only copy that keeps them for the subkeys below. */
+static void key_inherit_sd( struct key *key, const struct security_descriptor *explicit_sd )
+{
+    const unsigned int inherit = CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
+    const struct acl *parent_dacl, *explicit_dacl = NULL;
+    const struct ace *ace;
+    struct security_descriptor *sd;
+    struct key *parent = get_parent( key );
+    struct acl *dacl;
+    struct ace *out;
+    unsigned int i, count = 0;
+    data_size_t size = sizeof(struct acl);
+    int present;
+
+    if (!parent || !parent->obj.sd) return;
+    if (explicit_sd && (explicit_sd->control & SE_DACL_PROTECTED)) return;
+    if (!(parent_dacl = sd_get_dacl( parent->obj.sd, &present )) || !present) return;
+    if (explicit_sd && (explicit_dacl = sd_get_dacl( explicit_sd, &present )) && !present) explicit_dacl = NULL;
+
+    /* first pass: the size */
+    for (i = 0, ace = ace_first( parent_dacl ); i < parent_dacl->count; i++, ace = ace_next( ace ))
+    {
+        if (!(ace->flags & inherit)) continue;
+        if (!(ace->flags & CONTAINER_INHERIT_ACE) && (ace->flags & NO_PROPAGATE_INHERIT_ACE)) continue;
+        count++;
+        size += ace->size;
+        if ((ace->flags & CONTAINER_INHERIT_ACE) && !(ace->flags & NO_PROPAGATE_INHERIT_ACE) &&
+            (ace->mask & (GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL)))
+        {
+            count++;
+            size += ace->size;
+        }
+    }
+    if (!count) return;
+    if (explicit_dacl)
+    {
+        size += explicit_dacl->size - sizeof(struct acl);
+        count += explicit_dacl->count;
+    }
+
+    if (!(sd = mem_alloc( sizeof(*sd) + size ))) return;
+    memset( sd, 0, sizeof(*sd) );
+    sd->control = SE_DACL_PRESENT | SE_DACL_AUTO_INHERITED;
+    sd->dacl_len = size;
+    dacl = (struct acl *)(sd + 1);
+    dacl->revision = ACL_REVISION;
+    dacl->pad1 = 0;
+    dacl->size = size;
+    dacl->count = count;
+    dacl->pad2 = 0;
+    out = ace_first( dacl );
+    if (explicit_dacl)
+    {
+        memcpy( out, ace_first( explicit_dacl ), explicit_dacl->size - sizeof(struct acl) );
+        out = (struct ace *)((char *)out + explicit_dacl->size - sizeof(struct acl));
+    }
+    for (i = 0, ace = ace_first( parent_dacl ); i < parent_dacl->count; i++, ace = ace_next( ace ))
+    {
+        if (!(ace->flags & inherit)) continue;
+        if (!(ace->flags & CONTAINER_INHERIT_ACE))
+        {
+            if (ace->flags & NO_PROPAGATE_INHERIT_ACE) continue;
+            /* object-inherit only: kept for the objects below, effective for none of them here */
+            memcpy( out, ace, ace->size );
+            out->flags = (ace->flags & ~(CONTAINER_INHERIT_ACE | NO_PROPAGATE_INHERIT_ACE)) |
+                         INHERIT_ONLY_ACE | INHERITED_ACE;
+            out = ace_next( out );
+            continue;
+        }
+        memcpy( out, ace, ace->size );
+        if (ace->flags & NO_PROPAGATE_INHERIT_ACE)
+        {
+            out->flags = INHERITED_ACE;
+            out->mask = map_access( ace->mask, &key_type.mapping );
+            out = ace_next( out );
+            continue;
+        }
+        if (ace->mask & (GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL))
+        {
+            out->flags = INHERITED_ACE;
+            out->mask = map_access( ace->mask, &key_type.mapping );
+            out = ace_next( out );
+            memcpy( out, ace, ace->size );
+            out->flags = (ace->flags & inherit) | INHERIT_ONLY_ACE | INHERITED_ACE;
+        }
+        else out->flags = (ace->flags & inherit) | INHERITED_ACE;
+        out = ace_next( out );
+    }
+    default_set_sd( &key->obj, sd, DACL_SECURITY_INFORMATION );
+    free( sd );
+}
+
 DECL_HANDLER(create_key)
 {
     struct key *key, *parent = NULL, *mapped = NULL;
@@ -4823,6 +4918,7 @@ DECL_HANDLER(create_key)
         }
         else
         {
+            if (!mapped && !key->e1s_sd) key_inherit_sd( key, params.sd );
             reply->hkey = key->e1s_sd ? e1s_alloc_key_handle( key, access, params.attr ) :
                 alloc_handle_no_access_check( current->process, key, access, params.attr );
             if (parent)

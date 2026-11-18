@@ -498,10 +498,11 @@ static NTSTATUS open_key( HKEY *retkey, HKEY root, UNICODE_STRING *name, DWORD o
 }
 
 static NTSTATUS create_key( HKEY *retkey, HKEY root, UNICODE_STRING name, ULONG options, ACCESS_MASK access,
-                            const UNICODE_STRING *class, PULONG dispos );
+                            const UNICODE_STRING *class, PULONG dispos, PSECURITY_DESCRIPTOR sd );
 
+/* sd: the descriptor of the last key of the path; the keys created on the way get inheritance only */
 static NTSTATUS create_subkey( HKEY *subkey, HKEY root, UNICODE_STRING *name, DWORD options, ACCESS_MASK access,
-                               const UNICODE_STRING *class, PULONG dispos )
+                               const UNICODE_STRING *class, PULONG dispos, PSECURITY_DESCRIPTOR sd )
 {
     ACCESS_MASK access_64 = access & ~KEY_WOW64_32KEY;
     DWORD i = 0, len = name->Length / sizeof(WCHAR);
@@ -518,7 +519,7 @@ static NTSTATUS create_subkey( HKEY *subkey, HKEY root, UNICODE_STRING *name, DW
     if (i < len)
         options &= ~REG_OPTION_CREATE_LINK;
 
-    status = create_key( subkey, root, str, options, access_64, class, dispos );
+    status = create_key( subkey, root, str, options, access_64, class, dispos, i < len ? NULL : sd );
     if (!status)
     {
         while (i < len && buffer[i] == '\\') i++;
@@ -532,7 +533,7 @@ static NTSTATUS create_subkey( HKEY *subkey, HKEY root, UNICODE_STRING *name, DW
 
 /* wrapper for NtCreateKey that creates the key recursively if necessary */
 static NTSTATUS create_key( HKEY *retkey, HKEY root, UNICODE_STRING name, ULONG options, ACCESS_MASK access,
-                            const UNICODE_STRING *class, PULONG dispos )
+                            const UNICODE_STRING *class, PULONG dispos, PSECURITY_DESCRIPTOR sd )
 {
     NTSTATUS status = STATUS_OBJECT_NAME_NOT_FOUND;
     HKEY subkey, subkey_root = root;
@@ -543,7 +544,7 @@ static NTSTATUS create_key( HKEY *retkey, HKEY root, UNICODE_STRING name, ULONG 
     {
         OBJECT_ATTRIBUTES attr;
 
-        InitializeObjectAttributes( &attr, &name, 0, root, NULL );
+        InitializeObjectAttributes( &attr, &name, 0, root, sd );
         if (options & REG_OPTION_OPEN_LINK) attr.Attributes |= OBJ_OPENLINK;
 
         status = NtCreateKey( (HANDLE *)retkey, access, &attr, 0, class, options, dispos );
@@ -572,7 +573,7 @@ static NTSTATUS create_key( HKEY *retkey, HKEY root, UNICODE_STRING name, ULONG 
         status = STATUS_SUCCESS;
         while (!status && name.Length)
         {
-            status = create_subkey( &subkey, subkey_root, &name, options, access, class, dispos );
+            status = create_subkey( &subkey, subkey_root, &name, options, access, class, dispos, sd );
             if (subkey_root && subkey_root != root) NtClose( subkey_root );
             subkey_root = subkey;
         }
@@ -600,7 +601,7 @@ static HKEY create_special_root_hkey( HKEY hkey, DWORD access )
         UNICODE_STRING name;
 
         RtlInitUnicodeString( &name, root_key_names[idx] );
-        if (create_key( &hkey, 0, name, 0, access, NULL, NULL )) return 0;
+        if (create_key( &hkey, 0, name, 0, access, NULL, NULL, NULL )) return 0;
         TRACE( "%s -> %p\n", debugstr_w(name.Buffer), hkey );
     }
 
@@ -732,7 +733,8 @@ LSTATUS WINAPI DECLSPEC_HOTPATCH RegCreateKeyExW( HKEY hkey, LPCWSTR name, DWORD
     RtlInitUnicodeString( &nameW, name );
     RtlInitUnicodeString( &classW, class );
 
-    return RtlNtStatusToDosError( create_key( retkey, hkey, nameW, options, access, &classW, dispos ) );
+    return RtlNtStatusToDosError( create_key( retkey, hkey, nameW, options, access, &classW, dispos,
+                                              sa ? sa->lpSecurityDescriptor : NULL ) );
 }
 
 
@@ -784,7 +786,8 @@ LSTATUS WINAPI DECLSPEC_HOTPATCH RegCreateKeyExA( HKEY hkey, LPCSTR name, DWORD 
     {
         if (!(status = RtlAnsiStringToUnicodeString( &classW, &classA, TRUE )))
         {
-            status = create_key( retkey, hkey, NtCurrentTeb()->StaticUnicodeString, options, access, &classW, dispos );
+            status = create_key( retkey, hkey, NtCurrentTeb()->StaticUnicodeString, options, access, &classW, dispos,
+                                 sa ? sa->lpSecurityDescriptor : NULL );
             RtlFreeUnicodeString( &classW );
         }
     }

@@ -47,6 +47,7 @@
 #include "request.h"
 #include "process.h"
 #include "security.h"
+#include "sysrun.h"
 #include "e1s_profile.h"
 
 static const WCHAR file_name[] = {'F','i','l','e'};
@@ -482,6 +483,37 @@ mode_t sd_to_mode( const struct security_descriptor *sd, const struct sid *owner
     return new_mode;
 }
 
+/* WineExplorer system tier (B41): on a file of the machine root whose group is the system group, that group stands
+ * for SYSTEM, the service accounts and Administrators (an elevated program), none of which has a Unix account of its
+ * own. Their ACEs give the group bits, which sd_to_mode would derive from the owner instead; the owner and Everyone
+ * keep the user and other bits. Without the system role, or for any other group, the mode is as sd_to_mode makes it. */
+mode_t sd_system_group_mode( const struct security_descriptor *sd, gid_t gid, mode_t mode )
+{
+    static const struct sid local_service = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_LOCAL_SERVICE_RID } };
+    static const struct sid network_service = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_NETWORK_SERVICE_RID } };
+    mode_t group = 0, denied = 0, bits;
+    const struct acl *dacl;
+    const struct ace *ace;
+    unsigned int i;
+    int present;
+
+    if (!sysrun_machine_root() || gid != sysrun_group()) return mode;
+    if (!(dacl = sd_get_dacl( sd, &present )) || !present) return mode | S_IRWXG;  /* no DACL: full access */
+    for (i = 0, ace = ace_first( dacl ); i < dacl->count; i++, ace = ace_next( ace ))
+    {
+        const struct sid *sid = (const struct sid *)(ace + 1);
+
+        if (ace->flags & INHERIT_ONLY_ACE) continue;
+        if (!equal_sid( sid, &local_system_sid ) && !equal_sid( sid, &builtin_admins_sid ) &&
+            !equal_sid( sid, &local_service ) && !equal_sid( sid, &network_service ) && !equal_sid( sid, &world_sid ))
+            continue;
+        bits = file_access_to_mode( ace->mask ) << 3;
+        if (ace->type == ACCESS_DENIED_ACE_TYPE) denied |= bits;
+        else if (ace->type == ACCESS_ALLOWED_ACE_TYPE) group |= bits & ~denied;
+    }
+    return (mode & ~S_IRWXG) | group;
+}
+
 static int file_set_sd( struct object *obj, const struct security_descriptor *sd,
                         unsigned int set_info )
 {
@@ -525,14 +557,25 @@ static int file_set_sd( struct object *obj, const struct security_descriptor *sd
         /* keep the bits that we don't map to access rights in the ACL */
         mode = st.st_mode & (S_ISUID|S_ISGID|S_ISVTX);
         mode |= sd_to_mode( sd, owner );
+        mode = sd_system_group_mode( sd, st.st_gid, mode );
 
-        if (((st.st_mode ^ mode) & (S_IRWXU|S_IRWXG|S_IRWXO)) && fchmod( unix_fd, mode ) == -1)
+        if (((st.st_mode ^ mode) & (S_IRWXU|S_IRWXG|S_IRWXO)) && sysrun_fchmod( unix_fd, mode ) == -1)
         {
             file_set_error();
             return 0;
         }
     }
     return 1;
+}
+
+/* fchmod for a DACL change: an elevated caller's change runs with the system group, so that the kernel keeps the
+ * setgid bit of a machine-root directory (it clears it for a caller outside the file's group) */
+int sysrun_fchmod( int fd, mode_t mode )
+{
+    int raised = sysrun_raise_for_current(), ret = fchmod( fd, mode );
+
+    sysrun_drop( raised );
+    return ret;
 }
 
 static struct object *file_lookup_name( struct object *obj, struct unicode_str *name,

@@ -33,6 +33,7 @@
 #include "winsvc.h"
 #include "winerror.h"
 #include "aclapi.h"
+#include "sddl.h"
 
 #define IS_HKCR(hk) ((UINT_PTR)hk > 0 && ((UINT_PTR)hk & 3) == 2)
 
@@ -5175,6 +5176,87 @@ static void test_control_set_symlink(void)
     RegCloseKey( key );
 }
 
+/* does the DACL hold an allowed ACE for sid with exactly these flags and this mask? */
+static BOOL dacl_has_ace( const ACL *dacl, PSID sid, BYTE flags, ACCESS_MASK mask )
+{
+    ACCESS_ALLOWED_ACE *ace;
+    DWORD i;
+
+    for (i = 0; i < dacl->AceCount; i++)
+    {
+        if (!GetAce( (ACL *)dacl, i, (void **)&ace )) return FALSE;
+        if (ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && ace->Header.AceFlags == flags &&
+            ace->Mask == mask && EqualSid( (PSID)&ace->SidStart, sid )) return TRUE;
+    }
+    return FALSE;
+}
+
+static void test_reg_create_key_security(void)
+{
+    SID_IDENTIFIER_AUTHORITY world_auth = { SECURITY_WORLD_SID_AUTHORITY };
+    SECURITY_ATTRIBUTES sa = { sizeof(sa) };
+    PSECURITY_DESCRIPTOR sd, got_sd;
+    SECURITY_DESCRIPTOR_CONTROL control;
+    DWORD revision;
+    HKEY parent, child, generic, generic_child;
+    PSID world;
+    ACL *dacl;
+    LONG ret;
+
+    AllocateAndInitializeSid( &world_auth, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &world );
+
+    /* the descriptor given at creation is the key's */
+    ret = ConvertStringSecurityDescriptorToSecurityDescriptorA( "D:P(A;CI;KA;;;WD)", SDDL_REVISION_1, &sd, NULL );
+    ok( ret, "ConvertStringSecurityDescriptorToSecurityDescriptorA failed %lu\n", GetLastError() );
+    sa.lpSecurityDescriptor = sd;
+    ret = RegCreateKeyExA( hkey_main, "sa_key", 0, NULL, 0, KEY_ALL_ACCESS, &sa, &parent, NULL );
+    ok( !ret, "RegCreateKeyExA failed %ld\n", ret );
+    LocalFree( sd );
+    ret = GetSecurityInfo( parent, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, &dacl, NULL, &got_sd );
+    ok( !ret, "GetSecurityInfo failed %ld\n", ret );
+    GetSecurityDescriptorControl( got_sd, &control, &revision );
+    ok( control & SE_DACL_PROTECTED, "DACL not protected, control %#x\n", control );
+    ok( dacl->AceCount == 1, "got %u ACEs\n", dacl->AceCount );
+    ok( dacl_has_ace( dacl, world, CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS ), "the given ACE is missing\n" );
+    LocalFree( got_sd );
+
+    /* a new subkey inherits the container-inheritable ACE */
+    ret = RegCreateKeyExA( parent, "child", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &child, NULL );
+    ok( !ret, "RegCreateKeyExA failed %ld\n", ret );
+    ret = GetSecurityInfo( child, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, &dacl, NULL, &got_sd );
+    ok( !ret, "GetSecurityInfo failed %ld\n", ret );
+    ok( dacl_has_ace( dacl, world, CONTAINER_INHERIT_ACE | INHERITED_ACE, KEY_ALL_ACCESS ),
+        "the inherited ACE is missing\n" );
+    LocalFree( got_sd );
+
+    /* generic rights: an effective ACE with the rights mapped, and an inherit-only copy for the keys below */
+    ret = ConvertStringSecurityDescriptorToSecurityDescriptorA( "D:P(A;CI;GA;;;WD)", SDDL_REVISION_1, &sd, NULL );
+    ok( ret, "ConvertStringSecurityDescriptorToSecurityDescriptorA failed %lu\n", GetLastError() );
+    sa.lpSecurityDescriptor = sd;
+    ret = RegCreateKeyExA( hkey_main, "sa_generic", 0, NULL, 0, KEY_ALL_ACCESS, &sa, &generic, NULL );
+    ok( !ret, "RegCreateKeyExA failed %ld\n", ret );
+    LocalFree( sd );
+    ret = RegCreateKeyExA( generic, "child", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &generic_child, NULL );
+    ok( !ret, "RegCreateKeyExA failed %ld\n", ret );
+    ret = GetSecurityInfo( generic_child, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, &dacl, NULL,
+                           &got_sd );
+    ok( !ret, "GetSecurityInfo failed %ld\n", ret );
+    ok( dacl_has_ace( dacl, world, INHERITED_ACE, KEY_ALL_ACCESS ), "the effective inherited ACE is missing\n" );
+    ok( dacl_has_ace( dacl, world, CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE | INHERITED_ACE, GENERIC_ALL ),
+        "the inherit-only ACE is missing\n" );
+    LocalFree( got_sd );
+
+    RegDeleteKeyA( generic_child, "" );
+    RegCloseKey( generic_child );
+    RegDeleteKeyA( generic, "" );
+    RegCloseKey( generic );
+    RegDeleteKeyA( child, "" );
+    RegCloseKey( child );
+    RegDeleteKeyA( parent, "" );
+    RegCloseKey( parent );
+    FreeSid( world );
+}
+
 START_TEST(registry)
 {
     /* Load pointers for functions that are not available in all Windows versions */
@@ -5189,6 +5271,7 @@ START_TEST(registry)
     test_get_value();
     test_reg_open_key();
     test_reg_create_key();
+    test_reg_create_key_security();
     test_reg_close_key();
     test_reg_delete_key();
     test_reg_query_value();
