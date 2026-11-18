@@ -448,6 +448,11 @@ static BOOL get_command_image(const WCHAR *cmd, WCHAR *path, DWORD size)
 typedef DWORD (WINAPI *WEXELEVATERUN)(const WCHAR *, const WCHAR *, const WCHAR *, const WCHAR *, DWORD, DWORD,
                                       DWORD, HANDLE *, DWORD *);
 
+/* The broker's refusal of an image on a file system that gives no read leases (UDF, as a loop-mounted ISO). It is
+ * defined in wexelevate.h in the WineExplorer tree; no other failure can produce this value, and it never crosses
+ * back to the program: it is mapped to ERROR_NOT_SUPPORTED before ShellExecuteEx returns. */
+#define WEXELEVATE_E_NO_IMAGE_LEASE 0x20150
+
 static UINT_PTR execute_with_broker(const WCHAR *cmd, const WCHAR *env, const SHELLEXECUTEINFOW *psei,
                                     SHELLEXECUTEINFOW *psei_out)
 {
@@ -1861,6 +1866,16 @@ static void do_error_dialog( UINT_PTR retval, HWND hwnd )
     WCHAR msg[2048];
     int error_code=GetLastError();
 
+    if (error_code == WEXELEVATE_E_NO_IMAGE_LEASE)
+    {
+        /* The broker refused the image: its file system gives no read leases (UDF). Say what the user can do, in
+         * this process (the user's desktop), and leave the program-visible error as ERROR_NOT_SUPPORTED. */
+        LoadStringW(shell32_hInstance, IDS_SHLEXEC_NO_IMAGE_LEASE, msg, ARRAY_SIZE(msg));
+        MessageBoxW(hwnd, msg, NULL, MB_ICONERROR);
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return;
+    }
+
     if (retval == SE_ERR_NOASSOC)
         LoadStringW(shell32_hInstance, IDS_SHLEXEC_NOASSOC, msg, ARRAY_SIZE(msg));
     else
@@ -2050,6 +2065,8 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
                                       execfunc );
         if (retval <= 32 && !(sei_tmp.fMask & SEE_MASK_FLAG_NO_UI))
             do_error_dialog(retval, sei_tmp.hwnd);
+        if (retval <= 32 && GetLastError() == WEXELEVATE_E_NO_IMAGE_LEASE)
+            SetLastError(ERROR_NOT_SUPPORTED);   /* no dialog (SEE_MASK_FLAG_NO_UI): the program sees only the code */
         free(wszApplicationName);
         if (wszParameters != parametersBuffer)
             free(wszParameters);
@@ -2223,6 +2240,8 @@ end:
 
     if (retval <= 32 && !(sei_tmp.fMask & SEE_MASK_FLAG_NO_UI))
         do_error_dialog(retval, sei_tmp.hwnd);
+    if (retval <= 32 && GetLastError() == WEXELEVATE_E_NO_IMAGE_LEASE)
+        SetLastError(ERROR_NOT_SUPPORTED);   /* no dialog (SEE_MASK_FLAG_NO_UI): the program sees only the code */
     return retval > 32;
 }
 

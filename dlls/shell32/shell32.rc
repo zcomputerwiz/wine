@@ -279,6 +279,10 @@ the folder?"
 
         IDS_SHLEXEC_NOASSOC         "There is no Windows program configured to open this type of file."
 
+        /* The elevation broker refused the image: its file system gives no read leases (UDF, as a loop-mounted ISO) */
+        IDS_SHLEXEC_NO_IMAGE_LEASE  "Windows cannot run this program as an administrator from this location.\n\n\
+Copy it to a folder on the local disk, such as the Desktop, and run it from there."
+
         IDS_RECYCLEBIN_ERASEITEM       "Are you sure you wish to permanently delete '%1'?"
         IDS_RECYCLEBIN_ERASEMULTIPLE   "Are you sure you wish to permanently delete these %1 items?"
         IDS_RECYCLEBIN_ERASE_CAPTION   "Confirm deletion"

@@ -612,6 +612,11 @@ static HANDLE get_admin_token(void)
 typedef DWORD (WINAPI *WEXELEVATERUN)(const WCHAR *, const WCHAR *, const WCHAR *, const WCHAR *, DWORD, DWORD,
                                       DWORD, HANDLE *, DWORD *);
 
+/* The broker's refusal of an image on a file system that gives no read leases (UDF). Defined in wexelevate.h in
+ * the WineExplorer tree; every consumer maps it back to ERROR_NOT_SUPPORTED. The image here is always msiexec in
+ * the system directory, so this value cannot actually arrive. */
+#define WEXELEVATE_E_NO_IMAGE_LEASE 0x20150
+
 /* A per-machine install by a limited administrator, while elevation is enforced (the caller decides that it is
  * per-machine): start the same msiexec command line once through the elevation broker (one consent). The elevated msiexec runs the whole install, deferred
  * custom actions included, with the full token. Returns FALSE when this is not such an install (the caller goes
@@ -677,6 +682,7 @@ BOOL msi_install_through_broker(const WCHAR *package, const WCHAR *props, DWORD 
         CloseHandle(process);
     }
     else if (err == ERROR_CANCELLED) code = ERROR_INSTALL_USEREXIT;
+    else if (err == WEXELEVATE_E_NO_IMAGE_LEASE) code = ERROR_NOT_SUPPORTED;
     else code = err;
 
     if (env) FreeEnvironmentStringsW(env);
