@@ -1466,6 +1466,15 @@ static const WCHAR xsd_pattern_escaped_backslash[] =
     L"  <xs:element name=\"r\" type=\"T\"/>\n"
     L"</xs:schema>";
 
+/* a surrogate pair escape is one supplementary character (U+1F600) */
+static const WCHAR xsd_pattern_surrogates[] =
+    L"<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">\n"
+    L"  <xs:simpleType name=\"T\"><xs:restriction base=\"xs:string\">\n"
+    L"    <xs:pattern value=\"[\\uD83D\\uDE00]\"/>\n"
+    L"  </xs:restriction></xs:simpleType>\n"
+    L"  <xs:element name=\"r\" type=\"T\"/>\n"
+    L"</xs:schema>";
+
 static HRESULT validate_with_schema(const WCHAR *xsd, const WCHAR *xml, HRESULT *add_hr)
 {
     IXMLDOMDocument2 *doc, *schema;
@@ -1542,6 +1551,13 @@ static void test_xsd_encoding_and_pattern(void)
     ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
 
     hr = validate_with_schema(xsd_pattern_escaped_backslash, L"<r>A</r>", &add_hr);
+    ok(hr == S_FALSE, "Unexpected hr %#lx.\n", hr);
+
+    hr = validate_with_schema(xsd_pattern_surrogates, L"<r>\xd83d\xde00</r>", &add_hr);
+    ok(add_hr == S_OK, "Unexpected hr %#lx.\n", add_hr);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    hr = validate_with_schema(xsd_pattern_surrogates, L"<r>a</r>", &add_hr);
     ok(hr == S_FALSE, "Unexpected hr %#lx.\n", hr);
 }
 

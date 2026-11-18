@@ -752,7 +752,9 @@ static BOOL link_datatypes(xmlDocPtr schema)
  * Replace each escape with the character it stands for, escaped when it is a regular expression metacharacter.
  * Only a backslash that is not itself escaped starts an escape: in "\\u0041" the backslash is literal.
  * U+0000 cannot be stored in an attribute value, and XML cannot contain it in the instance either, so a character
- * class that starts there ("[^\u0000- ]") loses nothing when it starts at U+0001 instead. */
+ * class that starts there ("[^\u0000- ]") loses nothing when it starts at U+0001 instead.
+ * A high surrogate escape followed by a low surrogate escape is one supplementary character (4 bytes of UTF-8, not two
+ * 3-byte sequences, which libxml2 rejects); a lone surrogate becomes U+FFFD. If memory runs out the value is kept. */
 static void fix_pattern_u_escapes(xmlNodePtr node)
 {
     for (; node; node = node->next)
@@ -768,6 +770,13 @@ static void fix_pattern_u_escapes(xmlNodePtr node)
                 xmlChar *out = malloc(strlen((const char *)value) * 2 + 1), *o = out;
                 const xmlChar *i = value;
 
+                if (!out)
+                {
+                    xmlFree(value);
+                    fix_pattern_u_escapes(node->children);
+                    continue;
+                }
+
                 while (*i)
                 {
                     if (i[0] == '\\' && i[1] == 'u' && isxdigit(i[2]) && isxdigit(i[3]) && isxdigit(i[4]) && isxdigit(i[5]))
@@ -775,7 +784,21 @@ static void fix_pattern_u_escapes(xmlNodePtr node)
                         char hex[5] = { i[2], i[3], i[4], i[5], 0 };
                         unsigned int ch = strtoul(hex, NULL, 16);
 
+                        i += 6;
                         if (!ch) ch = 1;
+                        else if (ch >= 0xd800 && ch <= 0xdbff && i[0] == '\\' && i[1] == 'u' && isxdigit(i[2])
+                                && isxdigit(i[3]) && isxdigit(i[4]) && isxdigit(i[5]))
+                        {
+                            char hex2[5] = { i[2], i[3], i[4], i[5], 0 };
+                            unsigned int low = strtoul(hex2, NULL, 16);
+
+                            if (low >= 0xdc00 && low <= 0xdfff)
+                            {
+                                ch = 0x10000 + ((ch - 0xd800) << 10) + (low - 0xdc00);
+                                i += 6;
+                            }
+                        }
+                        if (ch >= 0xd800 && ch <= 0xdfff) ch = 0xfffd;
                         if (ch < 0x80)
                         {
                             if (strchr("\\.?*+{}()|[]^-$", ch)) *o++ = '\\';
@@ -786,13 +809,19 @@ static void fix_pattern_u_escapes(xmlNodePtr node)
                             *o++ = 0xc0 | (ch >> 6);
                             *o++ = 0x80 | (ch & 0x3f);
                         }
-                        else
+                        else if (ch < 0x10000)
                         {
                             *o++ = 0xe0 | (ch >> 12);
                             *o++ = 0x80 | ((ch >> 6) & 0x3f);
                             *o++ = 0x80 | (ch & 0x3f);
                         }
-                        i += 6;
+                        else
+                        {
+                            *o++ = 0xf0 | (ch >> 18);
+                            *o++ = 0x80 | ((ch >> 12) & 0x3f);
+                            *o++ = 0x80 | ((ch >> 6) & 0x3f);
+                            *o++ = 0x80 | (ch & 0x3f);
+                        }
                     }
                     else if (i[0] == '\\' && i[1])
                     {
