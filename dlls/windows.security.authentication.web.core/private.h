@@ -77,6 +77,16 @@ void diagnostic_dump_request( const char *method, IInspectable *request );
 
 /*
  *
+ * broker.c
+ *
+ */
+
+BOOL token_broker_enabled( void );
+HRESULT token_broker_request( IInspectable *request, BOOL silent, HWND window, WebTokenRequestStatus *status,
+                              UINT32 *code, HSTRING *message );
+
+/*
+ *
  * response.c
  *
  */
