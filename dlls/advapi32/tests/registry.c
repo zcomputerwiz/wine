@@ -5246,6 +5246,49 @@ static void test_reg_create_key_security(void)
         "the inherit-only ACE is missing\n" );
     LocalFree( got_sd );
 
+    /* CREATOR OWNER: the new key's owner (the token's default owner) gets the rights in the effective ACE, and the
+     * inherit-only copy keeps CREATOR OWNER for the keys below */
+    {
+        SID_IDENTIFIER_AUTHORITY creator_auth = { SECURITY_CREATOR_SID_AUTHORITY };
+        char owner_buf[sizeof(TOKEN_OWNER) + SECURITY_MAX_SID_SIZE];
+        TOKEN_OWNER *token_owner = (TOKEN_OWNER *)owner_buf;
+        HKEY creator, creator_child;
+        HANDLE token;
+        PSID creator_owner;
+        DWORD len;
+
+        AllocateAndInitializeSid( &creator_auth, 1, SECURITY_CREATOR_OWNER_RID, 0, 0, 0, 0, 0, 0, 0, &creator_owner );
+        OpenProcessToken( GetCurrentProcess(), TOKEN_QUERY, &token );
+        ret = GetTokenInformation( token, TokenOwner, owner_buf, sizeof(owner_buf), &len );
+        ok( ret, "GetTokenInformation failed %lu\n", GetLastError() );
+        CloseHandle( token );
+
+        ret = ConvertStringSecurityDescriptorToSecurityDescriptorA( "D:P(A;CI;KA;;;CO)(A;CI;KA;;;SY)(A;CI;KA;;;BA)",
+                                                                     SDDL_REVISION_1, &sd, NULL );
+        ok( ret, "ConvertStringSecurityDescriptorToSecurityDescriptorA failed %lu\n", GetLastError() );
+        sa.lpSecurityDescriptor = sd;
+        ret = RegCreateKeyExA( hkey_main, "sa_creator", 0, NULL, 0, KEY_ALL_ACCESS, &sa, &creator, NULL );
+        ok( !ret, "RegCreateKeyExA failed %ld\n", ret );
+        LocalFree( sd );
+        ret = RegCreateKeyExA( creator, "child", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &creator_child, NULL );
+        ok( !ret, "RegCreateKeyExA failed %ld\n", ret );
+        ret = GetSecurityInfo( creator_child, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, &dacl, NULL,
+                               &got_sd );
+        ok( !ret, "GetSecurityInfo failed %ld\n", ret );
+        ok( dacl_has_ace( dacl, token_owner->Owner, INHERITED_ACE, KEY_ALL_ACCESS ),
+            "the creator's effective ACE is missing\n" );
+        ok( dacl_has_ace( dacl, creator_owner, CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE | INHERITED_ACE, KEY_ALL_ACCESS ),
+            "the inherit-only CREATOR OWNER ACE is missing\n" );
+        ok( !dacl_has_ace( dacl, creator_owner, CONTAINER_INHERIT_ACE | INHERITED_ACE, KEY_ALL_ACCESS ),
+            "CREATOR OWNER is effective\n" );
+        LocalFree( got_sd );
+        RegDeleteKeyA( creator_child, "" );
+        RegCloseKey( creator_child );
+        RegDeleteKeyA( creator, "" );
+        RegCloseKey( creator );
+        FreeSid( creator_owner );
+    }
+
     RegDeleteKeyA( generic_child, "" );
     RegCloseKey( generic_child );
     RegDeleteKeyA( generic, "" );

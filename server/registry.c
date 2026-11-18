@@ -4772,64 +4772,79 @@ static int check_create_subkey( const struct object_params *params )
 }
 
 /* create a registry key */
+static const struct sid creator_owner_sid = { SID_REVISION, 1, SECURITY_CREATOR_SID_AUTHORITY, { SECURITY_CREATOR_OWNER_RID } };
+static const struct sid creator_group_sid = { SID_REVISION, 1, SECURITY_CREATOR_SID_AUTHORITY, { SECURITY_CREATOR_GROUP_RID } };
+
+/* one ACE of an inherited DACL at out: the parent's ace with these flags and this mask, its SID replaced by sid when
+ * given (only a plain allowed or denied ACE has its SID right after the header); returns the next ACE */
+static struct ace *inherit_ace( struct ace *out, const struct ace *ace, unsigned char flags, unsigned int mask,
+                                const struct sid *sid )
+{
+    if (sid && (ace->type == ACCESS_ALLOWED_ACE_TYPE || ace->type == ACCESS_DENIED_ACE_TYPE))
+        set_ace( out, sid, ace->type, flags, mask );
+    else
+    {
+        memcpy( out, ace, ace->size );
+        out->flags = flags;
+        out->mask = mask;
+    }
+    return ace_next( out );
+}
+
 /* Inheritance for a new key, as on Windows: the inheritable ACEs of the parent's own descriptor follow the explicit
  * ACEs given at creation (unless that DACL is protected). Only a parent with a descriptor of its own takes part; keys
- * under the built-in default descriptors keep them. A container-inheritable ACE that holds generic rights becomes an
- * effective ACE with the rights mapped plus an inherit-only copy that keeps them for the subkeys below. */
+ * under the built-in default descriptors keep them. A container-inheritable ACE becomes an effective ACE for this key,
+ * with generic rights mapped and CREATOR OWNER / CREATOR GROUP replaced by the key's owner / primary group, plus an
+ * inherit-only copy as it was for the subkeys below when the effective one differs from it (and the ACE propagates). */
 static void key_inherit_sd( struct key *key, const struct security_descriptor *explicit_sd )
 {
     const unsigned int inherit = CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
+    const unsigned int generic = GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL;
+    struct token *token = current->token ? current->token : current->process->token;
     const struct acl *parent_dacl, *explicit_dacl = NULL;
+    const struct sid *owner, *group, *sid, *effective_sid;
     const struct ace *ace;
     struct security_descriptor *sd;
     struct key *parent = get_parent( key );
     struct acl *dacl;
     struct ace *out;
     unsigned int i, count = 0;
-    data_size_t size = sizeof(struct acl);
-    int present;
+    data_size_t size = sizeof(struct acl), extra;
+    int present, split;
 
     if (!parent || !parent->obj.sd) return;
     if (explicit_sd && (explicit_sd->control & SE_DACL_PROTECTED)) return;
     if (!(parent_dacl = sd_get_dacl( parent->obj.sd, &present )) || !present) return;
     if (explicit_sd && (explicit_dacl = sd_get_dacl( explicit_sd, &present )) && !present) explicit_dacl = NULL;
+    owner = key->obj.sd && key->obj.sd->owner_len ? sd_get_owner( key->obj.sd ) : token_get_owner( token );
+    group = key->obj.sd && key->obj.sd->group_len ? sd_get_group( key->obj.sd ) : token_get_primary_group( token );
+    extra = max( sid_len( owner ), sid_len( group ) );
 
-    /* first pass: the size */
+    /* first pass: the size, at most (an ACE may be split, and a creator's SID replaced by a longer one) */
     for (i = 0, ace = ace_first( parent_dacl ); i < parent_dacl->count; i++, ace = ace_next( ace ))
     {
         if (!(ace->flags & inherit)) continue;
         if (!(ace->flags & CONTAINER_INHERIT_ACE) && (ace->flags & NO_PROPAGATE_INHERIT_ACE)) continue;
-        count++;
-        size += ace->size;
-        if ((ace->flags & CONTAINER_INHERIT_ACE) && !(ace->flags & NO_PROPAGATE_INHERIT_ACE) &&
-            (ace->mask & (GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL)))
-        {
-            count++;
-            size += ace->size;
-        }
+        count += 2;
+        size += 2 * ace->size + extra;
     }
     if (!count) return;
-    if (explicit_dacl)
-    {
-        size += explicit_dacl->size - sizeof(struct acl);
-        count += explicit_dacl->count;
-    }
+    if (explicit_dacl) size += explicit_dacl->size - sizeof(struct acl);
 
     if (!(sd = mem_alloc( sizeof(*sd) + size ))) return;
     memset( sd, 0, sizeof(*sd) );
     sd->control = SE_DACL_PRESENT | SE_DACL_AUTO_INHERITED;
-    sd->dacl_len = size;
     dacl = (struct acl *)(sd + 1);
     dacl->revision = ACL_REVISION;
     dacl->pad1 = 0;
-    dacl->size = size;
-    dacl->count = count;
     dacl->pad2 = 0;
+    dacl->count = 0;
     out = ace_first( dacl );
     if (explicit_dacl)
     {
         memcpy( out, ace_first( explicit_dacl ), explicit_dacl->size - sizeof(struct acl) );
         out = (struct ace *)((char *)out + explicit_dacl->size - sizeof(struct acl));
+        dacl->count = explicit_dacl->count;
     }
     for (i = 0, ace = ace_first( parent_dacl ); i < parent_dacl->count; i++, ace = ace_next( ace ))
     {
@@ -4838,31 +4853,39 @@ static void key_inherit_sd( struct key *key, const struct security_descriptor *e
         {
             if (ace->flags & NO_PROPAGATE_INHERIT_ACE) continue;
             /* object-inherit only: kept for the objects below, effective for none of them here */
-            memcpy( out, ace, ace->size );
-            out->flags = (ace->flags & ~(CONTAINER_INHERIT_ACE | NO_PROPAGATE_INHERIT_ACE)) |
-                         INHERIT_ONLY_ACE | INHERITED_ACE;
-            out = ace_next( out );
+            out = inherit_ace( out, ace, (ace->flags & ~(CONTAINER_INHERIT_ACE | NO_PROPAGATE_INHERIT_ACE)) |
+                               INHERIT_ONLY_ACE | INHERITED_ACE, ace->mask, NULL );
+            dacl->count++;
             continue;
         }
-        memcpy( out, ace, ace->size );
+        sid = (const struct sid *)(ace + 1);
+        effective_sid = NULL;
+        if (ace->type == ACCESS_ALLOWED_ACE_TYPE || ace->type == ACCESS_DENIED_ACE_TYPE)
+        {
+            if (equal_sid( sid, &creator_owner_sid )) effective_sid = owner;
+            else if (equal_sid( sid, &creator_group_sid )) effective_sid = group;
+        }
         if (ace->flags & NO_PROPAGATE_INHERIT_ACE)
         {
-            out->flags = INHERITED_ACE;
-            out->mask = map_access( ace->mask, &key_type.mapping );
-            out = ace_next( out );
+            out = inherit_ace( out, ace, INHERITED_ACE, map_access( ace->mask, &key_type.mapping ), effective_sid );
+            dacl->count++;
             continue;
         }
-        if (ace->mask & (GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL))
+        split = (ace->mask & generic) || effective_sid;
+        if (split)
         {
-            out->flags = INHERITED_ACE;
-            out->mask = map_access( ace->mask, &key_type.mapping );
-            out = ace_next( out );
-            memcpy( out, ace, ace->size );
-            out->flags = (ace->flags & inherit) | INHERIT_ONLY_ACE | INHERITED_ACE;
+            out = inherit_ace( out, ace, INHERITED_ACE, map_access( ace->mask, &key_type.mapping ), effective_sid );
+            out = inherit_ace( out, ace, (ace->flags & inherit) | INHERIT_ONLY_ACE | INHERITED_ACE, ace->mask, NULL );
+            dacl->count += 2;
         }
-        else out->flags = (ace->flags & inherit) | INHERITED_ACE;
-        out = ace_next( out );
+        else
+        {
+            out = inherit_ace( out, ace, (ace->flags & inherit) | INHERITED_ACE, ace->mask, NULL );
+            dacl->count++;
+        }
     }
+    dacl->size = (char *)out - (char *)dacl;
+    sd->dacl_len = dacl->size;
     default_set_sd( &key->obj, sd, DACL_SECURITY_INFORMATION );
     free( sd );
 }
