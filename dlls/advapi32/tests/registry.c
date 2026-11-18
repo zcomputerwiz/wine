@@ -5270,6 +5270,22 @@ static void test_reg_create_key_security(void)
         ret = RegCreateKeyExA( hkey_main, "sa_creator", 0, NULL, 0, KEY_ALL_ACCESS, &sa, &creator, NULL );
         ok( !ret, "RegCreateKeyExA failed %ld\n", ret );
         LocalFree( sd );
+
+        /* the explicit CREATOR OWNER ACE given at creation applies too: the key's owner gets the rights, and the
+         * inherit-only copy keeps CREATOR OWNER (an installer's own key must stay open to it, B46) */
+        ret = GetSecurityInfo( creator, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, &dacl, NULL, &got_sd );
+        ok( !ret, "GetSecurityInfo failed %ld\n", ret );
+        ok( dacl_has_ace( dacl, token_owner->Owner, 0, KEY_ALL_ACCESS ), "the owner's explicit ACE is missing\n" );
+        ok( dacl_has_ace( dacl, creator_owner, CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE, KEY_ALL_ACCESS ),
+            "the explicit inherit-only CREATOR OWNER ACE is missing\n" );
+        LocalFree( got_sd );
+        {
+            HKEY reopened;
+
+            ret = RegOpenKeyExA( hkey_main, "sa_creator", 0, KEY_ALL_ACCESS, &reopened );
+            ok( !ret, "the creator cannot open its own key: %ld\n", ret );
+            if (!ret) RegCloseKey( reopened );
+        }
         ret = RegCreateKeyExA( creator, "child", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &creator_child, NULL );
         ok( !ret, "RegCreateKeyExA failed %ld\n", ret );
         ret = GetSecurityInfo( creator_child, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, &dacl, NULL,
