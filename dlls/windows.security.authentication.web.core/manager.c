@@ -104,27 +104,33 @@ static HRESULT request_token_not_available( REFIID riid, void **out )
     return hr;
 }
 
-/* a token request: "no provider", or with the diagnostic provider on, the request in the log and the given status
- * (silent requests: UserInteractionRequired, so that the program goes on to an interactive one) */
+/* a token request: with the token broker on and reachable, its answer; else "no provider", or with the diagnostic
+ * provider on, the request in the log and the given status (silent requests: UserInteractionRequired, so that the
+ * program goes on to an interactive one) */
 static HRESULT request_token( const char *method, IInspectable *request, WebTokenRequestStatus status,
-                              REFIID riid, void **out )
+                              HWND window, REFIID riid, void **out )
 {
     const WCHAR *text = L"Wine's diagnostic provider gives no token.";
     IVectorView_WebTokenResponse *response_data;
     IWebProviderError *response_error = NULL;
     IWebTokenRequestResult *result;
     UINT32 code = E_NOTIMPL;
-    HSTRING message;
+    HSTRING message = NULL;
     HRESULT hr;
 
-    if (!diagnostic_provider_enabled()) return request_token_not_available( riid, out );
+    if (!token_broker_enabled() ||
+        FAILED(token_broker_request( request, status == WebTokenRequestStatus_UserInteractionRequired, window,
+                                     &status, &code, &message )))
+    {
+        if (!diagnostic_provider_enabled()) return request_token_not_available( riid, out );
 
-    diagnostic_dump_request( method, request );
-    /* the answer Windows gives a silent request that needs the user; programs read its error without a NULL check */
-    if (status == WebTokenRequestStatus_UserInteractionRequired) diagnostic_interaction_error( request, &code, &text );
-    FIXME( "diagnostic: status %d, error %#x %s.\n", status, code, debugstr_w( text ) );
-    if (FAILED(hr = WindowsCreateString( text, wcslen( text ), &message )))
-        return hr;
+        diagnostic_dump_request( method, request );
+        /* the answer Windows gives a silent request that needs the user; programs read its error without a NULL check */
+        if (status == WebTokenRequestStatus_UserInteractionRequired) diagnostic_interaction_error( request, &code, &text );
+        FIXME( "diagnostic: status %d, error %#x %s.\n", status, code, debugstr_w( text ) );
+        if (FAILED(hr = WindowsCreateString( text, wcslen( text ), &message )))
+            return hr;
+    }
     if (FAILED(hr = vector_view_webtokenresponse_create_empty( &response_data )))
     {
         WindowsDeleteString( message );
@@ -366,7 +372,7 @@ static HRESULT WINAPI manager_statics_GetTokenSilentlyAsync( IWebAuthenticationC
     if (!request) return E_INVALIDARG;
 
     return request_token( __func__, (IInspectable *)request, WebTokenRequestStatus_UserInteractionRequired,
-                          &IID_IAsyncOperation_WebTokenRequestResult, (void **)asyncInfo );
+                          NULL, &IID_IAsyncOperation_WebTokenRequestResult, (void **)asyncInfo );
 }
 
 static HRESULT WINAPI manager_statics_GetTokenSilentlyWithWebAccountAsync( IWebAuthenticationCoreManagerStatics *iface,
@@ -380,7 +386,7 @@ static HRESULT WINAPI manager_statics_GetTokenSilentlyWithWebAccountAsync( IWebA
     if (!request) return E_INVALIDARG;
 
     return request_token( __func__, (IInspectable *)request, WebTokenRequestStatus_UserInteractionRequired,
-                          &IID_IAsyncOperation_WebTokenRequestResult, (void **)asyncInfo );
+                          NULL, &IID_IAsyncOperation_WebTokenRequestResult, (void **)asyncInfo );
 }
 
 static HRESULT WINAPI manager_statics_RequestTokenAsync( IWebAuthenticationCoreManagerStatics *iface,
@@ -394,7 +400,7 @@ static HRESULT WINAPI manager_statics_RequestTokenAsync( IWebAuthenticationCoreM
     if (!request) return E_INVALIDARG;
 
     return request_token( __func__, (IInspectable *)request, WebTokenRequestStatus_ProviderError,
-                          &IID_IAsyncOperation_WebTokenRequestResult, (void **)asyncInfo );
+                          NULL, &IID_IAsyncOperation_WebTokenRequestResult, (void **)asyncInfo );
 }
 
 static HRESULT WINAPI manager_statics_RequestTokenWithWebAccountAsync( IWebAuthenticationCoreManagerStatics *iface,
@@ -408,7 +414,7 @@ static HRESULT WINAPI manager_statics_RequestTokenWithWebAccountAsync( IWebAuthe
     if (!request) return E_INVALIDARG;
 
     return request_token( __func__, (IInspectable *)request, WebTokenRequestStatus_ProviderError,
-                          &IID_IAsyncOperation_WebTokenRequestResult, (void **)asyncInfo );
+                          NULL, &IID_IAsyncOperation_WebTokenRequestResult, (void **)asyncInfo );
 }
 
 static HRESULT WINAPI manager_statics_FindAccountAsync( IWebAuthenticationCoreManagerStatics *iface,
@@ -656,7 +662,7 @@ static HRESULT WINAPI manager_interop_RequestTokenForWindowAsync( IWebAuthentica
     *asyncInfo = NULL;
     if (!request) return E_INVALIDARG;
 
-    return request_token( __func__, request, WebTokenRequestStatus_ProviderError, riid, asyncInfo );
+    return request_token( __func__, request, WebTokenRequestStatus_ProviderError, appWindow, riid, asyncInfo );
 }
 
 static HRESULT WINAPI manager_interop_RequestTokenWithWebAccountForWindowAsync( IWebAuthenticationCoreManagerInterop *iface,
@@ -671,7 +677,7 @@ static HRESULT WINAPI manager_interop_RequestTokenWithWebAccountForWindowAsync( 
     *asyncInfo = NULL;
     if (!request) return E_INVALIDARG;
 
-    return request_token( __func__, request, WebTokenRequestStatus_ProviderError, riid, asyncInfo );
+    return request_token( __func__, request, WebTokenRequestStatus_ProviderError, appWindow, riid, asyncInfo );
 }
 
 static const struct IWebAuthenticationCoreManagerInteropVtbl manager_interop_vtbl =

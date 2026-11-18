@@ -4,6 +4,7 @@ IMPORTS = combase advapi32
 SOURCES = \
 	async.c \
 	async_private.idl \
+	broker.c \
 	classes.idl \
 	main.c \
 	manager.c \
