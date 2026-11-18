@@ -19,6 +19,9 @@
 #include <stdarg.h>
 #include <stddef.h>
 
+/* IAppCapability2 is of contract version 15 (the default of the headers is 14) */
+#define WINDOWS_FOUNDATION_UNIVERSALAPICONTRACT_VERSION 0xf0000
+
 #include "windef.h"
 #include "winbase.h"
 
@@ -60,6 +63,8 @@
 #include "windows.web.http.h"
 #define WIDL_using_Windows_System_Power
 #include "windows.system.power.h"
+#define WIDL_using_Windows_Security_Authorization_AppCapabilityAccess
+#include "windows.security.authorization.appcapabilityaccess.h"
 
 #include "wine/test.h"
 

@@ -38,6 +38,7 @@ import "windows.ui.startscreen.idl";
 import "windows.system.display.idl";
 import "windows.web.http.idl";
 import "windows.system.power.idl";
+import "windows.security.authorization.appcapabilityaccess.idl";
 import "windows.devices.input.idl";
 import "windows.management.policies.idl";
 
@@ -55,6 +56,9 @@ namespace Windows.ApplicationModel.UserActivities {
     runtimeclass UserActivityChannel;
     runtimeclass UserActivityContentInfo;
     runtimeclass UserActivityRequestManager;
+}
+namespace Windows.Security.Authorization.AppCapabilityAccess {
+    runtimeclass AppCapability;
 }
 namespace Windows.System.Power {
     runtimeclass PowerManager;
