@@ -4901,6 +4901,13 @@ static void key_inherit_sd( struct key *key, const struct security_descriptor *e
     if (parent_dacl)
         for (i = 0, ace = ace_first( parent_dacl ); i < parent_dacl->count; i++, ace = ace_next( ace ))
             if (ace->flags & inherit) out = new_key_ace( out, ace, TRUE, owner, group, &count );
+    if (!explicit_dacl && !count)
+    {
+        /* nothing given and nothing inherited: the key keeps the default it has (Windows: the creator's default
+         * DACL), never an empty DACL that would deny everyone */
+        free( sd );
+        return;
+    }
     dacl->count = count;
     dacl->size = (char *)out - (char *)dacl;
     sd->dacl_len = dacl->size;
