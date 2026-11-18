@@ -5246,6 +5246,29 @@ static void test_reg_create_key_security(void)
         "the inherit-only ACE is missing\n" );
     LocalFree( got_sd );
 
+    /* a parent with a descriptor of its own but nothing inheritable: a new subkey keeps the default, its creator
+     * may open it */
+    {
+        HKEY plain, plain_child, reopened;
+
+        ret = ConvertStringSecurityDescriptorToSecurityDescriptorA( "D:P(A;;KA;;;SY)(A;;KA;;;BA)(A;;KA;;;WD)",
+                                                                     SDDL_REVISION_1, &sd, NULL );
+        ok( ret, "ConvertStringSecurityDescriptorToSecurityDescriptorA failed %lu\n", GetLastError() );
+        sa.lpSecurityDescriptor = sd;
+        ret = RegCreateKeyExA( hkey_main, "sa_noinherit", 0, NULL, 0, KEY_ALL_ACCESS, &sa, &plain, NULL );
+        ok( !ret, "RegCreateKeyExA failed %ld\n", ret );
+        LocalFree( sd );
+        ret = RegCreateKeyExA( plain, "child", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &plain_child, NULL );
+        ok( !ret, "RegCreateKeyExA failed %ld\n", ret );
+        ret = RegOpenKeyExA( plain, "child", 0, KEY_ALL_ACCESS, &reopened );
+        ok( !ret, "the creator cannot open a subkey with nothing inherited: %ld\n", ret );
+        if (!ret) RegCloseKey( reopened );
+        RegDeleteKeyA( plain_child, "" );
+        RegCloseKey( plain_child );
+        RegDeleteKeyA( plain, "" );
+        RegCloseKey( plain );
+    }
+
     /* CREATOR OWNER: the new key's owner (the token's default owner) gets the rights in the effective ACE, and the
      * inherit-only copy keeps CREATOR OWNER for the keys below */
     {
