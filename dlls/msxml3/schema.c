@@ -748,12 +748,105 @@ static BOOL link_datatypes(xmlDocPtr schema)
     return TRUE;
 }
 
+/* MSXML accepts \uXXXX escapes in the value of an xs:pattern facet, libxml2's regular expression compiler does not.
+ * Replace each escape with the character it stands for, escaped when it is a regular expression metacharacter.
+ * Only a backslash that is not itself escaped starts an escape: in "\\u0041" the backslash is literal.
+ * U+0000 cannot be stored in an attribute value, and XML cannot contain it in the instance either, so a character
+ * class that starts there ("[^\u0000- ]") loses nothing when it starts at U+0001 instead.
+ * A high surrogate escape followed by a low surrogate escape is one supplementary character (4 bytes of UTF-8, not two
+ * 3-byte sequences, which libxml2 rejects); a lone surrogate becomes U+FFFD. If memory runs out the value is kept. */
+static void fix_pattern_u_escapes(xmlNodePtr node)
+{
+    for (; node; node = node->next)
+    {
+        if (node->type != XML_ELEMENT_NODE) continue;
+
+        if (!xmlStrcmp(node->name, (const xmlChar *)"pattern"))
+        {
+            xmlChar *value = xmlGetProp(node, (const xmlChar *)"value");
+
+            if (value && strstr((const char *)value, "\\u"))
+            {
+                xmlChar *out = malloc(strlen((const char *)value) * 2 + 1), *o = out;
+                const xmlChar *i = value;
+
+                if (!out)
+                {
+                    xmlFree(value);
+                    fix_pattern_u_escapes(node->children);
+                    continue;
+                }
+
+                while (*i)
+                {
+                    if (i[0] == '\\' && i[1] == 'u' && isxdigit(i[2]) && isxdigit(i[3]) && isxdigit(i[4]) && isxdigit(i[5]))
+                    {
+                        char hex[5] = { i[2], i[3], i[4], i[5], 0 };
+                        unsigned int ch = strtoul(hex, NULL, 16);
+
+                        i += 6;
+                        if (!ch) ch = 1;
+                        else if (ch >= 0xd800 && ch <= 0xdbff && i[0] == '\\' && i[1] == 'u' && isxdigit(i[2])
+                                && isxdigit(i[3]) && isxdigit(i[4]) && isxdigit(i[5]))
+                        {
+                            char hex2[5] = { i[2], i[3], i[4], i[5], 0 };
+                            unsigned int low = strtoul(hex2, NULL, 16);
+
+                            if (low >= 0xdc00 && low <= 0xdfff)
+                            {
+                                ch = 0x10000 + ((ch - 0xd800) << 10) + (low - 0xdc00);
+                                i += 6;
+                            }
+                        }
+                        if (ch >= 0xd800 && ch <= 0xdfff) ch = 0xfffd;
+                        if (ch < 0x80)
+                        {
+                            if (strchr("\\.?*+{}()|[]^-$", ch)) *o++ = '\\';
+                            *o++ = ch;
+                        }
+                        else if (ch < 0x800)
+                        {
+                            *o++ = 0xc0 | (ch >> 6);
+                            *o++ = 0x80 | (ch & 0x3f);
+                        }
+                        else if (ch < 0x10000)
+                        {
+                            *o++ = 0xe0 | (ch >> 12);
+                            *o++ = 0x80 | ((ch >> 6) & 0x3f);
+                            *o++ = 0x80 | (ch & 0x3f);
+                        }
+                        else
+                        {
+                            *o++ = 0xf0 | (ch >> 18);
+                            *o++ = 0x80 | ((ch >> 12) & 0x3f);
+                            *o++ = 0x80 | ((ch >> 6) & 0x3f);
+                            *o++ = 0x80 | (ch & 0x3f);
+                        }
+                    }
+                    else if (i[0] == '\\' && i[1])
+                    {
+                        *o++ = *i++;
+                        *o++ = *i++;
+                    }
+                    else *o++ = *i++;
+                }
+                *o = 0;
+                xmlSetProp(node, (const xmlChar *)"value", out);
+                free(out);
+            }
+            xmlFree(value);
+        }
+        fix_pattern_u_escapes(node->children);
+    }
+}
+
 static cache_entry* cache_entry_from_xsd_doc(xmlDocPtr doc, xmlChar const* nsURI, MSXML_VERSION v)
 {
     cache_entry* entry = malloc(sizeof(cache_entry));
     xmlSchemaParserCtxtPtr spctx;
     xmlDocPtr new_doc = xmlCopyDoc(doc, 1);
 
+    fix_pattern_u_escapes(xmlDocGetRootElement(new_doc));
     link_datatypes(new_doc);
 
     /* TODO: if the nsURI is different from the default xmlns or targetNamespace,
@@ -921,7 +1014,9 @@ static xmlDocPtr create_xmldoc_for_text(BSTR xml)
     xmlChar *str = xmlchar_from_wchar(xml);
     xmlDocPtr doc;
 
-    doc = xmlParseMemory((const char *)str, xmlStrlen(str));
+    /* the text was converted to UTF-8, whatever encoding its declaration claims (a document loaded from an
+     * encoding="utf-16" source still says so) */
+    doc = xmlReadMemory((const char *)str, xmlStrlen(str), NULL, "UTF-8", 0);
     free(str);
     return doc;
 }
