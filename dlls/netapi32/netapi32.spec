@@ -100,6 +100,10 @@
 @ stdcall NetGetDCName(wstr wstr ptr)
 @ stub NetGetDisplayInformationIndex
 @ stdcall NetGetJoinInformation(wstr ptr ptr) wkscli.NetGetJoinInformation
+@ stdcall NetJoinDomain(wstr wstr wstr wstr wstr long) wkscli.NetJoinDomain
+@ stdcall NetRenameMachineInDomain(wstr wstr wstr wstr long) wkscli.NetRenameMachineInDomain
+@ stdcall NetUnjoinDomain(wstr wstr wstr long) wkscli.NetUnjoinDomain
+@ stdcall NetValidateName(wstr wstr wstr wstr long) wkscli.NetValidateName
 @ stub NetGroupAdd
 @ stdcall NetGroupAddUser(wstr wstr wstr)
 @ stub NetGroupDel
