@@ -21,6 +21,9 @@
 #include <stdarg.h>
 #include <stddef.h>
 
+/* IAppCapability2 is of contract version 15 (the default of the headers is 14) */
+#define WINDOWS_FOUNDATION_UNIVERSALAPICONTRACT_VERSION 0xf0000
+
 #include "windef.h"
 #include "winbase.h"
 #include "winuser.h"
@@ -31,6 +34,7 @@
 
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_Foundation_Collections
+#define WIDL_using_Windows_System
 #include "windows.foundation.h"
 #define WIDL_using_Windows_Devices_Input
 #include "windows.devices.input.h"
@@ -40,6 +44,8 @@
 #include "windows.web.http.h"
 #define WIDL_using_Windows_System_Power
 #include "windows.system.power.h"
+#define WIDL_using_Windows_Security_Authorization_AppCapabilityAccess
+#include "windows.security.authorization.appcapabilityaccess.h"
 
 #include "wine/test.h"
 
@@ -181,6 +187,84 @@ static void test_PowerManager(void)
     IPowerManagerStatics_Release( statics );
 }
 
+/* measured on Windows 11, unpackaged: every capability name is Allowed, an empty name and process id 0 are E_INVALIDARG */
+static void test_AppCapability(void)
+{
+    IAsyncOperation_AppCapabilityAccessStatus *operation;
+    IAppCapabilityStatics *statics = NULL;
+    AppCapabilityAccessStatus status;
+    IAppCapability2 *capability2;
+    IAppCapability *capability;
+    HSTRING name, text;
+    IUser *user;
+    HRESULT hr;
+
+    WindowsCreateString( L"Windows.Security.Authorization.AppCapabilityAccess.AppCapability", 64, &name );
+    hr = RoGetActivationFactory( name, &IID_IAppCapabilityStatics, (void **)&statics );
+    WindowsDeleteString( name );
+    ok( hr == S_OK || broken( hr == REGDB_E_CLASSNOTREG ), "got hr %#lx.\n", hr );
+    if (!statics)
+    {
+        win_skip( "AppCapability runtimeclass not registered, skipping tests.\n" );
+        return;
+    }
+
+    WindowsCreateString( L"webcam", 6, &name );
+    hr = IAppCapabilityStatics_Create( statics, name, &capability );
+    ok( hr == S_OK && capability, "got hr %#lx.\n", hr );
+    hr = IAppCapability_get_CapabilityName( capability, &text );
+    ok( hr == S_OK && !wcscmp( WindowsGetStringRawBuffer( text, NULL ), L"webcam" ), "got hr %#lx.\n", hr );
+    WindowsDeleteString( text );
+    hr = IAppCapability_get_User( capability, &user );
+    ok( hr == S_OK && user, "got hr %#lx.\n", hr );
+    if (user) IUser_Release( user );
+    status = 0xdeadbeef;
+    hr = IAppCapability_CheckAccess( capability, &status );
+    ok( hr == S_OK && status == AppCapabilityAccessStatus_Allowed, "got hr %#lx, status %d.\n", hr, status );
+    hr = IAppCapability_RequestAccessAsync( capability, &operation );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    status = 0xdeadbeef;
+    hr = IAsyncOperation_AppCapabilityAccessStatus_GetResults( operation, &status );
+    ok( hr == S_OK && status == AppCapabilityAccessStatus_Allowed, "got hr %#lx, status %d.\n", hr, status );
+    IAsyncOperation_AppCapabilityAccessStatus_Release( operation );
+
+    hr = IAppCapability_QueryInterface( capability, &IID_IAppCapability2, (void **)&capability2 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    WindowsCreateString( L"hi", 2, &text );
+    hr = IAppCapability2_put_DisplayMessage( capability2, text );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    WindowsDeleteString( text );
+    hr = IAppCapability2_get_DisplayMessage( capability2, &text );
+    ok( hr == S_OK && !wcscmp( WindowsGetStringRawBuffer( text, NULL ), L"hi" ), "got hr %#lx.\n", hr );
+    WindowsDeleteString( text );
+    IAppCapability2_Release( capability2 );
+
+    hr = IAppCapability_add_AccessChanged( capability, NULL, (EventRegistrationToken *)&status );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+    IAppCapability_Release( capability );
+
+    /* a name that is no capability is allowed as well; an empty name and process id 0 are not accepted */
+    WindowsDeleteString( name );
+    WindowsCreateString( L"bogusCapabilityName", 19, &name );
+    hr = IAppCapabilityStatics_Create( statics, name, &capability );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IAppCapability_CheckAccess( capability, &status );
+    ok( hr == S_OK && status == AppCapabilityAccessStatus_Allowed, "got hr %#lx, status %d.\n", hr, status );
+    IAppCapability_Release( capability );
+    capability = (void *)0xdeadbeef;
+    hr = IAppCapabilityStatics_CreateWithProcessIdForUser( statics, NULL, name, 0, &capability );
+    ok( hr == E_INVALIDARG && !capability, "got hr %#lx, capability %p.\n", hr, capability );
+    hr = IAppCapabilityStatics_CreateWithProcessIdForUser( statics, NULL, name, GetCurrentProcessId(), &capability );
+    ok( hr == S_OK && capability, "got hr %#lx.\n", hr );
+    IAppCapability_Release( capability );
+    WindowsDeleteString( name );
+    capability = (void *)0xdeadbeef;
+    hr = IAppCapabilityStatics_Create( statics, NULL, &capability );
+    ok( hr == E_INVALIDARG && !capability, "got hr %#lx, capability %p.\n", hr, capability );
+
+    IAppCapabilityStatics_Release( statics );
+}
+
 static void test_HttpClient(void)
 {
     IInspectable *instance, *operation = (void *)0xdeadbeef;
@@ -224,6 +308,7 @@ START_TEST(capabilities)
     test_DisplayRequest();
     test_HttpClient();
     test_PowerManager();
+    test_AppCapability();
 
     RoUninitialize();
 }
