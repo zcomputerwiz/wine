@@ -1443,6 +1443,108 @@ static void test_XDR_datatypes(void)
     free_bstrs();
 }
 
+static const WCHAR xsd_utf16_decl[] =
+    L"<?xml version=\"1.0\" encoding=\"utf-16\"?>\n"
+    L"<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">\n"
+    L"  <xs:element name=\"r\" type=\"xs:string\"/>\n"
+    L"</xs:schema>";
+
+/* MSXML accepts \uXXXX escapes in pattern facets, an escaped backslash stays a literal backslash. */
+static const WCHAR xsd_pattern_u_escape[] =
+    L"<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">\n"
+    L"  <xs:simpleType name=\"T\"><xs:restriction base=\"xs:string\">\n"
+    L"    <xs:pattern value=\"[^\\u0000-\\u0020\\u00A0\\uFFF9-\\uFFFF]+\"/>\n"
+    L"  </xs:restriction></xs:simpleType>\n"
+    L"  <xs:element name=\"r\" type=\"T\"/>\n"
+    L"</xs:schema>";
+
+static const WCHAR xsd_pattern_escaped_backslash[] =
+    L"<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">\n"
+    L"  <xs:simpleType name=\"T\"><xs:restriction base=\"xs:string\">\n"
+    L"    <xs:pattern value=\"\\\\u0041\"/>\n"
+    L"  </xs:restriction></xs:simpleType>\n"
+    L"  <xs:element name=\"r\" type=\"T\"/>\n"
+    L"</xs:schema>";
+
+static HRESULT validate_with_schema(const WCHAR *xsd, const WCHAR *xml, HRESULT *add_hr)
+{
+    IXMLDOMDocument2 *doc, *schema;
+    IXMLDOMSchemaCollection *cache;
+    IXMLDOMParseError *err;
+    VARIANT_BOOL b;
+    HRESULT hr, validate_hr = E_FAIL;
+    VARIANT v;
+
+    doc = create_document(&IID_IXMLDOMDocument2);
+    schema = create_document(&IID_IXMLDOMDocument2);
+    cache = create_cache(&IID_IXMLDOMSchemaCollection);
+    if (!doc || !schema || !cache)
+    {
+        if (doc) IXMLDOMDocument2_Release(doc);
+        if (schema) IXMLDOMDocument2_Release(schema);
+        if (cache) IXMLDOMSchemaCollection_Release(cache);
+        return E_FAIL;
+    }
+
+    hr = IXMLDOMDocument2_loadXML(schema, _bstr_(xsd), &b);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(b == VARIANT_TRUE, "failed to load the schema\n");
+
+    V_VT(&v) = VT_DISPATCH;
+    V_DISPATCH(&v) = (IDispatch *)schema;
+    *add_hr = IXMLDOMSchemaCollection_add(cache, _bstr_(L""), v);
+
+    hr = IXMLDOMDocument2_loadXML(doc, _bstr_(xml), &b);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(b == VARIANT_TRUE, "failed to load the instance\n");
+
+    V_VT(&v) = VT_DISPATCH;
+    V_DISPATCH(&v) = NULL;
+    hr = IXMLDOMSchemaCollection_QueryInterface(cache, &IID_IDispatch, (void **)&V_DISPATCH(&v));
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IXMLDOMDocument2_putref_schemas(doc, v);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    VariantClear(&v);
+
+    err = NULL;
+    validate_hr = IXMLDOMDocument2_validate(doc, &err);
+    if (err) IXMLDOMParseError_Release(err);
+
+    IXMLDOMDocument2_Release(doc);
+    IXMLDOMDocument2_Release(schema);
+    IXMLDOMSchemaCollection_Release(cache);
+    return validate_hr;
+}
+
+static void test_xsd_encoding_and_pattern(void)
+{
+    HRESULT hr, add_hr;
+
+    /* a document whose declaration says utf-16 can be added to the cache */
+    hr = validate_with_schema(xsd_utf16_decl, L"<r>text</r>", &add_hr);
+    todo_wine ok(add_hr == S_OK, "Unexpected hr %#lx.\n", add_hr);
+    todo_wine ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    /* \uXXXX escapes in a pattern facet */
+    hr = validate_with_schema(xsd_pattern_u_escape, L"<r>abc</r>", &add_hr);
+    todo_wine ok(add_hr == S_OK, "Unexpected hr %#lx.\n", add_hr);
+    todo_wine ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    hr = validate_with_schema(xsd_pattern_u_escape, L"<r>a b</r>", &add_hr);
+    ok(hr == S_FALSE, "Unexpected hr %#lx.\n", hr);
+
+    hr = validate_with_schema(xsd_pattern_u_escape, L"<r>a b</r>", &add_hr);
+    ok(hr == S_FALSE, "Unexpected hr %#lx.\n", hr);
+
+    /* "\\u0041" is a literal backslash followed by u0041, not an escape for 'A' */
+    hr = validate_with_schema(xsd_pattern_escaped_backslash, L"<r>\\u0041</r>", &add_hr);
+    ok(add_hr == S_OK, "Unexpected hr %#lx.\n", add_hr);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    hr = validate_with_schema(xsd_pattern_escaped_backslash, L"<r>A</r>", &add_hr);
+    ok(hr == S_FALSE, "Unexpected hr %#lx.\n", hr);
+}
+
 static void test_obj_dispex(IUnknown *obj)
 {
     DISPID dispid = DISPID_SAX_XMLREADER_GETFEATURE;
@@ -1546,6 +1648,7 @@ START_TEST(schema)
     test_collection_content();
     test_XDR_schemas();
     test_XDR_datatypes();
+    test_xsd_encoding_and_pattern();
     test_dispex();
 
     CoUninitialize();
