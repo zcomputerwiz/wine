@@ -544,12 +544,14 @@ static BOOL is_root_pnp_service(HDEVINFO set, const struct service_entry *servic
     return FALSE;
 }
 
-/* WineExplorer system tier (B44): session 0 runs the Security Accounts Manager (lsass) from the start, as Windows
- * does. Started on demand instead (secur32's start_samss), a service that authenticates in its own start-up asks for it
- * while the database's startup lock is still held for that same start, and waits out the lock's timeout. */
+/* WineExplorer system tier (B44): every session's service manager with the system role (session 0's and a user
+ * session's, where SamSs is one of the session's own services) runs the Security Accounts Manager (lsass) from the
+ * start, as Windows does. Started on demand instead (secur32's start_samss), a service that authenticates in its own
+ * start-up asks for it while the database's startup lock is still held for that same start, and waits out the lock's
+ * timeout; and a standard user's program may not start a service at all, so its authentication packages fail. */
 static BOOL always_started(const struct service_entry *service)
 {
-    return system_role && !forward_mode && !wcsicmp(service->name, L"SamSs");
+    return system_role && !wcsicmp(service->name, L"SamSs");
 }
 
 static void scmdatabase_autostart_services(struct scmdatabase *db)

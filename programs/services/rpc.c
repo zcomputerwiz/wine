@@ -178,7 +178,21 @@ struct sc_remote_handle
 {
     struct sc_handle hdr;
     SC_RPC_HANDLE remote;
+    struct sc_notify_handle *notify;  /* a status notification waiting (remote_notify_thread), under remote_notify_cs */
+    BOOL notified;                    /* a notification was given for notified_state */
+    DWORD notified_state;
 };
+
+/* the notifications of session 0's services: the wrapped handles' notify links, and their remote handles while a
+ * watcher queries them, so that a handle is never closed under a query */
+static CRITICAL_SECTION remote_notify_cs;
+static CRITICAL_SECTION_DEBUG remote_notify_cs_debug =
+{
+    0, 0, &remote_notify_cs,
+    { &remote_notify_cs_debug.ProcessLocksList, &remote_notify_cs_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": remote_notify_cs") }
+};
+static CRITICAL_SECTION remote_notify_cs = { &remote_notify_cs_debug, -1, 0, 0, 0, 0 };
 
 BOOL forward_mode;
 
@@ -208,6 +222,9 @@ static DWORD wrap_remote(SC_RPC_HANDLE remote, SC_RPC_HANDLE *handle)
     wrapped->hdr.type = SC_HTYPE_REMOTE;
     wrapped->hdr.access = 0;  /* session 0 checks the access */
     wrapped->remote = remote;
+    wrapped->notify = NULL;
+    wrapped->notified = FALSE;
+    wrapped->notified_state = 0;
     *handle = &wrapped->hdr;
     return ERROR_SUCCESS;
 }
@@ -219,6 +236,7 @@ struct sc_notify_handle
     DWORD notify_mask;
     LONG ref;
     SC_RPC_NOTIFY_PARAMS_LIST *params_list;
+    struct sc_remote_handle *watched;  /* T5.4: the session 0 service watched, under remote_notify_cs */
 };
 
 struct sc_service_handle       /* service handle */
@@ -477,6 +495,18 @@ static void SC_RPC_HANDLE_destroy(SC_RPC_HANDLE handle)
         case SC_HTYPE_REMOTE:
         {
             struct sc_remote_handle *remote = (struct sc_remote_handle *)hdr;
+            struct sc_notify_handle *notify;
+
+            /* a waiting notification ends without a result, as for a service of this session */
+            EnterCriticalSection(&remote_notify_cs);
+            if ((notify = remote->notify))
+            {
+                notify->watched = NULL;
+                remote->notify = NULL;
+                SetEvent(notify->event);
+            }
+            LeaveCriticalSection(&remote_notify_cs);
+            if (notify) sc_notify_release(notify);
             forward_close(&remote->remote);
             free(remote);
             break;
@@ -1082,7 +1112,8 @@ static void fill_status_process(SERVICE_STATUS_PROCESS *status, struct service_e
     status->dwServiceFlags  = 0;
 }
 
-static void fill_notify(struct sc_notify_handle *notify, struct service_entry *service)
+/* the notification's result: the status, or the error that ended the watch */
+static void fill_notify_status(struct sc_notify_handle *notify, const SERVICE_STATUS_PROCESS *status, DWORD error)
 {
     SC_RPC_NOTIFY_PARAMS_LIST *list;
     SERVICE_NOTIFY_STATUS_CHANGE_PARAMS_2 *cparams;
@@ -1097,9 +1128,9 @@ static void fill_notify(struct sc_notify_handle *notify, struct service_entry *s
     }
 
     cparams->dwNotifyMask = notify->notify_mask;
-    fill_status_process(&cparams->ServiceStatus, service);
-    cparams->dwNotificationStatus = ERROR_SUCCESS;
-    cparams->dwNotificationTriggered = 1 << (cparams->ServiceStatus.dwCurrentState - SERVICE_STOPPED);
+    cparams->ServiceStatus = *status;
+    cparams->dwNotificationStatus = error;
+    cparams->dwNotificationTriggered = error ? 0 : 1 << (cparams->ServiceStatus.dwCurrentState - SERVICE_STOPPED);
     cparams->pszServiceNames = NULL;
 
     list->cElements = 1;
@@ -1110,6 +1141,14 @@ static void fill_notify(struct sc_notify_handle *notify, struct service_entry *s
     InterlockedExchangePointer((void**)&notify->params_list, list);
 
     SetEvent(notify->event);
+}
+
+static void fill_notify(struct sc_notify_handle *notify, struct service_entry *service)
+{
+    SERVICE_STATUS_PROCESS status;
+
+    fill_status_process(&status, service);
+    fill_notify_status(notify, &status, ERROR_SUCCESS);
 }
 
 void notify_service_state(struct service_entry *service)
@@ -2152,6 +2191,102 @@ DWORD __cdecl svcctl_unknown46(void)
     return ERROR_CALL_NOT_IMPLEMENTED;
 }
 
+/* WineExplorer T5.4: a status notification for a service of session 0. Session 0's service manager changes the
+ * status, not this one, so a thread of this one watches it through the forwarded status query and gives the
+ * notification when the state is one asked for, as notify_service_state does for this session's services: once per
+ * registration, and not again for the state already notified on the same handle. An error of the query ends the
+ * watch with that error. */
+#define REMOTE_NOTIFY_INTERVAL 250  /* milliseconds between two queries */
+
+static DWORD WINAPI remote_notify_thread(void *arg)
+{
+    struct sc_notify_handle *notify = arg;
+    struct sc_remote_handle *watched;
+    SERVICE_STATUS_PROCESS status;
+    DWORD err, needed, mask;
+
+    for (;;)
+    {
+        EnterCriticalSection(&remote_notify_cs);
+        if (!(watched = notify->watched))  /* the service handle was closed */
+        {
+            LeaveCriticalSection(&remote_notify_cs);
+            break;
+        }
+        err = forward_QueryServiceStatusEx(watched->remote, SC_STATUS_PROCESS_INFO, (BYTE *)&status, sizeof(status),
+                                           &needed);
+        mask = err ? 0 : 1 << (status.dwCurrentState - SERVICE_STOPPED);
+        if (err || ((notify->notify_mask & mask) &&
+                    (!watched->notified || watched->notified_state != status.dwCurrentState)))
+        {
+            if (err) memset(&status, 0, sizeof(status));
+            else
+            {
+                watched->notified = TRUE;
+                watched->notified_state = status.dwCurrentState;
+            }
+            watched->notify = NULL;
+            notify->watched = NULL;
+            fill_notify_status(notify, &status, err);
+            LeaveCriticalSection(&remote_notify_cs);
+            sc_notify_release(notify);  /* the service handle's link */
+            break;
+        }
+        LeaveCriticalSection(&remote_notify_cs);
+        Sleep(REMOTE_NOTIFY_INTERVAL);
+    }
+    sc_notify_release(notify);  /* the thread's */
+    return 0;
+}
+
+static DWORD remote_notify(struct sc_remote_handle *wrapped, DWORD notify_mask, SC_NOTIFY_RPC_HANDLE *hNotify)
+{
+    struct sc_notify_handle *notify;
+    SERVICE_STATUS_PROCESS status;
+    DWORD err, needed;
+    HANDLE thread;
+
+    /* the caller needs SERVICE_QUERY_STATUS, which session 0 checks */
+    if ((err = forward_QueryServiceStatusEx(wrapped->remote, SC_STATUS_PROCESS_INFO, (BYTE *)&status,
+                                            sizeof(status), &needed)))
+        return err;
+    if (!(notify = calloc(1, sizeof(*notify)))) return ERROR_NOT_ENOUGH_SERVER_MEMORY;
+    notify->hdr.type = SC_HTYPE_NOTIFY;
+    notify->hdr.access = 0;
+    notify->notify_mask = notify_mask;
+    if (!(notify->event = CreateEventW(NULL, TRUE, FALSE, NULL)))
+    {
+        free(notify);
+        return GetLastError();
+    }
+    notify->ref = 3;  /* the returned handle, the service handle's link and the thread */
+
+    EnterCriticalSection(&remote_notify_cs);
+    if (wrapped->notify)
+    {
+        LeaveCriticalSection(&remote_notify_cs);
+        CloseHandle(notify->event);
+        free(notify);
+        return ERROR_ALREADY_REGISTERED;
+    }
+    wrapped->notify = notify;
+    notify->watched = wrapped;
+    if (!(thread = CreateThread(NULL, 0, remote_notify_thread, notify, 0, NULL)))
+    {
+        err = GetLastError();
+        wrapped->notify = NULL;
+        notify->watched = NULL;
+        LeaveCriticalSection(&remote_notify_cs);
+        CloseHandle(notify->event);
+        free(notify);
+        return err;
+    }
+    LeaveCriticalSection(&remote_notify_cs);
+    CloseHandle(thread);
+    *hNotify = &notify->hdr;
+    return ERROR_SUCCESS;
+}
+
 DWORD __cdecl svcctl_NotifyServiceStatusChange(
     SC_RPC_HANDLE handle,
     SC_RPC_NOTIFY_PARAMS params,
@@ -2170,8 +2305,7 @@ DWORD __cdecl svcctl_NotifyServiceStatusChange(
             params.params->dwNotifyMask, clientprocessguid, scmprocessguid,
             createremotequeue, hNotify);
 
-    /* T5.4: status notifications of session 0's services are not relayed yet */
-    if (remote_of(handle)) return ERROR_CALL_NOT_IMPLEMENTED;
+    if (remote_of(handle)) return remote_notify(handle, params.params->dwNotifyMask, hNotify);
     switch (hdr->type)
     {
     case SC_HTYPE_SERVICE:
