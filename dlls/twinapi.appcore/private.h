@@ -42,6 +42,8 @@
 #define WIDL_using_Windows_Foundation_Collections
 #define WIDL_using_Windows_Web_Http
 #define WIDL_using_Windows_System_Power
+#define WIDL_using_Windows_Management_Core
+#define WIDL_using_Windows_Storage
 #define WIDL_using_Windows_Security_Authorization_AppCapabilityAccess
 #define WIDL_using_Windows_System_Display
 #define WIDL_using_Windows_Devices_Input
@@ -68,6 +70,7 @@
 #include "windows.system.display.h"
 #include "windows.web.http.h"
 #include "windows.system.power.h"
+#include "windows.management.core.h"
 #include "windows.security.authorization.appcapabilityaccess.h"
 #include "windows.devices.input.h"
 #include "windows.ui.startscreen.h"
@@ -117,6 +120,12 @@ extern IActivationFactory *display_request_factory;
 extern IActivationFactory *http_client_factory;
 extern IActivationFactory *power_manager_factory;
 extern IActivationFactory *app_capability_factory;
+extern IActivationFactory *application_data_manager_factory;
+extern IActivationFactory *education_settings_factory;
+extern IActivationFactory *platform_diagnostics_factory;
+extern IActivationFactory *assigned_access_settings_factory;
+extern IActivationFactory *diagnostics_settings_factory;
+extern IActivationFactory *pen_device_factory;
 extern IActivationFactory *keyboard_capabilities_factory;
 extern IActivationFactory *mouse_capabilities_factory;
 extern IActivationFactory *touch_capabilities_factory;

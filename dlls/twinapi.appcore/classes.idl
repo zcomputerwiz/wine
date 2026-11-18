@@ -37,6 +37,7 @@ import "windows.applicationmodel.useractivities.idl";
 import "windows.ui.startscreen.idl";
 import "windows.system.display.idl";
 import "windows.web.http.idl";
+import "windows.management.core.idl";
 import "windows.system.power.idl";
 import "windows.security.authorization.appcapabilityaccess.idl";
 import "windows.devices.input.idl";
@@ -63,6 +64,17 @@ namespace Windows.Security.Authorization.AppCapabilityAccess {
 namespace Windows.System.Power {
     runtimeclass PowerManager;
 }
+namespace Windows.Management.Core {
+    runtimeclass ApplicationDataManager;
+}
+namespace Windows.System.Profile {
+    runtimeclass EducationSettings;
+    runtimeclass PlatformDiagnosticsAndUsageDataSettings;
+}
+namespace Windows.System.UserProfile {
+    runtimeclass AssignedAccessSettings;
+    runtimeclass DiagnosticsSettings;
+}
 namespace Windows.Web.Http {
     runtimeclass HttpClient;
 }
@@ -70,6 +82,7 @@ namespace Windows.System.Display {
     runtimeclass DisplayRequest;
 }
 namespace Windows.Devices.Input {
+    runtimeclass PenDevice;
     runtimeclass KeyboardCapabilities;
     runtimeclass MouseCapabilities;
     runtimeclass TouchCapabilities;

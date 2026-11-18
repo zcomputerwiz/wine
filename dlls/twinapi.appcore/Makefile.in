@@ -35,6 +35,7 @@ SOURCES = \
 	memory.c \
 	policies.c \
 	power_manager.c \
+	settings_classes.c \
 	standarddataformats.c \
 	static_factory.c \
 	title_bar.c \

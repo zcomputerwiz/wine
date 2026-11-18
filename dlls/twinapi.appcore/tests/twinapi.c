@@ -63,6 +63,8 @@
 #include "windows.web.http.h"
 #define WIDL_using_Windows_System_Power
 #include "windows.system.power.h"
+#define WIDL_using_Windows_Management_Core
+#include "windows.management.core.h"
 #define WIDL_using_Windows_Security_Authorization_AppCapabilityAccess
 #include "windows.security.authorization.appcapabilityaccess.h"
 
