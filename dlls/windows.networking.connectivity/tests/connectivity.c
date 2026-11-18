@@ -172,6 +172,30 @@ static void test_NetworkInformationStatics(void)
     ok( hr == S_OK || hr == 0x8007023e /* Internet disconnect after GetInternetConnectionProfile */, "got hr %#lx.\n", hr );
     ok( network_connectivity_level != 0xdeadbeef, "failed to get network_connectivity_level\n" );
 
+    {
+        IConnectionCost *cost = (void *)0xdeadbeef;
+        NetworkCostType cost_type = 0xdeadbeef;
+        boolean flag = TRUE;
+
+        hr = IConnectionProfile_GetConnectionCost( connection_profile, NULL );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+        hr = IConnectionProfile_GetConnectionCost( connection_profile, &cost );
+        ok( hr == S_OK || broken( hr == E_NOTIMPL ) /* before the cost was implemented */, "got hr %#lx.\n", hr );
+        if (hr == S_OK)
+        {
+            hr = IConnectionCost_get_NetworkCostType( cost, &cost_type );
+            ok( hr == S_OK && cost_type >= NetworkCostType_Unknown && cost_type <= NetworkCostType_Variable,
+                "got hr %#lx, type %d.\n", hr, cost_type );
+            hr = IConnectionCost_get_Roaming( cost, &flag );
+            ok( hr == S_OK && !flag, "got hr %#lx, flag %d.\n", hr, flag );
+            hr = IConnectionCost_get_OverDataLimit( cost, &flag );
+            ok( hr == S_OK && !flag, "got hr %#lx, flag %d.\n", hr, flag );
+            hr = IConnectionCost_get_ApproachingDataLimit( cost, &flag );
+            ok( hr == S_OK && !flag, "got hr %#lx, flag %d.\n", hr, flag );
+            IConnectionCost_Release( cost );
+        }
+    }
+
     connectivity = 0xdeadbeef;
     hr = INetworkListManager_GetConnectivity( network_list_manager, &connectivity );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
