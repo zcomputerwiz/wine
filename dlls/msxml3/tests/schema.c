@@ -1522,13 +1522,13 @@ static void test_xsd_encoding_and_pattern(void)
 
     /* a document whose declaration says utf-16 can be added to the cache */
     hr = validate_with_schema(xsd_utf16_decl, L"<r>text</r>", &add_hr);
-    todo_wine ok(add_hr == S_OK, "Unexpected hr %#lx.\n", add_hr);
-    todo_wine ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(add_hr == S_OK, "Unexpected hr %#lx.\n", add_hr);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
 
     /* \uXXXX escapes in a pattern facet */
     hr = validate_with_schema(xsd_pattern_u_escape, L"<r>abc</r>", &add_hr);
-    todo_wine ok(add_hr == S_OK, "Unexpected hr %#lx.\n", add_hr);
-    todo_wine ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(add_hr == S_OK, "Unexpected hr %#lx.\n", add_hr);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
 
     hr = validate_with_schema(xsd_pattern_u_escape, L"<r>a b</r>", &add_hr);
     ok(hr == S_FALSE, "Unexpected hr %#lx.\n", hr);
