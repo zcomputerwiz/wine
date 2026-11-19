@@ -867,6 +867,23 @@ UINT WINAPI MsiConfigureProductExW(LPCWSTR szProduct, int iInstallLevel,
     if (r != ERROR_SUCCESS)
         return r;
 
+    /* a limited administrator changing a per-machine product (removal, patches): the elevated msiexec does it */
+    if (context == MSIINSTALLCONTEXT_MACHINE && !msi_elevation_helper_unset())
+    {
+        WCHAR *props = malloc( (lstrlenW( szCommandLine ? szCommandLine : L"" ) + 64) * sizeof(WCHAR) );
+
+        if (!props) return ERROR_OUTOFMEMORY;
+        lstrcpyW( props, szCommandLine ? szCommandLine : L"" );
+        if (eInstallState != INSTALLSTATE_DEFAULT) lstrcatW( props, L" INSTALLLEVEL=32767" );
+        if (eInstallState == INSTALLSTATE_ABSENT) lstrcatW( props, L" REMOVE=ALL" );
+        if (msi_install_through_broker( szProduct, props, gUILevel, &r ))
+        {
+            free( props );
+            return r;
+        }
+        free( props );
+    }
+
     r = open_package(szProduct, NULL, context, &package);
     if (r != ERROR_SUCCESS)
         return r;

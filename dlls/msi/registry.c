@@ -38,6 +38,19 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(msi);
 
+/* A limited administrator token cannot open the machine's Installer keys with all access, but any user can read
+ * them (Windows lets every user ask which products are installed): fall back to read access, so that the queries
+ * work and the install code can see that a product is per-machine and ask the elevation broker. Writes through
+ * such a key fail, as they would have at the open. */
+static LSTATUS open_key_or_read( HKEY root, const WCHAR *path, REGSAM access, HKEY *key )
+{
+    LSTATUS r = RegOpenKeyExW( root, path, 0, access, key );
+
+    if (r == ERROR_ACCESS_DENIED) r = RegOpenKeyExW( root, path, 0, (access & (KEY_WOW64_64KEY | KEY_WOW64_32KEY)) | KEY_READ, key );
+    return r;
+}
+#define RegOpenKeyExW(root, path, options, access, key) open_key_or_read( root, path, access, key )
+
 BOOL unsquash_guid(LPCWSTR in, LPWSTR out)
 {
     DWORD i,n=0;

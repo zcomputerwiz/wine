@@ -1397,6 +1397,46 @@ static void report_local_copy_failure( const WCHAR *file, UINT error )
     MessageBoxW( gUIhwnd, text, L"Windows Installer", MB_OK | MB_ICONERROR );
 }
 
+/* The elevation broker freezes the package of a per-machine install and gives the elevated msiexec the path and the
+ * SHA-256 of what it froze (WEXELEVATE_DOC_PATH and WEXELEVATE_DOC_SHA256): the copy made here has to be that file,
+ * even if the path was made to lead elsewhere after the freeze. TRUE when there is nothing to check. */
+static BOOL copy_is_frozen_file( const WCHAR *src, const WCHAR *copy )
+{
+    WCHAR want[MAX_PATH], full_src[MAX_PATH], full_want[MAX_PATH], expected[65], hex[65];
+    BYTE buf[65536], digest[32];
+    HCRYPTPROV prov;
+    HCRYPTHASH hash;
+    HANDLE file;
+    DWORD got, len = sizeof(digest), i;
+    BOOL ok = FALSE;
+
+    if (!GetEnvironmentVariableW( L"WEXELEVATE_DOC_PATH", want, ARRAY_SIZE(want) ) ||
+        GetEnvironmentVariableW( L"WEXELEVATE_DOC_SHA256", expected, ARRAY_SIZE(expected) ) != 64) return TRUE;
+    if (!GetFullPathNameW( src, ARRAY_SIZE(full_src), full_src, NULL ) ||
+        !GetFullPathNameW( want, ARRAY_SIZE(full_want), full_want, NULL ) || wcsicmp( full_src, full_want )) return TRUE;
+
+    file = CreateFileW( copy, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, 0 );
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    if (CryptAcquireContextW( &prov, NULL, MS_ENH_RSA_AES_PROV_W, PROV_RSA_AES, CRYPT_VERIFYCONTEXT ))
+    {
+        if (CryptCreateHash( prov, CALG_SHA_256, 0, 0, &hash ))
+        {
+            while (ReadFile( file, buf, sizeof(buf), &got, NULL ) && got)
+                if (!CryptHashData( hash, buf, got, 0 )) break;
+            if (!got && CryptGetHashParam( hash, HP_HASHVAL, digest, &len, 0 ) && len == sizeof(digest))
+            {
+                for (i = 0; i < len; i++) swprintf( hex + 2 * i, 3, L"%02x", digest[i] );
+                ok = !wcsicmp( hex, expected );
+            }
+            CryptDestroyHash( hash );
+        }
+        CryptReleaseContext( prov, 0 );
+    }
+    CloseHandle( file );
+    if (!ok) WARN( "the copy of %s is not the file the broker froze\n", debugstr_w(src) );
+    return ok;
+}
+
 UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
 {
     MSIDATABASE *db;
@@ -1464,6 +1504,12 @@ UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
                 return r;
             }
             delete_on_close = TRUE;
+            if (!copy_is_frozen_file( file, localfile ))
+            {
+                DeleteFileW( localfile );
+                msiobj_release( &db->hdr );
+                return ERROR_FILE_CORRUPT;
+            }
 
             /* Remove read-only bit, we are opening it with write access in MSI_OpenDatabaseW below. */
             localfile_attr = GetFileAttributesW( localfile );
@@ -1478,6 +1524,11 @@ UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
                 WARN("unable to update cached package (%u)\n", r);
                 msiobj_release( &db->hdr );
                 return r;
+            }
+            if (!copy_is_frozen_file( file, localfile ))
+            {
+                msiobj_release( &db->hdr );
+                return ERROR_FILE_CORRUPT;
             }
         }
         else

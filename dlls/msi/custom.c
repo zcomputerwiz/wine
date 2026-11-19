@@ -637,7 +637,8 @@ BOOL msi_install_through_broker(const WCHAR *package, const WCHAR *props, DWORD 
     if (!GetTokenInformation(GetCurrentThreadEffectiveToken(), TokenElevationType, &type, sizeof(type), &size)
             || type != TokenElevationTypeLimited)
         return FALSE;
-    if (GetFileAttributesW(package) == INVALID_FILE_ATTRIBUTES) return FALSE;
+    /* a package file, or the code of a registered product ("{...}": removal, repair, patches) */
+    if (package[0] != '{' && GetFileAttributesW(package) == INVALID_FILE_ATTRIBUTES) return FALSE;
 
     wcscpy(ui, ui_names[(level & INSTALLUILEVEL_MASK) <= 5 ? (level & INSTALLUILEVEL_MASK) : 5]);
     if ((level & INSTALLUILEVEL_MASK) == INSTALLUILEVEL_BASIC || (level & INSTALLUILEVEL_MASK) == INSTALLUILEVEL_NONE)
