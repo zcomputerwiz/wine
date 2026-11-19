@@ -118,6 +118,17 @@ static BOOL      (WINAPI *pRtlIsCriticalSectionLocked)(CRITICAL_SECTION *);
 static BOOL      (WINAPI *pRtlIsCriticalSectionLockedByThread)(CRITICAL_SECTION *);
 static BOOLEAN   (WINAPI *pRtlIsGenericTableEmpty)(PRTL_GENERIC_TABLE);
 static NTSTATUS  (WINAPI *pRtlInitializeCriticalSectionEx)(CRITICAL_SECTION *, ULONG, ULONG);
+static void *    (WINAPI *pRtlInsertElementGenericTableAvl)(RTL_AVL_TABLE *, void *, CLONG, BOOLEAN *);
+static void      (WINAPI *pRtlInitializeGenericTableAvl)(RTL_AVL_TABLE *, PRTL_AVL_COMPARE_ROUTINE, PRTL_AVL_ALLOCATE_ROUTINE,
+                                                         PRTL_AVL_FREE_ROUTINE, void *);
+static void *    (WINAPI *pRtlLookupElementGenericTableAvl)(RTL_AVL_TABLE *, void *);
+static BOOLEAN   (WINAPI *pRtlDeleteElementGenericTableAvl)(RTL_AVL_TABLE *, void *);
+static void *    (WINAPI *pRtlEnumerateGenericTableAvl)(RTL_AVL_TABLE *, BOOLEAN);
+static void *    (WINAPI *pRtlEnumerateGenericTableWithoutSplayingAvl)(RTL_AVL_TABLE *, void **);
+static void *    (WINAPI *pRtlGetElementGenericTableAvl)(RTL_AVL_TABLE *, ULONG);
+static ULONG     (WINAPI *pRtlNumberGenericTableElementsAvl)(RTL_AVL_TABLE *);
+static BOOLEAN   (WINAPI *pRtlIsGenericTableEmptyAvl)(RTL_AVL_TABLE *);
+static BOOLEAN   (WINAPI *pRtlIsNameInExpression)(const UNICODE_STRING *, const UNICODE_STRING *, BOOLEAN, const WCHAR *);
 static void      (WINAPI *pRtlInitializeGenericTable)(RTL_GENERIC_TABLE *, PRTL_GENERIC_COMPARE_ROUTINE,
                                                       PRTL_GENERIC_ALLOCATE_ROUTINE, PRTL_GENERIC_FREE_ROUTINE,
                                                       void *);
@@ -194,6 +205,16 @@ static void InitFunctionPtrs(void)
         pRtlIsCriticalSectionLockedByThread = (void *)GetProcAddress(hntdll, "RtlIsCriticalSectionLockedByThread");
         pRtlIsGenericTableEmpty = (void *)GetProcAddress(hntdll, "RtlIsGenericTableEmpty");
         pRtlInitializeCriticalSectionEx = (void *)GetProcAddress(hntdll, "RtlInitializeCriticalSectionEx");
+        pRtlInsertElementGenericTableAvl = (void *)GetProcAddress(hntdll, "RtlInsertElementGenericTableAvl");
+        pRtlInitializeGenericTableAvl = (void *)GetProcAddress(hntdll, "RtlInitializeGenericTableAvl");
+        pRtlLookupElementGenericTableAvl = (void *)GetProcAddress(hntdll, "RtlLookupElementGenericTableAvl");
+        pRtlDeleteElementGenericTableAvl = (void *)GetProcAddress(hntdll, "RtlDeleteElementGenericTableAvl");
+        pRtlEnumerateGenericTableAvl = (void *)GetProcAddress(hntdll, "RtlEnumerateGenericTableAvl");
+        pRtlEnumerateGenericTableWithoutSplayingAvl = (void *)GetProcAddress(hntdll, "RtlEnumerateGenericTableWithoutSplayingAvl");
+        pRtlGetElementGenericTableAvl = (void *)GetProcAddress(hntdll, "RtlGetElementGenericTableAvl");
+        pRtlNumberGenericTableElementsAvl = (void *)GetProcAddress(hntdll, "RtlNumberGenericTableElementsAvl");
+        pRtlIsGenericTableEmptyAvl = (void *)GetProcAddress(hntdll, "RtlIsGenericTableEmptyAvl");
+        pRtlIsNameInExpression = (void *)GetProcAddress(hntdll, "RtlIsNameInExpression");
         pRtlInitializeGenericTable = (void *)GetProcAddress(hntdll, "RtlInitializeGenericTable");
         pRtlFindExportedRoutineByName = (void *)GetProcAddress(hntdll, "RtlFindExportedRoutineByName");
         pRtlLookupElementGenericTable = (void *)GetProcAddress(hntdll, "RtlLookupElementGenericTable");
@@ -4946,6 +4967,188 @@ static void WINAPI generic_free_proc(RTL_GENERIC_TABLE *table, void *ptr)
     free(ptr);
 }
 
+static RTL_GENERIC_COMPARE_RESULTS WINAPI avl_compare_proc(RTL_AVL_TABLE *table, void *p1, void *p2)
+{
+    int *value1 = p1, *value2 = p2;
+
+    if (*value1 < *value2) return GenericLessThan;
+    if (*value1 > *value2) return GenericGreaterThan;
+    return GenericEqual;
+}
+
+static void * WINAPI avl_allocate_proc(RTL_AVL_TABLE *table, LONG size)
+{
+    return malloc(size);
+}
+
+static void WINAPI avl_free_proc(RTL_AVL_TABLE *table, void *ptr)
+{
+    free(ptr);
+}
+
+static void expect_avl_order(RTL_AVL_TABLE *table, const int *expected, unsigned int count)
+{
+    void *previous = NULL, *data;
+    unsigned int i;
+    int *value;
+
+    ok(pRtlNumberGenericTableElementsAvl(table) == count, "Got %lu elements, expected %u.\n",
+            pRtlNumberGenericTableElementsAvl(table), count);
+    ok(pRtlIsGenericTableEmptyAvl(table) == !count, "Got unexpected emptiness for %u elements.\n", count);
+
+    for (i = 0; i < count; i++)
+    {
+        value = pRtlEnumerateGenericTableAvl(table, !i);
+        ok(value && *value == expected[i], "Index %u: got %d, expected %d.\n", i, value ? *value : -1, expected[i]);
+        data = pRtlEnumerateGenericTableWithoutSplayingAvl(table, &previous);
+        ok(data == value, "Index %u: got %p, expected %p.\n", i, data, value);
+        data = pRtlGetElementGenericTableAvl(table, i);
+        ok(data == value, "Index %u: got %p, expected %p.\n", i, data, value);
+    }
+    ok(!pRtlEnumerateGenericTableAvl(table, FALSE), "Expected the end of the enumeration.\n");
+    ok(!pRtlEnumerateGenericTableWithoutSplayingAvl(table, &previous), "Expected the end of the enumeration.\n");
+    ok(!pRtlGetElementGenericTableAvl(table, count), "Expected no element at index %u.\n", count);
+}
+
+static void test_avl_table(void)
+{
+    static const int insert_order[] = { 50, 30, 80, 10, 40, 70, 90, 35, 45, 60 };
+    static const int sorted[] = { 10, 30, 35, 40, 45, 50, 60, 70, 80, 90 };
+    RTL_AVL_TABLE table;
+    BOOLEAN is_new;
+    unsigned int i;
+    int value, *ptr, *ptr2;
+
+    if (!pRtlInitializeGenericTableAvl || !pRtlInsertElementGenericTableAvl || !pRtlLookupElementGenericTableAvl
+            || !pRtlDeleteElementGenericTableAvl || !pRtlEnumerateGenericTableAvl || !pRtlIsGenericTableEmptyAvl
+            || !pRtlEnumerateGenericTableWithoutSplayingAvl || !pRtlGetElementGenericTableAvl
+            || !pRtlNumberGenericTableElementsAvl)
+    {
+        win_skip("AVL generic table functions are unavailable.\n");
+        return;
+    }
+
+    memset(&table, 0xcc, sizeof(table));
+    pRtlInitializeGenericTableAvl(&table, avl_compare_proc, avl_allocate_proc, avl_free_proc, (void *)0x1234);
+    ok(table.CompareRoutine == avl_compare_proc, "Got unexpected compare routine.\n");
+    ok(table.TableContext == (void *)0x1234, "Got unexpected context.\n");
+    expect_avl_order(&table, NULL, 0);
+    value = 5;
+    ok(!pRtlLookupElementGenericTableAvl(&table, &value), "Found an element in an empty table.\n");
+    ok(!pRtlDeleteElementGenericTableAvl(&table, &value), "Deleted an element from an empty table.\n");
+
+    for (i = 0; i < ARRAY_SIZE(insert_order); i++)
+    {
+        value = insert_order[i];
+        is_new = FALSE;
+        ptr = pRtlInsertElementGenericTableAvl(&table, &value, sizeof(value), &is_new);
+        ok(ptr && *ptr == value, "Got unexpected element %p.\n", ptr);
+        ok(is_new == TRUE, "Expected a new element.\n");
+        ok(!((ULONG_PTR)ptr & 7), "Element %p is not aligned.\n", ptr);
+
+        is_new = TRUE;
+        ptr2 = pRtlInsertElementGenericTableAvl(&table, &value, sizeof(value), &is_new);
+        ok(ptr2 == ptr, "Got %p, expected %p.\n", ptr2, ptr);
+        ok(is_new == FALSE, "Expected an existing element.\n");
+
+        ptr2 = pRtlLookupElementGenericTableAvl(&table, &value);
+        ok(ptr2 == ptr, "Got %p, expected %p.\n", ptr2, ptr);
+    }
+    expect_avl_order(&table, sorted, ARRAY_SIZE(sorted));
+    value = 55;
+    ok(!pRtlLookupElementGenericTableAvl(&table, &value), "Found a missing element.\n");
+    ok(!pRtlDeleteElementGenericTableAvl(&table, &value), "Deleted a missing element.\n");
+
+    /* a leaf, an element with one child, an element with two children, then the root */
+    {
+        static const int after_leaf[] = { 10, 30, 35, 40, 50, 60, 70, 80, 90 };
+        static const int after_one_child[] = { 10, 30, 35, 40, 50, 60, 70, 80 };
+        static const int after_two_children[] = { 10, 35, 40, 50, 60, 70, 80 };
+        static const int after_root[] = { 10, 35, 40, 60, 70, 80 };
+
+        value = 45;
+        ok(pRtlDeleteElementGenericTableAvl(&table, &value), "Failed to delete %d.\n", value);
+        expect_avl_order(&table, after_leaf, ARRAY_SIZE(after_leaf));
+        value = 90;
+        ok(pRtlDeleteElementGenericTableAvl(&table, &value), "Failed to delete %d.\n", value);
+        expect_avl_order(&table, after_one_child, ARRAY_SIZE(after_one_child));
+        value = 30;
+        ok(pRtlDeleteElementGenericTableAvl(&table, &value), "Failed to delete %d.\n", value);
+        expect_avl_order(&table, after_two_children, ARRAY_SIZE(after_two_children));
+        value = 50;
+        ok(pRtlDeleteElementGenericTableAvl(&table, &value), "Failed to delete %d.\n", value);
+        expect_avl_order(&table, after_root, ARRAY_SIZE(after_root));
+        value = 50;
+        ok(!pRtlLookupElementGenericTableAvl(&table, &value), "Found a deleted element.\n");
+    }
+
+    for (i = 0; i < ARRAY_SIZE(insert_order); i++)
+    {
+        value = insert_order[i];
+        pRtlDeleteElementGenericTableAvl(&table, &value);
+    }
+    expect_avl_order(&table, NULL, 0);
+
+    value = 7;
+    ptr = pRtlInsertElementGenericTableAvl(&table, &value, sizeof(value), &is_new);
+    ok(ptr && is_new, "Failed to insert into the emptied table.\n");
+    expect_avl_order(&table, &value, 1);
+    pRtlDeleteElementGenericTableAvl(&table, &value);
+}
+
+static void test_RtlIsNameInExpression(void)
+{
+    static const struct
+    {
+        const WCHAR *expression, *name;
+        BOOLEAN ignore_case, expected;
+    }
+    tests[] =
+    {
+        { L"*",        L"ABC",     TRUE,  TRUE  },
+        { L"*",        L"",        TRUE,  TRUE  },
+        { L"A*",       L"ABC",     TRUE,  TRUE  },
+        { L"A*",       L"BC",      TRUE,  FALSE },
+        { L"A?C",      L"ABC",     TRUE,  TRUE  },
+        { L"A?C",      L"AC",      TRUE,  FALSE },
+        { L"*.TXT",    L"FOO.TXT", TRUE,  TRUE  },
+        { L"*.TXT",    L"FOO.DOC", TRUE,  FALSE },
+        { L"*.TXT",    L"foo.txt", TRUE,  TRUE  },
+        { L"*.TXT",    L"foo.txt", FALSE, FALSE },
+        { L"foo.txt",  L"foo.txt", FALSE, TRUE  },
+        { L"foo.txt",  L"foo.txt", TRUE,  FALSE },
+        { L"A*B*C",    L"AXXBYYC", TRUE,  TRUE  },
+        { L"A*B*C",    L"AXXBYY",  TRUE,  FALSE },
+        { L"ABC",      L"ABCD",    TRUE,  FALSE },
+        { L">>>",      L"AB",      TRUE,  TRUE  },
+        { L">>>",      L"ABCD",    TRUE,  FALSE },
+        { L"\"",       L"",        TRUE,  TRUE  },
+        { L"\"",       L".",       TRUE,  TRUE  },
+        { L"\"",       L"A",       TRUE,  FALSE },
+        { L"<",        L"ABC",     TRUE,  TRUE  },
+        { L"<",        L"A.B",     TRUE,  FALSE },
+        { L"<\"B",     L"A.B",     TRUE,  TRUE  },
+    };
+    UNICODE_STRING expression, name;
+    BOOLEAN ret;
+    unsigned int i;
+
+    if (!pRtlIsNameInExpression)
+    {
+        win_skip("RtlIsNameInExpression is unavailable.\n");
+        return;
+    }
+
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        RtlInitUnicodeString(&expression, tests[i].expression);
+        RtlInitUnicodeString(&name, tests[i].name);
+        ret = pRtlIsNameInExpression(&expression, &name, tests[i].ignore_case, NULL);
+        ok(ret == tests[i].expected, "Test %u (%s, %s, %d): got %d, expected %d.\n", i, debugstr_w(tests[i].expression),
+                debugstr_w(tests[i].name), tests[i].ignore_case, ret, tests[i].expected);
+    }
+}
+
 static void test_RtlInitializeGenericTable(void)
 {
     RTL_GENERIC_TABLE table;
@@ -5726,6 +5929,8 @@ START_TEST(rtl)
     test_RtlDeleteNoSplay();
     test_RtlDelete();
     test_RtlInitializeGenericTable();
+    test_avl_table();
+    test_RtlIsNameInExpression();
     test_RtlNumberGenericTableElements();
     test_RtlIsGenericTableEmpty();
     test_RtlInsertElementGenericTable();
