@@ -629,7 +629,7 @@ BOOL msi_install_through_broker(const WCHAR *package, const WCHAR *props, DWORD 
     WEXELEVATERUN run;
     HMODULE wexhost;
     HANDLE process = NULL;
-    WCHAR *cmd, *env, *p, image[MAX_PATH], cwd[MAX_PATH], ui[16];
+    WCHAR *cmd, *env, *p, *log = NULL, image[MAX_PATH], cwd[MAX_PATH], ui[16];
     DWORD size, err, code = 0, env_len = 0, pid;
 
     if (!package || !package[0]) return FALSE;
@@ -650,10 +650,15 @@ BOOL msi_install_through_broker(const WCHAR *package, const WCHAR *props, DWORD 
         }
     }
 
+    /* the caller's log file (msiexec /l*v) would be lost: the elevated msiexec appends to it */
+    if (gszLogFile && (log = malloc((lstrlenW(gszLogFile) + 16) * sizeof(WCHAR))))
+        swprintf(log, lstrlenW(gszLogFile) + 16, L" /l+*v \"%s\"", gszLogFile);
+
     swprintf(image, ARRAY_SIZE(image), L"%s\\msiexec.exe", sysdir);
-    size = lstrlenW(image) + lstrlenW(package) + lstrlenW(ui) + (props ? lstrlenW(props) : 0) + 32;
-    if (!(cmd = malloc(size * sizeof(WCHAR)))) { *result = ERROR_OUTOFMEMORY; return TRUE; }
-    swprintf(cmd, size, L"\"%s\" /i \"%s\"%s %s", image, package, ui, props ? props : L"");
+    size = lstrlenW(image) + lstrlenW(package) + lstrlenW(ui) + (log ? lstrlenW(log) : 0) + (props ? lstrlenW(props) : 0) + 32;
+    if (!(cmd = malloc(size * sizeof(WCHAR)))) { free(log); *result = ERROR_OUTOFMEMORY; return TRUE; }
+    swprintf(cmd, size, L"\"%s\" /i \"%s\"%s%s %s", image, package, ui, log ? log : L"", props ? props : L"");
+    free(log);
 
     if (!GetCurrentDirectoryW(ARRAY_SIZE(cwd), cwd)) cwd[0] = 0;
     env = GetEnvironmentStringsW();
