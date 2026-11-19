@@ -5120,6 +5120,7 @@ static void test_RtlIsNameInExpression(void)
         { L"A*B*C",    L"AXXBYYC", TRUE,  TRUE  },
         { L"A*B*C",    L"AXXBYY",  TRUE,  FALSE },
         { L"ABC",      L"ABCD",    TRUE,  FALSE },
+        /* The DOS wildcard cases (<, > and ") follow the documented FsRtlIsNameInExpression rules; not checked on Windows. */
         { L">>>",      L"AB",      TRUE,  TRUE  },
         { L">>>",      L"ABCD",    TRUE,  FALSE },
         { L"\"",       L"",        TRUE,  TRUE  },
