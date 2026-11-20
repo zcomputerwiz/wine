@@ -1100,6 +1100,17 @@ static int key_in_user_tree( struct key *key )
            !memicmp_strW( name + own_len / sizeof(WCHAR), classes, sizeof(classes) );
 }
 
+/* is the key \Registry\User (HKEY_USERS) itself? */
+static int key_is_user_root( struct key *key )
+{
+    static const WCHAR user[] = {'U','s','e','r'};
+    const WCHAR *name;
+    data_size_t len;
+
+    if (get_parent( key ) != root_key || !(name = get_object_name( &key->obj, &len ))) return FALSE;
+    return len == sizeof(user) && !memicmp_strW( name, user, sizeof(user) );
+}
+
 /* The service accounts' own profiles below User (S-1-5-19 LocalService, S-1-5-20 NetworkService, and their _Classes):
  * Windows gives each account full control of its own HKCU. Returns the account's SID, NULL for other keys. */
 static const struct sid *key_service_profile_sid( struct key *key )
@@ -1302,7 +1313,7 @@ static void reset_policy_trees( struct key *hive )
  * Administrators and SYSTEM have full control. */
 static struct security_descriptor *key_get_sd( struct object *obj )
 {
-    static struct security_descriptor *key_default_sd, *key_user_sd, *key_display_sd, *key_ls_sd, *key_ns_sd;
+    static struct security_descriptor *key_default_sd, *key_user_sd, *key_display_sd, *key_ls_sd, *key_ns_sd, *key_users_sd;
     const struct sid *service_sid;
 
     if (obj->sd) return obj->sd;
@@ -1312,6 +1323,24 @@ static struct security_descriptor *key_get_sd( struct object *obj )
         struct save_branch_info *info = find_branch_info( (struct key *)obj );
         if (info && info->owner_sd)
             return info->policy_sd && key_at_policy_tree( (struct key *)obj, info, 1 ) ? info->policy_sd : info->owner_sd;
+    }
+
+    if (key_is_user_root( (struct key *)obj ))
+    {
+        /* HKEY_USERS itself: as on Windows every user can read it (the SIDs of the profiles); nobody but the system
+         * creates keys in it, and each profile has its own descriptor */
+        if (!key_users_sd)
+        {
+            const struct default_ace aces[] =
+            {
+                { &builtin_users_sid,         0, KEY_READ },
+                { security_server_user_sid(), CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+                { &local_system_sid,          CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+                { &builtin_admins_sid,        CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+            };
+            key_users_sd = key_alloc_default_sd( aces, ARRAY_SIZE(aces) );
+        }
+        return key_users_sd;
     }
 
     if ((service_sid = key_service_profile_sid( (struct key *)obj )))
