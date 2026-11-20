@@ -4802,6 +4802,32 @@ void flush_registry(void)
 }
 
 
+/* Windows loads the profile of a service account (S-1-5-18, S-1-5-19, S-1-5-20) before it starts the service, so the
+ * account's HKEY_CURRENT_USER exists for it. Here nothing loads it when the machine's server has none yet, so the
+ * account may create its own profile key below User, and only that one. */
+static int service_profile_create_allowed( struct key *parent, const struct unicode_str *left )
+{
+    static const WCHAR user[] = {'U','s','e','r'};
+    static const WCHAR prefix[] = {'S','-','1','-','5','-'};
+    struct token *token = current->token ? current->token : current->process->token;
+    const struct sid *sid;
+    const WCHAR *name;
+    data_size_t len;
+    WCHAR expected[8];
+    unsigned int rid;
+
+    if (!token || get_parent( parent ) != root_key || !(name = get_object_name( &parent->obj, &len ))) return FALSE;
+    if (len != sizeof(user) || memicmp_strW( name, user, sizeof(user) )) return FALSE;
+    sid = token_get_user_sid( token );
+    if (sid->sub_count != 1 || sid->id_auth[5] != 5) return FALSE;
+    rid = sid->sub_auth[0];
+    if (rid != 18 && rid != 19 && rid != 20) return FALSE;
+    memcpy( expected, prefix, sizeof(prefix) );
+    expected[6] = '0' + rid / 10;
+    expected[7] = '0' + rid % 10;
+    return left->len == sizeof(expected) && !memicmp_strW( left->str, expected, sizeof(expected) );
+}
+
 /* a key that does not exist yet needs KEY_CREATE_SUB_KEY on the parent it would be created in */
 static int check_create_subkey( const struct object_params *params )
 {
@@ -4815,7 +4841,8 @@ static int check_create_subkey( const struct object_params *params )
     if (!(parent = lookup_named_object( params->root, params->name, params->attr, &left ))) return TRUE;
     if (left.len && parent->ops == &key_ops && !check_object_access( NULL, parent, &access ))
     {
-        ret = key_in_display_cache( (struct key *)parent, &left );
+        ret = key_in_display_cache( (struct key *)parent, &left ) ||
+              service_profile_create_allowed( (struct key *)parent, &left );
         if (ret) clear_error();
     }
     release_object( parent );
