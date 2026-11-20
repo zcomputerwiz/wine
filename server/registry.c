@@ -1352,7 +1352,6 @@ static struct security_descriptor *key_get_sd( struct object *obj )
             const struct default_ace aces[] =
             {
                 { service_sid,                CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
-                { security_server_user_sid(), CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
                 { &local_system_sid,          CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
                 { &builtin_admins_sid,        CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
             };
