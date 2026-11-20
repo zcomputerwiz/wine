@@ -1314,6 +1314,24 @@ static struct security_descriptor *key_get_sd( struct object *obj )
             return info->policy_sd && key_at_policy_tree( (struct key *)obj, info, 1 ) ? info->policy_sd : info->owner_sd;
     }
 
+    if ((service_sid = key_service_profile_sid( (struct key *)obj )))
+    {
+        struct security_descriptor **sd = (service_sid->sub_auth[0] == SECURITY_LOCAL_SERVICE_RID) ? &key_ls_sd : &key_ns_sd;
+
+        if (!*sd)
+        {
+            const struct default_ace aces[] =
+            {
+                { service_sid,                CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+                { security_server_user_sid(), CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+                { &local_system_sid,          CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+                { &builtin_admins_sid,        CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+            };
+            *sd = key_alloc_default_sd( aces, ARRAY_SIZE(aces) );
+        }
+        return *sd;
+    }
+
     if (key_in_user_tree( (struct key *)obj ))
     {
         if (!key_user_sd)
@@ -1327,23 +1345,6 @@ static struct security_descriptor *key_get_sd( struct object *obj )
             key_user_sd = key_alloc_default_sd( aces, ARRAY_SIZE(aces) );
         }
         return key_user_sd;
-    }
-
-    if ((service_sid = key_service_profile_sid( (struct key *)obj )))
-    {
-        struct security_descriptor **sd = (service_sid->sub_auth[0] == SECURITY_LOCAL_SERVICE_RID) ? &key_ls_sd : &key_ns_sd;
-
-        if (!*sd)
-        {
-            const struct default_ace aces[] =
-            {
-                { service_sid,         CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
-                { &local_system_sid,   CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
-                { &builtin_admins_sid, CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
-            };
-            *sd = key_alloc_default_sd( aces, ARRAY_SIZE(aces) );
-        }
-        return *sd;
     }
 
     if (elevation_enforced() && key_in_display_cache( (struct key *)obj, NULL ))
