@@ -1400,7 +1400,7 @@ static void report_local_copy_failure( const WCHAR *file, UINT error )
 /* The elevation broker freezes the package of a per-machine install and gives the elevated msiexec the path and the
  * SHA-256 of what it froze (WEXELEVATE_DOC_PATH and WEXELEVATE_DOC_SHA256): the copy made here has to be that file,
  * even if the path was made to lead elsewhere after the freeze. TRUE when there is nothing to check. */
-static BOOL copy_is_frozen_file( const WCHAR *src, const WCHAR *copy )
+BOOL msi_copy_is_frozen_file( const WCHAR *src, const WCHAR *copy )
 {
     WCHAR want[MAX_PATH], full_src[MAX_PATH], full_want[MAX_PATH], expected[65], hex[65];
     BYTE buf[65536], digest[32];
@@ -1504,7 +1504,7 @@ UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
                 return r;
             }
             delete_on_close = TRUE;
-            if (!copy_is_frozen_file( file, localfile ))
+            if (!msi_copy_is_frozen_file( file, localfile ))
             {
                 DeleteFileW( localfile );
                 msiobj_release( &db->hdr );
@@ -1525,7 +1525,7 @@ UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
                 msiobj_release( &db->hdr );
                 return r;
             }
-            if (!copy_is_frozen_file( file, localfile ))
+            if (!msi_copy_is_frozen_file( file, localfile ))
             {
                 msiobj_release( &db->hdr );
                 return ERROR_FILE_CORRUPT;

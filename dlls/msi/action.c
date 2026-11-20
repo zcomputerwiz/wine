@@ -4198,6 +4198,13 @@ static UINT publish_patches( MSIPACKAGE *package )
             ERR( "unable to copy patch package %lu\n", res );
             goto done;
         }
+        if (patch->filename && !msi_copy_is_frozen_file( patch->filename, patch->localfile ))
+        {
+            DeleteFileW( patch->localfile );
+            res = ERROR_FILE_CORRUPT;
+            ERR( "the copy of the patch package is not the file the broker froze\n" );
+            goto done;
+        }
         res = RegCreateKeyExW( product_patches_key, patch_squashed, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &patch_key, NULL );
         if (res != ERROR_SUCCESS)
             goto done;

@@ -1075,6 +1075,7 @@ extern BOOL msi_action_is_unique(const MSIPACKAGE *, const WCHAR *);
 extern UINT msi_set_last_used_source(LPCWSTR product, LPCWSTR usersid,
                         MSIINSTALLCONTEXT context, DWORD options, LPCWSTR value);
 extern UINT msi_create_empty_local_file(LPWSTR path, LPCWSTR suffix);
+extern BOOL msi_copy_is_frozen_file(const WCHAR *src, const WCHAR *copy);
 extern UINT msi_set_sourcedir_props(MSIPACKAGE *package, BOOL replace);
 extern MSIASSEMBLY *msi_load_assembly(MSIPACKAGE *, MSICOMPONENT *);
 extern UINT msi_install_assembly(MSIPACKAGE *, MSICOMPONENT *);
