@@ -1100,6 +1100,32 @@ static int key_in_user_tree( struct key *key )
            !memicmp_strW( name + own_len / sizeof(WCHAR), classes, sizeof(classes) );
 }
 
+/* The service accounts' own profiles below User (S-1-5-19 LocalService, S-1-5-20 NetworkService, and their _Classes):
+ * Windows gives each account full control of its own HKCU. Returns the account's SID, NULL for other keys. */
+static const struct sid *key_service_profile_sid( struct key *key )
+{
+    static const struct sid local_service = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_LOCAL_SERVICE_RID } };
+    static const struct sid network_service = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_NETWORK_SERVICE_RID } };
+    static const WCHAR user[] = {'U','s','e','r'};
+    static const WCHAR ls[] = {'S','-','1','-','5','-','1','9'};
+    static const WCHAR ns[] = {'S','-','1','-','5','-','2','0'};
+    static const WCHAR classes[] = {'_','C','l','a','s','s','e','s'};
+    const WCHAR *name;
+    data_size_t len;
+    struct key *parent, *sub = NULL;
+
+    while ((parent = get_parent( key )) && parent != root_key) { sub = key; key = parent; }
+    if (!parent || !sub || !(name = get_object_name( &key->obj, &len ))) return NULL;
+    if (len != sizeof(user) || memicmp_strW( name, user, sizeof(user) )) return NULL;
+    if (!(name = get_object_name( &sub->obj, &len ))) return NULL;
+    if (len == sizeof(ls) + sizeof(classes) && !memicmp_strW( name + sizeof(ls) / sizeof(WCHAR), classes, sizeof(classes) ))
+        len = sizeof(ls);
+    if (len != sizeof(ls)) return NULL;
+    if (!memicmp_strW( name, ls, sizeof(ls) )) return &local_service;
+    if (!memicmp_strW( name, ns, sizeof(ns) )) return &network_service;
+    return NULL;
+}
+
 /* Keys under HKLM that win32u's prepare_devices rewrites on every GUI process start (the display device
  * cache). Windows has SYSTEM components do this; here every process does, so while elevation is enforced these
  * keys and their subkeys default to Users full control. Deviation from Windows, see STOCK_CHANGES.md. */
@@ -1276,7 +1302,8 @@ static void reset_policy_trees( struct key *hive )
  * Administrators and SYSTEM have full control. */
 static struct security_descriptor *key_get_sd( struct object *obj )
 {
-    static struct security_descriptor *key_default_sd, *key_user_sd, *key_display_sd;
+    static struct security_descriptor *key_default_sd, *key_user_sd, *key_display_sd, *key_ls_sd, *key_ns_sd;
+    const struct sid *service_sid;
 
     if (obj->sd) return obj->sd;
     if (((struct key *)obj)->e1s_sd) return ((struct key *)obj)->e1s_sd;
@@ -1300,6 +1327,23 @@ static struct security_descriptor *key_get_sd( struct object *obj )
             key_user_sd = key_alloc_default_sd( aces, ARRAY_SIZE(aces) );
         }
         return key_user_sd;
+    }
+
+    if ((service_sid = key_service_profile_sid( (struct key *)obj )))
+    {
+        struct security_descriptor **sd = (service_sid->sub_auth[0] == SECURITY_LOCAL_SERVICE_RID) ? &key_ls_sd : &key_ns_sd;
+
+        if (!*sd)
+        {
+            const struct default_ace aces[] =
+            {
+                { service_sid,         CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+                { &local_system_sid,   CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+                { &builtin_admins_sid, CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+            };
+            *sd = key_alloc_default_sd( aces, ARRAY_SIZE(aces) );
+        }
+        return *sd;
     }
 
     if (elevation_enforced() && key_in_display_cache( (struct key *)obj, NULL ))
