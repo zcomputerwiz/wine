@@ -4063,7 +4063,7 @@ void init_registry(void)
 
     /* With a system role server the service profiles exist from the start, so that a limited user cannot create
      * them (and their subkeys) through its create access to the User key; they get the machine default descriptor. */
-    if (sysrun_active && elevation_enforced())
+    if (sysrun_active)
     {
         static const char * const service_profiles[] = { "User\\S-1-5-18", "User\\S-1-5-19", "User\\S-1-5-20" };
 
