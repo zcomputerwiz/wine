@@ -317,6 +317,16 @@ HRESULT WINAPI SLGetSLIDList(HSLC handle, SLIDTYPE query_type, const SLID *query
     return S_OK;
 }
 
+HRESULT WINAPI SLGetProductSkuInformation(HSLC handle, const SLID *sku, PCWSTR name, SLDATATYPE *type,
+                                          UINT *size, BYTE **value)
+{
+    FIXME("(%p %s %s %p %p %p) not served from the store\n", handle, debugstr_guid( sku ), debugstr_w( name ),
+          type, size, value);
+
+    if (!handle || !sku || !name || !size || !value) return E_INVALIDARG;
+    return SL_E_VALUE_NOT_FOUND;
+}
+
 HRESULT WINAPI SLInstallLicense(HSLC handle, UINT size, const BYTE *blob, SLID *id)
 {
     WCHAR path[MAX_PATH];

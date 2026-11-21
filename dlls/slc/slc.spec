@@ -21,7 +21,7 @@
 @ stub SLGetPKeyInformation
 @ stub SLGetPolicyInformation
 @ stub SLGetPolicyInformationDWORD
-@ stub SLGetProductSkuInformation
+@ stdcall SLGetProductSkuInformation(ptr ptr wstr ptr ptr ptr) sppc.SLGetProductSkuInformation
 @ stub SLGetSAMLicense
 @ stdcall SLGetSLIDList(ptr long ptr long ptr ptr) sppc.SLGetSLIDList
 @ stub SLGetServiceInformation

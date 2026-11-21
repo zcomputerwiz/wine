@@ -43,7 +43,7 @@
 @ stub SLGetPKeyInformation
 @ stub SLGetPolicyInformation
 @ stub SLGetPolicyInformationDWORD
-@ stub SLGetProductSkuInformation
+@ stdcall SLGetProductSkuInformation(ptr ptr wstr ptr ptr ptr)
 @ stdcall SLGetSLIDList(ptr long ptr long ptr ptr)
 @ stub SLGetServiceInformation
 @ stdcall SLInstallLicense(ptr long ptr ptr)
