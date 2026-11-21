@@ -18,50 +18,50 @@
 @ stub SLpTriggerServiceWorker
 @ stub SLpVLActivateProduct
 @ stdcall SLClose(ptr)
-@ stdcall SLConsumeRight(ptr ptr ptr wstr ptr)
+@ stub SLConsumeRight
 @ stub SLDepositMigrationBlob
-@ stdcall SLDepositOfflineConfirmationId(ptr ptr wstr wstr)
+@ stub SLDepositOfflineConfirmationId
 @ stub SLDepositOfflineConfirmationIdEx
 @ stub SLDepositStoreToken
-@ stdcall SLFireEvent(ptr wstr ptr)
+@ stub SLFireEvent
 @ stub SLGatherMigrationBlob
 @ stub SLGatherMigrationBlobEx
-@ stdcall SLGenerateOfflineInstallationId(ptr ptr ptr)
+@ stub SLGenerateOfflineInstallationId
 @ stub SLGenerateOfflineInstallationIdEx
 @ stub SLGetActiveLicenseInfo
-@ stdcall SLGetApplicationInformation(ptr ptr wstr ptr ptr ptr)
-@ stdcall SLGetApplicationPolicy(ptr wstr ptr ptr ptr)
-@ stdcall SLGetAuthenticationResult(ptr ptr ptr)
+@ stub SLGetApplicationInformation
+@ stub SLGetApplicationPolicy
+@ stub SLGetAuthenticationResult
 @ stub SLGetEncryptedPIDEx
 @ stub SLGetGenuineInformation
-@ stdcall SLGetInstalledProductKeyIds(ptr ptr ptr ptr)
+@ stub SLGetInstalledProductKeyIds
 @ stub SLGetLicense
-@ stdcall SLGetLicenseFileId(ptr long ptr ptr)
-@ stdcall SLGetLicenseInformation(ptr ptr wstr ptr ptr ptr)
+@ stub SLGetLicenseFileId
+@ stub SLGetLicenseInformation
 @ stdcall SLGetLicensingStatusInformation(ptr ptr ptr wstr ptr ptr)
-@ stdcall SLGetPKeyId(ptr wstr wstr long ptr ptr)
-@ stdcall SLGetPKeyInformation(ptr ptr wstr ptr ptr ptr)
-@ stdcall SLGetPolicyInformation(ptr wstr ptr ptr ptr)
-@ stdcall SLGetPolicyInformationDWORD(ptr wstr ptr)
-@ stdcall SLGetProductSkuInformation(ptr ptr wstr ptr ptr ptr)
-@ stdcall SLGetSLIDList(ptr long ptr long ptr ptr)
-@ stdcall SLGetServiceInformation(ptr wstr ptr ptr ptr)
-@ stdcall SLInstallLicense(ptr long ptr ptr)
-@ stdcall SLInstallProofOfPurchase(ptr wstr wstr long ptr ptr)
+@ stub SLGetPKeyId
+@ stub SLGetPKeyInformation
+@ stub SLGetPolicyInformation
+@ stub SLGetPolicyInformationDWORD
+@ stub SLGetProductSkuInformation
+@ stub SLGetSLIDList
+@ stub SLGetServiceInformation
+@ stub SLInstallLicense
+@ stub SLInstallProofOfPurchase
 @ stub SLInstallProofOfPurchaseEx
 @ stub SLIsGenuineLocalEx
-@ stdcall SLLoadApplicationPolicies(ptr ptr long ptr)
+@ stub SLLoadApplicationPolicies
 @ stdcall SLOpen(ptr)
 @ stdcall SLPersistApplicationPolicies(ptr ptr long)
 @ stub SLPersistRTSPayloadOverride
-@ stdcall SLReArm(ptr ptr ptr long)
+@ stub SLReArm
 @ stdcall SLRegisterEvent(ptr wstr ptr ptr)
-@ stdcall SLRegisterPlugin(ptr wstr wstr)
-@ stdcall SLSetAuthenticationData(ptr long ptr)
+@ stub SLRegisterPlugin
+@ stub SLSetAuthenticationData
 @ stub SLSetCurrentProductKey
 @ stub SLSetGenuineInformation
-@ stdcall SLUninstallLicense(ptr ptr)
-@ stdcall SLUninstallProofOfPurchase(ptr ptr)
-@ stdcall SLUnloadApplicationPolicies(ptr long)
+@ stub SLUninstallLicense
+@ stub SLUninstallProofOfPurchase
+@ stub SLUnloadApplicationPolicies
 @ stdcall SLUnregisterEvent(ptr wstr ptr ptr)
-@ stdcall SLUnregisterPlugin(ptr wstr)
+@ stub SLUnregisterPlugin
