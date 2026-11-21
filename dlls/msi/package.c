@@ -1397,12 +1397,53 @@ static void report_local_copy_failure( const WCHAR *file, UINT error )
     MessageBoxW( gUIhwnd, text, L"Windows Installer", MB_OK | MB_ICONERROR );
 }
 
+/* Is this msiexec the one the elevation broker started for a frozen package (WEXELEVATE_DOC_PATH and
+ * WEXELEVATE_DOC_SHA256 set)? Then the user consented to that one file only. */
+BOOL msi_broker_froze_a_file(void)
+{
+    WCHAR want[MAX_PATH], expected[65];
+
+    return GetEnvironmentVariableW( L"WEXELEVATE_DOC_PATH", want, ARRAY_SIZE(want) ) &&
+           GetEnvironmentVariableW( L"WEXELEVATE_DOC_SHA256", expected, ARRAY_SIZE(expected) ) == 64;
+}
+
+/* Is FILE, as this process resolves it, the file the broker froze? */
+BOOL msi_is_frozen_file_path( const WCHAR *file )
+{
+    WCHAR want[MAX_PATH], full_src[MAX_PATH], full_want[MAX_PATH];
+    DWORD len;
+
+    len = GetEnvironmentVariableW( L"WEXELEVATE_DOC_PATH", want, ARRAY_SIZE(want) );
+    if (!len || len >= ARRAY_SIZE(want)) return FALSE;
+    len = GetFullPathNameW( file, ARRAY_SIZE(full_src), full_src, NULL );
+    if (!len || len >= ARRAY_SIZE(full_src)) return FALSE;
+    len = GetFullPathNameW( want, ARRAY_SIZE(full_want), full_want, NULL );
+    if (!len || len >= ARRAY_SIZE(full_want)) return FALSE;
+    return !wcsicmp( full_src, full_want );
+}
+
+/* a package in the Installer cache (%windir%\Installer), which only administrators can write: the cached package of an
+ * installed product, which /i {product-code} PATCH=... opens */
+static BOOL is_cached_package( const WCHAR *file )
+{
+    WCHAR dir[MAX_PATH], full[MAX_PATH];
+    DWORD len, n;
+
+    if (!(len = GetWindowsDirectoryW( dir, ARRAY_SIZE(dir) - 12 ))) return FALSE;
+    lstrcpyW( dir + len, L"\\Installer\\" );
+    len += 11;
+    n = GetFullPathNameW( file, ARRAY_SIZE(full), full, NULL );
+    return n && n < ARRAY_SIZE(full) && n > len && !wcsnicmp( full, dir, len ) && !wcschr( full + len, '\\' );
+}
+
 /* The elevation broker freezes the package of a per-machine install and gives the elevated msiexec the path and the
  * SHA-256 of what it froze (WEXELEVATE_DOC_PATH and WEXELEVATE_DOC_SHA256): the copy made here has to be that file,
- * even if the path was made to lead elsewhere after the freeze. TRUE when there is nothing to check. */
+ * even if the path was made to lead elsewhere after the freeze. Another file is refused: the consent window showed the
+ * frozen one, and msiexec's command line may name more than the broker read (a second /i). TRUE when the broker froze
+ * nothing, or for the Installer cache's copy of an installed product. */
 BOOL msi_copy_is_frozen_file( const WCHAR *src, const WCHAR *copy )
 {
-    WCHAR want[MAX_PATH], full_src[MAX_PATH], full_want[MAX_PATH], expected[65], hex[65];
+    WCHAR expected[65], hex[65];
     BYTE buf[65536], digest[32];
     HCRYPTPROV prov;
     HCRYPTHASH hash;
@@ -1410,10 +1451,14 @@ BOOL msi_copy_is_frozen_file( const WCHAR *src, const WCHAR *copy )
     DWORD got, len = sizeof(digest), i;
     BOOL ok = FALSE;
 
-    if (!GetEnvironmentVariableW( L"WEXELEVATE_DOC_PATH", want, ARRAY_SIZE(want) ) ||
-        GetEnvironmentVariableW( L"WEXELEVATE_DOC_SHA256", expected, ARRAY_SIZE(expected) ) != 64) return TRUE;
-    if (!GetFullPathNameW( src, ARRAY_SIZE(full_src), full_src, NULL ) ||
-        !GetFullPathNameW( want, ARRAY_SIZE(full_want), full_want, NULL ) || wcsicmp( full_src, full_want )) return TRUE;
+    if (!msi_broker_froze_a_file()) return TRUE;
+    if (!msi_is_frozen_file_path( src ))
+    {
+        if (is_cached_package( src )) return TRUE;
+        WARN( "%s is not the file the broker froze\n", debugstr_w(src) );
+        return FALSE;
+    }
+    GetEnvironmentVariableW( L"WEXELEVATE_DOC_SHA256", expected, ARRAY_SIZE(expected) );
 
     file = CreateFileW( copy, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, 0 );
     if (file == INVALID_HANDLE_VALUE) return FALSE;
