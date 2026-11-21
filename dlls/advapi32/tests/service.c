@@ -2184,6 +2184,48 @@ static void test_sequence(void)
             bret = pQueryServiceObjectSecurity(svc_handle, DACL_SECURITY_INFORMATION, pSD, n1, &n2);
             ok(bret, "Expected QueryServiceObjectSecurity to succeed: result %d\n", bret);
             LocalFree(pSD);
+
+            /* SetSecurityInfo on a service sets its DACL (an installer lets users start a service this way) */
+            {
+                static SID_IDENTIFIER_AUTHORITY world_auth = {SECURITY_WORLD_SID_AUTHORITY};
+                static SID_IDENTIFIER_AUTHORITY nt_auth = {SECURITY_NT_AUTHORITY};
+                PSID world, admins;
+                ACL *new_dacl;
+                ACE_HEADER *ace;
+                ACL_SIZE_INFORMATION size_info;
+                BYTE acl_buffer[256];
+
+                ok(AllocateAndInitializeSid(&world_auth, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &world), "no sid\n");
+                ok(AllocateAndInitializeSid(&nt_auth, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0,
+                                            0, 0, 0, &admins), "no sid\n");
+                new_dacl = (ACL *)acl_buffer;
+                ok(InitializeAcl(new_dacl, sizeof(acl_buffer), ACL_REVISION), "InitializeAcl failed\n");
+                ok(AddAccessAllowedAce(new_dacl, ACL_REVISION, SERVICE_ALL_ACCESS | WRITE_DAC | DELETE, admins), "no ace\n");
+                ok(AddAccessAllowedAce(new_dacl, ACL_REVISION, SERVICE_START | SERVICE_QUERY_STATUS, world), "no ace\n");
+
+                retval = SetSecurityInfo(svc_handle, SE_SERVICE, DACL_SECURITY_INFORMATION, NULL, NULL, new_dacl, NULL);
+                ok(retval == ERROR_SUCCESS, "SetSecurityInfo failed: %ld\n", retval);
+
+                retval = GetSecurityInfo(svc_handle, SE_SERVICE, DACL_SECURITY_INFORMATION, NULL, NULL, &dacl, NULL, &pSD);
+                ok(retval == ERROR_SUCCESS, "GetSecurityInfo failed: %ld\n", retval);
+                if (!retval)
+                {
+                    ok(GetAclInformation(dacl, &size_info, sizeof(size_info), AclSizeInformation), "no info\n");
+                    ok(size_info.AceCount == 2, "got %lu aces\n", size_info.AceCount);
+                    for (n1 = 0; n1 < size_info.AceCount; n1++)
+                    {
+                        ok(GetAce(dacl, n1, (void **)&ace), "no ace\n");
+                        if (EqualSid((SID *)&((ACCESS_ALLOWED_ACE *)ace)->SidStart, world)) break;
+                    }
+                    ok(n1 < size_info.AceCount, "no ace for Everyone\n");
+                    if (n1 < size_info.AceCount)
+                        ok(((ACCESS_ALLOWED_ACE *)ace)->Mask == (SERVICE_START | SERVICE_QUERY_STATUS), "got mask %#lx\n",
+                           ((ACCESS_ALLOWED_ACE *)ace)->Mask);
+                    LocalFree(pSD);
+                }
+                FreeSid(world);
+                FreeSid(admins);
+            }
         }
     }
 

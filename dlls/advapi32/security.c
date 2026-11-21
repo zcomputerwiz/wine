@@ -3096,6 +3096,7 @@ DWORD WINAPI SetSecurityInfo(HANDLE handle, SE_OBJECT_TYPE ObjectType,
     SECURITY_DESCRIPTOR sd;
     PACL dacl = pDacl;
     NTSTATUS status;
+    DWORD service_err = 0;
 
     if (!handle)
         return ERROR_INVALID_HANDLE;
@@ -3214,6 +3215,15 @@ DWORD WINAPI SetSecurityInfo(HANDLE handle, SE_OBJECT_TYPE ObjectType,
         status = NtSetSecurityObject(handle, SecurityInfo, &sd);
         break;
 
+    case SE_SERVICE:
+        /* the service control manager keeps the DACL of a service (programs/services) */
+        if (SecurityInfo & ~DACL_SECURITY_INFORMATION)
+            FIXME("only the DACL of a service is set, ignoring 0x%lx\n", SecurityInfo & ~DACL_SECURITY_INFORMATION);
+        status = STATUS_SUCCESS;
+        if ((SecurityInfo & DACL_SECURITY_INFORMATION) && !SetServiceObjectSecurity( handle, DACL_SECURITY_INFORMATION, &sd ))
+            service_err = GetLastError();
+        break;
+
     default:
         FIXME("unimplemented type %u, returning success\n", ObjectType);
         status = STATUS_SUCCESS;
@@ -3222,7 +3232,7 @@ DWORD WINAPI SetSecurityInfo(HANDLE handle, SE_OBJECT_TYPE ObjectType,
     }
     if (dacl != pDacl)
         free(dacl);
-    return RtlNtStatusToDosError(status);
+    return service_err ? service_err : RtlNtStatusToDosError(status);
 }
 
 /******************************************************************************
