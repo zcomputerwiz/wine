@@ -27,7 +27,7 @@
 @ stub SLGetServiceInformation
 @ stdcall SLGetWindowsInformation(wstr ptr ptr ptr)
 @ stdcall SLGetWindowsInformationDWORD(wstr ptr)
-@ stub SLInstallLicense
+@ stdcall SLInstallLicense(ptr long ptr ptr) sppc.SLInstallLicense
 @ stub SLInstallProofOfPurchase
 @ stub SLInstallSAMLicense
 @ stdcall SLOpen(ptr) sppc.SLOpen

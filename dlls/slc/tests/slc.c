@@ -135,8 +135,54 @@ static void test_SLRegisterEvent(void)
     SLClose(slc);
 }
 
+/* Wine-only: the license is kept in the prefix and nothing checks its signature. Windows'
+ * licensing service rejects an unsigned document. */
+static void test_SLInstallLicense(void)
+{
+    static const char license[] =
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?><r:license xmlns:r=\"urn:mpeg:mpeg21:2003:01-REL-R-NS\" "
+        "licenseId=\"{7CBEB5E5-2BF9-4F2E-9E0B-1F0A8F2B4B77}\"></r:license>";
+    static const GUID expected = {0x7cbeb5e5, 0x2bf9, 0x4f2e, {0x9e, 0x0b, 0x1f, 0x0a, 0x8f, 0x2b, 0x4b, 0x77}};
+    WCHAR path[MAX_PATH];
+    HSLC slc;
+    SLID id;
+    HRESULT hr;
+
+    if (!GetProcAddress(GetModuleHandleA("ntdll.dll"), "wine_get_version"))
+    {
+        skip("Wine's license store\n");
+        return;
+    }
+
+    hr = SLOpen(&slc);
+    ok(hr == S_OK, "got %08lx\n", hr);
+
+    hr = SLInstallLicense(slc, sizeof(license) - 1, (const BYTE *)license, NULL);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLInstallLicense(slc, sizeof(license) - 1, NULL, &id);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLInstallLicense(slc, 0, (const BYTE *)license, &id);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLInstallLicense(NULL, sizeof(license) - 1, (const BYTE *)license, &id);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLInstallLicense(slc, 4, (const BYTE *)"junk", &id);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+
+    memset(&id, 0, sizeof(id));
+    hr = SLInstallLicense(slc, sizeof(license) - 1, (const BYTE *)license, &id);
+    ok(hr == S_OK, "got %08lx\n", hr);
+    ok(IsEqualGUID(&id, &expected), "got %s\n", wine_dbgstr_guid(&id));
+
+    if (!GetEnvironmentVariableW(L"ProgramData", path, MAX_PATH - 80)) GetWindowsDirectoryW(path, MAX_PATH - 80);
+    lstrcatW(path, L"\\SPPWine\\Licenses\\{7CBEB5E5-2BF9-4F2E-9E0B-1F0A8F2B4B77}.xrm-ms");
+    ok(DeleteFileW(path), "license file not in the store: %lu\n", GetLastError());
+
+    SLClose(slc);
+}
+
 START_TEST(slc)
 {
+    test_SLInstallLicense();
     test_SLGetWindowsInformationDWORD();
     test_SLRegisterEvent();
 }
