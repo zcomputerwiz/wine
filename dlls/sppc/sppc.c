@@ -44,23 +44,74 @@ HRESULT WINAPI SLGetLicensingStatusInformation(HSLC handle, const SLID *app, con
     return SL_E_RIGHT_NOT_CONSUMED;
 }
 
+/* A handle only carries the state "a right was consumed through it" (SLConsumeRight). */
+struct slc_handle
+{
+    struct list entry;
+    BOOL right_consumed;
+};
+
+static struct list open_handles = LIST_INIT( open_handles );
+static CRITICAL_SECTION handle_cs;
+static CRITICAL_SECTION_DEBUG handle_cs_debug =
+{
+    0, 0, &handle_cs,
+    { &handle_cs_debug.ProcessLocksList, &handle_cs_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": handle_cs") }
+};
+static CRITICAL_SECTION handle_cs = { &handle_cs_debug, -1, 0, 0, 0, 0 };
+
+static struct slc_handle *get_handle( HSLC handle )
+{
+    struct slc_handle *h;
+
+    LIST_FOR_EACH_ENTRY( h, &open_handles, struct slc_handle, entry )
+        if (h == handle) return h;
+    return NULL;
+}
+
 HRESULT WINAPI SLOpen(HSLC *handle)
 {
-    FIXME("(%p) stub\n", handle );
+    struct slc_handle *h;
+
+    TRACE("(%p)\n", handle );
 
     if (!handle)
         return E_INVALIDARG;
 
-    *handle = (HSLC)0xdeadbeef;
-
+    if (!(h = calloc( 1, sizeof(*h) ))) return E_OUTOFMEMORY;
+    EnterCriticalSection( &handle_cs );
+    list_add_tail( &open_handles, &h->entry );
+    LeaveCriticalSection( &handle_cs );
+    *handle = h;
     return S_OK;
 }
 
 HRESULT WINAPI SLClose(HSLC handle)
 {
-    FIXME("(%p) stub\n", handle );
+    struct slc_handle *h;
 
+    TRACE("(%p)\n", handle );
+
+    EnterCriticalSection( &handle_cs );
+    if ((h = get_handle( handle ))) list_remove( &h->entry );
+    LeaveCriticalSection( &handle_cs );
+    if (!h) return E_HANDLE;
+    free( h );
     return S_OK;
+}
+
+HRESULT WINAPI SLConsumeRight(HSLC handle, const SLID *app, const SLID *sku, PCWSTR right, PVOID reserved)
+{
+    struct slc_handle *h;
+
+    TRACE("(%p %s %s %s %p)\n", handle, debugstr_guid( app ), debugstr_guid( sku ), debugstr_w( right ), reserved);
+
+    if (!app) return E_INVALIDARG;
+    EnterCriticalSection( &handle_cs );
+    if ((h = get_handle( handle ))) h->right_consumed = TRUE;
+    LeaveCriticalSection( &handle_cs );
+    return h ? S_OK : E_HANDLE;
 }
 
 /* Nothing fires licensing events on Wine, so a registration is only remembered: Windows refuses a second

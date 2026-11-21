@@ -7,7 +7,7 @@
 @ stub SLpGetMachineUGUID
 @ stub SLpVLActivateProduct
 @ stdcall SLClose(ptr) sppc.SLClose
-@ stub SLConsumeRight
+@ stdcall SLConsumeRight(ptr ptr ptr wstr ptr) sppc.SLConsumeRight
 @ stub SLConsumeWindowsRight
 @ stub SLDepositOfflineConfirmationId
 @ stub SLFireEvent

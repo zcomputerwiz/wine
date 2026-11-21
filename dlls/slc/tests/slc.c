@@ -229,6 +229,18 @@ static void test_SLInstallLicense(void)
     hr = SLUninstallLicense(slc, &expected);
     ok(hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), "got %08lx\n", hr);
 
+    hr = SLConsumeRight(slc, NULL, NULL, NULL, NULL);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLConsumeRight(slc, &expected, NULL, NULL, NULL);
+    ok(hr == S_OK, "got %08lx\n", hr);
+    hr = SLConsumeRight((HSLC)0xdead, &expected, NULL, NULL, NULL);
+    ok(hr == E_HANDLE, "got %08lx\n", hr);
+    hr = SLClose(slc);
+    ok(hr == S_OK, "got %08lx\n", hr);
+    hr = SLClose(slc);
+    ok(hr == E_HANDLE, "second close: got %08lx\n", hr);
+    return;
+
     SLClose(slc);
 }
 
