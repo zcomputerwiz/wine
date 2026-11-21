@@ -167,6 +167,20 @@ HRESULT WINAPI SLGetPolicyInformation(HSLC handle, PCWSTR name, SLDATATYPE *type
     return S_OK;
 }
 
+/* Office's licensing package registers a plugin (OSPPOBJS.DLL and its manifest) with the system licensing client. The
+ * parameters are not documented; nothing here loads plugins, so the calls are accepted and logged. */
+HRESULT WINAPI SLRegisterPlugin(ULONG_PTR a1, ULONG_PTR a2, ULONG_PTR a3, ULONG_PTR a4)
+{
+    FIXME("(%#Ix %#Ix %#Ix %#Ix) plugin accepted, not used\n", a1, a2, a3, a4);
+    return S_OK;
+}
+
+HRESULT WINAPI SLUnregisterPlugin(ULONG_PTR a1, ULONG_PTR a2, ULONG_PTR a3, ULONG_PTR a4)
+{
+    FIXME("(%#Ix %#Ix %#Ix %#Ix) plugin removal accepted\n", a1, a2, a3, a4);
+    return S_OK;
+}
+
 /* The authentication data is only accepted: nothing here asks for an authentication result. */
 HRESULT WINAPI SLSetAuthenticationData(HSLC handle, UINT size, const BYTE *data)
 {
