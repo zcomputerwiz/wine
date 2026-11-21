@@ -241,6 +241,7 @@ static BYTE *cfb_chain(struct cfb *c, const BYTE *fat, DWORD nfat, DWORD sec, DW
         if (sec >= nfat || i > nfat) goto fail;
         if (n + ssize > cap)
         {
+            if (cap > 0x20000000) goto fail;   /* no stream of the SIP's is 1 GiB; and cap * 2 cannot wrap */
             cap = cap ? cap * 2 : 4 * ssize;
             if (!(p = realloc(buf, cap))) goto fail;
             buf = p;
@@ -284,13 +285,15 @@ static BOOL cfb_open(struct cfb *c)
     c->ssize = 1u << hdr[0x1e];
     c->msize = 1u << hdr[0x20];
     c->cutoff = rd32(hdr + 0x38);
-    if (c->msize != 64 || fsize.QuadPart / c->ssize > 0x10000000) return FALSE;
+    /* at most 2^24 sectors (8 GiB of 512-byte sectors): the FAT then needs 64 MiB, and no size below wraps */
+    if (c->msize != 64 || fsize.QuadPart / c->ssize > 0x1000000) return FALSE;
     nsec = fsize.QuadPart / c->ssize;
     c->nfat = nsec * (c->ssize / 4);
 
     /* the FAT: the sectors listed in the header and in the DIFAT chain */
-    if (!(fatsecs = malloc((109 + (nsec + 1) * (c->ssize / 4)) * sizeof(DWORD))) ||
-        !(c->fat = malloc(nsec * c->ssize)) || !(buf = malloc(c->ssize))) goto fail;
+    /* up to 109 FAT sectors from the header and nsec from the DIFAT chain; nsec entries of 4 bytes in the FAT */
+    if (!(fatsecs = malloc(((size_t)109 + nsec) * sizeof(DWORD))) ||
+        !(c->fat = malloc((size_t)nsec * 4)) || !(buf = malloc(c->ssize))) goto fail;
     for (i = 0; i < 109; i++)
         if (rd32(hdr + 0x4c + i * 4) != CFB_FREESECT) fatsecs[n++] = rd32(hdr + 0x4c + i * 4);
     difat_sec = rd32(hdr + 0x44);

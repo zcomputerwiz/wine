@@ -4,3 +4,5 @@
 8 stub MsiSIPRemoveSignedDataMsg
 9 stdcall MsiSIPCreateIndirectData(ptr ptr ptr)
 10 stdcall MsiSIPVerifyIndirectData(ptr ptr)
+11 stdcall -private DllRegisterServer()
+12 stdcall -private DllUnregisterServer()
