@@ -20,32 +20,32 @@
 @ stdcall SLClose(ptr)
 @ stdcall SLConsumeRight(ptr ptr ptr wstr ptr)
 @ stub SLDepositMigrationBlob
-@ stub SLDepositOfflineConfirmationId
+@ stdcall SLDepositOfflineConfirmationId(ptr ptr wstr wstr)
 @ stub SLDepositOfflineConfirmationIdEx
 @ stub SLDepositStoreToken
-@ stub SLFireEvent
+@ stdcall SLFireEvent(ptr wstr ptr)
 @ stub SLGatherMigrationBlob
 @ stub SLGatherMigrationBlobEx
-@ stub SLGenerateOfflineInstallationId
+@ stdcall SLGenerateOfflineInstallationId(ptr ptr ptr)
 @ stub SLGenerateOfflineInstallationIdEx
 @ stub SLGetActiveLicenseInfo
-@ stub SLGetApplicationInformation
+@ stdcall SLGetApplicationInformation(ptr ptr wstr ptr ptr ptr)
 @ stdcall SLGetApplicationPolicy(ptr wstr ptr ptr ptr)
-@ stub SLGetAuthenticationResult
+@ stdcall SLGetAuthenticationResult(ptr ptr ptr)
 @ stub SLGetEncryptedPIDEx
 @ stub SLGetGenuineInformation
-@ stub SLGetInstalledProductKeyIds
+@ stdcall SLGetInstalledProductKeyIds(ptr ptr ptr ptr)
 @ stub SLGetLicense
 @ stdcall SLGetLicenseFileId(ptr long ptr ptr)
-@ stub SLGetLicenseInformation
+@ stdcall SLGetLicenseInformation(ptr ptr wstr ptr ptr ptr)
 @ stdcall SLGetLicensingStatusInformation(ptr ptr ptr wstr ptr ptr)
-@ stub SLGetPKeyId
-@ stub SLGetPKeyInformation
+@ stdcall SLGetPKeyId(ptr wstr wstr long ptr ptr)
+@ stdcall SLGetPKeyInformation(ptr ptr wstr ptr ptr ptr)
 @ stdcall SLGetPolicyInformation(ptr wstr ptr ptr ptr)
 @ stdcall SLGetPolicyInformationDWORD(ptr wstr ptr)
 @ stdcall SLGetProductSkuInformation(ptr ptr wstr ptr ptr ptr)
 @ stdcall SLGetSLIDList(ptr long ptr long ptr ptr)
-@ stub SLGetServiceInformation
+@ stdcall SLGetServiceInformation(ptr wstr ptr ptr ptr)
 @ stdcall SLInstallLicense(ptr long ptr ptr)
 @ stdcall SLInstallProofOfPurchase(ptr wstr wstr long ptr ptr)
 @ stub SLInstallProofOfPurchaseEx
@@ -54,9 +54,9 @@
 @ stdcall SLOpen(ptr)
 @ stdcall SLPersistApplicationPolicies(ptr ptr long)
 @ stub SLPersistRTSPayloadOverride
-@ stub SLReArm
+@ stdcall SLReArm(ptr ptr ptr long)
 @ stdcall SLRegisterEvent(ptr wstr ptr ptr)
-@ stdcall SLRegisterPlugin(ptr ptr ptr ptr)
+@ stdcall SLRegisterPlugin(ptr wstr wstr)
 @ stdcall SLSetAuthenticationData(ptr long ptr)
 @ stub SLSetCurrentProductKey
 @ stub SLSetGenuineInformation
@@ -64,4 +64,4 @@
 @ stdcall SLUninstallProofOfPurchase(ptr ptr)
 @ stdcall SLUnloadApplicationPolicies(ptr long)
 @ stdcall SLUnregisterEvent(ptr wstr ptr ptr)
-@ stdcall SLUnregisterPlugin(ptr ptr ptr ptr)
+@ stdcall SLUnregisterPlugin(ptr wstr)

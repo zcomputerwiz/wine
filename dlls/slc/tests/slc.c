@@ -244,9 +244,131 @@ static void test_SLInstallLicense(void)
     SLClose(slc);
 }
 
+/* Wine-only: local mode behaviour of the licensing exports when OSPP is absent. */
+static void test_local_exports(void)
+{
+    static const SLID id = {0x12345678, 0x1234, 0x1234, {1, 2, 3, 4, 5, 6, 7, 8}};
+    HSLC slc, bogus = (HSLC)0xdead;
+    SLDATATYPE type;
+    UINT size, count;
+    BYTE *value;
+    SLID *ids, pkey;
+    WCHAR *iid;
+    HRESULT hr;
+
+    if (!GetProcAddress(GetModuleHandleA("ntdll.dll"), "wine_get_version"))
+    {
+        skip("Wine's local sppc exports\n");
+        return;
+    }
+
+    hr = SLOpen(&slc);
+    ok(hr == S_OK, "got %08lx\n", hr);
+
+    hr = SLGetLicenseInformation(bogus, &id, L"Name", &type, &size, &value);
+    ok(hr == E_HANDLE, "got %08lx\n", hr);
+    hr = SLGetLicenseInformation(slc, &id, L"Name", &type, NULL, &value);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLGetLicenseInformation(slc, &id, L"Name", &type, &size, NULL);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLGetLicenseInformation(slc, &id, L"Name", &type, &size, &value);
+    ok(hr == SL_E_VALUE_NOT_FOUND, "got %08lx\n", hr);
+
+    hr = SLGetPKeyInformation(bogus, &id, L"Name", &type, &size, &value);
+    ok(hr == E_HANDLE, "got %08lx\n", hr);
+    hr = SLGetPKeyInformation(slc, &id, L"Name", &type, NULL, &value);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLGetPKeyInformation(slc, &id, L"Name", &type, &size, NULL);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLGetPKeyInformation(slc, &id, L"Name", &type, &size, &value);
+    ok(hr == SL_E_VALUE_NOT_FOUND, "got %08lx\n", hr);
+
+    hr = SLGetApplicationInformation(bogus, &id, L"Name", &type, &size, &value);
+    ok(hr == E_HANDLE, "got %08lx\n", hr);
+    hr = SLGetApplicationInformation(slc, &id, L"Name", &type, NULL, &value);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLGetApplicationInformation(slc, &id, L"Name", &type, &size, NULL);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLGetApplicationInformation(slc, &id, L"Name", &type, &size, &value);
+    ok(hr == SL_E_VALUE_NOT_FOUND, "got %08lx\n", hr);
+
+    hr = SLGetServiceInformation(bogus, L"Name", &type, &size, &value);
+    ok(hr == E_HANDLE, "got %08lx\n", hr);
+    hr = SLGetServiceInformation(slc, L"Name", &type, NULL, &value);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLGetServiceInformation(slc, L"Name", &type, &size, NULL);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLGetServiceInformation(slc, L"Name", &type, &size, &value);
+    ok(hr == SL_E_VALUE_NOT_FOUND, "got %08lx\n", hr);
+
+    hr = SLGetAuthenticationResult(bogus, &size, &value);
+    ok(hr == E_HANDLE, "got %08lx\n", hr);
+    hr = SLGetAuthenticationResult(slc, NULL, &value);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLGetAuthenticationResult(slc, &size, NULL);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLGetAuthenticationResult(slc, &size, &value);
+    ok(hr == E_NOTIMPL, "got %08lx\n", hr);
+
+    hr = SLGetInstalledProductKeyIds(bogus, &id, &count, &ids);
+    ok(hr == E_HANDLE, "got %08lx\n", hr);
+    hr = SLGetInstalledProductKeyIds(slc, &id, NULL, &ids);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLGetInstalledProductKeyIds(slc, &id, &count, NULL);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLGetInstalledProductKeyIds(slc, &id, &count, &ids);
+    ok(hr == SL_E_PKEY_NOT_INSTALLED, "got %08lx\n", hr);
+
+    hr = SLGetPKeyId(bogus, L"msft:rm/algorithm/pkey/2005", L"ABCDE-FGHJK-LMNPQ-RSTUV-WXYZ2", 0, NULL, &pkey);
+    ok(hr == E_HANDLE, "got %08lx\n", hr);
+    hr = SLGetPKeyId(slc, L"msft:rm/algorithm/pkey/2005", L"ABCDE-FGHJK-LMNPQ-RSTUV-WXYZ2", 0, NULL, NULL);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLGetPKeyId(slc, L"msft:rm/algorithm/pkey/2005", L"ABCDE-FGHJK-LMNPQ-RSTUV-WXYZ2", 0, NULL, &pkey);
+    ok(hr == SL_E_PKEY_NOT_INSTALLED, "got %08lx\n", hr);
+
+    hr = SLFireEvent(bogus, SL_EVENT_LICENSING_STATE_CHANGED, &id);
+    ok(hr == E_HANDLE, "got %08lx\n", hr);
+    hr = SLFireEvent(slc, NULL, &id);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLFireEvent(slc, SL_EVENT_LICENSING_STATE_CHANGED, NULL);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLFireEvent(slc, SL_EVENT_LICENSING_STATE_CHANGED, &id);
+    ok(hr == S_OK, "got %08lx\n", hr);
+
+    hr = SLReArm(bogus, &id, NULL, 0);
+    ok(hr == E_HANDLE, "got %08lx\n", hr);
+    hr = SLReArm(slc, NULL, NULL, 0);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLReArm(slc, &id, NULL, 0);
+    ok(hr == E_NOTIMPL, "got %08lx\n", hr);
+
+    hr = SLGenerateOfflineInstallationId(bogus, &id, &iid);
+    ok(hr == E_HANDLE, "got %08lx\n", hr);
+    hr = SLGenerateOfflineInstallationId(slc, &id, NULL);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLGenerateOfflineInstallationId(slc, &id, &iid);
+    ok(hr == E_NOTIMPL, "got %08lx\n", hr);
+
+    hr = SLDepositOfflineConfirmationId(bogus, &id, L"1234", L"5678");
+    ok(hr == E_HANDLE, "got %08lx\n", hr);
+    hr = SLDepositOfflineConfirmationId(slc, &id, NULL, L"5678");
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLDepositOfflineConfirmationId(slc, &id, L"1234", NULL);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    hr = SLDepositOfflineConfirmationId(slc, &id, L"1234", L"5678");
+    ok(hr == E_NOTIMPL, "got %08lx\n", hr);
+
+    hr = SLClose(slc);
+    ok(hr == S_OK, "got %08lx\n", hr);
+}
+
 START_TEST(slc)
 {
+    /* Force local mode even when OSPP is installed on the host. */
+    SetEnvironmentVariableA("SPPWINE_OSPPC", "C:\\nonexistent\\osppc.dll");
+
     test_SLInstallLicense();
     test_SLGetWindowsInformationDWORD();
     test_SLRegisterEvent();
+    test_local_exports();
 }

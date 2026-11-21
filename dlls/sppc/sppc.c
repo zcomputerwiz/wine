@@ -36,12 +36,119 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(slc);
 
-HRESULT WINAPI SLGetLicensingStatusInformation(HSLC handle, const SLID *app, const SLID *product,
-                                               LPCWSTR name, UINT *count, SL_LICENSING_STATUS **status)
+static struct
 {
-    FIXME("(%p %p %p %s %p %p) stub\n", handle, app, product, debugstr_w(name), count, status );
+    HRESULT (WINAPI *SLOpen)(HSLC *);
+    HRESULT (WINAPI *SLClose)(HSLC);
+    HRESULT (WINAPI *SLInstallLicense)(HSLC, UINT, const BYTE *, SLID *);
+    HRESULT (WINAPI *SLUninstallLicense)(HSLC, const SLID *);
+    HRESULT (WINAPI *SLInstallProofOfPurchase)(HSLC, PCWSTR, PCWSTR, UINT, PBYTE, SLID *);
+    HRESULT (WINAPI *SLUninstallProofOfPurchase)(HSLC, const SLID *);
+    HRESULT (WINAPI *SLGetSLIDList)(HSLC, SLIDTYPE, const SLID *, SLIDTYPE, UINT *, SLID **);
+    HRESULT (WINAPI *SLGetProductSkuInformation)(HSLC, const SLID *, PCWSTR, SLDATATYPE *, UINT *, PBYTE *);
+    HRESULT (WINAPI *SLGetLicensingStatusInformation)(HSLC, const SLID *, const SLID *, LPCWSTR, UINT *, SL_LICENSING_STATUS **);
+    HRESULT (WINAPI *SLGetPolicyInformation)(HSLC, PCWSTR, SLDATATYPE *, UINT *, PBYTE *);
+    HRESULT (WINAPI *SLGetPolicyInformationDWORD)(HSLC, PCWSTR, DWORD *);
+    HRESULT (WINAPI *SLSetAuthenticationData)(HSLC, UINT, const BYTE *);
+    HRESULT (WINAPI *SLConsumeRight)(HSLC, const SLID *, const SLID *, PCWSTR, PVOID);
+    HRESULT (WINAPI *SLRegisterPlugin)(HSLC, PCWSTR, PCWSTR);
+    HRESULT (WINAPI *SLUnregisterPlugin)(HSLC, PCWSTR);
+    HRESULT (WINAPI *SLLoadApplicationPolicies)(const SLID *, const SLID *, DWORD, HSLP *);
+    HRESULT (WINAPI *SLGetApplicationPolicy)(HSLP, PCWSTR, SLDATATYPE *, UINT *, PBYTE *);
+    HRESULT (WINAPI *SLUnloadApplicationPolicies)(HSLP, DWORD);
+    HRESULT (WINAPI *SLGetLicenseInformation)(HSLC, const SLID *, PCWSTR, SLDATATYPE *, UINT *, PBYTE *);
+    HRESULT (WINAPI *SLGetPKeyInformation)(HSLC, const SLID *, PCWSTR, SLDATATYPE *, UINT *, PBYTE *);
+    HRESULT (WINAPI *SLGetApplicationInformation)(HSLC, const SLID *, PCWSTR, SLDATATYPE *, UINT *, PBYTE *);
+    HRESULT (WINAPI *SLGetServiceInformation)(HSLC, PCWSTR, SLDATATYPE *, UINT *, PBYTE *);
+    HRESULT (WINAPI *SLGetAuthenticationResult)(HSLC, UINT *, PBYTE *);
+    HRESULT (WINAPI *SLGetInstalledProductKeyIds)(HSLC, const SLID *, UINT *, SLID **);
+    HRESULT (WINAPI *SLGetPKeyId)(HSLC, PCWSTR, PCWSTR, UINT, const BYTE *, SLID *);
+    HRESULT (WINAPI *SLFireEvent)(HSLC, PCWSTR, const SLID *);
+    HRESULT (WINAPI *SLReArm)(HSLC, const SLID *, const SLID *, DWORD);
+    HRESULT (WINAPI *SLGenerateOfflineInstallationId)(HSLC, const SLID *, PWSTR *);
+    HRESULT (WINAPI *SLDepositOfflineConfirmationId)(HSLC, const SLID *, PCWSTR, PCWSTR);
+} ospp;
 
-    return SL_E_RIGHT_NOT_CONSUMED;
+static INIT_ONCE ospp_init_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK init_ospp( INIT_ONCE *once, void *param, void **context )
+{
+    static const WCHAR suffix[] = L"\\Microsoft Shared\\OfficeSoftwareProtectionPlatform\\OSPPC.DLL";
+    WCHAR path[1024];
+    HMODULE mod;
+    DWORD len;
+
+    len = GetEnvironmentVariableW( L"SPPWINE_OSPPC", path, ARRAY_SIZE(path) );
+    if (len >= ARRAY_SIZE(path))
+    {
+        TRACE("SPPWINE_OSPPC path too long\n");
+        return TRUE;
+    }
+    if (!len)
+    {
+        len = GetEnvironmentVariableW( L"CommonProgramFiles", path, ARRAY_SIZE(path) );
+        if (!len || len + ARRAY_SIZE(suffix) > ARRAY_SIZE(path))
+        {
+            TRACE("no OSPP path\n");
+            return TRUE;
+        }
+        wcscpy( path + len, suffix );
+    }
+
+    mod = LoadLibraryExW( path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH );
+    if (!mod)
+    {
+        TRACE("OSPP not available (%s, err %lu)\n", debugstr_w( path ), GetLastError());
+        return TRUE;
+    }
+
+    ospp.SLOpen = (void *)GetProcAddress( mod, "SLOpen" );
+    if (!ospp.SLOpen)
+    {
+        TRACE("OSPP %s has no SLOpen\n", debugstr_w( path ));
+        FreeLibrary( mod );
+        return TRUE;
+    }
+
+#define LOAD_OSPP( name ) ospp.name = (void *)GetProcAddress( mod, #name )
+    LOAD_OSPP( SLClose );
+    LOAD_OSPP( SLInstallLicense );
+    LOAD_OSPP( SLUninstallLicense );
+    LOAD_OSPP( SLInstallProofOfPurchase );
+    LOAD_OSPP( SLUninstallProofOfPurchase );
+    LOAD_OSPP( SLGetSLIDList );
+    LOAD_OSPP( SLGetProductSkuInformation );
+    LOAD_OSPP( SLGetLicensingStatusInformation );
+    LOAD_OSPP( SLGetPolicyInformation );
+    LOAD_OSPP( SLGetPolicyInformationDWORD );
+    LOAD_OSPP( SLSetAuthenticationData );
+    LOAD_OSPP( SLConsumeRight );
+    LOAD_OSPP( SLRegisterPlugin );
+    LOAD_OSPP( SLUnregisterPlugin );
+    LOAD_OSPP( SLLoadApplicationPolicies );
+    LOAD_OSPP( SLGetApplicationPolicy );
+    LOAD_OSPP( SLUnloadApplicationPolicies );
+    LOAD_OSPP( SLGetLicenseInformation );
+    LOAD_OSPP( SLGetPKeyInformation );
+    LOAD_OSPP( SLGetApplicationInformation );
+    LOAD_OSPP( SLGetServiceInformation );
+    LOAD_OSPP( SLGetAuthenticationResult );
+    LOAD_OSPP( SLGetInstalledProductKeyIds );
+    LOAD_OSPP( SLGetPKeyId );
+    LOAD_OSPP( SLFireEvent );
+    LOAD_OSPP( SLReArm );
+    LOAD_OSPP( SLGenerateOfflineInstallationId );
+    LOAD_OSPP( SLDepositOfflineConfirmationId );
+#undef LOAD_OSPP
+
+    TRACE("loaded OSPP from %s\n", debugstr_w( path ));
+    return TRUE;
+}
+
+static BOOL ospp_loaded(void)
+{
+    InitOnceExecuteOnce( &ospp_init_once, init_ospp, NULL, NULL );
+    return ospp.SLOpen != NULL;
 }
 
 /* A handle only carries the state "a right was consumed through it" (SLConsumeRight). */
@@ -49,6 +156,7 @@ struct slc_handle
 {
     struct list entry;
     BOOL right_consumed;
+    HSLC ospp;
 };
 
 static struct list open_handles = LIST_INIT( open_handles );
@@ -70,9 +178,37 @@ static struct slc_handle *get_handle( HSLC handle )
     return NULL;
 }
 
+static HSLC get_ospp( HSLC handle, BOOL *known )
+{
+    struct slc_handle *h;
+    HSLC ret = NULL;
+
+    EnterCriticalSection( &handle_cs );
+    if ((h = get_handle( handle ))) ret = h->ospp;
+    LeaveCriticalSection( &handle_cs );
+    if (known) *known = h != NULL;
+    return ret;
+}
+
+HRESULT WINAPI SLGetLicensingStatusInformation(HSLC handle, const SLID *app, const SLID *product,
+                                               LPCWSTR name, UINT *count, SL_LICENSING_STATUS **status)
+{
+    HSLC ospp_h;
+
+    TRACE("(%p %p %p %s %p %p)\n", handle, app, product, debugstr_w( name ), count, status);
+
+    if ((ospp_h = get_ospp( handle, NULL )) && ospp.SLGetLicensingStatusInformation)
+        return ospp.SLGetLicensingStatusInformation( ospp_h, app, product, name, count, status );
+
+    FIXME("(%p %p %p %s %p %p) stub\n", handle, app, product, debugstr_w(name), count, status );
+
+    return SL_E_RIGHT_NOT_CONSUMED;
+}
+
 HRESULT WINAPI SLOpen(HSLC *handle)
 {
     struct slc_handle *h;
+    HRESULT hr;
 
     TRACE("(%p)\n", handle );
 
@@ -80,6 +216,15 @@ HRESULT WINAPI SLOpen(HSLC *handle)
         return E_INVALIDARG;
 
     if (!(h = calloc( 1, sizeof(*h) ))) return E_OUTOFMEMORY;
+    if (ospp_loaded())
+    {
+        hr = ospp.SLOpen( &h->ospp );
+        if (FAILED(hr))
+        {
+            WARN("OSPP SLOpen failed: %#lx\n", hr);
+            h->ospp = NULL;
+        }
+    }
     EnterCriticalSection( &handle_cs );
     list_add_tail( &open_handles, &h->entry );
     LeaveCriticalSection( &handle_cs );
@@ -97,6 +242,7 @@ HRESULT WINAPI SLClose(HSLC handle)
     if ((h = get_handle( handle ))) list_remove( &h->entry );
     LeaveCriticalSection( &handle_cs );
     if (!h) return E_HANDLE;
+    if (h->ospp && ospp.SLClose) ospp.SLClose( h->ospp );
     free( h );
     return S_OK;
 }
@@ -141,10 +287,14 @@ static HRESULT get_policy_dword( HSLC handle, const WCHAR *name, DWORD *value )
 
 HRESULT WINAPI SLGetPolicyInformationDWORD(HSLC handle, PCWSTR name, DWORD *value)
 {
+    HSLC ospp_h;
     DWORD v = 0;
     HRESULT hr;
 
     TRACE("(%p %s %p)\n", handle, debugstr_w( name ), value);
+
+    if ((ospp_h = get_ospp( handle, NULL )) && ospp.SLGetPolicyInformationDWORD)
+        return ospp.SLGetPolicyInformationDWORD( ospp_h, name, value );
 
     if (!value) return E_INVALIDARG;
     if (SUCCEEDED(hr = get_policy_dword( handle, name, &v ))) *value = v;
@@ -153,10 +303,14 @@ HRESULT WINAPI SLGetPolicyInformationDWORD(HSLC handle, PCWSTR name, DWORD *valu
 
 HRESULT WINAPI SLGetPolicyInformation(HSLC handle, PCWSTR name, SLDATATYPE *type, UINT *size, BYTE **value)
 {
+    HSLC ospp_h;
     DWORD v = 0;
     HRESULT hr;
 
     TRACE("(%p %s %p %p %p)\n", handle, debugstr_w( name ), type, size, value);
+
+    if ((ospp_h = get_ospp( handle, NULL )) && ospp.SLGetPolicyInformation)
+        return ospp.SLGetPolicyInformation( ospp_h, name, type, size, value );
 
     if (!size || !value) return E_INVALIDARG;
     if (FAILED(hr = get_policy_dword( handle, name, &v ))) return hr;
@@ -167,30 +321,49 @@ HRESULT WINAPI SLGetPolicyInformation(HSLC handle, PCWSTR name, SLDATATYPE *type
     return S_OK;
 }
 
-/* Office's licensing package registers a plugin (OSPPOBJS.DLL and its manifest) with the system licensing client. The
- * parameters are not documented; nothing here loads plugins, so the calls are accepted and logged. */
-HRESULT WINAPI SLRegisterPlugin(ULONG_PTR a1, ULONG_PTR a2, ULONG_PTR a3, ULONG_PTR a4)
+/* Office's licensing package registers a plugin (OSPPOBJS.DLL and its manifest) through the client handle it got
+ * from SLOpen, with two strings (module and application identity), both required. Without OSPP nothing here loads
+ * plugins, so the calls are accepted and logged. */
+HRESULT WINAPI SLRegisterPlugin(HSLC handle, PCWSTR module, PCWSTR app)
 {
-    FIXME("(%#Ix %#Ix %#Ix %#Ix) plugin accepted, not used\n", a1, a2, a3, a4);
+    HSLC ospp_h;
+    BOOL known;
+
+    TRACE("(%p %s %s)\n", handle, debugstr_w( module ), debugstr_w( app ));
+
+    if ((ospp_h = get_ospp( handle, &known )) && ospp.SLRegisterPlugin)
+        return ospp.SLRegisterPlugin( ospp_h, module, app );
+    if (!known) return E_HANDLE;
+    if (!module || !app) return E_INVALIDARG;
+    FIXME("(%p %s %s) plugin accepted, not used\n", handle, debugstr_w( module ), debugstr_w( app ));
     return S_OK;
 }
 
-HRESULT WINAPI SLUnregisterPlugin(ULONG_PTR a1, ULONG_PTR a2, ULONG_PTR a3, ULONG_PTR a4)
+HRESULT WINAPI SLUnregisterPlugin(HSLC handle, PCWSTR module)
 {
-    FIXME("(%#Ix %#Ix %#Ix %#Ix) plugin removal accepted\n", a1, a2, a3, a4);
+    HSLC ospp_h;
+    BOOL known;
+
+    TRACE("(%p %s)\n", handle, debugstr_w( module ));
+
+    if ((ospp_h = get_ospp( handle, &known )) && ospp.SLUnregisterPlugin)
+        return ospp.SLUnregisterPlugin( ospp_h, module );
+    if (!known) return E_HANDLE;
+    if (!module) return E_INVALIDARG;
+    FIXME("(%p %s) plugin removal accepted\n", handle, debugstr_w( module ));
     return S_OK;
 }
 
 /* The authentication data is only accepted: nothing here asks for an authentication result. */
 HRESULT WINAPI SLSetAuthenticationData(HSLC handle, UINT size, const BYTE *data)
 {
+    HSLC ospp_h;
     BOOL known;
 
     TRACE("(%p %u %p)\n", handle, size, data);
 
-    EnterCriticalSection( &handle_cs );
-    known = get_handle( handle ) != NULL;
-    LeaveCriticalSection( &handle_cs );
+    if ((ospp_h = get_ospp( handle, &known )) && ospp.SLSetAuthenticationData)
+        return ospp.SLSetAuthenticationData( ospp_h, size, data );
     if (!known) return E_HANDLE;
     if (!size || !data) return E_INVALIDARG;
     return S_OK;
@@ -199,8 +372,21 @@ HRESULT WINAPI SLSetAuthenticationData(HSLC handle, UINT size, const BYTE *data)
 HRESULT WINAPI SLConsumeRight(HSLC handle, const SLID *app, const SLID *sku, PCWSTR right, PVOID reserved)
 {
     struct slc_handle *h;
+    HSLC ospp_h;
 
     TRACE("(%p %s %s %s %p)\n", handle, debugstr_guid( app ), debugstr_guid( sku ), debugstr_w( right ), reserved);
+
+    if ((ospp_h = get_ospp( handle, NULL )) && ospp.SLConsumeRight)
+    {
+        HRESULT hr = ospp.SLConsumeRight( ospp_h, app, sku, right, reserved );
+        if (SUCCEEDED(hr))
+        {
+            EnterCriticalSection( &handle_cs );
+            if ((h = get_handle( handle ))) h->right_consumed = TRUE;
+            LeaveCriticalSection( &handle_cs );
+        }
+        return hr;
+    }
 
     if (!app) return E_INVALIDARG;
     EnterCriticalSection( &handle_cs );
@@ -393,13 +579,20 @@ HRESULT WINAPI SLGetLicenseFileId(HSLC handle, UINT size, const BYTE *blob, SLID
 HRESULT WINAPI SLUninstallLicense(HSLC handle, const SLID *id)
 {
     WCHAR path[MAX_PATH];
+    HSLC ospp_h;
+    HRESULT ospp_hr = E_FAIL, hr;
 
     TRACE("(%p %s)\n", handle, debugstr_guid( id ));
 
     if (!handle || !id) return E_INVALIDARG;
-    if (!get_license_path( id, path )) return HRESULT_FROM_WIN32( ERROR_PATH_NOT_FOUND );
-    if (!DeleteFileW( path )) return HRESULT_FROM_WIN32( GetLastError() );
-    return S_OK;
+    if ((ospp_h = get_ospp( handle, NULL )) && ospp.SLUninstallLicense)
+        ospp_hr = ospp.SLUninstallLicense( ospp_h, id );
+
+    if (!get_license_path( id, path )) hr = HRESULT_FROM_WIN32( ERROR_PATH_NOT_FOUND );
+    else if (!DeleteFileW( path )) hr = HRESULT_FROM_WIN32( GetLastError() );
+    else hr = S_OK;
+
+    return (SUCCEEDED(ospp_hr) || SUCCEEDED(hr)) ? S_OK : hr;
 }
 
 /* The ids of the license files in the store: a license file is its own license here. */
@@ -409,12 +602,16 @@ HRESULT WINAPI SLGetSLIDList(HSLC handle, SLIDTYPE query_type, const SLID *query
     WCHAR path[MAX_PATH], *name;
     WIN32_FIND_DATAW data;
     HANDLE find;
+    HSLC ospp_h;
     SLID id, *list = NULL;
     UINT n = 0, capacity = 0;
     char guid[37];
     unsigned int i;
 
     TRACE("(%p %d %s %d %p %p)\n", handle, query_type, debugstr_guid( query_id ), return_type, count, ids);
+
+    if ((ospp_h = get_ospp( handle, NULL )) && ospp.SLGetSLIDList)
+        return ospp.SLGetSLIDList( ospp_h, query_type, query_id, return_type, count, ids );
 
     if (!handle || !count || !ids || query_type >= SL_ID_LAST || return_type >= SL_ID_LAST) return E_INVALIDARG;
     *count = 0;
@@ -510,11 +707,19 @@ HRESULT WINAPI SLInstallProofOfPurchase(HSLC handle, PCWSTR algorithm, PCWSTR ke
     WCHAR id_string[39], partial[6], name[80];
     char key[26];
     HKEY root, record;
+    HSLC ospp_h;
     SLID id;
     LSTATUS ret;
     int i;
 
     TRACE("(%p %s %p %u %p %p)\n", handle, debugstr_w( algorithm ), key_string, size, data, key_id);
+
+    if ((ospp_h = get_ospp( handle, NULL )) && ospp.SLInstallProofOfPurchase)
+    {
+        HRESULT hr = ospp.SLInstallProofOfPurchase( ospp_h, algorithm, key_string, size, data, key_id );
+        if (hr != (HRESULT)0xC004E016 && hr != (HRESULT)SL_E_NOT_SUPPORTED) return hr;
+        FIXME("OSPP has no key table for this key, kept locally\n");
+    }
 
     if (!handle || !algorithm || !*algorithm || !key_string || !key_id) return E_INVALIDARG;
     if (!normalize_key( key_string, key )) return SL_E_INVALID_PRODUCT_KEY;
@@ -541,10 +746,13 @@ HRESULT WINAPI SLInstallProofOfPurchase(HSLC handle, PCWSTR algorithm, PCWSTR ke
 HRESULT WINAPI SLUninstallProofOfPurchase(HSLC handle, const SLID *key_id)
 {
     WCHAR id_string[39], name[80];
+    HSLC ospp_h;
 
     TRACE("(%p %s)\n", handle, debugstr_guid( key_id ));
 
     if (!handle || !key_id) return E_INVALIDARG;
+    if ((ospp_h = get_ospp( handle, NULL )) && ospp.SLUninstallProofOfPurchase)
+        ospp.SLUninstallProofOfPurchase( ospp_h, key_id );
     format_key_id( key_id, id_string );
     swprintf( name, ARRAY_SIZE(name), L"SOFTWARE\\SPPWine\\ProductKeyStore\\%s", id_string );
     RegDeleteKeyExW( HKEY_LOCAL_MACHINE, name, KEY_WOW64_64KEY, 0 ); /* a missing record is not an error */
@@ -554,6 +762,13 @@ HRESULT WINAPI SLUninstallProofOfPurchase(HSLC handle, const SLID *key_id)
 HRESULT WINAPI SLGetProductSkuInformation(HSLC handle, const SLID *sku, PCWSTR name, SLDATATYPE *type,
                                           UINT *size, BYTE **value)
 {
+    HSLC ospp_h;
+
+    TRACE("(%p %s %s %p %p %p)\n", handle, debugstr_guid( sku ), debugstr_w( name ), type, size, value);
+
+    if ((ospp_h = get_ospp( handle, NULL )) && ospp.SLGetProductSkuInformation)
+        return ospp.SLGetProductSkuInformation( ospp_h, sku, name, type, size, value );
+
     FIXME("(%p %s %s %p %p %p) not served from the store\n", handle, debugstr_guid( sku ), debugstr_w( name ),
           type, size, value);
 
@@ -561,20 +776,14 @@ HRESULT WINAPI SLGetProductSkuInformation(HSLC handle, const SLID *sku, PCWSTR n
     return SL_E_VALUE_NOT_FOUND;
 }
 
-HRESULT WINAPI SLInstallLicense(HSLC handle, UINT size, const BYTE *blob, SLID *id)
+static HRESULT write_local_license( const SLID *license_id, const BYTE *blob, UINT size )
 {
     WCHAR path[MAX_PATH];
     DWORD written;
     HANDLE file;
-    SLID license_id;
     BOOL ret;
 
-    TRACE("(%p %u %p %p)\n", handle, size, blob, id);
-
-    if (!handle || !size || !blob || !id) return E_INVALIDARG;
-    if (!parse_license_id( blob, size, &license_id )) return E_INVALIDARG;
-
-    if (!get_license_path( &license_id, path )) return HRESULT_FROM_WIN32( ERROR_PATH_NOT_FOUND );
+    if (!get_license_path( license_id, path )) return HRESULT_FROM_WIN32( ERROR_PATH_NOT_FOUND );
 
     file = CreateFileW( path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
     if (file == INVALID_HANDLE_VALUE) return HRESULT_FROM_WIN32( GetLastError() );
@@ -586,6 +795,42 @@ HRESULT WINAPI SLInstallLicense(HSLC handle, UINT size, const BYTE *blob, SLID *
         DeleteFileW( path );
         return hr;
     }
+    return S_OK;
+}
+
+HRESULT WINAPI SLInstallLicense(HSLC handle, UINT size, const BYTE *blob, SLID *id)
+{
+    HSLC ospp_h;
+    SLID license_id;
+    HRESULT hr;
+
+    TRACE("(%p %u %p %p)\n", handle, size, blob, id);
+
+    if ((ospp_h = get_ospp( handle, NULL )) && ospp.SLInstallLicense)
+    {
+        if (size >= 0x100000)
+            TRACE("kept locally, above the OSPP limit\n");
+        else
+        {
+            SLID ospp_id = {0};
+
+            hr = ospp.SLInstallLicense( ospp_h, size, blob, id ? &ospp_id : NULL );
+            if (FAILED(hr)) return hr;
+            if (blob && size)
+            {
+                HRESULT local_hr;
+                if (!parse_license_id( blob, size, &license_id )) license_id = ospp_id;
+                if (FAILED(local_hr = write_local_license( &license_id, blob, size )))
+                    WARN("failed to keep local copy of %s: %#lx\n", debugstr_guid( &license_id ), local_hr);
+            }
+            if (id) *id = ospp_id;
+            return hr;
+        }
+    }
+
+    if (!handle || !size || !blob || !id) return E_INVALIDARG;
+    if (!parse_license_id( blob, size, &license_id )) return E_INVALIDARG;
+    if (FAILED(hr = write_local_license( &license_id, blob, size ))) return hr;
     *id = license_id;
     return S_OK;
 }
@@ -617,6 +862,9 @@ HRESULT WINAPI SLLoadApplicationPolicies(const SLID *app, const SLID *sku, DWORD
 
     TRACE("(%s %s %lx %p)\n", debugstr_guid( app ), debugstr_guid( sku ), flags, handle);
 
+    if (ospp_loaded() && ospp.SLLoadApplicationPolicies)
+        return ospp.SLLoadApplicationPolicies( app, sku, flags, handle );
+
     if (!app || !handle || flags) return E_INVALIDARG;
     if (!(c = calloc( 1, sizeof(*c) ))) return E_OUTOFMEMORY;
     c->app = *app;
@@ -641,22 +889,35 @@ HRESULT WINAPI SLUnloadApplicationPolicies(HSLP handle, DWORD flags)
     EnterCriticalSection( &handle_cs );
     if ((c = get_policy_context( handle ))) list_remove( &c->entry );
     LeaveCriticalSection( &handle_cs );
-    if (!c) return E_HANDLE;
-    free( c );
-    return S_OK;
+    if (c)
+    {
+        free( c );
+        return S_OK;
+    }
+    if (ospp_loaded() && ospp.SLUnloadApplicationPolicies)
+        return ospp.SLUnloadApplicationPolicies( handle, flags );
+    return E_HANDLE;
 }
 
 HRESULT WINAPI SLGetApplicationPolicy(HSLP handle, PCWSTR name, SLDATATYPE *type, UINT *size, PBYTE *value)
 {
     BOOL known;
 
-    FIXME("(%p %s %p %p %p) no policy values yet\n", handle, debugstr_w( name ), type, size, value);
+    TRACE("(%p %s %p %p %p)\n", handle, debugstr_w( name ), type, size, value);
 
-    if (!name || !size || !value) return E_INVALIDARG;
     EnterCriticalSection( &handle_cs );
     known = get_policy_context( handle ) != NULL;
     LeaveCriticalSection( &handle_cs );
-    return known ? SL_E_VALUE_NOT_FOUND : E_HANDLE;
+    if (known)
+    {
+        if (!name || !size || !value) return E_INVALIDARG;
+        FIXME("(%p %s %p %p %p) no policy values yet\n", handle, debugstr_w( name ), type, size, value);
+        return SL_E_VALUE_NOT_FOUND;
+    }
+    if (ospp_loaded() && ospp.SLGetApplicationPolicy)
+        return ospp.SLGetApplicationPolicy( handle, name, type, size, value );
+    if (!name || !size || !value) return E_INVALIDARG;
+    return E_HANDLE;
 }
 
 HRESULT WINAPI SLPersistApplicationPolicies(const SLID *app, const SLID *product, DWORD flags)
@@ -667,4 +928,165 @@ HRESULT WINAPI SLPersistApplicationPolicies(const SLID *app, const SLID *product
         return E_INVALIDARG;
 
     return S_OK;
+}
+
+HRESULT WINAPI SLGetLicenseInformation(HSLC handle, const SLID *license, PCWSTR name, SLDATATYPE *type,
+                                       UINT *size, PBYTE *value)
+{
+    HSLC ospp_h;
+    BOOL known;
+
+    TRACE("(%p %s %s %p %p %p)\n", handle, debugstr_guid( license ), debugstr_w( name ), type, size, value);
+
+    if ((ospp_h = get_ospp( handle, &known )) && ospp.SLGetLicenseInformation)
+        return ospp.SLGetLicenseInformation( ospp_h, license, name, type, size, value );
+    if (!known) return E_HANDLE;
+    if (!license || !name || !size || !value) return E_INVALIDARG;
+    return SL_E_VALUE_NOT_FOUND;
+}
+
+HRESULT WINAPI SLGetPKeyInformation(HSLC handle, const SLID *pkey, PCWSTR name, SLDATATYPE *type,
+                                    UINT *size, PBYTE *value)
+{
+    HSLC ospp_h;
+    BOOL known;
+
+    TRACE("(%p %s %s %p %p %p)\n", handle, debugstr_guid( pkey ), debugstr_w( name ), type, size, value);
+
+    if ((ospp_h = get_ospp( handle, &known )) && ospp.SLGetPKeyInformation)
+        return ospp.SLGetPKeyInformation( ospp_h, pkey, name, type, size, value );
+    if (!known) return E_HANDLE;
+    if (!pkey || !name || !size || !value) return E_INVALIDARG;
+    return SL_E_VALUE_NOT_FOUND;
+}
+
+HRESULT WINAPI SLGetApplicationInformation(HSLC handle, const SLID *app, PCWSTR name, SLDATATYPE *type,
+                                           UINT *size, PBYTE *value)
+{
+    HSLC ospp_h;
+    BOOL known;
+
+    TRACE("(%p %s %s %p %p %p)\n", handle, debugstr_guid( app ), debugstr_w( name ), type, size, value);
+
+    if ((ospp_h = get_ospp( handle, &known )) && ospp.SLGetApplicationInformation)
+        return ospp.SLGetApplicationInformation( ospp_h, app, name, type, size, value );
+    if (!known) return E_HANDLE;
+    if (!app || !name || !size || !value) return E_INVALIDARG;
+    return SL_E_VALUE_NOT_FOUND;
+}
+
+HRESULT WINAPI SLGetServiceInformation(HSLC handle, PCWSTR name, SLDATATYPE *type, UINT *size, PBYTE *value)
+{
+    HSLC ospp_h;
+    BOOL known;
+
+    TRACE("(%p %s %p %p %p)\n", handle, debugstr_w( name ), type, size, value);
+
+    if ((ospp_h = get_ospp( handle, &known )) && ospp.SLGetServiceInformation)
+        return ospp.SLGetServiceInformation( ospp_h, name, type, size, value );
+    if (!known) return E_HANDLE;
+    if (!name || !size || !value) return E_INVALIDARG;
+    return SL_E_VALUE_NOT_FOUND;
+}
+
+HRESULT WINAPI SLGetAuthenticationResult(HSLC handle, UINT *size, PBYTE *value)
+{
+    HSLC ospp_h;
+    BOOL known;
+
+    TRACE("(%p %p %p)\n", handle, size, value);
+
+    if ((ospp_h = get_ospp( handle, &known )) && ospp.SLGetAuthenticationResult)
+        return ospp.SLGetAuthenticationResult( ospp_h, size, value );
+    if (!known) return E_HANDLE;
+    if (!size || !value) return E_INVALIDARG;
+    FIXME("(%p %p %p) stub\n", handle, size, value);
+    return E_NOTIMPL;
+}
+
+HRESULT WINAPI SLGetInstalledProductKeyIds(HSLC handle, const SLID *product, UINT *count, SLID **ids)
+{
+    HSLC ospp_h;
+    BOOL known;
+
+    TRACE("(%p %s %p %p)\n", handle, debugstr_guid( product ), count, ids);
+
+    if ((ospp_h = get_ospp( handle, &known )) && ospp.SLGetInstalledProductKeyIds)
+        return ospp.SLGetInstalledProductKeyIds( ospp_h, product, count, ids );
+    if (!known) return E_HANDLE;
+    if (!product || !count || !ids) return E_INVALIDARG;
+    return SL_E_PKEY_NOT_INSTALLED;
+}
+
+HRESULT WINAPI SLGetPKeyId(HSLC handle, PCWSTR algorithm, PCWSTR key, UINT size, const BYTE *data, SLID *pkey)
+{
+    HSLC ospp_h;
+    BOOL known;
+
+    TRACE("(%p %s %p %u %p %p)\n", handle, debugstr_w( algorithm ), key, size, data, pkey);
+
+    if ((ospp_h = get_ospp( handle, &known )) && ospp.SLGetPKeyId)
+        return ospp.SLGetPKeyId( ospp_h, algorithm, key, size, data, pkey );
+    if (!known) return E_HANDLE;
+    if (!algorithm || !key || !pkey) return E_INVALIDARG;
+    return SL_E_PKEY_NOT_INSTALLED;
+}
+
+HRESULT WINAPI SLFireEvent(HSLC handle, PCWSTR event, const SLID *app)
+{
+    HSLC ospp_h;
+    BOOL known;
+
+    TRACE("(%p %s %s)\n", handle, debugstr_w( event ), debugstr_guid( app ));
+
+    if ((ospp_h = get_ospp( handle, &known )) && ospp.SLFireEvent)
+        return ospp.SLFireEvent( ospp_h, event, app );
+    if (!known) return E_HANDLE;
+    if (!event || !app) return E_INVALIDARG;
+    return S_OK;
+}
+
+HRESULT WINAPI SLReArm(HSLC handle, const SLID *app, const SLID *product, DWORD flags)
+{
+    HSLC ospp_h;
+    BOOL known;
+
+    TRACE("(%p %s %s %lx)\n", handle, debugstr_guid( app ), debugstr_guid( product ), flags);
+
+    if ((ospp_h = get_ospp( handle, &known )) && ospp.SLReArm)
+        return ospp.SLReArm( ospp_h, app, product, flags );
+    if (!known) return E_HANDLE;
+    if (!app) return E_INVALIDARG;
+    FIXME("(%p %s %s %lx) stub\n", handle, debugstr_guid( app ), debugstr_guid( product ), flags);
+    return E_NOTIMPL;
+}
+
+HRESULT WINAPI SLGenerateOfflineInstallationId(HSLC handle, const SLID *product, PWSTR *iid)
+{
+    HSLC ospp_h;
+    BOOL known;
+
+    TRACE("(%p %s %p)\n", handle, debugstr_guid( product ), iid);
+
+    if ((ospp_h = get_ospp( handle, &known )) && ospp.SLGenerateOfflineInstallationId)
+        return ospp.SLGenerateOfflineInstallationId( ospp_h, product, iid );
+    if (!known) return E_HANDLE;
+    if (!iid) return E_INVALIDARG;
+    FIXME("(%p %s %p) stub\n", handle, debugstr_guid( product ), iid);
+    return E_NOTIMPL;
+}
+
+HRESULT WINAPI SLDepositOfflineConfirmationId(HSLC handle, const SLID *product, PCWSTR iid, PCWSTR cid)
+{
+    HSLC ospp_h;
+    BOOL known;
+
+    TRACE("(%p %s %s %s)\n", handle, debugstr_guid( product ), debugstr_w( iid ), debugstr_w( cid ));
+
+    if ((ospp_h = get_ospp( handle, &known )) && ospp.SLDepositOfflineConfirmationId)
+        return ospp.SLDepositOfflineConfirmationId( ospp_h, product, iid, cid );
+    if (!known) return E_HANDLE;
+    if (!iid || !cid) return E_INVALIDARG;
+    FIXME("(%p %s %s %s) stub\n", handle, debugstr_guid( product ), debugstr_w( iid ), debugstr_w( cid ));
+    return E_NOTIMPL;
 }
