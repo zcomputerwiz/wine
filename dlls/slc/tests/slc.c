@@ -364,9 +364,6 @@ static void test_local_exports(void)
 
 START_TEST(slc)
 {
-    /* Force local mode even when OSPP is installed on the host. */
-    SetEnvironmentVariableA("SPPWINE_OSPPC", "C:\\nonexistent\\osppc.dll");
-
     test_SLInstallLicense();
     test_SLGetWindowsInformationDWORD();
     test_SLRegisterEvent();

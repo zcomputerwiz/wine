@@ -76,26 +76,27 @@ static BOOL CALLBACK init_ospp( INIT_ONCE *once, void *param, void **context )
     static const WCHAR suffix[] = L"\\Microsoft Shared\\OfficeSoftwareProtectionPlatform\\OSPPC.DLL";
     WCHAR path[1024];
     HMODULE mod;
-    DWORD len;
+    DWORD size = sizeof(path), len;
 
-    len = GetEnvironmentVariableW( L"SPPWINE_OSPPC", path, ARRAY_SIZE(path) );
-    if (len >= ARRAY_SIZE(path))
+    /* The folder is the machine's Common Files folder of this process's view, from HKLM, never from the environment:
+     * an elevated installer that calls sppc gets the environment of the limited user who started it, who must not
+     * choose the library it loads. REG_SZ only, so nothing is expanded from the environment either. */
+    if (RegGetValueW( HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion", L"CommonFilesDir",
+                      RRF_RT_REG_SZ, NULL, path, &size ))
     {
-        TRACE("SPPWINE_OSPPC path too long\n");
+        TRACE("no Common Files folder\n");
         return TRUE;
     }
-    if (!len)
+    len = wcslen( path );
+    if (len < 3 || path[1] != ':' || path[2] != '\\' || len + ARRAY_SIZE(suffix) > ARRAY_SIZE(path))
     {
-        len = GetEnvironmentVariableW( L"CommonProgramFiles", path, ARRAY_SIZE(path) );
-        if (!len || len + ARRAY_SIZE(suffix) > ARRAY_SIZE(path))
-        {
-            TRACE("no OSPP path\n");
-            return TRUE;
-        }
-        wcscpy( path + len, suffix );
+        TRACE("unusable Common Files folder %s\n", debugstr_w( path ));
+        return TRUE;
     }
+    wcscpy( path + len, suffix );
 
-    mod = LoadLibraryExW( path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH );
+    /* the client's own folder and system32 only: no current directory, no PATH */
+    mod = LoadLibraryExW( path, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32 );
     if (!mod)
     {
         TRACE("OSPP not available (%s, err %lu)\n", debugstr_w( path ), GetLastError());
