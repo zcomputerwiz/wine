@@ -175,6 +175,34 @@ static void test_SLInstallLicense(void)
     ok(hr == S_OK, "got %08lx\n", hr);
     ok(IsEqualGUID(&id, &expected), "got %s\n", wine_dbgstr_guid(&id));
 
+    {
+        SLID key_id, key_id2;
+
+        hr = SLInstallProofOfPurchase(slc, L"msft:rm/algorithm/pkey/2005", L"ABC", 0, NULL, &key_id);
+        ok(hr == SL_E_INVALID_PRODUCT_KEY, "got %08lx\n", hr);
+        hr = SLInstallProofOfPurchase(slc, L"msft:rm/algorithm/pkey/2005", L"ABCDE-FGHJK-LMNPQ-RSTUV-WXYZ2", 0,
+                                      NULL, NULL);
+        ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+        hr = SLInstallProofOfPurchase(slc, NULL, L"ABCDE-FGHJK-LMNPQ-RSTUV-WXYZ2", 0, NULL, &key_id);
+        ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+
+        hr = SLInstallProofOfPurchase(slc, L"msft:rm/algorithm/pkey/2005", L"ABCDE-FGHJK-LMNPQ-RSTUV-WXYZ2", 0,
+                                      NULL, &key_id);
+        ok(hr == S_OK, "got %08lx\n", hr);
+        hr = SLInstallProofOfPurchase(slc, L"msft:rm/algorithm/pkey/2005", L"abcdefghjklmnpqrstuvwxyz2", 0,
+                                      NULL, &key_id2);
+        ok(hr == S_OK, "got %08lx\n", hr);
+        ok(IsEqualGUID(&key_id, &key_id2), "the same key got %s and %s\n", wine_dbgstr_guid(&key_id),
+           wine_dbgstr_guid(&key_id2));
+
+        hr = SLUninstallProofOfPurchase(slc, &key_id);
+        ok(hr == S_OK, "got %08lx\n", hr);
+        hr = SLUninstallProofOfPurchase(slc, &key_id);
+        ok(hr == S_OK, "second uninstall: got %08lx\n", hr);
+        hr = SLUninstallProofOfPurchase(slc, NULL);
+        ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+    }
+
     memset(&id, 0, sizeof(id));
     hr = SLGetLicenseFileId(slc, sizeof(license) - 1, (const BYTE *)license, &id);
     ok(hr == S_OK, "got %08lx\n", hr);

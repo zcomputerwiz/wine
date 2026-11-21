@@ -27,6 +27,7 @@
 #include "windef.h"
 #include "winbase.h"
 #include "winternl.h"
+#include "winreg.h"
 #include "wine/debug.h"
 #include "wine/list.h"
 
@@ -314,6 +315,93 @@ HRESULT WINAPI SLGetSLIDList(HSLC handle, SLIDTYPE query_type, const SLID *query
 
     *count = n;
     *ids = list;
+    return S_OK;
+}
+
+/* Product keys: HKLM\SOFTWARE\SPPWine\ProductKeyStore\{pkey id}, a record with the algorithm and the last five
+ * characters of the key (the key itself is not kept). The key id is a stable id derived from the normalised key
+ * (placeholder: the clean-room spec asks for the Windows construction, SPP clean-room item U2). */
+static BOOL normalize_key( const WCHAR *key, char *out )
+{
+    unsigned int n = 0;
+
+    for (; *key; key++)
+    {
+        if (*key == '-' || *key == ' ') continue;
+        if (n == 25) return FALSE;
+        if (*key >= '0' && *key <= '9') out[n++] = *key;
+        else if (*key >= 'a' && *key <= 'z') out[n++] = *key - 'a' + 'A';
+        else if (*key >= 'A' && *key <= 'Z') out[n++] = *key;
+        else return FALSE;
+    }
+    out[n] = 0;
+    return n == 25;
+}
+
+static void derive_key_id( const char *key, SLID *id )
+{
+    UINT64 h[2] = { 0xcbf29ce484222325ull, 0x84222325cbf29ce4ull };
+    unsigned int i;
+
+    for (i = 0; key[i]; i++)
+    {
+        h[0] = (h[0] ^ (BYTE)key[i]) * 0x100000001b3ull;
+        h[1] = (h[1] ^ (BYTE)key[i]) * 0x100000001b3ull;
+    }
+    memcpy( id, h, sizeof(*id) );
+}
+
+static void format_key_id( const SLID *id, WCHAR *buffer )
+{
+    swprintf( buffer, 39, L"{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}", id->Data1, id->Data2, id->Data3,
+              id->Data4[0], id->Data4[1], id->Data4[2], id->Data4[3], id->Data4[4], id->Data4[5], id->Data4[6],
+              id->Data4[7] );
+}
+
+HRESULT WINAPI SLInstallProofOfPurchase(HSLC handle, PCWSTR algorithm, PCWSTR key_string, UINT size,
+                                        PBYTE data, SLID *key_id)
+{
+    WCHAR id_string[39], partial[6], name[80];
+    char key[26];
+    HKEY root, record;
+    SLID id;
+    LSTATUS ret;
+    int i;
+
+    TRACE("(%p %s %p %u %p %p)\n", handle, debugstr_w( algorithm ), key_string, size, data, key_id);
+
+    if (!handle || !algorithm || !*algorithm || !key_string || !key_id) return E_INVALIDARG;
+    if (!normalize_key( key_string, key )) return SL_E_INVALID_PRODUCT_KEY;
+
+    derive_key_id( key, &id );
+    format_key_id( &id, id_string );
+    for (i = 0; i < 5; i++) partial[i] = key[20 + i];
+    partial[5] = 0;
+
+    swprintf( name, ARRAY_SIZE(name), L"SOFTWARE\\SPPWine\\ProductKeyStore\\%s", id_string );
+    ret = RegCreateKeyExW( HKEY_LOCAL_MACHINE, name, 0, NULL, 0, KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &record, NULL );
+    if (ret) return HRESULT_FROM_WIN32( ret );
+    root = record;
+    ret = RegSetValueExW( root, L"Algorithm", 0, REG_SZ, (const BYTE *)algorithm,
+                          (wcslen( algorithm ) + 1) * sizeof(WCHAR) );
+    if (!ret) ret = RegSetValueExW( root, L"PartialKey", 0, REG_SZ, (const BYTE *)partial, sizeof(partial) );
+    RegCloseKey( root );
+    if (ret) return HRESULT_FROM_WIN32( ret );
+
+    *key_id = id;
+    return S_OK;
+}
+
+HRESULT WINAPI SLUninstallProofOfPurchase(HSLC handle, const SLID *key_id)
+{
+    WCHAR id_string[39], name[80];
+
+    TRACE("(%p %s)\n", handle, debugstr_guid( key_id ));
+
+    if (!handle || !key_id) return E_INVALIDARG;
+    format_key_id( key_id, id_string );
+    swprintf( name, ARRAY_SIZE(name), L"SOFTWARE\\SPPWine\\ProductKeyStore\\%s", id_string );
+    RegDeleteKeyExW( HKEY_LOCAL_MACHINE, name, KEY_WOW64_64KEY, 0 ); /* a missing record is not an error */
     return S_OK;
 }
 

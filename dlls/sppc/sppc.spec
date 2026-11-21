@@ -47,7 +47,7 @@
 @ stdcall SLGetSLIDList(ptr long ptr long ptr ptr)
 @ stub SLGetServiceInformation
 @ stdcall SLInstallLicense(ptr long ptr ptr)
-@ stub SLInstallProofOfPurchase
+@ stdcall SLInstallProofOfPurchase(ptr wstr wstr long ptr ptr)
 @ stub SLInstallProofOfPurchaseEx
 @ stub SLIsGenuineLocalEx
 @ stub SLLoadApplicationPolicies
@@ -61,7 +61,7 @@
 @ stub SLSetCurrentProductKey
 @ stub SLSetGenuineInformation
 @ stdcall SLUninstallLicense(ptr ptr)
-@ stub SLUninstallProofOfPurchase
+@ stdcall SLUninstallProofOfPurchase(ptr ptr)
 @ stub SLUnloadApplicationPolicies
 @ stdcall SLUnregisterEvent(ptr wstr ptr ptr)
 @ stub SLUnregisterPlugin

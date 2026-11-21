@@ -1,5 +1,6 @@
 EXTRADEFS = -D_SLC_
 MODULE    = sppc.dll
+IMPORTS   = advapi32
 
 EXTRADLLFLAGS = -Wb,--prefer-native
 
