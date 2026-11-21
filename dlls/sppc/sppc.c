@@ -101,6 +101,87 @@ HRESULT WINAPI SLClose(HSLC handle)
     return S_OK;
 }
 
+static BOOL get_license_dir( WCHAR *dir, DWORD size );
+
+static BOOL have_license(void)
+{
+    WCHAR path[MAX_PATH];
+    WIN32_FIND_DATAW data;
+    HANDLE find;
+
+    if (!get_license_dir( path, MAX_PATH - 16 )) return FALSE;
+    wcscat( path, L"\\*.xrm-ms" );
+    if ((find = FindFirstFileW( path, &data )) == INVALID_HANDLE_VALUE) return FALSE;
+    FindClose( find );
+    return TRUE;
+}
+
+/* SPP clean-room spec 01, section 3: "*" is granted after a right was consumed and with a license present,
+ * "office-ParentCode" is never there; the other names are to come from the license files. */
+static HRESULT get_policy_dword( HSLC handle, const WCHAR *name, DWORD *value )
+{
+    struct slc_handle *h;
+    BOOL consumed = FALSE;
+
+    if (!name) return E_INVALIDARG;
+    EnterCriticalSection( &handle_cs );
+    if ((h = get_handle( handle ))) consumed = h->right_consumed;
+    LeaveCriticalSection( &handle_cs );
+    if (!h) return E_HANDLE;
+
+    if (!wcscmp( name, L"*" ))
+    {
+        if (!consumed || !have_license()) return SL_E_RIGHT_NOT_GRANTED;
+        *value = 1;
+        return S_OK;
+    }
+    if (wcscmp( name, L"office-ParentCode" )) FIXME("policy %s is not served from the license files yet\n", debugstr_w( name ));
+    return SL_E_VALUE_NOT_FOUND;
+}
+
+HRESULT WINAPI SLGetPolicyInformationDWORD(HSLC handle, PCWSTR name, DWORD *value)
+{
+    DWORD v = 0;
+    HRESULT hr;
+
+    TRACE("(%p %s %p)\n", handle, debugstr_w( name ), value);
+
+    if (!value) return E_INVALIDARG;
+    if (SUCCEEDED(hr = get_policy_dword( handle, name, &v ))) *value = v;
+    return hr;
+}
+
+HRESULT WINAPI SLGetPolicyInformation(HSLC handle, PCWSTR name, SLDATATYPE *type, UINT *size, BYTE **value)
+{
+    DWORD v = 0;
+    HRESULT hr;
+
+    TRACE("(%p %s %p %p %p)\n", handle, debugstr_w( name ), type, size, value);
+
+    if (!size || !value) return E_INVALIDARG;
+    if (FAILED(hr = get_policy_dword( handle, name, &v ))) return hr;
+    if (!(*value = LocalAlloc( LMEM_FIXED, sizeof(v) ))) return E_OUTOFMEMORY;
+    memcpy( *value, &v, sizeof(v) );
+    *size = sizeof(v);
+    if (type) *type = SL_DATA_DWORD;
+    return S_OK;
+}
+
+/* The authentication data is only accepted: nothing here asks for an authentication result. */
+HRESULT WINAPI SLSetAuthenticationData(HSLC handle, UINT size, const BYTE *data)
+{
+    BOOL known;
+
+    TRACE("(%p %u %p)\n", handle, size, data);
+
+    EnterCriticalSection( &handle_cs );
+    known = get_handle( handle ) != NULL;
+    LeaveCriticalSection( &handle_cs );
+    if (!known) return E_HANDLE;
+    if (!size || !data) return E_INVALIDARG;
+    return S_OK;
+}
+
 HRESULT WINAPI SLConsumeRight(HSLC handle, const SLID *app, const SLID *sku, PCWSTR right, PVOID reserved)
 {
     struct slc_handle *h;
@@ -493,6 +574,75 @@ HRESULT WINAPI SLInstallLicense(HSLC handle, UINT size, const BYTE *blob, SLID *
     }
     *id = license_id;
     return S_OK;
+}
+
+/* A policy context only remembers its application and product; the values are not served yet (see SPP clean-room
+ * spec 01, section 3: they are to come from the license files). */
+struct policy_context
+{
+    struct list entry;
+    SLID app;
+    SLID sku;
+    BOOL has_sku;
+};
+
+static struct list policy_contexts = LIST_INIT( policy_contexts );
+
+static struct policy_context *get_policy_context( HSLP handle )
+{
+    struct policy_context *c;
+
+    LIST_FOR_EACH_ENTRY( c, &policy_contexts, struct policy_context, entry )
+        if (c == handle) return c;
+    return NULL;
+}
+
+HRESULT WINAPI SLLoadApplicationPolicies(const SLID *app, const SLID *sku, DWORD flags, HSLP *handle)
+{
+    struct policy_context *c;
+
+    TRACE("(%s %s %lx %p)\n", debugstr_guid( app ), debugstr_guid( sku ), flags, handle);
+
+    if (!app || !handle || flags) return E_INVALIDARG;
+    if (!(c = calloc( 1, sizeof(*c) ))) return E_OUTOFMEMORY;
+    c->app = *app;
+    if (sku)
+    {
+        c->sku = *sku;
+        c->has_sku = TRUE;
+    }
+    EnterCriticalSection( &handle_cs );
+    list_add_tail( &policy_contexts, &c->entry );
+    LeaveCriticalSection( &handle_cs );
+    *handle = c;
+    return S_OK;
+}
+
+HRESULT WINAPI SLUnloadApplicationPolicies(HSLP handle, DWORD flags)
+{
+    struct policy_context *c;
+
+    TRACE("(%p %lx)\n", handle, flags);
+
+    EnterCriticalSection( &handle_cs );
+    if ((c = get_policy_context( handle ))) list_remove( &c->entry );
+    LeaveCriticalSection( &handle_cs );
+    if (!c) return E_HANDLE;
+    free( c );
+    return S_OK;
+}
+
+HRESULT WINAPI SLGetApplicationPolicy(HSLP handle, PCWSTR name, SLDATATYPE *type, UINT *size, PBYTE *value)
+{
+    BOOL known;
+
+    FIXME("(%p %s %p %p %p) no policy values yet\n", handle, debugstr_w( name ), type, size, value);
+
+    if (!name || !size || !value) return E_INVALIDARG;
+    EnterCriticalSection( &handle_cs );
+    known = get_policy_context( handle ) != NULL;
+    LeaveCriticalSection( &handle_cs );
+    return known ? SL_E_VALUE_NOT_FOUND : E_HANDLE;
 }
 
 HRESULT WINAPI SLPersistApplicationPolicies(const SLID *app, const SLID *product, DWORD flags)

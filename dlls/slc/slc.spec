@@ -19,8 +19,8 @@
 @ stdcall SLGetLicensingStatusInformation(ptr ptr ptr wstr ptr ptr) sppc.SLGetLicensingStatusInformation
 @ stub SLGetPKeyId
 @ stub SLGetPKeyInformation
-@ stub SLGetPolicyInformation
-@ stub SLGetPolicyInformationDWORD
+@ stdcall SLGetPolicyInformation(ptr wstr ptr ptr ptr) sppc.SLGetPolicyInformation
+@ stdcall SLGetPolicyInformationDWORD(ptr wstr ptr) sppc.SLGetPolicyInformationDWORD
 @ stdcall SLGetProductSkuInformation(ptr ptr wstr ptr ptr ptr) sppc.SLGetProductSkuInformation
 @ stub SLGetSAMLicense
 @ stdcall SLGetSLIDList(ptr long ptr long ptr ptr) sppc.SLGetSLIDList

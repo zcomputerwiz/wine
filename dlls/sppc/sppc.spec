@@ -30,7 +30,7 @@
 @ stub SLGenerateOfflineInstallationIdEx
 @ stub SLGetActiveLicenseInfo
 @ stub SLGetApplicationInformation
-@ stub SLGetApplicationPolicy
+@ stdcall SLGetApplicationPolicy(ptr wstr ptr ptr ptr)
 @ stub SLGetAuthenticationResult
 @ stub SLGetEncryptedPIDEx
 @ stub SLGetGenuineInformation
@@ -41,8 +41,8 @@
 @ stdcall SLGetLicensingStatusInformation(ptr ptr ptr wstr ptr ptr)
 @ stub SLGetPKeyId
 @ stub SLGetPKeyInformation
-@ stub SLGetPolicyInformation
-@ stub SLGetPolicyInformationDWORD
+@ stdcall SLGetPolicyInformation(ptr wstr ptr ptr ptr)
+@ stdcall SLGetPolicyInformationDWORD(ptr wstr ptr)
 @ stdcall SLGetProductSkuInformation(ptr ptr wstr ptr ptr ptr)
 @ stdcall SLGetSLIDList(ptr long ptr long ptr ptr)
 @ stub SLGetServiceInformation
@@ -50,18 +50,18 @@
 @ stdcall SLInstallProofOfPurchase(ptr wstr wstr long ptr ptr)
 @ stub SLInstallProofOfPurchaseEx
 @ stub SLIsGenuineLocalEx
-@ stub SLLoadApplicationPolicies
+@ stdcall SLLoadApplicationPolicies(ptr ptr long ptr)
 @ stdcall SLOpen(ptr)
 @ stdcall SLPersistApplicationPolicies(ptr ptr long)
 @ stub SLPersistRTSPayloadOverride
 @ stub SLReArm
 @ stdcall SLRegisterEvent(ptr wstr ptr ptr)
 @ stub SLRegisterPlugin
-@ stub SLSetAuthenticationData
+@ stdcall SLSetAuthenticationData(ptr long ptr)
 @ stub SLSetCurrentProductKey
 @ stub SLSetGenuineInformation
 @ stdcall SLUninstallLicense(ptr ptr)
 @ stdcall SLUninstallProofOfPurchase(ptr ptr)
-@ stub SLUnloadApplicationPolicies
+@ stdcall SLUnloadApplicationPolicies(ptr long)
 @ stdcall SLUnregisterEvent(ptr wstr ptr ptr)
 @ stub SLUnregisterPlugin
