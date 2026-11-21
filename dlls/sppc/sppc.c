@@ -160,18 +160,11 @@ HRESULT WINAPI SLUnregisterEvent(HSLC handle, PCWSTR event_id, const SLID *app, 
     return hr;
 }
 
-/* The license id is the licenseId="{...}" attribute near the start of the license document. */
-static BOOL parse_license_id( const BYTE *blob, UINT size, SLID *id )
+/* 36 characters: 8-4-4-4-12 hexadecimal digits */
+static BOOL parse_guid( const char *p, SLID *id )
 {
-    static const char tag[] = "licenseId=\"{";
-    const char *p = (const char *)blob, *end = p + min( size, 4096 );
     unsigned int i, v = 0;
 
-    for (; p + sizeof(tag) + 36 <= end; p++) if (!memcmp( p, tag, sizeof(tag) - 1 )) break;
-    if (p + sizeof(tag) + 36 > end) return FALSE;
-    p += sizeof(tag) - 1;
-
-    /* 8-4-4-4-12 hexadecimal digits */
     memset( id, 0, sizeof(*id) );
     for (i = 0; i < 36; i++)
     {
@@ -193,7 +186,19 @@ static BOOL parse_license_id( const BYTE *blob, UINT size, SLID *id )
             id->Data4[k] = id->Data4[k] << 4 | v;
         }
     }
-    return p[36] == '}';
+    return TRUE;
+}
+
+/* The license id is the licenseId="{...}" attribute near the start of the license document. */
+static BOOL parse_license_id( const BYTE *blob, UINT size, SLID *id )
+{
+    static const char tag[] = "licenseId=\"{";
+    const char *p = (const char *)blob, *end = p + min( size, 4096 );
+
+    for (; p + sizeof(tag) + 36 <= end; p++) if (!memcmp( p, tag, sizeof(tag) - 1 )) break;
+    if (p + sizeof(tag) + 36 > end) return FALSE;
+    p += sizeof(tag) - 1;
+    return parse_guid( p, id ) && p[36] == '}';
 }
 
 /* Licenses are kept as files of their own inside the prefix, named after the license id (WineExplorer's
@@ -221,6 +226,97 @@ static BOOL get_license_dir( WCHAR *dir, DWORD size )
     return TRUE;
 }
 
+static BOOL get_license_path( const SLID *id, WCHAR *path )
+{
+    if (!get_license_dir( path, MAX_PATH - 48 )) return FALSE;
+    swprintf( path + wcslen( path ), 48, L"\\{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}.xrm-ms",
+              id->Data1, id->Data2, id->Data3, id->Data4[0], id->Data4[1], id->Data4[2], id->Data4[3],
+              id->Data4[4], id->Data4[5], id->Data4[6], id->Data4[7] );
+    return TRUE;
+}
+
+HRESULT WINAPI SLGetLicenseFileId(HSLC handle, UINT size, const BYTE *blob, SLID *id)
+{
+    TRACE("(%p %u %p %p)\n", handle, size, blob, id);
+
+    if (!handle || !size || !blob || !id) return E_INVALIDARG;
+    return parse_license_id( blob, size, id ) ? S_OK : E_INVALIDARG;
+}
+
+HRESULT WINAPI SLUninstallLicense(HSLC handle, const SLID *id)
+{
+    WCHAR path[MAX_PATH];
+
+    TRACE("(%p %s)\n", handle, debugstr_guid( id ));
+
+    if (!handle || !id) return E_INVALIDARG;
+    if (!get_license_path( id, path )) return HRESULT_FROM_WIN32( ERROR_PATH_NOT_FOUND );
+    if (!DeleteFileW( path )) return HRESULT_FROM_WIN32( GetLastError() );
+    return S_OK;
+}
+
+/* The ids of the license files in the store: a license file is its own license here. */
+HRESULT WINAPI SLGetSLIDList(HSLC handle, SLIDTYPE query_type, const SLID *query_id, SLIDTYPE return_type,
+                             UINT *count, SLID **ids)
+{
+    WCHAR path[MAX_PATH], *name;
+    WIN32_FIND_DATAW data;
+    HANDLE find;
+    SLID id, *list = NULL;
+    UINT n = 0, capacity = 0;
+    char guid[37];
+    unsigned int i;
+
+    TRACE("(%p %d %s %d %p %p)\n", handle, query_type, debugstr_guid( query_id ), return_type, count, ids);
+
+    if (!handle || !count || !ids || query_type >= SL_ID_LAST || return_type >= SL_ID_LAST) return E_INVALIDARG;
+    *count = 0;
+    *ids = NULL;
+
+    if (query_type != SL_ID_ALL_LICENSES && query_type != SL_ID_ALL_LICENSE_FILES)
+    {
+        FIXME("query type %d for %s is not served from the store\n", query_type, debugstr_guid( query_id ));
+        return S_OK;
+    }
+    if (return_type != SL_ID_LICENSE && return_type != SL_ID_LICENSE_FILE)
+    {
+        FIXME("return type %d is not served from the store\n", return_type);
+        return S_OK;
+    }
+
+    if (!get_license_dir( path, MAX_PATH - 48 )) return HRESULT_FROM_WIN32( ERROR_PATH_NOT_FOUND );
+    name = path + wcslen( path );
+    wcscpy( name, L"\\*.xrm-ms" );
+    if ((find = FindFirstFileW( path, &data )) == INVALID_HANDLE_VALUE) return S_OK;
+    do
+    {
+        if (wcslen( data.cFileName ) != 45 || data.cFileName[0] != '{' || data.cFileName[37] != '}') continue;
+        for (i = 0; i < 36; i++) guid[i] = data.cFileName[1 + i] < 128 ? data.cFileName[1 + i] : 0;
+        guid[36] = 0;
+        if (!parse_guid( guid, &id )) continue;
+        if (n == capacity)
+        {
+            SLID *new_list = LocalAlloc( LMEM_FIXED, (capacity + 16) * sizeof(*list) );
+            if (!new_list)
+            {
+                LocalFree( list );
+                FindClose( find );
+                return E_OUTOFMEMORY;
+            }
+            if (list) memcpy( new_list, list, n * sizeof(*list) );
+            LocalFree( list );
+            list = new_list;
+            capacity += 16;
+        }
+        list[n++] = id;
+    } while (FindNextFileW( find, &data ));
+    FindClose( find );
+
+    *count = n;
+    *ids = list;
+    return S_OK;
+}
+
 HRESULT WINAPI SLInstallLicense(HSLC handle, UINT size, const BYTE *blob, SLID *id)
 {
     WCHAR path[MAX_PATH];
@@ -234,11 +330,7 @@ HRESULT WINAPI SLInstallLicense(HSLC handle, UINT size, const BYTE *blob, SLID *
     if (!handle || !size || !blob || !id) return E_INVALIDARG;
     if (!parse_license_id( blob, size, &license_id )) return E_INVALIDARG;
 
-    if (!get_license_dir( path, ARRAY_SIZE(path) - 48 )) return HRESULT_FROM_WIN32( ERROR_PATH_NOT_FOUND );
-    swprintf( path + wcslen( path ), 48, L"\\{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}.xrm-ms",
-              license_id.Data1, license_id.Data2, license_id.Data3, license_id.Data4[0], license_id.Data4[1],
-              license_id.Data4[2], license_id.Data4[3], license_id.Data4[4], license_id.Data4[5],
-              license_id.Data4[6], license_id.Data4[7] );
+    if (!get_license_path( &license_id, path )) return HRESULT_FROM_WIN32( ERROR_PATH_NOT_FOUND );
 
     file = CreateFileW( path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
     if (file == INVALID_HANDLE_VALUE) return HRESULT_FROM_WIN32( GetLastError() );

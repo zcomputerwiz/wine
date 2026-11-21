@@ -145,7 +145,9 @@ static void test_SLInstallLicense(void)
     static const GUID expected = {0x7cbeb5e5, 0x2bf9, 0x4f2e, {0x9e, 0x0b, 0x1f, 0x0a, 0x8f, 0x2b, 0x4b, 0x77}};
     WCHAR path[MAX_PATH];
     HSLC slc;
-    SLID id;
+    SLID id, *ids;
+    UINT count, i;
+    BOOL found;
     HRESULT hr;
 
     if (!GetProcAddress(GetModuleHandleA("ntdll.dll"), "wine_get_version"))
@@ -173,9 +175,31 @@ static void test_SLInstallLicense(void)
     ok(hr == S_OK, "got %08lx\n", hr);
     ok(IsEqualGUID(&id, &expected), "got %s\n", wine_dbgstr_guid(&id));
 
+    memset(&id, 0, sizeof(id));
+    hr = SLGetLicenseFileId(slc, sizeof(license) - 1, (const BYTE *)license, &id);
+    ok(hr == S_OK, "got %08lx\n", hr);
+    ok(IsEqualGUID(&id, &expected), "got %s\n", wine_dbgstr_guid(&id));
+
+    count = 0;
+    ids = NULL;
+    hr = SLGetSLIDList(slc, SL_ID_ALL_LICENSE_FILES, NULL, SL_ID_LICENSE_FILE, &count, &ids);
+    ok(hr == S_OK, "got %08lx\n", hr);
+    for (i = 0, found = FALSE; i < count; i++) if (IsEqualGUID(&ids[i], &expected)) found = TRUE;
+    ok(found, "installed license not listed (%u ids)\n", count);
+    LocalFree(ids);
+
+    hr = SLGetSLIDList(slc, SL_ID_ALL_LICENSE_FILES, NULL, SL_ID_LICENSE_FILE, NULL, &ids);
+    ok(hr == E_INVALIDARG, "got %08lx\n", hr);
+
     if (!GetEnvironmentVariableW(L"ProgramData", path, MAX_PATH - 80)) GetWindowsDirectoryW(path, MAX_PATH - 80);
     lstrcatW(path, L"\\SPPWine\\Licenses\\{7CBEB5E5-2BF9-4F2E-9E0B-1F0A8F2B4B77}.xrm-ms");
-    ok(DeleteFileW(path), "license file not in the store: %lu\n", GetLastError());
+    ok(GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES, "license file not in the store: %lu\n", GetLastError());
+
+    hr = SLUninstallLicense(slc, &expected);
+    ok(hr == S_OK, "got %08lx\n", hr);
+    ok(GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES, "license file still in the store\n");
+    hr = SLUninstallLicense(slc, &expected);
+    ok(hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), "got %08lx\n", hr);
 
     SLClose(slc);
 }

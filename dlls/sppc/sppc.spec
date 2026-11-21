@@ -36,7 +36,7 @@
 @ stub SLGetGenuineInformation
 @ stub SLGetInstalledProductKeyIds
 @ stub SLGetLicense
-@ stub SLGetLicenseFileId
+@ stdcall SLGetLicenseFileId(ptr long ptr ptr)
 @ stub SLGetLicenseInformation
 @ stdcall SLGetLicensingStatusInformation(ptr ptr ptr wstr ptr ptr)
 @ stub SLGetPKeyId
@@ -44,7 +44,7 @@
 @ stub SLGetPolicyInformation
 @ stub SLGetPolicyInformationDWORD
 @ stub SLGetProductSkuInformation
-@ stub SLGetSLIDList
+@ stdcall SLGetSLIDList(ptr long ptr long ptr ptr)
 @ stub SLGetServiceInformation
 @ stdcall SLInstallLicense(ptr long ptr ptr)
 @ stub SLInstallProofOfPurchase
@@ -60,7 +60,7 @@
 @ stub SLSetAuthenticationData
 @ stub SLSetCurrentProductKey
 @ stub SLSetGenuineInformation
-@ stub SLUninstallLicense
+@ stdcall SLUninstallLicense(ptr ptr)
 @ stub SLUninstallProofOfPurchase
 @ stub SLUnloadApplicationPolicies
 @ stdcall SLUnregisterEvent(ptr wstr ptr ptr)

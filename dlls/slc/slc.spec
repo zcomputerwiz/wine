@@ -14,7 +14,7 @@
 @ stub SLGenerateOfflineInstallationId
 @ stub SLGetInstalledSAMLicenseApplications
 @ stub SLGetLicense
-@ stub SLGetLicenseFileId
+@ stdcall SLGetLicenseFileId(ptr long ptr ptr) sppc.SLGetLicenseFileId
 @ stub SLGetLicenseInformation
 @ stdcall SLGetLicensingStatusInformation(ptr ptr ptr wstr ptr ptr) sppc.SLGetLicensingStatusInformation
 @ stub SLGetPKeyId
@@ -23,7 +23,7 @@
 @ stub SLGetPolicyInformationDWORD
 @ stub SLGetProductSkuInformation
 @ stub SLGetSAMLicense
-@ stub SLGetSLIDList
+@ stdcall SLGetSLIDList(ptr long ptr long ptr ptr) sppc.SLGetSLIDList
 @ stub SLGetServiceInformation
 @ stdcall SLGetWindowsInformation(wstr ptr ptr ptr)
 @ stdcall SLGetWindowsInformationDWORD(wstr ptr)
@@ -34,7 +34,7 @@
 @ stub SLReArmWindows
 @ stdcall SLRegisterEvent(ptr wstr ptr ptr) sppc.SLRegisterEvent
 @ stub SLRegisterWindowsEvent
-@ stub SLUninstallLicense
+@ stdcall SLUninstallLicense(ptr ptr) sppc.SLUninstallLicense
 @ stub SLUninstallProofOfPurchase
 @ stub SLUninstallSAMLicense
 @ stdcall SLUnregisterEvent(ptr wstr ptr ptr) sppc.SLUnregisterEvent
