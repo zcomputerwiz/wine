@@ -540,8 +540,9 @@ enum loadorder get_load_order( const UNICODE_STRING *nt_name, BOOL is_system_dir
             goto done;
         }
         /* a program mapped as a module (LoadLibraryEx as image resource, e.g. for its version
-         * resource) is never replaced by a builtin of the same name: a Microsoft setup.exe in an
-         * installer directory would get WineExplorer's own setup.exe */
+         * resource) prefers the native file over a builtin of the same name unless a load order
+         * setting above says otherwise: a Microsoft setup.exe in an installer directory would
+         * get WineExplorer's own setup.exe */
         if (pe_mapping && !(pe_mapping->image.image_charact & IMAGE_FILE_DLL) &&
             !pe_mapping->image.wine_builtin && !pe_mapping->image.wine_fakedll)
         {

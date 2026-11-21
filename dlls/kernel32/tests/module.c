@@ -2076,6 +2076,46 @@ static void test_known_dlls_load(void)
     DeleteFileA( dll );
 }
 
+/* a program outside the system directory, named like a builtin program, mapped as an image
+ * resource, must be the file on disk (WineExplorer: ntdll/unix/loadorder.c) */
+static void test_program_not_replaced_by_builtin(void)
+{
+    static const char marker[] = "program-not-replaced";
+    char tmp_path[MAX_PATH], self[MAX_PATH], file[MAX_PATH];
+    HANDLE update;
+    HMODULE mod;
+    HRSRC rsrc;
+    BOOL ret;
+
+    GetTempPathA( sizeof(tmp_path), tmp_path );
+    GetModuleFileNameA( NULL, self, MAX_PATH );
+    sprintf( file, "%snotepad.exe", tmp_path );
+
+    ret = CopyFileA( self, file, FALSE );
+    ok( ret, "CopyFileA failed %lu\n", GetLastError() );
+    if (!ret) return;
+
+    update = BeginUpdateResourceA( file, FALSE );
+    ok( !!update, "BeginUpdateResourceA failed %lu\n", GetLastError() );
+    if (update)
+    {
+        ret = UpdateResourceA( update, "WTPRG", "MARK", 0, (void *)marker, sizeof(marker) );
+        ok( ret, "UpdateResourceA failed %lu\n", GetLastError() );
+        ret = EndUpdateResourceA( update, FALSE );
+        ok( ret, "EndUpdateResourceA failed %lu\n", GetLastError() );
+    }
+
+    mod = LoadLibraryExA( file, 0, LOAD_LIBRARY_AS_IMAGE_RESOURCE );
+    ok( !!mod, "LoadLibraryExA failed %lu\n", GetLastError() );
+    if (mod)
+    {
+        rsrc = FindResourceA( mod, "MARK", "WTPRG" );
+        ok( !!rsrc, "marker resource not found: the file on disk was replaced (%lu)\n", GetLastError() );
+        FreeLibrary( mod );
+    }
+    DeleteFileA( file );
+}
+
 START_TEST(module)
 {
     WCHAR filenameW[MAX_PATH];
@@ -2117,4 +2157,5 @@ START_TEST(module)
     test_hash_links();
     test_dont_resolve_dll_references();
     test_known_dlls_load();
+    test_program_not_replaced_by_builtin();
 }
