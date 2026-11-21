@@ -4870,8 +4870,10 @@ static int check_create_subkey( const struct object_params *params )
     if (!(parent = lookup_named_object( params->root, params->name, params->attr, &left ))) return TRUE;
     if (left.len && parent->ops == &key_ops && !check_object_access( NULL, parent, &access ))
     {
+        /* never a link: a profile key made a link would send the account's HKEY_CURRENT_USER, and whatever a
+         * privileged program writes there, into another tree */
         ret = key_in_display_cache( (struct key *)parent, &left ) ||
-              service_profile_create_allowed( (struct key *)parent, &left );
+              (!(params->attr & OBJ_OPENLINK) && service_profile_create_allowed( (struct key *)parent, &left ));
         if (ret) clear_error();
     }
     release_object( parent );
