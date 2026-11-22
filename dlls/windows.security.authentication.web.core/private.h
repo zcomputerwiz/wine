@@ -101,6 +101,7 @@ HRESULT token_broker_find_account( IWebAccountProvider *provider, HSTRING id, IW
 
 HRESULT web_account_create( IWebAccountProvider *provider, const WCHAR *id, UINT32 id_len, const WCHAR *user_name,
                             UINT32 user_name_len, WebAccountState state, IWebAccount **out );
+void web_account_set_properties( IWebAccount *account, IMap_HSTRING_HSTRING *properties );
 HSTRING web_account_id( IInspectable *account );
 
 /*

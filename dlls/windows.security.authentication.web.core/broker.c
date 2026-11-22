@@ -329,6 +329,21 @@ static void provider_fields( IWebAccountProvider *provider, HSTRING *id, HSTRING
     }
 }
 
+/* a Microsoft account (the "consumers" authority) is reported as WebAccountState_None, an organization's as Connected */
+static WebAccountState account_state( IWebAccountProvider *provider )
+{
+    HSTRING id, authority;
+    const WCHAR *text;
+    WebAccountState state = WebAccountState_Connected;
+
+    provider_fields( provider, &id, &authority );
+    if (authority && (text = WindowsGetStringRawBuffer( authority, NULL )) && !wcscmp( text, L"consumers" ))
+        state = WebAccountState_None;
+    WindowsDeleteString( id );
+    WindowsDeleteString( authority );
+    return state;
+}
+
 /* the broker's answer to a token request as a WebTokenRequestResult */
 static HRESULT token_result( const struct broker_reply *reply, IWebAccountProvider *provider, IWebTokenRequestResult **out )
 {
@@ -342,13 +357,23 @@ static HRESULT token_result( const struct broker_reply *reply, IWebAccountProvid
 
     if (reply->status == WebTokenRequestStatus_Success)
     {
-        if (reply->field[TOKENBROKER_REPLY_ACCOUNT_ID].len &&
-            FAILED(hr = web_account_create( provider, reply->field[TOKENBROKER_REPLY_ACCOUNT_ID].text,
-                                            reply->field[TOKENBROKER_REPLY_ACCOUNT_ID].len,
-                                            reply->field[TOKENBROKER_REPLY_USER_NAME].text,
-                                            reply->field[TOKENBROKER_REPLY_USER_NAME].len, WebAccountState_Connected,
-                                            &account )))
-            goto done;
+        if (reply->field[TOKENBROKER_REPLY_ACCOUNT_ID].len)
+        {
+            IMap_HSTRING_HSTRING *account_properties;
+
+            if (FAILED(hr = web_account_create( provider, reply->field[TOKENBROKER_REPLY_ACCOUNT_ID].text,
+                                                reply->field[TOKENBROKER_REPLY_ACCOUNT_ID].len,
+                                                reply->field[TOKENBROKER_REPLY_USER_NAME].text,
+                                                reply->field[TOKENBROKER_REPLY_USER_NAME].len,
+                                                account_state( provider ), &account )))
+                goto done;
+            if (SUCCEEDED(properties_from_pairs( reply->field[TOKENBROKER_REPLY_ACCOUNT_PROPERTIES],
+                                                 &account_properties )))
+            {
+                web_account_set_properties( account, account_properties );
+                IMap_HSTRING_HSTRING_Release( account_properties );
+            }
+        }
         if (FAILED(hr = properties_from_pairs( reply->field[TOKENBROKER_REPLY_PROPERTIES], &properties ))) goto done;
         if (FAILED(hr = WindowsCreateString( reply->field[TOKENBROKER_REPLY_TOKEN].text,
                                              reply->field[TOKENBROKER_REPLY_TOKEN].len, &token )))
@@ -474,7 +499,7 @@ HRESULT token_broker_find_accounts( IWebAccountProvider *provider, HSTRING clien
     }
     while (count < max && next_string( &rest, &id ) && next_string( &rest, &name ))
     {
-        if (FAILED(hr = web_account_create( provider, id.text, id.len, name.text, name.len, WebAccountState_Connected,
+        if (FAILED(hr = web_account_create( provider, id.text, id.len, name.text, name.len, account_state( provider ),
                                             &accounts[count] )))
             goto done;
         count++;
@@ -520,7 +545,7 @@ HRESULT token_broker_find_account( IWebAccountProvider *provider, HSTRING id, IW
         hr = web_account_create( provider, reply.field[TOKENBROKER_REPLY_ACCOUNT_ID].text,
                                  reply.field[TOKENBROKER_REPLY_ACCOUNT_ID].len,
                                  reply.field[TOKENBROKER_REPLY_USER_NAME].text,
-                                 reply.field[TOKENBROKER_REPLY_USER_NAME].len, WebAccountState_Connected, account );
+                                 reply.field[TOKENBROKER_REPLY_USER_NAME].len, account_state( provider ), account );
     free_reply( &reply );
     return hr;
 }
