@@ -1380,7 +1380,7 @@ int is_obj_signaled( struct object *obj )
     struct object *sync;
     int signaled;
 
-    sync = obj->ops->get_sync( obj );
+    sync = get_obj_sync( obj );
     signaled = sync->ops->signaled( sync, NULL );
     if (signaled)
         sync->ops->satisfied( sync, NULL );

@@ -84,6 +84,7 @@ struct completion_packet
     struct object      obj;                       /* object header */
     struct list        entry;                     /* list entry in the target object wait completion packet queue */
     struct object     *target;                    /* target object this packet waits for */
+    struct object     *sync;                      /* sync object whose queue holds the packet (referenced) */
     struct completion *completion;                /* completion object */
     apc_param_t        ckey;                      /* key context */
     apc_param_t        cvalue;                    /* apc context */
@@ -318,12 +319,14 @@ struct type_descr completion_packet_type =
 
 static void completion_packet_dump( struct object *, int );
 static void completion_packet_destroy( struct object * );
+static bool completion_packet_init( struct object *, const void * );
 
 static const struct object_ops completion_packet_ops =
 {
     .size         = sizeof(struct completion_packet),
     .type         = &completion_packet_type,
     .dump         = completion_packet_dump,
+    .init         = completion_packet_init,
     .destroy      = completion_packet_destroy,
 };
 
@@ -349,7 +352,7 @@ static struct completion_packet *get_completion_packet_obj( struct process *proc
 /* try to wake up completion packets in the object when it's signaled */
 void wake_up_completion_packets( struct object *obj )
 {
-    struct completion_packet *packet;
+    struct completion_packet *packet, *next;
 
     if (list_empty( &obj->completion_packet_queue ))
         return;
@@ -357,7 +360,8 @@ void wake_up_completion_packets( struct object *obj )
     if (!is_obj_signaled( obj ))
         return;
 
-    LIST_FOR_EACH_ENTRY( packet, &obj->completion_packet_queue, struct completion_packet, entry )
+    grab_object( obj );  /* releasing the references of the packets must not free the queue under us */
+    LIST_FOR_EACH_ENTRY_SAFE( packet, next, &obj->completion_packet_queue, struct completion_packet, entry )
     {
         assert( packet->in_target_packet_queue );
         assert( packet->target );
@@ -365,13 +369,16 @@ void wake_up_completion_packets( struct object *obj )
         assert( packet->completion );
 
         list_remove( &packet->entry );
-        release_object( packet->target );
         packet->in_target_packet_queue = 0;
-        packet->target = NULL;
         packet->in_completion_queue = 1;
         add_completion( packet->completion, packet->ckey, packet->cvalue, packet->status,
                         packet->information, packet );
+        release_object( packet->target );
+        packet->target = NULL;
+        release_object( packet->sync );
+        packet->sync = NULL;
     }
+    release_object( obj );
 }
 
 static void cancel_completion_packet( struct completion_packet *packet )
@@ -383,6 +390,12 @@ static void cancel_completion_packet( struct completion_packet *packet )
         assert( packet->target );
         list_remove( &packet->entry );
         packet->in_target_packet_queue = 0;
+    }
+
+    if (packet->sync)
+    {
+        release_object( packet->sync );
+        packet->sync = NULL;
     }
 
     if (packet->in_completion_queue)
@@ -413,6 +426,25 @@ static void cancel_completion_packet( struct completion_packet *packet )
         release_object( packet->completion );
         packet->completion = NULL;
     }
+}
+
+static bool completion_packet_init( struct object *obj, const void *init_data )
+{
+    struct completion_packet *packet = (struct completion_packet *)obj;
+
+    /* the allocator does not clear the object */
+    list_init( &packet->entry );
+    packet->target = NULL;
+    packet->sync = NULL;
+    packet->completion = NULL;
+    packet->ckey = 0;
+    packet->cvalue = 0;
+    packet->information = 0;
+    packet->status = 0;
+    packet->in_target_packet_queue = 0;
+    packet->in_completion_queue = 0;
+    packet->pad = 0;
+    return true;
 }
 
 static void completion_packet_destroy( struct object *obj )
@@ -603,6 +635,18 @@ DECL_HANDLER(associate_completion_packet)
         return;
     }
 
+    /* objects without a wait state cannot be waited for */
+    sync = get_obj_sync( target );
+    if (!sync->ops->signaled)
+    {
+        release_object( sync );
+        release_object( target );
+        release_object( packet );
+        set_error( STATUS_INVALID_PARAMETER_3 );
+        return;
+    }
+    release_object( sync );
+
     completion = get_completion_obj( current->process, req->completion, IO_COMPLETION_MODIFY_STATE );
     if (!completion)
     {
@@ -632,10 +676,10 @@ DECL_HANDLER(associate_completion_packet)
     else
     {
         packet->target = grab_object( target );
-        sync = target->ops->get_sync( target );
+        sync = get_obj_sync( target );
         list_add_tail( &sync->completion_packet_queue, &packet->entry );
         packet->in_target_packet_queue = 1;
-        release_object( sync );
+        packet->sync = sync;  /* keeps the queue alive while the packet is on it */
         reply->already_signaled = 0;
     }
     release_object( completion );
