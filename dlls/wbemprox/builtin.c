@@ -2048,7 +2048,13 @@ static void get_compsys_membership( struct record_computersystem *rec )
     rec->workgroup = NULL;
     if (NetGetJoinInformation( NULL, &name, &type ) == NERR_Success && name && type == NetSetupDomainName)
     {
-        rec->domain = wcsdup( name );
+        /* Windows gives the DNS name of the domain; the join state WineExplorer keeps for Windows programs has it */
+        WCHAR dns[256];
+        DWORD size = sizeof(dns);
+        if (!RegGetValueW( HKEY_LOCAL_MACHINE, L"Software\\WineExplorer\\Domain", L"Name", RRF_RT_REG_SZ, NULL, dns, &size ) && dns[0])
+            rec->domain = wcsdup( dns );
+        else
+            rec->domain = wcsdup( name );
         rec->partofdomain = -1;
         rec->domainrole = 1; /* member workstation */
     }
