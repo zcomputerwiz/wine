@@ -11,4 +11,5 @@ SOURCES = \
 	package.c \
 	pri.c \
 	resources.c \
+	staterepository.c \
 	vector.c
