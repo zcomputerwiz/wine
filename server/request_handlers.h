@@ -290,6 +290,9 @@ DECL_HANDLER(remove_completion);
 DECL_HANDLER(get_thread_completion);
 DECL_HANDLER(query_completion);
 DECL_HANDLER(set_completion_info);
+DECL_HANDLER(create_completion_packet);
+DECL_HANDLER(associate_completion_packet);
+DECL_HANDLER(cancel_completion_packet);
 DECL_HANDLER(add_fd_completion);
 DECL_HANDLER(set_fd_disp_info);
 DECL_HANDLER(set_fd_name_info);
@@ -622,6 +625,9 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_get_thread_completion,
     (req_handler)req_query_completion,
     (req_handler)req_set_completion_info,
+    (req_handler)req_create_completion_packet,
+    (req_handler)req_associate_completion_packet,
+    (req_handler)req_cancel_completion_packet,
     (req_handler)req_add_fd_completion,
     (req_handler)req_set_fd_disp_info,
     (req_handler)req_set_fd_name_info,
@@ -2316,6 +2322,23 @@ C_ASSERT( offsetof(struct set_completion_info_request, handle) == 12 );
 C_ASSERT( offsetof(struct set_completion_info_request, ckey) == 16 );
 C_ASSERT( offsetof(struct set_completion_info_request, chandle) == 24 );
 C_ASSERT( sizeof(struct set_completion_info_request) == 32 );
+C_ASSERT( offsetof(struct create_completion_packet_request, access) == 12 );
+C_ASSERT( sizeof(struct create_completion_packet_request) == 16 );
+C_ASSERT( offsetof(struct create_completion_packet_reply, handle) == 8 );
+C_ASSERT( sizeof(struct create_completion_packet_reply) == 16 );
+C_ASSERT( offsetof(struct associate_completion_packet_request, packet) == 12 );
+C_ASSERT( offsetof(struct associate_completion_packet_request, completion) == 16 );
+C_ASSERT( offsetof(struct associate_completion_packet_request, target) == 20 );
+C_ASSERT( offsetof(struct associate_completion_packet_request, ckey) == 24 );
+C_ASSERT( offsetof(struct associate_completion_packet_request, cvalue) == 32 );
+C_ASSERT( offsetof(struct associate_completion_packet_request, information) == 40 );
+C_ASSERT( offsetof(struct associate_completion_packet_request, status) == 48 );
+C_ASSERT( sizeof(struct associate_completion_packet_request) == 56 );
+C_ASSERT( offsetof(struct associate_completion_packet_reply, already_signaled) == 8 );
+C_ASSERT( sizeof(struct associate_completion_packet_reply) == 16 );
+C_ASSERT( offsetof(struct cancel_completion_packet_request, packet) == 12 );
+C_ASSERT( offsetof(struct cancel_completion_packet_request, remove_signaled) == 16 );
+C_ASSERT( sizeof(struct cancel_completion_packet_request) == 24 );
 C_ASSERT( offsetof(struct add_fd_completion_request, handle) == 12 );
 C_ASSERT( offsetof(struct add_fd_completion_request, cvalue) == 16 );
 C_ASSERT( offsetof(struct add_fd_completion_request, information) == 24 );
