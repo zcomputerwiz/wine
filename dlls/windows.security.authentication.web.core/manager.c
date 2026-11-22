@@ -246,15 +246,24 @@ static HRESULT broker_call_callback( IUnknown *invoker, IUnknown *param, PROPVAR
     return S_OK;
 }
 
-/* an operation (iid) that the broker call completes; riid is the interface returned */
+/* a new call, ready to be released on any failure path */
+static struct broker_call *broker_call_alloc( void )
+{
+    struct broker_call *call = calloc( 1, sizeof(*call) );
+
+    if (!call) return NULL;
+    call->IUnknown_iface.lpVtbl = &broker_call_vtbl;
+    call->ref = 1;
+    return call;
+}
+
+/* an operation (iid) that the broker call completes (it takes the call's reference); riid is the interface returned */
 static HRESULT broker_call_start( struct broker_call *call, const GUID *iid, REFIID riid, void **out )
 {
     IAsyncOperation_IInspectable *operation;
     HRESULT hr;
 
     *out = NULL;
-    call->IUnknown_iface.lpVtbl = &broker_call_vtbl;
-    call->ref = 1;
     hr = async_operation_inspectable_create( iid, NULL, &call->IUnknown_iface, broker_call_callback, &operation );
     IUnknown_Release( &call->IUnknown_iface );
     if (FAILED(hr)) return hr;
@@ -274,7 +283,7 @@ static HRESULT request_token( const char *method, IInspectable *request, IInspec
 
     if (token_broker_enabled())
     {
-        if (!(call = calloc( 1, sizeof(*call) ))) return E_OUTOFMEMORY;
+        if (!(call = broker_call_alloc())) return E_OUTOFMEMORY;
         call->type = BROKER_CALL_TOKEN;
         call->method = method;
         IInspectable_AddRef( (call->request = request) );
@@ -300,12 +309,12 @@ static HRESULT find_accounts( IWebAccountProvider *provider, HSTRING client_id, 
 
     if (token_broker_enabled() && provider)
     {
-        if (!(call = calloc( 1, sizeof(*call) ))) return E_OUTOFMEMORY;
+        if (!(call = broker_call_alloc())) return E_OUTOFMEMORY;
         call->type = BROKER_CALL_FIND_ACCOUNTS;
         IWebAccountProvider_AddRef( (call->provider = provider) );
         if (FAILED(hr = WindowsDuplicateString( client_id, &call->string )))
         {
-            IUnknown_Release( &call->IUnknown_iface );
+            broker_call_Release( &call->IUnknown_iface );
             return hr;
         }
         return broker_call_start( call, &IID_IAsyncOperation_FindAllAccountsResult,
@@ -328,12 +337,12 @@ static HRESULT find_account( IWebAccountProvider *provider, HSTRING id, IAsyncOp
 
     if (token_broker_enabled() && provider)
     {
-        if (!(call = calloc( 1, sizeof(*call) ))) return E_OUTOFMEMORY;
+        if (!(call = broker_call_alloc())) return E_OUTOFMEMORY;
         call->type = BROKER_CALL_FIND_ACCOUNT;
         IWebAccountProvider_AddRef( (call->provider = provider) );
         if (FAILED(hr = WindowsDuplicateString( id, &call->string )))
         {
-            IUnknown_Release( &call->IUnknown_iface );
+            broker_call_Release( &call->IUnknown_iface );
             return hr;
         }
         return broker_call_start( call, &IID_IAsyncOperation_WebAccount, &IID_IAsyncOperation_WebAccount, (void **)out );

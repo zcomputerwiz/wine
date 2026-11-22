@@ -117,7 +117,8 @@ static HANDLE connect_broker( const SID *own )
     start = GetTickCount();
     for (;;)
     {
-        pipe = CreateFileW( name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL );
+        pipe = CreateFileW( name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+                            SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL );
         if (pipe != INVALID_HANDLE_VALUE) break;
         if (GetLastError() == ERROR_PIPE_BUSY) WaitNamedPipeW( name, 1000 );
         else if (GetLastError() == ERROR_FILE_NOT_FOUND && !started)
@@ -159,9 +160,17 @@ struct broker_reply
     UINT32 code;
     struct field field[TOKENBROKER_REPLY_COUNT];
     char *buffer;
+    DWORD size;             /* of buffer, zeroed before it is freed: it held the token */
 };
 
-/* One exchange with the user's broker. S_OK with its reply (free reply->buffer), or a failure: then the call is
+static void free_reply( struct broker_reply *reply )
+{
+    if (reply->buffer) SecureZeroMemory( reply->buffer, reply->size );
+    free( reply->buffer );
+    reply->buffer = NULL;
+}
+
+/* One exchange with the user's broker. S_OK with its reply (free_reply), or a failure: then the call is
  * answered as without a broker. */
 static HRESULT broker_exchange( unsigned int kind, const struct field fields[TOKENBROKER_FIELD_COUNT],
                                 WebTokenRequestPromptType prompt, HWND window, struct broker_reply *out )
@@ -225,6 +234,7 @@ static HRESULT broker_exchange( unsigned int kind, const struct field fields[TOK
     out->status = reply->status;
     out->code = reply->error_code;
     out->buffer = answer;
+    out->size = size;
     answer = NULL;
     /* lengths only: tokens are never logged */
     TRACE( "request %u kind %u: status %d, error %#x, token length %u\n", req->hdr.request_id, kind, out->status,
@@ -234,6 +244,7 @@ static HRESULT broker_exchange( unsigned int kind, const struct field fields[TOK
 done:
     if (pipe != INVALID_HANDLE_VALUE) CloseHandle( pipe );
     free( buffer );
+    if (answer) SecureZeroMemory( answer, TOKENBROKER_MAX_MESSAGE );
     free( answer );
     free( own );
     if (FAILED(hr)) WARN( "the token broker was not reached; answering without it\n" );
@@ -396,7 +407,7 @@ HRESULT token_broker_request( IInspectable *request, IInspectable *account, BOOL
                                         prompt, window, &reply )))
     {
         hr = token_result( &reply, provider, result );
-        free( reply.buffer );
+        free_reply( &reply );
     }
 
     if (provider) IWebAccountProvider_Release( provider );
@@ -462,7 +473,7 @@ done:
     if (view) IVectorView_WebAccount_Release( view );
     if (error) IWebProviderError_Release( error );
     WindowsDeleteString( message );
-    free( reply.buffer );
+    free_reply( &reply );
     return hr;
 }
 
@@ -488,6 +499,6 @@ HRESULT token_broker_find_account( IWebAccountProvider *provider, HSTRING id, IW
                                  reply.field[TOKENBROKER_REPLY_ACCOUNT_ID].len,
                                  reply.field[TOKENBROKER_REPLY_USER_NAME].text,
                                  reply.field[TOKENBROKER_REPLY_USER_NAME].len, WebAccountState_Connected, account );
-    free( reply.buffer );
+    free_reply( &reply );
     return hr;
 }

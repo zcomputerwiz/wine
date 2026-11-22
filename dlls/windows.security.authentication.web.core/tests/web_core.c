@@ -18,6 +18,7 @@
 #define COBJMACROS
 #include "initguid.h"
 #include <stdarg.h>
+#include <stdio.h>
 
 #include "windef.h"
 #include "winbase.h"
@@ -679,6 +680,101 @@ static UINT32 broker_accounts( IWebAuthenticationCoreManagerStatics4 *statics4, 
     return count;
 }
 
+/* the child of test_broker_sandboxed: a silent request for the test provider's account; the exit code is the
+ * request's status in the high word and the low word of its error code */
+static void broker_child(void)
+{
+    IWebAuthenticationCoreManagerStatics *statics;
+    IWebAccountProvider *provider;
+    IActivationFactory *factory;
+    struct broker_result r = { 0xdead, 0xdead };
+
+    if ((factory = get_factory( L"Windows.Security.Authentication.Web.Core.WebAuthenticationCoreManager" )))
+    {
+        IActivationFactory_QueryInterface( factory, &IID_IWebAuthenticationCoreManagerStatics, (void **)&statics );
+        IActivationFactory_Release( factory );
+        if ((provider = broker_provider( statics, TEST_PROVIDER, L"consumers" )))
+        {
+            broker_silent( statics, provider, NULL, L"user.read", &r );
+            IWebAccountProvider_Release( provider );
+        }
+        IWebAuthenticationCoreManagerStatics_Release( statics );
+    }
+    RoUninitialize();
+    ExitProcess( (r.status << 16) | (r.error & 0xffff) );
+}
+
+/* runs the child with a token; its exit code */
+static DWORD run_child( HANDLE token )
+{
+    STARTUPINFOA si = { sizeof(si) };
+    PROCESS_INFORMATION pi;
+    char cmd[MAX_PATH * 2], **argv;
+    DWORD code = 0xdeadbeef;
+
+    winetest_get_mainargs( &argv );
+    sprintf( cmd, "\"%s\" web_core broker_child", argv[0] );
+    if (!CreateProcessAsUserA( token, NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi ))
+    {
+        ok( 0, "CreateProcessAsUser failed: %lu.\n", GetLastError() );
+        return code;
+    }
+    ok( !WaitForSingleObject( pi.hProcess, 120000 ), "the child did not finish.\n" );
+    GetExitCodeProcess( pi.hProcess, &code );
+    CloseHandle( pi.hProcess );
+    CloseHandle( pi.hThread );
+    return code;
+}
+
+/* sandboxed callers get no token, even of an account the user has: a restricted token, a low integrity token */
+static void test_broker_sandboxed(void)
+{
+    static SID low = { SID_REVISION, 1, { SECURITY_MANDATORY_LABEL_AUTHORITY }, { SECURITY_MANDATORY_LOW_RID } };
+    char buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    TOKEN_USER *user = (TOKEN_USER *)buffer;
+    TOKEN_MANDATORY_LABEL label;
+    SID_AND_ATTRIBUTES restrict_sid;
+    HANDLE token, restricted, low_token;
+    DWORD len, code;
+
+    if (!OpenProcessToken( GetCurrentProcess(), TOKEN_ALL_ACCESS, &token ))
+    {
+        ok( 0, "OpenProcessToken failed: %lu.\n", GetLastError() );
+        return;
+    }
+    GetTokenInformation( token, TokenUser, buffer, sizeof(buffer), &len );
+
+    /* restricted: its restricting SID is the user's own, so that every access check still passes */
+    restrict_sid.Sid = user->User.Sid;
+    restrict_sid.Attributes = 0;
+    if (CreateRestrictedToken( token, 0, 0, NULL, 0, NULL, 1, &restrict_sid, &restricted ))
+    {
+        ok( IsTokenRestricted( restricted ), "not restricted.\n" );
+        code = run_child( restricted );
+        ok( code == ((WebTokenRequestStatus_ProviderError << 16) | 0x0005), "restricted caller: got %#lx.\n", code );
+        CloseHandle( restricted );
+    }
+    else ok( 0, "CreateRestrictedToken failed: %lu.\n", GetLastError() );
+
+    /* below medium integrity */
+    if (DuplicateTokenEx( token, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation, TokenPrimary, &low_token ))
+    {
+        label.Label.Sid = &low;
+        label.Label.Attributes = SE_GROUP_INTEGRITY;
+        ok( SetTokenInformation( low_token, TokenIntegrityLevel, &label, sizeof(label) ), "got error %lu.\n",
+            GetLastError() );
+        code = run_child( low_token );
+        ok( code == ((WebTokenRequestStatus_ProviderError << 16) | 0x0005), "low integrity caller: got %#lx.\n", code );
+        CloseHandle( low_token );
+    }
+    else ok( 0, "DuplicateTokenEx failed: %lu.\n", GetLastError() );
+
+    /* the same user's ordinary token is served */
+    code = run_child( token );
+    ok( (code >> 16) == WebTokenRequestStatus_Success, "medium caller: got %#lx.\n", code );
+    CloseHandle( token );
+}
+
 static void test_broker(void)
 {
     IWebAuthenticationCoreManagerStatics4 *statics4;
@@ -754,6 +850,9 @@ static void test_broker(void)
     ok( !!wcsstr( r.scopes, L"user.read" ), "got scopes %s.\n", wine_dbgstr_w( r.scopes ) );
     wcscpy( first_token, r.token );
 
+    /* sandboxed callers are refused although the account exists; the same user's ordinary token is served */
+    test_broker_sandboxed();
+
     /* the account is listed and found */
     ok( broker_accounts( statics4, provider, &account ) == 1, "wrong account count.\n" );
     ok( account != NULL, "no account.\n" );
@@ -764,7 +863,7 @@ static void test_broker(void)
     found = NULL;
     wait_broker( (IUnknown *)account_op );
     IAsyncOperation_WebAccount_GetResults( account_op, &found );
-    ok( found != NULL, "account not found.\n" );
+    ok( !found, "FindAccountAsync names no client and still found an account.\n" );
     if (found) IWebAccount_Release( found );
     IAsyncOperation_WebAccount_Release( account_op );
 
@@ -837,10 +936,19 @@ done:
 
 START_TEST(web_core)
 {
+    char **argv;
     HRESULT hr;
+    int argc;
 
     hr = RoInitialize( RO_INIT_MULTITHREADED );
     ok( hr == S_OK, "RoInitialize failed, hr %#lx\n", hr );
+
+    argc = winetest_get_mainargs( &argv );
+    if (argc >= 3 && !strcmp( argv[2], "broker_child" ))
+    {
+        broker_child();
+        return;
+    }
 
     test_manager();
     test_diagnostic_provider();
