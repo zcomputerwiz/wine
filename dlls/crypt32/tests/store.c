@@ -2100,6 +2100,38 @@ static void testCertOpenSystemStore(void)
     ok(ret, "CryptReleaseContext: %08lx\n", GetLastError());
 }
 
+/* the user's Root store (CertOpenSystemStore) also holds the machine's Root certificates, whether or not the user can
+ * write the machine's store */
+static void testUserStoreIncludesMachineStore(void)
+{
+    const CERT_CONTEXT *cert = NULL, *found;
+    HCERTSTORE machine, user;
+    DWORD count = 0;
+
+    machine = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0, CERT_SYSTEM_STORE_LOCAL_MACHINE | CERT_STORE_READONLY_FLAG,
+                            L"Root");
+    ok(machine != NULL, "CertOpenStore failed: %08lx\n", GetLastError());
+    user = CertOpenSystemStoreW(0, L"Root");
+    ok(user != NULL, "CertOpenSystemStore failed: %08lx\n", GetLastError());
+    if (machine && user)
+    {
+        while ((cert = CertEnumCertificatesInStore(machine, cert)))
+        {
+            count++;
+            found = CertFindCertificateInStore(user, cert->dwCertEncodingType, 0, CERT_FIND_EXISTING, cert, NULL);
+            ok(found != NULL, "machine Root certificate %lu is not in the user's Root: %08lx\n", count, GetLastError());
+            if (found) CertFreeCertificateContext(found);
+            else
+            {
+                CertFreeCertificateContext(cert);
+                break;
+            }
+        }
+    }
+    if (user) CertCloseStore(user, 0);
+    if (machine) CertCloseStore(machine, 0);
+}
+
 static const struct
 {
     DWORD cert_store;
@@ -3882,6 +3914,7 @@ START_TEST(store)
     testCertRegisterSystemStore();
 
     testCertOpenSystemStore();
+    testUserStoreIncludesMachineStore();
     testCertEnumSystemStore();
     testStoreProperty();
 
