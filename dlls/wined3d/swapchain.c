@@ -550,7 +550,6 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
         unsigned int swap_interval, uint32_t flags)
 {
     const struct wined3d_swapchain_desc *desc = &swapchain->state.desc;
-    HRESULT hr;
     RECT s, d;
     struct wined3d_texture *surface;
     struct wined3d_dcomp_background *background = NULL;

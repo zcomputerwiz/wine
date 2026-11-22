@@ -1613,7 +1613,7 @@ static void test_processor_idle_cycle_time(void)
     ok( size == cpu_count * sizeof(ULONG64), "got %lu.\n", size );
 }
 
-static void test_TzSpecificLocalTimeEx(void)
+static void test_TzSpecificLocalTimeEx_dynamic(void)
 {
     static const WORD years[] = { 2000, 2024 };
     static const WORD months[] = { 1, 7 };
@@ -1712,7 +1712,7 @@ START_TEST(time)
     test_GetSystemTimeAsFileTime();
     test_GetSystemTimePreciseAsFileTime();
     test_GetTimeZoneInformationForYear();
-    test_TzSpecificLocalTimeEx();
+    test_TzSpecificLocalTimeEx_dynamic();
     test_GetTickCount();
     test_QueryUnbiasedInterruptTime();
     test_processor_idle_cycle_time();
