@@ -222,6 +222,8 @@ struct table *create_table( enum wbm_namespace, const WCHAR * );
 struct table *grab_table( struct table * );
 void release_table( struct table * );
 BOOL add_table( enum wbm_namespace, struct table * );
+UINT get_table_names( enum wbm_namespace, WCHAR *** );
+HRESULT EnumWbemClassObject_create_classes( enum wbm_namespace, LPVOID * );
 void free_columns( struct column *, UINT );
 void free_row_values( const struct table *, UINT );
 UINT get_type_size( CIMTYPE );

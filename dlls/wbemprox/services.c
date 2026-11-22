@@ -608,8 +608,15 @@ static HRESULT WINAPI wbem_services_CreateClassEnum(
     IWbemContext *pCtx,
     IEnumWbemClassObject **ppEnum )
 {
-    FIXME("\n");
-    return WBEM_E_FAILED;
+    struct wbem_services *services = impl_from_IWbemServices( iface );
+
+    TRACE( "%p, %s, %#lx, %p, %p\n", iface, debugstr_w(strSuperclass), lFlags, pCtx, ppEnum );
+
+    if (!ppEnum) return WBEM_E_INVALID_PARAMETER;
+    /* the classes have no hierarchy: with a superclass there is nothing to list */
+    if (strSuperclass && strSuperclass[0])
+        return EnumWbemClassObject_create_classes( WBEMPROX_NAMESPACE_LAST, (void **)ppEnum );
+    return EnumWbemClassObject_create_classes( services->ns, (void **)ppEnum );
 }
 
 static HRESULT WINAPI wbem_services_CreateClassEnumAsync(

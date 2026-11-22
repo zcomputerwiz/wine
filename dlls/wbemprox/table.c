@@ -428,6 +428,36 @@ struct table *create_table( enum wbm_namespace ns, const WCHAR *name )
     return NULL;
 }
 
+/* copies of the names of the tables (the classes) of a namespace; the caller frees the array and the names */
+UINT get_table_names( enum wbm_namespace ns, WCHAR ***names )
+{
+    struct table *iter;
+    WCHAR **list = NULL;
+    UINT count = 0;
+
+    *names = NULL;
+    if (ns == WBEMPROX_NAMESPACE_LAST) return 0;
+
+    EnterCriticalSection( &table_list_cs );
+    LIST_FOR_EACH_ENTRY( iter, table_list[ns], struct table, entry )
+    {
+        WCHAR **tmp = realloc( list, (count + 1) * sizeof(*list) );
+        if (!tmp || !(tmp[count] = wcsdup( iter->name )))
+        {
+            if (tmp) list = tmp;
+            while (count) free( list[--count] );
+            free( list );
+            LeaveCriticalSection( &table_list_cs );
+            return 0;
+        }
+        list = tmp;
+        count++;
+    }
+    LeaveCriticalSection( &table_list_cs );
+    *names = list;
+    return count;
+}
+
 BOOL add_table( enum wbm_namespace ns, struct table *table )
 {
     struct table *iter;
