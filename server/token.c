@@ -3486,6 +3486,7 @@ DECL_HANDLER(set_token_package)
      * that has no context. A process gets a context by being started with such a token from the executable
      * of the application (token_package_check_image), never by changing the token it runs with. */
     if (!token->primary || token->package || is_process_token( token )) set_error( STATUS_ACCESS_DENIED );
+    else if (!uwp_compatibility_enabled( token_get_user_sid( token ) )) set_error( STATUS_NOT_SUPPORTED );  /* the gate is off */
     else if ((ctx = uwp_context_from_aumid( get_req_data(), get_req_data_size() )))
     {
         token->package = ctx;

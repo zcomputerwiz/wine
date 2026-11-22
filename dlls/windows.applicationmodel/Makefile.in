@@ -2,6 +2,7 @@ MODULE  = windows.applicationmodel.dll
 IMPORTS = combase kernelbase advapi32
 
 SOURCES = \
+	appservice.c \
 	classes.idl \
 	designmode.c \
 	limitedaccess.c \

@@ -3927,6 +3927,38 @@ static WCHAR *format_user_registry_path( const struct sid *sid, struct unicode_s
     return ascii_to_unicode_str( buffer, path );
 }
 
+/* The UWP compatibility gate of a user (HKCU\Software\WineExplorer\Shell\UwpCompatibility): exactly the DWORD 1 turns it on;
+ * an absent key or value, another type, length or value leave it off. Same rule as the client side of the gate in
+ * twinapi.appcore, decided again here so that a process that asks the server directly gets no package context either. */
+int uwp_compatibility_enabled( const struct sid *user )
+{
+    static const WCHAR tail[] = {'\\','S','o','f','t','w','a','r','e','\\','W','i','n','e','E','x','p','l','o','r','e','r',
+                                 '\\','S','h','e','l','l'};
+    static const WCHAR value_name[] = {'U','w','p','C','o','m','p','a','t','i','b','i','l','i','t','y'};
+    struct unicode_str name = { value_name, sizeof(value_name) }, path;
+    struct key_value *value;
+    struct key *key;
+    WCHAR *full, *full_path;
+    unsigned int dword;
+    int index, ret = 0;
+
+    if (!root_key || !user || !(full = format_user_registry_path( user, &path ))) return 0;
+    if ((full_path = malloc( path.len + sizeof(tail) )))
+    {
+        memcpy( full_path, full, path.len );
+        memcpy( (char *)full_path + path.len, tail, sizeof(tail) );
+        if ((key = find_subkey_by_path( root_key, full_path, path.len + sizeof(tail) )) &&
+            (value = find_value( key, name, &index )) && value->type == REG_DWORD && value->len == sizeof(dword))
+        {
+            memcpy( &dword, value->data, sizeof(dword) );
+            ret = dword == 1;
+        }
+        free( full_path );
+    }
+    free( full );
+    return ret;
+}
+
 #ifdef __aarch64__
 static bool supports_aarch32(void)
 {
