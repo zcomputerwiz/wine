@@ -798,6 +798,35 @@ done:
     return hr;
 }
 
+/* the query of a class path (no key): for a table whose fill walks the disk the class object is built on a blank row */
+HRESULT exec_class_query( enum wbm_namespace ns, const WCHAR *str, IEnumWbemClassObject **result )
+{
+    HRESULT hr;
+    struct query *query;
+    struct table *table;
+
+    *result = NULL;
+    if (!(query = create_query( ns ))) return E_OUTOFMEMORY;
+    hr = parse_query( ns, str, &query->view, &query->mem );
+    if (hr != S_OK) goto done;
+    table = query->view->table_count ? query->view->table[0] : NULL;
+    if (table && (table->flags & TABLE_FLAG_SLOW_FILL) && !query->view->cond)
+    {
+        if (!add_blank_row( table ) || !(query->view->result = calloc( 1, sizeof(UINT) )))
+        {
+            hr = E_OUTOFMEMORY;
+            goto done;
+        }
+        query->view->result_count = 1;
+    }
+    else if ((hr = execute_view( query->view )) != S_OK) goto done;
+    hr = EnumWbemClassObject_create( query, (void **)result );
+
+done:
+    release_query( query );
+    return hr;
+}
+
 BOOL is_result_prop( const struct view *view, const WCHAR *name )
 {
     const struct property *prop = view->proplist;

@@ -508,7 +508,13 @@ HRESULT get_object( enum wbm_namespace ns, const WCHAR *object_path, IWbemClassO
     hr = parse_path( object_path, &path );
     if (hr != S_OK) return hr;
 
-    hr = create_instance_enum( ns, path, &iter );
+    if (!path->filter)  /* a class path: the class object, not an enumeration of the instances */
+    {
+        WCHAR *query = query_from_path( path );
+        hr = query ? exec_class_query( ns, query, &iter ) : E_OUTOFMEMORY;
+        free( query );
+    }
+    else hr = create_instance_enum( ns, path, &iter );
     if (hr != S_OK)
     {
         free_path( path );

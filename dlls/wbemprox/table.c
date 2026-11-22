@@ -399,6 +399,7 @@ static struct table *dup_table( const struct table *src )
         dst->num_rows = dst->num_rows_allocated = src->num_rows;
     }
     dst->fill = src->fill;
+    dst->flags = src->flags & TABLE_FLAG_SLOW_FILL;
 
     return dst;
 }
@@ -426,6 +427,16 @@ struct table *create_table( enum wbm_namespace ns, const WCHAR *name )
 
     LeaveCriticalSection( &table_list_cs );
     return NULL;
+}
+
+/* one zeroed row, so that a class object has a row to read its columns from without the table being filled */
+BOOL add_blank_row( struct table *table )
+{
+    if (table->num_rows) return TRUE;
+    free( table->data );
+    if (!(table->data = calloc( 1, get_row_size( table ) ))) return FALSE;
+    table->num_rows = table->num_rows_allocated = 1;
+    return TRUE;
 }
 
 /* copies of the names of the tables (the classes) of a namespace; the caller frees the array and the names */
