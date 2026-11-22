@@ -74,6 +74,7 @@ enum tokenbroker_reply_field
     TOKENBROKER_REPLY_USER_NAME,    /* and UserName */
     TOKENBROKER_REPLY_PROPERTIES,   /* WebTokenResponse.Properties, as pairs */
     TOKENBROKER_REPLY_ACCOUNTS,     /* FIND_ACCOUNTS: id and user name of each account */
+    TOKENBROKER_REPLY_ACCOUNT_PROPERTIES, /* the response WebAccount's Properties, as pairs */
     TOKENBROKER_REPLY_COUNT
 };
 
