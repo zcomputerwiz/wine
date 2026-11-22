@@ -519,8 +519,10 @@ static WINECRYPT_CERTSTORE *CRYPT_SysRegOpenStoreW(HCRYPTPROV hCryptProv,
     {
         LONG rc;
         HKEY key;
-        REGSAM sam = dwFlags & CERT_STORE_READONLY_FLAG ? KEY_READ :
-            KEY_ALL_ACCESS;
+        /* SystemCertificates is shared between the 32-bit and 64-bit views of the registry, as on Windows: a 32-bit
+         * program sees the same stores (and the same trusted roots) as a 64-bit one. */
+        REGSAM sam = (dwFlags & CERT_STORE_READONLY_FLAG ? KEY_READ :
+            KEY_ALL_ACCESS) | KEY_WOW64_64KEY;
 
         wsprintfW(storePath, L"%s\\%s", base, storeName);
         if (dwFlags & CERT_STORE_OPEN_EXISTING_FLAG)
@@ -1375,7 +1377,7 @@ static LONG CRYPT_OpenParentStore(DWORD dwFlags,
         return ERROR_FILE_NOT_FOUND;
     }
 
-    return RegOpenKeyExW(root, base, 0, KEY_READ, key);
+    return RegOpenKeyExW(root, base, 0, KEY_READ | KEY_WOW64_64KEY, key);
 }
 
 BOOL WINAPI CertEnumSystemStore(DWORD dwFlags, void *pvSystemStoreLocationPara,

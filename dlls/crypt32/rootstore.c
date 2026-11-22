@@ -779,8 +779,9 @@ void CRYPT_ImportSystemRootCertsToReg(void)
         goto done;
     }
 
+    /* the shared (64-bit) view, which 32-bit and 64-bit programs both read (store.c, CRYPT_SysRegOpenStoreW) */
     rc = RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\SystemCertificates\\Root\\Certificates", 0, NULL, 0,
-            KEY_ALL_ACCESS, NULL, &key, 0);
+            KEY_ALL_ACCESS | KEY_WOW64_64KEY, NULL, &key, 0);
     if (rc)
         goto done;
 
