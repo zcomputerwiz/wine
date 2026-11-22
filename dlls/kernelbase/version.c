@@ -2100,7 +2100,7 @@ static void *pkg_realloc( void *ptr, SIZE_T size )
 static void pkg_free( void *ptr ) { if (ptr) HeapFree( GetProcessHeap(), 0, ptr ); }
 #define CATALOG_MAX_APPS 64
 #define CATALOG_MAX_DEPENDENCIES 16
-#define CATALOG_RECORD_MAX (256 * 1024)
+#define CATALOG_RECORD_MAX (1024 * 1024)
 #define PACKAGE_INFO_FLAGS 0x10         /* what Windows 11 reports in PACKAGE_INFO.flags for these packages */
 
 #ifndef PACKAGE_FILTER_HEAD
@@ -2633,6 +2633,26 @@ LONG WINAPI PackageFamilyNameFromId( const PACKAGE_ID *id, UINT32 *length, WCHAR
 
     if (!id || !length || (!buffer && *length)) return ERROR_INVALID_PARAMETER;
     if ((err = PackageFullNameFromId( id, &name_len, full_name ))) return err;
+    if (!package_family_from_full_name( full_name, family, ARRAY_SIZE(family) )) return ERROR_INVALID_PARAMETER;
+    capacity = *length;
+    needed = wcslen( family ) + 1;
+    *length = needed;
+    if (!buffer || capacity < needed) return ERROR_INSUFFICIENT_BUFFER;
+    wcscpy( buffer, family );
+    return ERROR_SUCCESS;
+}
+
+/***********************************************************************
+ *         PackageFamilyNameFromFullName   (kernelbase.@)
+ */
+LONG WINAPI PackageFamilyNameFromFullName( const WCHAR *full_name, UINT32 *length, WCHAR *buffer )
+{
+    WCHAR family[PACKAGE_FAMILY_NAME_MAX_LENGTH + 1];
+    UINT32 capacity, needed;
+
+    TRACE( "(%s %p %p)\n", debugstr_w( full_name ), length, buffer );
+
+    if (!full_name || !length || (!buffer && *length)) return ERROR_INVALID_PARAMETER;
     if (!package_family_from_full_name( full_name, family, ARRAY_SIZE(family) )) return ERROR_INVALID_PARAMETER;
     capacity = *length;
     needed = wcslen( family ) + 1;

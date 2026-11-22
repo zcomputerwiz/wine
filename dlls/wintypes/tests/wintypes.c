@@ -1520,6 +1520,130 @@ static void test_RoParseTypeName(void)
     }
 }
 
+static void test_GuidHelper(void)
+{
+    static const WCHAR *class_name = L"Windows.Foundation.GuidHelper";
+    IGuidHelperStatics *statics;
+    GUID empty, first, second;
+    HSTRING name;
+    boolean equal;
+    HRESULT hr;
+
+    hr = RoInitialize( RO_INIT_MULTITHREADED );
+    ok( hr == S_OK, "got %#lx\n", hr );
+
+    WindowsCreateString( class_name, wcslen( class_name ), &name );
+    hr = RoGetActivationFactory( name, &IID_IGuidHelperStatics, (void **)&statics );
+    WindowsDeleteString( name );
+    ok( hr == S_OK || broken( hr == REGDB_E_CLASSNOTREG ), "RoGetActivationFactory failed, hr %#lx.\n", hr );
+    if (hr != S_OK)
+    {
+        win_skip( "%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w( class_name ) );
+        goto done;
+    }
+
+    hr = IGuidHelperStatics_get_Empty( statics, &empty );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    ok( !memcmp( &empty, &(GUID){0}, sizeof(GUID) ), "got %s\n", debugstr_guid( &empty ) );
+
+    hr = IGuidHelperStatics_CreateNewGuid( statics, &first );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    hr = IGuidHelperStatics_CreateNewGuid( statics, &second );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    ok( !IsEqualGUID( &first, &second ), "got the same GUID twice, %s\n", debugstr_guid( &first ) );
+    ok( memcmp( &first, &(GUID){0}, sizeof(GUID) ), "got an empty GUID\n" );
+
+    equal = FALSE;
+    hr = IGuidHelperStatics_Equals( statics, &first, &first, &equal );
+    ok( hr == S_OK && equal, "got hr %#lx, equal %d\n", hr, equal );
+    equal = TRUE;
+    hr = IGuidHelperStatics_Equals( statics, &first, &second, &equal );
+    ok( hr == S_OK && !equal, "got hr %#lx, equal %d\n", hr, equal );
+
+    IGuidHelperStatics_Release( statics );
+done:
+    RoUninitialize();
+}
+
+static void test_ValueSet(void)
+{
+    static const WCHAR *class_name = L"Windows.Foundation.Collections.ValueSet";
+    IMap_HSTRING_IInspectable *map;
+    IPropertyValueStatics *propval_statics;
+    IInspectable *inspectable, *value, *found;
+    IObservableMap_HSTRING_IInspectable *observable_map;
+    IIterable_IKeyValuePair_HSTRING_IInspectable *iterable;
+    IPropertySet *propset;
+    UINT32 size = 0;
+    ULONG count = 0;
+    HSTRING name, key;
+    BOOLEAN replaced;
+    IID *iids;
+    HRESULT hr;
+
+    hr = RoInitialize( RO_INIT_MULTITHREADED );
+    ok( hr == S_OK, "got %#lx\n", hr );
+
+    WindowsCreateString( class_name, wcslen( class_name ), &name );
+    hr = RoActivateInstance( name, &inspectable );
+    WindowsDeleteString( name );
+    ok( hr == S_OK || broken( hr == REGDB_E_CLASSNOTREG ), "RoActivateInstance failed, hr %#lx.\n", hr );
+    if (hr != S_OK)
+    {
+        win_skip( "%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w( class_name ) );
+        goto done;
+    }
+
+    hr = IInspectable_GetRuntimeClassName( inspectable, &name );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    ok( !wcscmp( WindowsGetStringRawBuffer( name, NULL ), class_name ), "got class name %s.\n", debugstr_hstring( name ) );
+    WindowsDeleteString( name );
+    hr = IInspectable_GetIids( inspectable, &count, &iids );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    ok( count >= 3, "got %lu interfaces.\n", count );
+    CoTaskMemFree( iids );
+
+    hr = IInspectable_QueryInterface( inspectable, &IID_IPropertySet, (void **)&propset );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    hr = IPropertySet_QueryInterface( propset, &IID_IObservableMap_HSTRING_IInspectable, (void **)&observable_map );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    IObservableMap_HSTRING_IInspectable_Release( observable_map );
+    hr = IPropertySet_QueryInterface( propset, &IID_IIterable_IKeyValuePair_HSTRING_IInspectable, (void **)&iterable );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    IIterable_IKeyValuePair_HSTRING_IInspectable_Release( iterable );
+    hr = IPropertySet_QueryInterface( propset, &IID_IMap_HSTRING_IInspectable, (void **)&map );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    IPropertySet_Release( propset );
+
+    WindowsCreateString( L"Command", 7, &name );
+    hr = IMap_HSTRING_IInspectable_get_Size( map, &size );
+    ok( hr == S_OK && !size, "got hr %#lx, size %u\n", hr, size );
+
+    WindowsCreateString( RuntimeClass_Windows_Foundation_PropertyValue,
+                         wcslen( RuntimeClass_Windows_Foundation_PropertyValue ), &key );
+    hr = RoGetActivationFactory( key, &IID_IPropertyValueStatics, (void **)&propval_statics );
+    WindowsDeleteString( key );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    hr = IPropertyValueStatics_CreateUInt32( propval_statics, 7, &value );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    IPropertyValueStatics_Release( propval_statics );
+    replaced = TRUE;
+    hr = IMap_HSTRING_IInspectable_Insert( map, name, value, &replaced );
+    ok( hr == S_OK && !replaced, "got hr %#lx, replaced %d\n", hr, replaced );
+    hr = IMap_HSTRING_IInspectable_Lookup( map, name, &found );
+    ok( hr == S_OK && found == value, "got hr %#lx, value %p\n", hr, found );
+    if (hr == S_OK) IInspectable_Release( found );
+    hr = IMap_HSTRING_IInspectable_get_Size( map, &size );
+    ok( hr == S_OK && size == 1, "got hr %#lx, size %u\n", hr, size );
+    IInspectable_Release( value );
+    WindowsDeleteString( name );
+
+    IMap_HSTRING_IInspectable_Release( map );
+    IInspectable_Release( inspectable );
+done:
+    RoUninitialize();
+}
+
 static void test_IPropertySet(void)
 {
     static const WCHAR *class_name = RuntimeClass_Windows_Foundation_Collections_PropertySet;
@@ -1989,6 +2113,8 @@ START_TEST(wintypes)
     test_IPropertyValueStatics();
     test_RoParseTypeName();
     test_RoResolveNamespace();
+    test_GuidHelper();
+    test_ValueSet();
     test_IPropertySet();
     test_DataWriter();
 }

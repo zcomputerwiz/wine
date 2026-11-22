@@ -35,6 +35,15 @@ import "windows.ui.input.idl";
 import "windows.ui.windowmanagement.idl";
 import "windows.ui.viewmanagement.idl";
 import "windows.ui.text.idl";
+import "windows.ui.applicationsettings.idl";
+
+namespace Windows.UI.ApplicationSettings {
+    runtimeclass AccountsSettingsPane;
+    runtimeclass CredentialCommand;
+    runtimeclass SettingsCommand;
+    runtimeclass WebAccountCommand;
+    runtimeclass WebAccountProviderCommand;
+}
 
 namespace Windows.UI.Core {
     runtimeclass CoreWindow;

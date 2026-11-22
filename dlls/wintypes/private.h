@@ -54,6 +54,8 @@ extern IActivationFactory *data_reader_activation_factory;
 extern IActivationFactory *data_writer_activation_factory;
 extern IActivationFactory *buffer_activation_factory;
 extern IActivationFactory *property_set_factory;
+extern IActivationFactory *value_set_factory;
+extern IActivationFactory *guid_helper_factory;
 extern IActivationFactory *diagnostics_factory( const WCHAR *name );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \

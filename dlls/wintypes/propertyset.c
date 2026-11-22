@@ -32,6 +32,7 @@ struct propertyset
     IObservableMap_HSTRING_IInspectable IObservableMap_HSTRING_IInspectable_iface;
     LONG ref;
 
+    const WCHAR *class_name;
     IInspectable *map_inner;
 };
 
@@ -96,20 +97,33 @@ static ULONG STDMETHODCALLTYPE propertyset_Release( IPropertySet *iface )
 
 static HRESULT STDMETHODCALLTYPE propertyset_GetIids( IPropertySet *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "(%p, %p, %p) stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    IID *list;
+
+    TRACE( "(%p, %p, %p)\n", iface, iid_count, iids );
+
+    if (!(list = CoTaskMemAlloc( 4 * sizeof(*list) ))) return E_OUTOFMEMORY;
+    list[0] = IID_IPropertySet;
+    list[1] = IID_IObservableMap_HSTRING_IInspectable;
+    list[2] = IID_IMap_HSTRING_IInspectable;
+    list[3] = IID_IIterable_IKeyValuePair_HSTRING_IInspectable;
+    *iid_count = 4;
+    *iids = list;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE propertyset_GetRuntimeClassName( IPropertySet *iface, HSTRING *class_name )
 {
-    FIXME( "(%p, %p) stub!\n", iface, class_name );
-    return E_NOTIMPL;
+    struct propertyset *impl = impl_from_IPropertySet( iface );
+
+    TRACE( "(%p, %p)\n", iface, class_name );
+    return WindowsCreateString( impl->class_name, wcslen( impl->class_name ), class_name );
 }
 
 static HRESULT STDMETHODCALLTYPE propertyset_GetTrustLevel( IPropertySet *iface, TrustLevel *trust_level )
 {
-    FIXME( "(%p, %p) stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    TRACE( "(%p, %p)\n", iface, trust_level );
+    *trust_level = BaseTrust;
+    return S_OK;
 }
 
 static const IPropertySetVtbl propertyset_vtbl =
@@ -159,6 +173,7 @@ struct propertyset_factory
 {
     IActivationFactory IActivationFactory_iface;
     LONG ref;
+    const WCHAR *class_name;
 };
 
 static inline struct propertyset_factory *impl_from_IActivationFactory( IActivationFactory *iface )
@@ -218,6 +233,7 @@ static HRESULT STDMETHODCALLTYPE factory_GetTrustLevel( IActivationFactory *ifac
 
 static HRESULT STDMETHODCALLTYPE factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
 {
+    struct propertyset_factory *factory = impl_from_IActivationFactory( iface );
     static const struct map_iids iids =
     {
         .map = &IID_IMap_HSTRING_IInspectable,
@@ -239,6 +255,7 @@ static HRESULT STDMETHODCALLTYPE factory_ActivateInstance( IActivationFactory *i
     impl->IPropertySet_iface.lpVtbl = &propertyset_vtbl;
     impl->IObservableMap_HSTRING_IInspectable_iface.lpVtbl = &propertyset_IObservableMap_vtbl;
     impl->ref = 1;
+    impl->class_name = factory->class_name;
 
     if (FAILED(hr = multi_threaded_map_create( &iids, (IInspectable *)&impl->IPropertySet_iface, &impl->map_inner )))
     {
@@ -267,7 +284,19 @@ static const IActivationFactoryVtbl propertyset_factory_vtbl =
 static struct propertyset_factory propertyset_factory =
 {
     {&propertyset_factory_vtbl},
-    1
+    1,
+    L"Windows.Foundation.Collections.PropertySet",
 };
 
 IActivationFactory *property_set_factory = &propertyset_factory.IActivationFactory_iface;
+
+/* A ValueSet is a PropertySet whose values are to be of the kinds a message can carry (the primitive types, strings, arrays
+ * of them, IPropertyValue); that restriction is not made here (Windows refuses other values with an error). */
+static struct propertyset_factory valueset_factory =
+{
+    {&propertyset_factory_vtbl},
+    1,
+    L"Windows.Foundation.Collections.ValueSet",
+};
+
+IActivationFactory *value_set_factory = &valueset_factory.IActivationFactory_iface;

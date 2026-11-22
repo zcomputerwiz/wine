@@ -1,0 +1,385 @@
+/*
+ * Windows.UI.ApplicationSettings, the accounts pane (WineExplorer UWP)
+ *
+ * The interface and delegate identifiers and the method lists are those of the Windows Runtime metadata; the deprecated
+ * SettingsPane family is left out.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+#ifdef __WIDL__
+#pragma winrt ns_prefix
+#endif
+
+import "inspectable.idl";
+import "asyncinfo.idl";
+import "eventtoken.idl";
+import "windowscontracts.idl";
+import "windows.foundation.idl";
+import "windows.security.credentials.idl";
+import "windows.system.idl";
+import "windows.ui.popups.idl";
+
+namespace Windows.UI.ApplicationSettings {
+    typedef enum SupportedWebAccountActions SupportedWebAccountActions;
+    typedef enum WebAccountAction WebAccountAction;
+
+    interface IAccountsSettingsPane;
+    interface IAccountsSettingsPaneCommandsRequestedEventArgs;
+    interface IAccountsSettingsPaneCommandsRequestedEventArgs2;
+    interface IAccountsSettingsPaneEventDeferral;
+    interface IAccountsSettingsPaneStatics;
+    interface IAccountsSettingsPaneStatics2;
+    interface IAccountsSettingsPaneStatics3;
+    interface ICredentialCommand;
+    interface ICredentialCommandFactory;
+    interface ISettingsCommandFactory;
+    interface ISettingsCommandStatics;
+    interface IWebAccountCommand;
+    interface IWebAccountCommandFactory;
+    interface IWebAccountInvokedArgs;
+    interface IWebAccountProviderCommand;
+    interface IWebAccountProviderCommandFactory;
+
+    runtimeclass AccountsSettingsPane;
+    runtimeclass AccountsSettingsPaneCommandsRequestedEventArgs;
+    runtimeclass AccountsSettingsPaneEventDeferral;
+    runtimeclass CredentialCommand;
+    runtimeclass SettingsCommand;
+    runtimeclass WebAccountCommand;
+    runtimeclass WebAccountInvokedArgs;
+    runtimeclass WebAccountProviderCommand;
+
+    declare {
+        interface Windows.Foundation.Collections.IIterable<Windows.UI.ApplicationSettings.CredentialCommand *>;
+        interface Windows.Foundation.Collections.IIterable<Windows.UI.ApplicationSettings.SettingsCommand *>;
+        interface Windows.Foundation.Collections.IIterable<Windows.UI.ApplicationSettings.WebAccountCommand *>;
+        interface Windows.Foundation.Collections.IIterable<Windows.UI.ApplicationSettings.WebAccountProviderCommand *>;
+        interface Windows.Foundation.Collections.IIterator<Windows.UI.ApplicationSettings.CredentialCommand *>;
+        interface Windows.Foundation.Collections.IIterator<Windows.UI.ApplicationSettings.SettingsCommand *>;
+        interface Windows.Foundation.Collections.IIterator<Windows.UI.ApplicationSettings.WebAccountCommand *>;
+        interface Windows.Foundation.Collections.IIterator<Windows.UI.ApplicationSettings.WebAccountProviderCommand *>;
+        interface Windows.Foundation.Collections.IVectorView<Windows.UI.ApplicationSettings.CredentialCommand *>;
+        interface Windows.Foundation.Collections.IVectorView<Windows.UI.ApplicationSettings.SettingsCommand *>;
+        interface Windows.Foundation.Collections.IVectorView<Windows.UI.ApplicationSettings.WebAccountCommand *>;
+        interface Windows.Foundation.Collections.IVectorView<Windows.UI.ApplicationSettings.WebAccountProviderCommand *>;
+        interface Windows.Foundation.Collections.IVector<Windows.UI.ApplicationSettings.CredentialCommand *>;
+        interface Windows.Foundation.Collections.IVector<Windows.UI.ApplicationSettings.SettingsCommand *>;
+        interface Windows.Foundation.Collections.IVector<Windows.UI.ApplicationSettings.WebAccountCommand *>;
+        interface Windows.Foundation.Collections.IVector<Windows.UI.ApplicationSettings.WebAccountProviderCommand *>;
+        interface Windows.Foundation.TypedEventHandler<Windows.UI.ApplicationSettings.AccountsSettingsPane *, Windows.UI.ApplicationSettings.AccountsSettingsPaneCommandsRequestedEventArgs *>;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        flags
+    ]
+    enum SupportedWebAccountActions
+    {
+        None = 0x0,
+        Reconnect = 0x1,
+        Remove = 0x2,
+        ViewDetails = 0x4,
+        Manage = 0x8,
+        More = 0x10,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum WebAccountAction
+    {
+        Reconnect = 0,
+        Remove = 1,
+        ViewDetails = 2,
+        Manage = 3,
+        More = 4,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(61c0e185-0977-4678-b4e2-98727afbeed9)
+    ]
+    delegate HRESULT CredentialCommandCredentialDeletedHandler([in] Windows.UI.ApplicationSettings.CredentialCommand *command);
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(1ee6e459-1705-4a9a-b599-a0c3d6921973)
+    ]
+    delegate HRESULT WebAccountCommandInvokedHandler([in] Windows.UI.ApplicationSettings.WebAccountCommand *command, [in] Windows.UI.ApplicationSettings.WebAccountInvokedArgs *args);
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(b7de5527-4c8f-42dd-84da-5ec493abdb9a)
+    ]
+    delegate HRESULT WebAccountProviderCommandInvokedHandler([in] Windows.UI.ApplicationSettings.WebAccountProviderCommand *command);
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.ApplicationSettings.AccountsSettingsPane),
+        uuid(81ea942c-4f09-4406-a538-838d9b14b7e6)
+    ]
+    interface IAccountsSettingsPane : IInspectable
+    {
+        [eventadd] HRESULT AccountCommandsRequested([in] Windows.Foundation.TypedEventHandler<Windows.UI.ApplicationSettings.AccountsSettingsPane *, Windows.UI.ApplicationSettings.AccountsSettingsPaneCommandsRequestedEventArgs *> *handler, [out, retval] EventRegistrationToken *cookie);
+        [eventremove] HRESULT AccountCommandsRequested([in] EventRegistrationToken cookie);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.ApplicationSettings.AccountsSettingsPaneCommandsRequestedEventArgs),
+        uuid(3b68c099-db19-45d0-9abf-95d3773c9330)
+    ]
+    interface IAccountsSettingsPaneCommandsRequestedEventArgs : IInspectable
+    {
+        [propget] HRESULT WebAccountProviderCommands([out, retval] Windows.Foundation.Collections.IVector<Windows.UI.ApplicationSettings.WebAccountProviderCommand *> **value);
+        [propget] HRESULT WebAccountCommands([out, retval] Windows.Foundation.Collections.IVector<Windows.UI.ApplicationSettings.WebAccountCommand *> **value);
+        [propget] HRESULT CredentialCommands([out, retval] Windows.Foundation.Collections.IVector<Windows.UI.ApplicationSettings.CredentialCommand *> **value);
+        [propget] HRESULT Commands([out, retval] Windows.Foundation.Collections.IVector<Windows.UI.ApplicationSettings.SettingsCommand *> **value);
+        [propget] HRESULT HeaderText([out, retval] HSTRING *value);
+        [propput] HRESULT HeaderText([in] HSTRING value);
+        HRESULT GetDeferral([out, retval] Windows.UI.ApplicationSettings.AccountsSettingsPaneEventDeferral **deferral);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 6.0),
+        exclusiveto(Windows.UI.ApplicationSettings.AccountsSettingsPaneCommandsRequestedEventArgs),
+        uuid(362f7bad-4e37-4967-8c40-e78ee7a1e5bb)
+    ]
+    interface IAccountsSettingsPaneCommandsRequestedEventArgs2 : IInspectable
+    {
+        [propget] HRESULT User([out, retval] Windows.System.User **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.ApplicationSettings.AccountsSettingsPaneEventDeferral),
+        uuid(cbf25d3f-e5ba-40ef-93da-65e096e5fb04)
+    ]
+    interface IAccountsSettingsPaneEventDeferral : IInspectable
+    {
+        HRESULT Complete();
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.ApplicationSettings.AccountsSettingsPane),
+        uuid(561f8b60-b0ec-4150-a8dc-208ee44b068a)
+    ]
+    interface IAccountsSettingsPaneStatics : IInspectable
+    {
+        HRESULT GetForCurrentView([out, retval] Windows.UI.ApplicationSettings.AccountsSettingsPane **current);
+        HRESULT Show();
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 3.0),
+        exclusiveto(Windows.UI.ApplicationSettings.AccountsSettingsPane),
+        uuid(d21df7c2-ce0d-484f-b8e8-e823c215765e)
+    ]
+    interface IAccountsSettingsPaneStatics2 : IInspectable
+        requires Windows.UI.ApplicationSettings.IAccountsSettingsPaneStatics
+    {
+        HRESULT ShowManageAccountsAsync([out, retval] Windows.Foundation.IAsyncAction **asyncInfo);
+        HRESULT ShowAddAccountAsync([out, retval] Windows.Foundation.IAsyncAction **asyncInfo);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 6.0),
+        exclusiveto(Windows.UI.ApplicationSettings.AccountsSettingsPane),
+        uuid(08410458-a2ba-4c6f-b4ac-48f514331216)
+    ]
+    interface IAccountsSettingsPaneStatics3 : IInspectable
+    {
+        HRESULT ShowManageAccountsForUserAsync([in] Windows.System.User *user, [out, retval] Windows.Foundation.IAsyncAction **operation);
+        HRESULT ShowAddAccountForUserAsync([in] Windows.System.User *user, [out, retval] Windows.Foundation.IAsyncAction **operation);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.ApplicationSettings.CredentialCommand),
+        uuid(a5f665e6-6143-4a7a-a971-b017ba978ce2)
+    ]
+    interface ICredentialCommand : IInspectable
+    {
+        [propget] HRESULT PasswordCredential([out, retval] Windows.Security.Credentials.PasswordCredential **value);
+        [propget] HRESULT CredentialDeleted([out, retval] Windows.UI.ApplicationSettings.CredentialCommandCredentialDeletedHandler **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.ApplicationSettings.CredentialCommand),
+        uuid(27e88c17-bc3e-4b80-9495-4ed720e48a91)
+    ]
+    interface ICredentialCommandFactory : IInspectable
+    {
+        HRESULT CreateCredentialCommand([in] Windows.Security.Credentials.PasswordCredential *passwordCredential, [out, retval] Windows.UI.ApplicationSettings.CredentialCommand **instance);
+        HRESULT CreateCredentialCommandWithHandler([in] Windows.Security.Credentials.PasswordCredential *passwordCredential, [in] Windows.UI.ApplicationSettings.CredentialCommandCredentialDeletedHandler *deleted, [out, retval] Windows.UI.ApplicationSettings.CredentialCommand **instance);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.ApplicationSettings.SettingsCommand),
+        uuid(68e15b33-1c83-433a-aa5a-ceeea5bd4764)
+    ]
+    interface ISettingsCommandFactory : IInspectable
+    {
+        HRESULT CreateSettingsCommand([in] IInspectable *settingsCommandId, [in] HSTRING label, [in] Windows.UI.Popups.UICommandInvokedHandler *handler, [out, retval] Windows.UI.ApplicationSettings.SettingsCommand **instance);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.ApplicationSettings.SettingsCommand),
+        uuid(749ae954-2f69-4b17-8aba-d05ce5778e46)
+    ]
+    interface ISettingsCommandStatics : IInspectable
+    {
+        [propget] HRESULT AccountsCommand([out, retval] Windows.UI.ApplicationSettings.SettingsCommand **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.ApplicationSettings.WebAccountCommand),
+        uuid(caa39398-9cfa-4246-b0c4-a913a3896541)
+    ]
+    interface IWebAccountCommand : IInspectable
+    {
+        [propget] HRESULT WebAccount([out, retval] Windows.Security.Credentials.WebAccount **value);
+        [propget] HRESULT Invoked([out, retval] Windows.UI.ApplicationSettings.WebAccountCommandInvokedHandler **value);
+        [propget] HRESULT Actions([out, retval] Windows.UI.ApplicationSettings.SupportedWebAccountActions *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.ApplicationSettings.WebAccountCommand),
+        uuid(bfa6cdff-2f2d-42f5-81de-1d56bafc496d)
+    ]
+    interface IWebAccountCommandFactory : IInspectable
+    {
+        HRESULT CreateWebAccountCommand([in] Windows.Security.Credentials.WebAccount *webAccount, [in] Windows.UI.ApplicationSettings.WebAccountCommandInvokedHandler *invoked, [in] Windows.UI.ApplicationSettings.SupportedWebAccountActions actions, [out, retval] Windows.UI.ApplicationSettings.WebAccountCommand **instance);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.ApplicationSettings.WebAccountInvokedArgs),
+        uuid(e7abcc40-a1d8-4c5d-9a7f-1d34b2f90ad2)
+    ]
+    interface IWebAccountInvokedArgs : IInspectable
+    {
+        [propget] HRESULT Action([out, retval] Windows.UI.ApplicationSettings.WebAccountAction *action);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.ApplicationSettings.WebAccountProviderCommand),
+        uuid(d69bdd9a-a0a6-4e9b-88dc-c71e757a3501)
+    ]
+    interface IWebAccountProviderCommand : IInspectable
+    {
+        [propget] HRESULT WebAccountProvider([out, retval] Windows.Security.Credentials.WebAccountProvider **value);
+        [propget] HRESULT Invoked([out, retval] Windows.UI.ApplicationSettings.WebAccountProviderCommandInvokedHandler **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.ApplicationSettings.WebAccountProviderCommand),
+        uuid(d5658a1b-b176-4776-8469-a9d3ff0b3f59)
+    ]
+    interface IWebAccountProviderCommandFactory : IInspectable
+    {
+        HRESULT CreateWebAccountProviderCommand([in] Windows.Security.Credentials.WebAccountProvider *webAccountProvider, [in] Windows.UI.ApplicationSettings.WebAccountProviderCommandInvokedHandler *invoked, [out, retval] Windows.UI.ApplicationSettings.WebAccountProviderCommand **instance);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(none),
+        static(Windows.UI.ApplicationSettings.IAccountsSettingsPaneStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        static(Windows.UI.ApplicationSettings.IAccountsSettingsPaneStatics2, Windows.Foundation.UniversalApiContract, 3.0),
+        static(Windows.UI.ApplicationSettings.IAccountsSettingsPaneStatics3, Windows.Foundation.UniversalApiContract, 6.0)
+    ]
+    runtimeclass AccountsSettingsPane
+    {
+        [default] interface Windows.UI.ApplicationSettings.IAccountsSettingsPane;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(none)
+    ]
+    runtimeclass AccountsSettingsPaneCommandsRequestedEventArgs
+    {
+        [default] interface Windows.UI.ApplicationSettings.IAccountsSettingsPaneCommandsRequestedEventArgs;
+        [contract(Windows.Foundation.UniversalApiContract, 6.0)] interface Windows.UI.ApplicationSettings.IAccountsSettingsPaneCommandsRequestedEventArgs2;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(none)
+    ]
+    runtimeclass AccountsSettingsPaneEventDeferral
+    {
+        [default] interface Windows.UI.ApplicationSettings.IAccountsSettingsPaneEventDeferral;
+    }
+
+    [
+        activatable(Windows.UI.ApplicationSettings.ICredentialCommandFactory, Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(none)
+    ]
+    runtimeclass CredentialCommand
+    {
+        [default] interface Windows.UI.ApplicationSettings.ICredentialCommand;
+    }
+
+    [
+        activatable(Windows.UI.ApplicationSettings.ISettingsCommandFactory, Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(none),
+        static(Windows.UI.ApplicationSettings.ISettingsCommandStatics, Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    runtimeclass SettingsCommand
+    {
+        [default] interface Windows.UI.Popups.IUICommand;
+    }
+
+    [
+        activatable(Windows.UI.ApplicationSettings.IWebAccountCommandFactory, Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(none)
+    ]
+    runtimeclass WebAccountCommand
+    {
+        [default] interface Windows.UI.ApplicationSettings.IWebAccountCommand;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(none)
+    ]
+    runtimeclass WebAccountInvokedArgs
+    {
+        [default] interface Windows.UI.ApplicationSettings.IWebAccountInvokedArgs;
+    }
+
+    [
+        activatable(Windows.UI.ApplicationSettings.IWebAccountProviderCommandFactory, Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(none)
+    ]
+    runtimeclass WebAccountProviderCommand
+    {
+        [default] interface Windows.UI.ApplicationSettings.IWebAccountProviderCommand;
+    }
+}

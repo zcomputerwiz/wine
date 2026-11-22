@@ -51,6 +51,28 @@
 #define WIDL_using_Windows_UI_Text
 #include "windows.ui.text.h"
 
+#define WIDL_using_Windows_Security_Credentials
+#include "windows.security.credentials.h"
+#define WIDL_using_Windows_UI_Popups
+#include "windows.ui.popups.h"
+#define WIDL_using_Windows_UI_ApplicationSettings
+#include "windows.ui.applicationsettings.h"
+#include "accountssettingspaneinterop.h"
+
+struct vector_iids
+{
+    const GUID *iterable;
+    const GUID *iterator;
+    const GUID *vector;
+    const GUID *view;
+};
+HRESULT vector_inspectable_create( const struct vector_iids *iids, IVector_IInspectable **out );
+
+extern IActivationFactory *accountssettingspane_factory;
+extern IActivationFactory *credentialcommand_factory;
+extern IActivationFactory *settingscommand_factory;
+extern IActivationFactory *webaccountcommand_factory;
+extern IActivationFactory *webaccountprovidercommand_factory;
 extern IActivationFactory *accessibilitysettings_factory;
 extern IActivationFactory *uisettings_factory;
 extern IActivationFactory *uiviewsettings_factory;
