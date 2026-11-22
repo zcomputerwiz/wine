@@ -538,7 +538,7 @@ static WINECRYPT_CERTSTORE *CRYPT_SysRegOpenStoreW(HCRYPTPROV hCryptProv,
                 rc = ERROR_FILE_EXISTS;
             }
         }
-        if (rc == ERROR_ACCESS_DENIED && !(dwFlags & CERT_STORE_READONLY_FLAG))
+        if (rc == ERROR_ACCESS_DENIED && !(dwFlags & (CERT_STORE_READONLY_FLAG | CERT_STORE_CREATE_NEW_FLAG)))
         {
             /* A user without write access to the key (a limited user and the machine registry) gets the store
              * read-only, as on Windows, instead of no store: otherwise no root certificate is trusted. */
