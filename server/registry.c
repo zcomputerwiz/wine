@@ -1113,6 +1113,11 @@ static int key_is_user_root( struct key *key )
 
 /* The service accounts' own profiles below User (S-1-5-19 LocalService, S-1-5-20 NetworkService, and their _Classes):
  * Windows gives each account full control of its own HKCU. Returns the account's SID, NULL for other keys. */
+/* RESTRICTED: a restricted token (a sandbox such as Chromium's GPU and utility processes) must also pass a second
+ * check against its restricting SIDs; on Windows a user's hive grants this SID read access, so such a process can
+ * read its user's settings (win32u needs HKCU\Software\Wine for the display configuration) */
+static const struct sid restricted_code_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_RESTRICTED_CODE_RID } };
+
 static const struct sid *key_service_profile_sid( struct key *key )
 {
     static const struct sid local_service = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_LOCAL_SERVICE_RID } };
@@ -1369,6 +1374,7 @@ static struct security_descriptor *key_get_sd( struct object *obj )
                 { security_server_user_sid(), CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
                 { &local_system_sid,  CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
                 { &builtin_admins_sid, CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+                { &restricted_code_sid, CONTAINER_INHERIT_ACE, KEY_READ },
             };
             key_user_sd = key_alloc_default_sd( aces, ARRAY_SIZE(aces) );
         }
@@ -4645,12 +4651,14 @@ unsigned int session0_load_user_hive( const struct sid *sid, int fd, void *agent
         { sid,                 CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
         { &local_system_sid,   CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
         { &builtin_admins_sid, CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+        { &restricted_code_sid, CONTAINER_INHERIT_ACE, KEY_READ },
     };
     const struct default_ace policy_aces[] =
     {
         { sid,                 CONTAINER_INHERIT_ACE, KEY_READ },
         { &local_system_sid,   CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
         { &builtin_admins_sid, CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS },
+        { &restricted_code_sid, CONTAINER_INHERIT_ACE, KEY_READ },
     };
 
     if (save_branch_count >= MAX_SAVE_BRANCH_INFO)
