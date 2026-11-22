@@ -26,6 +26,7 @@ import "windows.storage.idl";
 import "windows.system.idl";
 import "windows.applicationmodel.idl";
 import "windows.applicationmodel.appservice.idl";
+import "windows.internal.staterepository.idl";
 import "windows.applicationmodel.resources.idl";
 import "windows.applicationmodel.resources.core.idl";
 
@@ -37,6 +38,10 @@ namespace Windows.ApplicationModel {
 
 namespace Windows.ApplicationModel.AppService {
     runtimeclass AppServiceConnection;
+}
+
+namespace Windows.Internal.StateRepository {
+    runtimeclass Package;
 }
 
 namespace Windows.ApplicationModel.Resources {
