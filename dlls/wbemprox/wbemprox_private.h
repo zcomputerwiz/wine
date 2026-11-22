@@ -266,6 +266,9 @@ HRESULT reg_set_stringvalue(IWbemClassObject *obj, IWbemContext *context, IWbemC
 HRESULT reg_set_dwordvalue(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
 HRESULT reg_delete_key(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
 HRESULT service_change_start_mode(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
+HRESULT compsys_join_domain_or_workgroup(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
+HRESULT compsys_rename(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
+HRESULT compsys_unjoin_domain_or_workgroup(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
 HRESULT service_pause_service(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
 HRESULT service_resume_service(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
 HRESULT service_start_service(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);

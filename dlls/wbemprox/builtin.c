@@ -39,6 +39,7 @@
 #include "ntsecapi.h"
 #include "winspool.h"
 #include "ntddstor.h"
+#include "lm.h"
 #include "setupapi.h"
 #include "devguid.h"
 
@@ -106,17 +107,24 @@ static const struct column col_cdromdrive[] =
 static const struct column col_compsys[] =
 {
     { L"Description",               CIM_STRING },
-    { L"Domain",                    CIM_STRING },
+    { L"DNSHostName",               CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"Domain",                    CIM_STRING|COL_FLAG_DYNAMIC },
     { L"DomainRole",                CIM_UINT16 },
     { L"HypervisorPresent",         CIM_BOOLEAN },
     { L"Manufacturer",              CIM_STRING },
     { L"Model",                     CIM_STRING },
-    { L"Name",                      CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"Name",                      CIM_STRING|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
     { L"NumberOfLogicalProcessors", CIM_UINT32 },
     { L"NumberOfProcessors",        CIM_UINT32 },
+    { L"PartOfDomain",              CIM_BOOLEAN },
     { L"SystemType",                CIM_STRING },
     { L"TotalPhysicalMemory",       CIM_UINT64 },
     { L"UserName",                  CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"Workgroup",                 CIM_STRING|COL_FLAG_DYNAMIC },
+    /* methods */
+    { L"JoinDomainOrWorkgroup",     CIM_FLAG_ARRAY|COL_FLAG_METHOD },
+    { L"Rename",                    CIM_FLAG_ARRAY|COL_FLAG_METHOD },
+    { L"UnjoinDomainOrWorkgroup",   CIM_FLAG_ARRAY|COL_FLAG_METHOD },
 };
 static const struct column col_compsysproduct[] =
 {
@@ -692,6 +700,7 @@ struct record_cdromdrive
 struct record_computersystem
 {
     const WCHAR *description;
+    const WCHAR *dnshostname;
     const WCHAR *domain;
     UINT16       domainrole;
     int          hypervisorpresent;
@@ -700,9 +709,15 @@ struct record_computersystem
     const WCHAR *name;
     UINT32       num_logical_processors;
     UINT32       num_processors;
+    int          partofdomain;
     const WCHAR *systemtype;
     UINT64       total_physical_memory;
     const WCHAR *username;
+    const WCHAR *workgroup;
+    /* methods */
+    class_method *join_domain_or_workgroup;
+    class_method *rename;
+    class_method *unjoin_domain_or_workgroup;
 };
 struct record_computersystemproduct
 {
@@ -1275,6 +1290,20 @@ static const struct record_param data_param[] =
     { L"SystemRestore", L"Disable", -1, L"ReturnValue", CIM_UINT32 },
     { L"SystemRestore", L"Enable", 1, L"Drive", CIM_STRING },
     { L"SystemRestore", L"Enable", -1, L"ReturnValue", CIM_UINT32 },
+    { L"Win32_ComputerSystem", L"JoinDomainOrWorkgroup", 1, L"Name", CIM_STRING },
+    { L"Win32_ComputerSystem", L"JoinDomainOrWorkgroup", 1, L"Password", CIM_STRING },
+    { L"Win32_ComputerSystem", L"JoinDomainOrWorkgroup", 1, L"UserName", CIM_STRING },
+    { L"Win32_ComputerSystem", L"JoinDomainOrWorkgroup", 1, L"AccountOU", CIM_STRING },
+    { L"Win32_ComputerSystem", L"JoinDomainOrWorkgroup", 1, L"FJoinOptions", CIM_UINT32 },
+    { L"Win32_ComputerSystem", L"JoinDomainOrWorkgroup", -1, L"ReturnValue", CIM_UINT32 },
+    { L"Win32_ComputerSystem", L"Rename", 1, L"Name", CIM_STRING },
+    { L"Win32_ComputerSystem", L"Rename", 1, L"Password", CIM_STRING },
+    { L"Win32_ComputerSystem", L"Rename", 1, L"UserName", CIM_STRING },
+    { L"Win32_ComputerSystem", L"Rename", -1, L"ReturnValue", CIM_UINT32 },
+    { L"Win32_ComputerSystem", L"UnjoinDomainOrWorkgroup", 1, L"Password", CIM_STRING },
+    { L"Win32_ComputerSystem", L"UnjoinDomainOrWorkgroup", 1, L"UserName", CIM_STRING },
+    { L"Win32_ComputerSystem", L"UnjoinDomainOrWorkgroup", 1, L"FUnjoinOptions", CIM_UINT32 },
+    { L"Win32_ComputerSystem", L"UnjoinDomainOrWorkgroup", -1, L"ReturnValue", CIM_UINT32 },
     { L"Win32_Process", L"Create", 1, L"CommandLine", CIM_STRING },
     { L"Win32_Process", L"Create", 1, L"CurrentDirectory", CIM_STRING },
     { L"Win32_Process", L"Create", -1, L"ProcessId", CIM_UINT32 },
@@ -2009,6 +2038,30 @@ static WCHAR *get_compsysproduct_vendor( const char *buf, UINT len )
     return ret;
 }
 
+/* the domain or workgroup the computer is in (NetGetJoinInformation); WineExplorer's join engine answers it */
+static void get_compsys_membership( struct record_computersystem *rec )
+{
+    WCHAR *name = NULL;
+    NETSETUP_JOIN_STATUS type = NetSetupUnknownStatus;
+
+    rec->domain = NULL;
+    rec->workgroup = NULL;
+    if (NetGetJoinInformation( NULL, &name, &type ) == NERR_Success && name && type == NetSetupDomainName)
+    {
+        rec->domain = wcsdup( name );
+        rec->partofdomain = -1;
+        rec->domainrole = 1; /* member workstation */
+    }
+    else
+    {
+        WCHAR *wg = wcsdup( name && type == NetSetupWorkgroupName ? name : L"WORKGROUP" );
+        if (wg) CharUpperW( wg ); /* as Windows shows a workgroup */
+        rec->workgroup = wg;
+        rec->domain = wcsdup( wg );
+    }
+    if (name) NetApiBufferFree( name );
+}
+
 static enum fill_status fill_compsys( struct table *table, const struct expr *cond )
 {
     struct record_computersystem *rec;
@@ -2024,7 +2077,8 @@ static enum fill_status fill_compsys( struct table *table, const struct expr *co
 
     rec = (struct record_computersystem *)table->data;
     rec->description            = L"AT/AT COMPATIBLE";
-    rec->domain                 = L"WORKGROUP";
+    get_compsys_membership( rec );
+    rec->dnshostname            = get_computername();
     rec->manufacturer           = get_compsysproduct_vendor( buf, len );
     rec->model                  = get_compsysproduct_name( buf, len );
     rec->name                   = get_computername();
@@ -2032,6 +2086,10 @@ static enum fill_status fill_compsys( struct table *table, const struct expr *co
     rec->systemtype             = get_systemtype();
     rec->total_physical_memory  = get_total_physical_memory();
     rec->username               = get_username();
+    /* methods */
+    rec->join_domain_or_workgroup = compsys_join_domain_or_workgroup;
+    rec->rename                 = compsys_rename;
+    rec->unjoin_domain_or_workgroup = compsys_unjoin_domain_or_workgroup;
     if (!match_row( table, row, cond, &status )) free_row_values( table, row );
     else row++;
 
