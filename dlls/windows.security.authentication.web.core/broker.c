@@ -74,13 +74,33 @@ static BOOL server_is_own_user( HANDLE pipe, const SID *own )
     SID *sid;
     BOOL ret = FALSE;
 
-    if (!GetNamedPipeServerProcessId( pipe, &pid )) return FALSE;
-    if (!(process = OpenProcess( PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid ))) return FALSE;
+    if (!GetNamedPipeServerProcessId( pipe, &pid ))
+    {
+        WARN( "no server process id for the pipe: %lu\n", GetLastError() );
+        return FALSE;
+    }
+    if (!(process = OpenProcess( PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid )))
+    {
+        WARN( "cannot open the pipe's server process %04lx: %lu\n", pid, GetLastError() );
+        return FALSE;
+    }
     if ((sid = process_user( process )))
     {
         ret = EqualSid( sid, (SID *)own );
+        if (!ret && WARN_ON(webcore))
+        {
+            WCHAR *server_text = NULL, *own_text = NULL;
+
+            ConvertSidToStringSidW( sid, &server_text );
+            ConvertSidToStringSidW( (SID *)own, &own_text );
+            WARN( "the pipe's server process %04lx runs as %s, this program as %s\n", pid, debugstr_w( server_text ),
+                  debugstr_w( own_text ) );
+            LocalFree( server_text );
+            LocalFree( own_text );
+        }
         free( sid );
     }
+    else WARN( "cannot read the user of the pipe's server process %04lx: %lu\n", pid, GetLastError() );
     CloseHandle( process );
     return ret;
 }
