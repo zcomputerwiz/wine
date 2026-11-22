@@ -441,8 +441,14 @@ static void wait_broker( IUnknown *op )
     if (FAILED(IUnknown_QueryInterface( op, &IID_IAsyncInfo, (void **)&info ))) return;
     for (i = 0; i < 6000 && status == Started; i++)
     {
+        MSG msg;
+
         IAsyncInfo_get_Status( info, &status );
-        if (status == Started) Sleep( 10 );
+        if (status != Started) break;
+        /* the calling window's thread keeps its messages going, as a program's would (the sign-in window is owned by
+         * the test's window) */
+        while (PeekMessageW( &msg, NULL, 0, 0, PM_REMOVE )) DispatchMessageW( &msg );
+        Sleep( 10 );
     }
     IAsyncInfo_Release( info );
     ok( status == Completed, "got status %u.\n", status );
@@ -452,6 +458,7 @@ struct broker_result
 {
     WebTokenRequestStatus status;
     UINT32 error;
+    WCHAR message[256];
     WCHAR token[128];
     WCHAR user_name[128];
     WCHAR account_id[128];
@@ -505,6 +512,11 @@ static void broker_result( IAsyncOperation_WebTokenRequestResult *op, struct bro
     if (SUCCEEDED(IWebTokenRequestResult_get_ResponseError( result, &error )) && error)
     {
         IWebProviderError_get_ErrorCode( error, &out->error );
+        if (SUCCEEDED(IWebProviderError_get_ErrorMessage( error, &str )))
+        {
+            hstring_copy( str, out->message, ARRAY_SIZE(out->message) );
+            WindowsDeleteString( str );
+        }
         IWebProviderError_Release( error );
     }
     if (SUCCEEDED(IWebTokenRequestResult_get_ResponseData( result, &responses )) && responses)
@@ -708,6 +720,22 @@ static void test_broker(void)
 
     provider = broker_provider( statics, TEST_PROVIDER, L"consumers" );
     if (!provider) goto done;
+
+    if (GetEnvironmentVariableW( L"WEBCORE_TEST_WINDOW", NULL, 0 ))
+    {
+        /* the broker's WebView2 sign-in window against the test authority: the sign-in alone */
+        if (!RegOpenKeyExW( HKEY_CURRENT_USER, L"Software\\Wine\\WebAuthentication", 0, KEY_ALL_ACCESS, &key ))
+        {
+            RegSetValueExW( key, L"TestWindow", 0, REG_DWORD, (BYTE *)&one, sizeof(one) );
+            RegCloseKey( key );
+        }
+        broker_interactive( interop, window, provider, L"user.read", L"ok@wine.test", &r );
+        ok( r.status == WebTokenRequestStatus_Success, "window: got status %d, error %#x %s.\n", r.status, r.error,
+            wine_dbgstr_w( r.message ) );
+        ok( !wcscmp( r.user_name, L"ok@wine.test" ), "window: got user name %s.\n", wine_dbgstr_w( r.user_name ) );
+        IWebAccountProvider_Release( provider );
+        goto done;
+    }
 
     /* a new user: no account, a silent request needs the user */
     ok( broker_accounts( statics4, provider, NULL ) == 0, "accounts already.\n" );
