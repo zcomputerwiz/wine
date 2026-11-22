@@ -315,18 +315,37 @@ static DWORD SOFTPUB_VerifyImageHash(CRYPT_PROVIDER_DATA *data, HANDLE file)
     HCRYPTHASH hash = 0;
     ALG_ID algID;
 
-    if (((ULONG_PTR)indirect->Data.pszObjId >> 16) != 0 && !strcmp(indirect->Data.pszObjId, "1.3.6.1.4.1.311.2.1.30"))
+    /* Two kinds of subject were never verified here and stay as they were, each by what it is, not by what the signature
+     * claims: a cabinet with the cabinet digest type (its Authenticode digest is not implemented, so its SIP only has a
+     * stub: KNOWN_BUGS B70), and a catalog, whose content is a CTL that is not indirect data at all. */
     {
-        /* a SIP-hashed subject (Windows Installer packages): the SIP knows how its subject is hashed */
+        static const GUID cab_subject = { 0xc689aaba, 0x8e78, 0x11d0, { 0x8c, 0x47, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee }};
+        static const GUID catalog_subject = { 0xde351a43, 0x8e59, 0x11d0, { 0x8c, 0x47, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee }};
+        const GUID *subject = &data->pPDSip->gSubject;
+
+        if (IsEqualGUID(subject, &catalog_subject)) return ERROR_SUCCESS;
+        if (IsEqualGUID(subject, &cab_subject) && ((ULONG_PTR)indirect->Data.pszObjId >> 16) != 0 &&
+            !strcmp(indirect->Data.pszObjId, "1.3.6.1.4.1.311.2.1.25"))
+        {
+            FIXME("Cannot verify the digest of a cabinet\n");
+            return ERROR_SUCCESS;
+        }
+    }
+    if (((ULONG_PTR)indirect->Data.pszObjId >> 16) != 0 && strcmp(indirect->Data.pszObjId, SPC_PE_IMAGE_DATA_OBJID))
+    {
+        /* anything but a PE image (Windows Installer packages, application packages, other subjects): only the SIP of the
+         * subject knows how it is hashed. Without a SIP that can say, nothing was verified, and a digest that was not
+         * verified is not a good digest: a signature of one kind of subject must not carry another kind. */
         if (data->pPDSip->pSip && data->pPDSip->pSip->pfVerify && data->pPDSip->psSipSubjectInfo)
             return data->pPDSip->pSip->pfVerify(data->pPDSip->psSipSubjectInfo, (SIP_INDIRECT_DATA *)indirect) ?
                    ERROR_SUCCESS : TRUST_E_BAD_DIGEST;
-    }
-    if (((ULONG_PTR)indirect->Data.pszObjId >> 16) == 0 ||
-        strcmp(indirect->Data.pszObjId, SPC_PE_IMAGE_DATA_OBJID))
-    {
         FIXME("Cannot verify hash for pszObjId=%s\n", debugstr_a(indirect->Data.pszObjId));
-        return ERROR_SUCCESS;
+        return TRUST_E_BAD_DIGEST;
+    }
+    if (((ULONG_PTR)indirect->Data.pszObjId >> 16) == 0)
+    {
+        FIXME("Cannot verify hash for pszObjId=%p\n", indirect->Data.pszObjId);
+        return TRUST_E_BAD_DIGEST;
     }
 
     if (!(algID = CertOIDToAlgId(indirect->DigestAlgorithm.pszObjId)))
@@ -1271,13 +1290,15 @@ HRESULT WINAPI SoftpubAuthenticode(CRYPT_PROVIDER_DATA *data)
         ret = TRUE;
         for (i = 0; ret && i < data->csSigners; i++)
         {
-            BYTE hash[20];
+            /* the hash is the one of the certificate's signature algorithm: SHA-256 and larger do not fit 20 bytes */
+            BYTE hash[64];
             DWORD size = sizeof(hash);
 
-            /* First make sure cert isn't disallowed */
-            if ((ret = CertGetCertificateContextProperty(
+            /* First make sure cert isn't disallowed. A certificate whose hash cannot be had is not on the list;
+             * ending the policy here without an error would let every such certificate pass unchecked. */
+            if (CertGetCertificateContextProperty(
              data->pasSigners[i].pasCertChain[0].pCert,
-             CERT_SIGNATURE_HASH_PROP_ID, hash, &size)))
+             CERT_SIGNATURE_HASH_PROP_ID, hash, &size))
             {
                 static const WCHAR disallowedW[] =
                  { 'D','i','s','a','l','l','o','w','e','d',0 };
