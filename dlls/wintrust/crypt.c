@@ -1619,6 +1619,73 @@ static const GUID cabGUID = { 0xC689AABA, 0x8E78, 0x11D0, { 0x8C,0x47,
 static const GUID catGUID = { 0xDE351A43, 0x8E59, 0x11D0, { 0x8C,0x47,
      0x00,0xC0,0x4F,0xC2,0x95,0xEE }};
 
+/* The digest of a signed cabinet (found by comparing signed cabinets with their signatures): the hash of the file from its
+ * start up to the signature, which the CFHEADER's cbCabinet already ends at, without the four reserved bytes at 4, without
+ * cbCFHeader (36) and without the header reserve area (40, cbCFHeader bytes: the offset and size of the signature). */
+static BOOL WINTRUST_VerifyCabDigest(SIP_SUBJECTINFO *info, SIP_INDIRECT_DATA *indirect)
+{
+    HANDLE file = info->hFile, own = INVALID_HANDLE_VALUE;
+    BYTE header[cfhead_SIZEOF + 4 + 0xffff], *digest = NULL, buf[4096];
+    DWORD read, cb_reserve, end, pos, dlen, cert_offset, cert_size;
+    HCRYPTPROV prov = 0;
+    HCRYPTHASH hash = 0;
+    ALG_ID alg;
+    BOOL ret = FALSE;
+    LARGE_INTEGER size;
+
+    if (!indirect->DigestAlgorithm.pszObjId || !(alg = CertOIDToAlgId(indirect->DigestAlgorithm.pszObjId)))
+        return FALSE;
+    if (!file || file == INVALID_HANDLE_VALUE)
+    {
+        if (!info->pwsFileName) return FALSE;
+        own = file = CreateFileW(info->pwsFileName, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                 NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (file == INVALID_HANDLE_VALUE) return FALSE;
+    }
+    if (!GetFileSizeEx(file, &size) || size.QuadPart < cfhead_SIZEOF + 4 || size.QuadPart > 0x7fffffff) goto done;
+    if (SetFilePointer(file, 0, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) goto done;
+    if (!ReadFile(file, header, cfhead_SIZEOF + 4, &read, NULL) || read != cfhead_SIZEOF + 4) goto done;
+    if (memcmp(header, "MSCF", 4) || !(EndGetI16(header + cfhead_Flags) & cfheadRESERVE_PRESENT)) goto done;
+    cb_reserve = EndGetI16(header + cfhead_SIZEOF);
+    if (cb_reserve < cfsigninfo_SIZEOF || !ReadFile(file, header + cfhead_SIZEOF + 4, cb_reserve, &read, NULL) ||
+        read != cb_reserve) goto done;
+    /* the reserve area, as the header reads it: cbCFHeader (2), cbCFFolder (1), cbCFData (1), then the signature info */
+    cert_offset = EndGetI32(header + cfhead_SIZEOF + 4 + cfsigninfo_CertOffset);
+    cert_size = EndGetI32(header + cfhead_SIZEOF + 4 + cfsigninfo_CertSize);
+    /* the signature ends the file (a byte behind it is a bad digest on Windows) */
+    if (!cert_size || cert_offset > size.QuadPart || cert_size != size.QuadPart - cert_offset) goto done;
+    end = cert_offset;
+    if (end < cfhead_SIZEOF + 4 + cb_reserve) goto done;
+
+    if (!CryptAcquireContextW(&prov, NULL, MS_ENH_RSA_AES_PROV_W, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) goto done;
+    if (!CryptCreateHash(prov, alg, 0, 0, &hash)) goto done;
+    /* [0,4) signature, [8,36) header up to cbCFHeader, [38,40) cbCFFolder and cbCFData, then after the reserve area */
+    if (!CryptHashData(hash, header, 4, 0) || !CryptHashData(hash, header + 8, 28, 0) ||
+        !CryptHashData(hash, header + 38, 2, 0)) goto done;
+    pos = cfhead_SIZEOF + 4 + cb_reserve;
+    if (SetFilePointer(file, pos, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) goto done;
+    while (pos < end)
+    {
+        DWORD n = min(end - pos, sizeof(buf));
+        if (!ReadFile(file, buf, n, &read, NULL) || read != n) goto done;
+        if (!CryptHashData(hash, buf, n, 0)) goto done;
+        pos += n;
+    }
+    read = sizeof(dlen);
+    if (!CryptGetHashParam(hash, HP_HASHSIZE, (BYTE *)&dlen, &read, 0)) goto done;
+    if (!(digest = malloc(dlen))) goto done;
+    if (!CryptGetHashParam(hash, HP_HASHVAL, digest, &dlen, 0)) goto done;
+    ret = dlen == indirect->Digest.cbData && !memcmp(digest, indirect->Digest.pbData, dlen);
+    if (!ret) WARN("the digest of the cabinet does not match its signature\n");
+
+done:
+    free(digest);
+    if (hash) CryptDestroyHash(hash);
+    if (prov) CryptReleaseContext(prov, 0);
+    if (own != INVALID_HANDLE_VALUE) CloseHandle(own);
+    return ret;
+}
+
 /***********************************************************************
  *      CryptSIPGetSignedDataMsg  (WINTRUST.@)
  */
@@ -1697,7 +1764,17 @@ BOOL WINAPI CryptSIPRemoveSignedDataMsg(SIP_SUBJECTINFO* pSubjectInfo,
 BOOL WINAPI CryptSIPVerifyIndirectData(SIP_SUBJECTINFO* pSubjectInfo,
                                        SIP_INDIRECT_DATA* pIndirectData)
 {
-    FIXME("(%p %p) stub\n", pSubjectInfo, pIndirectData);
- 
+    TRACE("(%p %p)\n", pSubjectInfo, pIndirectData);
+
+    if (!pSubjectInfo || !pIndirectData || !pSubjectInfo->pgSubjectType)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (!memcmp(pSubjectInfo->pgSubjectType, &cabGUID, sizeof(cabGUID)))
+        return WINTRUST_VerifyCabDigest(pSubjectInfo, pIndirectData);
+
+    FIXME("unimplemented for subject type %s\n", debugstr_guid(pSubjectInfo->pgSubjectType));
     return FALSE;
 }

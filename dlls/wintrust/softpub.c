@@ -315,20 +315,20 @@ static DWORD SOFTPUB_VerifyImageHash(CRYPT_PROVIDER_DATA *data, HANDLE file)
     HCRYPTHASH hash = 0;
     ALG_ID algID;
 
-    /* Two kinds of subject were never verified here and stay as they were, each by what it is, not by what the signature
-     * claims: a cabinet with the cabinet digest type (its Authenticode digest is not implemented, so its SIP only has a
-     * stub: KNOWN_BUGS B70), and a catalog, whose content is a CTL that is not indirect data at all. */
+    /* A catalog was never verified here and stays as it was: its content is a CTL that is not indirect data at all (KNOWN_BUGS
+     * B70). A cabinet is verified by its SIP, whatever the type of the data in its signature is. */
     {
-        static const GUID cab_subject = { 0xc689aaba, 0x8e78, 0x11d0, { 0x8c, 0x47, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee }};
         static const GUID catalog_subject = { 0xde351a43, 0x8e59, 0x11d0, { 0x8c, 0x47, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee }};
+        static const GUID cab_subject = { 0xc689aaba, 0x8e78, 0x11d0, { 0x8c, 0x47, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee }};
         const GUID *subject = &data->pPDSip->gSubject;
 
         if (IsEqualGUID(subject, &catalog_subject)) return ERROR_SUCCESS;
-        if (IsEqualGUID(subject, &cab_subject) && ((ULONG_PTR)indirect->Data.pszObjId >> 16) != 0 &&
-            !strcmp(indirect->Data.pszObjId, "1.3.6.1.4.1.311.2.1.25"))
+        if (IsEqualGUID(subject, &cab_subject))
         {
-            FIXME("Cannot verify the digest of a cabinet\n");
-            return ERROR_SUCCESS;
+            if (data->pPDSip->pSip && data->pPDSip->pSip->pfVerify && data->pPDSip->psSipSubjectInfo)
+                return data->pPDSip->pSip->pfVerify(data->pPDSip->psSipSubjectInfo, (SIP_INDIRECT_DATA *)indirect) ?
+                       ERROR_SUCCESS : TRUST_E_BAD_DIGEST;
+            return TRUST_E_BAD_DIGEST;
         }
     }
     if (((ULONG_PTR)indirect->Data.pszObjId >> 16) != 0 && strcmp(indirect->Data.pszObjId, SPC_PE_IMAGE_DATA_OBJID))
