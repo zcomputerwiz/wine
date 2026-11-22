@@ -732,10 +732,12 @@ static void test_broker_sandboxed(void)
     static SID low = { SID_REVISION, 1, { SECURITY_MANDATORY_LABEL_AUTHORITY }, { SECURITY_MANDATORY_LOW_RID } };
     char buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
     TOKEN_USER *user = (TOKEN_USER *)buffer;
+    static SID_IDENTIFIER_AUTHORITY world = { SECURITY_WORLD_SID_AUTHORITY }, nt = { SECURITY_NT_AUTHORITY };
     TOKEN_MANDATORY_LABEL label;
-    SID_AND_ATTRIBUTES restrict_sid;
+    SID_AND_ATTRIBUTES restrict_sids[5];
     HANDLE token, restricted, low_token;
-    DWORD len, code;
+    DWORD len, code, i;
+    BOOL ok_restricted;
 
     if (!OpenProcessToken( GetCurrentProcess(), TOKEN_ALL_ACCESS, &token ))
     {
@@ -744,10 +746,21 @@ static void test_broker_sandboxed(void)
     }
     GetTokenInformation( token, TokenUser, buffer, sizeof(buffer), &len );
 
-    /* restricted: its restricting SID is the user's own, so that every access check still passes */
-    restrict_sid.Sid = user->User.Sid;
-    restrict_sid.Attributes = 0;
-    if (CreateRestrictedToken( token, 0, 0, NULL, 0, NULL, 1, &restrict_sid, &restricted ))
+    /* restricted: its restricting SIDs are the user's own and the groups the machine's registry grants reading to
+     * (Everyone, Users, Authenticated Users, RESTRICTED), as a sandbox's token carries, so that the child can still
+     * activate the class (the activation registry is readable by Users, not by the user's own SID) and only the
+     * broker's own check refuses it */
+    restrict_sids[0].Sid = user->User.Sid;
+    AllocateAndInitializeSid( &world, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &restrict_sids[1].Sid );
+    AllocateAndInitializeSid( &nt, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_USERS, 0, 0, 0, 0, 0, 0,
+                              &restrict_sids[2].Sid );
+    AllocateAndInitializeSid( &nt, 1, SECURITY_AUTHENTICATED_USER_RID, 0, 0, 0, 0, 0, 0, 0, &restrict_sids[3].Sid );
+    AllocateAndInitializeSid( &nt, 1, SECURITY_RESTRICTED_CODE_RID, 0, 0, 0, 0, 0, 0, 0, &restrict_sids[4].Sid );
+    for (i = 0; i < ARRAY_SIZE(restrict_sids); i++) restrict_sids[i].Attributes = 0;
+    ok_restricted = CreateRestrictedToken( token, 0, 0, NULL, 0, NULL, ARRAY_SIZE(restrict_sids), restrict_sids,
+                                           &restricted );
+    for (i = 1; i < ARRAY_SIZE(restrict_sids); i++) FreeSid( restrict_sids[i].Sid );
+    if (ok_restricted)
     {
         ok( IsTokenRestricted( restricted ), "not restricted.\n" );
         code = run_child( restricted );
