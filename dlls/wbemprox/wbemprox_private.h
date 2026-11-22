@@ -109,6 +109,7 @@ enum fill_status
 };
 
 #define TABLE_FLAG_DYNAMIC 0x00000001
+#define TABLE_FLAG_SLOW_FILL 0x00000002  /* fill() walks the disk: not run to build a class object */
 
 struct table
 {
@@ -208,6 +209,8 @@ void free_query( struct query * );
 struct query *addref_query( struct query * );
 void release_query( struct query *query );
 HRESULT exec_query( enum wbm_namespace, const WCHAR *, IEnumWbemClassObject ** );
+HRESULT exec_class_query( enum wbm_namespace, const WCHAR *, IEnumWbemClassObject ** );
+BOOL add_blank_row( struct table * );
 HRESULT parse_query( enum wbm_namespace, const WCHAR *, struct view **, struct list * );
 HRESULT create_view( enum view_type, enum wbm_namespace, const WCHAR *, const struct keyword *, const WCHAR *,
                      const struct property *, const struct expr *, struct view ** );
