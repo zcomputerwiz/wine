@@ -79,7 +79,9 @@ static BOOL server_is_own_user( HANDLE pipe, const SID *own )
         WARN( "no server process id for the pipe: %lu\n", GetLastError() );
         return FALSE;
     }
-    if (!(process = OpenProcess( PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid )))
+    /* the query right, not only the limited one: with elevation enforced WineExplorer's server gives a process's token
+     * only to a handle with PROCESS_QUERY_INFORMATION (server/token.c, open_token) */
+    if (!(process = OpenProcess( PROCESS_QUERY_INFORMATION, FALSE, pid )))
     {
         WARN( "cannot open the pipe's server process %04lx: %lu\n", pid, GetLastError() );
         return FALSE;
