@@ -805,7 +805,9 @@ static HRESULT d3d11_swapchain_present_locked(struct d3d11_swapchain *swapchain,
     wined3d_mutex_unlock();
 
     hwnd = target_hwnd ? target_hwnd : d3d11_swapchain_get_hwnd(swapchain);
-    if (hwnd && IsIconic(hwnd))
+    /* wined3d reports occlusion of the swapchain's own window (and keeps the
+     * frame latency semaphore balanced); it does not see a composition target. */
+    if (target_hwnd && IsIconic(target_hwnd))
     {
         ReleaseSRWLockShared(&dcomp_binding_lock);
         return DXGI_STATUS_OCCLUDED;
@@ -815,6 +817,11 @@ static HRESULT d3d11_swapchain_present_locked(struct d3d11_swapchain *swapchain,
         FIXME("Unimplemented flags %#x.\n", flags);
     if (flags & DXGI_PRESENT_TEST)
     {
+        if (hwnd && IsIconic(hwnd))
+        {
+            ReleaseSRWLockShared(&dcomp_binding_lock);
+            return DXGI_STATUS_OCCLUDED;
+        }
         WARN("Returning S_OK for DXGI_PRESENT_TEST.\n");
         ReleaseSRWLockShared(&dcomp_binding_lock);
         return S_OK;
@@ -834,12 +841,18 @@ static HRESULT d3d11_swapchain_present_locked(struct d3d11_swapchain *swapchain,
         }
         history_ready = hr == S_OK;
     }
-    if (SUCCEEDED(hr = wined3d_swapchain_present(swapchain->wined3d_swapchain,
+    hr = wined3d_swapchain_present(swapchain->wined3d_swapchain,
             has_dst_rect ? &src_rect : NULL,
             has_dst_rect ? &dst_rect : NULL,
             target_hwnd, sync_interval, capture_only ? WINED3D_PRESENT_CAPTURE_ONLY
                     : swapchain->comp_wnd ? WINED3D_PRESENT_CLEAR
-                    | (fully_clipped ? WINED3D_PRESENT_CLEAR_ONLY : 0) : 0)))
+                    | (fully_clipped ? WINED3D_PRESENT_CLEAR_ONLY : 0) : 0);
+    if (hr == WINED3DOK_PRESENT_OCCLUDED)
+    {
+        ReleaseSRWLockShared(&dcomp_binding_lock);
+        return DXGI_STATUS_OCCLUDED;
+    }
+    if (SUCCEEDED(hr))
     {
         InterlockedIncrement(&swapchain->present_count);
         if (history_ready)

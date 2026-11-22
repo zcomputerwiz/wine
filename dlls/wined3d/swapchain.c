@@ -550,6 +550,7 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
         unsigned int swap_interval, uint32_t flags)
 {
     const struct wined3d_swapchain_desc *desc = &swapchain->state.desc;
+    HRESULT hr;
     RECT s, d;
     struct wined3d_texture *surface;
     struct wined3d_dcomp_background *background = NULL;
@@ -656,14 +657,14 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
         dst_rect = &d;
     }
 
-    wined3d_cs_emit_present(swapchain->device->cs, swapchain, src_rect,
+    hr = wined3d_cs_emit_present(swapchain->device->cs, swapchain, src_rect,
             dst_rect, dst_window_override, swap_interval, flags);
     if (swapchain->has_target_scene && (flags & WINED3D_PRESENT_CLEAR_ONLY))
         wined3d_cs_finish(swapchain->device->cs, WINED3D_CS_QUEUE_DEFAULT);
 
     wined3d_mutex_unlock();
 
-    return WINED3D_OK;
+    return hr;
 }
 
 HRESULT CDECL wined3d_swapchain_get_front_buffer_data(const struct wined3d_swapchain *swapchain,

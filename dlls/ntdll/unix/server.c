@@ -2304,6 +2304,7 @@ void server_init_process( struct thread_data *data )
     sigaction( SIGPIPE, &sig_act, NULL );
 
     reply_pipe = init_thread_pipe( data );
+    close( reply_pipe );
 
     SERVER_START_REQ( init_first_thread )
     {
@@ -2331,7 +2332,6 @@ void server_init_process( struct thread_data *data )
         }
     }
     SERVER_END_REQ;
-    close( reply_pipe );
 
     if (ret) server_protocol_error( "init_first_thread failed with status %x\n", ret );
     TRACE_(wex_process)( "win_pid=%04x win_tid=%04x unix_pid=%u unix_tid=%u\n",
@@ -2417,6 +2417,8 @@ void server_init_thread( struct thread_data *data )
     pthread_setspecific( thread_data_key, data );
 
     reply_pipe = init_thread_pipe( data );
+    close( reply_pipe );
+
     SERVER_START_REQ( init_thread )
     {
         req->unix_tid  = get_unix_tid();
@@ -2428,7 +2430,6 @@ void server_init_thread( struct thread_data *data )
         data->suspend = reply->suspend;
     }
     SERVER_END_REQ;
-    close( reply_pipe );
 
     if (data->teb)
     {

@@ -30,6 +30,7 @@
 #include "objbase.h"
 #include "userenv.h"
 #include "bcrypt.h"
+#include "lmcons.h"
 
 #include "wine/debug.h"
 #include "wine/wex_profile.h"
@@ -240,7 +241,7 @@ BOOL WINAPI CreateEnvironmentBlock( LPVOID* lpEnvironment,
     static const WCHAR env_keyW[] = L"System\\CurrentControlSet\\Control\\Session Manager\\Environment";
     static const WCHAR profile_keyW[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList";
 
-    WCHAR *env, buf[UNICODE_STRING_MAX_CHARS], profiles_dir[MAX_PATH];
+    WCHAR *env, buf[UNICODE_STRING_MAX_CHARS], profiles_dir[MAX_PATH], username[UNLEN + 1];
     DWORD len;
     HKEY hkey, hsubkey;
     HANDLE tok = hToken;
@@ -401,51 +402,69 @@ BOOL WINAPI CreateEnvironmentBlock( LPVOID* lpEnvironment,
             return FALSE;
         }
 
-        len = lstrlenW(profiles_dir);
-        memcpy(buf, profiles_dir, len*sizeof(WCHAR));
-
-        size = UNICODE_STRING_MAX_CHARS-len;
-        if (LookupAccountSidW(NULL, token_user->User.Sid,
-                    buf+len, &size, domain, &domain_size, &use))
+        size = ARRAY_SIZE(username);
+        if (LookupAccountSidW(NULL, token_user->User.Sid, username, &size, domain, &domain_size, &use))
         {
+            BOOL is_local_system, is_local_service, is_network_service;
 #ifdef WEX_E1S13_HKU_TEST
-            if (is_managed)
-            {
-                WCHAR prof_dir[MAX_PATH];
-                DWORD cch = ARRAY_SIZE(prof_dir);
-                if (GetUserProfileDirectoryW( tok, prof_dir, &cch ))
-                {
-                    WCHAR sub[MAX_PATH];
-                    set_env_var(&env, L"USERNAME", buf+len);
-                    set_env_var(&env, L"USERPROFILE", prof_dir);
-                    if (prof_dir[0] && prof_dir[1] == ':')
-                    {
-                        WCHAR drv[3] = { prof_dir[0], ':', 0 };
-                        set_env_var(&env, L"HOMEDRIVE", drv);
-                        set_env_var(&env, L"HOMEPATH", prof_dir + 2);
-                    }
-                    set_env_var(&env, L"USERDOMAIN", L"WINEHOST");
-                    lstrcpyW(sub, prof_dir);
-                    lstrcatW(sub, L"\\AppData\\Roaming");
-                    set_env_var(&env, L"APPDATA", sub);
-                    lstrcpyW(sub, prof_dir);
-                    lstrcatW(sub, L"\\AppData\\Local");
-                    set_env_var(&env, L"LOCALAPPDATA", sub);
-                    lstrcpyW(sub, prof_dir);
-                    lstrcatW(sub, L"\\AppData\\Local\\Temp");
-                    set_env_var(&env, L"TEMP", sub);
-                    set_env_var(&env, L"TMP", sub);
-                }
-            }
-            else
-            {
-                set_env_var(&env, L"USERNAME", buf+len);
-                if (len) set_env_var(&env, L"USERPROFILE", buf);
-            }
-#else
-            set_env_var(&env, L"USERNAME", buf+len);
-            if (len) set_env_var(&env, L"USERPROFILE", buf);
+            WCHAR prof_dir[MAX_PATH];
+            DWORD cch = ARRAY_SIZE(prof_dir);
 #endif
+
+            set_env_var(&env, L"USERNAME", username);
+
+            is_local_system = IsWellKnownSid(token_user->User.Sid, WinLocalSystemSid);
+            is_local_service = IsWellKnownSid(token_user->User.Sid, WinLocalServiceSid);
+            is_network_service = IsWellKnownSid(token_user->User.Sid, WinNetworkServiceSid);
+            if (is_local_system || is_local_service || is_network_service)
+            {
+                GetWindowsDirectoryW(profiles_dir, ARRAY_SIZE(profiles_dir));
+                if (is_local_system)
+                    wcscat(profiles_dir, L"\\system32\\config\\systemprofile");
+                else if (is_local_service)
+                    wcscat(profiles_dir, L"\\ServiceProfiles\\LocalService");
+                else
+                    wcscat(profiles_dir, L"\\ServiceProfiles\\NetworkService");
+                set_env_var(&env, L"USERPROFILE", profiles_dir);
+
+                wcscpy(buf, profiles_dir);
+                wcscat(buf, L"\\AppData\\Roaming");
+                set_env_var(&env, L"APPDATA", buf);
+
+                wcscpy(buf, profiles_dir);
+                wcscat(buf, L"\\AppData\\Local");
+                set_env_var(&env, L"LOCALAPPDATA", buf);
+            }
+#ifdef WEX_E1S13_HKU_TEST
+            else if (is_managed && GetUserProfileDirectoryW( tok, prof_dir, &cch ))
+            {
+                WCHAR sub[MAX_PATH];
+                set_env_var(&env, L"USERPROFILE", prof_dir);
+                if (prof_dir[0] && prof_dir[1] == ':')
+                {
+                    WCHAR drv[3] = { prof_dir[0], ':', 0 };
+                    set_env_var(&env, L"HOMEDRIVE", drv);
+                    set_env_var(&env, L"HOMEPATH", prof_dir + 2);
+                }
+                set_env_var(&env, L"USERDOMAIN", L"WINEHOST");
+                lstrcpyW(sub, prof_dir);
+                lstrcatW(sub, L"\\AppData\\Roaming");
+                set_env_var(&env, L"APPDATA", sub);
+                lstrcpyW(sub, prof_dir);
+                lstrcatW(sub, L"\\AppData\\Local");
+                set_env_var(&env, L"LOCALAPPDATA", sub);
+                lstrcpyW(sub, prof_dir);
+                lstrcatW(sub, L"\\AppData\\Local\\Temp");
+                set_env_var(&env, L"TEMP", sub);
+                set_env_var(&env, L"TMP", sub);
+            }
+#endif
+            else if (profiles_dir[0])
+            {
+                wcscpy(buf, profiles_dir);
+                wcscat(buf, username);
+                set_env_var(&env, L"USERPROFILE", buf);
+            }
         }
 
         HeapFree(GetProcessHeap(), 0, token_user);
