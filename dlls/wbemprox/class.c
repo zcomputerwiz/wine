@@ -219,6 +219,131 @@ HRESULT EnumWbemClassObject_create( struct query *query, LPVOID *ppObj )
     return S_OK;
 }
 
+/* an enumerator of the classes (not the instances) of a namespace, for IWbemServices::CreateClassEnum */
+struct enum_classes
+{
+    IEnumWbemClassObject IEnumWbemClassObject_iface;
+    LONG refs;
+    enum wbm_namespace ns;
+    WCHAR **names;
+    UINT count, index;
+};
+
+static inline struct enum_classes *impl_from_enum_classes( IEnumWbemClassObject *iface )
+{
+    return CONTAINING_RECORD(iface, struct enum_classes, IEnumWbemClassObject_iface);
+}
+
+static HRESULT WINAPI enum_classes_QueryInterface( IEnumWbemClassObject *iface, REFIID riid, void **ppvObject )
+{
+    if (IsEqualGUID( riid, &IID_IEnumWbemClassObject ) || IsEqualGUID( riid, &IID_IUnknown ))
+    {
+        *ppvObject = iface;
+        IEnumWbemClassObject_AddRef( iface );
+        return S_OK;
+    }
+    *ppvObject = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI enum_classes_AddRef( IEnumWbemClassObject *iface )
+{
+    return InterlockedIncrement( &impl_from_enum_classes( iface )->refs );
+}
+
+static ULONG WINAPI enum_classes_Release( IEnumWbemClassObject *iface )
+{
+    struct enum_classes *ec = impl_from_enum_classes( iface );
+    LONG refs = InterlockedDecrement( &ec->refs );
+    if (!refs)
+    {
+        UINT i;
+        for (i = 0; i < ec->count; i++) free( ec->names[i] );
+        free( ec->names );
+        free( ec );
+    }
+    return refs;
+}
+
+static HRESULT WINAPI enum_classes_Reset( IEnumWbemClassObject *iface )
+{
+    impl_from_enum_classes( iface )->index = 0;
+    return WBEM_S_NO_ERROR;
+}
+
+static HRESULT WINAPI enum_classes_Next( IEnumWbemClassObject *iface, LONG lTimeout, ULONG uCount,
+                                         IWbemClassObject **apObjects, ULONG *puReturned )
+{
+    struct enum_classes *ec = impl_from_enum_classes( iface );
+    ULONG i, j;
+    HRESULT hr;
+
+    if (!apObjects || !puReturned) return WBEM_E_INVALID_PARAMETER;
+    *puReturned = 0;
+    for (i = 0; i < uCount; i++)
+    {
+        if (ec->index >= ec->count) return WBEM_S_FALSE;
+        hr = create_class_object( ec->ns, ec->names[ec->index], NULL, 0, NULL, &apObjects[i] );
+        if (hr != S_OK)
+        {
+            for (j = 0; j < i; j++) IWbemClassObject_Release( apObjects[j] );
+            *puReturned = 0;
+            return hr;
+        }
+        ec->index++;
+        (*puReturned)++;
+    }
+    return WBEM_S_NO_ERROR;
+}
+
+static HRESULT WINAPI enum_classes_NextAsync( IEnumWbemClassObject *iface, ULONG uCount, IWbemObjectSink *pSink )
+{
+    FIXME( "%p, %lu, %p\n", iface, uCount, pSink );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI enum_classes_Clone( IEnumWbemClassObject *iface, IEnumWbemClassObject **ppEnum )
+{
+    return EnumWbemClassObject_create_classes( impl_from_enum_classes( iface )->ns, (void **)ppEnum );
+}
+
+static HRESULT WINAPI enum_classes_Skip( IEnumWbemClassObject *iface, LONG lTimeout, ULONG nCount )
+{
+    struct enum_classes *ec = impl_from_enum_classes( iface );
+    if (nCount > ec->count - ec->index)
+    {
+        ec->index = ec->count;
+        return WBEM_S_FALSE;
+    }
+    ec->index += nCount;
+    return WBEM_S_NO_ERROR;
+}
+
+static const IEnumWbemClassObjectVtbl enum_classes_vtbl =
+{
+    enum_classes_QueryInterface,
+    enum_classes_AddRef,
+    enum_classes_Release,
+    enum_classes_Reset,
+    enum_classes_Next,
+    enum_classes_NextAsync,
+    enum_classes_Clone,
+    enum_classes_Skip
+};
+
+HRESULT EnumWbemClassObject_create_classes( enum wbm_namespace ns, LPVOID *ppObj )
+{
+    struct enum_classes *ec;
+
+    if (!(ec = calloc( 1, sizeof(*ec) ))) return E_OUTOFMEMORY;
+    ec->IEnumWbemClassObject_iface.lpVtbl = &enum_classes_vtbl;
+    ec->refs = 1;
+    ec->ns = ns;
+    ec->count = get_table_names( ns, &ec->names );
+    *ppObj = &ec->IEnumWbemClassObject_iface;
+    return S_OK;
+}
+
 static struct record *create_record( struct table *table )
 {
     UINT i;
@@ -406,6 +531,15 @@ static HRESULT WINAPI class_object_Get(
 
         if ((hr = get_column_index( co->record->table, wszName, &index )) != S_OK) return hr;
         return record_get_value( co->record, index, pVal, pType );
+    }
+    if (!co->iter)  /* a class from CreateClassEnum: only its name is known */
+    {
+        if (!co->name || wcsicmp( wszName, L"__CLASS" )) return WBEM_E_NOT_FOUND;
+        V_VT(pVal) = VT_BSTR;
+        if (!(V_BSTR(pVal) = SysAllocString( co->name ))) return E_OUTOFMEMORY;
+        if (pType) *pType = CIM_STRING;
+        if (plFlavor) *plFlavor = WBEM_FLAVOR_ORIGIN_SYSTEM;
+        return S_OK;
     }
     return get_propval( ec->query->view, co->index, wszName, pVal, pType, plFlavor );
 }

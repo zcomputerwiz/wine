@@ -222,6 +222,8 @@ struct table *create_table( enum wbm_namespace, const WCHAR * );
 struct table *grab_table( struct table * );
 void release_table( struct table * );
 BOOL add_table( enum wbm_namespace, struct table * );
+UINT get_table_names( enum wbm_namespace, WCHAR *** );
+HRESULT EnumWbemClassObject_create_classes( enum wbm_namespace, LPVOID * );
 void free_columns( struct column *, UINT );
 void free_row_values( const struct table *, UINT );
 UINT get_type_size( CIMTYPE );
@@ -266,6 +268,9 @@ HRESULT reg_set_stringvalue(IWbemClassObject *obj, IWbemContext *context, IWbemC
 HRESULT reg_set_dwordvalue(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
 HRESULT reg_delete_key(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
 HRESULT service_change_start_mode(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
+HRESULT compsys_join_domain_or_workgroup(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
+HRESULT compsys_rename(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
+HRESULT compsys_unjoin_domain_or_workgroup(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
 HRESULT service_pause_service(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
 HRESULT service_resume_service(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
 HRESULT service_start_service(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
