@@ -315,18 +315,21 @@ static DWORD SOFTPUB_VerifyImageHash(CRYPT_PROVIDER_DATA *data, HANDLE file)
     HCRYPTHASH hash = 0;
     ALG_ID algID;
 
-    if (((ULONG_PTR)indirect->Data.pszObjId >> 16) != 0 && !strcmp(indirect->Data.pszObjId, "1.3.6.1.4.1.311.2.1.30"))
+    if (((ULONG_PTR)indirect->Data.pszObjId >> 16) != 0 && strcmp(indirect->Data.pszObjId, SPC_PE_IMAGE_DATA_OBJID))
     {
-        /* a SIP-hashed subject (Windows Installer packages): the SIP knows how its subject is hashed */
+        /* anything but a PE image (Windows Installer packages, application packages, other subjects): only the SIP of the
+         * subject knows how it is hashed. Without a SIP that can say, nothing was verified, and a digest that was not
+         * verified is not a good digest: a signature of one kind of subject must not carry another kind. */
         if (data->pPDSip->pSip && data->pPDSip->pSip->pfVerify && data->pPDSip->psSipSubjectInfo)
             return data->pPDSip->pSip->pfVerify(data->pPDSip->psSipSubjectInfo, (SIP_INDIRECT_DATA *)indirect) ?
                    ERROR_SUCCESS : TRUST_E_BAD_DIGEST;
-    }
-    if (((ULONG_PTR)indirect->Data.pszObjId >> 16) == 0 ||
-        strcmp(indirect->Data.pszObjId, SPC_PE_IMAGE_DATA_OBJID))
-    {
         FIXME("Cannot verify hash for pszObjId=%s\n", debugstr_a(indirect->Data.pszObjId));
-        return ERROR_SUCCESS;
+        return TRUST_E_BAD_DIGEST;
+    }
+    if (((ULONG_PTR)indirect->Data.pszObjId >> 16) == 0)
+    {
+        FIXME("Cannot verify hash for pszObjId=%p\n", indirect->Data.pszObjId);
+        return TRUST_E_BAD_DIGEST;
     }
 
     if (!(algID = CertOIDToAlgId(indirect->DigestAlgorithm.pszObjId)))
