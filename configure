@@ -1015,6 +1015,7 @@ enable_avifil32
 enable_avifile
 enable_avrt
 enable_bcp47langs
+enable_bcp47mrm
 enable_bcrypt
 enable_bcryptprimitives
 enable_bluetoothapis
@@ -1177,6 +1178,7 @@ enable_dxdiagn
 enable_dxgi
 enable_dxtrans
 enable_dxva2
+enable_elscore
 enable_esent
 enable_evr
 enable_explorerframe
@@ -21941,6 +21943,8 @@ wine_fn_config_makefile dlls/avifile.dll16 enable_avifile
 wine_fn_config_makefile dlls/avrt enable_avrt
 wine_fn_config_makefile dlls/bcp47langs enable_bcp47langs
 wine_fn_config_makefile dlls/bcp47langs/tests enable_tests
+wine_fn_config_makefile dlls/bcp47mrm enable_bcp47mrm
+wine_fn_config_makefile dlls/bcp47mrm/tests enable_tests
 wine_fn_config_makefile dlls/bcrypt enable_bcrypt
 wine_fn_config_makefile dlls/bcrypt/tests enable_tests
 wine_fn_config_makefile dlls/bcryptprimitives enable_bcryptprimitives
@@ -22186,6 +22190,7 @@ wine_fn_config_makefile dlls/dxgi/tests enable_tests
 wine_fn_config_makefile dlls/dxtrans enable_dxtrans
 wine_fn_config_makefile dlls/dxva2 enable_dxva2
 wine_fn_config_makefile dlls/dxva2/tests enable_tests
+wine_fn_config_makefile dlls/elscore enable_elscore
 wine_fn_config_makefile dlls/esent enable_esent
 wine_fn_config_makefile dlls/evr enable_evr
 wine_fn_config_makefile dlls/evr/tests enable_tests

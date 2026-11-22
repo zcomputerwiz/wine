@@ -793,6 +793,7 @@
 @ stdcall -import GetStagedPackagePathByFullName(wstr ptr ptr)
 @ stdcall -import OpenPackageInfoByFullName(wstr long ptr)
 @ stdcall -import OpenPackageInfoByFullNameForUser(ptr wstr long ptr)
+@ stdcall -import PackageFamilyNameFromFullName(wstr ptr ptr)
 @ stdcall -import PackageFamilyNameFromId(ptr ptr ptr)
 @ stdcall -import PackageNameAndPublisherIdFromFamilyName(wstr ptr ptr ptr ptr)
 @ stdcall -import ParseApplicationUserModelId(wstr ptr ptr ptr ptr)

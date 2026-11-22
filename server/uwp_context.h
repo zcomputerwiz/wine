@@ -26,9 +26,9 @@
 struct fd;
 
 /* the largest catalog record, in bytes */
-#define UWP_RECORD_MAX_BYTES 65536
+#define UWP_RECORD_MAX_BYTES (512 * 1024)
 /* the largest class table of a context (the classes of the package and of its dependencies), in bytes */
-#define UWP_CLASSES_MAX_BYTES (256 * 1024)
+#define UWP_CLASSES_MAX_BYTES (1024 * 1024)
 /* the dependencies of a package whose classes are taken */
 #define UWP_MAX_DEPENDENCIES 16
 

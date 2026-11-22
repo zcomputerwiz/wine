@@ -27,6 +27,7 @@ import "windows.storage.streams.idl";
 import "windows.foundation.diagnostics.idl";
 
 namespace Windows.Foundation {
+    runtimeclass GuidHelper;
     runtimeclass PropertyValue;
 }
 namespace Windows.Foundation.Diagnostics {

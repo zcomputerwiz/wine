@@ -324,6 +324,7 @@ SOURCES = \
 	dxva2api.idl \
 	dxvahd.idl \
 	dyngraph.idl \
+	elscore.h \
 	endpointvolume.idl \
 	errhandlingapi.h \
 	errlup.idl \

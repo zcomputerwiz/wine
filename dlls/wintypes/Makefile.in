@@ -7,6 +7,7 @@ SOURCES = \
 	classes.idl \
 	datareader.c \
 	diagnostics.c \
+	guidhelper.c \
 	main.c \
 	map.c \
 	propertyset.c \

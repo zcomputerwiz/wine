@@ -1520,6 +1520,51 @@ static void test_RoParseTypeName(void)
     }
 }
 
+static void test_GuidHelper(void)
+{
+    static const WCHAR *class_name = L"Windows.Foundation.GuidHelper";
+    IGuidHelperStatics *statics;
+    GUID empty, first, second;
+    HSTRING name;
+    boolean equal;
+    HRESULT hr;
+
+    hr = RoInitialize( RO_INIT_MULTITHREADED );
+    ok( hr == S_OK, "got %#lx\n", hr );
+
+    WindowsCreateString( class_name, wcslen( class_name ), &name );
+    hr = RoGetActivationFactory( name, &IID_IGuidHelperStatics, (void **)&statics );
+    WindowsDeleteString( name );
+    ok( hr == S_OK || broken( hr == REGDB_E_CLASSNOTREG ), "RoGetActivationFactory failed, hr %#lx.\n", hr );
+    if (hr != S_OK)
+    {
+        win_skip( "%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w( class_name ) );
+        goto done;
+    }
+
+    hr = IGuidHelperStatics_get_Empty( statics, &empty );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    ok( !memcmp( &empty, &(GUID){0}, sizeof(GUID) ), "got %s\n", debugstr_guid( &empty ) );
+
+    hr = IGuidHelperStatics_CreateNewGuid( statics, &first );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    hr = IGuidHelperStatics_CreateNewGuid( statics, &second );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    ok( !IsEqualGUID( &first, &second ), "got the same GUID twice, %s\n", debugstr_guid( &first ) );
+    ok( memcmp( &first, &(GUID){0}, sizeof(GUID) ), "got an empty GUID\n" );
+
+    equal = FALSE;
+    hr = IGuidHelperStatics_Equals( statics, &first, &first, &equal );
+    ok( hr == S_OK && equal, "got hr %#lx, equal %d\n", hr, equal );
+    equal = TRUE;
+    hr = IGuidHelperStatics_Equals( statics, &first, &second, &equal );
+    ok( hr == S_OK && !equal, "got hr %#lx, equal %d\n", hr, equal );
+
+    IGuidHelperStatics_Release( statics );
+done:
+    RoUninitialize();
+}
+
 static void test_ValueSet(void)
 {
     static const WCHAR *class_name = L"Windows.Foundation.Collections.ValueSet";
@@ -2068,6 +2113,7 @@ START_TEST(wintypes)
     test_IPropertyValueStatics();
     test_RoParseTypeName();
     test_RoResolveNamespace();
+    test_GuidHelper();
     test_ValueSet();
     test_IPropertySet();
     test_DataWriter();
