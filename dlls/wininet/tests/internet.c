@@ -2052,6 +2052,22 @@ static void test_format_message(HMODULE hdll)
 
 /* ############################### */
 
+static void test_listen_timeout_option(void)
+{
+    DWORD timeout = 1234;
+    HINTERNET session;
+    BOOL ret;
+
+    session = InternetOpenA("winetest", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0);
+    ok(session != NULL, "InternetOpenA failed: %lu\n", GetLastError());
+
+    SetLastError(0xdeadbeef);
+    ret = InternetSetOptionA(session, INTERNET_OPTION_LISTEN_TIMEOUT, &timeout, sizeof(timeout));
+    ok(ret, "InternetSetOptionA failed: %lu\n", GetLastError());
+
+    InternetCloseHandle(session);
+}
+
 START_TEST(internet)
 {
     HMODULE hdll;
@@ -2077,6 +2093,7 @@ START_TEST(internet)
     }
 
     test_InternetCanonicalizeUrlA();
+    test_listen_timeout_option();
     test_InternetQueryOptionA();
     test_InternetGetConnectedStateExA();
     test_InternetGetConnectedStateExW();
