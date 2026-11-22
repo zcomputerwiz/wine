@@ -1,6 +1,7 @@
 SOURCES = \
 	accctrl.h \
 	access.idl \
+	accountssettingspaneinterop.idl \
 	aclapi.h \
 	aclui.h \
 	activation.idl \
@@ -1112,6 +1113,7 @@ SOURCES = \
 	windows.system.profile.systemmanufacturers.idl \
 	windows.system.threading.idl \
 	windows.system.userprofile.idl \
+	windows.ui.applicationsettings.idl \
 	windows.ui.composition.idl \
 	windows.ui.composition.interop.idl \
 	windows.ui.core.corewindow.interop.idl \
@@ -1121,6 +1123,7 @@ SOURCES = \
 	windows.ui.startscreen.idl \
 	windows.ui.input.idl \
 	windows.ui.notifications.idl \
+	windows.ui.popups.idl \
 	windows.ui.text.core.idl \
 	windows.ui.text.idl \
 	windows.ui.viewmanagement.core.idl \
