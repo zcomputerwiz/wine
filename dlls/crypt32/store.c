@@ -538,13 +538,6 @@ static WINECRYPT_CERTSTORE *CRYPT_SysRegOpenStoreW(HCRYPTPROV hCryptProv,
                 rc = ERROR_FILE_EXISTS;
             }
         }
-        if (rc == ERROR_ACCESS_DENIED && !(dwFlags & (CERT_STORE_READONLY_FLAG | CERT_STORE_CREATE_NEW_FLAG)))
-        {
-            /* A user without write access to the key (a limited user and the machine registry) gets the store
-             * read-only, as on Windows, instead of no store: otherwise no root certificate is trusted. */
-            dwFlags |= CERT_STORE_READONLY_FLAG;
-            rc = RegOpenKeyExW(root, storePath, 0, KEY_READ, &key);
-        }
         if (!rc)
         {
             store = CRYPT_RegOpenStore(hCryptProv, dwFlags, key);
@@ -640,13 +633,14 @@ static WINECRYPT_CERTSTORE *CRYPT_SysOpenStoreW(HCRYPTPROV hCryptProv,
             {
                 dwFlags &= ~CERT_SYSTEM_STORE_CURRENT_USER;
                 dwFlags |= CERT_SYSTEM_STORE_LOCAL_MACHINE;
+                /* The machine's part of a user's store is read-only, as on Windows: a user who cannot write the
+                 * machine registry still sees the machine's certificates, and what the user adds goes to the
+                 * user's own store. */
                 regStore = CertOpenStore(CERT_STORE_PROV_SYSTEM_REGISTRY_W, 0,
-                 0, dwFlags, pvPara);
+                 0, dwFlags | CERT_STORE_READONLY_FLAG, pvPara);
                 if (regStore)
                 {
-                    CertAddStoreToCollection(store, regStore,
-                     dwFlags & CERT_STORE_READONLY_FLAG ? 0 :
-                     CERT_PHYSICAL_STORE_ADD_ENABLE_FLAG, 0);
+                    CertAddStoreToCollection(store, regStore, 0, 0);
                     CertCloseStore(regStore, 0);
                 }
             }
