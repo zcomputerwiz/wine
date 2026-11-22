@@ -3308,6 +3308,39 @@ static void dump_set_completion_info_request( const struct set_completion_info_r
     fprintf( stderr, ", chandle=%04x", req->chandle );
 }
 
+static void dump_create_completion_packet_request( const struct create_completion_packet_request *req )
+{
+    fprintf( stderr, " access=%08x", req->access );
+    dump_varargs_object_attributes( ", objattr=", cur_size );
+}
+
+static void dump_create_completion_packet_reply( const struct create_completion_packet_reply *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+}
+
+static void dump_associate_completion_packet_request( const struct associate_completion_packet_request *req )
+{
+    fprintf( stderr, " packet=%04x", req->packet );
+    fprintf( stderr, ", completion=%04x", req->completion );
+    fprintf( stderr, ", target=%04x", req->target );
+    dump_uint64( ", ckey=", &req->ckey );
+    dump_uint64( ", cvalue=", &req->cvalue );
+    dump_uint64( ", information=", &req->information );
+    fprintf( stderr, ", status=%08x", req->status );
+}
+
+static void dump_associate_completion_packet_reply( const struct associate_completion_packet_reply *req )
+{
+    fprintf( stderr, " already_signaled=%d", req->already_signaled );
+}
+
+static void dump_cancel_completion_packet_request( const struct cancel_completion_packet_request *req )
+{
+    fprintf( stderr, " packet=%04x", req->packet );
+    fprintf( stderr, ", remove_signaled=%d", req->remove_signaled );
+}
+
 static void dump_add_fd_completion_request( const struct add_fd_completion_request *req )
 {
     fprintf( stderr, " handle=%04x", req->handle );
@@ -4091,6 +4124,9 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_thread_completion_request,
     (dump_func)dump_query_completion_request,
     (dump_func)dump_set_completion_info_request,
+    (dump_func)dump_create_completion_packet_request,
+    (dump_func)dump_associate_completion_packet_request,
+    (dump_func)dump_cancel_completion_packet_request,
     (dump_func)dump_add_fd_completion_request,
     (dump_func)dump_set_fd_completion_mode_request,
     (dump_func)dump_set_fd_disp_info_request,
@@ -4425,6 +4461,9 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_remove_completion_reply,
     (dump_func)dump_get_thread_completion_reply,
     (dump_func)dump_query_completion_reply,
+    NULL,
+    (dump_func)dump_create_completion_packet_reply,
+    (dump_func)dump_associate_completion_packet_reply,
     NULL,
     NULL,
     NULL,
@@ -4761,6 +4800,9 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "get_thread_completion",
     "query_completion",
     "set_completion_info",
+    "create_completion_packet",
+    "associate_completion_packet",
+    "cancel_completion_packet",
     "add_fd_completion",
     "set_fd_completion_mode",
     "set_fd_disp_info",
@@ -4892,6 +4934,7 @@ static const struct
     { "INVALID_PARAMETER",           STATUS_INVALID_PARAMETER },
     { "INVALID_PARAMETER_1",         STATUS_INVALID_PARAMETER_1 },
     { "INVALID_PARAMETER_2",         STATUS_INVALID_PARAMETER_2 },
+    { "INVALID_PARAMETER_3",         STATUS_INVALID_PARAMETER_3 },
     { "INVALID_PARAMETER_MIX",       STATUS_INVALID_PARAMETER_MIX },
     { "INVALID_PIPE_STATE",          STATUS_INVALID_PIPE_STATE },
     { "INVALID_READ_MODE",           STATUS_INVALID_READ_MODE },

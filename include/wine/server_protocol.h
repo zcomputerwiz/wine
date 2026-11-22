@@ -5858,6 +5858,56 @@ struct set_completion_info_reply
 
 
 
+struct create_completion_packet_request
+{
+    struct request_header __header;
+    unsigned int access;
+    /* VARARG(objattr,object_attributes); */
+};
+struct create_completion_packet_reply
+{
+    struct reply_header __header;
+    obj_handle_t handle;
+    char __pad_12[4];
+};
+
+
+
+struct associate_completion_packet_request
+{
+    struct request_header __header;
+    obj_handle_t  packet;
+    obj_handle_t  completion;
+    obj_handle_t  target;
+    apc_param_t   ckey;
+    apc_param_t   cvalue;
+    apc_param_t   information;
+    unsigned int  status;
+    char __pad_52[4];
+};
+struct associate_completion_packet_reply
+{
+    struct reply_header __header;
+    int           already_signaled;
+    char __pad_12[4];
+};
+
+
+
+struct cancel_completion_packet_request
+{
+    struct request_header __header;
+    obj_handle_t  packet;
+    int           remove_signaled;
+    char __pad_20[4];
+};
+struct cancel_completion_packet_reply
+{
+    struct reply_header __header;
+};
+
+
+
 struct add_fd_completion_request
 {
     struct request_header __header;
@@ -6912,6 +6962,9 @@ enum request
     REQ_get_thread_completion,
     REQ_query_completion,
     REQ_set_completion_info,
+    REQ_create_completion_packet,
+    REQ_associate_completion_packet,
+    REQ_cancel_completion_packet,
     REQ_add_fd_completion,
     REQ_set_fd_completion_mode,
     REQ_set_fd_disp_info,
@@ -7250,6 +7303,9 @@ union generic_request
     struct get_thread_completion_request get_thread_completion_request;
     struct query_completion_request query_completion_request;
     struct set_completion_info_request set_completion_info_request;
+    struct create_completion_packet_request create_completion_packet_request;
+    struct associate_completion_packet_request associate_completion_packet_request;
+    struct cancel_completion_packet_request cancel_completion_packet_request;
     struct add_fd_completion_request add_fd_completion_request;
     struct set_fd_completion_mode_request set_fd_completion_mode_request;
     struct set_fd_disp_info_request set_fd_disp_info_request;
@@ -7586,6 +7642,9 @@ union generic_reply
     struct get_thread_completion_reply get_thread_completion_reply;
     struct query_completion_reply query_completion_reply;
     struct set_completion_info_reply set_completion_info_reply;
+    struct create_completion_packet_reply create_completion_packet_reply;
+    struct associate_completion_packet_reply associate_completion_packet_reply;
+    struct cancel_completion_packet_reply cancel_completion_packet_reply;
     struct add_fd_completion_reply add_fd_completion_reply;
     struct set_fd_completion_mode_reply set_fd_completion_mode_reply;
     struct set_fd_disp_info_reply set_fd_disp_info_reply;
@@ -7635,6 +7694,6 @@ union generic_reply
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 985
+#define SERVER_PROTOCOL_VERSION 986
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

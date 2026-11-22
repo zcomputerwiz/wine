@@ -137,6 +137,7 @@ static struct type_descr *types[] =
     &key_type,
     &apc_reserve_type,
     &completion_reserve_type,
+    &completion_packet_type,
     &alpc_port_type,
 };
 
