@@ -271,7 +271,16 @@ static const struct IWebAccountProvider2Vtbl provider2_vtbl =
 
 HRESULT diagnostic_provider_create( HSTRING id, HSTRING authority, IWebAccountProvider **out )
 {
-    static const WCHAR name[] = L"Wine diagnostic account provider";
+    HRESULT hr;
+
+    if (SUCCEEDED(hr = provider_create( id, authority, L"Wine diagnostic account provider", out )))
+        FIXME( "diagnostic provider for id %s, authority %s.\n", debugstr_hstring( id ), debugstr_hstring( authority ) );
+    return hr;
+}
+
+/* a provider object for an id and authority (the token broker decides at each request whether it serves them) */
+HRESULT provider_create( HSTRING id, HSTRING authority, const WCHAR *name, IWebAccountProvider **out )
+{
     struct provider *impl;
     HRESULT hr;
 
@@ -287,7 +296,6 @@ HRESULT diagnostic_provider_create( HSTRING id, HSTRING authority, IWebAccountPr
         provider_Release( &impl->IWebAccountProvider_iface );
         return hr;
     }
-    FIXME( "diagnostic provider for id %s, authority %s.\n", debugstr_hstring( id ), debugstr_hstring( authority ) );
     *out = &impl->IWebAccountProvider_iface;
     return S_OK;
 }

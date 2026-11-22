@@ -611,6 +611,44 @@ void map_hstring_dump( IMap_HSTRING_HSTRING *iface, const char *prefix )
         FIXME( "%s%s = %s\n", prefix, debugstr_hstring( impl->entries[i].key ), debugstr_hstring( impl->entries[i].value ) );
 }
 
+/* the pairs of a map made by map_hstring_create, as the token broker's protocol carries them ("key\0value\0...",
+ * allocated; len in characters); pairs with a NUL character in them are left out */
+HRESULT map_hstring_pairs( IMap_HSTRING_HSTRING *iface, WCHAR **text, UINT32 *len )
+{
+    struct hstring_map *impl;
+    UINT32 i, key_len, value_len, total = 0;
+    const WCHAR *key, *value;
+    WCHAR *buffer, *pos;
+
+    *text = NULL;
+    *len = 0;
+    if (!iface || iface->lpVtbl != &hstring_map_vtbl) return S_OK;
+    impl = impl_from_IMap_HSTRING_HSTRING( iface );
+    for (i = 0; i < impl->count; i++)
+    {
+        WindowsGetStringRawBuffer( impl->entries[i].key, &key_len );
+        WindowsGetStringRawBuffer( impl->entries[i].value, &value_len );
+        total += key_len + value_len + 2;
+    }
+    if (!total) return S_OK;
+    if (!(buffer = malloc( total * sizeof(WCHAR) ))) return E_OUTOFMEMORY;
+    for (i = 0, pos = buffer; i < impl->count; i++)
+    {
+        key = WindowsGetStringRawBuffer( impl->entries[i].key, &key_len );
+        value = WindowsGetStringRawBuffer( impl->entries[i].value, &value_len );
+        if (wcslen( key ) < key_len || wcslen( value ) < value_len) continue;
+        memcpy( pos, key, key_len * sizeof(WCHAR) );
+        pos += key_len;
+        *pos++ = 0;
+        memcpy( pos, value, value_len * sizeof(WCHAR) );
+        pos += value_len;
+        *pos++ = 0;
+    }
+    *text = buffer;
+    *len = pos - buffer;
+    return S_OK;
+}
+
 HRESULT map_hstring_create( IMap_HSTRING_HSTRING **out )
 {
     struct hstring_map *impl;

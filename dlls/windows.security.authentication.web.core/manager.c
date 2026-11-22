@@ -91,46 +91,30 @@ static HRESULT create_completed_operation( const GUID *iid, IInspectable *result
     return create_completed_operation_riid( iid, result, iid, out );
 }
 
-/* The result of every token request while no account provider exists. */
-static HRESULT request_token_not_available( REFIID riid, void **out )
-{
-    IWebTokenRequestResult *result;
-    HRESULT hr;
-
-    no_provider_fixme();
-    if (FAILED(hr = create_not_available_result( &result ))) return hr;
-    hr = create_completed_operation_riid( &IID_IAsyncOperation_WebTokenRequestResult, (IInspectable *)result, riid, out );
-    IWebTokenRequestResult_Release( result );
-    return hr;
-}
-
-/* a token request: with the token broker on and reachable, its answer; else "no provider", or with the diagnostic
- * provider on, the request in the log and the given status (silent requests: UserInteractionRequired, so that the
- * program goes on to an interactive one) */
-static HRESULT request_token( const char *method, IInspectable *request, WebTokenRequestStatus status,
-                              HWND window, REFIID riid, void **out )
+/* the answer to a token request without the token broker: "no provider", or with the diagnostic provider on, the
+ * request in the log and the given status (silent requests: UserInteractionRequired, so that the program goes on to
+ * an interactive one) */
+static HRESULT fallback_token_result( const char *method, IInspectable *request, WebTokenRequestStatus status,
+                                      IWebTokenRequestResult **out )
 {
     const WCHAR *text = L"Wine's diagnostic provider gives no token.";
     IVectorView_WebTokenResponse *response_data;
     IWebProviderError *response_error = NULL;
-    IWebTokenRequestResult *result;
     UINT32 code = E_NOTIMPL;
     HSTRING message = NULL;
     HRESULT hr;
 
-    if (!token_broker_enabled() ||
-        FAILED(token_broker_request( request, status == WebTokenRequestStatus_UserInteractionRequired, window,
-                                     &status, &code, &message )))
+    if (!diagnostic_provider_enabled())
     {
-        if (!diagnostic_provider_enabled()) return request_token_not_available( riid, out );
-
-        diagnostic_dump_request( method, request );
-        /* the answer Windows gives a silent request that needs the user; programs read its error without a NULL check */
-        if (status == WebTokenRequestStatus_UserInteractionRequired) diagnostic_interaction_error( request, &code, &text );
-        FIXME( "diagnostic: status %d, error %#x %s.\n", status, code, debugstr_w( text ) );
-        if (FAILED(hr = WindowsCreateString( text, wcslen( text ), &message )))
-            return hr;
+        no_provider_fixme();
+        return create_not_available_result( out );
     }
+
+    diagnostic_dump_request( method, request );
+    /* the answer Windows gives a silent request that needs the user; programs read its error without a NULL check */
+    if (status == WebTokenRequestStatus_UserInteractionRequired) diagnostic_interaction_error( request, &code, &text );
+    FIXME( "diagnostic: status %d, error %#x %s.\n", status, code, debugstr_w( text ) );
+    if (FAILED(hr = WindowsCreateString( text, wcslen( text ), &message ))) return hr;
     if (FAILED(hr = vector_view_webtokenresponse_create_empty( &response_data )))
     {
         WindowsDeleteString( message );
@@ -143,27 +127,251 @@ static HRESULT request_token( const char *method, IInspectable *request, WebToke
         IVectorView_WebTokenResponse_Release( response_data );
         return hr;
     }
-    hr = webtokenrequestresult_create( status, response_data, response_error, &result );
+    hr = webtokenrequestresult_create( status, response_data, response_error, out );
     IVectorView_WebTokenResponse_Release( response_data );
     IWebProviderError_Release( response_error );
+    return hr;
+}
+
+/*
+ *
+ * Calls to the token broker: they run on a thread pool thread (an interactive one lasts as long as the sign-in), and
+ * complete their operation with the broker's answer, or with the answer without a broker when it cannot be reached.
+ *
+ */
+
+enum broker_call_type
+{
+    BROKER_CALL_TOKEN,
+    BROKER_CALL_FIND_ACCOUNTS,
+    BROKER_CALL_FIND_ACCOUNT,
+};
+
+struct broker_call
+{
+    IUnknown IUnknown_iface;
+    LONG ref;
+    enum broker_call_type type;
+    const char *method;
+    IInspectable *request;              /* BROKER_CALL_TOKEN */
+    IInspectable *account;              /* the WebAccount the request names, or NULL */
+    WebTokenRequestStatus status;       /* the answer without a broker */
+    BOOL silent;
+    HWND window;
+    IWebAccountProvider *provider;      /* BROKER_CALL_FIND_ACCOUNTS, BROKER_CALL_FIND_ACCOUNT */
+    HSTRING string;                     /* the client id, or the account id */
+};
+
+static inline struct broker_call *impl_from_IUnknown( IUnknown *iface )
+{
+    return CONTAINING_RECORD( iface, struct broker_call, IUnknown_iface );
+}
+
+static HRESULT WINAPI broker_call_QueryInterface( IUnknown *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ))
+    {
+        IUnknown_AddRef( iface );
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI broker_call_AddRef( IUnknown *iface )
+{
+    return InterlockedIncrement( &impl_from_IUnknown( iface )->ref );
+}
+
+static ULONG WINAPI broker_call_Release( IUnknown *iface )
+{
+    struct broker_call *impl = impl_from_IUnknown( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        if (impl->request) IInspectable_Release( impl->request );
+        if (impl->account) IInspectable_Release( impl->account );
+        if (impl->provider) IWebAccountProvider_Release( impl->provider );
+        WindowsDeleteString( impl->string );
+        free( impl );
+    }
+    return ref;
+}
+
+static const IUnknownVtbl broker_call_vtbl =
+{
+    broker_call_QueryInterface,
+    broker_call_AddRef,
+    broker_call_Release,
+};
+
+static HRESULT broker_call_callback( IUnknown *invoker, IUnknown *param, PROPVARIANT *result, BOOL called_async )
+{
+    struct broker_call *call = impl_from_IUnknown( param );
+    IWebTokenRequestResult *token_result = NULL;
+    IFindAllAccountsResult *find_result = NULL;
+    IWebAccount *account = NULL;
+    IInspectable *object = NULL;
+    HRESULT hr;
+
+    if (!called_async) return STATUS_PENDING;
+
+    switch (call->type)
+    {
+    case BROKER_CALL_TOKEN:
+        if (FAILED(token_broker_request( call->request, call->account, call->silent, call->window, &token_result )) &&
+            FAILED(hr = fallback_token_result( call->method, call->request, call->status, &token_result )))
+            return hr;
+        object = (IInspectable *)token_result;
+        break;
+    case BROKER_CALL_FIND_ACCOUNTS:
+        if (FAILED(token_broker_find_accounts( call->provider, call->string, &find_result )) &&
+            FAILED(hr = create_find_all_result( &find_result )))
+            return hr;
+        object = (IInspectable *)find_result;
+        break;
+    case BROKER_CALL_FIND_ACCOUNT:
+        if (FAILED(token_broker_find_account( call->provider, call->string, &account ))) account = NULL;
+        object = (IInspectable *)account;
+        break;
+    }
+    if (object)
+    {
+        result->vt = VT_UNKNOWN;
+        result->punkVal = (IUnknown *)object;   /* the reference goes to the operation */
+    }
+    else result->vt = VT_EMPTY;
+    return S_OK;
+}
+
+/* an operation (iid) that the broker call completes; riid is the interface returned */
+static HRESULT broker_call_start( struct broker_call *call, const GUID *iid, REFIID riid, void **out )
+{
+    IAsyncOperation_IInspectable *operation;
+    HRESULT hr;
+
+    *out = NULL;
+    call->IUnknown_iface.lpVtbl = &broker_call_vtbl;
+    call->ref = 1;
+    hr = async_operation_inspectable_create( iid, NULL, &call->IUnknown_iface, broker_call_callback, &operation );
+    IUnknown_Release( &call->IUnknown_iface );
     if (FAILED(hr)) return hr;
+    hr = IUnknown_QueryInterface( (IUnknown *)operation, riid, out );
+    IAsyncOperation_IInspectable_Release( operation );
+    return hr;
+}
+
+/* a token request: with the token broker on, its answer (or without it when it cannot be reached); else the answer
+ * without a broker, at once */
+static HRESULT request_token( const char *method, IInspectable *request, IInspectable *account,
+                              WebTokenRequestStatus status, HWND window, REFIID riid, void **out )
+{
+    IWebTokenRequestResult *result;
+    struct broker_call *call;
+    HRESULT hr;
+
+    if (token_broker_enabled())
+    {
+        if (!(call = calloc( 1, sizeof(*call) ))) return E_OUTOFMEMORY;
+        call->type = BROKER_CALL_TOKEN;
+        call->method = method;
+        IInspectable_AddRef( (call->request = request) );
+        if ((call->account = account)) IInspectable_AddRef( account );
+        call->status = status;
+        call->silent = status == WebTokenRequestStatus_UserInteractionRequired;
+        call->window = window;
+        return broker_call_start( call, &IID_IAsyncOperation_WebTokenRequestResult, riid, out );
+    }
+
+    if (FAILED(hr = fallback_token_result( method, request, status, &result ))) return hr;
     hr = create_completed_operation_riid( &IID_IAsyncOperation_WebTokenRequestResult, (IInspectable *)result, riid, out );
     IWebTokenRequestResult_Release( result );
     return hr;
 }
 
-/* a provider lookup: none, or the diagnostic provider for the id and authority asked for */
+/* account lookups: through the token broker when it is on */
+static HRESULT find_accounts( IWebAccountProvider *provider, HSTRING client_id, IAsyncOperation_FindAllAccountsResult **out )
+{
+    IFindAllAccountsResult *result;
+    struct broker_call *call;
+    HRESULT hr;
+
+    if (token_broker_enabled() && provider)
+    {
+        if (!(call = calloc( 1, sizeof(*call) ))) return E_OUTOFMEMORY;
+        call->type = BROKER_CALL_FIND_ACCOUNTS;
+        IWebAccountProvider_AddRef( (call->provider = provider) );
+        if (FAILED(hr = WindowsDuplicateString( client_id, &call->string )))
+        {
+            IUnknown_Release( &call->IUnknown_iface );
+            return hr;
+        }
+        return broker_call_start( call, &IID_IAsyncOperation_FindAllAccountsResult,
+                                  &IID_IAsyncOperation_FindAllAccountsResult, (void **)out );
+    }
+
+    if (diagnostic_provider_enabled())
+        FIXME( "diagnostic: FindAllAccounts provider %p, client id %s: no accounts.\n", provider, debugstr_hstring( client_id ) );
+    no_provider_fixme();
+    if (FAILED(hr = create_find_all_result( &result ))) return hr;
+    hr = create_completed_operation( &IID_IAsyncOperation_FindAllAccountsResult, (IInspectable *)result, (void **)out );
+    IFindAllAccountsResult_Release( result );
+    return hr;
+}
+
+static HRESULT find_account( IWebAccountProvider *provider, HSTRING id, IAsyncOperation_WebAccount **out )
+{
+    struct broker_call *call;
+    HRESULT hr;
+
+    if (token_broker_enabled() && provider)
+    {
+        if (!(call = calloc( 1, sizeof(*call) ))) return E_OUTOFMEMORY;
+        call->type = BROKER_CALL_FIND_ACCOUNT;
+        IWebAccountProvider_AddRef( (call->provider = provider) );
+        if (FAILED(hr = WindowsDuplicateString( id, &call->string )))
+        {
+            IUnknown_Release( &call->IUnknown_iface );
+            return hr;
+        }
+        return broker_call_start( call, &IID_IAsyncOperation_WebAccount, &IID_IAsyncOperation_WebAccount, (void **)out );
+    }
+
+    if (diagnostic_provider_enabled())
+        FIXME( "diagnostic: FindAccountAsync provider %p, account id %s: no account.\n", provider, debugstr_hstring( id ) );
+    no_provider_fixme();
+    return create_completed_operation( &IID_IAsyncOperation_WebAccount, NULL, (void **)out );
+}
+
+/* the display name of a provider the token broker serves */
+static const WCHAR *broker_provider_name( HSTRING id, HSTRING authority )
+{
+    const WCHAR *text = WindowsGetStringRawBuffer( authority, NULL );
+
+    if (wcscmp( WindowsGetStringRawBuffer( id, NULL ), L"https://login.microsoft.com" )) return L"Web account";
+    if (!wcscmp( text, L"consumers" )) return L"Microsoft account";
+    return L"Work or school account";
+}
+
+/* a provider lookup: with the token broker on, a provider for the id and authority (the broker answers for it at each
+ * request); else none, or the diagnostic provider */
 static HRESULT find_provider( HSTRING id, HSTRING authority, IAsyncOperation_WebAccountProvider **out )
 {
     IWebAccountProvider *provider;
     HRESULT hr;
 
-    if (!diagnostic_provider_enabled())
+    if (token_broker_enabled())
+        hr = provider_create( id, authority, broker_provider_name( id, authority ), &provider );
+    else if (diagnostic_provider_enabled())
+        hr = diagnostic_provider_create( id, authority, &provider );
+    else
     {
         no_provider_fixme();
         return create_completed_operation( &IID_IAsyncOperation_WebAccountProvider, NULL, (void **)out );
     }
-    if (FAILED(hr = diagnostic_provider_create( id, authority, &provider ))) return hr;
+    if (FAILED(hr)) return hr;
     hr = create_completed_operation( &IID_IAsyncOperation_WebAccountProvider, (IInspectable *)provider, (void **)out );
     IWebAccountProvider_Release( provider );
     return hr;
@@ -371,7 +579,7 @@ static HRESULT WINAPI manager_statics_GetTokenSilentlyAsync( IWebAuthenticationC
     *asyncInfo = NULL;
     if (!request) return E_INVALIDARG;
 
-    return request_token( __func__, (IInspectable *)request, WebTokenRequestStatus_UserInteractionRequired,
+    return request_token( __func__, (IInspectable *)request, NULL, WebTokenRequestStatus_UserInteractionRequired,
                           NULL, &IID_IAsyncOperation_WebTokenRequestResult, (void **)asyncInfo );
 }
 
@@ -385,8 +593,9 @@ static HRESULT WINAPI manager_statics_GetTokenSilentlyWithWebAccountAsync( IWebA
     *asyncInfo = NULL;
     if (!request) return E_INVALIDARG;
 
-    return request_token( __func__, (IInspectable *)request, WebTokenRequestStatus_UserInteractionRequired,
-                          NULL, &IID_IAsyncOperation_WebTokenRequestResult, (void **)asyncInfo );
+    return request_token( __func__, (IInspectable *)request, (IInspectable *)webAccount,
+                          WebTokenRequestStatus_UserInteractionRequired, NULL,
+                          &IID_IAsyncOperation_WebTokenRequestResult, (void **)asyncInfo );
 }
 
 static HRESULT WINAPI manager_statics_RequestTokenAsync( IWebAuthenticationCoreManagerStatics *iface,
@@ -399,7 +608,7 @@ static HRESULT WINAPI manager_statics_RequestTokenAsync( IWebAuthenticationCoreM
     *asyncInfo = NULL;
     if (!request) return E_INVALIDARG;
 
-    return request_token( __func__, (IInspectable *)request, WebTokenRequestStatus_ProviderError,
+    return request_token( __func__, (IInspectable *)request, NULL, WebTokenRequestStatus_ProviderError,
                           NULL, &IID_IAsyncOperation_WebTokenRequestResult, (void **)asyncInfo );
 }
 
@@ -413,8 +622,9 @@ static HRESULT WINAPI manager_statics_RequestTokenWithWebAccountAsync( IWebAuthe
     *asyncInfo = NULL;
     if (!request) return E_INVALIDARG;
 
-    return request_token( __func__, (IInspectable *)request, WebTokenRequestStatus_ProviderError,
-                          NULL, &IID_IAsyncOperation_WebTokenRequestResult, (void **)asyncInfo );
+    return request_token( __func__, (IInspectable *)request, (IInspectable *)webAccount,
+                          WebTokenRequestStatus_ProviderError, NULL,
+                          &IID_IAsyncOperation_WebTokenRequestResult, (void **)asyncInfo );
 }
 
 static HRESULT WINAPI manager_statics_FindAccountAsync( IWebAuthenticationCoreManagerStatics *iface,
@@ -426,11 +636,7 @@ static HRESULT WINAPI manager_statics_FindAccountAsync( IWebAuthenticationCoreMa
     if (!asyncInfo) return E_POINTER;
     *asyncInfo = NULL;
 
-    if (diagnostic_provider_enabled())
-        FIXME( "diagnostic: FindAccountAsync provider %p, account id %s: no account.\n", provider, debugstr_hstring( webAccountId ) );
-    no_provider_fixme();
-
-    return create_completed_operation( &IID_IAsyncOperation_WebAccount, NULL, (void **)asyncInfo );
+    return find_account( provider, webAccountId, asyncInfo );
 }
 
 static HRESULT WINAPI manager_statics_FindAccountProviderAsync( IWebAuthenticationCoreManagerStatics *iface,
@@ -520,44 +726,24 @@ static HRESULT WINAPI manager_statics4_FindAllAccountsAsync( IWebAuthenticationC
                                                              IWebAccountProvider *provider,
                                                              IAsyncOperation_FindAllAccountsResult **operation )
 {
-    IFindAllAccountsResult *result;
-    HRESULT hr;
-
     TRACE( "iface %p, provider %p, operation %p.\n", iface, provider, operation );
 
     if (!operation) return E_POINTER;
     *operation = NULL;
 
-    if (diagnostic_provider_enabled()) FIXME( "diagnostic: FindAllAccountsAsync provider %p: no accounts.\n", provider );
-    no_provider_fixme();
-
-    if (FAILED(hr = create_find_all_result( &result ))) return hr;
-    hr = create_completed_operation( &IID_IAsyncOperation_FindAllAccountsResult, (IInspectable *)result, (void **)operation );
-    IFindAllAccountsResult_Release( result );
-    return hr;
+    return find_accounts( provider, NULL, operation );
 }
 
 static HRESULT WINAPI manager_statics4_FindAllAccountsWithClientIdAsync( IWebAuthenticationCoreManagerStatics4 *iface,
                                                                          IWebAccountProvider *provider, HSTRING clientId,
                                                                          IAsyncOperation_FindAllAccountsResult **operation )
 {
-    IFindAllAccountsResult *result;
-    HRESULT hr;
-
     TRACE( "iface %p, provider %p, clientId %s, operation %p.\n", iface, provider, debugstr_hstring( clientId ), operation );
 
     if (!operation) return E_POINTER;
     *operation = NULL;
 
-    if (diagnostic_provider_enabled())
-        FIXME( "diagnostic: FindAllAccountsWithClientIdAsync provider %p, client id %s: no accounts.\n", provider,
-               debugstr_hstring( clientId ) );
-    no_provider_fixme();
-
-    if (FAILED(hr = create_find_all_result( &result ))) return hr;
-    hr = create_completed_operation( &IID_IAsyncOperation_FindAllAccountsResult, (IInspectable *)result, (void **)operation );
-    IFindAllAccountsResult_Release( result );
-    return hr;
+    return find_accounts( provider, clientId, operation );
 }
 
 static HRESULT WINAPI manager_statics4_FindSystemAccountProviderAsync( IWebAuthenticationCoreManagerStatics4 *iface,
@@ -662,7 +848,7 @@ static HRESULT WINAPI manager_interop_RequestTokenForWindowAsync( IWebAuthentica
     *asyncInfo = NULL;
     if (!request) return E_INVALIDARG;
 
-    return request_token( __func__, request, WebTokenRequestStatus_ProviderError, appWindow, riid, asyncInfo );
+    return request_token( __func__, request, NULL, WebTokenRequestStatus_ProviderError, appWindow, riid, asyncInfo );
 }
 
 static HRESULT WINAPI manager_interop_RequestTokenWithWebAccountForWindowAsync( IWebAuthenticationCoreManagerInterop *iface,
@@ -677,7 +863,8 @@ static HRESULT WINAPI manager_interop_RequestTokenWithWebAccountForWindowAsync( 
     *asyncInfo = NULL;
     if (!request) return E_INVALIDARG;
 
-    return request_token( __func__, request, WebTokenRequestStatus_ProviderError, appWindow, riid, asyncInfo );
+    return request_token( __func__, request, webAccount, WebTokenRequestStatus_ProviderError, appWindow, riid,
+                          asyncInfo );
 }
 
 static const struct IWebAuthenticationCoreManagerInteropVtbl manager_interop_vtbl =

@@ -499,8 +499,8 @@ static const struct IAsyncOperation_IInspectableVtbl async_inspectable_vtbl =
     async_inspectable_GetResults,
 };
 
-static HRESULT async_operation_inspectable_create( const GUID *iid, IUnknown *invoker, IUnknown *param,
-                                                   async_operation_callback callback, IAsyncOperation_IInspectable **out )
+HRESULT async_operation_inspectable_create( const GUID *iid, IUnknown *invoker, IUnknown *param,
+                                            async_operation_callback callback, IAsyncOperation_IInspectable **out )
 {
     struct async_inspectable *impl;
     HRESULT hr;

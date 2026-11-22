@@ -34,6 +34,8 @@
 #include "windows.foundation.h"
 #define WIDL_using_Windows_System
 #include "windows.system.h"
+#define WIDL_using_Windows_Storage_Streams
+#include "windows.storage.streams.h"
 #define WIDL_using_Windows_Security_Credentials
 #include "windows.security.credentials.h"
 #define WIDL_using_Windows_Security_Authentication_Web_Core
@@ -61,6 +63,8 @@ extern IActivationFactory *providererror_factory;
  */
 
 HRESULT async_operation_inspectable_create_completed( const GUID *iid, IInspectable *result, IAsyncOperation_IInspectable **out );
+HRESULT async_operation_inspectable_create( const GUID *iid, IUnknown *invoker, IUnknown *param,
+                                            async_operation_callback callback, IAsyncOperation_IInspectable **out );
 
 /*
  *
@@ -71,8 +75,10 @@ HRESULT async_operation_inspectable_create_completed( const GUID *iid, IInspecta
 HRESULT map_hstring_create( IMap_HSTRING_HSTRING **out );
 void map_hstring_dump( IMap_HSTRING_HSTRING *iface, const char *prefix );
 BOOL diagnostic_provider_enabled( void );
+HRESULT map_hstring_pairs( IMap_HSTRING_HSTRING *iface, WCHAR **text, UINT32 *len );
 void diagnostic_interaction_error( IInspectable *request, UINT32 *code, const WCHAR **message );
 HRESULT diagnostic_provider_create( HSTRING id, HSTRING authority, IWebAccountProvider **out );
+HRESULT provider_create( HSTRING id, HSTRING authority, const WCHAR *display_name, IWebAccountProvider **out );
 void diagnostic_dump_request( const char *method, IInspectable *request );
 
 /*
@@ -82,8 +88,20 @@ void diagnostic_dump_request( const char *method, IInspectable *request );
  */
 
 BOOL token_broker_enabled( void );
-HRESULT token_broker_request( IInspectable *request, BOOL silent, HWND window, WebTokenRequestStatus *status,
-                              UINT32 *code, HSTRING *message );
+HRESULT token_broker_request( IInspectable *request, IInspectable *account, BOOL silent, HWND window,
+                              IWebTokenRequestResult **result );
+HRESULT token_broker_find_accounts( IWebAccountProvider *provider, HSTRING client_id, IFindAllAccountsResult **result );
+HRESULT token_broker_find_account( IWebAccountProvider *provider, HSTRING id, IWebAccount **account );
+
+/*
+ *
+ * account.c
+ *
+ */
+
+HRESULT web_account_create( IWebAccountProvider *provider, const WCHAR *id, UINT32 id_len, const WCHAR *user_name,
+                            UINT32 user_name_len, WebAccountState state, IWebAccount **out );
+HSTRING web_account_id( IInspectable *account );
 
 /*
  *
@@ -98,6 +116,10 @@ HRESULT findallaccountsresult_create( FindAllWebAccountsStatus status, IVectorVi
                                       IWebProviderError *provider_error, IFindAllAccountsResult **out );
 HRESULT vector_view_webtokenresponse_create_empty( IVectorView_WebTokenResponse **out );
 HRESULT vector_view_webaccount_create_empty( IVectorView_WebAccount **out );
+HRESULT vector_view_webtokenresponse_create( IWebTokenResponse **items, UINT32 count, IVectorView_WebTokenResponse **out );
+HRESULT vector_view_webaccount_create( IWebAccount **items, UINT32 count, IVectorView_WebAccount **out );
+HRESULT webtokenresponse_create( HSTRING token, IWebAccount *web_account, IMap_HSTRING_HSTRING *properties,
+                                 IWebTokenResponse **out );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \
