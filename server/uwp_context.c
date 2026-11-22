@@ -264,7 +264,7 @@ static WCHAR *read_record( const char *catalog, const char *full_name, size_t *r
 }
 
 /* find the one published package of a family; returns the length of its full name, 0 with the error set */
-static size_t find_package( const struct field *family, char full_name[FULL_NAME_MAX + 1] )
+static size_t find_package( const char *catalog, const struct field *family, char full_name[FULL_NAME_MAX + 1] )
 {
     const size_t suffix_len = sizeof(RECORD_SUFFIX) - 1;
     struct dirent *de;
@@ -272,7 +272,7 @@ static size_t find_package( const struct field *family, char full_name[FULL_NAME
     DIR *dir = NULL;
     int fd;
 
-    if ((fd = openat( config_dir_fd, CATALOG_DIR, O_RDONLY | O_DIRECTORY | O_CLOEXEC )) == -1 ||
+    if ((fd = openat( config_dir_fd, catalog, O_RDONLY | O_DIRECTORY | O_CLOEXEC )) == -1 ||
         !(dir = fdopendir( fd )))
     {
         if (fd != -1) close( fd );
@@ -475,6 +475,7 @@ static WCHAR *dependency_classes( const WCHAR *text, size_t text_len, size_t own
 struct uwp_context *uwp_context_from_aumid( const WCHAR *aumid, data_size_t len )
 {
     char full_name[FULL_NAME_MAX + 1], exe_path[2 * REL_PATH_MAX + 2];
+    const char *catalog;
     struct field family, app_id, fields[4], app = { NULL, 0 }, exe = { NULL, 0 }, entry = { NULL, 0 }, root, root_rel;
     const WCHAR *pos, *end;
     struct uwp_context *ctx = NULL;
@@ -494,9 +495,18 @@ struct uwp_context *uwp_context_from_aumid( const WCHAR *aumid, data_size_t len 
     if (!family.len || !valid_app_id( &app_id )) goto invalid;
     for (i = 0; i < family.len; i++) if (!is_name_char( family.str[i] ) && family.str[i] != '_') goto invalid;
 
-    if (!(full_len = find_package( &family, full_name ))) return NULL;
+    /* the user's own packages first, then those installed for every user (the machine catalog, which only an
+     * administrator writes; the files of such a package are in C:\Program Files\WindowsApps) */
+    catalog = CATALOG_DIR;
+    if (!(full_len = find_package( catalog, &family, full_name )))
+    {
+        if (get_error() != STATUS_NOT_FOUND) return NULL;
+        catalog = MACHINE_CATALOG_DIR;
+        if (!(full_len = find_package( catalog, &family, full_name ))) return NULL;
+        set_error( STATUS_SUCCESS );   /* the user's catalog had none: that error is not the answer */
+    }
     if (!split_full_name( full_name, full_len, &name_len, &publisher )) goto invalid;
-    if (!(text = read_record( CATALOG_DIR, full_name, &text_len ))) return NULL;
+    if (!(text = read_record( catalog, full_name, &text_len ))) return NULL;
 
     /* A record that cannot be read completely is an error: it never counts as "no package". */
     pos = text;

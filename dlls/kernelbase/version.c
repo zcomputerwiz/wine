@@ -2169,7 +2169,7 @@ static BOOL package_family_is_valid( const WCHAR *family )
 /* The catalogs: the user's, in the prefix directory, and the machine's, %ProgramData%\WineExplorer\appx-catalog, where
  * framework packages installed for every user are recorded (their files are in C:\Program Files\WindowsApps; in a
  * WineExplorer system both directories are the machine root's, shared by every prefix and written only by the machine's
- * administrators). A machine record counts only as a framework: no application is published through it. */
+ * administrators). Frameworks and applications installed for every user are recorded there. */
 enum catalog { CATALOG_USER, CATALOG_MACHINE };
 
 /* the catalog directory (with a trailing backslash), or with a name the path of that record */
@@ -2210,7 +2210,7 @@ static LONG package_record_read( enum catalog catalog, const WCHAR *full_name, s
     WCHAR path[MAX_PATH], *text, *line, *next, *end;
     HANDLE file;
     DWORD bytes = 0;
-    BOOL first = TRUE, have_root = FALSE, framework = FALSE;
+    BOOL first = TRUE, have_root = FALSE;
 
     if (!catalog_path( catalog, full_name, path, ARRAY_SIZE(path) )) return ERROR_NOT_FOUND;
     file = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
@@ -2254,8 +2254,6 @@ static LONG package_record_read( enum catalog catalog, const WCHAR *full_name, s
             have_root = record_set( rec->root, ARRAY_SIZE(rec->root), fields[1], wcslen( fields[1] ) );
         else if (!wcscmp( fields[0], L"publisher" ) && count >= 2)
             record_set( rec->publisher, ARRAY_SIZE(rec->publisher), fields[1], wcslen( fields[1] ) );
-        else if (!wcscmp( fields[0], L"framework" ) && count >= 2)
-            framework = !wcscmp( fields[1], L"1" );
         else if (!wcscmp( fields[0], L"app" ) && count >= 2 && rec->app_count < CATALOG_MAX_APPS)
         {
             if (record_set( rec->apps[rec->app_count], ARRAY_SIZE(rec->apps[0]), fields[1], wcslen( fields[1] ) ))
@@ -2271,17 +2269,13 @@ static LONG package_record_read( enum catalog catalog, const WCHAR *full_name, s
     }
     pkg_free( text );
     if (!have_root) return ERROR_NOT_FOUND;
-    if (catalog == CATALOG_MACHINE)
-    {
-        /* the machine's catalog holds frameworks for every user, nothing to start */
-        if (!framework) return ERROR_NOT_FOUND;
-        rec->app_count = 0;
-    }
+    /* the machine's catalog holds the packages installed for every user: frameworks and applications (wexappx install
+     * --all-users); only an administrator writes there */
     return ERROR_SUCCESS;
 }
 
 /* ERROR_SUCCESS, ERROR_NOT_FOUND for an unknown package, ERROR_INVALID_PARAMETER for a malformed name; the user's
- * catalog first, then the machine's frameworks */
+ * catalog first, then the machine's (every user's packages) */
 static LONG package_record_load( const WCHAR *full_name, struct package_record *rec )
 {
     if (!package_full_name_is_valid( full_name )) return ERROR_INVALID_PARAMETER;
