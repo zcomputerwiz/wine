@@ -150,6 +150,7 @@ extern int check_object_access( struct token *token, struct object *obj, unsigne
 
 /* elevation enforcement is on while an elevation helper is configured (registry.c) */
 extern int elevation_helper_unset(void);
+extern int uwp_compatibility_enabled( const struct sid *user );
 static inline int elevation_enforced(void) { return !elevation_helper_unset(); }
 extern int object_is_registry_key( struct object *obj );
 extern const struct luid SeAssignPrimaryTokenPrivilege;
