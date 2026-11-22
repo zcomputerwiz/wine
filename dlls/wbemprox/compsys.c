@@ -100,6 +100,31 @@ static void free_credentials( WCHAR *a, WCHAR *b, WCHAR *c )
     free( c );
 }
 
+/* The host name of a computer outside a domain: WineExplorer's wexhost.dll sets it through the host name service (as
+ * System Properties does, with the system's authorisation); where that is not there, the call of stock Wine (a name that
+ * takes effect after a restart) is all there is. */
+static DWORD set_workgroup_name( const WCHAR *name )
+{
+    typedef DWORD (WINAPI *hostname_set_t)( HWND, const char *, BOOL );
+    hostname_set_t hostname_set;
+    HMODULE wexhost;
+    char utf8[256];
+    DWORD err;
+
+    if ((wexhost = LoadLibraryW( L"wexhost.dll" )) &&
+        (hostname_set = (hostname_set_t)GetProcAddress( wexhost, "WexHostnameSet" )) &&
+        WideCharToMultiByte( CP_UTF8, 0, name, -1, utf8, sizeof(utf8), NULL, NULL ))
+    {
+        err = hostname_set( NULL, utf8, FALSE );
+        FreeLibrary( wexhost );
+        if (err) return err;
+        SetComputerNameExW( ComputerNamePhysicalDnsHostname, name );  /* the registry names follow, best effort */
+        return 0;
+    }
+    if (wexhost) FreeLibrary( wexhost );
+    return SetComputerNameExW( ComputerNamePhysicalDnsHostname, name ) ? 0 : GetLastError();
+}
+
 /* Rename( Name, Password, UserName ) */
 HRESULT compsys_rename( IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out )
 {
@@ -114,7 +139,7 @@ HRESULT compsys_rename( IWbemClassObject *obj, IWbemContext *context, IWbemClass
     else if (NetGetJoinInformation( NULL, &member, &type ) == NERR_Success && type == NetSetupDomainName)
         status = NetRenameMachineInDomain( NULL, name, user, password, NETSETUP_ACCT_CREATE );
     else
-        status = SetComputerNameExW( ComputerNamePhysicalDnsHostname, name ) ? 0 : GetLastError();
+        status = set_workgroup_name( name );
     if (member) NetApiBufferFree( member );
     free_credentials( name, password, user );
     return return_value( L"Rename", status, out );
