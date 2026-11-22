@@ -39,6 +39,7 @@ namespace Windows.Foundation.Diagnostics {
 }
 namespace Windows.Foundation.Collections {
     runtimeclass PropertySet;
+    runtimeclass ValueSet;
 }
 namespace Windows.Foundation.Metadata {
     runtimeclass ApiInformation;
