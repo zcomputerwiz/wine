@@ -1073,6 +1073,9 @@
 @ stub RtlStartRXact
 # @ stub RtlStatMemoryStream
 @ stdcall RtlStringFromGUID(ptr ptr)
+@ stdcall NtQueryWnfStateData(ptr ptr ptr ptr ptr ptr)
+@ stdcall RtlSubscribeWnfStateChangeNotification(ptr ptr long ptr ptr ptr long long)
+@ stdcall RtlUnsubscribeWnfStateChangeNotification(ptr)
 @ stdcall RtlSubAuthorityCountSid(ptr)
 @ stdcall RtlSubAuthoritySid(ptr long)
 @ stdcall RtlSubtreePredecessor(ptr)
