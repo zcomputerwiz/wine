@@ -318,5 +318,8 @@ HRESULT view_title_bar_create( IApplicationViewTitleBar **out );
         impl_type *impl = impl_from( iface );                                                      \
         return IInspectable_GetTrustLevel( (IInspectable *)(expr), trust_level );                  \
     }
+extern const GUID IID_IStaticLifetime_twinapi;
+extern void *get_static_lifetime(void);
+
 #define DEFINE_IINSPECTABLE( pfx, iface_type, impl_type, base_iface )                              \
     DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from_##iface_type, iface_type##_iface, &impl->base_iface )
