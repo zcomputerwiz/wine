@@ -55,6 +55,12 @@
  *   session 0 is not inherited; the child gets no handle at that value.
  * - NtSaveKey, NtLoadKey and NtUnloadKey on a session 0 key: they go to the process's own server, which does not
  *   know the handle.
+ * - As for any handle in stock Wine: a close-only DUPLICATE_CLOSE_SOURCE of another process's key without a target
+ *   process fails (APC_DUP_HANDLE needs one), and when the APC never runs (its thread ends first), the target keeps
+ *   the record's section handle (as with APC_MAP_VIEW).
+ * - A virtual key does not check its own access: a write goes to the store key (created with full access at the
+ *   first write), which is the user's own. A duplicate with an access of its own gets real and store handles of that
+ *   access.
  */
 
 #if 0
@@ -1236,10 +1242,13 @@ static NTSTATUS virt_duplicate( HANDLE source, HANDLE *dest, ACCESS_MASK access,
         status = STATUS_NO_MEMORY;
     wexkey_unlock( &sigset );
 
+    /* with an access of its own, the copy's real and store keys have that access (the real key keeps its view) */
+    options &= DUPLICATE_SAME_ACCESS;
     if (!status && real)
-        status = NtDuplicateObject( NtCurrentProcess(), real, NtCurrentProcess(), &new_real, 0, 0, DUPLICATE_SAME_ACCESS );
+        status = NtDuplicateObject( NtCurrentProcess(), real, NtCurrentProcess(), &new_real, access, 0, options );
     if (!status && store)
-        status = NtDuplicateObject( NtCurrentProcess(), store, NtCurrentProcess(), &new_store, 0, 0, DUPLICATE_SAME_ACCESS );
+        status = NtDuplicateObject( NtCurrentProcess(), store, NtCurrentProcess(), &new_store,
+                                    access & ~(KEY_WOW64_32KEY | KEY_WOW64_64KEY), 0, options );
     if (!status && !(*dest = virt_add( new_real, new_store, &path, &store_path, access ))) status = STATUS_NO_MEMORY;
     if (status)
     {
@@ -1301,7 +1310,10 @@ static NTSTATUS send_key( HANDLE source, HANDLE process, HANDLE *dest, ACCESS_MA
         rec.attributes = key->attributes;
         if (key->kind == WEXKEY_VIRTUAL && key->real && (real = get_key( key->real, WEXKEY_SESSION0 )))
         {
-            rec.real_access = real->access;
+            /* with an access of its own, the real key gets it too, in the real key's view */
+            if (options & DUPLICATE_SAME_ACCESS) rec.real_access = real->access;
+            else rec.real_access = (access & ~(KEY_WOW64_32KEY | KEY_WOW64_64KEY)) |
+                                   (real->access & (KEY_WOW64_32KEY | KEY_WOW64_64KEY));
             rec.real_attributes = real->attributes;
         }
         rec.len = key->len;
@@ -1342,15 +1354,20 @@ NTSTATUS wexkey_receive( HANDLE section, unsigned int size, HANDLE *handle )
 {
     struct wexkey_record rec;
     UNICODE_STRING path = { 0 }, store_path = { 0 };
+    SECTION_BASIC_INFORMATION info;
     const WCHAR *rest;
     unsigned int rest_count;
     HANDLE real = 0, store = 0;
     void *view = NULL;
-    SIZE_T view_size = 0;
+    SIZE_T view_size = size;
     NTSTATUS status;
 
     *handle = 0;
     if (size < sizeof(rec) || size > sizeof(rec) + 0xfffe) return STATUS_INVALID_PARAMETER;
+    /* a data section of at least the record's size (never an image: its mapping would run the loader), of which
+     * only the record is mapped */
+    if ((status = NtQuerySection( section, SectionBasicInformation, &info, sizeof(info), NULL ))) return status;
+    if ((info.Attributes & (SEC_IMAGE | SEC_FILE)) || info.Size.QuadPart < size) return STATUS_INVALID_PARAMETER;
     if ((status = NtMapViewOfSection( section, NtCurrentProcess(), &view, 0, 0, NULL, &view_size, ViewShare, 0,
                                       PAGE_READONLY )))
         return status;
@@ -1382,8 +1399,8 @@ NTSTATUS wexkey_receive( HANDLE section, unsigned int size, HANDLE *handle )
         status = STATUS_INVALID_PARAMETER;
     else
     {
-        /* the store key is this process's user's */
-        if (virt_open_path( &store, &store_path, KEY_ALL_ACCESS, FALSE )) store = 0;
+        /* the store key is this process's user's, with the copy's access */
+        if (virt_open_path( &store, &store_path, rec.access & ~(KEY_WOW64_32KEY | KEY_WOW64_64KEY), FALSE )) store = 0;
         if (rec.real_access && !(real = wexkey_add_session0( 0, S0_NOT_OPEN, &path, rec.real_access,
                                                              rec.real_attributes )))
             status = STATUS_NO_MEMORY;
