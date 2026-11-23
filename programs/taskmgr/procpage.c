@@ -65,12 +65,13 @@ static void CommaSeparateNumberString(LPWSTR strNumber, int nMaxCount)
     memcpy(strNumber, temp, min(nMaxCount, j) * sizeof(WCHAR));
 }
 
-/* Vista: an administrator whose Task Manager runs with the filtered token sees "Show processes from all users"
- * as a button with the shield, which starts Task Manager again elevated. Elevated, as a standard user or without
- * an elevation helper (TokenElevationTypeDefault) it stays XP's check box. */
-static BOOL is_filtered_admin(void)
+/* Vista: unless Task Manager runs elevated, "Show processes from all users" is a button with the shield, which
+ * starts Task Manager again elevated (consent for an administrator's filtered token, credentials for a standard
+ * user), so other users' processes are listed only when elevated. Elevated or without an elevation helper it
+ * stays XP's check box. */
+static BOOL needs_elevation_for_all_users(void)
 {
-    TOKEN_ELEVATION_TYPE type = TokenElevationTypeDefault;
+    TOKEN_ELEVATION elevation = { 0 };
     WCHAR helper[MAX_PATH];
     DWORD len = sizeof(helper);
     HANDLE token;
@@ -81,11 +82,12 @@ static BOOL is_filtered_admin(void)
                      helper, &len) || !helper[0])
         return FALSE;
 
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return FALSE;
-    if (!GetTokenInformation(token, TokenElevationType, &type, sizeof(type), &len))
-        type = TokenElevationTypeDefault;
+    /* with enforcement on, fail closed: a token that cannot be queried is treated as not elevated */
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return TRUE;
+    if (!GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &len))
+        elevation.TokenIsElevated = 0;
     CloseHandle(token);
-    return type == TokenElevationTypeLimited;
+    return !elevation.TokenIsElevated;
 }
 
 static void ProcessPage_OnShowAllProcessesElevated(void)
@@ -545,7 +547,7 @@ ProcessPageWndProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
         hProcessPageHeaderCtrl = (HWND)SendMessageW(hProcessPageListCtrl, LVM_GETHEADER, 0, 0);
         hProcessPageEndProcessButton = GetDlgItem(hDlg, IDC_ENDPROCESS);
         hProcessPageShowAllProcessesButton = GetDlgItem(hDlg, IDC_SHOWALLPROCESSES);
-        if (is_filtered_admin())
+        if (needs_elevation_for_all_users())
         {
             HWND elevate = GetDlgItem(hDlg, IDC_SHOWALLPROCESSES_ELEVATE);
 
