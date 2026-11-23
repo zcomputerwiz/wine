@@ -32,6 +32,7 @@ struct hstring_map
 {
     IMap_HSTRING_HSTRING IMap_HSTRING_HSTRING_iface;
     IIterable_IKeyValuePair_HSTRING_HSTRING IIterable_IKeyValuePair_HSTRING_HSTRING_iface;
+    IMapView_HSTRING_HSTRING IMapView_HSTRING_HSTRING_iface;
     LONG ref;
     struct hstring_map_entry *entries;
     UINT32 count;
@@ -78,6 +79,12 @@ static HRESULT WINAPI hstring_map_QueryInterface( IMap_HSTRING_HSTRING *iface, R
     if (IsEqualGUID( iid, &IID_IIterable_IKeyValuePair_HSTRING_HSTRING ))
     {
         *out = &impl->IIterable_IKeyValuePair_HSTRING_HSTRING_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IMapView_HSTRING_HSTRING ))
+    {
+        *out = &impl->IMapView_HSTRING_HSTRING_iface;
         IInspectable_AddRef( *out );
         return S_OK;
     }
@@ -177,8 +184,15 @@ static HRESULT WINAPI hstring_map_HasKey( IMap_HSTRING_HSTRING *iface, HSTRING k
 
 static HRESULT WINAPI hstring_map_GetView( IMap_HSTRING_HSTRING *iface, IMapView_HSTRING_HSTRING **value )
 {
-    FIXME( "iface %p, value %p stub!\n", iface, value );
-    return E_NOTIMPL;
+    struct hstring_map *impl = impl_from_IMap_HSTRING_HSTRING( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    /* the view is the map itself, read-only through its interface, and follows later changes */
+    *value = &impl->IMapView_HSTRING_HSTRING_iface;
+    IMapView_HSTRING_HSTRING_AddRef( *value );
+    return S_OK;
 }
 
 static HRESULT WINAPI hstring_map_Insert( IMap_HSTRING_HSTRING *iface, HSTRING key, HSTRING value, boolean *replaced )
@@ -273,6 +287,85 @@ static const struct IMap_HSTRING_HSTRINGVtbl hstring_map_vtbl =
     hstring_map_Insert,
     hstring_map_Remove,
     hstring_map_Clear,
+};
+
+/* IMapView<HSTRING, HSTRING>: the same object as the map, so one reference count */
+static inline struct hstring_map *impl_from_IMapView_HSTRING_HSTRING( IMapView_HSTRING_HSTRING *iface )
+{
+    return CONTAINING_RECORD( iface, struct hstring_map, IMapView_HSTRING_HSTRING_iface );
+}
+
+static HRESULT WINAPI hstring_view_QueryInterface( IMapView_HSTRING_HSTRING *iface, REFIID iid, void **out )
+{
+    return hstring_map_QueryInterface( &impl_from_IMapView_HSTRING_HSTRING( iface )->IMap_HSTRING_HSTRING_iface, iid, out );
+}
+
+static ULONG WINAPI hstring_view_AddRef( IMapView_HSTRING_HSTRING *iface )
+{
+    return hstring_map_AddRef( &impl_from_IMapView_HSTRING_HSTRING( iface )->IMap_HSTRING_HSTRING_iface );
+}
+
+static ULONG WINAPI hstring_view_Release( IMapView_HSTRING_HSTRING *iface )
+{
+    return hstring_map_Release( &impl_from_IMapView_HSTRING_HSTRING( iface )->IMap_HSTRING_HSTRING_iface );
+}
+
+static HRESULT WINAPI hstring_view_GetIids( IMapView_HSTRING_HSTRING *iface, ULONG *iid_count, IID **iids )
+{
+    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI hstring_view_GetRuntimeClassName( IMapView_HSTRING_HSTRING *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( L"Windows.Foundation.Collections.IMapView`2<System.String, System.String>",
+                                ARRAY_SIZE(L"Windows.Foundation.Collections.IMapView`2<System.String, System.String>"),
+                                class_name );
+}
+
+static HRESULT WINAPI hstring_view_GetTrustLevel( IMapView_HSTRING_HSTRING *iface, TrustLevel *trust_level )
+{
+    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI hstring_view_Lookup( IMapView_HSTRING_HSTRING *iface, HSTRING key, HSTRING *value )
+{
+    return hstring_map_Lookup( &impl_from_IMapView_HSTRING_HSTRING( iface )->IMap_HSTRING_HSTRING_iface, key, value );
+}
+
+static HRESULT WINAPI hstring_view_get_Size( IMapView_HSTRING_HSTRING *iface, UINT32 *value )
+{
+    return hstring_map_get_Size( &impl_from_IMapView_HSTRING_HSTRING( iface )->IMap_HSTRING_HSTRING_iface, value );
+}
+
+static HRESULT WINAPI hstring_view_HasKey( IMapView_HSTRING_HSTRING *iface, HSTRING key, boolean *value )
+{
+    return hstring_map_HasKey( &impl_from_IMapView_HSTRING_HSTRING( iface )->IMap_HSTRING_HSTRING_iface, key, value );
+}
+
+static HRESULT WINAPI hstring_view_Split( IMapView_HSTRING_HSTRING *iface, IMapView_HSTRING_HSTRING **first,
+                                          IMapView_HSTRING_HSTRING **second )
+{
+    FIXME( "iface %p, first %p, second %p stub!\n", iface, first, second );
+    return E_NOTIMPL;
+}
+
+static const struct IMapView_HSTRING_HSTRINGVtbl hstring_view_vtbl =
+{
+    /* IUnknown methods */
+    hstring_view_QueryInterface,
+    hstring_view_AddRef,
+    hstring_view_Release,
+    /* IInspectable methods */
+    hstring_view_GetIids,
+    hstring_view_GetRuntimeClassName,
+    hstring_view_GetTrustLevel,
+    /* IMapView methods */
+    hstring_view_Lookup,
+    hstring_view_get_Size,
+    hstring_view_HasKey,
+    hstring_view_Split,
 };
 
 /* IKeyValuePair<HSTRING, HSTRING>: one entry, copied */
@@ -657,6 +750,7 @@ HRESULT map_hstring_create( IMap_HSTRING_HSTRING **out )
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IMap_HSTRING_HSTRING_iface.lpVtbl = &hstring_map_vtbl;
     impl->IIterable_IKeyValuePair_HSTRING_HSTRING_iface.lpVtbl = &hstring_map_iterable_vtbl;
+    impl->IMapView_HSTRING_HSTRING_iface.lpVtbl = &hstring_view_vtbl;
     impl->ref = 1;
 
     *out = &impl->IMap_HSTRING_HSTRING_iface;
