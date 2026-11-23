@@ -2236,8 +2236,7 @@ DECL_HANDLER(get_pipe_caller_binding)
     }
 #endif
     /* Keep the same system-role / SeTcbPrivilege gate as create_linked_token. */
-    if (!elevation_enforced() || token_service_account( current->process->token ) != SERVICE_ACCOUNT_SYSTEM ||
-        !sysrun_process_privileged( current->process ) || !token_has_privilege( current->process->token, SeTcbPrivilege ))
+    if (!elevation_enforced() || !sysrun_process_is_tcb_system( current->process ))
     {
         E1S6_BINDING_AUDIT( "authority" );
         set_error( STATUS_ACCESS_DENIED );

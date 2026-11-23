@@ -167,6 +167,18 @@ int sysrun_process_privileged( const struct process *process )
     return sysrun_active && process && process->peer_uid == getuid() && process->peer_gid == system_gid;
 }
 
+/* The system role's authority (WineExplorer R2): a process started over the system role connection
+ * (sysrun_process_privileged) whose primary token is SYSTEM's and holds SeTcbPrivilege. Wine's administrator token
+ * holds SeTcbPrivilege too, so the privilege alone proves nothing; SYSTEM's token alone is not enough either, since
+ * the connection is what the launcher vouches for. Session 0 has no system role connection: callers there decide
+ * for themselves. */
+int sysrun_process_is_tcb_system( struct process *process )
+{
+    return sysrun_process_privileged( process ) && process->token &&
+           token_service_account( process->token ) == SERVICE_ACCOUNT_SYSTEM &&
+           token_has_privilege( process->token, SeTcbPrivilege );
+}
+
 int sysrun_raise_for_current(void)
 {
     return sysrun_active && current && sysrun_process_privileged( current->process ) ? sysrun_raise() : 0;
