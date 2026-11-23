@@ -6599,101 +6599,6 @@ struct alpc_impersonate_reply
 };
 
 
-
-struct dwm_connect_request
-{
-    struct request_header __header;
-    char __pad_12[4];
-};
-struct dwm_connect_reply
-{
-    struct reply_header __header;
-    obj_handle_t        handle;
-    unsigned int        version;
-    unsigned __int64    epoch;
-};
-
-
-
-struct dwm_get_broker_capability_request
-{
-    struct request_header __header;
-    char __pad_12[4];
-};
-struct dwm_get_broker_capability_reply
-{
-    struct reply_header __header;
-    unsigned __int64    capability;
-    unsigned __int64    epoch;
-};
-
-
-
-struct dwm_broker_register_request
-{
-    struct request_header __header;
-    unsigned int        flags;
-    unsigned __int64    capability;
-};
-struct dwm_broker_register_reply
-{
-    struct reply_header __header;
-    obj_handle_t        handle;
-    unsigned int        version;
-    unsigned __int64    epoch;
-};
-
-
-
-struct dwm_send_request
-{
-    struct request_header __header;
-    obj_handle_t        handle;
-    /* VARARG(msg,bytes); */
-};
-struct dwm_send_reply
-{
-    struct reply_header __header;
-    unsigned __int64    epoch;
-    unsigned int        request_id;
-    char __pad_20[4];
-};
-
-
-
-struct dwm_recv_request
-{
-    struct request_header __header;
-    obj_handle_t        handle;
-};
-struct dwm_recv_reply
-{
-    struct reply_header __header;
-    unsigned int        request_id;
-    process_id_t        sender_pid;
-    thread_id_t         sender_tid;
-    unsigned int        desktop_id;
-    unsigned int        status;
-    /* VARARG(msg,bytes); */
-    char __pad_28[4];
-};
-
-
-
-struct dwm_reply_request
-{
-    struct request_header __header;
-    obj_handle_t        handle;
-    unsigned int        request_id;
-    unsigned int        status;
-    /* VARARG(msg,bytes); */
-};
-struct dwm_reply_reply
-{
-    struct reply_header __header;
-};
-
-
 /* WineExplorer private E1-S10. Caps are negotiated on the actual endorsed
  * broker connection. Normal builds refuse all operations. Exact byte limits:
  * negotiate 0, issue 204, lab-only install 268; kind-5 response 136/108.
@@ -7067,12 +6972,6 @@ enum request
     REQ_alpc_send_receive,
     REQ_alpc_disconnect,
     REQ_alpc_impersonate,
-    REQ_dwm_connect,
-    REQ_dwm_get_broker_capability,
-    REQ_dwm_broker_register,
-    REQ_dwm_send,
-    REQ_dwm_recv,
-    REQ_dwm_reply,
     REQ_create_e1s_account_token,
     REQ_load_e1s_profile,
     REQ_NB_REQUESTS
@@ -7410,12 +7309,6 @@ union generic_request
     struct alpc_send_receive_request alpc_send_receive_request;
     struct alpc_disconnect_request alpc_disconnect_request;
     struct alpc_impersonate_request alpc_impersonate_request;
-    struct dwm_connect_request dwm_connect_request;
-    struct dwm_get_broker_capability_request dwm_get_broker_capability_request;
-    struct dwm_broker_register_request dwm_broker_register_request;
-    struct dwm_send_request dwm_send_request;
-    struct dwm_recv_request dwm_recv_request;
-    struct dwm_reply_request dwm_reply_request;
     struct create_e1s_account_token_request create_e1s_account_token_request;
     struct load_e1s_profile_request load_e1s_profile_request;
 };
@@ -7751,16 +7644,10 @@ union generic_reply
     struct alpc_send_receive_reply alpc_send_receive_reply;
     struct alpc_disconnect_reply alpc_disconnect_reply;
     struct alpc_impersonate_reply alpc_impersonate_reply;
-    struct dwm_connect_reply dwm_connect_reply;
-    struct dwm_get_broker_capability_reply dwm_get_broker_capability_reply;
-    struct dwm_broker_register_reply dwm_broker_register_reply;
-    struct dwm_send_reply dwm_send_reply;
-    struct dwm_recv_reply dwm_recv_reply;
-    struct dwm_reply_reply dwm_reply_reply;
     struct create_e1s_account_token_reply create_e1s_account_token_reply;
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 990
+#define SERVER_PROTOCOL_VERSION 991
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

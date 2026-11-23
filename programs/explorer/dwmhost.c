@@ -36,8 +36,6 @@
 #include "wingdi.h"
 #include "winuser.h"
 #include "winreg.h"
-#include "winternl.h"
-#include "wine/dwm_protocol.h"
 #include "wine/debug.h"
 #include "explorer_private.h"
 
@@ -57,49 +55,28 @@ static BOOL dwm_service_enabled(void)
                           RRF_RT_REG_DWORD, NULL, &value, &size ) && value;
 }
 
+/* dwm.exe on the desktop it serves; it creates that desktop's pipe itself (DWM_ARCHITECTURE.md section 2.0) */
 static HANDLE launch_broker(void)
 {
-    struct dwm_channel_call call = { .op = DWM_CHANNEL_OP_GET_CAPABILITY };
     WCHAR cmdline[128], station[MAX_PATH], desktop[MAX_PATH], full[2 * MAX_PATH + 2];
     STARTUPINFOW si = { sizeof(si) };
-    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
     PROCESS_INFORMATION pi;
-    HANDLE read_pipe, write_pipe;
     BOOL wow64 = FALSE, ok;
     PVOID redirect = NULL;
-
-    if (NtSetInformationProcess( GetCurrentProcess(), ProcessWineDwmChannel, &call, sizeof(call) )) return NULL;
 
     if (!GetUserObjectInformationW( GetProcessWindowStation(), UOI_NAME, station, sizeof(station), NULL ) ||
         !GetUserObjectInformationW( dwm_desktop, UOI_NAME, desktop, sizeof(desktop), NULL )) return NULL;
     swprintf( full, ARRAY_SIZE(full), L"%s\\%s", station, desktop );
     si.lpDesktop = full;
 
-    /* the capability goes through the child's stdin, not the command line other processes can read */
-    if (!CreatePipe( &read_pipe, &write_pipe, &sa, 0 )) return NULL;
-    SetHandleInformation( write_pipe, HANDLE_FLAG_INHERIT, 0 );
-    si.dwFlags    = STARTF_USESTDHANDLES;
-    si.hStdInput  = read_pipe;
-    si.hStdOutput = GetStdHandle( STD_OUTPUT_HANDLE );
-    si.hStdError  = GetStdHandle( STD_ERROR_HANDLE );
-
     swprintf( cmdline, ARRAY_SIZE(cmdline), L"\"C:\\windows\\system32\\dwm.exe\" /parent=%lu", GetCurrentProcessId() );
     /* a 32-bit explorer must still reach the native broker */
     if (IsWow64Process( GetCurrentProcess(), &wow64 ) && wow64) Wow64DisableWow64FsRedirection( &redirect );
-    ok = CreateProcessW( NULL, cmdline, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi );
+    ok = CreateProcessW( NULL, cmdline, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi );
     if (wow64) Wow64RevertWow64FsRedirection( redirect );
-    CloseHandle( read_pipe );
-    if (ok)
-    {
-        char text[17];
-        DWORD written;
-
-        sprintf( text, "%016llx", (unsigned long long)call.capability );
-        WriteFile( write_pipe, text, 16, &written, NULL );
-        CloseHandle( pi.hThread );
-    }
-    CloseHandle( write_pipe );
-    return ok ? pi.hProcess : NULL;
+    if (!ok) return NULL;
+    CloseHandle( pi.hThread );
+    return pi.hProcess;
 }
 
 static DWORD WINAPI dwm_supervisor( void *arg )

@@ -1,7 +1,7 @@
 /*
  * WineExplorer Desktop Environment - dwm_client.c
  *
- * Client-side DWM broker control channel helper and test hook.
+ * The client end of the DWM broker's pipe (docs/DWM_ARCHITECTURE.md section 2.0) and the private exports over it.
  *
  * Copyright 2026 WineExplorer Desktop Environment Project
  *
@@ -36,12 +36,15 @@
 #include "winreg.h"
 #include "dwmapi.h"
 #include "dwm_client.h"
+#include "wine/wex_pipe.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dwmapi);
 
-/* Brief failure cache window (ms) to avoid reconnect loops when no broker is registered. */
+/* Brief failure cache window (ms) to avoid reconnect loops when no broker serves the desktop. */
 #define DWM_FAIL_CACHE_MS 50ULL
+/* desktops this process talks to at once; a process with windows on more desktops reconnects */
+#define DWM_CLIENT_LINKS  4
 
 static CRITICAL_SECTION dwm_client_cs;
 static CRITICAL_SECTION_DEBUG dwm_client_cs_debug =
@@ -52,29 +55,21 @@ static CRITICAL_SECTION_DEBUG dwm_client_cs_debug =
 };
 static CRITICAL_SECTION dwm_client_cs = { &dwm_client_cs_debug, -1, 0, 0, 0, 0 };
 
-static HANDLE cached_handle;
-static HDESK cached_desktop;
-static uint64_t cached_epoch;
-
-/* The broker generation this process last reached: the server's desktop epoch, which changes whenever a broker
- * registers or goes away. A new one means a broker that does not hold this process's attributes yet. */
-static uint64_t known_epoch;
-static BOOL broker_changed;
-
-static HDESK fail_desktop;
-static ULONGLONG fail_tick;
-static NTSTATUS fail_status;
-
-static void close_cached_channel(void)
+/* A connection to one desktop's broker, made when a call needs it. generation is the last broker generation seen
+ * there: a new one means a broker that does not hold this process's attributes yet. */
+struct broker_link
 {
-    if (cached_handle)
-    {
-        NtClose( cached_handle );
-        cached_handle = NULL;
-    }
-    cached_desktop = NULL;
-    cached_epoch = 0;
-}
+    HDESK desktop;
+    HANDLE pipe;
+    uint64_t generation;
+    ULONGLONG fail_tick;
+    NTSTATUS fail_status;
+};
+
+static struct broker_link links[DWM_CLIENT_LINKS];
+static unsigned int next_evicted;
+static HANDLE io_event;
+static BOOL broker_changed;
 
 /* The DwmService gate (HKCU\Software\WineExplorer\Shell), read once per process: without it no desktop starts a
  * broker, so the attribute and thumbnail calls do not ask for one. */
@@ -91,181 +86,133 @@ static BOOL broker_enabled(void)
     return enabled;
 }
 
-static void record_failure( HDESK desktop, NTSTATUS status )
+static void close_link( struct broker_link *link )
 {
-    fail_desktop = desktop;
-    fail_tick = GetTickCount64();
-    fail_status = status;
+    if (link->pipe) CloseHandle( link->pipe );
+    link->pipe = NULL;
 }
 
-/***********************************************************************
- *           dwm_client_connect
- *
- * Open a waitable client channel bound to the calling thread's current desktop.
- * Never called from DllMain.
- */
-static NTSTATUS dwm_client_connect( HANDLE *ret_handle, uint64_t *ret_epoch )
+/* The broker to ask about a window: the desktop of the thread that owns it when that thread is this process's
+ * (routing by window, not by the calling thread: a process may have windows on several desktops); otherwise the
+ * calling thread's desktop. */
+static HDESK call_desktop( HWND hwnd )
 {
-    struct dwm_channel_call call;
-    NTSTATUS status;
+    DWORD pid = 0, tid = hwnd ? GetWindowThreadProcessId( hwnd, &pid ) : 0;
+    HDESK desktop = NULL;
 
-    if (!ret_handle) return STATUS_INVALID_PARAMETER;
-    *ret_handle = NULL;
-    if (ret_epoch) *ret_epoch = 0;
+    if (tid && pid == GetCurrentProcessId()) desktop = GetThreadDesktop( tid );
+    return desktop ? desktop : GetThreadDesktop( GetCurrentThreadId() );
+}
 
-    memset( &call, 0, sizeof(call) );
-    call.op = DWM_CHANNEL_OP_CONNECT;
+static struct broker_link *get_link( HDESK desktop )
+{
+    struct broker_link *link;
+    unsigned int i;
 
-    status = NtSetInformationProcess( NtCurrentProcess(), ProcessWineDwmChannel, &call, sizeof(call) );
-    if (status) return status;
-
-    if (call.version != DWM_PROTOCOL_VERSION)
+    for (i = 0; i < DWM_CLIENT_LINKS; i++) if (links[i].desktop == desktop) return &links[i];
+    for (i = 0; i < DWM_CLIENT_LINKS; i++) if (!links[i].desktop) break;
+    if (i == DWM_CLIENT_LINKS)
     {
-        NtClose( UlongToHandle( call.handle ) );
-        return STATUS_REVISION_MISMATCH;
+        i = next_evicted++ % DWM_CLIENT_LINKS;
+        close_link( &links[i] );
     }
+    link = &links[i];
+    memset( link, 0, sizeof(*link) );
+    link->desktop = desktop;
+    return link;
+}
 
-    *ret_handle = UlongToHandle( call.handle );
-    if (ret_epoch) *ret_epoch = call.epoch;
+/* Open the desktop's pipe and check that dwm.exe serves it. A failed check counts as no broker. */
+static NTSTATUS connect_link( struct broker_link *link )
+{
+    WCHAR name[MAX_PATH * 2 + 64];
+    HANDLE pipe;
+
+    if (!dwm_pipe_name( link->desktop, name, ARRAY_SIZE(name) )) return STATUS_PORT_DISCONNECTED;
+    if ((pipe = wex_pipe_connect( name, 500 )) == INVALID_HANDLE_VALUE)
+        return GetLastError() == ERROR_PIPE_BUSY ? STATUS_IO_TIMEOUT : STATUS_PORT_DISCONNECTED;
+    if (!wex_pipe_server_is( pipe, L"dwm.exe" ))
+    {
+        WARN( "%s is not served by dwm.exe with an ordinary token\n", debugstr_w( name ) );
+        CloseHandle( pipe );
+        return STATUS_PORT_DISCONNECTED;
+    }
+    link->pipe = pipe;
     return STATUS_SUCCESS;
 }
 
-/* one request and its reply over the cached channel; called with dwm_client_cs held */
-static NTSTATUS call_locked( uint32_t opcode, HWND hwnd, const void *in, uint32_t in_len,
+static NTSTATUS pipe_status( DWORD err )
+{
+    switch (err)
+    {
+    case ERROR_SUCCESS: return STATUS_SUCCESS;
+    case ERROR_TIMEOUT: return STATUS_IO_TIMEOUT;
+    case ERROR_MORE_DATA: return STATUS_INVALID_NETWORK_RESPONSE;
+    default: return STATUS_PORT_DISCONNECTED;   /* broken pipe, no data, not connected */
+    }
+}
+
+/* one request and its reply; called with dwm_client_cs held */
+static NTSTATUS call_locked( struct broker_link *link, uint32_t opcode, HWND hwnd, const void *in, uint32_t in_len,
                              void *out, uint32_t *out_len, uint32_t timeout_ms )
 {
-    unsigned char req_buf[sizeof(struct dwm_msg_header) + DWM_MAX_MESSAGE_SIZE];
-    unsigned char rep_buf[sizeof(struct dwm_msg_header) + DWM_MAX_MESSAGE_SIZE];
-    struct dwm_msg_header hdr, rep_hdr;
-    struct dwm_channel_call call;
-    HDESK cur_desktop;
+    unsigned char req_buf[sizeof(struct dwm_request) + DWM_MAX_MESSAGE_SIZE];
+    unsigned char rep_buf[sizeof(struct dwm_reply) + DWM_MAX_MESSAGE_SIZE];
+    struct dwm_request req;
+    struct dwm_reply rep;
     BOOL retried = FALSE;
+    DWORD size;
     NTSTATUS status;
 
-    cur_desktop = GetThreadDesktop( GetCurrentThreadId() );
-
-    /* If the calling thread switched desktops, drop the cached channel for the old desktop. */
-    if (cached_handle && cached_desktop != cur_desktop)
-        close_cached_channel();
-
     /* Brief failure cache so missing-broker calls do not spin in reconnect loops. */
-    if (!cached_handle && fail_status && fail_desktop == cur_desktop)
+    if (!link->pipe && link->fail_status)
     {
-        if (GetTickCount64() - fail_tick < DWM_FAIL_CACHE_MS) return fail_status;
-        fail_status = STATUS_SUCCESS;
+        if (GetTickCount64() - link->fail_tick < DWM_FAIL_CACHE_MS) return link->fail_status;
+        link->fail_status = STATUS_SUCCESS;
     }
+    if (!io_event && !(io_event = CreateEventW( NULL, TRUE, FALSE, NULL ))) return STATUS_NO_MEMORY;
 
-retry_connect:
-    if (!cached_handle)
-    {
-        status = dwm_client_connect( &cached_handle, &cached_epoch );
-        if (status)
-        {
-            record_failure( cur_desktop, status );
-            return status;
-        }
-        cached_desktop = cur_desktop;
-        retried = TRUE;
-    }
-
-    memset( &hdr, 0, sizeof(hdr) );
-    hdr.opcode           = opcode;
-    hdr.version          = DWM_PROTOCOL_VERSION;
-    hdr.length           = in_len;
-    hdr.request_id       = 0;
-    hdr.connection_epoch = cached_epoch;
-    hdr.window_token     = HandleToUlong( hwnd );
-    hdr.revision         = 0;
-    hdr.capabilities     = 0;
-
-    memcpy( req_buf, &hdr, sizeof(hdr) );
-    if (in_len) memcpy( req_buf + sizeof(hdr), in, in_len );
-
-    memset( &call, 0, sizeof(call) );
-    call.op     = DWM_CHANNEL_OP_SEND;
-    call.handle = HandleToUlong( cached_handle );
-    call.in_ptr = (uintptr_t)req_buf;
-    call.in_len = sizeof(hdr) + in_len;
-
-    status = NtSetInformationProcess( NtCurrentProcess(), ProcessWineDwmChannel, &call, sizeof(call) );
-    if (status == STATUS_PORT_DISCONNECTED || status == STATUS_ACCESS_DENIED || status == STATUS_INVALID_HANDLE)
-    {
-        close_cached_channel();
-        if (!retried && status == STATUS_PORT_DISCONNECTED)
-        {
-            retried = TRUE;
-            goto retry_connect;
-        }
-        record_failure( cur_desktop, status );
-        return status;
-    }
-    if (status) return status;
-
-    cached_epoch = call.epoch;
-    if (call.epoch != known_epoch)
-    {
-        known_epoch = call.epoch;
-        broker_changed = TRUE;
-    }
+    req.opcode  = opcode;
+    req.length  = in_len;
+    req.window  = HandleToUlong( hwnd );
+    req.version = DWM_PROTOCOL_VERSION;
+    memcpy( req_buf, &req, sizeof(req) );
+    if (in_len) memcpy( req_buf + sizeof(req), in, in_len );
 
     for (;;)
     {
-        memset( &call, 0, sizeof(call) );
-        call.op      = DWM_CHANNEL_OP_RECV;
-        call.handle  = HandleToUlong( cached_handle );
-        call.out_ptr = (uintptr_t)rep_buf;
-        call.out_len = sizeof(rep_buf);
-
-        status = NtSetInformationProcess( NtCurrentProcess(), ProcessWineDwmChannel, &call, sizeof(call) );
-        if (status == STATUS_PENDING)
+        if (!link->pipe && (status = connect_link( link )))
         {
-            LARGE_INTEGER timeout, *ptimeout = NULL;
-            NTSTATUS wait_status;
-
-            if (timeout_ms != INFINITE)
-            {
-                timeout.QuadPart = -(LONGLONG)timeout_ms * 10000;
-                ptimeout = &timeout;
-            }
-
-            wait_status = NtWaitForSingleObject( cached_handle, FALSE, ptimeout );
-            if (wait_status != STATUS_WAIT_0)
-            {
-                close_cached_channel();
-                return (wait_status == STATUS_TIMEOUT) ? STATUS_IO_TIMEOUT : wait_status;
-            }
-            continue;
+            link->fail_tick = GetTickCount64();
+            link->fail_status = status;
+            return status;
         }
-        break;
+        status = pipe_status( wex_pipe_transact( link->pipe, req_buf, sizeof(req) + in_len, rep_buf, sizeof(rep_buf),
+                                                 &size, io_event, timeout_ms ) );
+        if (!status) break;
+        close_link( link );
+        /* a broker that went away is replaced by the desktop manager: one new connection */
+        if (status != STATUS_PORT_DISCONNECTED || retried) return status;
+        retried = TRUE;
     }
 
-    if (status)
+    if (size < sizeof(rep)) return STATUS_INVALID_NETWORK_RESPONSE;
+    memcpy( &rep, rep_buf, sizeof(rep) );
+    if (rep.length != size - sizeof(rep)) return STATUS_INVALID_NETWORK_RESPONSE;
+    if (rep.generation != link->generation)
     {
-        if (status == STATUS_PORT_DISCONNECTED)
-        {
-            close_cached_channel();
-            record_failure( cur_desktop, status );
-        }
-        return status;
+        TRACE( "broker generation %I64x on desktop %p\n", (UINT64)rep.generation, link->desktop );
+        link->generation = rep.generation;
+        broker_changed = TRUE;
     }
-
-    fail_status = STATUS_SUCCESS;
-
-    if (call.status) return (NTSTATUS)call.status;
-    if (call.out_len < sizeof(rep_hdr)) return STATUS_INVALID_NETWORK_RESPONSE;
-
-    memcpy( &rep_hdr, rep_buf, sizeof(rep_hdr) );
-    if (rep_hdr.version != DWM_PROTOCOL_VERSION ||
-        rep_hdr.length != call.out_len - sizeof(rep_hdr))
-        return STATUS_INVALID_NETWORK_RESPONSE;
+    if (rep.status) return rep.status;
 
     if (out_len)
     {
         uint32_t avail = *out_len;
-        *out_len = rep_hdr.length;
-        if (avail < rep_hdr.length) return STATUS_BUFFER_TOO_SMALL;
-        if (rep_hdr.length && out)
-            memcpy( out, rep_buf + sizeof(rep_hdr), rep_hdr.length );
+        *out_len = rep.length;
+        if (avail < rep.length) return STATUS_BUFFER_TOO_SMALL;
+        if (rep.length && out) memcpy( out, rep_buf + sizeof(rep), rep.length );
     }
     return STATUS_SUCCESS;
 }
@@ -273,22 +220,24 @@ retry_connect:
 /***********************************************************************
  *           dwm_client_call_window
  *
- * Perform a bounded synchronous request/reply call to the current desktop's
- * DWM broker with brief failure caching when no broker is registered.
- * The first call that reaches a new broker hands it this process's attributes and thumbnails.
+ * A bounded synchronous call to the broker of the window's desktop (the calling thread's for no window), with
+ * brief failure caching when no broker serves it. The first call that reaches a new broker hands it this process's
+ * attributes and thumbnails.
  */
 static NTSTATUS dwm_client_call_window( uint32_t opcode, HWND hwnd, const void *in, uint32_t in_len,
                                         void *out, uint32_t *out_len, uint32_t timeout_ms )
 {
+    HDESK desktop;
     NTSTATUS status;
     BOOL resend;
 
     if (in_len > DWM_MAX_MESSAGE_SIZE) return STATUS_PORT_MESSAGE_TOO_LONG;
     if (in_len && !in) return STATUS_INVALID_PARAMETER;
     if (out_len && *out_len && !out) return STATUS_INVALID_PARAMETER;
+    if (!(desktop = call_desktop( hwnd ))) return STATUS_PORT_DISCONNECTED;
 
     EnterCriticalSection( &dwm_client_cs );
-    status = call_locked( opcode, hwnd, in, in_len, out, out_len, timeout_ms );
+    status = call_locked( get_link( desktop ), opcode, hwnd, in, in_len, out, out_len, timeout_ms );
     resend = broker_changed;
     broker_changed = FALSE;
     LeaveCriticalSection( &dwm_client_cs );
@@ -359,7 +308,7 @@ NTSTATUS dwm_client_thumb_del( HWND dest, UINT handle )
 /***********************************************************************
  *           WexDwmpChannelEcho   (DWMAPI.@)
  *
- * Private test hook performing an ECHO round-trip over the desktop DWM channel.
+ * Private test hook: an ECHO round trip to the calling thread's desktop's broker.
  */
 HRESULT WINAPI WexDwmpChannelEcho( const void *in, ULONG in_len, void *out, ULONG *out_len )
 {

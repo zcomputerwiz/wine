@@ -1191,6 +1191,7 @@ SOURCES = \
 	wine/wined3d.h \
 	wine/winedmo.h \
 	wine/winedxgi.idl \
+	wine/wex_pipe.h \
 	wine/wingdi16.h \
 	wine/winnet16.h \
 	wine/winuser16.h \

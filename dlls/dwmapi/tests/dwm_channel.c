@@ -1,8 +1,9 @@
 /*
  * WineExplorer Desktop Environment - dwm_channel.c
  *
- * Conformance tests for the per-desktop DWM broker control channel
- * (Phase P1, Slice 1 of docs/DWM_ARCHITECTURE.md).
+ * Conformance tests for the per-desktop DWM broker pipe (docs/DWM_ARCHITECTURE.md section 2.0): the transport, the
+ * server check and the broker's per-message checks, talking to the desktop's real dwm.exe. They need a desktop with
+ * a broker (DwmService=1 on a shell desktop) and skip without one; on Windows the private export is missing.
  *
  * Copyright 2026 WineExplorer Desktop Environment Project
  *
@@ -25,6 +26,7 @@
 
 #include <stdarg.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "ntstatus.h"
@@ -34,476 +36,368 @@
 #include "wingdi.h"
 #include "winuser.h"
 #include "winternl.h"
+#include "dwmapi.h"
 #include "wine/dwm_protocol.h"
+#include "wine/wex_pipe.h"
 #include "wine/test.h"
 
-/*
- * The DWM control channel is a Wine-only private mechanism reached through the
- * private ProcessWineDwmChannel process information class (NtSetInformationProcess)
- * and the private WexDwmpChannelEcho dwmapi export. On real Windows neither exists,
- * so the whole test skips cleanly there (missing export, or the information class
- * failing with STATUS_INVALID_INFO_CLASS).
- *
- * Not testable from user mode: the server stamps sender_pid/sender_tid/desktop_id/
- * request_id/connection_epoch/capabilities onto every message and never trusts the
- * caller-supplied values for those fields. The wire carries no identity fields a
- * client could set, so identity cannot be spoofed; there is no user-mode API to
- * observe the stamped values on the receiving side, so this property cannot be
- * exercised directly.
- */
+#ifndef DWMWA_CAPTION_COLOR
+#define DWMWA_CAPTION_COLOR 35
+#endif
 
 static HRESULT (WINAPI *pWexDwmpChannelEcho)(const void *in, ULONG in_len, void *out, ULONG *out_len);
 
-static HANDLE broker_handle, broker_thread, broker_stop_event;
-static uint64_t broker_epoch;
-static HDESK switch_desktop, test_desktop;
-
-static void use_test_desktop(void)
+/* a client end of this desktop's broker pipe, opened by hand: the test plays a client that does not use dwmapi */
+static HANDLE open_broker(void)
 {
-    if (test_desktop) SetThreadDesktop( test_desktop );
-}
-static uint64_t switch_epoch;
-static NTSTATUS switch_status;
+    WCHAR name[MAX_PATH * 2 + 64];
 
-static NTSTATUS dwm_channel_call( struct dwm_channel_call *call )
-{
-    return NtSetInformationProcess( NtCurrentProcess(), ProcessWineDwmChannel, call, sizeof(*call) );
+    if (!dwm_pipe_name( GetThreadDesktop( GetCurrentThreadId() ), name, ARRAY_SIZE(name) ))
+        return INVALID_HANDLE_VALUE;
+    return wex_pipe_connect( name, 2000 );
 }
 
-static void build_echo_message( unsigned char *buf, uint32_t len, const void *payload )
+/* one raw request; returns the broker's status, or 0xffffffff when the transport failed */
+static NTSTATUS raw_call( HANDLE pipe, uint32_t opcode, uint32_t window, uint32_t version, const void *in,
+                          uint32_t in_len, void *out, uint32_t out_max, uint32_t *out_len, uint64_t *generation )
 {
-    struct dwm_msg_header *hdr = (struct dwm_msg_header *)buf;
-    memset( buf, 0, sizeof(*hdr) + len );
-    hdr->opcode  = DWM_OP_ECHO;
-    hdr->version = DWM_PROTOCOL_VERSION;
-    hdr->length  = len;
-    if (len && payload) memcpy( buf + sizeof(*hdr), payload, len );
+    unsigned char req_buf[sizeof(struct dwm_request) + DWM_MAX_MESSAGE_SIZE + 64];
+    unsigned char rep_buf[sizeof(struct dwm_reply) + DWM_MAX_MESSAGE_SIZE];
+    struct dwm_request req = { opcode, in_len, window, version };
+    struct dwm_reply rep;
+    HANDLE event = CreateEventW( NULL, TRUE, FALSE, NULL );
+    DWORD size, err;
+
+    memcpy( req_buf, &req, sizeof(req) );
+    if (in_len) memcpy( req_buf + sizeof(req), in, in_len );
+    err = wex_pipe_transact( pipe, req_buf, sizeof(req) + in_len, rep_buf, sizeof(rep_buf), &size, event, 5000 );
+    CloseHandle( event );
+    if (err || size < sizeof(rep)) return 0xffffffff;
+    memcpy( &rep, rep_buf, sizeof(rep) );
+    ok( rep.length == size - sizeof(rep), "reply length %u, message %lu\n", rep.length, size );
+    if (generation) *generation = rep.generation;
+    if (out_len) *out_len = rep.length;
+    if (out && rep.length <= out_max) memcpy( out, rep_buf + sizeof(rep), rep.length );
+    return rep.status;
 }
 
-/* Broker loop thread: receive requests and reply with the same payload. */
-static DWORD WINAPI broker_thread_fn( LPVOID arg )
-{
-    unsigned char buf[sizeof(struct dwm_msg_header) + DWM_MAX_MESSAGE_SIZE];
-    struct dwm_channel_call call;
-    NTSTATUS status;
-
-    use_test_desktop();
-
-    for (;;)
-    {
-        if (WaitForSingleObject( broker_stop_event, 0 ) == WAIT_OBJECT_0) break;
-        memset( &call, 0, sizeof(call) );
-        call.op      = DWM_CHANNEL_OP_RECV;
-        call.handle  = HandleToUlong( broker_handle );
-        call.out_ptr = (uintptr_t)buf;
-        call.out_len = sizeof(buf);
-        status = dwm_channel_call( &call );
-        if (status == STATUS_PENDING)
-        {
-            HANDLE objs[2] = { broker_handle, broker_stop_event };
-            if (WaitForMultipleObjects( 2, objs, FALSE, 100 ) == WAIT_OBJECT_0 + 1) break;
-            continue;
-        }
-        if (status != STATUS_SUCCESS) break;  /* broker disconnected or error */
-        {
-            uint32_t id = call.request_id, size = call.out_len;
-            memset( &call, 0, sizeof(call) );
-            call.op         = DWM_CHANNEL_OP_REPLY;
-            call.handle     = HandleToUlong( broker_handle );
-            call.request_id = id;
-            call.status     = STATUS_SUCCESS;
-            call.in_ptr     = (uintptr_t)buf;
-            call.in_len     = size;
-            dwm_channel_call( &call );
-        }
-    }
-    return 0;
-}
-
-static void start_broker_thread(void)
-{
-    DWORD tid;
-    broker_thread = CreateThread( NULL, 0, broker_thread_fn, NULL, 0, &tid );
-}
-
-static void stop_broker_thread(void)
-{
-    if (!broker_thread) return;
-    SetEvent( broker_stop_event );
-    WaitForSingleObject( broker_thread, INFINITE );
-    CloseHandle( broker_thread );
-    broker_thread = NULL;
-    ResetEvent( broker_stop_event );
-}
-
-/* (1) No broker registered: echo fails with the server's no-broker status. */
-static void test_no_broker(void)
-{
-    unsigned char payload[16], reply[16];
-    ULONG reply_len = sizeof(reply);
-    HRESULT hr;
-
-    memset( payload, 0xa5, sizeof(payload) );
-    hr = pWexDwmpChannelEcho( payload, sizeof(payload), reply, &reply_len );
-    ok( hr == HRESULT_FROM_NT( STATUS_PORT_DISCONNECTED ),
-        "expected no-broker echo to fail with STATUS_PORT_DISCONNECTED, got hr %#lx\n", hr );
-}
-
-/* (2) Obtain the broker capability and register as broker. */
-static void test_broker(void)
-{
-    struct dwm_channel_call call;
-    uint64_t capability;
-    NTSTATUS status;
-
-    GetDesktopWindow();  /* ensure the desktop window (top-window owner) exists */
-
-    memset( &call, 0, sizeof(call) );
-    call.op = DWM_CHANNEL_OP_GET_CAPABILITY;
-    status = dwm_channel_call( &call );
-    if (status == STATUS_ACCESS_DENIED)
-    {
-        /* Test process does not own the desktop top window (managed desktop). */
-        trace( "test process does not own the desktop top window\n" );
-        memset( &call, 0, sizeof(call) );
-        call.op         = DWM_CHANNEL_OP_BROKER_REGISTER;
-        call.capability = 0xdeadbeefcafebabeULL;
-        status = dwm_channel_call( &call );
-        ok( status == STATUS_ACCESS_DENIED,
-            "expected bogus broker register to be refused, got %08lx\n", status );
-        skip( "cannot obtain broker capability (not the desktop top-window owner); "
-              "skipping broker-dependent tests\n" );
-        return;
-    }
-    if (status != STATUS_SUCCESS)
-    {
-        skip( "failed to mint broker capability (status %08lx); skipping broker tests\n", status );
-        return;
-    }
-    capability = call.capability;
-    ok( capability != 0, "expected a non-zero capability token\n" );
-
-    memset( &call, 0, sizeof(call) );
-    call.op         = DWM_CHANNEL_OP_BROKER_REGISTER;
-    call.capability = capability;
-    status = dwm_channel_call( &call );
-    ok( status == STATUS_SUCCESS, "expected broker register to succeed, got %08lx\n", status );
-    if (status != STATUS_SUCCESS)
-    {
-        skip( "failed to register broker (status %08lx); skipping broker tests\n", status );
-        return;
-    }
-    broker_handle = UlongToHandle( call.handle );
-    broker_epoch  = call.epoch;
-    ok( broker_handle != NULL, "expected a broker channel handle\n" );
-    start_broker_thread();
-}
-
-/* (3) Echo round trips for various payload sizes. */
 static void test_echo_sizes(void)
 {
-    static const uint32_t sizes[] = { 0, 1, 100, DWM_MAX_MESSAGE_SIZE };
-    unsigned char payload[DWM_MAX_MESSAGE_SIZE + 1], reply[DWM_MAX_MESSAGE_SIZE + 1];
+    static const ULONG sizes[] = { 0, 1, 100, DWM_MAX_MESSAGE_SIZE };
+    unsigned char *payload = malloc( DWM_MAX_MESSAGE_SIZE + 1 ), *reply = malloc( DWM_MAX_MESSAGE_SIZE );
     ULONG reply_len;
+    unsigned int i;
     HRESULT hr;
-    unsigned int i, j;
 
-    Sleep( 100 );  /* clear the client helper's brief failure cache from test (1) */
-
-    for (i = 0; i < sizeof(sizes)/sizeof(sizes[0]); i++)
+    for (i = 0; i < DWM_MAX_MESSAGE_SIZE + 1; i++) payload[i] = (unsigned char)i;
+    for (i = 0; i < ARRAY_SIZE(sizes); i++)
     {
-        uint32_t size = sizes[i];
-        for (j = 0; j < size; j++) payload[j] = (unsigned char)(j * 7 + i);
-        reply_len = sizeof(reply);
-        hr = pWexDwmpChannelEcho( size ? payload : NULL, size, reply, &reply_len );
-        ok( hr == S_OK, "echo size %u failed: hr %#lx\n", size, hr );
-        ok( reply_len == size, "echo size %u: expected reply_len %u, got %lu\n", size, size, reply_len );
-        if (size) ok( !memcmp( payload, reply, size ), "echo size %u: payload mismatch\n", size );
+        reply_len = DWM_MAX_MESSAGE_SIZE;
+        memset( reply, 0, DWM_MAX_MESSAGE_SIZE );
+        hr = pWexDwmpChannelEcho( sizes[i] ? payload : NULL, sizes[i], reply, &reply_len );
+        ok( hr == S_OK, "size %lu: hr %#lx\n", sizes[i], hr );
+        ok( reply_len == sizes[i], "size %lu: reply %lu\n", sizes[i], reply_len );
+        ok( !memcmp( reply, payload, sizes[i] ), "size %lu: payload differs\n", sizes[i] );
     }
-
-    for (i = 0; i <= DWM_MAX_MESSAGE_SIZE; i++) payload[i] = (unsigned char)i;
-    reply_len = sizeof(reply);
+    reply_len = DWM_MAX_MESSAGE_SIZE;
     hr = pWexDwmpChannelEcho( payload, DWM_MAX_MESSAGE_SIZE + 1, reply, &reply_len );
-    ok( hr == HRESULT_FROM_NT( STATUS_PORT_MESSAGE_TOO_LONG ),
-        "expected max+1 echo to fail with STATUS_PORT_MESSAGE_TOO_LONG, got hr %#lx\n", hr );
+    ok( hr == HRESULT_FROM_NT( STATUS_PORT_MESSAGE_TOO_LONG ), "max+1: hr %#lx\n", hr );
+    free( payload );
+    free( reply );
 }
 
-/* (4) Concurrent echoes from multiple threads. */
-#define CONCURRENT_THREADS 4
-#define CONCURRENT_ECHOES  100
-
-struct echo_thread_arg { DWORD thread_id; int failures; };
-
-static DWORD WINAPI echo_thread_fn( LPVOID arg )
+static DWORD WINAPI echo_thread( void *arg )
 {
-    struct echo_thread_arg *targ = arg;
-    unsigned char payload[3], reply[3];
-    ULONG reply_len;
-    HRESULT hr;
-    int i;
+    unsigned char payload[100], reply[100];
+    unsigned int i, failures = 0;
+    ULONG len;
 
-    use_test_desktop();
-
-    for (i = 0; i < CONCURRENT_ECHOES; i++)
+    memset( payload, (int)(INT_PTR)arg, sizeof(payload) );
+    for (i = 0; i < 100; i++)
     {
-        payload[0] = (unsigned char)targ->thread_id;
-        payload[1] = (unsigned char)i;
-        payload[2] = (unsigned char)(i * 31 + targ->thread_id);
-        reply_len = sizeof(reply);
-        hr = pWexDwmpChannelEcho( payload, sizeof(payload), reply, &reply_len );
-        if (hr != S_OK || reply_len != sizeof(payload) || memcmp( payload, reply, sizeof(payload) ))
-            targ->failures++;
+        len = sizeof(reply);
+        if (pWexDwmpChannelEcho( payload, sizeof(payload), reply, &len ) || len != sizeof(payload) ||
+            memcmp( reply, payload, sizeof(payload) )) failures++;
     }
-    return 0;
+    return failures;
 }
 
 static void test_concurrent(void)
 {
-    HANDLE threads[CONCURRENT_THREADS];
-    struct echo_thread_arg args[CONCURRENT_THREADS];
-    DWORD total = 0;
-    int i;
+    HANDLE threads[4];
+    DWORD failures;
+    unsigned int i;
 
-    for (i = 0; i < CONCURRENT_THREADS; i++)
+    for (i = 0; i < ARRAY_SIZE(threads); i++) threads[i] = CreateThread( NULL, 0, echo_thread, (void *)(INT_PTR)(i + 1), 0, NULL );
+    WaitForMultipleObjects( ARRAY_SIZE(threads), threads, TRUE, 30000 );
+    for (i = 0; i < ARRAY_SIZE(threads); i++)
     {
-        args[i].thread_id = i;
-        args[i].failures  = 0;
-        threads[i] = CreateThread( NULL, 0, echo_thread_fn, &args[i], 0, NULL );
-        ok( threads[i] != NULL, "failed to create echo thread %d\n", i );
+        GetExitCodeThread( threads[i], &failures );
+        ok( !failures, "thread %u: %lu failed echoes\n", i, failures );
+        CloseHandle( threads[i] );
     }
-    WaitForMultipleObjects( CONCURRENT_THREADS, threads, TRUE, INFINITE );
-    for (i = 0; i < CONCURRENT_THREADS; i++) { total += args[i].failures; CloseHandle( threads[i] ); }
-    ok( total == 0, "expected 0 concurrent echo failures, got %lu\n", total );
 }
 
-/* (5) Epoch increases after broker unregister + re-register; stale channel fails. */
-static void test_epoch(void)
+/* the server is dwm.exe with an ordinary token; a pipe this test serves itself is not */
+static void test_server_check(void)
 {
-    struct dwm_channel_call call;
-    unsigned char msg[sizeof(struct dwm_msg_header) + 1];
-    uint64_t stale_epoch, capability;
-    HANDLE stale_handle;
-    NTSTATUS status;
+    WCHAR name[64];
+    HANDLE pipe, server, client;
 
-    stop_broker_thread();
+    pipe = open_broker();
+    ok( pipe != INVALID_HANDLE_VALUE, "no broker pipe: %lu\n", GetLastError() );
+    if (pipe == INVALID_HANDLE_VALUE) return;
+    ok( wex_pipe_server_is( pipe, L"dwm.exe" ), "the broker's server check failed\n" );
+    ok( !wex_pipe_server_is( pipe, L"explorer.exe" ), "the broker passed as explorer.exe\n" );
+    CloseHandle( pipe );
 
-    memset( &call, 0, sizeof(call) );
-    call.op = DWM_CHANNEL_OP_CONNECT;
-    status = dwm_channel_call( &call );
-    ok( status == STATUS_SUCCESS, "expected connect to succeed, got %08lx\n", status );
-    if (status != STATUS_SUCCESS) { start_broker_thread(); return; }
-    stale_handle = UlongToHandle( call.handle );
-    stale_epoch  = call.epoch;
-
-    NtClose( broker_handle );  /* unregister the broker; advances the desktop epoch */
-    broker_handle = NULL;
-
-    memset( &call, 0, sizeof(call) );
-    call.op = DWM_CHANNEL_OP_GET_CAPABILITY;
-    status = dwm_channel_call( &call );
-    ok( status == STATUS_SUCCESS, "expected capability mint to succeed, got %08lx\n", status );
-    if (status != STATUS_SUCCESS) return;
-    capability = call.capability;
-
-    memset( &call, 0, sizeof(call) );
-    call.op         = DWM_CHANNEL_OP_BROKER_REGISTER;
-    call.capability = capability;
-    status = dwm_channel_call( &call );
-    ok( status == STATUS_SUCCESS, "expected re-register to succeed, got %08lx\n", status );
-    if (status != STATUS_SUCCESS) return;
-    broker_handle = UlongToHandle( call.handle );
-    broker_epoch  = call.epoch;
-
-    ok( broker_epoch > stale_epoch, "expected epoch to increase (stale %llu, new %llu)\n",
-        (unsigned long long)stale_epoch, (unsigned long long)broker_epoch );
-
-    build_echo_message( msg, 1, "\x42" );
-    memset( &call, 0, sizeof(call) );
-    call.op     = DWM_CHANNEL_OP_SEND;
-    call.handle = HandleToUlong( stale_handle );
-    call.in_ptr = (uintptr_t)msg;
-    call.in_len = sizeof(msg);
-    status = dwm_channel_call( &call );
-    ok( status == STATUS_PORT_DISCONNECTED,
-        "expected stale channel send to fail with STATUS_PORT_DISCONNECTED, got %08lx\n", status );
-    NtClose( stale_handle );
-
-    start_broker_thread();
+    swprintf( name, ARRAY_SIZE(name), L"\\\\.\\pipe\\WineExplorer\\DwmTest\\%lu", GetCurrentProcessId() );
+    server = wex_pipe_create( name, NULL, TRUE, 256 );
+    ok( server != INVALID_HANDLE_VALUE, "create failed %lu\n", GetLastError() );
+    client = wex_pipe_connect( name, 1000 );
+    ok( client != INVALID_HANDLE_VALUE, "connect failed %lu\n", GetLastError() );
+    ok( !wex_pipe_server_is( client, L"dwm.exe" ), "an impostor passed the server check\n" );
+    CloseHandle( client );
+    CloseHandle( server );
 }
 
-/* (6) Queue quota: with a non-draining broker, >64 sends fail with STATUS_QUOTA_EXCEEDED. */
-static void test_queue_quota(void)
+struct other_desktop_window { HDESK desktop; HWND hwnd; HANDLE done, quit; };
+
+static DWORD WINAPI other_desktop_thread( void *arg )
 {
-    struct dwm_channel_call call;
-    unsigned char msg[sizeof(struct dwm_msg_header) + 1];
-    HANDLE quota_handle;
-    NTSTATUS status, last = 0;
-    int i;
+    struct other_desktop_window *w = arg;
+    MSG msg;
 
-    stop_broker_thread();  /* broker registered but not draining the queue */
-
-    memset( &call, 0, sizeof(call) );
-    call.op = DWM_CHANNEL_OP_CONNECT;
-    status = dwm_channel_call( &call );
-    ok( status == STATUS_SUCCESS, "expected connect to succeed, got %08lx\n", status );
-    if (status != STATUS_SUCCESS) { start_broker_thread(); return; }
-    quota_handle = UlongToHandle( call.handle );
-
-    build_echo_message( msg, 1, "\x42" );
-    for (i = 0; i <= DWM_MAX_QUEUE_DEPTH; i++)
-    {
-        memset( &call, 0, sizeof(call) );
-        call.op     = DWM_CHANNEL_OP_SEND;
-        call.handle = HandleToUlong( quota_handle );
-        call.in_ptr = (uintptr_t)msg;
-        call.in_len = sizeof(msg);
-        status = dwm_channel_call( &call );
-        if (i < DWM_MAX_QUEUE_DEPTH)
-            ok( status == STATUS_SUCCESS, "send %d failed: %08lx\n", i, status );
-        else
-            last = status;
-    }
-    ok( last == STATUS_QUOTA_EXCEEDED,
-        "expected send #%d to fail with STATUS_QUOTA_EXCEEDED, got %08lx\n",
-        DWM_MAX_QUEUE_DEPTH + 1, last );
-
-    NtClose( quota_handle );  /* aborts the queued messages */
-    start_broker_thread();
-}
-
-/* (7) A thread that switched desktops connects to the new desktop. */
-static DWORD WINAPI desktop_switch_thread_fn( LPVOID arg )
-{
-    struct dwm_channel_call call;
-
-    if (!SetThreadDesktop( switch_desktop )) { switch_status = STATUS_ACCESS_DENIED; return 1; }
-    memset( &call, 0, sizeof(call) );
-    call.op = DWM_CHANNEL_OP_CONNECT;
-    switch_status = dwm_channel_call( &call );
-    if (switch_status == STATUS_SUCCESS)
-    {
-        switch_epoch = call.epoch;
-        NtClose( UlongToHandle( call.handle ) );
-    }
+    if (SetThreadDesktop( w->desktop ))
+        w->hwnd = CreateWindowExW( 0, L"static", L"dwm_pipe_other", WS_POPUP, 0, 0, 10, 10, 0, 0, 0, NULL );
+    SetEvent( w->done );
+    while (MsgWaitForMultipleObjects( 1, &w->quit, FALSE, INFINITE, QS_ALLINPUT ) != WAIT_OBJECT_0)
+        while (PeekMessageW( &msg, 0, 0, 0, PM_REMOVE )) DispatchMessageW( &msg );
+    if (w->hwnd) DestroyWindow( w->hwnd );
     return 0;
 }
 
-static void test_desktop_switch(void)
+/* the broker's per-message checks: the window must be on its desktop, and only its owner changes it */
+static void test_window_checks(void)
 {
-    struct dwm_channel_call call;
-    HANDLE thread;
-    uint64_t default_epoch;
+    struct dwm_attr_set set = { DWMWA_CAPTION_COLOR, 0x00332211 };
+    struct dwm_attr_get get = { DWMWA_CAPTION_COLOR };
+    struct dwm_attr_reply rep;
+    struct other_desktop_window other = { 0 };
+    uint64_t generation1 = 0, generation2 = 0;
+    unsigned char big[64];
+    uint32_t len;
+    HANDLE pipe, thread;
     NTSTATUS status;
+    HWND hwnd, foreign;
 
-    switch_desktop = CreateDesktopW( L"dwm_test_desktop", NULL, NULL, 0, GENERIC_ALL, NULL );
-    if (!switch_desktop)
+    pipe = open_broker();
+    if (pipe == INVALID_HANDLE_VALUE) return;
+    hwnd = CreateWindowExW( 0, L"static", L"dwm_pipe_own", WS_POPUP, 0, 0, 10, 10, 0, 0, 0, NULL );
+
+    status = raw_call( pipe, DWM_OP_SET_ATTR, HandleToUlong( hwnd ), DWM_PROTOCOL_VERSION, &set, sizeof(set),
+                       &rep, sizeof(rep), &len, &generation1 );
+    ok( !status, "own window: status %#lx\n", status );
+    ok( generation1, "no generation\n" );
+    status = raw_call( pipe, DWM_OP_GET_ATTR, HandleToUlong( hwnd ), DWM_PROTOCOL_VERSION, &get, sizeof(get),
+                       &rep, sizeof(rep), &len, &generation2 );
+    ok( !status && len == sizeof(rep) && rep.found && rep.value == set.value, "get: status %#lx found %u value %#x\n",
+        status, rep.found, rep.value );
+    ok( generation2 == generation1, "generation changed: %I64x, %I64x\n", generation1, generation2 );
+
+    /* another process's window on this desktop: the shell's taskbar, which the broker lets this client read */
+    if ((foreign = FindWindowW( L"Shell_TrayWnd", NULL )))
     {
-        win_skip( "CreateDesktopW failed (error %lu); skipping desktop switch test\n", GetLastError() );
-        return;
+        status = raw_call( pipe, DWM_OP_SET_ATTR, HandleToUlong( foreign ), DWM_PROTOCOL_VERSION, &set,
+                           sizeof(set), &rep, sizeof(rep), &len, NULL );
+        ok( status == STATUS_ACCESS_DENIED, "foreign window: status %#lx\n", status );
+        status = raw_call( pipe, DWM_OP_GET_ATTR, HandleToUlong( foreign ), DWM_PROTOCOL_VERSION, &get,
+                           sizeof(get), &rep, sizeof(rep), &len, NULL );
+        ok( !status, "foreign window, read: status %#lx\n", status );
     }
+    else skip( "no taskbar window\n" );
 
-    switch_epoch = 0;
-    switch_status = STATUS_UNSUCCESSFUL;
-    thread = CreateThread( NULL, 0, desktop_switch_thread_fn, NULL, 0, NULL );
-    ok( thread != NULL, "failed to create thread\n" );
-    if (thread) { WaitForSingleObject( thread, INFINITE ); CloseHandle( thread ); }
-    ok( switch_status == STATUS_SUCCESS, "expected connect on new desktop to succeed, got %08lx\n", switch_status );
-
-    memset( &call, 0, sizeof(call) );
-    call.op = DWM_CHANNEL_OP_CONNECT;
-    status = dwm_channel_call( &call );
-    ok( status == STATUS_SUCCESS, "expected connect on default desktop to succeed, got %08lx\n", status );
-    if (status == STATUS_SUCCESS)
+    /* this process's window on another desktop */
+    other.desktop = CreateDesktopW( L"dwm_pipe_other", NULL, NULL, 0, GENERIC_ALL, NULL );
+    other.done = CreateEventW( NULL, TRUE, FALSE, NULL );
+    other.quit = CreateEventW( NULL, TRUE, FALSE, NULL );
+    if (other.desktop)
     {
-        default_epoch = call.epoch;
-        NtClose( UlongToHandle( call.handle ) );
-        ok( switch_epoch != default_epoch,
-            "expected new desktop epoch (%llu) to differ from default (%llu)\n",
-            (unsigned long long)switch_epoch, (unsigned long long)default_epoch );
+        thread = CreateThread( NULL, 0, other_desktop_thread, &other, 0, NULL );
+        WaitForSingleObject( other.done, 5000 );
+        if (other.hwnd)
+        {
+            status = raw_call( pipe, DWM_OP_SET_ATTR, HandleToUlong( other.hwnd ), DWM_PROTOCOL_VERSION, &set,
+                               sizeof(set), &rep, sizeof(rep), &len, NULL );
+            ok( status == STATUS_ACCESS_DENIED, "other desktop's window: status %#lx\n", status );
+            status = raw_call( pipe, DWM_OP_GET_ATTR, HandleToUlong( other.hwnd ), DWM_PROTOCOL_VERSION, &get,
+                               sizeof(get), &rep, sizeof(rep), &len, NULL );
+            ok( status == STATUS_ACCESS_DENIED, "other desktop's window, read: status %#lx\n", status );
+        }
+        else skip( "no window on another desktop\n" );
+        SetEvent( other.quit );
+        WaitForSingleObject( thread, 5000 );
+        CloseHandle( thread );
+        CloseDesktop( other.desktop );
     }
+    CloseHandle( other.done );
+    CloseHandle( other.quit );
 
-    CloseDesktop( switch_desktop );
-    switch_desktop = NULL;
+    /* malformed requests */
+    status = raw_call( pipe, DWM_OP_SET_ATTR, HandleToUlong( hwnd ), DWM_PROTOCOL_VERSION, &set, sizeof(set) - 1,
+                       &rep, sizeof(rep), &len, NULL );
+    ok( status == STATUS_INVALID_PARAMETER, "short payload: status %#lx\n", status );
+    status = raw_call( pipe, DWM_OP_SET_ATTR, HandleToUlong( hwnd ), DWM_PROTOCOL_VERSION + 1, &set, sizeof(set),
+                       &rep, sizeof(rep), &len, NULL );
+    ok( status == STATUS_REVISION_MISMATCH, "wrong version: status %#lx\n", status );
+    status = raw_call( pipe, 0x7777, HandleToUlong( hwnd ), DWM_PROTOCOL_VERSION, NULL, 0, NULL, 0, &len, NULL );
+    ok( status == STATUS_NOT_IMPLEMENTED, "unknown opcode: status %#lx\n", status );
+    memset( big, 0, sizeof(big) );
+    status = raw_call( pipe, DWM_OP_ECHO, 0, DWM_PROTOCOL_VERSION, big, sizeof(big), big, sizeof(big), &len, NULL );
+    ok( !status && len == sizeof(big), "echo after errors: status %#lx len %u\n", status, len );
+
+    CloseHandle( pipe );
+    DestroyWindow( hwnd );
 }
 
-/* (8) Handle leak check: 50 connect/close cycles should not leak handles. */
-static void test_handle_leak(void)
+/* a connection's thumbnails go away with it */
+static void test_thumbnail_connection(void)
 {
-    struct dwm_channel_call call;
-    ULONG before, after;
-    int i;
+    struct dwm_thumb_set set = { 7, 0, DWM_THUMB_VISIBLE, 255, { 0, 0, 10, 10 }, { 0 } };
+    struct dwm_thumb_list_req list = { 0 };
+    unsigned char buf[DWM_MAX_MESSAGE_SIZE];
+    struct dwm_thumb_list_reply *lrep = (struct dwm_thumb_list_reply *)buf;
+    struct dwm_thumb *thumbs = (struct dwm_thumb *)(buf + sizeof(*lrep));
+    HWND dest, src;
+    HANDLE pipe, watcher;
+    uint32_t len, i;
+    NTSTATUS status;
+    BOOL found;
 
-    if (NtQueryInformationProcess( NtCurrentProcess(), ProcessHandleCount, &before, sizeof(before), NULL ))
-        return;
-    for (i = 0; i < 50; i++)
+    if ((pipe = open_broker()) == INVALID_HANDLE_VALUE) return;
+    if ((watcher = open_broker()) == INVALID_HANDLE_VALUE)
     {
-        memset( &call, 0, sizeof(call) );
-        call.op = DWM_CHANNEL_OP_CONNECT;
-        if (dwm_channel_call( &call ) == STATUS_SUCCESS)
-            NtClose( UlongToHandle( call.handle ) );
-    }
-    if (NtQueryInformationProcess( NtCurrentProcess(), ProcessHandleCount, &after, sizeof(after), NULL ))
+        CloseHandle( pipe );
         return;
-    ok( after == before, "handle leak: before=%lu after=%lu (diff=%ld)\n",
-        before, after, (long)after - (long)before );
+    }
+    dest = CreateWindowExW( 0, L"static", L"dwm_pipe_dest", WS_POPUP, 0, 0, 10, 10, 0, 0, 0, NULL );
+    src  = CreateWindowExW( 0, L"static", L"dwm_pipe_src", WS_POPUP, 0, 0, 10, 10, 0, 0, 0, NULL );
+    set.src = HandleToUlong( src );
+    status = raw_call( pipe, DWM_OP_THUMB_SET, HandleToUlong( dest ), DWM_PROTOCOL_VERSION, &set, sizeof(set),
+                       NULL, 0, &len, NULL );
+    ok( !status, "thumb set: status %#lx\n", status );
+
+    status = raw_call( watcher, DWM_OP_THUMB_LIST, 0, DWM_PROTOCOL_VERSION, &list, sizeof(list), buf, sizeof(buf),
+                       &len, NULL );
+    for (i = 0, found = FALSE; !status && i < lrep->count; i++) found |= thumbs[i].dest == HandleToUlong( dest );
+    ok( !status && found, "thumbnail not listed: status %#lx\n", status );
+
+    CloseHandle( pipe );
+    Sleep( 200 );   /* the broker's client thread sees the pipe close */
+    status = raw_call( watcher, DWM_OP_THUMB_LIST, 0, DWM_PROTOCOL_VERSION, &list, sizeof(list), buf, sizeof(buf),
+                       &len, NULL );
+    for (i = 0, found = FALSE; !status && i < lrep->count; i++) found |= thumbs[i].dest == HandleToUlong( dest );
+    ok( !status && !found, "thumbnail kept after its connection closed: status %#lx\n", status );
+
+    CloseHandle( watcher );
+    DestroyWindow( dest );
+    DestroyWindow( src );
+}
+
+/* A Low-integrity client reaches the broker and can check it (Windows 11 measured: the limited query right opens the
+ * process and its token). Exit code: 0 checked, 1 no pipe, 2 the server check failed. */
+static DWORD run_low_child(void)
+{
+    WCHAR cmd[MAX_PATH + 64], exe[MAX_PATH];
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi;
+    TOKEN_MANDATORY_LABEL label = { { 0 } };
+    SID_IDENTIFIER_AUTHORITY authority = { SECURITY_MANDATORY_LABEL_AUTHORITY };
+    PSID low_sid = NULL;
+    HANDLE token, low;
+    DWORD code = 0xff;
+
+    GetModuleFileNameW( NULL, exe, ARRAY_SIZE(exe) );
+    swprintf( cmd, ARRAY_SIZE(cmd), L"\"%s\" dwm_channel lowchild", exe );
+    if (!OpenProcessToken( GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT |
+                           TOKEN_ASSIGN_PRIMARY, &token )) return code;
+    if (DuplicateTokenEx( token, 0, NULL, SecurityImpersonation, TokenPrimary, &low ) &&
+        AllocateAndInitializeSid( &authority, 1, SECURITY_MANDATORY_LOW_RID, 0, 0, 0, 0, 0, 0, 0, &low_sid ))
+    {
+        label.Label.Attributes = SE_GROUP_INTEGRITY;
+        label.Label.Sid = low_sid;
+        if (SetTokenInformation( low, TokenIntegrityLevel, &label, sizeof(label) + GetLengthSid( low_sid ) ) &&
+            CreateProcessAsUserW( low, NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi ))
+        {
+            WaitForSingleObject( pi.hProcess, 20000 );
+            GetExitCodeProcess( pi.hProcess, &code );
+            CloseHandle( pi.hProcess );
+            CloseHandle( pi.hThread );
+        }
+        FreeSid( low_sid );
+        CloseHandle( low );
+    }
+    CloseHandle( token );
+    return code;
+}
+
+static void test_low_integrity_client(void)
+{
+    DWORD code = run_low_child();
+
+    if (code == 0xff)
+    {
+        skip( "no Low integrity child\n" );
+        return;
+    }
+    ok( code == 0, "Low integrity client: exit code %lu (1 no pipe, 2 server check failed)\n", code );
+}
+
+static void test_no_handle_leak(void)
+{
+    ULONG before = 0, after = 0;
+    unsigned int i;
+    HANDLE pipe;
+
+    NtQueryInformationProcess( GetCurrentProcess(), ProcessHandleCount, &before, sizeof(before), NULL );
+    for (i = 0; i < 20; i++)
+        if ((pipe = open_broker()) != INVALID_HANDLE_VALUE) CloseHandle( pipe );
+    NtQueryInformationProcess( GetCurrentProcess(), ProcessHandleCount, &after, sizeof(after), NULL );
+    ok( after == before, "handle leak: before %lu after %lu\n", before, after );
 }
 
 START_TEST(dwm_channel)
 {
     HMODULE module;
-    HWINSTA station;
-    struct dwm_channel_call call;
-    NTSTATUS status;
+    char **argv;
+    ULONG len = 0;
+    HANDLE pipe;
+
+    if (winetest_get_mainargs( &argv ) >= 3 && !strcmp( argv[2], "lowchild" ))
+    {
+        if ((pipe = open_broker()) == INVALID_HANDLE_VALUE) ExitProcess( 1 );
+        ExitProcess( wex_pipe_server_is( pipe, L"dwm.exe" ) ? 0 : 2 );
+    }
 
     module = GetModuleHandleW( L"dwmapi.dll" );
     if (!module) module = LoadLibraryW( L"dwmapi.dll" );
-    pWexDwmpChannelEcho = (HRESULT (WINAPI *)(const void *, ULONG, void *, ULONG *))
-        (void *)GetProcAddress( module, "WexDwmpChannelEcho" );
+    pWexDwmpChannelEcho = (void *)GetProcAddress( module, "WexDwmpChannelEcho" );
     if (!pWexDwmpChannelEcho)
     {
         win_skip( "WexDwmpChannelEcho not available (not a Wine build).\n" );
         return;
     }
-
-    /* Verify the private information class exists; real Windows returns
-     * STATUS_INVALID_INFO_CLASS. */
-    memset( &call, 0, sizeof(call) );
-    call.op = DWM_CHANNEL_OP_CONNECT;
-    status = NtSetInformationProcess( NtCurrentProcess(), ProcessWineDwmChannel, &call, sizeof(call) );
-    if (status == STATUS_INVALID_INFO_CLASS)
+    if (pWexDwmpChannelEcho( NULL, 0, NULL, &len ) != S_OK)
     {
-        win_skip( "ProcessWineDwmChannel not available (not a Wine build).\n" );
+        skip( "needs a desktop with a DWM broker\n" );
         return;
     }
-    if (status == STATUS_SUCCESS) NtClose( UlongToHandle( call.handle ) );
 
-    /* A process on the service window station creates and owns the top window of its desktops
-     * itself (no explorer is started), so this process may mint the broker capability. */
-    station = CreateWindowStationW( L"__wineservice_winstation", 0, GENERIC_ALL, NULL );
-    if (station) SetProcessWindowStation( station );
-    test_desktop = CreateDesktopW( L"dwm_test_owner", NULL, NULL, 0, GENERIC_ALL, NULL );
-    if (test_desktop)
-    {
-        GUID guid = { 0xd3a1c5e0, 0x4b6f, 0x4c1e, { 0x9a, 0x2b, 0x7e, 0x11, 0x5f, 0x30, 0x01, 0x02 }};
-        SetThreadDesktop( test_desktop );
-        /* like explorer: create the desktop window ourselves, which makes this process the owner */
-        CreateWindowExW( 0, (LPCWSTR)MAKEINTATOM(32769), NULL, WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
-                         0, 0, 0, 0, 0, 0, 0, &guid );
-    }
-
-    broker_stop_event = CreateEventW( NULL, TRUE, FALSE, NULL );
-
-    test_no_broker();
-    test_broker();
-    if (!broker_handle) return;  /* could not register a broker; broker tests skipped */
     test_echo_sizes();
     test_concurrent();
-    test_epoch();
-    test_queue_quota();
-    test_desktop_switch();
-    test_handle_leak();
-
-    stop_broker_thread();
-    if (broker_handle) { NtClose( broker_handle ); broker_handle = NULL; }
-    CloseHandle( broker_stop_event );
+    test_server_check();
+    test_window_checks();
+    test_thumbnail_connection();
+    test_low_integrity_client();
+    test_no_handle_leak();
 }

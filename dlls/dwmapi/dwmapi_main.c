@@ -919,7 +919,7 @@ static INT64 clock_last_failed;   /* QPC time of the last failed open */
 
 static BOOL clock_open(void)
 {
-    WCHAR desk_name[MAX_PATH], name[MAX_PATH + 64], event_name[MAX_PATH + 64];
+    WCHAR name[MAX_PATH + 64], event_name[MAX_PATH + 64];
     HDESK desk;
     LARGE_INTEGER li;
     INT64 now;
@@ -931,12 +931,10 @@ static BOOL clock_open(void)
     now = li.QuadPart;
     if (clock_last_failed && now - clock_last_failed < 10000000) return FALSE;
 
-    if (!(desk = GetThreadDesktop(GetCurrentThreadId()))) return FALSE;
-    if (!GetUserObjectInformationW(desk, UOI_NAME, desk_name, ARRAY_SIZE(desk_name), NULL)) return FALSE;
-    lstrcpynW(name, DWM_CLOCK_NAME, ARRAY_SIZE(name));
-    lstrcatW(name, desk_name);
-    lstrcpynW(event_name, DWM_CLOCK_EVENT_NAME, ARRAY_SIZE(event_name));
-    lstrcatW(event_name, desk_name);
+    desk = GetThreadDesktop(GetCurrentThreadId());
+    if (!dwm_desktop_object_name(desk, DWM_CLOCK_NAME, name, ARRAY_SIZE(name)) ||
+        !dwm_desktop_object_name(desk, DWM_CLOCK_EVENT_NAME, event_name, ARRAY_SIZE(event_name)))
+        return FALSE;
 
     clock_mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, name);
     if (!clock_mapping)
