@@ -29,7 +29,10 @@
 DECL_FUNCPTR(AlpcGetHeaderSize)
 DECL_FUNCPTR(AlpcGetMessageAttribute)
 DECL_FUNCPTR(AlpcInitializeMessageAttribute)
+DECL_FUNCPTR(NtAlpcAcceptConnectPort)
+DECL_FUNCPTR(NtAlpcConnectPort)
 DECL_FUNCPTR(NtAlpcCreatePort)
+DECL_FUNCPTR(NtAlpcSendWaitReceivePort)
 
 #undef DECL_FUNCPTR
 
@@ -45,7 +48,10 @@ static void init_functions(void)
     LOAD_FUNCPTR(AlpcGetHeaderSize)
     LOAD_FUNCPTR(AlpcGetMessageAttribute)
     LOAD_FUNCPTR(AlpcInitializeMessageAttribute)
+    LOAD_FUNCPTR(NtAlpcAcceptConnectPort)
+    LOAD_FUNCPTR(NtAlpcConnectPort)
     LOAD_FUNCPTR(NtAlpcCreatePort)
+    LOAD_FUNCPTR(NtAlpcSendWaitReceivePort)
 
 #undef LOAD_FUNCPTR
 }
@@ -473,6 +479,196 @@ static void test_NtAlpcCreatePort(void)
     }
 }
 
+#define TEST_MSG_SIZE 0x200
+
+struct test_msg
+{
+    ALPC_PORT_MESSAGE header;
+    char data[TEST_MSG_SIZE - sizeof(ALPC_PORT_MESSAGE)];
+};
+
+static void init_test_msg(struct test_msg *msg, const char *data)
+{
+    memset(msg, 0, sizeof(*msg));
+    msg->header.DataLength = strlen(data);
+    msg->header.TotalLength = sizeof(ALPC_PORT_MESSAGE) + strlen(data);
+    memcpy(msg->data, data, strlen(data));
+}
+
+static HANDLE test_conn_port;
+static LONG test_closed_count;
+
+static DWORD WINAPI test_alpc_server(void *arg)
+{
+    ALPC_PORT_ATTRIBUTES port_attr;
+    HANDLE comm_port = NULL;
+    BOOL quit = FALSE;
+    unsigned int count;
+
+    for (count = 0; !quit && count < 20; ++count)
+    {
+        char attr_buffer[256];
+        ALPC_MESSAGE_ATTRIBUTES *attrs = (ALPC_MESSAGE_ATTRIBUTES *)attr_buffer;
+        struct test_msg msg, reply;
+        LARGE_INTEGER timeout;
+        NTSTATUS status;
+        SIZE_T size, req;
+
+        memset(&msg, 0xcc, sizeof(msg));
+        pAlpcInitializeMessageAttribute(ALPC_MESSAGE_CONTEXT_ATTRIBUTE, attrs, sizeof(attr_buffer), &req);
+        size = sizeof(msg);
+        timeout.QuadPart = -100000000;
+        status = pNtAlpcSendWaitReceivePort(test_conn_port, 0, NULL, NULL, &msg.header, &size, attrs, &timeout);
+        ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+        if (status) break;
+        ok(size == sizeof(msg), "Got unexpected size %Iu.\n", size);
+
+        switch (msg.header.Type & 0xff)
+        {
+            case 10: /* connection request */
+                ok(msg.header.Type == (10 | 0x2000), "Got unexpected type %#x.\n", msg.header.Type);
+                ok(msg.header.DataLength == 5 && !memcmp(msg.data, "hello", 5), "Got unexpected connection data.\n");
+                ok(msg.header.TotalLength == sizeof(ALPC_PORT_MESSAGE) + 5, "Got unexpected total length %u.\n",
+                        msg.header.TotalLength);
+                ok(!attrs->ValidAttributes, "Got unexpected attributes %#lx.\n", attrs->ValidAttributes);
+
+                init_port_attr(&port_attr, 0, 0x1000);
+                init_test_msg(&reply, "ACCEPTED");
+                reply.header.MessageId = msg.header.MessageId;
+                status = pNtAlpcAcceptConnectPort(&comm_port, test_conn_port, 0, NULL, &port_attr, (void *)0x1234,
+                        &reply.header, NULL, TRUE);
+                ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+                break;
+
+            case 1: /* request or datagram */
+                ok(msg.header.Type == (1 | 0x2000), "Got unexpected type %#x.\n", msg.header.Type);
+                ok(attrs->ValidAttributes == ALPC_MESSAGE_CONTEXT_ATTRIBUTE, "Got unexpected attributes %#lx.\n",
+                        attrs->ValidAttributes);
+                if (attrs->ValidAttributes & ALPC_MESSAGE_CONTEXT_ATTRIBUTE)
+                {
+                    ALPC_CONTEXT_ATTR *context = pAlpcGetMessageAttribute(attrs, ALPC_MESSAGE_CONTEXT_ATTRIBUTE);
+
+                    ok(context->PortContext == (void *)0x1234, "Got unexpected port context %p.\n",
+                            context->PortContext);
+                    ok(!context->MessageContext, "Got unexpected message context %p.\n", context->MessageContext);
+                    /* the message id of the context attribute is always 0 on 32-bit */
+                    ok(context->MessageId == (sizeof(void *) == 8 ? msg.header.MessageId : 0),
+                            "Got unexpected message id %lu.\n", context->MessageId);
+                }
+                if (msg.header.DataLength == 5 && !memcmp(msg.data, "quit.", 5))
+                {
+                    quit = TRUE;
+                }
+                else if (msg.header.DataLength == 5 && !memcmp(msg.data, "reque", 5))
+                {
+                    init_test_msg(&reply, "REPLY");
+                    reply.header.ClientId = msg.header.ClientId;
+                    reply.header.MessageId = msg.header.MessageId;
+                    status = pNtAlpcSendWaitReceivePort(test_conn_port, 0x10000, &reply.header, NULL, NULL, NULL,
+                            NULL, NULL);
+                    ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+                }
+                break;
+
+            case 5: /* port closed */
+                ok(msg.header.Type == 5, "Got unexpected type %#x.\n", msg.header.Type);
+                ok(msg.header.DataLength == 8, "Got unexpected data length %u.\n", msg.header.DataLength);
+                InterlockedIncrement(&test_closed_count);
+                break;
+
+            default:
+                ok(0, "Got unexpected message type %#x.\n", msg.header.Type);
+                break;
+        }
+    }
+    if (comm_port) CloseHandle(comm_port);
+    return 0;
+}
+
+static void test_alpc_messages(void)
+{
+    UNICODE_STRING name = RTL_CONSTANT_STRING(L"\\BaseNamedObjects\\test_alpc_messages_port");
+    char attr_buffer[256];
+    ALPC_MESSAGE_ATTRIBUTES *attrs = (ALPC_MESSAGE_ATTRIBUTES *)attr_buffer;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    struct test_msg msg, reply;
+    OBJECT_ATTRIBUTES attr;
+    LARGE_INTEGER timeout;
+    HANDLE client, thread;
+    NTSTATUS status;
+    SIZE_T size, req;
+
+    if (!pNtAlpcConnectPort || !pNtAlpcAcceptConnectPort || !pNtAlpcSendWaitReceivePort)
+    {
+        win_skip("ALPC messaging is unavailable.\n");
+        return;
+    }
+
+    InitializeObjectAttributes(&attr, &name, 0, NULL, NULL);
+    init_port_attr(&port_attr, 0, 0x1000);
+    status = pNtAlpcCreatePort(&test_conn_port, &attr, &port_attr);
+    ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+    test_closed_count = 0;
+    thread = CreateThread(NULL, 0, test_alpc_server, NULL, 0, NULL);
+
+    /* the buffer for the answer to the connection is too small: the connection is closed again */
+    init_test_msg(&msg, "hello");
+    size = sizeof(ALPC_PORT_MESSAGE) + 5;
+    client = (HANDLE)0xdeadbeef;
+    timeout.QuadPart = -100000000;
+    status = pNtAlpcConnectPort(&client, &name, NULL, &port_attr, ALPC_SYNC_CONNECTION, NULL, &msg.header, &size,
+            NULL, NULL, &timeout);
+    ok(status == STATUS_BUFFER_TOO_SMALL, "Got unexpected status %#lx.\n", status);
+    ok(size == sizeof(ALPC_PORT_MESSAGE) + 8, "Got unexpected size %Iu.\n", size);
+    ok(client == (HANDLE)0xdeadbeef, "Got unexpected handle %p.\n", client);
+
+    init_test_msg(&msg, "hello");
+    size = sizeof(msg);
+    timeout.QuadPart = -100000000;
+    status = pNtAlpcConnectPort(&client, &name, NULL, &port_attr, ALPC_SYNC_CONNECTION, NULL, &msg.header, &size,
+            NULL, NULL, &timeout);
+    ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+    ok(client != NULL, "Got unexpected handle %p.\n", client);
+    ok(size == sizeof(ALPC_PORT_MESSAGE) + 8, "Got unexpected size %Iu.\n", size);
+    ok(msg.header.Type == 0xb, "Got unexpected type %#x.\n", msg.header.Type);
+    ok(msg.header.DataLength == 8 && !memcmp(msg.data, "ACCEPTED", 8), "Got unexpected connection answer.\n");
+
+    /* a datagram */
+    init_test_msg(&msg, "dgram");
+    status = pNtAlpcSendWaitReceivePort(client, 0, &msg.header, NULL, NULL, NULL, NULL, NULL);
+    ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+
+    /* a request, and its reply */
+    init_test_msg(&msg, "reque");
+    memset(&reply, 0xcc, sizeof(reply));
+    pAlpcInitializeMessageAttribute(ALPC_MESSAGE_CONTEXT_ATTRIBUTE, attrs, sizeof(attr_buffer), &req);
+    size = sizeof(reply);
+    timeout.QuadPart = -100000000;
+    status = pNtAlpcSendWaitReceivePort(client, ALPC_MSGFLG_SYNC_REQUEST, &msg.header, NULL, &reply.header, &size,
+            attrs, &timeout);
+    ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+    ok(reply.header.Type == 2, "Got unexpected type %#x.\n", reply.header.Type);
+    ok(reply.header.DataLength == 5 && !memcmp(reply.data, "REPLY", 5), "Got unexpected reply.\n");
+    ok(attrs->ValidAttributes == ALPC_MESSAGE_CONTEXT_ATTRIBUTE, "Got unexpected attributes %#lx.\n",
+            attrs->ValidAttributes);
+
+    /* nothing is waiting: the receive times out */
+    memset(&reply, 0xcc, sizeof(reply));
+    size = sizeof(reply);
+    timeout.QuadPart = -1000000;
+    status = pNtAlpcSendWaitReceivePort(client, 0, NULL, NULL, &reply.header, &size, NULL, &timeout);
+    ok(status == STATUS_TIMEOUT, "Got unexpected status %#lx.\n", status);
+
+    init_test_msg(&msg, "quit.");
+    status = pNtAlpcSendWaitReceivePort(client, 0, &msg.header, NULL, NULL, NULL, NULL, NULL);
+    ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+    WaitForSingleObject(thread, 10000);
+    CloseHandle(thread);
+    CloseHandle(client);
+    ok(test_closed_count == 1, "Got unexpected count %ld.\n", test_closed_count);
+    CloseHandle(test_conn_port);
+}
+
 START_TEST(alpc)
 {
     init_functions();
@@ -481,4 +677,5 @@ START_TEST(alpc)
     test_AlpcGetMessageAttribute();
     test_AlpcInitializeMessageAttribute();
     test_NtAlpcCreatePort();
+    test_alpc_messages();
 }
