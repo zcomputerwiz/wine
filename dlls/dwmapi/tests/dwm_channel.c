@@ -40,6 +40,7 @@
 #include "wine/dwm_protocol.h"
 #include "wine/wex_pipe.h"
 #include "wine/test.h"
+#include "dwm_test.h"
 
 #ifndef DWMWA_CAPTION_COLOR
 #define DWMWA_CAPTION_COLOR 35
@@ -409,7 +410,6 @@ START_TEST(dwm_channel)
 {
     HMODULE module;
     char **argv;
-    ULONG len = 0;
     HANDLE pipe;
 
     if (winetest_get_mainargs( &argv ) >= 3 && !strcmp( argv[2], "lowchild" ))
@@ -436,7 +436,7 @@ START_TEST(dwm_channel)
         win_skip( "WexDwmpChannelEcho not available (not a Wine build).\n" );
         return;
     }
-    if (pWexDwmpChannelEcho( NULL, 0, NULL, &len ) != S_OK)
+    if (!dwm_broker_answers( pWexDwmpChannelEcho ))
     {
         skip( "needs a desktop with a DWM broker\n" );
         return;

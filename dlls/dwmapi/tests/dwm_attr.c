@@ -34,6 +34,7 @@
 #include "tlhelp32.h"
 #include "dwmapi.h"
 #include "wine/test.h"
+#include "dwm_test.h"
 
 #ifndef DWMWA_COLOR_DEFAULT
 #define DWMWA_COLOR_DEFAULT 0xFFFFFFFF
@@ -148,7 +149,6 @@ START_TEST(dwm_attr)
     char **argv;
     int argc;
     HMODULE dwmapi;
-    ULONG out_len = 0;
     HRESULT hr;
     WCHAR exe[MAX_PATH];
     HWND hwnd, hwnd2;
@@ -182,8 +182,7 @@ START_TEST(dwm_attr)
         return;
     }
 
-    hr = pWexDwmpChannelEcho( NULL, 0, NULL, &out_len );
-    if (hr != S_OK)
+    if (!dwm_broker_answers( pWexDwmpChannelEcho ))
     {
         skip( "needs a desktop with a DWM broker\n" );
         return;

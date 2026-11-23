@@ -34,6 +34,7 @@
 #include "dwmapi.h"
 #include "wine/dwm_protocol.h"
 #include "wine/test.h"
+#include "dwm_test.h"
 
 static HRESULT (WINAPI *pWexDwmpThumbList)(UINT64 since, void *out, DWORD *out_len);
 
@@ -62,6 +63,7 @@ static int find_thumb( struct dwm_thumb_list_reply *rep, struct dwm_thumb *thumb
 
 START_TEST(dwm_thumb)
 {
+    HRESULT (WINAPI *echo)(const void *, ULONG, void *, ULONG *);
     HMODULE dwmapi;
     static unsigned char buf[sizeof(struct dwm_thumb_list_reply) + DWM_THUMB_MAX * sizeof(struct dwm_thumb)];
     struct dwm_thumb_list_reply *rep;
@@ -93,7 +95,8 @@ START_TEST(dwm_thumb)
 
     /* no broker: the list call fails */
     out_len = sizeof(buf);
-    hr = pWexDwmpThumbList( 0, buf, &out_len );
+    echo = (void *)GetProcAddress( dwmapi, "WexDwmpChannelEcho" );
+    hr = echo && dwm_broker_answers( echo ) ? pWexDwmpThumbList( 0, buf, &out_len ) : E_FAIL;
     if (hr != S_OK)
     {
         skip( "needs a desktop with a DWM broker\n" );
