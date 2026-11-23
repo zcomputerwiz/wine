@@ -961,12 +961,16 @@ static void broker_pipe_name( WCHAR *name, UINT size )
     CloseHandle( token );
 }
 
-/* the child of test_broker_impostor (B86): creates the broker's pipe before any broker runs and waits for a client;
- * the exit code is 1 when a client connected, 0 when none came, 2 when the pipe could not be made */
+/* the child of test_broker_impostor (B86): creates the broker's pipe before any broker runs, waits for a client and
+ * then for its request; the exit code is 3 when a request came (the client took the impostor for the broker), 1 when
+ * the client connected and left without one (it refused the server), 0 when no client came, 2 when the pipe could
+ * not be made */
 static void broker_impostor(void)
 {
     OVERLAPPED ov = { 0 };
     WCHAR name[256];
+    BYTE request[4096];
+    BOOL connected = FALSE;
     HANDLE pipe;
     DWORD code = 2, n;
 
@@ -977,13 +981,43 @@ static void broker_impostor(void)
     if (name[0] && pipe != INVALID_HANDLE_VALUE)
     {
         code = 0;
-        if (ConnectNamedPipe( pipe, &ov ) || GetLastError() == ERROR_PIPE_CONNECTED) code = 1;
+        if (ConnectNamedPipe( pipe, &ov ) || GetLastError() == ERROR_PIPE_CONNECTED) connected = TRUE;
         else if (GetLastError() == ERROR_IO_PENDING && !WaitForSingleObject( ov.hEvent, 90000 ) &&
-                 GetOverlappedResult( pipe, &ov, &n, FALSE )) code = 1;
-        if (code) Sleep( 2000 );   /* the client checks the server while the pipe is open */
+                 GetOverlappedResult( pipe, &ov, &n, FALSE )) connected = TRUE;
+        if (connected)
+        {
+            /* a refusing client closes the pipe without writing: a broken pipe, or nothing within 5 seconds */
+            code = 1;
+            ResetEvent( ov.hEvent );
+            if (ReadFile( pipe, request, sizeof(request), &n, &ov ) ? n > 0 : GetLastError() == ERROR_MORE_DATA)
+                code = 3;
+            else if (GetLastError() == ERROR_IO_PENDING)
+            {
+                if (WaitForSingleObject( ov.hEvent, 5000 ))
+                {
+                    CancelIo( pipe );
+                    WaitForSingleObject( ov.hEvent, 5000 );
+                }
+                else if (GetOverlappedResult( pipe, &ov, &n, FALSE ) ? n > 0 : GetLastError() == ERROR_MORE_DATA)
+                    code = 3;
+            }
+        }
         CloseHandle( pipe );
     }
     ExitProcess( code );
+}
+
+/* waits up to 10 seconds for the user's broker pipe to exist */
+static BOOL wait_pipe( const WCHAR *name )
+{
+    unsigned int i;
+
+    for (i = 0; i < 200; i++)
+    {
+        if (WaitNamedPipeW( name, 0 ) || GetLastError() != ERROR_FILE_NOT_FOUND) return TRUE;
+        Sleep( 50 );
+    }
+    return FALSE;
 }
 
 /* B86: a sandboxed process of the user (here below medium integrity) that creates the broker's pipe before the broker
@@ -1025,23 +1059,37 @@ static void test_broker_impostor(void)
         CloseHandle( low_token );
         return;
     }
-    CloseHandle( low_token );
-    for (i = 0; i < 200; i++)
-    {
-        if (WaitNamedPipeW( name, 0 ) || GetLastError() != ERROR_FILE_NOT_FOUND) break;
-        Sleep( 50 );
-    }
-    ok( i < 200, "the impostor's pipe did not appear.\n" );
-    if (i < 200)
-    {
-        code = run_child( NULL );
-        ok( (code >> 16) != WebTokenRequestStatus_Success, "the impostor answered the request: %#lx.\n", code );
-    }
+    /* another image: the client connects and leaves without writing its request (1); 3 is the bug */
+    ok( wait_pipe( name ), "the impostor's pipe did not appear.\n" );
+    run_child( NULL );
     ok( !WaitForSingleObject( pi.hProcess, 120000 ), "the impostor did not finish.\n" );
     GetExitCodeProcess( pi.hProcess, &code );
-    ok( code == 1, "the client did not reach the impostor's pipe: %lu.\n", code );
+    ok( code == 1, "the impostor's pipe: got %lu (3: the client sent its request to it).\n", code );
     CloseHandle( pi.hProcess );
     CloseHandle( pi.hThread );
+
+    /* the real image with a sandbox's token: only the token check refuses it (the client logs "with a sandbox's
+     * token", which the suite looks for with WINEDEBUG=warn+webcore) */
+    i = GetSystemDirectoryA( cmd, MAX_PATH );
+    strcpy( cmd + i, "\\tokenbroker.exe" );
+    if (!CreateProcessAsUserA( low_token, NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi ))
+        skip( "tokenbroker.exe does not start with a low integrity token: %lu.\n", GetLastError() );
+    else
+    {
+        if (!wait_pipe( name )) skip( "tokenbroker.exe made no pipe with a low integrity token.\n" );
+        else
+        {
+            code = run_child( NULL );
+            ok( (code >> 16) != WebTokenRequestStatus_Success, "the low integrity broker served the request: %#lx.\n",
+                code );
+        }
+        TerminateProcess( pi.hProcess, 0 );
+        WaitForSingleObject( pi.hProcess, 10000 );
+        CloseHandle( pi.hProcess );
+        CloseHandle( pi.hThread );
+        for (i = 0; i < 100 && (WaitNamedPipeW( name, 0 ) || GetLastError() != ERROR_FILE_NOT_FOUND); i++) Sleep( 50 );
+    }
+    CloseHandle( low_token );
 }
 
 /* sandboxed callers get no token, even of an account the user has: a restricted token, a low integrity token */
