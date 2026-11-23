@@ -21,6 +21,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "winternl.h"
 #define COBJMACROS
@@ -98,28 +99,80 @@ static BOOL get_stored_attribute(HWND hwnd, DWORD attribute, DWORD *value)
     return found;
 }
 
-/* The broker, when there is one, holds the canonical value, so a setter in another process is seen. The local
- * table is a mirror: it answers when there is no broker, and it refills a broker that lost its state. */
+/* Store a value in the process table, reclaiming dead windows' slots, and hand it to the broker (best effort). */
+static BOOL set_attribute_value(HWND hwnd, DWORD attribute, DWORD value)
+{
+    int i, slot = -1;
+
+    EnterCriticalSection(&thumbnail_cs);
+    for (i = 0; i < ATTRIBUTE_TABLE_SIZE; i++)
+    {
+        if (attribute_table[i].hwnd == hwnd && attribute_table[i].attribute == attribute)
+        {
+            slot = i;
+            break;
+        }
+    }
+    for (i = 0; slot < 0 && i < ATTRIBUTE_TABLE_SIZE; i++)
+        if (!attribute_table[i].hwnd || !IsWindow(attribute_table[i].hwnd)) slot = i;
+    if (slot >= 0)
+    {
+        attribute_table[slot].hwnd = hwnd;
+        attribute_table[slot].attribute = attribute;
+        attribute_table[slot].value = value;
+    }
+    LeaveCriticalSection(&thumbnail_cs);
+    if (slot < 0) return FALSE;
+    dwm_client_set_attr(hwnd, attribute, value);
+    return TRUE;
+}
+
+static void publish_thumbnail(const THUMBNAIL_ENTRY *entry);
+
+/* A new broker (dwm_client.c saw its generation change) holds nothing of this process yet: hand it the live
+ * windows' attributes and the thumbnails. Called without any lock held. */
+void dwm_resend_state(void)
+{
+    ATTRIBUTE_ENTRY *attrs;
+    THUMBNAIL_ENTRY *thumbs;
+    int i, attr_count = 0, thumb_count = 0;
+
+    attrs = malloc(sizeof(attribute_table));
+    thumbs = malloc(sizeof(thumbnail_table));
+    if (!attrs || !thumbs)
+    {
+        free(attrs);
+        free(thumbs);
+        return;
+    }
+    EnterCriticalSection(&thumbnail_cs);
+    for (i = 0; i < ATTRIBUTE_TABLE_SIZE; i++)
+        if (attribute_table[i].hwnd && IsWindow(attribute_table[i].hwnd)) attrs[attr_count++] = attribute_table[i];
+    for (i = 0; i < THUMBNAIL_TABLE_SIZE; i++)
+        if (thumbnail_table[i].handle) thumbs[thumb_count++] = thumbnail_table[i];
+    LeaveCriticalSection(&thumbnail_cs);
+
+    TRACE("%d attributes, %d thumbnails\n", attr_count, thumb_count);
+    for (i = 0; i < attr_count; i++) dwm_client_set_attr(attrs[i].hwnd, attrs[i].attribute, attrs[i].value);
+    for (i = 0; i < thumb_count; i++) publish_thumbnail(&thumbs[i]);
+    free(attrs);
+    free(thumbs);
+}
+
+/* A window's attributes are set by its own process, which keeps them in its table and hands them to the broker
+ * (again after a broker restart, dwm_resend_state). So the table answers for this process's windows, with no
+ * broker call on every caption paint; only another process's window is asked of the broker. */
 static BOOL get_attribute_value(HWND hwnd, DWORD attribute, DWORD *value)
 {
     BOOL found = FALSE;
-    DWORD brokered;
+    DWORD brokered, pid = 0;
 
-    if (!dwm_client_get_attr(hwnd, attribute, &found, &brokered))
-    {
-        if (found)
-        {
-            *value = brokered;
-            return TRUE;
-        }
-        if (get_stored_attribute(hwnd, attribute, value))
-        {
-            dwm_client_set_attr(hwnd, attribute, *value);
-            return TRUE;
-        }
-        return FALSE;
-    }
-    return get_stored_attribute(hwnd, attribute, value);
+    if (get_stored_attribute(hwnd, attribute, value)) return TRUE;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == GetCurrentProcessId()) return FALSE;
+    if (dwm_client_get_attr(hwnd, attribute, &found, &brokered) || !found) return FALSE;
+    *value = brokered;
+    return TRUE;
 }
 
 
@@ -198,10 +251,25 @@ static BOOL dwm_frame_is_enabled(void)
     return enabled;
 }
 
+/* As the shell's bridge reads it (wexshell dwm_bridge.c): high contrast or a disabled transparency turn the
+ * materials off, so no window is made glass for a backdrop that is not drawn. */
 static BOOL dwm_materials_is_enabled(void)
 {
     static int enabled = -1;
-    if (enabled < 0) enabled = read_gate(L"DwmMaterials");
+    if (enabled < 0)
+    {
+        HIGHCONTRASTW hc = { sizeof(hc) };
+        DWORD value = 1, cb = sizeof(value);
+
+        enabled = read_gate(L"DwmMaterials");
+        if (enabled && SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0) &&
+            (hc.dwFlags & HCF_HIGHCONTRASTON))
+            enabled = 0;
+        if (enabled && !RegGetValueW(HKEY_CURRENT_USER,
+                                     L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                                     L"EnableTransparency", RRF_RT_REG_DWORD, NULL, &value, &cb) && !value)
+            enabled = 0;
+    }
     return enabled;
 }
 
@@ -276,7 +344,7 @@ static void set_glass(HWND hwnd, const MARGINS *margins)
     /* Repaint the client: the previous opaque surface may have forced its alpha bits to 0xff. */
     SetWindowPos(hwnd, 0, 0, 0, 0, 0,
                  SWP_FRAMECHANGED | SWP_NOCOPYBITS | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-    dwm_client_set_attr(hwnd, DWM_ATTR_WINE_FRAME, (DWORD)(ULONG_PTR)GetPropW(hwnd, L"__wine_dwm_frame"));
+    set_attribute_value(hwnd, DWM_ATTR_WINE_FRAME, (DWORD)(ULONG_PTR)GetPropW(hwnd, L"__wine_dwm_frame"));
 
     /* Aero glass is blurred and tinted with the colorization color (again, for a new color), unless the window chose
      * its own blur, or is choosing it now (__wine_dwm_blur_glass: DwmSetWindowAttribute made the glass) */
@@ -331,7 +399,7 @@ void WINAPI WexDwmpRefreshFrame(HWND hwnd)
         for (i = 0; i < 4; i++) RemovePropW(hwnd, margin_props[i]);
         RemovePropW(hwnd, L"__wine_dwm_alpha");
         RemovePropW(hwnd, L"__wine_dwm_frame");
-        dwm_client_set_attr(hwnd, DWM_ATTR_WINE_FRAME, 0);
+        set_attribute_value(hwnd, DWM_ATTR_WINE_FRAME, 0);
         clear_auto_blur(hwnd);
         SetWindowPos(hwnd, 0, 0, 0, 0, 0,
                      SWP_FRAMECHANGED | SWP_NOCOPYBITS | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -417,7 +485,6 @@ HRESULT WINAPI DwmInvalidateIconicBitmaps(HWND hwnd)
 HRESULT WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD attributenum, LPCVOID attribute, DWORD size)
 {
     DWORD value;
-    int i;
 
     TRACE("(%p, %lx, %p, %lx)\n", hwnd, attributenum, attribute, size);
 
@@ -437,7 +504,8 @@ HRESULT WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD attributenum, LPCVOID attr
          (value & ~(DWM_WINE_BLUR_MODE | DWM_WINE_BLUR_TINTED | DWM_WINE_BLUR_REGION))))
         return E_INVALIDARG;
 
-    dwm_client_set_attr(hwnd, attributenum, value);  /* best effort: the local table is the mirror */
+    /* the table first: the side effects below read it, and a value the call fails for is not sent */
+    if (!set_attribute_value(hwnd, attributenum, value)) return E_OUTOFMEMORY;
     if (attributenum == DWM_ATTR_WINE_BLUR) RemovePropW(hwnd, L"__wine_dwm_blur_auto");   /* the app's blur now */
 
     /* Blur behind (P12b) needs an alpha surface: the whole window becomes glass, unless the app already chose
@@ -466,31 +534,7 @@ HRESULT WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD attributenum, LPCVOID attr
             !GetPropW(hwnd, L"__wine_dwm_alpha"))
             set_glass(hwnd, &zero_margins);
     }
-
-    EnterCriticalSection(&thumbnail_cs);
-    for (i = 0; i < ATTRIBUTE_TABLE_SIZE; i++)
-    {
-        if (attribute_table[i].hwnd == hwnd && attribute_table[i].attribute == attributenum)
-        {
-            attribute_table[i].value = value;
-            LeaveCriticalSection(&thumbnail_cs);
-            return S_OK;
-        }
-    }
-    /* no existing entry; take a free slot, reclaiming dead windows first */
-    for (i = 0; i < ATTRIBUTE_TABLE_SIZE; i++)
-    {
-        if (!attribute_table[i].hwnd || !IsWindow(attribute_table[i].hwnd))
-        {
-            attribute_table[i].hwnd = hwnd;
-            attribute_table[i].attribute = attributenum;
-            attribute_table[i].value = value;
-            LeaveCriticalSection(&thumbnail_cs);
-            return S_OK;
-        }
-    }
-    LeaveCriticalSection(&thumbnail_cs);
-    return E_OUTOFMEMORY;
+    return S_OK;
 }
 
 /**********************************************************************
@@ -1113,30 +1157,31 @@ HRESULT WINAPI DwmUpdateThumbnailProperties(HTHUMBNAIL thumbnail, const DWM_THUM
     if (!found)
         return E_INVALIDARG;
 
-    /* publish the merged state to the broker (best effort; fails quietly without one) */
-    {
-        struct dwm_thumb_set set;
-        DWORD flags = 0;
-
-        memset(&set, 0, sizeof(set));
-        if (entry.props.fVisible) flags |= DWM_THUMB_VISIBLE;
-        if (entry.props.fSourceClientAreaOnly) flags |= DWM_THUMB_CLIENT_ONLY;
-        if (entry.props.rcSource.left || entry.props.rcSource.top ||
-            entry.props.rcSource.right || entry.props.rcSource.bottom)
-            flags |= DWM_THUMB_HAS_SOURCE;
-        set.flags = flags;
-        set.opacity = entry.props.opacity;
-        set.dest[0] = entry.props.rcDestination.left;
-        set.dest[1] = entry.props.rcDestination.top;
-        set.dest[2] = entry.props.rcDestination.right;
-        set.dest[3] = entry.props.rcDestination.bottom;
-        set.source[0] = entry.props.rcSource.left;
-        set.source[1] = entry.props.rcSource.top;
-        set.source[2] = entry.props.rcSource.right;
-        set.source[3] = entry.props.rcSource.bottom;
-        dwm_client_thumb_set(entry.dest, (UINT)(ULONG_PTR)entry.handle, entry.src, &set);
-    }
+    publish_thumbnail(&entry);
     return S_OK;
+}
+
+/* the merged state of a thumbnail to the broker (best effort; fails quietly without one) */
+static void publish_thumbnail(const THUMBNAIL_ENTRY *entry)
+{
+    struct dwm_thumb_set set;
+
+    memset(&set, 0, sizeof(set));
+    if (entry->props.fVisible) set.flags |= DWM_THUMB_VISIBLE;
+    if (entry->props.fSourceClientAreaOnly) set.flags |= DWM_THUMB_CLIENT_ONLY;
+    if (entry->props.rcSource.left || entry->props.rcSource.top ||
+        entry->props.rcSource.right || entry->props.rcSource.bottom)
+        set.flags |= DWM_THUMB_HAS_SOURCE;
+    set.opacity = entry->props.opacity;
+    set.dest[0] = entry->props.rcDestination.left;
+    set.dest[1] = entry->props.rcDestination.top;
+    set.dest[2] = entry->props.rcDestination.right;
+    set.dest[3] = entry->props.rcDestination.bottom;
+    set.source[0] = entry->props.rcSource.left;
+    set.source[1] = entry->props.rcSource.top;
+    set.source[2] = entry->props.rcSource.right;
+    set.source[3] = entry->props.rcSource.bottom;
+    dwm_client_thumb_set(entry->dest, (UINT)(ULONG_PTR)entry->handle, entry->src, &set);
 }
 
 /**********************************************************************

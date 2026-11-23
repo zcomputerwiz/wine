@@ -30,4 +30,7 @@ extern NTSTATUS dwm_client_get_attr( HWND hwnd, DWORD attribute, BOOL *found, DW
 extern NTSTATUS dwm_client_thumb_set( HWND dest, UINT handle, HWND src, const struct dwm_thumb_set *set );
 extern NTSTATUS dwm_client_thumb_del( HWND dest, UINT handle );
 
+/* dwmapi_main.c: hands a new broker this process's attributes and thumbnails */
+extern void dwm_resend_state(void);
+
 #endif

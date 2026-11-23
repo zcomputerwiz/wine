@@ -31,6 +31,7 @@
 #include "winbase.h"
 #include "wingdi.h"
 #include "winuser.h"
+#include "tlhelp32.h"
 #include "dwmapi.h"
 #include "wine/test.h"
 
@@ -74,6 +75,65 @@ static DWORD run_child( const WCHAR *exe, HWND hwnd, DWORD expected, DWORD attr 
         CloseHandle( pi.hThread );
     }
     return exit_code;
+}
+
+static DWORD parent_of( HANDLE snapshot, DWORD pid )
+{
+    PROCESSENTRY32W entry = { sizeof(entry) };
+
+    if (!Process32FirstW( snapshot, &entry )) return 0;
+    do if (entry.th32ProcessID == pid) return entry.th32ParentProcessID;
+    while (Process32NextW( snapshot, &entry ));
+    return 0;
+}
+
+/* Ends the broker of this test's desktop: the dwm.exe started by the desktop manager that started this test
+ * (explorer /desktop=NAME cmd /c test). FALSE when the test was started some other way. */
+static BOOL kill_own_broker(void)
+{
+    PROCESSENTRY32W entry = { sizeof(entry) };
+    HANDLE snapshot, process;
+    DWORD manager;
+    BOOL killed = FALSE;
+
+    snapshot = CreateToolhelp32Snapshot( TH32CS_SNAPPROCESS, 0 );
+    if (snapshot == INVALID_HANDLE_VALUE) return FALSE;
+    manager = parent_of( snapshot, parent_of( snapshot, GetCurrentProcessId() ) );
+    if (manager && Process32FirstW( snapshot, &entry ))
+    {
+        do
+        {
+            if (entry.th32ParentProcessID != manager || wcsicmp( entry.szExeFile, L"dwm.exe" )) continue;
+            if (!(process = OpenProcess( PROCESS_TERMINATE | SYNCHRONIZE, FALSE, entry.th32ProcessID ))) continue;
+            killed = TerminateProcess( process, 1 );
+            WaitForSingleObject( process, 5000 );
+            CloseHandle( process );
+        } while (Process32NextW( snapshot, &entry ));
+    }
+    CloseHandle( snapshot );
+    return killed;
+}
+
+/* The desktop manager starts a new broker, which holds nothing; the setter's next call reaches it and hands it
+ * the process's attributes, so another process reads them again. */
+static void test_broker_restart( const WCHAR *exe, HWND hwnd )
+{
+    DWORD val, exit_code = 1;
+    int i;
+
+    if (!kill_own_broker())
+    {
+        skip( "not started by a desktop manager with a broker\n" );
+        return;
+    }
+    for (i = 0; i < 25 && exit_code; i++)
+    {
+        Sleep( 200 );
+        val = 0x00445566 + i;
+        DwmSetWindowAttribute( hwnd, DWMWA_BORDER_COLOR, &val, sizeof(val) );
+        exit_code = run_child( exe, hwnd, 3, DWMWA_WINDOW_CORNER_PREFERENCE );
+    }
+    ok( exit_code == 0, "the restarted broker did not get the corner preference back\n" );
 }
 
 START_TEST(dwm_attr)
@@ -147,6 +207,8 @@ START_TEST(dwm_attr)
 
     exit_code = run_child( exe, hwnd, DWMWA_COLOR_DEFAULT, DWMWA_CAPTION_COLOR );
     ok( exit_code == 0, "child failed to read reset caption color, exit_code %lu\n", exit_code );
+
+    test_broker_restart( exe, hwnd );
 
     DestroyWindow( hwnd );
 

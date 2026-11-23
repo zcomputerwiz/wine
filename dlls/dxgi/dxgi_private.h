@@ -193,13 +193,8 @@ struct d3d11_swapchain
     LONG in_set_fullscreen_state;
     HWND comp_wnd;
     DXGI_ALPHA_MODE composition_alpha_mode;
-    /* Layer placement published by dcomp. Written by the composition window's
-     * thread and read by Present, so every access holds the wined3d mutex. */
+    /* The composition target window whose scene shows this swapchain; Present reads it under the wined3d mutex. */
     HWND target_hwnd;
-    RECT dst_rect;      /* visible destination in target client coordinates */
-    RECT src_rect;      /* matching back buffer source rectangle */
-    BOOL has_dst_rect;
-    BOOL fully_clipped;
     /* Serializes Present/Present1 history with ResizeBuffers. The device is
      * borrowed from the retained IWineDXGIDevice. History copies use its CS. */
     SRWLOCK present_lock;
@@ -224,7 +219,7 @@ HRESULT d3d12_swapchain_create(IWineDXGIFactory *factory, ID3D12CommandQueue *qu
 
 BOOL dxgi_validate_swapchain_desc(const DXGI_SWAP_CHAIN_DESC1 *desc);
 BOOL dxgi_validate_swapchain_fullscreen_desc(const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *desc);
-void dcomp_swapchain_apply_target(struct d3d11_swapchain *swapchain, WPARAM mode, LPARAM lparam);
+void dcomp_swapchain_clear_target(struct d3d11_swapchain *swapchain);
 void dcomp_swapchain_repaint(HWND window);
 
 /* IDXGISurface/IDXGIResource */
