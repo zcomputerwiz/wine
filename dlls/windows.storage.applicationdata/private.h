@@ -34,9 +34,11 @@
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_Foundation_Collections
 #include "windows.foundation.h"
+#define WIDL_using_Windows_System
 #define WIDL_using_Windows_Storage
 #include "windows.storage.h"
 
+extern IActivationFactory *app_data_paths_factory;
 extern IActivationFactory *application_data_factory;
 extern IActivationFactory *composite_value_factory;
 
