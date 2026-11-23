@@ -97,11 +97,66 @@ static HRESULT d2d_factory_reload_sysmetrics(struct d2d_factory *factory)
     return S_OK;
 }
 
+/*
+ * {6f72c0a2-6db7-46e9-9b62-b58a23f4928b}: an interface of the factory that Windows 11 answers (a separate object, like
+ * ID2D1Multithread; tests/uwp/alpc/d2dqi-probe.c) and that dwmcorei.dll of the Windows App Runtime queries in its DllMain, failing
+ * to load when it is refused. What it does is not known: it calls the method in slot 6 with 0. The object here forwards IUnknown
+ * to the factory and all its other methods succeed and log.
+ */
+static const GUID IID_d2d_private = {0x6f72c0a2, 0x6db7, 0x46e9, {0x9b, 0x62, 0xb5, 0x8a, 0x23, 0xf4, 0x92, 0x8b}};
+
+static struct d2d_factory *impl_from_private(void *iface)
+{
+    return CONTAINING_RECORD(iface, struct d2d_factory, private_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_private_QueryInterface(void *iface, REFIID iid, void **out)
+{
+    struct d2d_factory *factory = impl_from_private(iface);
+
+    return ID2D1Factory7_QueryInterface(&factory->ID2D1Factory7_iface, iid, out);
+}
+
+static ULONG STDMETHODCALLTYPE d2d_private_AddRef(void *iface)
+{
+    return ID2D1Factory7_AddRef(&impl_from_private(iface)->ID2D1Factory7_iface);
+}
+
+static ULONG STDMETHODCALLTYPE d2d_private_Release(void *iface)
+{
+    return ID2D1Factory7_Release(&impl_from_private(iface)->ID2D1Factory7_iface);
+}
+
+#define D2D_PRIVATE_SLOT(n) \
+    static HRESULT STDMETHODCALLTYPE d2d_private_slot##n(void *iface, void *a, void *b) \
+    { \
+        FIXME("iface %p, private slot " #n "(%p, %p): semi-stub.\n", iface, a, b); \
+        return S_OK; \
+    }
+D2D_PRIVATE_SLOT(3) D2D_PRIVATE_SLOT(4) D2D_PRIVATE_SLOT(5) D2D_PRIVATE_SLOT(6) D2D_PRIVATE_SLOT(7) D2D_PRIVATE_SLOT(8)
+D2D_PRIVATE_SLOT(9) D2D_PRIVATE_SLOT(10) D2D_PRIVATE_SLOT(11) D2D_PRIVATE_SLOT(12) D2D_PRIVATE_SLOT(13) D2D_PRIVATE_SLOT(14)
+D2D_PRIVATE_SLOT(15)
+
+static const void *const d2d_private_vtbl[] =
+{
+    d2d_private_QueryInterface, d2d_private_AddRef, d2d_private_Release,
+    d2d_private_slot3, d2d_private_slot4, d2d_private_slot5, d2d_private_slot6, d2d_private_slot7, d2d_private_slot8,
+    d2d_private_slot9, d2d_private_slot10, d2d_private_slot11, d2d_private_slot12, d2d_private_slot13, d2d_private_slot14,
+    d2d_private_slot15,
+};
+
 static HRESULT STDMETHODCALLTYPE d2d_factory_QueryInterface(ID2D1Factory7 *iface, REFIID iid, void **out)
 {
     struct d2d_factory *factory = impl_from_ID2D1Factory7(iface);
 
     TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
+
+    if (IsEqualGUID(iid, &IID_d2d_private))
+    {
+        ID2D1Factory7_AddRef(iface);
+        *out = &factory->private_iface;
+        return S_OK;
+    }
 
     if ((IsEqualGUID(iid, &IID_ID2D1Factory7) && d2d_settings.max_version_factory >= 7)
             || (IsEqualGUID(iid, &IID_ID2D1Factory6) && d2d_settings.max_version_factory >= 6)
@@ -1355,6 +1410,7 @@ static void d2d_factory_init(struct d2d_factory *factory, D2D1_FACTORY_TYPE fact
         WARN("Ignoring debug level %#x.\n", factory_options->debugLevel);
 
     factory->ID2D1Factory7_iface.lpVtbl = &d2d_factory_vtbl;
+    factory->private_iface.vtbl = d2d_private_vtbl;
     factory->ID2D1Multithread_iface.lpVtbl = factory_type == D2D1_FACTORY_TYPE_SINGLE_THREADED ?
             &d2d_factory_multithread_noop_vtbl : &d2d_factory_multithread_vtbl;
     factory->factory_type = factory_type;
