@@ -499,7 +499,8 @@ enum apc_type
     APC_MAP_VIEW_EX,
     APC_UNMAP_VIEW,
     APC_CREATE_THREAD,
-    APC_DUP_HANDLE
+    APC_DUP_HANDLE,
+    APC_WEX_REGKEY
 };
 
 struct user_apc
@@ -637,6 +638,12 @@ union apc_call
         unsigned int     attributes;
         unsigned int     options;
     } dup_handle;
+    struct
+    {
+        enum apc_type    type;
+        obj_handle_t     section;
+        unsigned int     size;
+    } wex_regkey;
 };
 
 union apc_result
@@ -744,6 +751,12 @@ union apc_result
         unsigned int     status;
         obj_handle_t     handle;
     } dup_handle;
+    struct
+    {
+        enum apc_type    type;
+        unsigned int     status;
+        obj_handle_t     handle;
+    } wex_regkey;
     struct
     {
         enum apc_type    type;
@@ -7648,6 +7661,6 @@ union generic_reply
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 991
+#define SERVER_PROTOCOL_VERSION 992
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

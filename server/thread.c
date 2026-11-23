@@ -2214,6 +2214,21 @@ DECL_HANDLER(queue_apc)
             }
         }
         break;
+    case APC_WEX_REGKEY:  /* WineExplorer: a registry key duplicated into the process (ntdll's wex_regkey.c) */
+        process = get_process_from_handle( req->handle, PROCESS_DUP_HANDLE );
+        if (process && process != current->process)
+        {
+            /* duplicate the record's section into the target process */
+            obj_handle_t handle = duplicate_handle( current->process, apc->call.wex_regkey.section,
+                                                    process, 0, 0, DUPLICATE_SAME_ACCESS );
+            if (handle) apc->call.wex_regkey.section = handle;
+            else
+            {
+                release_object( process );
+                process = NULL;
+            }
+        }
+        break;
     default:
         set_error( STATUS_INVALID_PARAMETER );
         break;
