@@ -59,6 +59,9 @@
 #include "windows.ui.applicationsettings.h"
 #include "accountssettingspaneinterop.h"
 
+extern IActivationFactory *compositor_stub_factory;
+extern IActivationFactory *apiinfo_stub_factory;
+
 struct vector_iids
 {
     const GUID *iterable;
