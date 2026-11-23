@@ -4728,6 +4728,23 @@ typedef struct _ALPC_WORK_ON_BEHALF_ATTR
     ULONGLONG Ticket;
 } ALPC_WORK_ON_BEHALF_ATTR, *PALPC_WORK_ON_BEHALF_ATTR;
 
+typedef enum _ALPC_PORT_INFORMATION_CLASS
+{
+    AlpcBasicInformation,
+    AlpcPortInformation,
+    AlpcAssociateCompletionPortInformation,
+    AlpcConnectedSIDInformation,
+    AlpcServerInformation,
+    AlpcMessageSidInformation,
+    AlpcMessageZoneInformation,
+    AlpcRegisterCompletionListInformation,
+    AlpcUnregisterCompletionListInformation,
+    AlpcAdjustCompletionListConcurrencyCountInformation,
+    AlpcRegisterCallbackInformation,
+    AlpcCompletionListRundownInformation,
+    AlpcWaitForPortReferences
+} ALPC_PORT_INFORMATION_CLASS;
+
 typedef struct _ALPC_BASIC_INFORMATION
 {
     ULONG Flags;
@@ -4757,6 +4774,7 @@ typedef struct _ALPC_PORT_ATTRIBUTES
 
 NTSYSAPI SIZE_T    WINAPI AlpcGetHeaderSize(ULONG);
 NTSYSAPI void *    WINAPI AlpcGetMessageAttribute(ALPC_MESSAGE_ATTRIBUTES *,ULONG);
+NTSYSAPI NTSTATUS  WINAPI NtAlpcQueryInformation(HANDLE,ALPC_PORT_INFORMATION_CLASS,void *,ULONG,ULONG *);
 NTSYSAPI NTSTATUS  WINAPI AlpcInitializeMessageAttribute(ULONG,ALPC_MESSAGE_ATTRIBUTES *,SIZE_T,SIZE_T *);
 NTSYSAPI NTSTATUS  WINAPI ApiSetQueryApiSetPresence(const UNICODE_STRING*,BOOLEAN*);
 NTSYSAPI NTSTATUS  WINAPI ApiSetQueryApiSetPresenceEx(const UNICODE_STRING*,BOOLEAN*,BOOLEAN*);
