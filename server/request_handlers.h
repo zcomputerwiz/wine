@@ -21,6 +21,7 @@ DECL_HANDLER(get_process_debug_info);
 DECL_HANDLER(get_process_handle_table);
 DECL_HANDLER(get_process_image_name);
 DECL_HANDLER(get_process_vm_counters);
+DECL_HANDLER(get_process_io_counters);
 DECL_HANDLER(set_process_info);
 DECL_HANDLER(get_thread_info);
 DECL_HANDLER(get_thread_page_priority);
@@ -353,6 +354,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_get_process_handle_table,
     (req_handler)req_get_process_image_name,
     (req_handler)req_get_process_vm_counters,
+    (req_handler)req_get_process_io_counters,
     (req_handler)req_set_process_info,
     (req_handler)req_get_thread_info,
     (req_handler)req_get_thread_page_priority,
@@ -835,6 +837,15 @@ C_ASSERT( offsetof(struct get_process_vm_counters_reply, working_set_size) == 32
 C_ASSERT( offsetof(struct get_process_vm_counters_reply, pagefile_usage) == 40 );
 C_ASSERT( offsetof(struct get_process_vm_counters_reply, peak_pagefile_usage) == 48 );
 C_ASSERT( sizeof(struct get_process_vm_counters_reply) == 56 );
+C_ASSERT( offsetof(struct get_process_io_counters_request, handle) == 12 );
+C_ASSERT( sizeof(struct get_process_io_counters_request) == 16 );
+C_ASSERT( offsetof(struct get_process_io_counters_reply, read_operations) == 8 );
+C_ASSERT( offsetof(struct get_process_io_counters_reply, write_operations) == 16 );
+C_ASSERT( offsetof(struct get_process_io_counters_reply, other_operations) == 24 );
+C_ASSERT( offsetof(struct get_process_io_counters_reply, read_bytes) == 32 );
+C_ASSERT( offsetof(struct get_process_io_counters_reply, write_bytes) == 40 );
+C_ASSERT( offsetof(struct get_process_io_counters_reply, other_bytes) == 48 );
+C_ASSERT( sizeof(struct get_process_io_counters_reply) == 56 );
 C_ASSERT( offsetof(struct set_process_info_request, handle) == 12 );
 C_ASSERT( offsetof(struct set_process_info_request, affinity) == 16 );
 C_ASSERT( offsetof(struct set_process_info_request, priority) == 24 );

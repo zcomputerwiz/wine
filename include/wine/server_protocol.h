@@ -1382,6 +1382,24 @@ struct get_process_vm_counters_reply
 
 
 
+struct get_process_io_counters_request
+{
+    struct request_header __header;
+    obj_handle_t handle;
+};
+struct get_process_io_counters_reply
+{
+    struct reply_header __header;
+    file_pos_t read_operations;
+    file_pos_t write_operations;
+    file_pos_t other_operations;
+    file_pos_t read_bytes;
+    file_pos_t write_bytes;
+    file_pos_t other_bytes;
+};
+
+
+
 struct set_process_info_request
 {
     struct request_header __header;
@@ -6608,6 +6626,7 @@ enum request
     REQ_get_process_handle_table,
     REQ_get_process_image_name,
     REQ_get_process_vm_counters,
+    REQ_get_process_io_counters,
     REQ_set_process_info,
     REQ_get_thread_info,
     REQ_get_thread_page_priority,
@@ -6943,6 +6962,7 @@ union generic_request
     struct get_process_handle_table_request get_process_handle_table_request;
     struct get_process_image_name_request get_process_image_name_request;
     struct get_process_vm_counters_request get_process_vm_counters_request;
+    struct get_process_io_counters_request get_process_io_counters_request;
     struct set_process_info_request set_process_info_request;
     struct get_thread_info_request get_thread_info_request;
     struct get_thread_page_priority_request get_thread_page_priority_request;
@@ -7276,6 +7296,7 @@ union generic_reply
     struct get_process_handle_table_reply get_process_handle_table_reply;
     struct get_process_image_name_reply get_process_image_name_reply;
     struct get_process_vm_counters_reply get_process_vm_counters_reply;
+    struct get_process_io_counters_reply get_process_io_counters_reply;
     struct set_process_info_reply set_process_info_reply;
     struct get_thread_info_reply get_thread_info_reply;
     struct get_thread_page_priority_reply get_thread_page_priority_reply;
@@ -7592,6 +7613,6 @@ union generic_reply
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 986
+#define SERVER_PROTOCOL_VERSION 987
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

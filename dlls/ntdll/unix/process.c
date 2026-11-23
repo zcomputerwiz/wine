@@ -1171,8 +1171,22 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
                 else if (!handle) ret = STATUS_INVALID_HANDLE;
                 else
                 {
-                    /* FIXME : real data */
                     memset(&pii, 0 , sizeof(IO_COUNTERS));
+                    SERVER_START_REQ(get_process_io_counters)
+                    {
+                        req->handle = wine_server_obj_handle( handle );
+                        if (!(ret = wine_server_call( req )))
+                        {
+                            pii.ReadOperationCount = reply->read_operations;
+                            pii.WriteOperationCount = reply->write_operations;
+                            pii.OtherOperationCount = reply->other_operations;
+                            pii.ReadTransferCount = reply->read_bytes;
+                            pii.WriteTransferCount = reply->write_bytes;
+                            pii.OtherTransferCount = reply->other_bytes;
+                        }
+                    }
+                    SERVER_END_REQ;
+                    if (ret) break;
                     memcpy(info, &pii, sizeof(IO_COUNTERS));
                     len = sizeof(IO_COUNTERS);
                 }
