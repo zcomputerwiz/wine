@@ -61,6 +61,8 @@ extern void sysrun_drop( int raised );
 
 /* does this client run with the system group (SO_PEERCRED at connect time)? */
 extern int sysrun_process_privileged( const struct process *process );
+/* the system role's authority: started over the system role connection, SYSTEM's primary token, SeTcbPrivilege */
+extern int sysrun_process_is_tcb_system( struct process *process );
 /* is this a Safe Mode start (the root-owned boot mode file)? */
 extern int sysrun_safe_boot(void);
 extern int sysrun_raise_for_current(void);
