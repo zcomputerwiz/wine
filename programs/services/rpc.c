@@ -1542,6 +1542,7 @@ DWORD __cdecl svcctl_StartServiceW(
     LPCWSTR *lpServiceArgVectors)
 {
     struct sc_service_handle *service;
+    BOOL running;
     DWORD err;
 
     if (remote_of(hService)) return forward_StartServiceW(remote_of(hService), dwNumServiceArgs, lpServiceArgVectors);
@@ -1559,6 +1560,15 @@ DWORD __cdecl svcctl_StartServiceW(
         WINE_TRACE("%s is not a Safe Mode service\n", wine_dbgstr_w(service->service_entry->name));
         return ERROR_NOT_SAFEBOOT_SERVICE;
     }
+
+    /* A service that runs is answered at once, as on Windows, even while the auto-start services are being
+     * started (the startup lock is held for the whole list). */
+    service_lock(service->service_entry);
+    running = service->service_entry->process &&
+              WaitForSingleObject(service->service_entry->process->process, 0) == WAIT_TIMEOUT;
+    service_unlock(service->service_entry);
+    if (running)
+        return ERROR_SERVICE_ALREADY_RUNNING;
 
     if (!scmdatabase_lock_startup(service->service_entry->db, 3000))
         return ERROR_SERVICE_DATABASE_LOCKED;
