@@ -36,6 +36,14 @@
 #define WIDL_using_Windows_ApplicationModel
 #include "windows.management.deployment.h"
 
+#include "async_private.h"
+
+typedef IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress async_operation;
+HRESULT async_deployment_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback, async_operation **out );
+
+/* stage.c: install the package a file Uri names with wexappx, on a thread pool thread */
+HRESULT start_install( IUriRuntimeClass *uri, DeploymentOptions options, BOOL development, async_operation **out );
+
 extern IActivationFactory *package_manager_factory;
 extern IActivationFactory *stage_package_options_factory;
 
@@ -87,5 +95,7 @@ HRESULT vector_inspectable_create( const struct vector_iids *iids, IVector_IInsp
     }
 #define DEFINE_IINSPECTABLE( pfx, iface_type, impl_type, base_iface )                              \
     DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from_##iface_type, iface_type##_iface, &impl->base_iface )
+#define DEFINE_IINSPECTABLE_OUTER( pfx, iface_type, impl_type, outer_iface )                       \
+    DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from_##iface_type, iface_type##_iface, impl->outer_iface )
 
 #endif
