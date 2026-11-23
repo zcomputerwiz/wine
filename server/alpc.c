@@ -88,6 +88,8 @@ struct alpc_message
     unsigned int      id;
     unsigned int      callback_id;
     unsigned int      pid, tid;        /* sender */
+    struct token     *token;           /* token of the sending thread when the message was sent (referenced), or NULL */
+    int               sec_level;       /* impersonation level the sender gave with its security attribute */
     unsigned int      status;          /* carried by connection replies */
     struct alpc_port *from;            /* server communication port the message came through (not referenced) */
     data_size_t       len;
@@ -101,7 +103,8 @@ struct alpc_outstanding
     unsigned int      id;
     unsigned int      callback_id;
     int               is_connect;
-    unsigned int      pid, tid;        /* sender of the request */
+    struct token     *token;           /* token of the sender when the request was sent (referenced), or NULL */
+    int               sec_level;       /* impersonation level the sender gave with its security attribute */
     struct alpc_port *from;            /* server communication port (not referenced) */
 };
 
@@ -119,7 +122,6 @@ struct alpc_port
     struct list              queue;                 /* messages waiting to be received */
     struct list              outstanding;           /* connection port: requests waiting for a reply */
     mem_size_t               context;               /* port context */
-    int                      qos_level;             /* communication ports: impersonation level the client allows, -1: not given */
     unsigned int             sequence;              /* messages received so far */
 };
 
@@ -170,7 +172,6 @@ static void init_port( struct alpc_port *port, enum alpc_port_enum_type type, un
     port->conn        = NULL;
     port->peer        = NULL;
     port->context     = 0;
-    port->qos_level   = -1;
     port->sequence    = 0;
     list_init( &port->queue );
     list_init( &port->outstanding );
@@ -212,6 +213,35 @@ static void alpc_port_satisfied( struct object *obj, struct wait_queue_entry *en
 {
 }
 
+static void free_message( struct alpc_message *msg )
+{
+    if (msg->token) release_object( msg->token );
+    free( msg );
+}
+
+static void free_outstanding( struct alpc_outstanding *out )
+{
+    if (out->token) release_object( out->token );
+    free( out );
+}
+
+/* The token of the sending thread, taken when the message is sent: what is impersonated later is exactly this one.
+ * Only a message sent with a security attribute carries a token (measured on Windows 11: without the attribute the
+ * impersonation succeeds and the thread gets nothing); the attribute also gives the level the sender allows. */
+static void capture_sender_token( struct alpc_message *msg, int sec_level )
+{
+    struct token *token;
+
+    msg->token = NULL;
+    msg->sec_level = -1;
+    if (sec_level < 0 || !current) return;
+    if ((token = thread_get_impersonation_token( current )))
+    {
+        msg->token = (struct token *)grab_object( token );
+        msg->sec_level = sec_level;
+    }
+}
+
 static struct alpc_message *alloc_message( unsigned int type, unsigned int id, unsigned int callback_id,
                                            const void *data, data_size_t len )
 {
@@ -224,6 +254,8 @@ static struct alpc_message *alloc_message( unsigned int type, unsigned int id, u
     msg->pid         = current ? current->process->id : 0;
     msg->tid         = current ? current->id : 0;
     msg->status      = 0;
+    msg->token       = NULL;
+    msg->sec_level   = -1;
     msg->from        = NULL;
     msg->len         = len;
     if (len) memcpy( msg->data, data, len );
@@ -247,13 +279,13 @@ static void purge_messages_from( struct alpc_port *conn, struct alpc_port *from 
     {
         if (msg->from != from) continue;
         list_remove( &msg->entry );
-        free( msg );
+        free_message( msg );
     }
     LIST_FOR_EACH_ENTRY_SAFE( out, out_next, &conn->outstanding, struct alpc_outstanding, entry )
     {
         if (out->from != from) continue;
         list_remove( &out->entry );
-        free( out );
+        free_outstanding( out );
     }
 }
 
@@ -316,12 +348,12 @@ static void alpc_port_destroy( struct object *obj )
                 queue_message( msg->from->peer, reply );
             }
         }
-        free( msg );
+        free_message( msg );
     }
     LIST_FOR_EACH_ENTRY_SAFE( out, out_next, &port->outstanding, struct alpc_outstanding, entry )
     {
         list_remove( &out->entry );
-        free( out );
+        free_outstanding( out );
     }
     release_object( port->thread );
 }
@@ -408,7 +440,6 @@ DECL_HANDLER(alpc_connect)
     }
     init_port( client, COMMUNICATION_PORT, req->port_flags, conn->max_msg_len );
     client->is_client = 1;
-    client->qos_level = req->qos_level;
     if (!(server = alloc_object( &alpc_port_ops )))
     {
         release_object( client );
@@ -416,7 +447,6 @@ DECL_HANDLER(alpc_connect)
         return;
     }
     init_port( server, COMMUNICATION_PORT, req->port_flags, conn->max_msg_len );
-    server->qos_level = req->qos_level;
     server->conn = (struct alpc_port *)grab_object( conn );
     server->peer = client;
     client->peer = server;  /* the reference of the allocation */
@@ -429,6 +459,7 @@ DECL_HANDLER(alpc_connect)
         return;
     }
     msg->from = server;
+    capture_sender_token( msg, req->sec_level );
 
     if ((reply->handle = alloc_handle( current->process, client, ALPC_PORT_ALL_ACCESS, 0 )))
     {
@@ -437,7 +468,7 @@ DECL_HANDLER(alpc_connect)
     }
     else
     {
-        free( msg );
+        free_message( msg );
     }
     release_object( client );
     release_object( conn );
@@ -472,7 +503,7 @@ DECL_HANDLER(alpc_accept)
         server = out->from;
         callback_id = out->callback_id;
         list_remove( &out->entry );
-        free( out );
+        free_outstanding( out );
         found = 1;
         break;
     }
@@ -501,7 +532,7 @@ DECL_HANDLER(alpc_accept)
     {
         if (!(reply->handle = alloc_handle( current->process, server, ALPC_PORT_ALL_ACCESS, 0 )))
         {
-            free( msg );
+            free_message( msg );
             release_object( conn );
             return;
         }
@@ -553,7 +584,7 @@ DECL_HANDLER(alpc_send_receive)
                     client = out->from->peer;
                     callback_id = out->callback_id;
                     list_remove( &out->entry );
-                    free( out );
+                    free_outstanding( out );
                     found = 1;
                     break;
                 }
@@ -589,6 +620,7 @@ DECL_HANDLER(alpc_send_receive)
             }
             id = ++next_message_id;
             if (!(msg = alloc_message( ALPC_TYPE_REQUEST | ALPC_TYPE_RECEIVED_FLAG, id, ++next_callback_id, data, len ))) goto done;
+            capture_sender_token( msg, req->sec_level );
             if (port->is_client)
             {
                 server = port->peer;
@@ -640,32 +672,34 @@ recv:
                 out->id          = msg->id;
                 out->callback_id = msg->callback_id;
                 out->is_connect  = (msg->type & 0xff) == ALPC_TYPE_CONNECTION_REQUEST;
-                out->pid         = msg->pid;
-                out->tid         = msg->tid;
+                out->token       = msg->token;  /* the record owns it from now on */
+                out->sec_level   = msg->sec_level;
+                msg->token       = NULL;
                 out->from        = msg->from;
                 list_add_tail( &conn->outstanding, &out->entry );
             }
         }
         if (msg->len) set_reply_data( msg->data, msg->len );
-        free( msg );
+        free_message( msg );
     }
 
 done:
     release_object( port );
 }
 
-/* Impersonate the sender of a message. The message is the one the server received on this port, found by the
- * id the server gave it; what the header says about the sender is not used. The port must allow impersonation, the
- * level the client allows (its quality of service) limits what the thread gets. */
+/* Impersonate the sender of a message. The message is the one the server received on this port, found by the id the
+ * server gave it; what the header says about the sender is not used. The thread gets the token the sending thread had when
+ * it sent the message (not its token of now: ids are reused and tokens change), if the message came with a security
+ * attribute; without it the call succeeds and does nothing, as on Windows. The port must allow impersonation. The level is
+ * the lowest of what the sender gave in its security attribute and what the server may have of this client (the rule of the
+ * named pipes: identification only, unless the server has SeImpersonatePrivilege or is the same user and not less
+ * trusted). Not given: the delegation level (capped to impersonation). */
 DECL_HANDLER(alpc_impersonate)
 {
     struct alpc_port *port, *conn;
     struct alpc_outstanding *out;
-    struct alpc_port *from = NULL;
-    unsigned int pid = 0, tid = 0;
-    struct thread *thread;
-    struct token *token, *copy;
-    int level;
+    struct token *token = NULL, *copy;
+    int level = -1, found = 0, allowed;
 
     if (!(port = get_port( req->handle ))) return;
     conn = port->type == CONNECTION_PORT ? port : port->conn;
@@ -675,14 +709,14 @@ DECL_HANDLER(alpc_impersonate)
         LIST_FOR_EACH_ENTRY( out, &conn->outstanding, struct alpc_outstanding, entry )
         {
             if (out->id != req->msg_id || (port->type != CONNECTION_PORT && out->from != port)) continue;
-            from = out->from;
-            pid = out->pid;
-            tid = out->tid;
+            token = out->token;
+            level = out->sec_level;
+            found = 1;
             break;
         }
     }
     /* the message is looked up first, then the port is asked (the order Windows answers in) */
-    if (!from)
+    if (!found)
     {
         release_object( port );
         set_error( STATUS_INVALID_MESSAGE );
@@ -696,32 +730,13 @@ DECL_HANDLER(alpc_impersonate)
     }
     release_object( port );
 
-    /* the level the client allows: anonymous gives nothing, identification only the identity */
-    level = from->qos_level < 0 ? SecurityImpersonation : from->qos_level;
-    if (level < SecurityIdentification)
-    {
-        set_error( STATUS_BAD_IMPERSONATION_LEVEL );
-        return;
-    }
-    if (level > SecurityImpersonation) level = SecurityImpersonation;
+    if (!token) return;  /* no security attribute: nothing to impersonate */
 
-    if (!(thread = get_thread_from_id( tid ))) return;
-    if (thread->process->id != pid)
-    {
-        release_object( thread );
-        set_error( STATUS_INVALID_MESSAGE );
-        return;
-    }
-    token = thread_get_impersonation_token( thread );
-    if (!token)
-    {
-        release_object( thread );
-        set_error( STATUS_NO_TOKEN );
-        return;
-    }
-    copy = token_duplicate( token, 0, level, NULL, NULL, 0, NULL, 0, 0 );
-    release_object( thread );
-    if (!copy) return;
+    if (level > SecurityImpersonation) level = SecurityImpersonation;
+    allowed = token_impersonation_level( token, current->process->token );
+    if (allowed < level) level = allowed;
+
+    if (!(copy = token_duplicate( token, 0, level, NULL, NULL, 0, NULL, 0, 0 ))) return;
     if (current->token) release_object( current->token );
     current->token = copy;
 }

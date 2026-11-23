@@ -39,8 +39,8 @@ struct alpc_result
 };
 
 /* one request to the server: send a message (data after the header) and/or take one from the queue */
-static NTSTATUS server_send_receive( HANDLE port, ULONG flags, const ALPC_PORT_MESSAGE *send_msg, void *recv_data,
-                                     ULONG max_recv, int has_recv, struct alpc_result *r )
+static NTSTATUS server_send_receive( HANDLE port, ULONG flags, const ALPC_PORT_MESSAGE *send_msg, int sec_level,
+                                     void *recv_data, ULONG max_recv, int has_recv, struct alpc_result *r )
 {
     NTSTATUS status;
 
@@ -52,6 +52,7 @@ static NTSTATUS server_send_receive( HANDLE port, ULONG flags, const ALPC_PORT_M
         req->has_send = send_msg != NULL;
         req->has_recv = has_recv;
         req->max_recv = max_recv;
+        req->sec_level = sec_level;
         if (send_msg)
         {
             req->msg_id = send_msg->MessageId;
@@ -109,6 +110,18 @@ static void *get_attribute( ALPC_MESSAGE_ATTRIBUTES *attrs, ULONG flag )
     return (char *)attrs + offset;
 }
 
+/* the impersonation level of the security attribute of a message that is sent, -1 if it has none */
+static int get_security_level( ALPC_MESSAGE_ATTRIBUTES *attrs )
+{
+    ALPC_SECURITY_ATTR *sec;
+
+    if (!attrs || !(attrs->ValidAttributes & ALPC_MESSAGE_SECURITY_ATTRIBUTE) ||
+        !(attrs->AllocatedAttributes & ALPC_MESSAGE_SECURITY_ATTRIBUTE))
+        return -1;
+    sec = get_attribute( attrs, ALPC_MESSAGE_SECURITY_ATTRIBUTE );
+    return sec->QoS ? sec->QoS->ImpersonationLevel : SecurityImpersonation;
+}
+
 static void fill_attributes( ALPC_MESSAGE_ATTRIBUTES *attrs, const struct alpc_result *r )
 {
     if (!attrs) return;
@@ -137,17 +150,18 @@ static const LARGE_INTEGER *absolute_timeout( const LARGE_INTEGER *timeout, LARG
 }
 
 /* send (the first time) and receive; wait for a message to arrive while the queue is empty */
-static NTSTATUS send_wait_receive( HANDLE port, ULONG flags, const ALPC_PORT_MESSAGE *send_msg, void *recv_data,
-                                   ULONG max_recv, int has_recv, const LARGE_INTEGER *timeout, struct alpc_result *r )
+static NTSTATUS send_wait_receive( HANDLE port, ULONG flags, const ALPC_PORT_MESSAGE *send_msg, int sec_level,
+                                   void *recv_data, ULONG max_recv, int has_recv, const LARGE_INTEGER *timeout,
+                                   struct alpc_result *r )
 {
     LARGE_INTEGER abs_buf;
     const LARGE_INTEGER *deadline = absolute_timeout( timeout, &abs_buf );
-    NTSTATUS status = server_send_receive( port, flags, send_msg, recv_data, max_recv, has_recv, r );
+    NTSTATUS status = server_send_receive( port, flags, send_msg, sec_level, recv_data, max_recv, has_recv, r );
 
     while (has_recv && status == STATUS_PENDING)
     {
         if ((status = NtWaitForSingleObject( port, FALSE, deadline )) != STATUS_WAIT_0) return status;
-        status = server_send_receive( port, flags & ~ALPC_MSGFLG_REPLY, NULL, recv_data, max_recv, has_recv, r );
+        status = server_send_receive( port, flags & ~ALPC_MSGFLG_REPLY, NULL, -1, recv_data, max_recv, has_recv, r );
     }
     return status;
 }
@@ -214,7 +228,7 @@ NTSTATUS WINAPI NtAlpcConnectPort( HANDLE *port_handle, UNICODE_STRING *port_nam
     {
         req->flags = flags;
         req->port_flags = port_attr ? port_attr->Flags : 0;
-        req->qos_level = port_attr ? port_attr->SecurityQos.ImpersonationLevel : -1;
+        req->sec_level = get_security_level( send_msg_attr );
         wine_server_add_data( req, objattr, len );
         if (connect_msg && connect_msg->DataLength) wine_server_add_data( req, connect_msg + 1, connect_msg->DataLength );
         if (!(status = wine_server_call( req ))) handle = wine_server_ptr_handle( reply->handle );
@@ -230,7 +244,7 @@ NTSTATUS WINAPI NtAlpcConnectPort( HANDLE *port_handle, UNICODE_STRING *port_nam
     }
     else reply_msg = NULL;
 
-    status = send_wait_receive( handle, 0, NULL, reply_data, max_reply, TRUE, timeout, &r );
+    status = send_wait_receive( handle, 0, NULL, -1, reply_data, max_reply, TRUE, timeout, &r );
     if (status == STATUS_BUFFER_TOO_SMALL && connect_msg_size) *connect_msg_size = sizeof(*connect_msg) + r.data_len;
     if (!status && r.status) status = r.status;
     if (status)
@@ -347,7 +361,8 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, ULONG flags,
         }
     }
 
-    status = send_wait_receive( port_handle, flags, send_msg, recv_data, max_recv, recv_msg != NULL, timeout, &r );
+    status = send_wait_receive( port_handle, flags, send_msg, get_security_level( send_msg_attr ), recv_data, max_recv,
+                                recv_msg != NULL, timeout, &r );
     TRACE( "-> %#x send id %u cb %u type %#x len %u, received id %u cb %u type %#x len %u\n", (unsigned int)status,
            send_msg ? (unsigned int)send_msg->MessageId : 0, send_msg ? (unsigned int)send_msg->CallbackId : 0,
            send_msg ? (unsigned int)send_msg->Type : 0, send_msg ? (unsigned int)send_msg->DataLength : 0,

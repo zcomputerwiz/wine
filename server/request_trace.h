@@ -3720,7 +3720,7 @@ static void dump_alpc_connect_request( const struct alpc_connect_request *req )
 {
     fprintf( stderr, " flags=%08x", req->flags );
     fprintf( stderr, ", port_flags=%08x", req->port_flags );
-    fprintf( stderr, ", qos_level=%d", req->qos_level );
+    fprintf( stderr, ", sec_level=%d", req->sec_level );
     dump_varargs_object_attributes( ", obj_attr=", cur_size );
     dump_varargs_bytes( ", data=", cur_size );
 }
@@ -3753,6 +3753,7 @@ static void dump_alpc_send_receive_request( const struct alpc_send_receive_reque
     fprintf( stderr, ", has_recv=%d", req->has_recv );
     fprintf( stderr, ", msg_id=%08x", req->msg_id );
     fprintf( stderr, ", max_recv=%08x", req->max_recv );
+    fprintf( stderr, ", sec_level=%d", req->sec_level );
     dump_varargs_bytes( ", data=", cur_size );
 }
 

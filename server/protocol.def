@@ -4516,7 +4516,7 @@ enum inproc_sync_type
 @REQ(alpc_connect)
     unsigned int        flags;          /* connection flags */
     unsigned int        port_flags;     /* flags of the port attributes of the client */
-    int                 qos_level;      /* impersonation level of the quality of service, -1 if there are no attributes */
+    int                 sec_level;      /* impersonation level of the security attribute of the connection message, -1 if none */
     VARARG(obj_attr,object_attributes); /* object attributes (the port name) */
     VARARG(data,bytes);                 /* connection message data */
 @REPLY
@@ -4545,6 +4545,7 @@ enum inproc_sync_type
     int                 has_recv;       /* a message is received */
     unsigned int        msg_id;         /* id in the header of the sent message (a reply) */
     unsigned int        max_recv;       /* size of the data the caller can take */
+    int                 sec_level;      /* impersonation level of the security attribute of the sent message, -1 if none */
     VARARG(data,bytes);                 /* data of the sent message */
 @REPLY
     int                 has_msg;        /* a message was received */

@@ -32,6 +32,7 @@ DECL_FUNCPTR(AlpcInitializeMessageAttribute)
 DECL_FUNCPTR(NtAlpcAcceptConnectPort)
 DECL_FUNCPTR(NtAlpcConnectPort)
 DECL_FUNCPTR(NtAlpcCreatePort)
+DECL_FUNCPTR(NtAlpcCreateSecurityContext)
 DECL_FUNCPTR(NtAlpcImpersonateClientOfPort)
 DECL_FUNCPTR(NtAlpcSendWaitReceivePort)
 
@@ -52,6 +53,7 @@ static void init_functions(void)
     LOAD_FUNCPTR(NtAlpcAcceptConnectPort)
     LOAD_FUNCPTR(NtAlpcConnectPort)
     LOAD_FUNCPTR(NtAlpcCreatePort)
+    LOAD_FUNCPTR(NtAlpcCreateSecurityContext)
     LOAD_FUNCPTR(NtAlpcImpersonateClientOfPort)
     LOAD_FUNCPTR(NtAlpcSendWaitReceivePort)
 
@@ -829,6 +831,178 @@ static void test_alpc_security(void)
     HeapFree(GetProcessHeap(), 0, acl);
 }
 
+struct tok_results
+{
+    NTSTATUS recv, imp, open;
+    DWORD restricted, level;
+};
+
+static struct tok_results tok_results;
+static HANDLE tok_port, tok_sent;
+
+static DWORD WINAPI tok_server(void *arg)
+{
+    struct test_msg msg, reply;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    LARGE_INTEGER timeout;
+    HANDLE comm = NULL, token;
+    ULONG len;
+    SIZE_T size;
+
+    memset(&tok_results, 0, sizeof(tok_results));
+    size = sizeof(msg);
+    timeout.QuadPart = -50000000;
+    tok_results.recv = pNtAlpcSendWaitReceivePort(tok_port, 0, NULL, NULL, &msg.header, &size, NULL, &timeout);
+    if (tok_results.recv) return 0;
+    init_port_attr(&port_attr, 0, 0x1000);
+    init_test_msg(&reply, "OK");
+    reply.header.MessageId = msg.header.MessageId;
+    pNtAlpcAcceptConnectPort(&comm, tok_port, 0, NULL, &port_attr, NULL, &reply.header, NULL, TRUE);
+
+    size = sizeof(msg);
+    timeout.QuadPart = -50000000;
+    tok_results.recv = pNtAlpcSendWaitReceivePort(tok_port, 0, NULL, NULL, &msg.header, &size, NULL, &timeout);
+    if (tok_results.recv) return 0;
+
+    /* the client has changed its own token since it sent the message */
+    WaitForSingleObject(tok_sent, 10000);
+
+    tok_results.imp = pNtAlpcImpersonateClientOfPort(tok_port, &msg.header, NULL);
+    tok_results.open = NtOpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token);
+    if (!tok_results.open)
+    {
+        NtQueryInformationToken(token, TokenIsRestricted, &tok_results.restricted, sizeof(DWORD), &len);
+        NtQueryInformationToken(token, TokenImpersonationLevel, &tok_results.level, sizeof(DWORD), &len);
+        CloseHandle(token);
+    }
+    revert_to_self();
+    if (comm) CloseHandle(comm);
+    return 0;
+}
+
+/* the client sends a request with a security attribute of the given level (-1: none) while it impersonates a restricted token */
+static void run_token_capture(const WCHAR *port_name, int level, HANDLE restricted_token)
+{
+    char attr_buffer[128];
+    ALPC_MESSAGE_ATTRIBUTES *attrs = (ALPC_MESSAGE_ATTRIBUTES *)attr_buffer;
+    SECURITY_QUALITY_OF_SERVICE qos = {sizeof(qos), level < 0 ? SecurityImpersonation : level, SECURITY_STATIC_TRACKING, TRUE};
+    ALPC_PORT_ATTRIBUTES port_attr;
+    OBJECT_ATTRIBUTES attr;
+    UNICODE_STRING name;
+    struct test_msg msg;
+    LARGE_INTEGER timeout;
+    HANDLE client = NULL, thread, none = NULL;
+    NTSTATUS status;
+    SIZE_T size, req;
+
+    RtlInitUnicodeString(&name, port_name);
+    InitializeObjectAttributes(&attr, &name, 0, NULL, NULL);
+    init_port_attr(&port_attr, ALPC_PORTFLG_ALLOWIMPERSONATION, 0x1000);
+    status = pNtAlpcCreatePort(&tok_port, &attr, &port_attr);
+    ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+    tok_sent = CreateEventW(NULL, FALSE, FALSE, NULL);
+    thread = CreateThread(NULL, 0, tok_server, NULL, 0, NULL);
+
+    init_test_msg(&msg, "hi");
+    size = sizeof(msg);
+    init_port_attr(&port_attr, 0, 0x1000);
+    timeout.QuadPart = -50000000;
+    status = pNtAlpcConnectPort(&client, &name, NULL, &port_attr, ALPC_SYNC_CONNECTION, NULL, &msg.header, &size,
+            NULL, NULL, &timeout);
+    ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+
+    status = NtSetInformationThread(GetCurrentThread(), ThreadImpersonationToken, &restricted_token, sizeof(restricted_token));
+    ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+    init_test_msg(&msg, "req");
+    if (level >= 0)
+    {
+        ALPC_SECURITY_ATTR *sec;
+
+        pAlpcInitializeMessageAttribute(ALPC_MESSAGE_SECURITY_ATTRIBUTE, attrs, sizeof(attr_buffer), &req);
+        sec = pAlpcGetMessageAttribute(attrs, ALPC_MESSAGE_SECURITY_ATTRIBUTE);
+        sec->Flags = 0;
+        sec->QoS = &qos;
+        sec->ContextHandle = NULL;
+        status = pNtAlpcCreateSecurityContext(client, 0, sec);
+        ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+        attrs->ValidAttributes = ALPC_MESSAGE_SECURITY_ATTRIBUTE;
+        status = pNtAlpcSendWaitReceivePort(client, 0, &msg.header, attrs, NULL, NULL, NULL, NULL);
+    }
+    else
+    {
+        status = pNtAlpcSendWaitReceivePort(client, 0, &msg.header, NULL, NULL, NULL, NULL, NULL);
+    }
+    ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+    NtSetInformationThread(GetCurrentThread(), ThreadImpersonationToken, &none, sizeof(none));
+    SetEvent(tok_sent);
+
+    WaitForSingleObject(thread, 10000);
+    CloseHandle(thread);
+    CloseHandle(tok_sent);
+    if (client) CloseHandle(client);
+    CloseHandle(tok_port);
+}
+
+static void test_alpc_impersonation_token(void)
+{
+    SID_IDENTIFIER_AUTHORITY world_auth = {SECURITY_WORLD_SID_AUTHORITY};
+    SECURITY_QUALITY_OF_SERVICE qos = {sizeof(qos), SecurityImpersonation, SECURITY_STATIC_TRACKING, TRUE};
+    HANDLE process_token, filtered, restricted;
+    OBJECT_ATTRIBUTES attr;
+    TOKEN_GROUPS *groups;
+    NTSTATUS status;
+    PSID world;
+
+    if (!pNtAlpcConnectPort || !pNtAlpcImpersonateClientOfPort || !pNtAlpcCreateSecurityContext)
+    {
+        win_skip("ALPC security contexts are unavailable.\n");
+        return;
+    }
+
+    status = NtOpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY, &process_token);
+    ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+    RtlAllocateAndInitializeSid(&world_auth, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &world);
+    groups = HeapAlloc(GetProcessHeap(), 0, sizeof(*groups));
+    groups->GroupCount = 1;
+    groups->Groups[0].Sid = world;
+    groups->Groups[0].Attributes = 0;
+    status = NtFilterToken(process_token, 0, NULL, NULL, groups, &filtered);
+    if (status)
+    {
+        skip("NtFilterToken failed, status %#lx.\n", status);
+        goto done;
+    }
+    InitializeObjectAttributes(&attr, NULL, 0, NULL, NULL);
+    attr.SecurityQualityOfService = &qos;
+    status = NtDuplicateToken(filtered, TOKEN_ALL_ACCESS, &attr, FALSE, TokenImpersonation, &restricted);
+    ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+
+    /* the token that is impersonated is the one the sender had when it sent the message, at the level it gave */
+    run_token_capture(L"\\BaseNamedObjects\\test_alpc_token_2_port", 2, restricted);
+    ok(tok_results.imp == STATUS_SUCCESS, "Got unexpected status %#lx.\n", tok_results.imp);
+    ok(tok_results.open == STATUS_SUCCESS, "Got unexpected status %#lx.\n", tok_results.open);
+    ok(tok_results.restricted == 1, "Got unexpected restricted %lu.\n", tok_results.restricted);
+    ok(tok_results.level == SecurityImpersonation, "Got unexpected level %lu.\n", tok_results.level);
+
+    run_token_capture(L"\\BaseNamedObjects\\test_alpc_token_1_port", 1, restricted);
+    ok(tok_results.imp == STATUS_SUCCESS, "Got unexpected status %#lx.\n", tok_results.imp);
+    ok(tok_results.open == STATUS_SUCCESS, "Got unexpected status %#lx.\n", tok_results.open);
+    ok(tok_results.restricted == 1, "Got unexpected restricted %lu.\n", tok_results.restricted);
+    ok(tok_results.level == SecurityIdentification, "Got unexpected level %lu.\n", tok_results.level);
+
+    /* without a security attribute the call succeeds and gives the thread no token */
+    run_token_capture(L"\\BaseNamedObjects\\test_alpc_token_none_port", -1, restricted);
+    ok(tok_results.imp == STATUS_SUCCESS, "Got unexpected status %#lx.\n", tok_results.imp);
+    ok(tok_results.open == STATUS_NO_TOKEN, "Got unexpected status %#lx.\n", tok_results.open);
+
+    CloseHandle(restricted);
+    CloseHandle(filtered);
+done:
+    HeapFree(GetProcessHeap(), 0, groups);
+    RtlFreeSid(world);
+    CloseHandle(process_token);
+}
+
 START_TEST(alpc)
 {
     init_functions();
@@ -839,4 +1013,5 @@ START_TEST(alpc)
     test_NtAlpcCreatePort();
     test_alpc_messages();
     test_alpc_security();
+    test_alpc_impersonation_token();
 }
