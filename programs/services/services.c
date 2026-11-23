@@ -1495,7 +1495,28 @@ static DWORD WINAPI process_monitor_thread_proc( void *arg )
  * and Wine's services that work on the session's devices, desktop, processes or user (printing, scanners, smart
  * cards, WMI, terminal services, scheduled tasks and transfers run as the user, msiexec's installs, E1's broker
  * until T6). Session 0 runs them for itself too. Every other service, in practice those that programs install,
- * runs once, in session 0. */
+ * runs once, in session 0, unless the machine names it in HKLM\Software\Wine\Services, SessionServices (REG_MULTI_SZ):
+ * a program's service that has to share process ids with that program's processes, which session 0 cannot (each
+ * server numbers its own processes), runs in every session too. */
+static WCHAR *extra_session_services;   /* the configured list, read once in a forwarding session */
+
+static void read_extra_session_services(void)
+{
+    DWORD type, size = 0;
+    WCHAR *buf;
+
+    if (RegGetValueW( HKEY_LOCAL_MACHINE, L"Software\\Wine\\Services", L"SessionServices",
+                      RRF_RT_REG_MULTI_SZ, &type, NULL, &size ) || size < 2 * sizeof(WCHAR)) return;
+    if (!(buf = calloc( 1, size + 2 * sizeof(WCHAR) ))) return;
+    if (RegGetValueW( HKEY_LOCAL_MACHINE, L"Software\\Wine\\Services", L"SessionServices",
+                      RRF_RT_REG_MULTI_SZ, &type, buf, &size ))
+    {
+        free( buf );
+        return;
+    }
+    extra_session_services = buf;
+}
+
 BOOL is_session_service(const WCHAR *name, DWORD type)
 {
     static const WCHAR * const session_services[] =
@@ -1504,12 +1525,15 @@ BOOL is_session_service(const WCHAR *name, DWORD type)
         L"RpcSs", L"SamSs", L"scardsvr", L"Schedule", L"Spooler", L"StiSvc", L"TermService", L"Winmgmt",
         L"wexelevate",
     };
+    const WCHAR *p;
     unsigned int i;
 
     if (type & (SERVICE_KERNEL_DRIVER | SERVICE_FILE_SYSTEM_DRIVER)) return TRUE;
     if (!wcsnicmp(name, L"Winedevice", 10)) return TRUE;  /* the driver hosts (add_winedevice_service) */
     for (i = 0; i < ARRAY_SIZE(session_services); i++)
         if (!wcsicmp(name, session_services[i])) return TRUE;
+    for (p = extra_session_services; p && *p; p += wcslen(p) + 1)
+        if (!wcsicmp(name, p)) return TRUE;
     return FALSE;
 }
 
@@ -1520,7 +1544,11 @@ static void init_forward_mode(void)
     DWORD session = 0;
 
     if (!ProcessIdToSessionId(GetCurrentProcessId(), &session) || !session) return;
-    if ((forward_mode = forward_available())) WINE_TRACE("services that are not the session's are session 0's\n");
+    if ((forward_mode = forward_available()))
+    {
+        WINE_TRACE("services that are not the session's are session 0's\n");
+        read_extra_session_services();
+    }
 }
 
 int __cdecl main(int argc, char *argv[])
