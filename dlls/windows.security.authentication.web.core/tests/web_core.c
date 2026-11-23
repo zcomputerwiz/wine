@@ -899,7 +899,12 @@ static DWORD run_child_args( HANDLE token, const char *args )
         ok( 0, "CreateProcess failed: %lu.\n", GetLastError() );
         return code;
     }
-    ok( !WaitForSingleObject( pi.hProcess, 120000 ), "the child did not finish.\n" );
+    if (WaitForSingleObject( pi.hProcess, 120000 ))
+    {
+        ok( 0, "the child did not finish.\n" );
+        TerminateProcess( pi.hProcess, code );   /* the test's own child: not left running */
+        WaitForSingleObject( pi.hProcess, 5000 );
+    }
     GetExitCodeProcess( pi.hProcess, &code );
     CloseHandle( pi.hProcess );
     CloseHandle( pi.hThread );
@@ -1062,7 +1067,12 @@ static void test_broker_impostor(void)
     /* another image: the client connects and leaves without writing its request (1); 3 is the bug */
     ok( wait_pipe( name ), "the impostor's pipe did not appear.\n" );
     run_child( NULL );
-    ok( !WaitForSingleObject( pi.hProcess, 120000 ), "the impostor did not finish.\n" );
+    if (WaitForSingleObject( pi.hProcess, 120000 ))
+    {
+        ok( 0, "the impostor did not finish.\n" );
+        TerminateProcess( pi.hProcess, 0 );
+        WaitForSingleObject( pi.hProcess, 5000 );
+    }
     GetExitCodeProcess( pi.hProcess, &code );
     ok( code == 1, "the impostor's pipe: got %lu (3: the client sent its request to it).\n", code );
     CloseHandle( pi.hProcess );
