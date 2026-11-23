@@ -54,6 +54,7 @@
 #include "winternl.h"
 #include "unix_private.h"
 #include "wine/wex_sysrun_conf.h"
+#include "wine/wex_sysrun_peer.h"
 
 #define SYSRUN_CONF     "/etc/wineexplorer/sysrun.conf"
 #define SYSRUN_LAUNCHER "/usr/local/libexec/wineexplorer/wex-sysrun"
@@ -139,38 +140,18 @@ void sysrun_warn_refused( const char *mode )
 
 /* Is the process at the other end of the socket the system role server of this user? It has no write access
  * to the machine root unless it is raised, so the check is on the saved group: only a process that the launcher
- * started has the system group as its saved group and the user's own ids otherwise. The caller must run with
- * the system group, so a server that a user started without the launcher is never trusted. */
+ * started has the system group as its saved group and the user's own ids otherwise (wine/wex_sysrun_peer.h, with
+ * the pidfd pin). The caller must run with the system group, so a server that a user started without the launcher
+ * is never trusted. */
 BOOL sysrun_server_ok( int fd )
 {
-    unsigned int ruid, euid, suid, fuid, rgid, egid, sgid, fgid;
-    char path[64], buf[8192], *p;
-    struct ucred cred;
-    socklen_t len = sizeof(cred);
-    gid_t gid = get_system_gid();
-    BOOL got_uid = FALSE, got_gid = FALSE;
-    ssize_t n;
-    int sfd;
+    struct wex_sysrun_peer_rule rule;
 
-    if (gid == (gid_t)-1 || getsockopt( fd, SOL_SOCKET, SO_PEERCRED, &cred, &len ) || cred.pid <= 0) return FALSE;
-    if (cred.uid != getuid()) return FALSE;
-    snprintf( path, sizeof(path), "/proc/%d/status", (int)cred.pid );
-    if ((sfd = open( path, O_RDONLY | O_CLOEXEC )) == -1) return FALSE;
-    n = read( sfd, buf, sizeof(buf) - 1 );
-    close( sfd );
-    if (n <= 0) return FALSE;
-    buf[n] = 0;
-    for (p = buf; p; p = strchr( p, '\n' ))
-    {
-        if (*p == '\n') p++;
-        if (!strncmp( p, "Uid:", 4 ))
-            got_uid = sscanf( p + 4, "%u %u %u %u", &ruid, &euid, &suid, &fuid ) == 4;
-        else if (!strncmp( p, "Gid:", 4 ))
-            got_gid = sscanf( p + 4, "%u %u %u %u", &rgid, &egid, &sgid, &fgid ) == 4;
-    }
-    if (!got_uid || !got_gid) return FALSE;
-    return ruid == getuid() && euid == ruid && suid == ruid && fuid == ruid &&
-           rgid == getgid() && sgid == gid && (egid == rgid || egid == gid);
+    rule.uid = getuid();
+    rule.real_gid = getgid();
+    rule.sys_gid = get_system_gid();
+    rule.server_name = 0;
+    return wex_sysrun_peer_ok( fd, &rule );
 }
 
 /* A process of the system role is not dumpable (it has the system group), so the user cannot ptrace it. A service
