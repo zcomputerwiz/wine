@@ -5204,3 +5204,15 @@ HRESULT WINAPI DCompositionCreateDevice3(IUnknown *rendering_device, REFIID iid,
 
     return dcomp_device_create(3, rendering_device, iid, device);
 }
+
+/*
+ * Export 1040 of the real dcomp.dll, named DCompositionCreateSharedVisualHandle (tests/uwp/alpc/dcomp-exports-probe.c): imported
+ * by ordinal by dcompi.dll of the Windows App Runtime. The signature is not known (it is not the shape of
+ * DCompositionCreateSurfaceHandle: Windows 11 answers E_INVALIDARG to that, tests/uwp/alpc/dcomp-visualhandle-probe.c); the
+ * arguments are logged and the call is refused until it is.
+ */
+HRESULT WINAPI DCompositionCreateSharedVisualHandle(void *a, void *b, void *c, void *d)
+{
+    FIXME("(%p, %p, %p, %p): stub (caller %p)\n", a, b, c, d, __builtin_return_address(0));
+    return E_NOTIMPL;
+}

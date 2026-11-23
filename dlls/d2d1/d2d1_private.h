@@ -755,6 +755,7 @@ struct d2d_factory
 {
     ID2D1Factory7 ID2D1Factory7_iface;
     ID2D1Multithread ID2D1Multithread_iface;
+    struct d2d_private_iface { const void *const *vtbl; } private_iface;  /* {6f72c0a2-6db7-46e9-9b62-b58a23f4928b}, see factory.c */
     LONG refcount;
 
     ID3D10Device1 *device;

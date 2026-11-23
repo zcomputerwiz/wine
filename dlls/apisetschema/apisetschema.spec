@@ -1,5 +1,6 @@
 apiset api-ms-win-appmodel-runtime-internal-l1-1-1 = kernelbase.dll
 apiset api-ms-win-appmodel-runtime-l1-1-2 = kernelbase.dll
+apiset api-ms-win-appmodel-unlock-l1-1-0 = kernelbase.dll
 apiset api-ms-win-audiocore-spatial-config-l1-1-0 = windows.media.devices.dll
 apiset api-ms-win-base-bootconfig-l1-1-0 = advapi32.dll
 apiset api-ms-win-base-util-l1-1-0 = advapi32.dll

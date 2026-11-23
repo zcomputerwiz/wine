@@ -1898,6 +1898,48 @@ void WINAPI RtlGetDeviceFamilyInfoEnum(ULONGLONG *version, DWORD *family, DWORD 
 }
 
 /*********************************************************************
+ *           NtQueryWnfStateData [NTDLL.@]
+ *
+ * Windows Notification Facility: not implemented; every state reads as never published (no data, change stamp 0).
+ * The imports of dwmcorei.dll of the Windows App Runtime need the three functions to load.
+ */
+NTSTATUS WINAPI NtQueryWnfStateData(const void *state_name, const void *type_id, const void *scope, ULONG *change_stamp,
+                                    void *buffer, ULONG *size)
+{
+    FIXME("%p %p %p %p %p %p: stub\n", state_name, type_id, scope, change_stamp, buffer, size);
+
+    if (change_stamp) *change_stamp = 0;
+    if (size) *size = 0;
+    return STATUS_SUCCESS;
+}
+
+/*********************************************************************
+ *           RtlSubscribeWnfStateChangeNotification [NTDLL.@]
+ */
+NTSTATUS WINAPI RtlSubscribeWnfStateChangeNotification(void **subscription, const void *state_name, ULONG change_stamp,
+                                                       void *callback, void *context, const void *type_id,
+                                                       ULONG serialization_group, ULONG unknown)
+{
+    FIXME("%p %p %lu %p %p %p %lu %lu: semi-stub, no notification will come\n", subscription, state_name, change_stamp,
+          callback, context, type_id, serialization_group, unknown);
+
+    if (!subscription) return STATUS_INVALID_PARAMETER;
+    if (!(*subscription = RtlAllocateHeap( GetProcessHeap(), 0, sizeof(void *) ))) return STATUS_NO_MEMORY;
+    return STATUS_SUCCESS;
+}
+
+/*********************************************************************
+ *           RtlUnsubscribeWnfStateChangeNotification [NTDLL.@]
+ */
+NTSTATUS WINAPI RtlUnsubscribeWnfStateChangeNotification(void *subscription)
+{
+    FIXME("%p: semi-stub\n", subscription);
+
+    RtlFreeHeap( GetProcessHeap(), 0, subscription );
+    return STATUS_SUCCESS;
+}
+
+/*********************************************************************
  *           RtlConvertDeviceFamilyInfoToString [NTDLL.@]
  */
 DWORD WINAPI RtlConvertDeviceFamilyInfoToString(DWORD *device_family_size, DWORD *device_form_size,

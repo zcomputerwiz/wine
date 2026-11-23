@@ -1,1 +1,4 @@
 MODULE    = profapi.dll
+
+SOURCES = \
+	main.c

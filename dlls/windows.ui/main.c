@@ -74,6 +74,12 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     if (!wcscmp( buffer, RuntimeClass_Windows_UI_Text_FontWeights ))
         IActivationFactory_QueryInterface( fontweights_factory, &IID_IActivationFactory, (void **)factory );
 
+    if (!wcscmp( buffer, L"Windows.UI.Composition.Compositor" ))
+        IActivationFactory_QueryInterface( compositor_stub_factory, &IID_IActivationFactory, (void **)factory );
+
+    if (!wcscmp( buffer, L"WindowsUdk.Foundation.Metadata.ApiInformation" ))
+        IActivationFactory_QueryInterface( apiinfo_stub_factory, &IID_IActivationFactory, (void **)factory );
+
     if (*factory) return S_OK;
     return CLASS_E_CLASSNOTAVAILABLE;
 }

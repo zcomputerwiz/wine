@@ -38,6 +38,7 @@ SOURCES = \
 	settings_classes.c \
 	standarddataformats.c \
 	static_factory.c \
+	static_lifetime.c \
 	title_bar.c \
 	twinapi.appcore.rc \
 	user.c \

@@ -29,6 +29,7 @@ import "windows.foundation.idl";
 import "windows.system.idl";
 import "windows.devices.enumeration.idl";
 import "windows.ui.idl";
+import "windows.ui.composition.idl";
 import "windows.devices.input.idl";
 import "windows.ui.core.idl";
 import "windows.ui.input.idl";
@@ -43,6 +44,21 @@ namespace Windows.UI.ApplicationSettings {
     runtimeclass SettingsCommand;
     runtimeclass WebAccountCommand;
     runtimeclass WebAccountProviderCommand;
+}
+
+namespace Windows.UI.Composition {
+    runtimeclass Compositor;
+}
+
+namespace WindowsUdk.Foundation.Metadata {
+    [
+        activatable(Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    runtimeclass ApiInformation
+    {
+        [default] interface Windows.Foundation.IClosable;
+    }
 }
 
 namespace Windows.UI.Core {

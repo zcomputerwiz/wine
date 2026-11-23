@@ -3302,6 +3302,39 @@ static void dump_set_completion_info_request( const struct set_completion_info_r
     fprintf( stderr, ", chandle=%04x", req->chandle );
 }
 
+static void dump_create_completion_packet_request( const struct create_completion_packet_request *req )
+{
+    fprintf( stderr, " access=%08x", req->access );
+    dump_varargs_object_attributes( ", objattr=", cur_size );
+}
+
+static void dump_create_completion_packet_reply( const struct create_completion_packet_reply *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+}
+
+static void dump_associate_completion_packet_request( const struct associate_completion_packet_request *req )
+{
+    fprintf( stderr, " packet=%04x", req->packet );
+    fprintf( stderr, ", completion=%04x", req->completion );
+    fprintf( stderr, ", target=%04x", req->target );
+    dump_uint64( ", ckey=", &req->ckey );
+    dump_uint64( ", cvalue=", &req->cvalue );
+    dump_uint64( ", information=", &req->information );
+    fprintf( stderr, ", status=%08x", req->status );
+}
+
+static void dump_associate_completion_packet_reply( const struct associate_completion_packet_reply *req )
+{
+    fprintf( stderr, " already_signaled=%d", req->already_signaled );
+}
+
+static void dump_cancel_completion_packet_request( const struct cancel_completion_packet_request *req )
+{
+    fprintf( stderr, " packet=%04x", req->packet );
+    fprintf( stderr, ", remove_signaled=%d", req->remove_signaled );
+}
+
 static void dump_add_fd_completion_request( const struct add_fd_completion_request *req )
 {
     fprintf( stderr, " handle=%04x", req->handle );
@@ -3681,6 +3714,75 @@ static void dump_alpc_create_port_request( const struct alpc_create_port_request
 static void dump_alpc_create_port_reply( const struct alpc_create_port_reply *req )
 {
     fprintf( stderr, " handle=%04x", req->handle );
+}
+
+static void dump_alpc_connect_request( const struct alpc_connect_request *req )
+{
+    fprintf( stderr, " flags=%08x", req->flags );
+    fprintf( stderr, ", port_flags=%08x", req->port_flags );
+    fprintf( stderr, ", sec_level=%d", req->sec_level );
+    dump_varargs_object_attributes( ", obj_attr=", cur_size );
+    dump_varargs_bytes( ", data=", cur_size );
+}
+
+static void dump_alpc_connect_reply( const struct alpc_connect_reply *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    fprintf( stderr, ", msg_id=%08x", req->msg_id );
+}
+
+static void dump_alpc_accept_request( const struct alpc_accept_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    fprintf( stderr, ", msg_id=%08x", req->msg_id );
+    fprintf( stderr, ", accept=%d", req->accept );
+    dump_uint64( ", context=", &req->context );
+    dump_varargs_bytes( ", data=", cur_size );
+}
+
+static void dump_alpc_accept_reply( const struct alpc_accept_reply *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+}
+
+static void dump_alpc_send_receive_request( const struct alpc_send_receive_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    fprintf( stderr, ", flags=%08x", req->flags );
+    fprintf( stderr, ", has_send=%d", req->has_send );
+    fprintf( stderr, ", has_recv=%d", req->has_recv );
+    fprintf( stderr, ", msg_id=%08x", req->msg_id );
+    fprintf( stderr, ", max_recv=%08x", req->max_recv );
+    fprintf( stderr, ", sec_level=%d", req->sec_level );
+    dump_varargs_bytes( ", data=", cur_size );
+}
+
+static void dump_alpc_send_receive_reply( const struct alpc_send_receive_reply *req )
+{
+    fprintf( stderr, " has_msg=%d", req->has_msg );
+    fprintf( stderr, ", type=%08x", req->type );
+    fprintf( stderr, ", msg_id=%08x", req->msg_id );
+    fprintf( stderr, ", callback_id=%08x", req->callback_id );
+    fprintf( stderr, ", pid=%08x", req->pid );
+    fprintf( stderr, ", tid=%08x", req->tid );
+    fprintf( stderr, ", status=%08x", req->status );
+    fprintf( stderr, ", data_len=%08x", req->data_len );
+    fprintf( stderr, ", sequence=%08x", req->sequence );
+    fprintf( stderr, ", has_context=%d", req->has_context );
+    dump_uint64( ", port_context=", &req->port_context );
+    fprintf( stderr, ", sent_id=%08x", req->sent_id );
+    dump_varargs_bytes( ", data=", cur_size );
+}
+
+static void dump_alpc_disconnect_request( const struct alpc_disconnect_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+}
+
+static void dump_alpc_impersonate_request( const struct alpc_impersonate_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    fprintf( stderr, ", msg_id=%08x", req->msg_id );
 }
 
 static void dump_dwm_connect_request( const struct dwm_connect_request *req )
@@ -4072,6 +4174,9 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_thread_completion_request,
     (dump_func)dump_query_completion_request,
     (dump_func)dump_set_completion_info_request,
+    (dump_func)dump_create_completion_packet_request,
+    (dump_func)dump_associate_completion_packet_request,
+    (dump_func)dump_cancel_completion_packet_request,
     (dump_func)dump_add_fd_completion_request,
     (dump_func)dump_set_fd_disp_info_request,
     (dump_func)dump_set_fd_name_info_request,
@@ -4109,6 +4214,11 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_d3dkmt_sync_wait_request,
     (dump_func)dump_d3dkmt_sync_signal_request,
     (dump_func)dump_alpc_create_port_request,
+    (dump_func)dump_alpc_connect_request,
+    (dump_func)dump_alpc_accept_request,
+    (dump_func)dump_alpc_send_receive_request,
+    (dump_func)dump_alpc_disconnect_request,
+    (dump_func)dump_alpc_impersonate_request,
     (dump_func)dump_dwm_connect_request,
     (dump_func)dump_dwm_get_broker_capability_request,
     (dump_func)dump_dwm_broker_register_request,
@@ -4404,6 +4514,9 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_thread_completion_reply,
     (dump_func)dump_query_completion_reply,
     NULL,
+    (dump_func)dump_create_completion_packet_reply,
+    (dump_func)dump_associate_completion_packet_reply,
+    NULL,
     NULL,
     NULL,
     NULL,
@@ -4441,6 +4554,11 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_d3dkmt_sync_wait_reply,
     NULL,
     (dump_func)dump_alpc_create_port_reply,
+    (dump_func)dump_alpc_connect_reply,
+    (dump_func)dump_alpc_accept_reply,
+    (dump_func)dump_alpc_send_receive_reply,
+    NULL,
+    NULL,
     (dump_func)dump_dwm_connect_reply,
     (dump_func)dump_dwm_get_broker_capability_reply,
     (dump_func)dump_dwm_broker_register_reply,
@@ -4736,6 +4854,9 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "get_thread_completion",
     "query_completion",
     "set_completion_info",
+    "create_completion_packet",
+    "associate_completion_packet",
+    "cancel_completion_packet",
     "add_fd_completion",
     "set_fd_disp_info",
     "set_fd_name_info",
@@ -4773,6 +4894,11 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "d3dkmt_sync_wait",
     "d3dkmt_sync_signal",
     "alpc_create_port",
+    "alpc_connect",
+    "alpc_accept",
+    "alpc_send_receive",
+    "alpc_disconnect",
+    "alpc_impersonate",
     "dwm_connect",
     "dwm_get_broker_capability",
     "dwm_broker_register",
@@ -4861,6 +4987,7 @@ static const struct
     { "INVALID_IMAGE_WIN_16",        STATUS_INVALID_IMAGE_WIN_16 },
     { "INVALID_IMAGE_WIN_64",        STATUS_INVALID_IMAGE_WIN_64 },
     { "INVALID_LOCK_SEQUENCE",       STATUS_INVALID_LOCK_SEQUENCE },
+    { "INVALID_MESSAGE",             STATUS_INVALID_MESSAGE },
     { "INVALID_OWNER",               STATUS_INVALID_OWNER },
     { "INVALID_PARAMETER",           STATUS_INVALID_PARAMETER },
     { "INVALID_PARAMETER_1",         STATUS_INVALID_PARAMETER_1 },
@@ -4868,6 +4995,7 @@ static const struct
     { "INVALID_PARAMETER_3",         STATUS_INVALID_PARAMETER_3 },
     { "INVALID_PARAMETER_MIX",       STATUS_INVALID_PARAMETER_MIX },
     { "INVALID_PIPE_STATE",          STATUS_INVALID_PIPE_STATE },
+    { "INVALID_PORT_HANDLE",         STATUS_INVALID_PORT_HANDLE },
     { "INVALID_READ_MODE",           STATUS_INVALID_READ_MODE },
     { "INVALID_SECURITY_DESCR",      STATUS_INVALID_SECURITY_DESCR },
     { "INVALID_STATE_TRANSITION",    STATUS_INVALID_STATE_TRANSITION },
@@ -4921,6 +5049,7 @@ static const struct
     { "PIPE_LISTENING",              STATUS_PIPE_LISTENING },
     { "PIPE_NOT_AVAILABLE",          STATUS_PIPE_NOT_AVAILABLE },
     { "PORT_ALREADY_SET",            STATUS_PORT_ALREADY_SET },
+    { "PORT_CONNECTION_REFUSED",     STATUS_PORT_CONNECTION_REFUSED },
     { "PORT_DISCONNECTED",           STATUS_PORT_DISCONNECTED },
     { "PORT_MESSAGE_TOO_LONG",       STATUS_PORT_MESSAGE_TOO_LONG },
     { "PORT_NOT_SET",                STATUS_PORT_NOT_SET },

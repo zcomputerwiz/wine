@@ -693,9 +693,34 @@ static void init_funcs(void)
 #undef X
 }
 
+static void test_IsDeveloperModeEnabled(void)
+{
+    HRESULT (WINAPI *pIsDeveloperModeEnabled)( BOOL *enabled );
+    HMODULE module = LoadLibraryW( L"api-ms-win-appmodel-unlock-l1-1-0.dll" );
+    BOOL enabled;
+    HRESULT hr;
+
+    if (!module || !(pIsDeveloperModeEnabled = (void *)GetProcAddress( module, "IsDeveloperModeEnabled" )))
+    {
+        win_skip( "IsDeveloperModeEnabled is not available.\n" );
+        return;
+    }
+
+    enabled = 0x11111111;
+    hr = pIsDeveloperModeEnabled( &enabled );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( enabled == TRUE || enabled == FALSE, "got %#x.\n", enabled );
+
+    hr = pIsDeveloperModeEnabled( NULL );
+    ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+    FreeLibrary( module );
+}
+
 START_TEST(process)
 {
     init_funcs();
+
+    test_IsDeveloperModeEnabled();
 
     test_CompareObjectHandles();
     test_MapViewOfFile3();

@@ -5,6 +5,7 @@ SOURCES = \
 	accessibilitysettings.c \
 	accountssettings.c \
 	classes.idl \
+	compositor_stub.c \
 	corewindow.c \
 	dispatcher.c \
 	fontweights.c \

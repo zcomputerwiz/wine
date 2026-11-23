@@ -899,7 +899,7 @@
 @ stdcall IsDBCSLeadByte(long)
 @ stdcall IsDBCSLeadByteEx(long long)
 @ stdcall IsDebuggerPresent()
-# @ stub IsDeveloperModeEnabled
+@ stdcall IsDeveloperModeEnabled(ptr)
 # @ stub IsDeveloperModePolicyApplied
 # @ stub IsEnclaveTypeSupported
 # @ stub IsGlobalizationUserSettingsKeyRedirected

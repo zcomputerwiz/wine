@@ -19,6 +19,7 @@
  */
 
 #include <stdarg.h>
+#include <math.h>
 
 #include "windef.h"
 #include "winbase.h"
@@ -26,6 +27,7 @@
 #include "wine/test.h"
 
 BOOL WINAPI IsWellFormedTag( const WCHAR *tag );
+HRESULT WINAPI GetDistanceOfClosestLanguageInList( const WCHAR *language, const WCHAR *list, LONG delimiter, double *score );
 
 /* the answers of Windows 11 (10.0.26100) */
 static const struct
@@ -78,6 +80,55 @@ static void test_IsWellFormedTag(void)
     }
 }
 
+/* the answers of Windows 11: the score is 1 for the same tag, 0.1 less for every position in the list; no match gives ERROR_NO_MATCH */
+static const struct
+{
+    const WCHAR *language, *list;
+    double score;   /* 0: no match */
+} scores[] =
+{
+    { L"en-US", L"en-US", 1.0 }, { L"en-US", L"en", 0.98 }, { L"en", L"en-US", 0.98 }, { L"fr", L"fr-CA", 0.98 },
+    { L"en-US", L"fr-FR", 0.0 }, { L"en-US", L"fr-FR;en-US", 0.9 }, { L"en-US", L"", 0.0 }, { L"", L"en-US", 0.0 },
+    { L"zh-Hans-CN", L"zh-CN", 1.0 }, { L"zh-Hans-CN", L"zh-TW", 0.0 }, { L"EN-us", L"en-US", 1.0 },
+    { L"und", L"en-US", 0.96 }, { L"en-US", L"und", 0.0 }, { L"x-private", L"x-private", 0.0 }, { L"en-US", L"en-US,fr-FR", 0.0 },
+};
+
+static void test_GetDistanceOfClosestLanguageInList(void)
+{
+    double score;
+    HRESULT hr;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(scores); i++)
+    {
+        score = -7.0;
+        hr = GetDistanceOfClosestLanguageInList( scores[i].language, scores[i].list, ';', &score );
+        if (scores[i].score)
+        {
+            ok( hr == S_OK, "%s, %s: got %#lx.\n", debugstr_w( scores[i].language ), debugstr_w( scores[i].list ), hr );
+            ok( fabs( score - scores[i].score ) < 0.0001, "%s, %s: got %g, expected %g.\n", debugstr_w( scores[i].language ),
+                debugstr_w( scores[i].list ), score, scores[i].score );
+        }
+        else
+        {
+            ok( hr == HRESULT_FROM_WIN32( ERROR_NO_MATCH ), "%s, %s: got %#lx.\n", debugstr_w( scores[i].language ),
+                debugstr_w( scores[i].list ), hr );
+            ok( score == 0.0, "%s, %s: got %g.\n", debugstr_w( scores[i].language ), debugstr_w( scores[i].list ), score );
+        }
+    }
+
+    score = -7.0;
+    hr = GetDistanceOfClosestLanguageInList( L"en-US", L"en-US,fr-FR", ',', &score );
+    ok( hr == S_OK && score == 1.0, "got %#lx, %g.\n", hr, score );
+    score = -7.0;
+    hr = GetDistanceOfClosestLanguageInList( NULL, L"en-US", ';', &score );
+    ok( hr == E_POINTER && score == -7.0, "got %#lx, %g.\n", hr, score );
+    hr = GetDistanceOfClosestLanguageInList( L"en-US", NULL, ';', &score );
+    ok( hr == E_POINTER, "got %#lx.\n", hr );
+    hr = GetDistanceOfClosestLanguageInList( L"en-US", L"en-US", ';', NULL );
+    ok( hr == E_POINTER, "got %#lx.\n", hr );
+}
+
 START_TEST(bcp47mrm)
 {
     HMODULE module = LoadLibraryW( L"bcp47mrm.dll" );
@@ -90,4 +141,5 @@ START_TEST(bcp47mrm)
     FreeLibrary( module );
 
     test_IsWellFormedTag();
+    test_GetDistanceOfClosestLanguageInList();
 }

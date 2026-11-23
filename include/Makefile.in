@@ -1071,6 +1071,7 @@ SOURCES = \
 	windows.graphics.idl \
 	windows.graphics.imaging.idl \
 	windows.h \
+	windows.internal.staterepository.idl \
 	windows.management.core.idl \
 	windows.management.deployment.idl \
 	windows.management.policies.idl \

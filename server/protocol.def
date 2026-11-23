@@ -4117,6 +4117,36 @@ struct handle_info
 @END
 
 
+/* create a wait completion packet */
+@REQ(create_completion_packet)
+    unsigned int access;          /* desired access */
+    VARARG(objattr,object_attributes); /* object attributes */
+@REPLY
+    obj_handle_t handle;          /* wait completion packet handle */
+@END
+
+
+/* Associate a wait completion packet */
+@REQ(associate_completion_packet)
+    obj_handle_t  packet;         /* wait completion packet handle */
+    obj_handle_t  completion;     /* completion handle */
+    obj_handle_t  target;         /* target object handle */
+    apc_param_t   ckey;           /* completion key */
+    apc_param_t   cvalue;         /* completion value */
+    apc_param_t   information;    /* IO_STATUS_BLOCK information */
+    unsigned int  status;         /* completion status */
+@REPLY
+    int           already_signaled; /* whether the object is already signaled */
+@END
+
+
+/* Cancel a wait completion packet */
+@REQ(cancel_completion_packet)
+    obj_handle_t  packet;         /* wait completion packet handle */
+    int           remove_signaled;/* whether to remove signaled packet */
+@END
+
+
 /* check for associated completion and push msg */
 @REQ(add_fd_completion)
     obj_handle_t   handle;        /* async' object */
@@ -4479,6 +4509,71 @@ enum inproc_sync_type
     VARARG(obj_attr,object_attributes); /* object attributes */
 @REPLY
     obj_handle_t        handle;         /* handle to the ALPC port */
+@END
+
+
+/* Connect to a named ALPC connection port; the answer arrives as a message of the client port */
+@REQ(alpc_connect)
+    unsigned int        flags;          /* connection flags */
+    unsigned int        port_flags;     /* flags of the port attributes of the client */
+    int                 sec_level;      /* impersonation level of the security attribute of the connection message, -1 if none */
+    VARARG(obj_attr,object_attributes); /* object attributes (the port name) */
+    VARARG(data,bytes);                 /* connection message data */
+@REPLY
+    obj_handle_t        handle;         /* handle to the client communication port */
+    unsigned int        msg_id;         /* id of the connection request */
+@END
+
+
+/* Accept or refuse a connection request */
+@REQ(alpc_accept)
+    obj_handle_t        handle;         /* connection port */
+    unsigned int        msg_id;         /* id of the connection request */
+    int                 accept;         /* accept or refuse */
+    mem_size_t          context;        /* port context of the new server communication port */
+    VARARG(data,bytes);                 /* data of the answer */
+@REPLY
+    obj_handle_t        handle;         /* handle to the server communication port */
+@END
+
+
+/* Send a message and/or receive one */
+@REQ(alpc_send_receive)
+    obj_handle_t        handle;         /* port */
+    unsigned int        flags;          /* message flags */
+    int                 has_send;       /* a message is sent */
+    int                 has_recv;       /* a message is received */
+    unsigned int        msg_id;         /* id in the header of the sent message (a reply) */
+    unsigned int        max_recv;       /* size of the data the caller can take */
+    int                 sec_level;      /* impersonation level of the security attribute of the sent message, -1 if none */
+    VARARG(data,bytes);                 /* data of the sent message */
+@REPLY
+    int                 has_msg;        /* a message was received */
+    unsigned int        type;           /* type of the received message */
+    unsigned int        msg_id;         /* id of the received message */
+    unsigned int        callback_id;    /* callback id of the received message */
+    unsigned int        pid;            /* sender process */
+    unsigned int        tid;            /* sender thread */
+    unsigned int        status;         /* status carried by a connection reply */
+    unsigned int        data_len;       /* length of the data of the received message */
+    unsigned int        sequence;       /* sequence number of the context attribute */
+    int                 has_context;    /* the context attribute is valid */
+    mem_size_t          port_context;   /* port context for the context attribute */
+    unsigned int        sent_id;        /* id given to the sent message */
+    VARARG(data,bytes);                 /* data of the received message */
+@END
+
+
+/* Disconnect an ALPC communication port */
+@REQ(alpc_disconnect)
+    obj_handle_t        handle;         /* communication port */
+@END
+
+
+/* Impersonate the sender of an ALPC message */
+@REQ(alpc_impersonate)
+    obj_handle_t        handle;         /* port the message was received on */
+    unsigned int        msg_id;         /* id of the message (the client id of the header is not used) */
 @END
 
 

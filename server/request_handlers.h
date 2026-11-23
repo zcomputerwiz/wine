@@ -290,6 +290,9 @@ DECL_HANDLER(remove_completion);
 DECL_HANDLER(get_thread_completion);
 DECL_HANDLER(query_completion);
 DECL_HANDLER(set_completion_info);
+DECL_HANDLER(create_completion_packet);
+DECL_HANDLER(associate_completion_packet);
+DECL_HANDLER(cancel_completion_packet);
 DECL_HANDLER(add_fd_completion);
 DECL_HANDLER(set_fd_disp_info);
 DECL_HANDLER(set_fd_name_info);
@@ -327,6 +330,11 @@ DECL_HANDLER(d3dkmt_mutex_release);
 DECL_HANDLER(d3dkmt_sync_wait);
 DECL_HANDLER(d3dkmt_sync_signal);
 DECL_HANDLER(alpc_create_port);
+DECL_HANDLER(alpc_connect);
+DECL_HANDLER(alpc_accept);
+DECL_HANDLER(alpc_send_receive);
+DECL_HANDLER(alpc_disconnect);
+DECL_HANDLER(alpc_impersonate);
 DECL_HANDLER(dwm_connect);
 DECL_HANDLER(dwm_get_broker_capability);
 DECL_HANDLER(dwm_broker_register);
@@ -622,6 +630,9 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_get_thread_completion,
     (req_handler)req_query_completion,
     (req_handler)req_set_completion_info,
+    (req_handler)req_create_completion_packet,
+    (req_handler)req_associate_completion_packet,
+    (req_handler)req_cancel_completion_packet,
     (req_handler)req_add_fd_completion,
     (req_handler)req_set_fd_disp_info,
     (req_handler)req_set_fd_name_info,
@@ -659,6 +670,11 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_d3dkmt_sync_wait,
     (req_handler)req_d3dkmt_sync_signal,
     (req_handler)req_alpc_create_port,
+    (req_handler)req_alpc_connect,
+    (req_handler)req_alpc_accept,
+    (req_handler)req_alpc_send_receive,
+    (req_handler)req_alpc_disconnect,
+    (req_handler)req_alpc_impersonate,
     (req_handler)req_dwm_connect,
     (req_handler)req_dwm_get_broker_capability,
     (req_handler)req_dwm_broker_register,
@@ -2316,6 +2332,23 @@ C_ASSERT( offsetof(struct set_completion_info_request, handle) == 12 );
 C_ASSERT( offsetof(struct set_completion_info_request, ckey) == 16 );
 C_ASSERT( offsetof(struct set_completion_info_request, chandle) == 24 );
 C_ASSERT( sizeof(struct set_completion_info_request) == 32 );
+C_ASSERT( offsetof(struct create_completion_packet_request, access) == 12 );
+C_ASSERT( sizeof(struct create_completion_packet_request) == 16 );
+C_ASSERT( offsetof(struct create_completion_packet_reply, handle) == 8 );
+C_ASSERT( sizeof(struct create_completion_packet_reply) == 16 );
+C_ASSERT( offsetof(struct associate_completion_packet_request, packet) == 12 );
+C_ASSERT( offsetof(struct associate_completion_packet_request, completion) == 16 );
+C_ASSERT( offsetof(struct associate_completion_packet_request, target) == 20 );
+C_ASSERT( offsetof(struct associate_completion_packet_request, ckey) == 24 );
+C_ASSERT( offsetof(struct associate_completion_packet_request, cvalue) == 32 );
+C_ASSERT( offsetof(struct associate_completion_packet_request, information) == 40 );
+C_ASSERT( offsetof(struct associate_completion_packet_request, status) == 48 );
+C_ASSERT( sizeof(struct associate_completion_packet_request) == 56 );
+C_ASSERT( offsetof(struct associate_completion_packet_reply, already_signaled) == 8 );
+C_ASSERT( sizeof(struct associate_completion_packet_reply) == 16 );
+C_ASSERT( offsetof(struct cancel_completion_packet_request, packet) == 12 );
+C_ASSERT( offsetof(struct cancel_completion_packet_request, remove_signaled) == 16 );
+C_ASSERT( sizeof(struct cancel_completion_packet_request) == 24 );
 C_ASSERT( offsetof(struct add_fd_completion_request, handle) == 12 );
 C_ASSERT( offsetof(struct add_fd_completion_request, cvalue) == 16 );
 C_ASSERT( offsetof(struct add_fd_completion_request, information) == 24 );
@@ -2507,6 +2540,46 @@ C_ASSERT( offsetof(struct alpc_create_port_request, max_msg_len) == 16 );
 C_ASSERT( sizeof(struct alpc_create_port_request) == 24 );
 C_ASSERT( offsetof(struct alpc_create_port_reply, handle) == 8 );
 C_ASSERT( sizeof(struct alpc_create_port_reply) == 16 );
+C_ASSERT( offsetof(struct alpc_connect_request, flags) == 12 );
+C_ASSERT( offsetof(struct alpc_connect_request, port_flags) == 16 );
+C_ASSERT( offsetof(struct alpc_connect_request, sec_level) == 20 );
+C_ASSERT( sizeof(struct alpc_connect_request) == 24 );
+C_ASSERT( offsetof(struct alpc_connect_reply, handle) == 8 );
+C_ASSERT( offsetof(struct alpc_connect_reply, msg_id) == 12 );
+C_ASSERT( sizeof(struct alpc_connect_reply) == 16 );
+C_ASSERT( offsetof(struct alpc_accept_request, handle) == 12 );
+C_ASSERT( offsetof(struct alpc_accept_request, msg_id) == 16 );
+C_ASSERT( offsetof(struct alpc_accept_request, accept) == 20 );
+C_ASSERT( offsetof(struct alpc_accept_request, context) == 24 );
+C_ASSERT( sizeof(struct alpc_accept_request) == 32 );
+C_ASSERT( offsetof(struct alpc_accept_reply, handle) == 8 );
+C_ASSERT( sizeof(struct alpc_accept_reply) == 16 );
+C_ASSERT( offsetof(struct alpc_send_receive_request, handle) == 12 );
+C_ASSERT( offsetof(struct alpc_send_receive_request, flags) == 16 );
+C_ASSERT( offsetof(struct alpc_send_receive_request, has_send) == 20 );
+C_ASSERT( offsetof(struct alpc_send_receive_request, has_recv) == 24 );
+C_ASSERT( offsetof(struct alpc_send_receive_request, msg_id) == 28 );
+C_ASSERT( offsetof(struct alpc_send_receive_request, max_recv) == 32 );
+C_ASSERT( offsetof(struct alpc_send_receive_request, sec_level) == 36 );
+C_ASSERT( sizeof(struct alpc_send_receive_request) == 40 );
+C_ASSERT( offsetof(struct alpc_send_receive_reply, has_msg) == 8 );
+C_ASSERT( offsetof(struct alpc_send_receive_reply, type) == 12 );
+C_ASSERT( offsetof(struct alpc_send_receive_reply, msg_id) == 16 );
+C_ASSERT( offsetof(struct alpc_send_receive_reply, callback_id) == 20 );
+C_ASSERT( offsetof(struct alpc_send_receive_reply, pid) == 24 );
+C_ASSERT( offsetof(struct alpc_send_receive_reply, tid) == 28 );
+C_ASSERT( offsetof(struct alpc_send_receive_reply, status) == 32 );
+C_ASSERT( offsetof(struct alpc_send_receive_reply, data_len) == 36 );
+C_ASSERT( offsetof(struct alpc_send_receive_reply, sequence) == 40 );
+C_ASSERT( offsetof(struct alpc_send_receive_reply, has_context) == 44 );
+C_ASSERT( offsetof(struct alpc_send_receive_reply, port_context) == 48 );
+C_ASSERT( offsetof(struct alpc_send_receive_reply, sent_id) == 56 );
+C_ASSERT( sizeof(struct alpc_send_receive_reply) == 64 );
+C_ASSERT( offsetof(struct alpc_disconnect_request, handle) == 12 );
+C_ASSERT( sizeof(struct alpc_disconnect_request) == 16 );
+C_ASSERT( offsetof(struct alpc_impersonate_request, handle) == 12 );
+C_ASSERT( offsetof(struct alpc_impersonate_request, msg_id) == 16 );
+C_ASSERT( sizeof(struct alpc_impersonate_request) == 24 );
 C_ASSERT( sizeof(struct dwm_connect_request) == 16 );
 C_ASSERT( offsetof(struct dwm_connect_reply, handle) == 8 );
 C_ASSERT( offsetof(struct dwm_connect_reply, version) == 12 );

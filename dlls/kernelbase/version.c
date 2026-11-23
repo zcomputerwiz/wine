@@ -32,6 +32,7 @@
 #include "windef.h"
 #include "winbase.h"
 #include "winver.h"
+#include "winreg.h"
 #include "winuser.h"
 #include "winnls.h"
 #include "winternl.h"
@@ -2640,6 +2641,24 @@ LONG WINAPI PackageFamilyNameFromId( const PACKAGE_ID *id, UINT32 *length, WCHAR
     if (!buffer || capacity < needed) return ERROR_INSUFFICIENT_BUFFER;
     wcscpy( buffer, family );
     return ERROR_SUCCESS;
+}
+
+/***********************************************************************
+ *         IsDeveloperModeEnabled   (kernelbase.@)
+ *
+ * Whether the user may install and run apps without a developer licence: S_OK and the value for a pointer, E_POINTER for none
+ * (Windows 11, tests/uwp/alpc/devmode-probe.c). The setting is AllowDevelopmentWithoutDevLicense of the key AppModelUnlock.
+ */
+HRESULT WINAPI IsDeveloperModeEnabled( BOOL *enabled )
+{
+    DWORD value = 0, size = sizeof(value);
+
+    TRACE( "enabled %p.\n", enabled );
+
+    if (!enabled) return E_POINTER;
+    *enabled = !RegGetValueW( HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\AppModelUnlock",
+                              L"AllowDevelopmentWithoutDevLicense", RRF_RT_REG_DWORD, NULL, &value, &size ) && value;
+    return S_OK;
 }
 
 /***********************************************************************
