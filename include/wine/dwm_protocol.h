@@ -29,22 +29,20 @@
 
 #define DWM_PROTOCOL_VERSION     1u
 #define DWM_MAX_MESSAGE_SIZE     4096u
-#define DWM_MAX_QUEUE_DEPTH      64u
-#define DWM_MAX_PROCESS_CHANNELS 8u
 
 enum dwm_opcode
 {
-    DWM_OP_ECHO     = 1,
-    DWM_OP_SET_ATTR = 2,   /* window_token = HWND; payload struct dwm_attr_set; reply struct dwm_attr_reply */
-    DWM_OP_GET_ATTR = 3,   /* window_token = HWND; payload struct dwm_attr_get; reply struct dwm_attr_reply */
+    DWM_OP_ECHO     = 1,   /* the payload back: tests ask whether a broker answers */
+    DWM_OP_SET_ATTR = 2,   /* window = HWND; payload struct dwm_attr_set; reply struct dwm_attr_reply */
+    DWM_OP_GET_ATTR = 3,   /* window = HWND; payload struct dwm_attr_get; reply struct dwm_attr_reply */
     DWM_OP_POLL     = 4,   /* payload struct dwm_poll_req; reply struct dwm_poll_reply + count struct dwm_change */
-    DWM_OP_THUMB_SET  = 5, /* window_token = destination HWND; payload struct dwm_thumb_set; no reply payload */
-    DWM_OP_THUMB_DEL  = 6, /* window_token = destination HWND; payload struct dwm_thumb_del; no reply payload */
+    DWM_OP_THUMB_SET  = 5, /* window = destination HWND; payload struct dwm_thumb_set; no reply payload */
+    DWM_OP_THUMB_DEL  = 6, /* window = destination HWND; payload struct dwm_thumb_del; no reply payload */
     DWM_OP_THUMB_LIST = 7, /* payload struct dwm_thumb_list_req; reply struct dwm_thumb_list_reply + count struct dwm_thumb */
     DWM_OP_LAST     = DWM_OP_THUMB_LIST,
 };
 
-/* live thumbnails (P8). A thumbnail is keyed by the server-stamped sender process and its HTHUMBNAIL value;
+/* live thumbnails (P8). A thumbnail is keyed by the broker connection that set it and its HTHUMBNAIL value;
  * rectangles are left, top, right, bottom. dest is relative to the destination window (window rectangle, as
  * on Windows), source to the source window (or its client area with DWM_THUMB_CLIENT_ONLY). */
 #define DWM_THUMB_VISIBLE     0x1u
@@ -157,88 +155,64 @@ C_ASSERT( offsetof(struct dwm_clock_page, qpc_period) == 24 );
 #define DWM_CHANGE_EVENT_NAME L"Local\\__wex_dwm_change_"
 
 /*
- * Fixed-width control-channel message envelope (Section 2.1 of DWM_ARCHITECTURE.md).
- * Uses only fixed-width integer types (uint32_t / uint64_t), never long, size_t, or
- * pointers, so 32-bit (WoW64) and 64-bit processes share the exact wire layout.
+ * The broker's pipe (DWM_ARCHITECTURE.md section 2.0): one per ordinary desktop, named by dwm_pipe_name, created by
+ * dwm.exe. Each message is a header and its payload, fixed-width only, so 32-bit (WoW64) and 64-bit processes share
+ * the layout. A request names its window as a 32-bit handle; the reply carries the broker's generation, chosen at
+ * start, so that a client sees a new broker and hands it its state again.
  */
-struct dwm_msg_header
-{
-    uint32_t opcode;
-    uint32_t version;
-    uint32_t length;
-    uint32_t request_id;
-    uint64_t connection_epoch;
-    uint64_t window_token;
-    uint32_t revision;
-    uint32_t capabilities;
-};
+#define DWM_PIPE_PREFIX L"\\\\.\\pipe\\WineExplorer\\Dwm\\"
+/* %s: the broker's user SID. Everyone who can own a window on the desktop: the user, SYSTEM (sysrun), interactive
+ * users (an over-the-shoulder administrator has its own logon id), AppContainers; Low may write (no write-up). The
+ * broker's per-message checks are the authorization. */
+#define DWM_PIPE_SDDL_FMT L"D:P(A;;GA;;;%s)(A;;GRGW;;;SY)(A;;GRGW;;;IU)(A;;GRGW;;;AC)S:(ML;;NW;;;LW)"
 
-C_ASSERT( sizeof(struct dwm_msg_header) == 40 );
-C_ASSERT( offsetof(struct dwm_msg_header, opcode) == 0 );
-C_ASSERT( offsetof(struct dwm_msg_header, version) == 4 );
-C_ASSERT( offsetof(struct dwm_msg_header, length) == 8 );
-C_ASSERT( offsetof(struct dwm_msg_header, request_id) == 12 );
-C_ASSERT( offsetof(struct dwm_msg_header, connection_epoch) == 16 );
-C_ASSERT( offsetof(struct dwm_msg_header, window_token) == 24 );
-C_ASSERT( offsetof(struct dwm_msg_header, revision) == 32 );
-C_ASSERT( offsetof(struct dwm_msg_header, capabilities) == 36 );
+struct dwm_request { uint32_t opcode; uint32_t length; uint32_t window; uint32_t version; };
+struct dwm_reply   { uint32_t status; uint32_t length; uint64_t generation; };
 
-/* a full DWM_OP_POLL reply (header + reply + a full page of changes) must fit in one message */
-C_ASSERT( sizeof(struct dwm_msg_header) + sizeof(struct dwm_poll_reply) +
+C_ASSERT( sizeof(struct dwm_request) == 16 );
+C_ASSERT( sizeof(struct dwm_reply) == 16 );
+C_ASSERT( offsetof(struct dwm_reply, generation) == 8 );
+
+/* a full DWM_OP_POLL or DWM_OP_THUMB_LIST reply must fit in one message */
+C_ASSERT( sizeof(struct dwm_reply) + sizeof(struct dwm_poll_reply) +
           DWM_POLL_MAX_CHANGES * sizeof(struct dwm_change) <= DWM_MAX_MESSAGE_SIZE );
-C_ASSERT( sizeof(struct dwm_msg_header) + sizeof(struct dwm_thumb_list_reply) +
+C_ASSERT( sizeof(struct dwm_reply) + sizeof(struct dwm_thumb_list_reply) +
           DWM_THUMB_MAX * sizeof(struct dwm_thumb) <= DWM_MAX_MESSAGE_SIZE );
 
-/*
- * Operations and fixed-width 32/64-bit invariant parameter block for the private
- * ProcessWineDwmChannel process information class in NtSetInformationProcess.
- */
-#ifndef __WINESRC__
-#define ProcessWineDwmChannel 1004
+#if !defined(__WINE_SERVER__) && !defined(WINE_UNIX_LIB)
+#include <stdio.h>
+#include <wchar.h>
+#include "winbase.h"
+#include "winuser.h"
+
+/* The per-desktop objects: prefix followed by the desktop's name (DWM_CLOCK_NAME, DWM_CLOCK_EVENT_NAME,
+ * DWM_CHANGE_EVENT_NAME; Local\ names are per session already). */
+static inline BOOL dwm_desktop_object_name( HDESK desktop, const WCHAR *prefix, WCHAR *name, DWORD size )
+{
+    WCHAR desk_name[MAX_PATH];
+
+    if (!desktop || !GetUserObjectInformationW( desktop, UOI_NAME, desk_name, sizeof(desk_name), NULL )) return FALSE;
+    if (wcslen( prefix ) + wcslen( desk_name ) >= size) return FALSE;
+    wcscpy( name, prefix );
+    wcscat( name, desk_name );
+    return TRUE;
+}
+
+/* The broker's pipe of a desktop of this process's window station: the prefix, then session\station\desktop
+ * (pipe names are not per session). */
+static inline BOOL dwm_pipe_name( HDESK desktop, WCHAR *name, DWORD size )
+{
+    WCHAR station[MAX_PATH], desk_name[MAX_PATH];
+    DWORD session = 0;
+    int len;
+
+    if (!desktop || !GetUserObjectInformationW( desktop, UOI_NAME, desk_name, sizeof(desk_name), NULL ) ||
+        !GetUserObjectInformationW( GetProcessWindowStation(), UOI_NAME, station, sizeof(station), NULL ))
+        return FALSE;
+    ProcessIdToSessionId( GetCurrentProcessId(), &session );
+    len = _snwprintf( name, size, L"%s%lu\\%s\\%s", DWM_PIPE_PREFIX, session, station, desk_name );
+    return len > 0 && (DWORD)len < size;
+}
 #endif
-
-enum dwm_channel_op
-{
-    DWM_CHANNEL_OP_CONNECT         = 1,
-    DWM_CHANNEL_OP_GET_CAPABILITY  = 2,
-    DWM_CHANNEL_OP_BROKER_REGISTER = 3,
-    DWM_CHANNEL_OP_SEND            = 4,
-    DWM_CHANNEL_OP_RECV            = 5,
-    DWM_CHANNEL_OP_REPLY           = 6,
-};
-
-struct dwm_channel_call
-{
-    uint32_t op;
-    uint32_t handle;
-    uint32_t version;
-    uint32_t status;
-    uint64_t epoch;
-    uint64_t capability;
-    uint64_t in_ptr;
-    uint32_t in_len;
-    uint32_t out_len;
-    uint64_t out_ptr;
-    uint32_t request_id;
-    uint32_t sender_pid;
-    uint32_t sender_tid;
-    uint32_t desktop_id;
-};
-
-C_ASSERT( sizeof(struct dwm_channel_call) == 72 );
-C_ASSERT( offsetof(struct dwm_channel_call, op) == 0 );
-C_ASSERT( offsetof(struct dwm_channel_call, handle) == 4 );
-C_ASSERT( offsetof(struct dwm_channel_call, version) == 8 );
-C_ASSERT( offsetof(struct dwm_channel_call, status) == 12 );
-C_ASSERT( offsetof(struct dwm_channel_call, epoch) == 16 );
-C_ASSERT( offsetof(struct dwm_channel_call, capability) == 24 );
-C_ASSERT( offsetof(struct dwm_channel_call, in_ptr) == 32 );
-C_ASSERT( offsetof(struct dwm_channel_call, in_len) == 40 );
-C_ASSERT( offsetof(struct dwm_channel_call, out_len) == 44 );
-C_ASSERT( offsetof(struct dwm_channel_call, out_ptr) == 48 );
-C_ASSERT( offsetof(struct dwm_channel_call, request_id) == 56 );
-C_ASSERT( offsetof(struct dwm_channel_call, sender_pid) == 60 );
-C_ASSERT( offsetof(struct dwm_channel_call, sender_tid) == 64 );
-C_ASSERT( offsetof(struct dwm_channel_call, desktop_id) == 68 );
 
 #endif /* __WINE_DWM_PROTOCOL_H */

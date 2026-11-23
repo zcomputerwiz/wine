@@ -1141,7 +1141,6 @@ static void process_killed( struct process *process )
     process->end_time = current_time;
     wex_dialog_unprotect( process );
     winstation_process_killed( process );
-    dwm_cleanup_process( process );
     close_process_desktop( process );
     process->winstation = 0;
     process->desktop = 0;
