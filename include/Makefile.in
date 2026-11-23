@@ -1182,6 +1182,7 @@ SOURCES = \
 	wine/vulkan_driver.h \
 	wine/wex_session0.h \
 	wine/wex_sysrun_conf.h \
+	wine/wex_sysrun_peer.h \
 	wine/wex_token.h \
 	wine/wex_profile.h \
 	wine/wgl.h \

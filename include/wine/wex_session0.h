@@ -39,7 +39,14 @@ struct wex_session0_request
     unsigned int version;
     unsigned int desc_size;   /* size of the token description that follows */
     unsigned int type;        /* WEX_SESSION0_* below */
-    unsigned int machine;     /* CHANNEL: the program's machine (IMAGE_FILE_MACHINE_*): its registry view */
+    union                     /* the last field, by type (one word on the wire whatever its name) */
+    {
+        unsigned int machine;     /* CHANNEL: the program's machine (IMAGE_FILE_MACHINE_*): its registry view */
+        unsigned int saved;       /* HIVE_SAVED: 1 written, 0 not */
+        unsigned int name_size;   /* PIPE, PIPE_WAIT: the size in bytes of the pipe name after the description */
+        unsigned int session_id;  /* SESSION_ID: the id the server asks for (0: any) */
+        unsigned int unused;      /* USER_HIVE, HIVE_UNLOAD: 0 */
+    };
 };
 
 /* Message types. CHANNEL: the program's registry channel in SCM_RIGHTS; one message, then the link closes.

@@ -1267,8 +1267,8 @@ DECL_HANDLER(create_service_token)
     /* Wine's administrator token also holds SeTcbPrivilege: require the system role itself (in session 0, a
      * process whose token is SYSTEM's: only session 0's own account runs programs there, and its registry-only
      * clients cannot make this request) */
-    if (token_service_account( caller ) != SERVICE_ACCOUNT_SYSTEM ||
-        (!session0_server && !sysrun_process_privileged( current->process )))
+    if (session0_server ? token_service_account( caller ) != SERVICE_ACCOUNT_SYSTEM
+                        : !sysrun_process_is_tcb_system( current->process ))
     {
         set_error( STATUS_ACCESS_DENIED );
         return;
@@ -2711,9 +2711,7 @@ static int e1s_broker(void)
     struct process *p = current->process;
     struct luid id, modified;
     if (!elevation_enforced() || !sysrun_active || current->token ||
-        !sysrun_process_is_system( p ) || !sysrun_process_privileged( p ) ||
-        token_service_account( p->token ) != SERVICE_ACCOUNT_SYSTEM ||
-        !token_has_privilege( p->token, SeTcbPrivilege ) || !p->e1s6_broker_image ||
+        !sysrun_process_is_system( p ) || !sysrun_process_is_tcb_system( p ) || !p->e1s6_broker_image ||
         !p->e1s6_broker_generation || p->token != p->e1s6_primary) return 0;
     token_get_ids( p->token, &id, &modified );
     return is_equal_luid( id, p->e1s6_token_id ) && is_equal_luid( modified, p->e1s6_modified_id );
@@ -3266,8 +3264,7 @@ DECL_HANDLER(create_linked_token)
         /* Everyone gets an identification-level token. Windows hands a SeTcbPrivilege caller a usable primary
          * token (docs/ELEVATION_BOUNDARY_PLAN.md, N6): here only the system role does (the elevation broker),
          * because Wine's administrator token holds SeTcbPrivilege too. */
-        primary = elevation_enforced() && token_service_account( current->process->token ) == SERVICE_ACCOUNT_SYSTEM &&
-                  sysrun_process_privileged( current->process ) && token_has_privilege( current->process->token, SeTcbPrivilege );
+        primary = elevation_enforced() && sysrun_process_is_tcb_system( current->process );
         if ((linked = token_create_admin( primary, primary ? -1 : SecurityIdentification, elevation, token->session_id )))
         {
             unsigned int access = MAXIMUM_ALLOWED;
