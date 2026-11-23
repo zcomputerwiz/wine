@@ -24,6 +24,7 @@
 #include "winbase.h"
 #include "winreg.h"
 #include "winstring.h"
+#include "sddl.h"
 
 #include "roapi.h"
 
@@ -942,6 +943,107 @@ static void broker_find_child( const char *id_text, BOOL use_client )
     ExitProcess( code );
 }
 
+/* the user's broker pipe name */
+static void broker_pipe_name( WCHAR *name, UINT size )
+{
+    char buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    TOKEN_USER *user = (TOKEN_USER *)buffer;
+    WCHAR *sid = NULL;
+    HANDLE token;
+    DWORD len;
+
+    name[0] = 0;
+    if (!OpenProcessToken( GetCurrentProcess(), TOKEN_QUERY, &token )) return;
+    if (GetTokenInformation( token, TokenUser, buffer, sizeof(buffer), &len ) &&
+        ConvertSidToStringSidW( user->User.Sid, &sid ))
+        swprintf( name, size, L"\\\\.\\pipe\\WineTokenBroker\\%s", sid );
+    LocalFree( sid );
+    CloseHandle( token );
+}
+
+/* the child of test_broker_impostor (B86): creates the broker's pipe before any broker runs and waits for a client;
+ * the exit code is 1 when a client connected, 0 when none came, 2 when the pipe could not be made */
+static void broker_impostor(void)
+{
+    OVERLAPPED ov = { 0 };
+    WCHAR name[256];
+    HANDLE pipe;
+    DWORD code = 2, n;
+
+    broker_pipe_name( name, ARRAY_SIZE(name) );
+    ov.hEvent = CreateEventW( NULL, TRUE, FALSE, NULL );
+    pipe = CreateNamedPipeW( name, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE,
+                             PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0, NULL );
+    if (name[0] && pipe != INVALID_HANDLE_VALUE)
+    {
+        code = 0;
+        if (ConnectNamedPipe( pipe, &ov ) || GetLastError() == ERROR_PIPE_CONNECTED) code = 1;
+        else if (GetLastError() == ERROR_IO_PENDING && !WaitForSingleObject( ov.hEvent, 90000 ) &&
+                 GetOverlappedResult( pipe, &ov, &n, FALSE )) code = 1;
+        if (code) Sleep( 2000 );   /* the client checks the server while the pipe is open */
+        CloseHandle( pipe );
+    }
+    ExitProcess( code );
+}
+
+/* B86: a sandboxed process of the user (here below medium integrity) that creates the broker's pipe before the broker
+ * runs is refused by the client: its request is not answered by the impostor */
+static void test_broker_impostor(void)
+{
+    static SID low = { SID_REVISION, 1, { SECURITY_MANDATORY_LABEL_AUTHORITY }, { SECURITY_MANDATORY_LOW_RID } };
+    STARTUPINFOA si = { sizeof(si) };
+    PROCESS_INFORMATION pi;
+    TOKEN_MANDATORY_LABEL label;
+    HANDLE token, low_token;
+    char cmd[MAX_PATH * 2], **argv;
+    WCHAR name[256];
+    DWORD code = 0xdeadbeef, i;
+
+    broker_pipe_name( name, ARRAY_SIZE(name) );
+    if (!name[0] || WaitNamedPipeW( name, 0 ) || GetLastError() != ERROR_FILE_NOT_FOUND)
+    {
+        skip( "the impostor test needs a user without a running token broker.\n" );
+        return;
+    }
+    if (!OpenProcessToken( GetCurrentProcess(), TOKEN_ALL_ACCESS, &token )) return;
+    if (!DuplicateTokenEx( token, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation, TokenPrimary, &low_token ))
+    {
+        ok( 0, "DuplicateTokenEx failed: %lu.\n", GetLastError() );
+        CloseHandle( token );
+        return;
+    }
+    CloseHandle( token );
+    label.Label.Sid = &low;
+    label.Label.Attributes = SE_GROUP_INTEGRITY;
+    ok( SetTokenInformation( low_token, TokenIntegrityLevel, &label, sizeof(label) ), "got error %lu.\n",
+        GetLastError() );
+    winetest_get_mainargs( &argv );
+    sprintf( cmd, "\"%s\" web_core broker_impostor", argv[0] );
+    if (!CreateProcessAsUserA( low_token, NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi ))
+    {
+        ok( 0, "CreateProcessAsUser failed: %lu.\n", GetLastError() );
+        CloseHandle( low_token );
+        return;
+    }
+    CloseHandle( low_token );
+    for (i = 0; i < 200; i++)
+    {
+        if (WaitNamedPipeW( name, 0 ) || GetLastError() != ERROR_FILE_NOT_FOUND) break;
+        Sleep( 50 );
+    }
+    ok( i < 200, "the impostor's pipe did not appear.\n" );
+    if (i < 200)
+    {
+        code = run_child( NULL );
+        ok( (code >> 16) != WebTokenRequestStatus_Success, "the impostor answered the request: %#lx.\n", code );
+    }
+    ok( !WaitForSingleObject( pi.hProcess, 120000 ), "the impostor did not finish.\n" );
+    GetExitCodeProcess( pi.hProcess, &code );
+    ok( code == 1, "the client did not reach the impostor's pipe: %lu.\n", code );
+    CloseHandle( pi.hProcess );
+    CloseHandle( pi.hThread );
+}
+
 /* sandboxed callers get no token, even of an account the user has: a restricted token, a low integrity token */
 static void test_broker_sandboxed(void)
 {
@@ -1052,6 +1154,7 @@ static void test_broker(void)
 
     provider = broker_provider( statics, TEST_PROVIDER, L"consumers" );
     if (!provider) goto done;
+    test_broker_impostor();
 
     if (GetEnvironmentVariableW( L"WEBCORE_TEST_WINDOW", NULL, 0 ))
     {
@@ -1325,6 +1428,11 @@ START_TEST(web_core)
     if (argc >= 3 && !strcmp( argv[2], "broker_child_other" ))
     {
         broker_child( TRUE );
+        return;
+    }
+    if (argc >= 3 && !strcmp( argv[2], "broker_impostor" ))
+    {
+        broker_impostor();
         return;
     }
     if (argc >= 5 && !strcmp( argv[2], "broker_find_child" ))
