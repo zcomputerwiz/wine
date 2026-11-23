@@ -312,15 +312,29 @@ int sysrun_thread_created( struct thread *thread )
     return protect_object( &thread->obj, process->token, process->sysrun_account, 1 );
 }
 
-/* the system programs of the machine root that may be the main image of a system group root process */
-static const char *const system_images[] =
+/* The machine root's images that the server trusts, and for what. Each is recognised by the device and inode of
+ * the mapped file (machine_image_roles), never by a path string. */
+#define IMAGE_SYSTEM      0x1  /* may be the main image of a system group root process (it gets SYSTEM's token) */
+#define IMAGE_BROKER      0x2  /* the installed elevation broker (production names only) */
+#define IMAGE_DIALOG      0x4  /* E1-S18e R8 step 3c: the credentials dialog */
+#define IMAGE_SAFE_SHELL  0x8  /* an administrator's elevated desktop in Safe Mode */
+
+static const struct
 {
-    "/drive_c/windows/system32/services.exe",
-    "/drive_c/windows/system32/wexelevate.exe",
-    "/drive_c/windows/system32/wineboot.exe",
-    "/drive_c/windows/system32/winedevice.exe",
-    "/drive_c/windows/syswow64/wineboot.exe",
-    "/drive_c/windows/syswow64/winedevice.exe",
+    const char  *path;   /* below the machine root */
+    unsigned int roles;
+} machine_images[] =
+{
+    { "/drive_c/windows/system32/services.exe",   IMAGE_SYSTEM },
+    { "/drive_c/windows/system32/wexelevate.exe", IMAGE_SYSTEM | IMAGE_BROKER },
+    { "/drive_c/windows/system32/wineboot.exe",   IMAGE_SYSTEM },
+    { "/drive_c/windows/system32/winedevice.exe", IMAGE_SYSTEM },
+    { "/drive_c/windows/syswow64/wineboot.exe",   IMAGE_SYSTEM },
+    { "/drive_c/windows/syswow64/winedevice.exe", IMAGE_SYSTEM },
+    { "/drive_c/windows/syswow64/wexelevate.exe", IMAGE_BROKER },
+    { "/drive_c/windows/system32/consent.exe",    IMAGE_DIALOG },
+    { "/drive_c/windows/syswow64/consent.exe",    IMAGE_DIALOG },
+    { "/drive_c/windows/explorer.exe",            IMAGE_SAFE_SHELL },
 };
 
 static void kill_unverified( void *private )
@@ -331,39 +345,22 @@ static void kill_unverified( void *private )
     release_object( process );
 }
 
-/* is st one of the machine-root images in names (both ABIs), by device and inode? */
-static int is_machine_image( const struct stat *st, const char *const *names, unsigned int count )
+/* the roles, out of those asked, of the machine-root image that st is (device and inode); 0 when none */
+static unsigned int machine_image_roles( const struct stat *st, unsigned int asked )
 {
     char path[PATH_MAX];
     struct stat ref;
-    unsigned int i;
+    unsigned int i, roles = 0;
 
-    for (i = 0; i < count; i++)
-        if ((unsigned int)snprintf( path, sizeof(path), "%s%s", machine_root, names[i] ) < sizeof(path) &&
-            !stat( path, &ref ) && ref.st_dev == st->st_dev && ref.st_ino == st->st_ino) return 1;
-    return 0;
-}
-
-/* the installed elevation broker images (production names only) */
-static int is_broker_image( const struct stat *st )
-{
-    static const char *const brokers[] =
+    for (i = 0; i < ARRAY_SIZE(machine_images); i++)
     {
-        "/drive_c/windows/system32/wexelevate.exe",
-        "/drive_c/windows/syswow64/wexelevate.exe",
-    };
-    return is_machine_image( st, brokers, ARRAY_SIZE(brokers) );
-}
-
-/* E1-S18e R8 step 3c: the installed credentials dialog images */
-static int is_dialog_image( const struct stat *st )
-{
-    static const char *const dialogs[] =
-    {
-        "/drive_c/windows/system32/consent.exe",
-        "/drive_c/windows/syswow64/consent.exe",
-    };
-    return is_machine_image( st, dialogs, ARRAY_SIZE(dialogs) );
+        if (!(machine_images[i].roles & asked)) continue;
+        if ((unsigned int)snprintf( path, sizeof(path), "%s%s", machine_root, machine_images[i].path ) >= sizeof(path))
+            continue;
+        if (!stat( path, &ref ) && ref.st_dev == st->st_dev && ref.st_ino == st->st_ino)
+            roles |= machine_images[i].roles & asked;
+    }
+    return roles;
 }
 
 /* the broker identity holds only with the primary token it had when its image was recognised */
@@ -377,10 +374,13 @@ static void pin_broker( struct process *process )
 
 void sysrun_main_image( struct process *process, struct fd *fd )
 {
+#ifdef WEX_E1S6_TRANSPORT_TEST
     char path[PATH_MAX];
-    struct stat st, ref;
-    struct token *token;
+    struct stat ref;
     unsigned int i;
+#endif
+    struct stat st;
+    struct token *token;
     int unix_fd, broker = 0;
 
     /* The elevation broker is recognised by the actual mapped file (device and inode of the
@@ -393,10 +393,12 @@ void sysrun_main_image( struct process *process, struct fd *fd )
         if (system_role_enabled() && fd && (unix_fd = get_unix_fd( fd )) != -1 &&
             !fstat( unix_fd, &st ) && S_ISREG( st.st_mode ))
         {
-            broker = is_broker_image( &st );
+            unsigned int roles = machine_image_roles( &st, IMAGE_BROKER | (process->wex_creator ? IMAGE_DIALOG : 0) );
+
+            broker = !!(roles & IMAGE_BROKER);
             /* R8 3c: a protected dialog whose first executable image is the machine-root consent.exe;
              * mapping it later, as a second executable, never counts */
-            process->wex_dialog_image = process->wex_creator && is_dialog_image( &st );
+            process->wex_dialog_image = !!(roles & IMAGE_DIALOG);
 #ifdef WEX_R8_SERVER_TEST
             if (process->wex_creator)
                 fprintf( stderr, "wex-r8: dialog %04x image consent=%d\n", process->id, process->wex_dialog_image );
@@ -451,8 +453,7 @@ void sysrun_main_image( struct process *process, struct fd *fd )
          * that token (not SYSTEM's) and is protected as an elevated process, as one the broker starts
          * (docs/SAFE_MODE_ELEVATED_DESKTOP.md). Without both, it is ended below as any other image. */
         if (sysrun_safe_boot() && token_is_elevated( process->token ) &&
-            snprintf( path, sizeof(path), "%s/drive_c/windows/explorer.exe", machine_root ) < sizeof(path) &&
-            !stat( path, &ref ) && ref.st_dev == st.st_dev && ref.st_ino == st.st_ino)
+            machine_image_roles( &st, IMAGE_SAFE_SHELL ))
         {
             struct thread *thread;
             int ok;
@@ -465,11 +466,9 @@ void sysrun_main_image( struct process *process, struct fd *fd )
                 if (ok) ok = protect_object( &thread->obj, process->token, SYSRUN_ACCOUNT_ELEVATED, 1 );
             if (ok) return;
         }
-        for (i = 0; i < ARRAY_SIZE(system_images); i++)
+        if (machine_image_roles( &st, IMAGE_SYSTEM ) &&
+            (token = token_create_service( SERVICE_ACCOUNT_SYSTEM, process->session_id )))
         {
-            if (snprintf( path, sizeof(path), "%s%s", machine_root, system_images[i] ) >= sizeof(path)) continue;
-            if (stat( path, &ref ) || ref.st_dev != st.st_dev || ref.st_ino != st.st_ino) continue;
-            if (!(token = token_create_service( SERVICE_ACCOUNT_SYSTEM, process->session_id ))) break;
             release_object( process->token );
             process->token = token;
             if (broker) pin_broker( process );
