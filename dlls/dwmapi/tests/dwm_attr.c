@@ -34,6 +34,7 @@
 #include "tlhelp32.h"
 #include "dwmapi.h"
 #include "wine/test.h"
+#include "dwm_test.h"
 
 #ifndef DWMWA_COLOR_DEFAULT
 #define DWMWA_COLOR_DEFAULT 0xFFFFFFFF
@@ -69,8 +70,14 @@ static DWORD run_child( const WCHAR *exe, HWND hwnd, DWORD expected, DWORD attr 
     ok( ret, "CreateProcessW failed, error %lu\n", GetLastError() );
     if (ret)
     {
-        WaitForSingleObject( pi.hProcess, 10000 );
-        GetExitCodeProcess( pi.hProcess, &exit_code );
+        /* a reader that hangs fails its phase and is ended, never left behind */
+        if (WaitForSingleObject( pi.hProcess, 10000 ))
+        {
+            ok( 0, "reader of attribute %#lx timed out\n", attr );
+            TerminateProcess( pi.hProcess, 1 );
+            WaitForSingleObject( pi.hProcess, 5000 );
+        }
+        else GetExitCodeProcess( pi.hProcess, &exit_code );
         CloseHandle( pi.hProcess );
         CloseHandle( pi.hThread );
     }
@@ -114,25 +121,26 @@ static BOOL kill_own_broker(void)
     return killed;
 }
 
-/* The desktop manager starts a new broker, which holds nothing; the setter's next call reaches it and hands it
- * the process's attributes, so another process reads them again. */
+/* The desktop manager starts a new broker, which holds nothing; the setter's first call that reaches it hands it
+ * the process's attributes (synchronously, in that call), so another process reads them again. One bounded phase
+ * waits for the new broker, its echo doing the replay; then one cross-process read. */
 static void test_broker_restart( const WCHAR *exe, HWND hwnd )
 {
-    DWORD val, exit_code = 1;
-    int i;
+    DWORD exit_code, start;
+    ULONG len = 0;
+    HRESULT hr = E_FAIL;
 
     if (!kill_own_broker())
     {
         skip( "not started by a desktop manager with a broker\n" );
         return;
     }
-    for (i = 0; i < 25 && exit_code; i++)
-    {
-        Sleep( 200 );
-        val = 0x00445566 + i;
-        DwmSetWindowAttribute( hwnd, DWMWA_BORDER_COLOR, &val, sizeof(val) );
-        exit_code = run_child( exe, hwnd, 3, DWMWA_WINDOW_CORNER_PREFERENCE );
-    }
+    /* the desktop manager restarts it after 250 ms */
+    for (start = GetTickCount(); GetTickCount() - start < 5000; Sleep( 100 ))
+        if ((hr = pWexDwmpChannelEcho( NULL, 0, NULL, &len )) == S_OK) break;
+    ok( hr == S_OK, "the broker did not come back within 5 s: %#lx\n", hr );
+    if (hr != S_OK) return;
+    exit_code = run_child( exe, hwnd, 3, DWMWA_WINDOW_CORNER_PREFERENCE );
     ok( exit_code == 0, "the restarted broker did not get the corner preference back\n" );
 }
 
@@ -141,7 +149,6 @@ START_TEST(dwm_attr)
     char **argv;
     int argc;
     HMODULE dwmapi;
-    ULONG out_len = 0;
     HRESULT hr;
     WCHAR exe[MAX_PATH];
     HWND hwnd, hwnd2;
@@ -160,6 +167,8 @@ START_TEST(dwm_attr)
         attr = (argc > 5) ? strtoul( argv[5], NULL, 16 ) : DWMWA_CAPTION_COLOR;
         if (attr == 0x33) attr = DWMWA_WINDOW_CORNER_PREFERENCE;
 
+        /* the broker answers reads only for a process with a window on its desktop */
+        CreateWindowExW( 0, L"static", L"dwm_attr_child", WS_POPUP, 0, 0, 10, 10, 0, 0, 0, NULL );
         child_hr = DwmGetWindowAttribute( child_hwnd, attr, &v, 4 );
         ExitProcess( (child_hr == S_OK && v == expected) ? 0 : 1 );
     }
@@ -173,8 +182,7 @@ START_TEST(dwm_attr)
         return;
     }
 
-    hr = pWexDwmpChannelEcho( NULL, 0, NULL, &out_len );
-    if (hr != S_OK)
+    if (!dwm_broker_answers( pWexDwmpChannelEcho ))
     {
         skip( "needs a desktop with a DWM broker\n" );
         return;
