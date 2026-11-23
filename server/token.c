@@ -1944,16 +1944,29 @@ DECL_HANDLER(create_token)
 }
 
 
+/* does an open of a token ask only to read it? (MAXIMUM_ALLOWED and the generic rights that include more do not) */
+static int token_access_is_query( unsigned int access )
+{
+    if (access & MAXIMUM_ALLOWED) return 0;
+    access = map_access( access, &token_type.mapping );
+    return !(access & ~(TOKEN_QUERY | TOKEN_QUERY_SOURCE | READ_CONTROL));
+}
+
 /* open a security token */
 DECL_HANDLER(open_token)
 {
-    /* Windows needs the query right on the process or thread; with only the limited query a limited process could
-     * open the full token of an elevated process of its user (the descriptor of the token is the second line of defense) */
+    /* Windows needs only the limited query right on the process or thread (OpenProcessToken from Low integrity works
+     * there), and the token's own descriptor decides the rest. Here the tokens of the system role (token_create_service)
+     * have no DACL, and users have the limited query on those processes (sysrun.c, protect_object), so with elevation
+     * enforced the limited right opens a token only for reading it: duplicating, impersonating, assigning or adjusting
+     * still needs the full query right, until those tokens get a descriptor as on Windows. */
     unsigned int query = sysrun_active && elevation_enforced();
+    unsigned int read_only = token_access_is_query( req->access );
 
     if (req->flags & OPEN_TOKEN_THREAD)
     {
-        struct thread *thread = get_thread_from_handle( req->handle, query ? THREAD_QUERY_INFORMATION : 0 );
+        struct thread *thread = get_thread_from_handle( req->handle, !query ? 0 : read_only ?
+                                                        THREAD_QUERY_LIMITED_INFORMATION : THREAD_QUERY_INFORMATION );
         if (thread)
         {
             if (thread->token)
@@ -1977,7 +1990,8 @@ DECL_HANDLER(open_token)
     }
     else
     {
-        struct process *process = get_process_from_handle( req->handle, query ? PROCESS_QUERY_INFORMATION : 0 );
+        struct process *process = get_process_from_handle( req->handle, !query ? 0 : read_only ?
+                                                           PROCESS_QUERY_LIMITED_INFORMATION : PROCESS_QUERY_INFORMATION );
         if (process)
         {
             if (process->token)
