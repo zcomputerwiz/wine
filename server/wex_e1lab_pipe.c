@@ -261,16 +261,12 @@ static int install_verifier_receipt( struct pipe_binding *b, obj_handle_t contex
     site = "receipt-sender";
     if (creds != 1 || (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC))) goto done;
 
-    /* the frame: this attempt's request, attempt, nonce and channel as sealed at ENDORSE_DIALOG, a nonzero
-     * evidence reference, the record and the canonical account name (the codec's account rule) */
-    if ((err = e1r8_decode_receipt( pkt, n, &b->sealed, &receipt )))
-    {
-        site = "receipt-frame";
-        if (err == E1R8_ERR_STRING || ((err == E1R8_ERR_SHORT || err == E1R8_ERR_LONG) && n >= 317 && n <= 379))
-            site = "receipt-name";
-        goto done;
-    }
-    ev = receipt.evidence;
+    /* the frame: a receipt's length, this attempt's request, attempt, nonce and channel as sealed at ENDORSE_DIALOG
+     * and a nonzero evidence reference; the record, then the name, are checked below in this order */
+    site = "receipt-frame";
+    if (n < 317 || n > 379 || e1r8_get_header( pkt, n, E1R8_TYPE_RECEIPT, &b->sealed, NULL ) ||
+        !receipt_nonzero( pkt + 76, 16 )) goto done;
+    ev = pkt + 92;
 
     /* the exact 220-byte evidence record against the sealed tuple and the binding's generations */
     site = "receipt-evidence";
@@ -296,6 +292,9 @@ static int install_verifier_receipt( struct pipe_binding *b, obj_handle_t contex
         e1r8_get_u64( ev + 188 ) != b->sealed.verifier_gen || e1r8_get_u64( ev + 196 ) != b->map_gen ||
         e1r8_get_u64( ev + 204 ) != b->policy_gen) goto done;
 
+    /* the whole frame through the codec, which also checks the canonical account name (its account rule) */
+    site = "receipt-name";
+    if ((err = e1r8_decode_receipt( pkt, n, &b->sealed, &receipt ))) goto done;
     memcpy( canonical, receipt.account, receipt.account_len );
     canonical[receipt.account_len] = 0;
 
