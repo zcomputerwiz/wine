@@ -44,6 +44,12 @@ HRESULT async_deployment_create( IUnknown *invoker, IUnknown *param, async_opera
 /* stage.c: install the package a file Uri names with wexappx, on a thread pool thread */
 HRESULT start_install( IUriRuntimeClass *uri, DeploymentOptions options, BOOL development, async_operation **out );
 
+HRESULT start_provision( HSTRING family_name, async_operation **out );
+
+#ifndef PACKAGE_FAMILY_NAME_MAX_LENGTH
+#define PACKAGE_FAMILY_NAME_MAX_LENGTH 64
+#endif
+
 extern IActivationFactory *package_manager_factory;
 extern IActivationFactory *stage_package_options_factory;
 

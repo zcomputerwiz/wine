@@ -364,7 +364,12 @@ DEFINE_IINSPECTABLE( package_manager6, IPackageManager6, struct package_manager,
         return E_NOTIMPL; \
     }
 
-PM6_FAIL( ProvisionPackageForAllUsersAsync, HSTRING family_name, async_operation **operation )
+static HRESULT WINAPI package_manager6_ProvisionPackageForAllUsersAsync( IPackageManager6 *iface, HSTRING family_name,
+                                                                         async_operation **operation )
+{
+    TRACE( "iface %p, family_name %s.\n", iface, debugstr_hstring( family_name ) );
+    return start_provision( family_name, operation );
+}
 PM6_FAIL( AddPackageByAppInstallerFileAsync, IUriRuntimeClass *uri, AddPackageByAppInstallerOptions options,
           IPackageVolume *volume, async_operation **operation )
 PM6_FAIL( RequestAddPackageByAppInstallerFileAsync, IUriRuntimeClass *uri, AddPackageByAppInstallerOptions options,

@@ -1,5 +1,5 @@
 MODULE  = appxdeploymentclient.dll
-IMPORTS = combase shlwapi
+IMPORTS = combase shlwapi advapi32
 
 SOURCES = \
 	async.c \

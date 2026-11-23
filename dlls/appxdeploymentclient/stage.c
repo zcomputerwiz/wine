@@ -159,6 +159,8 @@ struct install_job
     LONG ref;
     IUriRuntimeClass *uri;
     BOOL development;
+    BOOL all_users;          /* provisioning: wexappx install --all-users, on the file the family name was staged from */
+    WCHAR family[PACKAGE_FAMILY_NAME_MAX_LENGTH + 1];
 };
 
 static inline struct install_job *impl_from_IUnknown( IUnknown *iface )
@@ -190,7 +192,7 @@ static ULONG WINAPI job_Release( IUnknown *iface )
 
     if (!ref)
     {
-        IUriRuntimeClass_Release( job->uri );
+        if (job->uri) IUriRuntimeClass_Release( job->uri );
         free( job );
     }
     return ref;
@@ -199,7 +201,7 @@ static ULONG WINAPI job_Release( IUnknown *iface )
 static const IUnknownVtbl job_vtbl = { job_QueryInterface, job_AddRef, job_Release };
 
 /* runs wexappx install on the file; the output is the error text */
-static HRESULT run_wexappx( const WCHAR *path, BOOL development, DWORD *exit_code, WCHAR **text )
+static HRESULT run_wexappx( const WCHAR *path, BOOL development, BOOL all_users, DWORD *exit_code, WCHAR **text )
 {
     SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
     STARTUPINFOW si = { sizeof(si) };
@@ -213,7 +215,8 @@ static HRESULT run_wexappx( const WCHAR *path, BOOL development, DWORD *exit_cod
 
     *text = NULL;
     if (!(cmd = malloc( cmd_len * sizeof(WCHAR) ))) return E_OUTOFMEMORY;
-    swprintf( cmd, cmd_len, L"wexappx.exe install%ls \"%ls\"", development ? L" --development" : L"", path );
+    swprintf( cmd, cmd_len, L"wexappx.exe install%ls%ls \"%ls\"", development ? L" --development" : L"",
+              all_users ? L" --all-users" : L"", path );
 
     if (!CreatePipe( &read, &write, &sa, 0 ))
     {
@@ -251,6 +254,43 @@ static HRESULT run_wexappx( const WCHAR *path, BOOL development, DWORD *exit_cod
     return hr;
 }
 
+/* The package file a family was installed from is remembered (HKCU\Software\WineExplorer\Appx\SourcePackages, by family name),
+ * because provisioning names only the family: wexappx installs for every user from a package file, never from the files of
+ * a user's own installation (the broker freezes the file the consent describes). */
+static const WCHAR sources_key[] = L"Software\\WineExplorer\\Appx\\SourcePackages";
+
+/* "Installed NAME_VERSION_ARCH_RESOURCE_PUBLISHERID" is the first line of wexappx's output: the family is NAME_PUBLISHERID */
+static void remember_source( const WCHAR *text, const WCHAR *path )
+{
+    static const WCHAR prefix[] = L"Installed ";
+    WCHAR family[PACKAGE_FAMILY_NAME_MAX_LENGTH + 1];
+    const WCHAR *name, *first, *last, *end;
+    HKEY key;
+
+    if (!text || wcsncmp( text, prefix, wcslen( prefix ) )) return;
+    name = text + wcslen( prefix );
+    end = name + wcscspn( name, L"\r\n" );
+    first = wcschr( name, '_' );
+    for (last = end; last > name && *last != '_'; last--) ;
+    if (!first || first >= end || last <= first || last >= end) return;
+    if (swprintf( family, ARRAY_SIZE(family), L"%.*ls%.*ls", (int)(first - name), name, (int)(end - last), last ) < 0) return;
+    if (RegCreateKeyExW( HKEY_CURRENT_USER, sources_key, 0, NULL, 0, KEY_SET_VALUE, NULL, &key, NULL )) return;
+    RegSetValueExW( key, family, 0, REG_SZ, (const BYTE *)path, (wcslen( path ) + 1) * sizeof(WCHAR) );
+    RegCloseKey( key );
+}
+
+static BOOL find_source( const WCHAR *family, WCHAR *path, DWORD len )
+{
+    DWORD size = len * sizeof(WCHAR), type;
+    HKEY key;
+    BOOL found;
+
+    if (RegOpenKeyExW( HKEY_CURRENT_USER, sources_key, 0, KEY_QUERY_VALUE, &key )) return FALSE;
+    found = !RegQueryValueExW( key, family, NULL, &type, (BYTE *)path, &size ) && type == REG_SZ;
+    RegCloseKey( key );
+    return found && GetFileAttributesW( path ) != INVALID_FILE_ATTRIBUTES;
+}
+
 static HRESULT install_callback( IUnknown *invoker, IUnknown *param, PROPVARIANT *result, BOOL called_async )
 {
     struct install_job *job = impl_from_IUnknown( param );
@@ -262,18 +302,39 @@ static HRESULT install_callback( IUnknown *invoker, IUnknown *param, PROPVARIANT
 
     if (!called_async) return STATUS_PENDING;
 
-    if (FAILED(hr = IUriRuntimeClass_get_AbsoluteUri( job->uri, &abs_uri ))) return hr;
-    hr = PathCreateFromUrlW( WindowsGetStringRawBuffer( abs_uri, NULL ), path, &size, 0 );
-    WindowsDeleteString( abs_uri );
-    if (FAILED(hr))
+    if (job->family[0])
     {
-        FIXME( "only a file Uri can be installed.\n" );
-        return HRESULT_FROM_WIN32( ERROR_NOT_SUPPORTED );
+        if (!find_source( job->family, path, ARRAY_SIZE(path) ))
+        {
+            FIXME( "no package file is known for family %s.\n", debugstr_w( job->family ) );
+            hr = HRESULT_FROM_WIN32( ERROR_NOT_FOUND );
+            if (SUCCEEDED(result_create( L"the package file this family was installed from is not known (or is gone)", hr,
+                                         &deployment )))
+            {
+                result->vt = VT_UNKNOWN;
+                result->punkVal = (IUnknown *)deployment;
+            }
+            return hr;
+        }
+    }
+    else
+    {
+        if (FAILED(hr = IUriRuntimeClass_get_AbsoluteUri( job->uri, &abs_uri ))) return hr;
+        hr = PathCreateFromUrlW( WindowsGetStringRawBuffer( abs_uri, NULL ), path, &size, 0 );
+        WindowsDeleteString( abs_uri );
+        if (FAILED(hr))
+        {
+            FIXME( "only a file Uri can be installed.\n" );
+            return HRESULT_FROM_WIN32( ERROR_NOT_SUPPORTED );
+        }
     }
 
-    if (FAILED(hr = run_wexappx( path, job->development, &exit_code, &text ))) return hr;
+    if (FAILED(hr = run_wexappx( path, job->development, job->all_users, &exit_code, &text ))) return hr;
     TRACE( "wexappx exit code %lu, output %s.\n", exit_code, debugstr_w( text ) );
 
+    if (!exit_code && !job->all_users) remember_source( text, path );
+    /* provisioning a package that is already provisioned is not an error */
+    if (exit_code && job->all_users && text && wcsstr( text, L"is already installed" )) exit_code = 0;
     hr = exit_code ? HRESULT_FROM_WIN32( ERROR_INSTALL_FAILURE ) : S_OK;
     if (SUCCEEDED(result_create( text ? text : L"", hr, &deployment )))
     {
@@ -296,6 +357,29 @@ HRESULT start_install( IUriRuntimeClass *uri, DeploymentOptions options, BOOL de
     job->ref = 1;
     IUriRuntimeClass_AddRef( (job->uri = uri) );
     job->development = development || (options & DeploymentOptions_DevelopmentMode);
+
+    hr = async_deployment_create( NULL, &job->IUnknown_iface, install_callback, out );
+    IUnknown_Release( &job->IUnknown_iface );
+    return hr;
+}
+
+/* ProvisionPackageForAllUsersAsync: the package of that family, which was installed from a file, is installed for every user
+ * (wexappx install --all-users, which asks an administrator's consent through the elevation broker) */
+HRESULT start_provision( HSTRING family_name, async_operation **out )
+{
+    struct install_job *job;
+    const WCHAR *family;
+    UINT32 len;
+    HRESULT hr;
+
+    *out = NULL;
+    family = WindowsGetStringRawBuffer( family_name, &len );
+    if (!family || !len || len > PACKAGE_FAMILY_NAME_MAX_LENGTH) return E_INVALIDARG;
+    if (!(job = calloc( 1, sizeof(*job) ))) return E_OUTOFMEMORY;
+    job->IUnknown_iface.lpVtbl = &job_vtbl;
+    job->ref = 1;
+    job->all_users = TRUE;
+    memcpy( job->family, family, len * sizeof(WCHAR) );
 
     hr = async_deployment_create( NULL, &job->IUnknown_iface, install_callback, out );
     IUnknown_Release( &job->IUnknown_iface );
