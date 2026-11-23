@@ -4515,6 +4515,8 @@ enum inproc_sync_type
 /* Connect to a named ALPC connection port; the answer arrives as a message of the client port */
 @REQ(alpc_connect)
     unsigned int        flags;          /* connection flags */
+    unsigned int        port_flags;     /* flags of the port attributes of the client */
+    int                 qos_level;      /* impersonation level of the quality of service, -1 if there are no attributes */
     VARARG(obj_attr,object_attributes); /* object attributes (the port name) */
     VARARG(data,bytes);                 /* connection message data */
 @REPLY
@@ -4570,8 +4572,7 @@ enum inproc_sync_type
 /* Impersonate the sender of an ALPC message */
 @REQ(alpc_impersonate)
     obj_handle_t        handle;         /* port the message was received on */
-    unsigned int        pid;            /* sender process (client id of the message) */
-    unsigned int        tid;            /* sender thread */
+    unsigned int        msg_id;         /* id of the message (the client id of the header is not used) */
 @END
 
 

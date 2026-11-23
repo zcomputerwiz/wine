@@ -6509,6 +6509,8 @@ struct alpc_connect_request
 {
     struct request_header __header;
     unsigned int        flags;
+    unsigned int        port_flags;
+    int                 qos_level;
     /* VARARG(obj_attr,object_attributes); */
     /* VARARG(data,bytes); */
 };
@@ -6588,8 +6590,8 @@ struct alpc_impersonate_request
 {
     struct request_header __header;
     obj_handle_t        handle;
-    unsigned int        pid;
-    unsigned int        tid;
+    unsigned int        msg_id;
+    char __pad_20[4];
 };
 struct alpc_impersonate_reply
 {
@@ -7759,6 +7761,6 @@ union generic_reply
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 988
+#define SERVER_PROTOCOL_VERSION 989
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

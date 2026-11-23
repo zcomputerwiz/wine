@@ -3719,6 +3719,8 @@ static void dump_alpc_create_port_reply( const struct alpc_create_port_reply *re
 static void dump_alpc_connect_request( const struct alpc_connect_request *req )
 {
     fprintf( stderr, " flags=%08x", req->flags );
+    fprintf( stderr, ", port_flags=%08x", req->port_flags );
+    fprintf( stderr, ", qos_level=%d", req->qos_level );
     dump_varargs_object_attributes( ", obj_attr=", cur_size );
     dump_varargs_bytes( ", data=", cur_size );
 }
@@ -3779,8 +3781,7 @@ static void dump_alpc_disconnect_request( const struct alpc_disconnect_request *
 static void dump_alpc_impersonate_request( const struct alpc_impersonate_request *req )
 {
     fprintf( stderr, " handle=%04x", req->handle );
-    fprintf( stderr, ", pid=%08x", req->pid );
-    fprintf( stderr, ", tid=%08x", req->tid );
+    fprintf( stderr, ", msg_id=%08x", req->msg_id );
 }
 
 static void dump_dwm_connect_request( const struct dwm_connect_request *req )
@@ -4985,6 +4986,7 @@ static const struct
     { "INVALID_IMAGE_WIN_16",        STATUS_INVALID_IMAGE_WIN_16 },
     { "INVALID_IMAGE_WIN_64",        STATUS_INVALID_IMAGE_WIN_64 },
     { "INVALID_LOCK_SEQUENCE",       STATUS_INVALID_LOCK_SEQUENCE },
+    { "INVALID_MESSAGE",             STATUS_INVALID_MESSAGE },
     { "INVALID_OWNER",               STATUS_INVALID_OWNER },
     { "INVALID_PARAMETER",           STATUS_INVALID_PARAMETER },
     { "INVALID_PARAMETER_1",         STATUS_INVALID_PARAMETER_1 },

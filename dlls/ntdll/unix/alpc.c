@@ -213,6 +213,8 @@ NTSTATUS WINAPI NtAlpcConnectPort( HANDLE *port_handle, UNICODE_STRING *port_nam
     SERVER_START_REQ( alpc_connect )
     {
         req->flags = flags;
+        req->port_flags = port_attr ? port_attr->Flags : 0;
+        req->qos_level = port_attr ? port_attr->SecurityQos.ImpersonationLevel : -1;
         wine_server_add_data( req, objattr, len );
         if (connect_msg && connect_msg->DataLength) wine_server_add_data( req, connect_msg + 1, connect_msg->DataLength );
         if (!(status = wine_server_call( req ))) handle = wine_server_ptr_handle( reply->handle );
@@ -372,8 +374,7 @@ NTSTATUS WINAPI NtAlpcImpersonateClientOfPort( HANDLE port_handle, ALPC_PORT_MES
     SERVER_START_REQ( alpc_impersonate )
     {
         req->handle = wine_server_obj_handle( port_handle );
-        req->pid    = HandleToULong( msg->ClientId.UniqueProcess );
-        req->tid    = HandleToULong( msg->ClientId.UniqueThread );
+        req->msg_id = msg->MessageId;
         status = wine_server_call( req );
     }
     SERVER_END_REQ;

@@ -32,6 +32,7 @@ DECL_FUNCPTR(AlpcInitializeMessageAttribute)
 DECL_FUNCPTR(NtAlpcAcceptConnectPort)
 DECL_FUNCPTR(NtAlpcConnectPort)
 DECL_FUNCPTR(NtAlpcCreatePort)
+DECL_FUNCPTR(NtAlpcImpersonateClientOfPort)
 DECL_FUNCPTR(NtAlpcSendWaitReceivePort)
 
 #undef DECL_FUNCPTR
@@ -51,6 +52,7 @@ static void init_functions(void)
     LOAD_FUNCPTR(NtAlpcAcceptConnectPort)
     LOAD_FUNCPTR(NtAlpcConnectPort)
     LOAD_FUNCPTR(NtAlpcCreatePort)
+    LOAD_FUNCPTR(NtAlpcImpersonateClientOfPort)
     LOAD_FUNCPTR(NtAlpcSendWaitReceivePort)
 
 #undef LOAD_FUNCPTR
@@ -669,6 +671,164 @@ static void test_alpc_messages(void)
     CloseHandle(test_conn_port);
 }
 
+
+
+struct imp_results
+{
+    NTSTATUS recv, imp_connect, imp_forged, imp_request, imp_changed_id;
+};
+
+static struct imp_results imp_results;
+static HANDLE imp_port;
+
+static void revert_to_self(void)
+{
+    HANDLE token = NULL;
+
+    NtSetInformationThread(GetCurrentThread(), ThreadImpersonationToken, &token, sizeof(token));
+}
+
+static DWORD WINAPI imp_server(void *arg)
+{
+    struct test_msg msg, copy, reply;
+    LARGE_INTEGER timeout;
+    HANDLE comm = NULL;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    SIZE_T size;
+
+    memset(&imp_results, 0, sizeof(imp_results));
+    size = sizeof(msg);
+    timeout.QuadPart = -50000000;
+    imp_results.recv = pNtAlpcSendWaitReceivePort(imp_port, 0, NULL, NULL, &msg.header, &size, NULL, &timeout);
+    if (imp_results.recv) return 0;
+
+    imp_results.imp_connect = pNtAlpcImpersonateClientOfPort(imp_port, &msg.header, NULL);
+    if (!imp_results.imp_connect) revert_to_self();
+
+    init_port_attr(&port_attr, 0, 0x1000);
+    init_test_msg(&reply, "OK");
+    reply.header.MessageId = msg.header.MessageId;
+    pNtAlpcAcceptConnectPort(&comm, imp_port, 0, NULL, &port_attr, NULL, &reply.header, NULL, TRUE);
+
+    size = sizeof(msg);
+    timeout.QuadPart = -50000000;
+    imp_results.recv = pNtAlpcSendWaitReceivePort(imp_port, 0, NULL, NULL, &msg.header, &size, NULL, &timeout);
+    if (imp_results.recv) return 0;
+
+    copy = msg;
+    copy.header.MessageId += 1000;
+    imp_results.imp_forged = pNtAlpcImpersonateClientOfPort(imp_port, &copy.header, NULL);
+    if (!imp_results.imp_forged) revert_to_self();
+
+    imp_results.imp_request = pNtAlpcImpersonateClientOfPort(imp_port, &msg.header, NULL);
+    if (!imp_results.imp_request) revert_to_self();
+
+    /* the client id of the header is informational: the message id is what counts */
+    copy = msg;
+    copy.header.ClientId.UniqueProcess = (HANDLE)((ULONG_PTR)copy.header.ClientId.UniqueProcess + 4);
+    copy.header.ClientId.UniqueThread = (HANDLE)((ULONG_PTR)copy.header.ClientId.UniqueThread + 4);
+    imp_results.imp_changed_id = pNtAlpcImpersonateClientOfPort(imp_port, &copy.header, NULL);
+    if (!imp_results.imp_changed_id) revert_to_self();
+
+    if (comm) CloseHandle(comm);
+    return 0;
+}
+
+/* one connection to a port with the given flags; the server thread tries to impersonate */
+static void run_impersonation(const WCHAR *port_name, ULONG port_flags)
+{
+    UNICODE_STRING name;
+    OBJECT_ATTRIBUTES attr;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    struct test_msg msg;
+    LARGE_INTEGER timeout;
+    HANDLE client = NULL, thread;
+    NTSTATUS status;
+    SIZE_T size;
+
+    RtlInitUnicodeString(&name, port_name);
+    InitializeObjectAttributes(&attr, &name, 0, NULL, NULL);
+    init_port_attr(&port_attr, port_flags, 0x1000);
+    status = pNtAlpcCreatePort(&imp_port, &attr, &port_attr);
+    ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+    thread = CreateThread(NULL, 0, imp_server, NULL, 0, NULL);
+
+    init_test_msg(&msg, "hi");
+    size = sizeof(msg);
+    init_port_attr(&port_attr, 0, 0x1000);
+    timeout.QuadPart = -50000000;
+    status = pNtAlpcConnectPort(&client, &name, NULL, &port_attr, ALPC_SYNC_CONNECTION, NULL, &msg.header, &size,
+            NULL, NULL, &timeout);
+    ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+    init_test_msg(&msg, "req");
+    status = pNtAlpcSendWaitReceivePort(client, 0, &msg.header, NULL, NULL, NULL, NULL, NULL);
+    ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+    WaitForSingleObject(thread, 10000);
+    CloseHandle(thread);
+    if (client) CloseHandle(client);
+    CloseHandle(imp_port);
+}
+
+static void test_alpc_security(void)
+{
+    UNICODE_STRING name = RTL_CONSTANT_STRING(L"\\BaseNamedObjects\\test_alpc_security_port");
+    SID_IDENTIFIER_AUTHORITY world_auth = {SECURITY_WORLD_SID_AUTHORITY};
+    SECURITY_DESCRIPTOR sd;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    OBJECT_ATTRIBUTES attr;
+    struct test_msg msg;
+    LARGE_INTEGER timeout;
+    HANDLE port, client;
+    NTSTATUS status;
+    SIZE_T size;
+    PSID world;
+    ACL *acl;
+
+    if (!pNtAlpcConnectPort || !pNtAlpcImpersonateClientOfPort)
+    {
+        win_skip("ALPC impersonation is unavailable.\n");
+        return;
+    }
+
+    /* the server has to allow impersonation on its port */
+    run_impersonation(L"\\BaseNamedObjects\\test_alpc_imp_denied_port", 0);
+    ok(imp_results.imp_connect == STATUS_ACCESS_DENIED, "Got unexpected status %#lx.\n", imp_results.imp_connect);
+    ok(imp_results.imp_forged == STATUS_INVALID_MESSAGE, "Got unexpected status %#lx.\n", imp_results.imp_forged);
+    ok(imp_results.imp_request == STATUS_ACCESS_DENIED, "Got unexpected status %#lx.\n", imp_results.imp_request);
+    ok(imp_results.imp_changed_id == STATUS_ACCESS_DENIED, "Got unexpected status %#lx.\n", imp_results.imp_changed_id);
+
+    run_impersonation(L"\\BaseNamedObjects\\test_alpc_imp_allowed_port", ALPC_PORTFLG_ALLOWIMPERSONATION);
+    ok(imp_results.imp_connect == STATUS_SUCCESS, "Got unexpected status %#lx.\n", imp_results.imp_connect);
+    ok(imp_results.imp_forged == STATUS_INVALID_MESSAGE, "Got unexpected status %#lx.\n", imp_results.imp_forged);
+    ok(imp_results.imp_request == STATUS_SUCCESS, "Got unexpected status %#lx.\n", imp_results.imp_request);
+    ok(imp_results.imp_changed_id == STATUS_SUCCESS, "Got unexpected status %#lx.\n", imp_results.imp_changed_id);
+
+    /* a port whose security descriptor denies everybody cannot be connected to */
+    RtlAllocateAndInitializeSid(&world_auth, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &world);
+    acl = HeapAlloc(GetProcessHeap(), 0, 256);
+    RtlCreateAcl(acl, 256, ACL_REVISION);
+    RtlAddAccessDeniedAce(acl, ACL_REVISION, GENERIC_ALL, world);
+    RtlCreateSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+    RtlSetDaclSecurityDescriptor(&sd, TRUE, acl, FALSE);
+    InitializeObjectAttributes(&attr, &name, 0, NULL, &sd);
+    init_port_attr(&port_attr, 0, 0x1000);
+    status = pNtAlpcCreatePort(&port, &attr, &port_attr);
+    ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+
+    init_test_msg(&msg, "hi");
+    size = sizeof(msg);
+    client = (HANDLE)0xdeadbeef;
+    timeout.QuadPart = -10000000;
+    status = pNtAlpcConnectPort(&client, &name, NULL, &port_attr, ALPC_SYNC_CONNECTION, NULL, &msg.header, &size,
+            NULL, NULL, &timeout);
+    ok(status == STATUS_ACCESS_DENIED, "Got unexpected status %#lx.\n", status);
+    ok(client == (HANDLE)0xdeadbeef, "Got unexpected handle %p.\n", client);
+
+    CloseHandle(port);
+    RtlFreeSid(world);
+    HeapFree(GetProcessHeap(), 0, acl);
+}
+
 START_TEST(alpc)
 {
     init_functions();
@@ -678,4 +838,5 @@ START_TEST(alpc)
     test_AlpcInitializeMessageAttribute();
     test_NtAlpcCreatePort();
     test_alpc_messages();
+    test_alpc_security();
 }
