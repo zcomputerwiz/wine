@@ -440,7 +440,7 @@ static HRESULT WINAPI async_inspectable_GetIids( IAsyncOperation_IInspectable *i
 static HRESULT WINAPI async_inspectable_GetRuntimeClassName( IAsyncOperation_IInspectable *iface, HSTRING *class_name )
 {
     return WindowsCreateString( L"Windows.Foundation.IAsyncOperation`1<IInspectable>",
-                                ARRAY_SIZE(L"Windows.Foundation.IAsyncOperation`1<IInspectable>"),
+                                ARRAY_SIZE(L"Windows.Foundation.IAsyncOperation`1<IInspectable>") - 1,
                                 class_name );
 }
 

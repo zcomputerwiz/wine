@@ -73,9 +73,19 @@ HRESULT async_operation_inspectable_create( const GUID *iid, IUnknown *invoker, 
  */
 
 HRESULT map_hstring_create( IMap_HSTRING_HSTRING **out );
+HRESULT map_hstring_get( IMap_HSTRING_HSTRING **slot, IMap_HSTRING_HSTRING **out );
 void map_hstring_dump( IMap_HSTRING_HSTRING *iface, const char *prefix );
-BOOL diagnostic_provider_enabled( void );
 HRESULT map_hstring_pairs( IMap_HSTRING_HSTRING *iface, WCHAR **text, UINT32 *len );
+
+/*
+ *
+ * provider.c
+ *
+ */
+
+BOOL authority_is_consumers( HSTRING authority );
+BOOL provider_is_consumers( IWebAccountProvider *provider );
+BOOL diagnostic_provider_enabled( void );
 void diagnostic_interaction_error( IInspectable *request, UINT32 *code, const WCHAR **message );
 HRESULT diagnostic_provider_create( HSTRING id, HSTRING authority, IWebAccountProvider **out );
 HRESULT provider_create( HSTRING id, HSTRING authority, const WCHAR *display_name, IWebAccountProvider **out );
@@ -101,6 +111,7 @@ HRESULT token_broker_find_account( IWebAccountProvider *provider, HSTRING id, IW
 
 HRESULT web_account_create( IWebAccountProvider *provider, const WCHAR *id, UINT32 id_len, const WCHAR *user_name,
                             UINT32 user_name_len, WebAccountState state, IWebAccount **out );
+void web_account_set_properties( IWebAccount *account, IMap_HSTRING_HSTRING *properties );
 HSTRING web_account_id( IInspectable *account );
 
 /*

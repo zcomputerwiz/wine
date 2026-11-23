@@ -41,14 +41,14 @@ static HRESULT create_not_available_result( IWebTokenRequestResult **out )
     HRESULT hr;
 
     if (FAILED(hr = WindowsCreateString( L"No account provider is available.",
-                                         ARRAY_SIZE(L"No account provider is available."), &message )))
+                                         ARRAY_SIZE(L"No account provider is available.") - 1, &message )))
         return hr;
     if (FAILED(hr = vector_view_webtokenresponse_create_empty( &response_data )))
     {
         WindowsDeleteString( message );
         return hr;
     }
-    if (FAILED(hr = webprovidererror_create( 0x80070490, message, &response_error )))
+    if (FAILED(hr = webprovidererror_create( HRESULT_FROM_WIN32(ERROR_NOT_FOUND), message, &response_error )))
     {
         WindowsDeleteString( message );
         IVectorView_WebTokenResponse_Release( response_data );
@@ -357,10 +357,8 @@ static HRESULT find_account( IWebAccountProvider *provider, HSTRING id, IAsyncOp
 /* the display name of a provider the token broker serves */
 static const WCHAR *broker_provider_name( HSTRING id, HSTRING authority )
 {
-    const WCHAR *text = WindowsGetStringRawBuffer( authority, NULL );
-
     if (wcscmp( WindowsGetStringRawBuffer( id, NULL ), L"https://login.microsoft.com" )) return L"Web account";
-    if (!wcscmp( text, L"consumers" )) return L"Microsoft account";
+    if (authority_is_consumers( authority )) return L"Microsoft account";
     return L"Work or school account";
 }
 

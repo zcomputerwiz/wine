@@ -50,9 +50,14 @@ enum tokenbroker_kind
     TOKENBROKER_GET_TOKEN_SILENT,   /* GetTokenSilentlyAsync: never shows anything */
     TOKENBROKER_REQUEST_TOKEN,      /* RequestTokenAsync and the ForWindow forms: may show the sign-in window */
     TOKENBROKER_FIND_ACCOUNTS,      /* FindAllAccountsAsync: the reply's status is a FindAllWebAccountsStatus */
-    TOKENBROKER_FIND_ACCOUNT,       /* FindAccountAsync by ACCOUNT_ID: status 0 and the account, or 1 for none */
+    TOKENBROKER_FIND_ACCOUNT,       /* FindAccountAsync by ACCOUNT_ID: TOKENBROKER_ACCOUNT_FOUND and the account, or
+                                     * TOKENBROKER_ACCOUNT_NONE */
     TOKENBROKER_SIGN_OUT,           /* WebAccount.SignOutAsync: the account's tokens (for CLIENT_ID if not empty) */
 };
+
+/* the status of a FIND_ACCOUNT reply */
+#define TOKENBROKER_ACCOUNT_FOUND   0
+#define TOKENBROKER_ACCOUNT_NONE    1
 
 enum tokenbroker_field
 {
@@ -74,6 +79,7 @@ enum tokenbroker_reply_field
     TOKENBROKER_REPLY_USER_NAME,    /* and UserName */
     TOKENBROKER_REPLY_PROPERTIES,   /* WebTokenResponse.Properties, as pairs */
     TOKENBROKER_REPLY_ACCOUNTS,     /* FIND_ACCOUNTS: id and user name of each account */
+    TOKENBROKER_REPLY_ACCOUNT_PROPERTIES, /* the response WebAccount's Properties, as pairs */
     TOKENBROKER_REPLY_COUNT
 };
 
