@@ -3785,75 +3785,6 @@ static void dump_alpc_impersonate_request( const struct alpc_impersonate_request
     fprintf( stderr, ", msg_id=%08x", req->msg_id );
 }
 
-static void dump_dwm_connect_request( const struct dwm_connect_request *req )
-{
-}
-
-static void dump_dwm_connect_reply( const struct dwm_connect_reply *req )
-{
-    fprintf( stderr, " handle=%04x", req->handle );
-    fprintf( stderr, ", version=%08x", req->version );
-    dump_uint64( ", epoch=", &req->epoch );
-}
-
-static void dump_dwm_get_broker_capability_request( const struct dwm_get_broker_capability_request *req )
-{
-}
-
-static void dump_dwm_get_broker_capability_reply( const struct dwm_get_broker_capability_reply *req )
-{
-    dump_uint64( " capability=", &req->capability );
-    dump_uint64( ", epoch=", &req->epoch );
-}
-
-static void dump_dwm_broker_register_request( const struct dwm_broker_register_request *req )
-{
-    fprintf( stderr, " flags=%08x", req->flags );
-    dump_uint64( ", capability=", &req->capability );
-}
-
-static void dump_dwm_broker_register_reply( const struct dwm_broker_register_reply *req )
-{
-    fprintf( stderr, " handle=%04x", req->handle );
-    fprintf( stderr, ", version=%08x", req->version );
-    dump_uint64( ", epoch=", &req->epoch );
-}
-
-static void dump_dwm_send_request( const struct dwm_send_request *req )
-{
-    fprintf( stderr, " handle=%04x", req->handle );
-    dump_varargs_bytes( ", msg=", cur_size );
-}
-
-static void dump_dwm_send_reply( const struct dwm_send_reply *req )
-{
-    dump_uint64( " epoch=", &req->epoch );
-    fprintf( stderr, ", request_id=%08x", req->request_id );
-}
-
-static void dump_dwm_recv_request( const struct dwm_recv_request *req )
-{
-    fprintf( stderr, " handle=%04x", req->handle );
-}
-
-static void dump_dwm_recv_reply( const struct dwm_recv_reply *req )
-{
-    fprintf( stderr, " request_id=%08x", req->request_id );
-    fprintf( stderr, ", sender_pid=%04x", req->sender_pid );
-    fprintf( stderr, ", sender_tid=%04x", req->sender_tid );
-    fprintf( stderr, ", desktop_id=%08x", req->desktop_id );
-    fprintf( stderr, ", status=%08x", req->status );
-    dump_varargs_bytes( ", msg=", cur_size );
-}
-
-static void dump_dwm_reply_request( const struct dwm_reply_request *req )
-{
-    fprintf( stderr, " handle=%04x", req->handle );
-    fprintf( stderr, ", request_id=%08x", req->request_id );
-    fprintf( stderr, ", status=%08x", req->status );
-    dump_varargs_bytes( ", msg=", cur_size );
-}
-
 static void dump_create_e1s_account_token_request( const struct create_e1s_account_token_request *req )
 {
     fprintf( stderr, " operation=%08x", req->operation );
@@ -4219,12 +4150,6 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_alpc_send_receive_request,
     (dump_func)dump_alpc_disconnect_request,
     (dump_func)dump_alpc_impersonate_request,
-    (dump_func)dump_dwm_connect_request,
-    (dump_func)dump_dwm_get_broker_capability_request,
-    (dump_func)dump_dwm_broker_register_request,
-    (dump_func)dump_dwm_send_request,
-    (dump_func)dump_dwm_recv_request,
-    (dump_func)dump_dwm_reply_request,
     (dump_func)dump_create_e1s_account_token_request,
     (dump_func)dump_load_e1s_profile_request,
 };
@@ -4558,12 +4483,6 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_alpc_accept_reply,
     (dump_func)dump_alpc_send_receive_reply,
     NULL,
-    NULL,
-    (dump_func)dump_dwm_connect_reply,
-    (dump_func)dump_dwm_get_broker_capability_reply,
-    (dump_func)dump_dwm_broker_register_reply,
-    (dump_func)dump_dwm_send_reply,
-    (dump_func)dump_dwm_recv_reply,
     NULL,
     (dump_func)dump_create_e1s_account_token_reply,
     (dump_func)dump_load_e1s_profile_reply,
@@ -4899,12 +4818,6 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "alpc_send_receive",
     "alpc_disconnect",
     "alpc_impersonate",
-    "dwm_connect",
-    "dwm_get_broker_capability",
-    "dwm_broker_register",
-    "dwm_send",
-    "dwm_recv",
-    "dwm_reply",
     "create_e1s_account_token",
     "load_e1s_profile",
 };
@@ -5048,17 +4961,14 @@ static const struct
     { "PIPE_EMPTY",                  STATUS_PIPE_EMPTY },
     { "PIPE_LISTENING",              STATUS_PIPE_LISTENING },
     { "PIPE_NOT_AVAILABLE",          STATUS_PIPE_NOT_AVAILABLE },
-    { "PORT_ALREADY_SET",            STATUS_PORT_ALREADY_SET },
     { "PORT_CONNECTION_REFUSED",     STATUS_PORT_CONNECTION_REFUSED },
     { "PORT_DISCONNECTED",           STATUS_PORT_DISCONNECTED },
-    { "PORT_MESSAGE_TOO_LONG",       STATUS_PORT_MESSAGE_TOO_LONG },
     { "PORT_NOT_SET",                STATUS_PORT_NOT_SET },
     { "PREDEFINED_HANDLE",           STATUS_PREDEFINED_HANDLE },
     { "PRIVILEGE_NOT_HELD",          STATUS_PRIVILEGE_NOT_HELD },
     { "PROCESS_IN_JOB",              STATUS_PROCESS_IN_JOB },
     { "PROCESS_IS_TERMINATING",      STATUS_PROCESS_IS_TERMINATING },
     { "PROCESS_NOT_IN_JOB",          STATUS_PROCESS_NOT_IN_JOB },
-    { "QUOTA_EXCEEDED",              STATUS_QUOTA_EXCEEDED },
     { "RANGE_NOT_LOCKED",            STATUS_RANGE_NOT_LOCKED },
     { "REGISTRY_CORRUPT",            STATUS_REGISTRY_CORRUPT },
     { "REGISTRY_IO_FAILED",          STATUS_REGISTRY_IO_FAILED },

@@ -2089,7 +2089,8 @@ NET_API_STATUS WINAPI NetUserModalsGet(
             RegOpenKeyExW( HKEY_LOCAL_MACHINE, lockout_keyW, 0, KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key );
             duration = lockout_value( key, L"LockoutDuration", 30, 99999 );
             umi->usrmod3_lockout_threshold = lockout_value( key, L"LockoutBadCount", 0, 999 );
-            umi->usrmod3_lockout_duration = duration ? duration * 60 : 0xffffffff;
+            /* forever is stored as 0 by NetUserModalsSet and as 99999 by a security template (LockoutDuration = -1) */
+            umi->usrmod3_lockout_duration = duration && duration < 99999 ? duration * 60 : 0xffffffff;
             umi->usrmod3_lockout_observation_window = 60 * lockout_value( key, L"ResetLockoutCount",
                                                                             duration && duration < 30 ? duration : 30, 99999 );
             if (key) RegCloseKey( key );

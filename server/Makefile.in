@@ -15,7 +15,6 @@ SOURCES = \
 	debugger.c \
 	device.c \
 	directory.c \
-	dwm.c \
 	e1s_profile.c \
 	e1s_profile.h \
 	e1s_token.h \

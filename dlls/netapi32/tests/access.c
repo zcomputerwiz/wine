@@ -23,6 +23,7 @@
 #include <windef.h>
 #include <winbase.h>
 #include <winerror.h>
+#include <winreg.h>
 #include <lmaccess.h>
 #include <lmerr.h>
 #include <lmapibuf.h>
@@ -186,6 +187,50 @@ static void run_usermodalsget_tests(void)
 
     if (umi2)
         NetApiBufferFree(umi2);
+}
+
+/* WineExplorer keeps the lockout policy under its own key; a security template writes "forever" (LockoutDuration = -1)
+ * as 99999 minutes, NetUserModalsSet as 0: both read back as TIMEQ_FOREVER */
+static void test_lockout_forever(void)
+{
+    static const WCHAR key_name[] = L"Software\\WineExplorer\\Elevation";
+    static const DWORD stored[] = { 0, 99999, 120000 };
+    USER_MODALS_INFO_3 *umi3;
+    DWORD saved, size = sizeof(saved), value, i;
+    BOOL had;
+    HKEY key;
+
+    if (!winetest_platform_is_wine ||
+        RegCreateKeyExW( HKEY_LOCAL_MACHINE, key_name, 0, NULL, 0, KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY,
+                         NULL, &key, NULL ))
+    {
+        skip( "the lockout policy key cannot be written.\n" );
+        return;
+    }
+    had = !RegQueryValueExW( key, L"LockoutDuration", NULL, NULL, (BYTE *)&saved, &size );
+    for (i = 0; i < ARRAY_SIZE(stored); i++)
+    {
+        value = stored[i];
+        RegSetValueExW( key, L"LockoutDuration", 0, REG_DWORD, (BYTE *)&value, sizeof(value) );
+        umi3 = NULL;
+        ok( !NetUserModalsGet( NULL, 3, (BYTE **)&umi3 ), "NetUserModalsGet failed.\n" );
+        if (!umi3) continue;
+        ok( umi3->usrmod3_lockout_duration == 0xffffffff, "stored %lu: got %lu.\n", value,
+            umi3->usrmod3_lockout_duration );
+        NetApiBufferFree( umi3 );
+    }
+    value = 45;
+    RegSetValueExW( key, L"LockoutDuration", 0, REG_DWORD, (BYTE *)&value, sizeof(value) );
+    umi3 = NULL;
+    ok( !NetUserModalsGet( NULL, 3, (BYTE **)&umi3 ), "NetUserModalsGet failed.\n" );
+    if (umi3)
+    {
+        ok( umi3->usrmod3_lockout_duration == 45 * 60, "got %lu.\n", umi3->usrmod3_lockout_duration );
+        NetApiBufferFree( umi3 );
+    }
+    if (had) RegSetValueExW( key, L"LockoutDuration", 0, REG_DWORD, (BYTE *)&saved, sizeof(saved) );
+    else RegDeleteValueW( key, L"LockoutDuration" );
+    RegCloseKey( key );
 }
 
 static void run_userhandling_tests(void)
@@ -505,6 +550,7 @@ START_TEST(access)
     run_usergetinfo_tests();
     run_querydisplayinformation1_tests();
     run_usermodalsget_tests();
+    test_lockout_forever();
     run_localgroupgetinfo_tests();
 
     test_DavGetHTTPFromUNCPath();
