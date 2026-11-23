@@ -61,9 +61,11 @@ namespace Windows.Security.Authentication.Web.Core {
         interface Windows.Foundation.IAsyncOperation<Windows.Security.Authentication.Web.Core.FindAllAccountsResult *>;
         interface Windows.Foundation.IAsyncOperation<Windows.Security.Credentials.WebAccountProvider *>;
         interface Windows.Foundation.IAsyncOperation<Windows.Security.Credentials.WebAccount *>;
+        interface Windows.Foundation.Collections.IVector<Windows.Security.Authentication.Web.Core.WebTokenResponse *>;
         interface Windows.Foundation.Collections.IVectorView<Windows.Security.Authentication.Web.Core.WebTokenResponse *>;
         interface Windows.Foundation.Collections.IIterable<Windows.Security.Authentication.Web.Core.WebTokenResponse *>;
         interface Windows.Foundation.Collections.IIterator<Windows.Security.Authentication.Web.Core.WebTokenResponse *>;
+        interface Windows.Foundation.Collections.IVector<Windows.Security.Credentials.WebAccount *>;
         interface Windows.Foundation.Collections.IVectorView<Windows.Security.Credentials.WebAccount *>;
         interface Windows.Foundation.Collections.IIterable<Windows.Security.Credentials.WebAccount *>;
         interface Windows.Foundation.Collections.IIterator<Windows.Security.Credentials.WebAccount *>;

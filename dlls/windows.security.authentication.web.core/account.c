@@ -184,15 +184,23 @@ static HRESULT WINAPI web_account2_GetPictureAsync( IWebAccount2 *iface, WebAcco
 
 static HRESULT WINAPI web_account2_SignOutAsync( IWebAccount2 *iface, IAsyncAction **operation )
 {
-    FIXME( "iface %p, operation %p stub!\n", iface, operation );
-    return E_NOTIMPL;
+    struct web_account *impl = impl_from_IWebAccount2( iface );
+
+    TRACE( "iface %p, operation %p.\n", iface, operation );
+
+    if (!operation) return E_POINTER;
+    return sign_out_async( impl->provider, impl->id, NULL, operation );
 }
 
 static HRESULT WINAPI web_account2_SignOutWithClientIdAsync( IWebAccount2 *iface, HSTRING client_id,
                                                              IAsyncAction **operation )
 {
-    FIXME( "iface %p, client_id %s, operation %p stub!\n", iface, debugstr_hstring( client_id ), operation );
-    return E_NOTIMPL;
+    struct web_account *impl = impl_from_IWebAccount2( iface );
+
+    TRACE( "iface %p, client_id %s, operation %p.\n", iface, debugstr_hstring( client_id ), operation );
+
+    if (!operation) return E_POINTER;
+    return sign_out_async( impl->provider, impl->id, client_id, operation );
 }
 
 static const struct IWebAccount2Vtbl web_account2_vtbl =

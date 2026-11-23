@@ -31,6 +31,10 @@
 WINE_DEFAULT_DEBUG_CHANNEL(webcore);
 
 #define BROKER_START_WAIT_MS 5000
+/* how long an answer is waited for: a silent request may refresh a token over the network; an interactive one lasts
+ * as long as the sign-in window, which the broker closes after ten minutes */
+#define BROKER_SILENT_TIMEOUT_MS      (60 * 1000)
+#define BROKER_INTERACTIVE_TIMEOUT_MS (11 * 60 * 1000)
 
 BOOL token_broker_enabled( void )
 {
@@ -142,7 +146,7 @@ static HANDLE connect_broker( const SID *own )
     for (;;)
     {
         pipe = CreateFileW( name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
-                            SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL );
+                            FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL );
         if (pipe != INVALID_HANDLE_VALUE) break;
         if (GetLastError() == ERROR_PIPE_BUSY) WaitNamedPipeW( name, 1000 );
         else if (GetLastError() == ERROR_FILE_NOT_FOUND && !started)
@@ -195,84 +199,140 @@ static void free_reply( struct broker_reply *reply )
     reply->buffer = NULL;
 }
 
-/* One exchange with the user's broker. S_OK with its reply (free_reply), or a failure: then the call is
- * answered as without a broker. */
-static HRESULT broker_exchange( unsigned int kind, const struct field fields[TOKENBROKER_FIELD_COUNT],
-                                WebTokenRequestPromptType prompt, HWND window, struct broker_reply *out )
+/* a request message to the broker, built where the call is made (the program may change its request afterwards) */
+struct broker_message
+{
+    struct tokenbroker_request *req;
+    DWORD size;
+};
+
+static void free_message( struct broker_message *msg )
+{
+    if (msg->req) SecureZeroMemory( msg->req, msg->size );
+    free( msg->req );
+    msg->req = NULL;
+}
+
+static HRESULT build_message( unsigned int kind, const struct field fields[TOKENBROKER_FIELD_COUNT],
+                              WebTokenRequestPromptType prompt, HWND window, struct broker_message *msg )
 {
     static LONG next_id;
-    struct tokenbroker_request *req;
-    struct tokenbroker_reply *reply;
-    char *buffer = NULL, *answer = NULL;
+    DWORD size = sizeof(*msg->req), offset;
+    unsigned int i;
+
+    msg->req = NULL;
+    for (i = 0; i < TOKENBROKER_FIELD_COUNT; i++)
+    {
+        if (fields[i].len > (TOKENBROKER_MAX_MESSAGE - size) / sizeof(WCHAR)) return E_INVALIDARG;
+        size += fields[i].len * sizeof(WCHAR);
+    }
+    if (!(msg->req = calloc( 1, size ))) return E_OUTOFMEMORY;
+    msg->size = size;
+    msg->req->hdr.magic = TOKENBROKER_MAGIC;
+    msg->req->hdr.version = TOKENBROKER_VERSION;
+    msg->req->hdr.kind = kind;
+    msg->req->hdr.request_id = InterlockedIncrement( &next_id );
+    msg->req->hdr.size = size;
+    msg->req->prompt_type = prompt;
+    msg->req->window = HandleToULong( window );
+    for (i = 0, offset = sizeof(*msg->req); i < TOKENBROKER_FIELD_COUNT; i++)
+    {
+        msg->req->field_len[i] = fields[i].len * sizeof(WCHAR);
+        memcpy( (char *)msg->req + offset, fields[i].text, msg->req->field_len[i] );
+        offset += msg->req->field_len[i];
+    }
+    return S_OK;
+}
+
+/* the reply's fields, checked against its header */
+static BOOL parse_reply( const struct tokenbroker_request *req, char *answer, DWORD size, struct broker_reply *out )
+{
+    const struct tokenbroker_reply *reply = (const struct tokenbroker_reply *)answer;
+    DWORD offset = sizeof(*reply);
+    unsigned int i;
+
+    if (size < sizeof(*reply) || reply->hdr.magic != TOKENBROKER_MAGIC || reply->hdr.version != TOKENBROKER_VERSION ||
+        reply->hdr.kind != req->hdr.kind || reply->hdr.request_id != req->hdr.request_id || reply->hdr.size != size)
+        return FALSE;
+    for (i = 0; i < TOKENBROKER_REPLY_COUNT; i++)
+    {
+        if (reply->field_len[i] % sizeof(WCHAR) || reply->field_len[i] > size - offset) return FALSE;
+        out->field[i].text = (const WCHAR *)(answer + offset);
+        out->field[i].len = reply->field_len[i] / sizeof(WCHAR);
+        offset += reply->field_len[i];
+    }
+    if (offset != size) return FALSE;
+    out->status = reply->status;
+    out->code = reply->error_code;
+    return TRUE;
+}
+
+/* The message to the user's broker and its reply, waited for up to timeout ms. S_OK with the reply (free_reply), or a
+ * failure: then the call is answered as without a broker. */
+static HRESULT transact( const struct broker_message *msg, DWORD timeout, struct broker_reply *out )
+{
     HANDLE token, pipe = INVALID_HANDLE_VALUE;
-    DWORD offset, size;
+    OVERLAPPED ov = {0};
+    char *answer = NULL;
     SID *own = NULL;
     HRESULT hr = E_FAIL;
-    unsigned int i;
+    DWORD size = 0;
+    BOOL ok;
 
     memset( out, 0, sizeof(*out) );
     if (!OpenProcessToken( GetCurrentProcess(), TOKEN_QUERY, &token )) goto done;
     own = token_user( token );
     CloseHandle( token );
-    if (!own) goto done;
-    if (!(buffer = malloc( TOKENBROKER_MAX_MESSAGE )) || !(answer = malloc( TOKENBROKER_MAX_MESSAGE ))) goto done;
-
-    req = (struct tokenbroker_request *)buffer;
-    req->hdr.magic = TOKENBROKER_MAGIC;
-    req->hdr.version = TOKENBROKER_VERSION;
-    req->hdr.kind = kind;
-    req->hdr.request_id = InterlockedIncrement( &next_id );
-    req->prompt_type = prompt;
-    req->window = HandleToULong( window );
-    offset = sizeof(*req);
-    for (i = 0; i < TOKENBROKER_FIELD_COUNT; i++)
-    {
-        req->field_len[i] = fields[i].len * sizeof(WCHAR);
-        if (req->field_len[i] > TOKENBROKER_MAX_MESSAGE - offset) goto done;
-        memcpy( buffer + offset, fields[i].text, req->field_len[i] );
-        offset += req->field_len[i];
-    }
-    req->hdr.size = offset;
-
+    if (!own || !(answer = malloc( TOKENBROKER_MAX_MESSAGE )) ||
+        !(ov.hEvent = CreateEventW( NULL, TRUE, FALSE, NULL )))
+        goto done;
     if ((pipe = connect_broker( own )) == INVALID_HANDLE_VALUE) goto done;
-    if (!TransactNamedPipe( pipe, buffer, offset, answer, TOKENBROKER_MAX_MESSAGE, &size, NULL )) goto done;
-    reply = (struct tokenbroker_reply *)answer;
-    if (size < sizeof(*reply) || reply->hdr.magic != TOKENBROKER_MAGIC || reply->hdr.version != TOKENBROKER_VERSION ||
-        reply->hdr.kind != req->hdr.kind || reply->hdr.request_id != req->hdr.request_id || reply->hdr.size != size)
+
+    ok = TransactNamedPipe( pipe, msg->req, msg->size, answer, TOKENBROKER_MAX_MESSAGE, &size, &ov );
+    if (!ok && GetLastError() == ERROR_IO_PENDING)
+    {
+        if (WaitForSingleObject( ov.hEvent, timeout ) != WAIT_OBJECT_0)
+        {
+            WARN( "the token broker did not answer within %lu ms\n", timeout );
+            CancelIoEx( pipe, &ov );
+        }
+        ok = GetOverlappedResult( pipe, &ov, &size, TRUE );
+    }
+    if (!ok) goto done;
+    if (!parse_reply( msg->req, answer, size, out ))
     {
         WARN( "the token broker's answer is not valid\n" );
         goto done;
     }
-    offset = sizeof(*reply);
-    for (i = 0; i < TOKENBROKER_REPLY_COUNT; i++)
-    {
-        if (reply->field_len[i] % sizeof(WCHAR) || reply->field_len[i] > size - offset)
-        {
-            WARN( "the token broker's answer is not valid\n" );
-            goto done;
-        }
-        out->field[i].text = (const WCHAR *)(answer + offset);
-        out->field[i].len = reply->field_len[i] / sizeof(WCHAR);
-        offset += reply->field_len[i];
-    }
-    if (offset != size) goto done;
-    out->status = reply->status;
-    out->code = reply->error_code;
     out->buffer = answer;
     out->size = size;
     answer = NULL;
     /* lengths only: tokens are never logged */
-    TRACE( "request %u kind %u: status %d, error %#x, token length %u\n", req->hdr.request_id, kind, out->status,
-           out->code, out->field[TOKENBROKER_REPLY_TOKEN].len );
+    TRACE( "request %u kind %u: status %d, error %#x, token length %u\n", msg->req->hdr.request_id,
+           msg->req->hdr.kind, out->status, out->code, out->field[TOKENBROKER_REPLY_TOKEN].len );
     hr = S_OK;
 
 done:
     if (pipe != INVALID_HANDLE_VALUE) CloseHandle( pipe );
-    free( buffer );
+    if (ov.hEvent) CloseHandle( ov.hEvent );
     if (answer) SecureZeroMemory( answer, TOKENBROKER_MAX_MESSAGE );
     free( answer );
     free( own );
     if (FAILED(hr)) WARN( "the token broker was not reached; answering without it\n" );
+    return hr;
+}
+
+/* one exchange that needs no user: an account lookup */
+static HRESULT broker_exchange( unsigned int kind, const struct field fields[TOKENBROKER_FIELD_COUNT],
+                                struct broker_reply *out )
+{
+    struct broker_message msg;
+    HRESULT hr;
+
+    memset( out, 0, sizeof(*out) );
+    if (FAILED(hr = build_message( kind, fields, WebTokenRequestPromptType_Default, NULL, &msg ))) return hr;
+    hr = transact( &msg, BROKER_SILENT_TIMEOUT_MS, out );
+    free_message( &msg );
     return hr;
 }
 
@@ -387,7 +447,7 @@ static HRESULT token_result( const struct broker_reply *reply, IWebAccountProvid
                                              reply->field[TOKENBROKER_REPLY_MESSAGE].len, &message )))
             goto done;
         if (FAILED(hr = webprovidererror_create( reply->code, message, &error ))) goto done;
-        hr = vector_view_webtokenresponse_create_empty( &responses );
+        hr = vector_view_webtokenresponse_create( NULL, 0, &responses );
     }
     if (SUCCEEDED(hr)) hr = webtokenrequestresult_create( reply->status, responses, error, out );
 
@@ -402,31 +462,44 @@ done:
     return hr;
 }
 
-/* A token request through the broker: S_OK and its result, or a failure, then the request is answered as without a
- * broker. account is the WebAccount the request names, or NULL. */
-HRESULT token_broker_request( IInspectable *request, IInspectable *account, BOOL silent, HWND window,
-                              IWebTokenRequestResult **result )
+/* a token request for the broker, read from the program's request where the call is made */
+struct token_broker_call
+{
+    struct broker_message msg;
+    IWebAccountProvider *provider;
+    BOOL silent;
+};
+
+/* The token request as the broker's message: S_OK, or a failure, then the request is answered as without a broker.
+ * account is the WebAccount the request names, or NULL. */
+HRESULT token_broker_prepare( IInspectable *request, IInspectable *account, BOOL silent, HWND window,
+                              struct token_broker_call **out )
 {
     HSTRING client = NULL, scope = NULL, provider_id = NULL, authority = NULL, correlation = NULL, account_id = NULL;
     struct field fields[TOKENBROKER_FIELD_COUNT] = {{0}};
     IMap_HSTRING_HSTRING *properties = NULL;
     WebTokenRequestPromptType prompt = 0;
-    IWebAccountProvider *provider = NULL;
     IWebTokenRequest *token_request;
     IWebTokenRequest3 *request3;
-    struct broker_reply reply;
+    struct token_broker_call *call;
     WCHAR *pairs = NULL;
     UINT32 pairs_len = 0;
     HRESULT hr;
 
-    *result = NULL;
+    *out = NULL;
     if (!request || FAILED(IInspectable_QueryInterface( request, &IID_IWebTokenRequest, (void **)&token_request )))
         return E_INVALIDARG;
+    if (!(call = calloc( 1, sizeof(*call) )))
+    {
+        IWebTokenRequest_Release( token_request );
+        return E_OUTOFMEMORY;
+    }
+    call->silent = silent;
     IWebTokenRequest_get_ClientId( token_request, &client );
     IWebTokenRequest_get_Scope( token_request, &scope );
     IWebTokenRequest_get_PromptType( token_request, &prompt );
-    if (FAILED(IWebTokenRequest_get_WebAccountProvider( token_request, &provider ))) provider = NULL;
-    provider_fields( provider, &provider_id, &authority );
+    if (FAILED(IWebTokenRequest_get_WebAccountProvider( token_request, &call->provider ))) call->provider = NULL;
+    provider_fields( call->provider, &provider_id, &authority );
     if (SUCCEEDED(IWebTokenRequest_QueryInterface( token_request, &IID_IWebTokenRequest3, (void **)&request3 )))
     {
         IWebTokenRequest3_get_CorrelationId( request3, &correlation );
@@ -448,15 +521,9 @@ HRESULT token_broker_request( IInspectable *request, IInspectable *account, BOOL
     fields[TOKENBROKER_FIELD_ACCOUNT_ID] = hstring_field( account_id );
     fields[TOKENBROKER_FIELD_PROPERTIES].text = pairs;
     fields[TOKENBROKER_FIELD_PROPERTIES].len = pairs_len;
+    hr = build_message( silent ? TOKENBROKER_GET_TOKEN_SILENT : TOKENBROKER_REQUEST_TOKEN, fields, prompt, window,
+                        &call->msg );
 
-    if (SUCCEEDED(hr = broker_exchange( silent ? TOKENBROKER_GET_TOKEN_SILENT : TOKENBROKER_REQUEST_TOKEN, fields,
-                                        prompt, window, &reply )))
-    {
-        hr = token_result( &reply, provider, result );
-        free_reply( &reply );
-    }
-
-    if (provider) IWebAccountProvider_Release( provider );
     WindowsDeleteString( client );
     WindowsDeleteString( scope );
     WindowsDeleteString( provider_id );
@@ -464,6 +531,62 @@ HRESULT token_broker_request( IInspectable *request, IInspectable *account, BOOL
     WindowsDeleteString( correlation );
     WindowsDeleteString( account_id );
     free( pairs );
+    if (FAILED(hr))
+    {
+        token_broker_free( call );
+        return hr;
+    }
+    *out = call;
+    return S_OK;
+}
+
+void token_broker_free( struct token_broker_call *call )
+{
+    if (!call) return;
+    free_message( &call->msg );
+    if (call->provider) IWebAccountProvider_Release( call->provider );
+    free( call );
+}
+
+/* The prepared request through the broker: S_OK and its result, or a failure, then the request is answered as without
+ * a broker */
+HRESULT token_broker_run( struct token_broker_call *call, IWebTokenRequestResult **result )
+{
+    struct broker_reply reply;
+    HRESULT hr;
+
+    *result = NULL;
+    if (FAILED(hr = transact( &call->msg, call->silent ? BROKER_SILENT_TIMEOUT_MS : BROKER_INTERACTIVE_TIMEOUT_MS,
+                              &reply )))
+        return hr;
+    hr = token_result( &reply, call->provider, result );
+    free_reply( &reply );
+    return hr;
+}
+
+/* WebAccount.SignOutAsync through the broker: the account's tokens for client_id (the broker refuses an empty one) */
+HRESULT token_broker_sign_out( IWebAccountProvider *provider, HSTRING account_id, HSTRING client_id )
+{
+    struct field fields[TOKENBROKER_FIELD_COUNT] = {{0}};
+    HSTRING provider_id, authority;
+    struct broker_reply reply;
+    HRESULT hr;
+
+    provider_fields( provider, &provider_id, &authority );
+    fields[TOKENBROKER_FIELD_CLIENT_ID] = hstring_field( client_id );
+    fields[TOKENBROKER_FIELD_PROVIDER_ID] = hstring_field( provider_id );
+    fields[TOKENBROKER_FIELD_AUTHORITY] = hstring_field( authority );
+    fields[TOKENBROKER_FIELD_ACCOUNT_ID] = hstring_field( account_id );
+    hr = broker_exchange( TOKENBROKER_SIGN_OUT, fields, &reply );
+    WindowsDeleteString( provider_id );
+    WindowsDeleteString( authority );
+    if (FAILED(hr)) return hr;
+    if (reply.status != WebTokenRequestStatus_Success)
+    {
+        WARN( "the token broker refused the sign-out: %#x\n", reply.code );
+        hr = reply.code ? reply.code : E_FAIL;
+    }
+    free_reply( &reply );
     return hr;
 }
 
@@ -485,7 +608,7 @@ HRESULT token_broker_find_accounts( IWebAccountProvider *provider, HSTRING clien
     fields[TOKENBROKER_FIELD_CLIENT_ID] = hstring_field( client_id );
     fields[TOKENBROKER_FIELD_PROVIDER_ID] = hstring_field( provider_id );
     fields[TOKENBROKER_FIELD_AUTHORITY] = hstring_field( authority );
-    hr = broker_exchange( TOKENBROKER_FIND_ACCOUNTS, fields, 0, NULL, &reply );
+    hr = broker_exchange( TOKENBROKER_FIND_ACCOUNTS, fields, &reply );
     WindowsDeleteString( provider_id );
     WindowsDeleteString( authority );
     if (FAILED(hr)) return hr;
@@ -543,7 +666,7 @@ HRESULT token_broker_find_account( IWebAccountProvider *provider, HSTRING id, IW
     fields[TOKENBROKER_FIELD_PROVIDER_ID] = hstring_field( provider_id );
     fields[TOKENBROKER_FIELD_AUTHORITY] = hstring_field( authority );
     fields[TOKENBROKER_FIELD_ACCOUNT_ID] = hstring_field( id );
-    hr = broker_exchange( TOKENBROKER_FIND_ACCOUNT, fields, 0, NULL, &reply );
+    hr = broker_exchange( TOKENBROKER_FIND_ACCOUNT, fields, &reply );
     WindowsDeleteString( provider_id );
     WindowsDeleteString( authority );
     if (FAILED(hr)) return hr;

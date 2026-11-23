@@ -630,40 +630,7 @@ static const struct IIterator_IKeyValuePair_HSTRING_HSTRINGVtbl hstring_iterator
 };
 
 /* IIterable<IKeyValuePair<HSTRING, HSTRING>> of the map */
-static inline struct hstring_map *impl_from_IIterable_IKeyValuePair_HSTRING_HSTRING( IIterable_IKeyValuePair_HSTRING_HSTRING *iface )
-{
-    return CONTAINING_RECORD( iface, struct hstring_map, IIterable_IKeyValuePair_HSTRING_HSTRING_iface );
-}
-
-static HRESULT WINAPI hstring_map_iterable_QueryInterface( IIterable_IKeyValuePair_HSTRING_HSTRING *iface, REFIID iid, void **out )
-{
-    return hstring_map_QueryInterface( &impl_from_IIterable_IKeyValuePair_HSTRING_HSTRING( iface )->IMap_HSTRING_HSTRING_iface, iid, out );
-}
-
-static ULONG WINAPI hstring_map_iterable_AddRef( IIterable_IKeyValuePair_HSTRING_HSTRING *iface )
-{
-    return hstring_map_AddRef( &impl_from_IIterable_IKeyValuePair_HSTRING_HSTRING( iface )->IMap_HSTRING_HSTRING_iface );
-}
-
-static ULONG WINAPI hstring_map_iterable_Release( IIterable_IKeyValuePair_HSTRING_HSTRING *iface )
-{
-    return hstring_map_Release( &impl_from_IIterable_IKeyValuePair_HSTRING_HSTRING( iface )->IMap_HSTRING_HSTRING_iface );
-}
-
-static HRESULT WINAPI hstring_map_iterable_GetIids( IIterable_IKeyValuePair_HSTRING_HSTRING *iface, ULONG *iid_count, IID **iids )
-{
-    return hstring_map_GetIids( &impl_from_IIterable_IKeyValuePair_HSTRING_HSTRING( iface )->IMap_HSTRING_HSTRING_iface, iid_count, iids );
-}
-
-static HRESULT WINAPI hstring_map_iterable_GetRuntimeClassName( IIterable_IKeyValuePair_HSTRING_HSTRING *iface, HSTRING *class_name )
-{
-    return hstring_map_GetRuntimeClassName( &impl_from_IIterable_IKeyValuePair_HSTRING_HSTRING( iface )->IMap_HSTRING_HSTRING_iface, class_name );
-}
-
-static HRESULT WINAPI hstring_map_iterable_GetTrustLevel( IIterable_IKeyValuePair_HSTRING_HSTRING *iface, TrustLevel *trust_level )
-{
-    return hstring_map_GetTrustLevel( &impl_from_IIterable_IKeyValuePair_HSTRING_HSTRING( iface )->IMap_HSTRING_HSTRING_iface, trust_level );
-}
+DEFINE_IINSPECTABLE( hstring_map_iterable, IIterable_IKeyValuePair_HSTRING_HSTRING, struct hstring_map, IMap_HSTRING_HSTRING_iface )
 
 static HRESULT WINAPI hstring_map_iterable_First( IIterable_IKeyValuePair_HSTRING_HSTRING *iface,
                                                   IIterator_IKeyValuePair_HSTRING_HSTRING **value )

@@ -62,9 +62,26 @@ extern IActivationFactory *providererror_factory;
  *
  */
 
+HRESULT async_action_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback, IAsyncAction **out );
 HRESULT async_operation_inspectable_create_completed( const GUID *iid, IInspectable *result, IAsyncOperation_IInspectable **out );
 HRESULT async_operation_inspectable_create( const GUID *iid, IUnknown *invoker, IUnknown *param,
                                             async_operation_callback callback, IAsyncOperation_IInspectable **out );
+
+/*
+ *
+ * vector.c
+ *
+ */
+
+struct vector_iids
+{
+    const GUID *vector;
+    const GUID *view;
+    const GUID *iterable;
+    const GUID *iterator;
+};
+
+HRESULT vector_create( const struct vector_iids *iids, void **out );
 
 /*
  *
@@ -98,8 +115,14 @@ void diagnostic_dump_request( const char *method, IInspectable *request );
  */
 
 BOOL token_broker_enabled( void );
-HRESULT token_broker_request( IInspectable *request, IInspectable *account, BOOL silent, HWND window,
-                              IWebTokenRequestResult **result );
+HRESULT completed_action_create( IAsyncAction **out );
+HRESULT sign_out_async( IWebAccountProvider *provider, HSTRING account_id, HSTRING client_id, IAsyncAction **out );
+struct token_broker_call;
+HRESULT token_broker_prepare( IInspectable *request, IInspectable *account, BOOL silent, HWND window,
+                              struct token_broker_call **out );
+HRESULT token_broker_run( struct token_broker_call *call, IWebTokenRequestResult **result );
+void token_broker_free( struct token_broker_call *call );
+HRESULT token_broker_sign_out( IWebAccountProvider *provider, HSTRING account_id, HSTRING client_id );
 HRESULT token_broker_find_accounts( IWebAccountProvider *provider, HSTRING client_id, IFindAllAccountsResult **result );
 HRESULT token_broker_find_account( IWebAccountProvider *provider, HSTRING id, IWebAccount **account );
 
@@ -125,8 +148,6 @@ HRESULT webtokenrequestresult_create( WebTokenRequestStatus status, IVectorView_
                                       IWebProviderError *response_error, IWebTokenRequestResult **out );
 HRESULT findallaccountsresult_create( FindAllWebAccountsStatus status, IVectorView_WebAccount *accounts,
                                       IWebProviderError *provider_error, IFindAllAccountsResult **out );
-HRESULT vector_view_webtokenresponse_create_empty( IVectorView_WebTokenResponse **out );
-HRESULT vector_view_webaccount_create_empty( IVectorView_WebAccount **out );
 HRESULT vector_view_webtokenresponse_create( IWebTokenResponse **items, UINT32 count, IVectorView_WebTokenResponse **out );
 HRESULT vector_view_webaccount_create( IWebAccount **items, UINT32 count, IVectorView_WebAccount **out );
 HRESULT webtokenresponse_create( HSTRING token, IWebAccount *web_account, IMap_HSTRING_HSTRING *properties,

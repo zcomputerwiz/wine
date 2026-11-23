@@ -828,8 +828,27 @@ static UINT32 broker_accounts( IWebAuthenticationCoreManagerStatics4 *statics4, 
     ok( status == FindAllWebAccountsStatus_Success, "got status %d.\n", status );
     if (SUCCEEDED(IFindAllAccountsResult_get_Accounts( result, &accounts )))
     {
+        IIterable_WebAccount *iterable;
+        IIterator_WebAccount *iterator;
+        boolean has_current = 2;
+
         IVectorView_WebAccount_get_Size( accounts, &count );
         if (count && first) IVectorView_WebAccount_GetAt( accounts, 0, first );
+        /* the list can be walked as programs' foreach loops do */
+        hr = IVectorView_WebAccount_QueryInterface( accounts, &IID_IIterable_WebAccount, (void **)&iterable );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        if (SUCCEEDED(hr))
+        {
+            hr = IIterable_WebAccount_First( iterable, &iterator );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            if (SUCCEEDED(hr))
+            {
+                IIterator_WebAccount_get_HasCurrent( iterator, &has_current );
+                ok( has_current == (count != 0), "got HasCurrent %d for %u accounts.\n", has_current, count );
+                IIterator_WebAccount_Release( iterator );
+            }
+            IIterable_WebAccount_Release( iterable );
+        }
         IVectorView_WebAccount_Release( accounts );
     }
     IFindAllAccountsResult_Release( result );
@@ -1218,6 +1237,35 @@ static void test_broker(void)
         ok( r.status == WebTokenRequestStatus_Success, "organization: got status %d, error %#x.\n", r.status, r.error );
         ok( r.state == WebAccountState_Connected, "organization: got account state %d.\n", r.state );
         ok( !wcscmp( r.account_id, L"oid-org" ), "organization: got account id %s.\n", wine_dbgstr_w( r.account_id ) );
+
+        /* WebAccount.SignOutAsync without a client id: the account's tokens of the client ids this program used go,
+         * and the account is no longer found */
+        ok( broker_accounts( statics4, other, &account ) == 1, "organization: wrong account count.\n" );
+        if (account)
+        {
+            IAsyncAction *action;
+            IWebAccount2 *account2;
+
+            hr = IWebAccount_QueryInterface( account, &IID_IWebAccount2, (void **)&account2 );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            hr = IWebAccount2_SignOutAsync( account2, &action );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            if (SUCCEEDED(hr))
+            {
+                wait_broker( (IUnknown *)action );
+                hr = IAsyncAction_GetResults( action );
+                ok( hr == S_OK, "got hr %#lx.\n", hr );
+                IAsyncAction_Release( action );
+            }
+            IWebAccount2_Release( account2 );
+            IWebAccount_Release( account );
+            ok( !broker_find_account( statics, other, L"oid-org", NULL, 0 ),
+                "organization: the account is still found after the sign-out.\n" );
+            ok( broker_accounts( statics4, other, NULL ) == 0, "organization: the account is still listed.\n" );
+            broker_silent( statics, other, NULL, L"user.read", &r );
+            ok( r.status == WebTokenRequestStatus_UserInteractionRequired,
+                "organization after the sign-out: got status %d.\n", r.status );
+        }
         IWebAccountProvider_Release( other );
     }
     IWebAccountProvider_Release( provider );
