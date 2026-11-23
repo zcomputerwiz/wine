@@ -160,6 +160,8 @@ START_TEST(dwm_attr)
         attr = (argc > 5) ? strtoul( argv[5], NULL, 16 ) : DWMWA_CAPTION_COLOR;
         if (attr == 0x33) attr = DWMWA_WINDOW_CORNER_PREFERENCE;
 
+        /* the broker answers reads only for a process with a window on its desktop */
+        CreateWindowExW( 0, L"static", L"dwm_attr_child", WS_POPUP, 0, 0, 10, 10, 0, 0, 0, NULL );
         child_hr = DwmGetWindowAttribute( child_hwnd, attr, &v, 4 );
         ExitProcess( (child_hr == S_OK && v == expected) ? 0 : 1 );
     }

@@ -83,21 +83,24 @@ START_TEST(dwm_thumb)
         return;
     }
 
-    /* no broker: the list call fails */
-    out_len = sizeof(buf);
-    hr = pWexDwmpThumbList( 0, buf, &out_len );
-    if (hr != S_OK)
-    {
-        skip( "needs a desktop with a DWM broker\n" );
-        return;
-    }
-
+    /* the broker answers reads only for a process with a window on its desktop */
     dest = CreateWindowExW( 0, L"static", L"dwm_thumb_dest", WS_POPUP | WS_VISIBLE,
                             0, 0, 200, 200, 0, 0, 0, NULL );
     ok( !!dest, "CreateWindowExW dest failed, error %lu\n", GetLastError() );
     src = CreateWindowExW( 0, L"static", L"dwm_thumb_src", WS_POPUP | WS_VISIBLE,
                            300, 0, 200, 200, 0, 0, 0, NULL );
     ok( !!src, "CreateWindowExW src failed, error %lu\n", GetLastError() );
+
+    /* no broker: the list call fails */
+    out_len = sizeof(buf);
+    hr = pWexDwmpThumbList( 0, buf, &out_len );
+    if (hr != S_OK)
+    {
+        skip( "needs a desktop with a DWM broker\n" );
+        DestroyWindow( dest );
+        DestroyWindow( src );
+        return;
+    }
 
     hr = DwmRegisterThumbnail( dest, src, &thumb );
     ok( hr == S_OK, "DwmRegisterThumbnail failed: %#lx\n", hr );
