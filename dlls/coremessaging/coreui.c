@@ -104,6 +104,59 @@ static const void *const item_vtbl[] =
     item_QueryInterface, item_AddRef, item_Release, item_slot3, item_slot4, item_slot5, item_slot6,
 };
 
+/*
+ * The interfaces behind the item are not known yet. The Windows App Runtime registers listeners and handlers (back button, window
+ * position, unhandled errors, input panes ...) with the CoreUI session through them; until each is known an unknown interface is
+ * answered with one object that has 32 methods that all succeed and log what they are given.
+ */
+struct generic
+{
+    const void *const *vtbl;
+};
+
+static HRESULT WINAPI generic_QueryInterface( void *iface, REFIID iid, void **out );
+
+static ULONG WINAPI generic_AddRef( void *iface )
+{
+    return 2;
+}
+
+static ULONG WINAPI generic_Release( void *iface )
+{
+    return 1;
+}
+
+#define GENERIC_STUB(n) \
+    static HRESULT WINAPI generic_slot##n( void *iface, void *a, void *b, void *c, void *d ) \
+    { \
+        FIXME( "iface %p, generic slot " #n ": %p, %p, %p, %p semi-stub (caller %p)\n", iface, a, b, c, d, \
+               __builtin_return_address(0) ); \
+        return S_OK; \
+    }
+GENERIC_STUB(3) GENERIC_STUB(4) GENERIC_STUB(5) GENERIC_STUB(6) GENERIC_STUB(7) GENERIC_STUB(8) GENERIC_STUB(9)
+GENERIC_STUB(10) GENERIC_STUB(11) GENERIC_STUB(12) GENERIC_STUB(13) GENERIC_STUB(14) GENERIC_STUB(15) GENERIC_STUB(16)
+GENERIC_STUB(17) GENERIC_STUB(18) GENERIC_STUB(19) GENERIC_STUB(20) GENERIC_STUB(21) GENERIC_STUB(22) GENERIC_STUB(23)
+GENERIC_STUB(24) GENERIC_STUB(25) GENERIC_STUB(26) GENERIC_STUB(27) GENERIC_STUB(28) GENERIC_STUB(29) GENERIC_STUB(30)
+GENERIC_STUB(31)
+
+static const void *const generic_vtbl[] =
+{
+    generic_QueryInterface, generic_AddRef, generic_Release,
+    generic_slot3, generic_slot4, generic_slot5, generic_slot6, generic_slot7, generic_slot8, generic_slot9, generic_slot10,
+    generic_slot11, generic_slot12, generic_slot13, generic_slot14, generic_slot15, generic_slot16, generic_slot17,
+    generic_slot18, generic_slot19, generic_slot20, generic_slot21, generic_slot22, generic_slot23, generic_slot24,
+    generic_slot25, generic_slot26, generic_slot27, generic_slot28, generic_slot29, generic_slot30, generic_slot31,
+};
+
+static struct generic generic_object = { generic_vtbl };
+
+static HRESULT WINAPI generic_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    FIXME( "generic %p, iid %s (caller %p)\n", iface, debugstr_guid( iid ), __builtin_return_address(0) );
+    *out = &generic_object;
+    return S_OK;
+}
+
 static HRESULT WINAPI item_inner_QueryInterface( IUnknown *iface, REFIID iid, void **out );
 static const IUnknownVtbl item_inner_vtbl = { item_inner_QueryInterface, object_AddRef, object_Release };
 
@@ -123,11 +176,7 @@ static HRESULT WINAPI item_inner_QueryInterface( IUnknown *iface, REFIID iid, vo
     else if (IsEqualGUID( iid, &IID_ICoreUIItem ))
         *out = &coreui_item;
     else
-    {
-        FIXME( "%s not implemented, returning E_NOINTERFACE (caller %p).\n", debugstr_guid( iid ), __builtin_return_address(0) );
-        *out = NULL;
-        return E_NOINTERFACE;
-    }
+        return generic_QueryInterface( &generic_object, iid, out );
     return S_OK;
 }
 
