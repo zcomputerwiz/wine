@@ -1368,7 +1368,14 @@ DWORD __cdecl svcctl_QueryServiceStatusEx(
     LPSERVICE_STATUS_PROCESS pSvcStatusData;
 
     if (remote_of(hService))
-        return forward_QueryServiceStatusEx(remote_of(hService), InfoLevel, lpBuffer, cbBufSize, pcbBytesNeeded);
+    {
+        /* B85: session 0's process id names another process, or none, in this session's server (process ids are
+         * per server): 0, as the pipe bridge reports for its callers */
+        err = forward_QueryServiceStatusEx(remote_of(hService), InfoLevel, lpBuffer, cbBufSize, pcbBytesNeeded);
+        if (!err && InfoLevel == SC_STATUS_PROCESS_INFO && cbBufSize >= sizeof(SERVICE_STATUS_PROCESS))
+            ((SERVICE_STATUS_PROCESS *)lpBuffer)->dwProcessId = 0;
+        return err;
+    }
     memset(lpBuffer, 0, cbBufSize);
 
     if ((err = validate_service_handle(hService, SERVICE_QUERY_STATUS, &service)) != 0)
@@ -1883,6 +1890,7 @@ static DWORD enum_merged(struct sc_manager_handle *manager, BOOL ex, DWORD type,
                 if (ex) status = rex->service_status_process;
                 else memcpy(&status, &rplain->service_status, sizeof(rplain->service_status));
                 if (is_session_service_name(manager->db, name, status.dwServiceType)) continue;  /* session 0's own copy */
+                status.dwProcessId = 0;  /* B85: a process id of session 0's server means nothing here */
                 if (!add_enum_item(&items, &count, &capacity, name, display, &status))
                     err = ERROR_NOT_ENOUGH_SERVER_MEMORY;
             }
