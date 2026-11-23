@@ -64,6 +64,7 @@ struct service_entry
     BOOL marked_for_delete;
     BOOL is_wow64;
     BOOL delayed_autostart;
+    int session_service;               /* WineExplorer: the WexSessionService value, SESSION_SERVICE_* */
     BYTE *security;                    /* self-relative security descriptor of the "Security" value, NULL for the native default */
     DWORD security_size;
     struct list handles;
@@ -97,8 +98,14 @@ void service_unlock(struct service_entry *service);
 DWORD service_start(struct service_entry *service, DWORD service_argc, LPCWSTR *service_argv);
 BOOL safeboot_allows(const struct service_entry *service);
 /* WineExplorer system tier T5.4: services that every session (session 0 included) runs for itself; the others
- * are session 0's while a session forwards (forward_mode) */
-BOOL is_session_service(const WCHAR *name, DWORD type);
+ * are session 0's while a session forwards (forward_mode). A service's WexSessionService value overrides the
+ * default (services.c). */
+#define SESSION_SERVICE_DEFAULT        0   /* no value: by type and the built-in names */
+#define SESSION_SERVICE_SESSION0       1   /* 0: session 0's only */
+#define SESSION_SERVICE_EVERY_SESSION  2   /* 1: every session runs it */
+BOOL is_session_service(const WCHAR *name, DWORD type, int configured);
+BOOL service_is_session_service(const struct service_entry *entry);
+BOOL is_session_service_name(struct scmdatabase *db, const WCHAR *name, DWORD type);
 extern BOOL forward_mode;
 void notify_service_state(struct service_entry *service);
 
