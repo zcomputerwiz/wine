@@ -31,6 +31,7 @@ struct web_account
     HSTRING id;
     HSTRING user_name;
     WebAccountState state;
+    IMap_HSTRING_HSTRING *properties;
 };
 
 static inline struct web_account *impl_from_IWebAccount( IWebAccount *iface )
@@ -80,6 +81,7 @@ static ULONG WINAPI web_account_Release( IWebAccount *iface )
     if (!ref)
     {
         if (impl->provider) IWebAccountProvider_Release( impl->provider );
+        if (impl->properties) IMap_HSTRING_HSTRING_Release( impl->properties );
         WindowsDeleteString( impl->id );
         WindowsDeleteString( impl->user_name );
         free( impl );
@@ -160,8 +162,14 @@ static HRESULT WINAPI web_account2_get_Id( IWebAccount2 *iface, HSTRING *value )
 
 static HRESULT WINAPI web_account2_get_Properties( IWebAccount2 *iface, IMapView_HSTRING_HSTRING **value )
 {
-    FIXME( "iface %p, value %p stub!\n", iface, value );
-    return E_NOTIMPL;
+    struct web_account *impl = impl_from_IWebAccount2( iface );
+    HRESULT hr;
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    if (!impl->properties && FAILED(hr = map_hstring_create( &impl->properties ))) return hr;
+    return IMap_HSTRING_HSTRING_GetView( impl->properties, value );
 }
 
 static HRESULT WINAPI web_account2_GetPictureAsync( IWebAccount2 *iface, WebAccountPictureSize size,
@@ -223,6 +231,15 @@ HRESULT web_account_create( IWebAccountProvider *provider, const WCHAR *id, UINT
     *out = &impl->IWebAccount_iface;
     TRACE( "created IWebAccount %p\n", *out );
     return S_OK;
+}
+
+/* the account's Properties (the account keeps a reference to PROPERTIES) */
+void web_account_set_properties( IWebAccount *account, IMap_HSTRING_HSTRING *properties )
+{
+    struct web_account *impl = impl_from_IWebAccount( account );
+
+    if (impl->properties) IMap_HSTRING_HSTRING_Release( impl->properties );
+    if ((impl->properties = properties)) IMap_HSTRING_HSTRING_AddRef( properties );
 }
 
 /* the Id of any WebAccount (ours, or a program's own that has IWebAccount2), or NULL */

@@ -431,6 +431,8 @@ static void test_diagnostic_provider(void)
 
 #define TEST_PROVIDER L"https://login.wine.test"
 #define TEST_CLIENT   L"11111111-2222-3333-4444-555555555555"
+#define OTHER_CLIENT  L"66666666-7777-8888-9999-000000000000"   /* another client id of the same program */
+#define CHILD_CLIENT  L"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"   /* a nested app inside TEST_CLIENT's program */
 
 /* wait up to a minute: the first request starts the broker */
 static void wait_broker( IUnknown *op )
@@ -460,12 +462,23 @@ struct broker_result
     WebTokenRequestStatus status;
     UINT32 error;
     WCHAR message[256];
-    WCHAR token[128];
+    WCHAR token[1024];
     WCHAR user_name[128];
     WCHAR account_id[128];
     WCHAR scopes[256];
     BOOL id_token;
     UINT32 responses;
+    WebAccountState state;
+    UINT32 account_props;               /* the WebAccount's Properties: how many */
+    WCHAR display_name[64];             /* and some of them */
+    WCHAR first_name[64];
+    WCHAR last_name[64];
+    WCHAR uid[64];
+    WCHAR safe_id[64];
+    WCHAR roaming[16];
+    BOOL wamcompat;                     /* the response's wamcompat_expires_on is there */
+    WCHAR wamcompat_account[64];        /* wamcompat_account_id */
+    BOOL mats;                          /* and the telemetry property MATS */
 };
 
 static void hstring_copy( HSTRING str, WCHAR *buf, UINT32 size )
@@ -484,6 +497,17 @@ static void map_value( IMap_HSTRING_HSTRING *map, const WCHAR *name, WCHAR *buf,
 
     buf[0] = 0;
     if (SUCCEEDED(IMap_HSTRING_HSTRING_Lookup( map, key, &value ))) hstring_copy( value, buf, size );
+    WindowsDeleteString( value );
+    WindowsDeleteString( key );
+}
+
+/* the same for a read-only view (WebAccount.Properties) */
+static void view_value( IMapView_HSTRING_HSTRING *view, const WCHAR *name, WCHAR *buf, UINT32 size )
+{
+    HSTRING key = hstring( name ), value = NULL;
+
+    buf[0] = 0;
+    if (SUCCEEDED(IMapView_HSTRING_HSTRING_Lookup( view, key, &value ))) hstring_copy( value, buf, size );
     WindowsDeleteString( value );
     WindowsDeleteString( key );
 }
@@ -535,13 +559,30 @@ static void broker_result( IAsyncOperation_WebTokenRequestResult *op, struct bro
                 IWebAccount_get_UserName( account, &str );
                 hstring_copy( str, out->user_name, ARRAY_SIZE(out->user_name) );
                 WindowsDeleteString( str );
+                IWebAccount_get_State( account, &out->state );
                 hr = IWebAccount_QueryInterface( account, &IID_IWebAccount2, (void **)&account2 );
                 ok( hr == S_OK, "got hr %#lx.\n", hr );
                 if (SUCCEEDED(hr))
                 {
+                    IMapView_HSTRING_HSTRING *account_props;
+
                     IWebAccount2_get_Id( account2, &str );
                     hstring_copy( str, out->account_id, ARRAY_SIZE(out->account_id) );
                     WindowsDeleteString( str );
+                    hr = IWebAccount2_get_Properties( account2, &account_props );
+                    ok( hr == S_OK, "got hr %#lx.\n", hr );
+                    if (SUCCEEDED(hr))
+                    {
+                        IMapView_HSTRING_HSTRING_get_Size( account_props, &out->account_props );
+                        view_value( account_props, L"DisplayName", out->display_name, ARRAY_SIZE(out->display_name) );
+                        view_value( account_props, L"FirstName", out->first_name, ARRAY_SIZE(out->first_name) );
+                        view_value( account_props, L"LastName", out->last_name, ARRAY_SIZE(out->last_name) );
+                        view_value( account_props, L"UID", out->uid, ARRAY_SIZE(out->uid) );
+                        view_value( account_props, L"SafeCustomerId", out->safe_id, ARRAY_SIZE(out->safe_id) );
+                        view_value( account_props, L"IsRoamingEncryptionKeyAvailable", out->roaming,
+                                    ARRAY_SIZE(out->roaming) );
+                        IMapView_HSTRING_HSTRING_Release( account_props );
+                    }
                     IWebAccount2_Release( account2 );
                 }
                 IWebAccount_Release( account );
@@ -551,6 +592,11 @@ static void broker_result( IAsyncOperation_WebTokenRequestResult *op, struct bro
                 map_value( props, L"wamcompat_scopes", out->scopes, ARRAY_SIZE(out->scopes) );
                 map_value( props, L"wamcompat_id_token", buf, ARRAY_SIZE(buf) );
                 out->id_token = !!buf[0];
+                map_value( props, L"wamcompat_expires_on", buf, ARRAY_SIZE(buf) );
+                out->wamcompat = !!buf[0];
+                map_value( props, L"wamcompat_account_id", out->wamcompat_account, ARRAY_SIZE(out->wamcompat_account) );
+                map_value( props, L"MATS", buf, ARRAY_SIZE(buf) );
+                out->mats = !!buf[0];
                 IMap_HSTRING_HSTRING_Release( props );
             }
             IWebTokenResponse_Release( response );
@@ -560,7 +606,10 @@ static void broker_result( IAsyncOperation_WebTokenRequestResult *op, struct bro
     IWebTokenRequestResult_Release( result );
 }
 
-static IWebTokenRequest *broker_request( IWebAccountProvider *provider, const WCHAR *scope_text, const WCHAR *hint )
+/* a request for the client id CLIENT_TEXT (TEST_CLIENT when NULL), with request properties EXTRA (key, value, key,
+ * value, ..., NULL) besides the login hint */
+static IWebTokenRequest *broker_request_ex( IWebAccountProvider *provider, const WCHAR *scope_text, const WCHAR *hint,
+                                            const WCHAR *client_text, const WCHAR **extra )
 {
     IWebTokenRequestFactory *request_factory;
     IMap_HSTRING_HSTRING *props;
@@ -575,7 +624,7 @@ static IWebTokenRequest *broker_request( IWebAccountProvider *provider, const WC
     ok( hr == S_OK, "got hr %#lx.\n", hr );
     IActivationFactory_Release( factory );
     scope = hstring( scope_text );
-    client = hstring( TEST_CLIENT );
+    client = hstring( client_text ? client_text : TEST_CLIENT );
     hr = IWebTokenRequestFactory_CreateWithPromptType( request_factory, provider, scope, client,
                                                        WebTokenRequestPromptType_ForceAuthentication, &request );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
@@ -592,7 +641,22 @@ static IWebTokenRequest *broker_request( IWebAccountProvider *provider, const WC
         WindowsDeleteString( value );
         IMap_HSTRING_HSTRING_Release( props );
     }
+    for (; extra && extra[0] && SUCCEEDED(IWebTokenRequest_get_Properties( request, &props )); extra += 2)
+    {
+        key = hstring( extra[0] );
+        value = hstring( extra[1] );
+        hr = IMap_HSTRING_HSTRING_Insert( props, key, value, &replaced );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        WindowsDeleteString( key );
+        WindowsDeleteString( value );
+        IMap_HSTRING_HSTRING_Release( props );
+    }
     return request;
+}
+
+static IWebTokenRequest *broker_request( IWebAccountProvider *provider, const WCHAR *scope_text, const WCHAR *hint )
+{
+    return broker_request_ex( provider, scope_text, hint, NULL, NULL );
 }
 
 static IWebAccountProvider *broker_provider( IWebAuthenticationCoreManagerStatics *statics, const WCHAR *id_text,
@@ -630,11 +694,12 @@ static void broker_interactive( IWebAuthenticationCoreManagerInterop *interop, H
     if (SUCCEEDED(hr)) broker_result( op, out );
 }
 
-static void broker_silent( IWebAuthenticationCoreManagerStatics *statics, IWebAccountProvider *provider,
-                           IWebAccount *account, const WCHAR *scope, struct broker_result *out )
+static void broker_silent_ex( IWebAuthenticationCoreManagerStatics *statics, IWebAccountProvider *provider,
+                              IWebAccount *account, const WCHAR *scope, const WCHAR *client, const WCHAR **extra,
+                              struct broker_result *out )
 {
     IAsyncOperation_WebTokenRequestResult *op;
-    IWebTokenRequest *request = broker_request( provider, scope, NULL );
+    IWebTokenRequest *request = broker_request_ex( provider, scope, NULL, client, extra );
     HRESULT hr;
 
     if (account)
@@ -644,6 +709,42 @@ static void broker_silent( IWebAuthenticationCoreManagerStatics *statics, IWebAc
     ok( hr == S_OK, "got hr %#lx.\n", hr );
     IWebTokenRequest_Release( request );
     if (SUCCEEDED(hr)) broker_result( op, out );
+}
+
+static void broker_silent( IWebAuthenticationCoreManagerStatics *statics, IWebAccountProvider *provider,
+                           IWebAccount *account, const WCHAR *scope, struct broker_result *out )
+{
+    broker_silent_ex( statics, provider, account, scope, NULL, NULL, out );
+}
+
+/* FindAccountAsync by id: whether the broker answered with an account */
+static BOOL broker_find_account( IWebAuthenticationCoreManagerStatics *statics, IWebAccountProvider *provider,
+                                 const WCHAR *id_text, WCHAR *found_id, UINT32 found_size )
+{
+    IAsyncOperation_WebAccount *op;
+    IWebAccount2 *account2;
+    IWebAccount *found = NULL;
+    HSTRING id = hstring( id_text ), str;
+    HRESULT hr;
+
+    if (found_id) found_id[0] = 0;
+    hr = IWebAuthenticationCoreManagerStatics_FindAccountAsync( statics, provider, id, &op );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    WindowsDeleteString( id );
+    if (FAILED(hr)) return FALSE;
+    wait_broker( (IUnknown *)op );
+    IAsyncOperation_WebAccount_GetResults( op, &found );
+    IAsyncOperation_WebAccount_Release( op );
+    if (!found) return FALSE;
+    if (found_id && SUCCEEDED(IWebAccount_QueryInterface( found, &IID_IWebAccount2, (void **)&account2 )))
+    {
+        IWebAccount2_get_Id( account2, &str );
+        hstring_copy( str, found_id, found_size );
+        WindowsDeleteString( str );
+        IWebAccount2_Release( account2 );
+    }
+    IWebAccount_Release( found );
+    return TRUE;
 }
 
 /* the accounts of the provider: their number, the first one */
@@ -682,7 +783,7 @@ static UINT32 broker_accounts( IWebAuthenticationCoreManagerStatics4 *statics4, 
 
 /* the child of test_broker_sandboxed: a silent request for the test provider's account; the exit code is the
  * request's status in the high word and the low word of its error code */
-static void broker_child(void)
+static void broker_child( BOOL other_client )
 {
     IWebAuthenticationCoreManagerStatics *statics;
     IWebAccountProvider *provider;
@@ -695,7 +796,7 @@ static void broker_child(void)
         IActivationFactory_Release( factory );
         if ((provider = broker_provider( statics, TEST_PROVIDER, L"consumers" )))
         {
-            broker_silent( statics, provider, NULL, L"user.read", &r );
+            broker_silent_ex( statics, provider, NULL, L"user.read", other_client ? OTHER_CLIENT : NULL, NULL, &r );
             IWebAccountProvider_Release( provider );
         }
         IWebAuthenticationCoreManagerStatics_Release( statics );
@@ -704,19 +805,23 @@ static void broker_child(void)
     ExitProcess( (r.status << 16) | (r.error & 0xffff) );
 }
 
-/* runs the child with a token; its exit code */
-static DWORD run_child( HANDLE token )
+/* runs this program as a child with the arguments ARGS (after "web_core"), with a token or, with none, as the test's
+ * own user; its exit code */
+static DWORD run_child_args( HANDLE token, const char *args )
 {
     STARTUPINFOA si = { sizeof(si) };
     PROCESS_INFORMATION pi;
     char cmd[MAX_PATH * 2], **argv;
     DWORD code = 0xdeadbeef;
+    BOOL ret;
 
     winetest_get_mainargs( &argv );
-    sprintf( cmd, "\"%s\" web_core broker_child", argv[0] );
-    if (!CreateProcessAsUserA( token, NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi ))
+    sprintf( cmd, "\"%s\" web_core %s", argv[0], args );
+    if (token) ret = CreateProcessAsUserA( token, NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi );
+    else ret = CreateProcessA( NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi );
+    if (!ret)
     {
-        ok( 0, "CreateProcessAsUser failed: %lu.\n", GetLastError() );
+        ok( 0, "CreateProcess failed: %lu.\n", GetLastError() );
         return code;
     }
     ok( !WaitForSingleObject( pi.hProcess, 120000 ), "the child did not finish.\n" );
@@ -724,6 +829,43 @@ static DWORD run_child( HANDLE token )
     CloseHandle( pi.hProcess );
     CloseHandle( pi.hThread );
     return code;
+}
+
+/* runs the child with a token; its exit code */
+static DWORD run_child( HANDLE token )
+{
+    return run_child_args( token, "broker_child" );
+}
+
+/* The child of the process-scope test: asks FindAccountAsync for the account ID (a narrow string, the argument),
+ * after using the test's client id itself (FindAllAccounts) when USE_CLIENT; the exit code is 1 when the broker
+ * answered with the account and 0 when with none. */
+static void broker_find_child( const char *id_text, BOOL use_client )
+{
+    IWebAuthenticationCoreManagerStatics4 *statics4;
+    IWebAuthenticationCoreManagerStatics *statics;
+    IWebAccountProvider *provider;
+    IActivationFactory *factory;
+    WCHAR id[64];
+    DWORD code = 2;
+
+    MultiByteToWideChar( CP_ACP, 0, id_text, -1, id, ARRAY_SIZE(id) );
+    if ((factory = get_factory( L"Windows.Security.Authentication.Web.Core.WebAuthenticationCoreManager" )))
+    {
+        IActivationFactory_QueryInterface( factory, &IID_IWebAuthenticationCoreManagerStatics, (void **)&statics );
+        IActivationFactory_QueryInterface( factory, &IID_IWebAuthenticationCoreManagerStatics4, (void **)&statics4 );
+        IActivationFactory_Release( factory );
+        if ((provider = broker_provider( statics, TEST_PROVIDER, L"consumers" )))
+        {
+            if (use_client) broker_accounts( statics4, provider, NULL );
+            code = broker_find_account( statics, provider, id, NULL, 0 ) ? 1 : 0;
+            IWebAccountProvider_Release( provider );
+        }
+        IWebAuthenticationCoreManagerStatics4_Release( statics4 );
+        IWebAuthenticationCoreManagerStatics_Release( statics );
+    }
+    RoUninitialize();
+    ExitProcess( code );
 }
 
 /* sandboxed callers get no token, even of an account the user has: a restricted token, a low integrity token */
@@ -793,17 +935,15 @@ static void test_broker(void)
     IWebAuthenticationCoreManagerStatics4 *statics4;
     IWebAuthenticationCoreManagerStatics *statics;
     IWebAuthenticationCoreManagerInterop *interop;
-    IAsyncOperation_WebAccount *account_op;
     IWebAccountProvider *provider, *other;
-    IWebAccount *account = NULL, *found;
+    IWebAccount *account = NULL;
     IActivationFactory *factory;
     struct broker_result r;
-    WCHAR authority[256], first_token[128];
-    DWORD size = sizeof(authority), one = 1;
-    HSTRING id;
+    WCHAR authority[256], first_token[128], nested_token[1024], found_id[128];
+    DWORD size = sizeof(authority), one = 1, code;
+    const WCHAR *p1, *p2, *p3, *p4;
     HWND window;
     HKEY key;
-    HRESULT hr;
 
     if (!winetest_platform_is_wine || !(size = GetEnvironmentVariableW( L"WEBCORE_TEST_AUTHORITY", authority,
                                                                         ARRAY_SIZE(authority) )) ||
@@ -861,6 +1001,18 @@ static void test_broker(void)
     ok( !wcscmp( r.account_id, L"oid-ok" ), "got account id %s.\n", wine_dbgstr_w( r.account_id ) );
     ok( r.id_token, "no wamcompat_id_token.\n" );
     ok( !!wcsstr( r.scopes, L"user.read" ), "got scopes %s.\n", wine_dbgstr_w( r.scopes ) );
+    /* a Microsoft account (the consumers authority) is not "Connected"; without the batch property the answer has the
+     * wamcompat_* properties, no telemetry (nobody asked for it) and the account's own properties */
+    ok( r.state == WebAccountState_None, "got account state %d.\n", r.state );
+    ok( r.wamcompat, "no wamcompat_expires_on.\n" );
+    ok( !wcscmp( r.wamcompat_account, L"oid-ok" ), "got wamcompat_account_id %s.\n", wine_dbgstr_w( r.wamcompat_account ) );
+    ok( !r.mats, "got the telemetry property MATS without being asked.\n" );
+    ok( r.account_props == 6, "got %u account properties.\n", r.account_props );
+    ok( !wcscmp( r.display_name, L"Test ok" ), "got DisplayName %s.\n", wine_dbgstr_w( r.display_name ) );
+    ok( !wcscmp( r.first_name, L"Test" ), "got FirstName %s.\n", wine_dbgstr_w( r.first_name ) );
+    ok( !wcscmp( r.last_name, L"ok" ), "got LastName %s.\n", wine_dbgstr_w( r.last_name ) );
+    ok( !wcscmp( r.uid, L"oid-ok" ), "got UID %s.\n", wine_dbgstr_w( r.uid ) );
+    ok( !wcscmp( r.roaming, L"false" ), "got IsRoamingEncryptionKeyAvailable %s.\n", wine_dbgstr_w( r.roaming ) );
     wcscpy( first_token, r.token );
 
     /* sandboxed callers are refused although the account exists; the same user's ordinary token is served */
@@ -869,16 +1021,17 @@ static void test_broker(void)
     /* the account is listed and found */
     ok( broker_accounts( statics4, provider, &account ) == 1, "wrong account count.\n" );
     ok( account != NULL, "no account.\n" );
-    id = hstring( L"oid-ok" );
-    hr = IWebAuthenticationCoreManagerStatics_FindAccountAsync( statics, provider, id, &account_op );
-    ok( hr == S_OK, "got hr %#lx.\n", hr );
-    WindowsDeleteString( id );
-    found = NULL;
-    wait_broker( (IUnknown *)account_op );
-    IAsyncOperation_WebAccount_GetResults( account_op, &found );
-    ok( !found, "FindAccountAsync names no client and still found an account.\n" );
-    if (found) IWebAccount_Release( found );
-    IAsyncOperation_WebAccount_Release( account_op );
+    /* FindAccountAsync names no client id: this process has used the test's client id, so it finds the account; a
+     * process that has not used it finds nothing, one that has used it finds the account too (the accounts of a client
+     * id are the processes' that used it, not every process's) */
+    ok( broker_find_account( statics, provider, L"oid-ok", found_id, ARRAY_SIZE(found_id) ),
+        "FindAccountAsync did not find the account of a client id this process used.\n" );
+    ok( !wcscmp( found_id, L"oid-ok" ), "got account id %s.\n", wine_dbgstr_w( found_id ) );
+    ok( !broker_find_account( statics, provider, L"oid-nobody", NULL, 0 ), "found an account that is not there.\n" );
+    code = run_child_args( NULL, "broker_find_child oid-ok no_client" );
+    ok( code == 0, "another process that never used the client id: got %#lx.\n", code );
+    code = run_child_args( NULL, "broker_find_child oid-ok use_client" );
+    ok( code == 1, "another process that used the client id itself: got %#lx.\n", code );
 
     /* silent: the same scope from the cache, another one by refresh token */
     broker_silent( statics, provider, NULL, L"user.read", &r );
@@ -889,6 +1042,64 @@ static void test_broker(void)
     ok( r.status == WebTokenRequestStatus_Success, "got status %d, error %#x.\n", r.status, r.error );
     ok( r.token[0] && wcscmp( r.token, first_token ), "got token %s.\n", wine_dbgstr_w( r.token ) );
     ok( !wcscmp( r.user_name, L"ok@wine.test" ), "got user name %s.\n", wine_dbgstr_w( r.user_name ) );
+
+    /* oauth2_batch=1: the Token is the token endpoint's answer as a form body, in this order; no wamcompat_*
+     * properties; the telemetry property MATS when asked for (telemetry=MATS) */
+    {
+        const WCHAR *batch[] = { L"api-version", L"2.0", L"oauth2_batch", L"1", L"telemetry", L"MATS", NULL };
+        const WCHAR *nobatch[] = { L"api-version", L"2.0", L"telemetry", L"MATS", NULL };
+
+        broker_silent_ex( statics, provider, NULL, L"user.read", NULL, batch, &r );
+        ok( r.status == WebTokenRequestStatus_Success, "batch: got status %d, error %#x.\n", r.status, r.error );
+        ok( !wcsncmp( r.token, L"access_token=at-", 16 ), "batch: got token %s.\n", wine_dbgstr_w( r.token ) );
+        p1 = wcsstr( r.token, L"&token_type=Bearer&expires_in=" );
+        p2 = p1 ? wcsstr( p1, L"&scope=" ) : NULL;
+        p3 = p2 ? wcsstr( p2, L"&id_token=" ) : NULL;
+        p4 = p3 ? wcsstr( p3, L"&client_info=" ) : NULL;
+        ok( p1 && p2 && p3 && p4, "batch: the fields are missing or out of order in %s.\n", wine_dbgstr_w( r.token ) );
+        ok( !r.wamcompat && !r.id_token, "batch: got wamcompat_* properties.\n" );
+        ok( r.mats, "batch: no MATS.\n" );
+        ok( r.account_props == 6, "batch: got %u account properties.\n", r.account_props );
+
+        /* the same without the batch property: the bare token and the wamcompat_* properties, MATS still on request */
+        broker_silent_ex( statics, provider, NULL, L"user.read", NULL, nobatch, &r );
+        ok( r.status == WebTokenRequestStatus_Success, "no batch: got status %d.\n", r.status );
+        ok( !wcsncmp( r.token, L"at-", 3 ), "no batch: got token %s.\n", wine_dbgstr_w( r.token ) );
+        ok( r.wamcompat && r.id_token, "no batch: no wamcompat_* properties.\n" );
+        ok( r.mats, "no batch: no MATS.\n" );
+    }
+
+    /* Nested App Authentication: a token for the child app, through the parent: the authority names it "nat-N"; it is
+     * cached under the child's client id (the same token again), and the parent's refresh token is untouched (the
+     * parent's own silent request for the same scope still works, with a token of its own) */
+    {
+        const WCHAR *naa[] = { L"child_client_id", CHILD_CLIENT, L"child_redirect_uri", L"brk-test://child", NULL };
+
+        broker_silent_ex( statics, provider, account, L"child.read", NULL, naa, &r );
+        ok( r.status == WebTokenRequestStatus_Success, "nested: got status %d, error %#x.\n", r.status, r.error );
+        ok( !wcsncmp( r.token, L"nat-", 4 ), "nested: got token %s.\n", wine_dbgstr_w( r.token ) );
+        wcscpy( nested_token, r.token );
+        broker_silent_ex( statics, provider, account, L"child.read", NULL, naa, &r );
+        ok( r.status == WebTokenRequestStatus_Success, "nested again: got status %d.\n", r.status );
+        ok( !wcscmp( r.token, nested_token ), "nested again: got token %s, not the cached %s.\n",
+            wine_dbgstr_w( r.token ), wine_dbgstr_w( nested_token ) );
+        broker_silent( statics, provider, account, L"child.read", &r );
+        ok( r.status == WebTokenRequestStatus_Success, "parent after nested: got status %d, error %#x.\n", r.status, r.error );
+        ok( !wcsncmp( r.token, L"at-", 3 ), "parent after nested: got token %s.\n", wine_dbgstr_w( r.token ) );
+        ok( !wcscmp( r.account_id, L"oid-ok" ), "parent after nested: got account id %s.\n", wine_dbgstr_w( r.account_id ) );
+    }
+
+    /* another client id of the same program, which has no account of its own: it uses the account of the client id the
+     * program has used, through it (a brokered request: the authority names the token "nat-N") */
+    broker_silent_ex( statics, provider, NULL, L"user.read", OTHER_CLIENT, NULL, &r );
+    ok( r.status == WebTokenRequestStatus_Success, "other client: got status %d, error %#x.\n", r.status, r.error );
+    ok( !wcsncmp( r.token, L"nat-", 4 ), "other client: got token %s.\n", wine_dbgstr_w( r.token ) );
+    ok( !wcscmp( r.account_id, L"oid-ok" ), "other client: got account id %s.\n", wine_dbgstr_w( r.account_id ) );
+    /* but another process that asks for that other client id, without ever having used the account's, is not served
+     * through this process's use of it: the user is needed */
+    code = run_child_args( NULL, "broker_child_other" );
+    ok( code == ((WebTokenRequestStatus_UserInteractionRequired << 16) | 0x0006), "another process, other client id: got %#lx.\n",
+        code );
 
     /* cancelled: a page waits for the user and the window is closed; the authority's access_denied */
     broker_interactive( interop, window, provider, L"user.read", L"cancel@wine.test", &r );
@@ -909,6 +1120,42 @@ static void test_broker(void)
     ok( r.status == WebTokenRequestStatus_UserInteractionRequired, "got status %d.\n", r.status );
     ok( broker_accounts( statics4, provider, NULL ) == 0, "the account is still there.\n" );
     if (account) IWebAccount_Release( account );
+
+    /* a Microsoft account: its object id is zeros and the 16 digits of its customer id; WAM names the account by those
+     * digits, upper case (WebAccount.Id and its UID), and keeps the customer id, lower case, as SafeCustomerId; the
+     * wamcompat_account_id keeps the object id's form; the account has seven properties (no country or age group:
+     * the id token has none) and is found by its id */
+    broker_interactive( interop, window, provider, L"user.read", L"msa@wine.test", &r );
+    ok( r.status == WebTokenRequestStatus_Success, "msa: got status %d, error %#x.\n", r.status, r.error );
+    ok( !wcscmp( r.account_id, L"E659DC1079E4A963" ), "msa: got account id %s.\n", wine_dbgstr_w( r.account_id ) );
+    ok( !wcscmp( r.uid, L"E659DC1079E4A963" ), "msa: got UID %s.\n", wine_dbgstr_w( r.uid ) );
+    ok( !wcscmp( r.safe_id, L"e659dc1079e4a963" ), "msa: got SafeCustomerId %s.\n", wine_dbgstr_w( r.safe_id ) );
+    ok( !wcscmp( r.wamcompat_account, L"00000000-0000-0000-e659-dc1079e4a963" ), "msa: got wamcompat_account_id %s.\n",
+        wine_dbgstr_w( r.wamcompat_account ) );
+    ok( !wcscmp( r.display_name, L"Test msa" ), "msa: got DisplayName %s.\n", wine_dbgstr_w( r.display_name ) );
+    ok( !wcscmp( r.first_name, L"Test" ), "msa: got FirstName %s.\n", wine_dbgstr_w( r.first_name ) );
+    ok( !wcscmp( r.last_name, L"msa" ), "msa: got LastName %s.\n", wine_dbgstr_w( r.last_name ) );
+    ok( r.account_props == 7, "msa: got %u account properties.\n", r.account_props );
+    ok( r.state == WebAccountState_None, "msa: got account state %d.\n", r.state );
+    ok( broker_find_account( statics, provider, L"E659DC1079E4A963", found_id, ARRAY_SIZE(found_id) ),
+        "msa: the account is not found by its id.\n" );
+    ok( !wcscmp( found_id, L"E659DC1079E4A963" ), "msa: found account id %s.\n", wine_dbgstr_w( found_id ) );
+    ok( broker_accounts( statics4, provider, &account ) == 1, "msa: wrong account count.\n" );
+    if (account) IWebAccount_Release( account );
+    /* silent requests for it work with the id the program got */
+    broker_silent( statics, provider, NULL, L"files.read", &r );
+    ok( r.status == WebTokenRequestStatus_Success, "msa silent: got status %d, error %#x.\n", r.status, r.error );
+    ok( !wcscmp( r.account_id, L"E659DC1079E4A963" ), "msa silent: got account id %s.\n", wine_dbgstr_w( r.account_id ) );
+
+    /* an organization's account is Connected */
+    if ((other = broker_provider( statics, TEST_PROVIDER, L"organizations" )))
+    {
+        broker_interactive( interop, window, other, L"user.read", L"org@wine.test", &r );
+        ok( r.status == WebTokenRequestStatus_Success, "organization: got status %d, error %#x.\n", r.status, r.error );
+        ok( r.state == WebAccountState_Connected, "organization: got account state %d.\n", r.state );
+        ok( !wcscmp( r.account_id, L"oid-org" ), "organization: got account id %s.\n", wine_dbgstr_w( r.account_id ) );
+        IWebAccountProvider_Release( other );
+    }
     IWebAccountProvider_Release( provider );
 
     /* an authority that is not a plain name */
@@ -959,7 +1206,17 @@ START_TEST(web_core)
     argc = winetest_get_mainargs( &argv );
     if (argc >= 3 && !strcmp( argv[2], "broker_child" ))
     {
-        broker_child();
+        broker_child( FALSE );
+        return;
+    }
+    if (argc >= 3 && !strcmp( argv[2], "broker_child_other" ))
+    {
+        broker_child( TRUE );
+        return;
+    }
+    if (argc >= 5 && !strcmp( argv[2], "broker_find_child" ))
+    {
+        broker_find_child( argv[3], !strcmp( argv[4], "use_client" ) );
         return;
     }
 
