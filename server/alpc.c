@@ -100,6 +100,7 @@ struct alpc_outstanding
     unsigned int      id;
     unsigned int      callback_id;
     int               is_connect;
+    unsigned int      pid, tid;        /* sender of the request */
     struct alpc_port *from;            /* server communication port (not referenced) */
 };
 
@@ -610,6 +611,8 @@ recv:
                 out->id          = msg->id;
                 out->callback_id = msg->callback_id;
                 out->is_connect  = (msg->type & 0xff) == ALPC_TYPE_CONNECTION_REQUEST;
+                out->pid         = msg->pid;
+                out->tid         = msg->tid;
                 out->from        = msg->from;
                 list_add_tail( &conn->outstanding, &out->entry );
             }
@@ -625,12 +628,33 @@ done:
 /* Impersonate the sender of a message: the thread takes over the token of the sending thread */
 DECL_HANDLER(alpc_impersonate)
 {
-    struct alpc_port *port;
+    struct alpc_port *port, *conn;
+    struct alpc_outstanding *out;
     struct thread *thread;
     struct token *token, *copy;
+    int found = 0;
 
     if (!(port = get_port( req->handle ))) return;
+    conn = port->type == CONNECTION_PORT ? port : port->conn;
+
+    /* only the sender of a request received on this port, that is still waiting for its answer, can be impersonated */
+    if (conn)
+    {
+        LIST_FOR_EACH_ENTRY( out, &conn->outstanding, struct alpc_outstanding, entry )
+        {
+            if (out->pid == req->pid && out->tid == req->tid && (port->type == CONNECTION_PORT || out->from == port))
+            {
+                found = 1;
+                break;
+            }
+        }
+    }
     release_object( port );
+    if (!found)
+    {
+        set_error( STATUS_INVALID_CID );
+        return;
+    }
 
     if (!(thread = get_thread_from_id( req->tid ))) return;
     if (thread->process->id != req->pid)
