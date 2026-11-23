@@ -72,6 +72,7 @@
 #include "accounts.h"
 #include "session0.h"
 #include "wine/wex_session0.h"
+#include "wine/wex_sysrun_peer.h"
 
 #define SESSION0_CONF "/etc/wineexplorer/sysrun.conf"
 
@@ -710,51 +711,19 @@ uid_t session0_hive_owner(void)
     return hive_owner;
 }
 
-/* A launcher-started server of the peer's uid. Only the setgid launcher gives a process of a user who is not in
- * the system group that group as its saved group, and it starts only the configured wineserver and the machine
- * root's wineboot; such a process is not dumpable, so the user cannot take it over. Its executable cannot be
- * checked from here: /proc/<pid>/exe of a non-dumpable process of another uid is not readable. */
-static int peer_is_launched_server( pid_t pid, uid_t uid )
-{
-    char path[64], buf[2048], *line;
-    unsigned int r, e, s, f;
-    int fd, uid_ok = 0, gid_ok = 0;
-    ssize_t n;
-
-    snprintf( path, sizeof(path), "/proc/%d/status", (int)pid );
-    if ((fd = open( path, O_RDONLY | O_CLOEXEC )) == -1) return 0;
-    n = read( fd, buf, sizeof(buf) - 1 );
-    close( fd );
-    if (n <= 0) return 0;
-    buf[n] = 0;
-    if ((line = strstr( buf, "\nUid:" )) && sscanf( line + 5, "%u %u %u %u", &r, &e, &s, &f ) == 4)
-        uid_ok = r == uid && e == uid && s == uid && f == uid;
-    if ((line = strstr( buf, "\nGid:" )) && sscanf( line + 5, "%u %u %u %u", &r, &e, &s, &f ) == 4)
-        gid_ok = s == peer_group && r != peer_group && (e == r || e == peer_group);
-    return uid_ok && gid_ok && !strncmp( buf, "Name:\twineserver\n", 17 );
-}
-
-/* the peer is trusted (see the top of this file). The pid of SO_PEERCRED is checked through a pidfd taken
- * before /proc is read: when that process is still alive afterwards, /proc described it and not a later
- * process that was given the same pid. Kernels without SO_PEERPIDFD (before 6.5) get the check without it. */
+/* the peer is trusted (see the top of this file): a launcher-started wineserver of another user, whose real group
+ * is not the system group (include/wine/wex_sysrun_peer.h, with the pidfd pin) */
 static int peer_trusted( int client, const struct ucred *cred )
 {
-    struct pollfd pfd;
-    socklen_t len = sizeof(int);
-    int pidfd = -1, ok;
+    struct wex_sysrun_peer_rule rule;
 
     if (session0_dev) return cred->uid == getuid();
     if (cred->uid == getuid()) return 0;
-    if (getsockopt( client, SOL_SOCKET, SO_PEERPIDFD, &pidfd, &len )) pidfd = -1;
-    ok = peer_is_launched_server( cred->pid, cred->uid );
-    if (ok && pidfd != -1)
-    {
-        pfd.fd = pidfd;
-        pfd.events = POLLIN;  /* a pidfd is readable once its process has exited */
-        if (poll( &pfd, 1, 0 ) != 0) ok = 0;
-    }
-    if (pidfd != -1) close( pidfd );
-    return ok;
+    rule.uid = cred->uid;
+    rule.real_gid = (gid_t)-1;
+    rule.sys_gid = peer_group;
+    rule.server_name = 1;
+    return wex_sysrun_peer_ok( client, &rule );
 }
 
 static void session0_listen_event( struct fd *fd, int event )
