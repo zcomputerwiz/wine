@@ -26,6 +26,7 @@
 
 #include <windows.h>
 #include <commctrl.h>
+#include <shellapi.h>
 #include <winnt.h>
 
 #include "taskmgr.h"
@@ -43,6 +44,8 @@ static int    nProcessPageWidth;
 static int    nProcessPageHeight;
 
 static HANDLE    hProcessPageEvent = NULL;    /* When this event becomes signaled then we refresh the process list */
+static DWORD     SelectedProcessId = (DWORD)-1;
+static BOOL      bRestoringSelection;
 
 
 static void CommaSeparateNumberString(LPWSTR strNumber, int nMaxCount)
@@ -60,6 +63,54 @@ static void CommaSeparateNumberString(LPWSTR strNumber, int nMaxCount)
     }
     temp[j++] = 0;
     memcpy(strNumber, temp, min(nMaxCount, j) * sizeof(WCHAR));
+}
+
+/* Vista: an administrator whose Task Manager runs with the filtered token sees "Show processes from all users"
+ * as a button with the shield, which starts Task Manager again elevated. Elevated, as a standard user or without
+ * an elevation helper (TokenElevationTypeDefault) it stays XP's check box. */
+static BOOL is_filtered_admin(void)
+{
+    TOKEN_ELEVATION_TYPE type = TokenElevationTypeDefault;
+    WCHAR helper[MAX_PATH];
+    DWORD len = sizeof(helper);
+    HANDLE token;
+
+    /* Without an elevation helper (HKLM\Software\Wine\Elevation\Helper, docs/ELEVATION.md in WineExplorer) Wine
+     * elevates without asking, as XP did, and the token's type says nothing: keep XP's check box */
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, L"Software\\Wine\\Elevation", L"Helper", RRF_RT_REG_SZ, NULL,
+                     helper, &len) || !helper[0])
+        return FALSE;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return FALSE;
+    if (!GetTokenInformation(token, TokenElevationType, &type, sizeof(type), &len))
+        type = TokenElevationTypeDefault;
+    CloseHandle(token);
+    return type == TokenElevationTypeLimited;
+}
+
+static void ProcessPage_OnShowAllProcessesElevated(void)
+{
+    SHELLEXECUTEINFOW sei = { sizeof(sei) };
+    WCHAR path[MAX_PATH];
+
+    GetModuleFileNameW(NULL, path, ARRAY_SIZE(path));
+    sei.fMask = SEE_MASK_NOASYNC;
+    sei.hwnd = hMainWnd;
+    sei.lpVerb = L"runas";
+    sei.lpFile = path;
+    sei.lpParameters = L"/showall";
+    sei.nShow = SW_SHOWNORMAL;
+    /* the elevated Task Manager takes over; on a refusal this one stays */
+    if (ShellExecuteExW(&sei))
+        PostMessageW(hMainWnd, WM_COMMAND, ID_FILE_EXIT, 0);
+}
+
+static void ProcessPage_OnShowAllProcesses(void)
+{
+    TaskManagerSettings.ShowProcessesFromAllUsers =
+        SendMessageW(hProcessPageShowAllProcessesButton, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    PerfDataRefresh();
+    RefreshProcessPage();
 }
 
 static void ProcessPageShowContextMenu(DWORD dwProcessId)
@@ -295,6 +346,19 @@ static void ProcessPageOnNotify(LPARAM lParam)
 
             break;
 
+        case LVN_ITEMCHANGED:
+        {
+            NMLISTVIEW *nmlv = (NMLISTVIEW *)lParam;
+
+            /* remember the selected process: its row moves when the list is refreshed */
+            if ((nmlv->uChanged & LVIF_STATE) && (nmlv->uNewState & LVIS_SELECTED) && nmlv->iItem >= 0)
+                SelectedProcessId = PerfDataGetProcessId(nmlv->iItem);
+            else if ((nmlv->uChanged & LVIF_STATE) && (nmlv->uOldState & LVIS_SELECTED) &&
+                     !(nmlv->uNewState & LVIS_SELECTED) && !bRestoringSelection)
+                SelectedProcessId = (DWORD)-1;
+            break;
+        }
+
         case NM_RCLICK:
             Count = SendMessageW(hProcessPageListCtrl, LVM_GETITEMCOUNT, 0, 0);
             for (Index=0; Index<Count; Index++)
@@ -325,15 +389,25 @@ static void ProcessPageOnNotify(LPARAM lParam)
         switch (pnmh->code)
         {
         case HDN_ITEMCLICKW:
+        {
+            NMHEADERW *nmh = (NMHEADERW *)lParam;
+            int column;
 
-            /*
-             * FIXME: Fix the column sorting
-             *
-             *ListView_SortItems(hApplicationPageListCtrl, ApplicationPageCompareFunc, NULL);
-             *bSortAscending = !bSortAscending;
-             */
-
+            if (nmh->iItem < 0 || nmh->iItem >= ARRAY_SIZE(ColumnDataHints))
+                break;
+            column = ColumnDataHints[nmh->iItem];
+            /* the first click on a column sorts it ascending, the next one reverses it */
+            if (TaskManagerSettings.SortColumn == column)
+                TaskManagerSettings.SortAscending = !TaskManagerSettings.SortAscending;
+            else
+            {
+                TaskManagerSettings.SortColumn = column;
+                TaskManagerSettings.SortAscending = TRUE;
+            }
+            PerfDataRefresh();
+            RefreshProcessPage();
             break;
+        }
 
         case HDN_ITEMCHANGEDW:
 
@@ -354,6 +428,38 @@ static void ProcessPageOnNotify(LPARAM lParam)
 
 void RefreshProcessPage(void)
 {
+    ULONG Count = PerfDataGetProcessCount(), Index;
+    LVITEMW item;
+
+    if (SendMessageW(hProcessPageListCtrl, LVM_GETITEMCOUNT, 0, 0) != Count)
+        SendMessageW(hProcessPageListCtrl, LVM_SETITEMCOUNT, Count, LVSICF_NOSCROLL);
+
+    /* Keep the selection on the same process (the list is in a new order after each refresh) */
+    if (SelectedProcessId != (DWORD)-1)
+    {
+        bRestoringSelection = TRUE;
+        for (Index = 0; Index < Count; Index++)
+            if (PerfDataGetProcessId(Index) == SelectedProcessId) break;
+        item.stateMask = LVIS_SELECTED|LVIS_FOCUSED;
+        if (Index < Count)
+        {
+            if (SendMessageW(hProcessPageListCtrl, LVM_GETITEMSTATE, Index, LVIS_SELECTED) != LVIS_SELECTED)
+            {
+                item.state = 0;
+                SendMessageW(hProcessPageListCtrl, LVM_SETITEMSTATE, -1, (LPARAM)&item);
+                item.state = LVIS_SELECTED|LVIS_FOCUSED;
+                SendMessageW(hProcessPageListCtrl, LVM_SETITEMSTATE, Index, (LPARAM)&item);
+            }
+        }
+        else
+        {
+            item.state = 0;
+            SendMessageW(hProcessPageListCtrl, LVM_SETITEMSTATE, -1, (LPARAM)&item);
+            SelectedProcessId = (DWORD)-1;
+        }
+        bRestoringSelection = FALSE;
+    }
+
     /* Signal the event so that our refresh thread */
     /* will wake up and refresh the process page */
     SetEvent(hProcessPageEvent);
@@ -393,9 +499,6 @@ static DWORD WINAPI ProcessPageRefreshThread(void *lpParameter)
 
             /* Reset our event */
             ResetEvent(hProcessPageEvent);
-
-            if (SendMessageW(hProcessPageListCtrl, LVM_GETITEMCOUNT, 0, 0) != PerfDataGetProcessCount())
-                SendMessageW(hProcessPageListCtrl, LVM_SETITEMCOUNT, PerfDataGetProcessCount(), /*LVSICF_NOINVALIDATEALL|*/LVSICF_NOSCROLL);
 
             if (IsWindowVisible(hProcessPage))
                 InvalidateRect(hProcessPageListCtrl, NULL, FALSE);
@@ -442,6 +545,23 @@ ProcessPageWndProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
         hProcessPageHeaderCtrl = (HWND)SendMessageW(hProcessPageListCtrl, LVM_GETHEADER, 0, 0);
         hProcessPageEndProcessButton = GetDlgItem(hDlg, IDC_ENDPROCESS);
         hProcessPageShowAllProcessesButton = GetDlgItem(hDlg, IDC_SHOWALLPROCESSES);
+        if (is_filtered_admin())
+        {
+            HWND elevate = GetDlgItem(hDlg, IDC_SHOWALLPROCESSES_ELEVATE);
+
+            TaskManagerSettings.ShowProcessesFromAllUsers = FALSE;
+            ShowWindow(hProcessPageShowAllProcessesButton, SW_HIDE);
+            DestroyWindow(hProcessPageShowAllProcessesButton);
+            hProcessPageShowAllProcessesButton = elevate;
+            SendMessageW(elevate, BCM_SETSHIELD, 0, TRUE);
+            ShowWindow(elevate, SW_SHOW);
+        }
+        else
+        {
+            DestroyWindow(GetDlgItem(hDlg, IDC_SHOWALLPROCESSES_ELEVATE));
+            SendMessageW(hProcessPageShowAllProcessesButton, BM_SETCHECK,
+                         TaskManagerSettings.ShowProcessesFromAllUsers ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
 
         /* Enable manual column reordering, set full select */
         SendMessageW(hProcessPageListCtrl, LVM_SETEXTENDEDLISTVIEWSTYLE, LVS_EX_FULLROWSELECT|LVS_EX_HEADERDRAGDROP,
@@ -472,8 +592,17 @@ ProcessPageWndProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
         /* Handle the button clicks */
         switch (LOWORD(wParam))
         {
-                case IDC_ENDPROCESS:
-                        ProcessPage_OnEndProcess();
+        case IDC_ENDPROCESS:
+            ProcessPage_OnEndProcess();
+            break;
+        case IDC_SHOWALLPROCESSES:
+            if (HIWORD(wParam) == BN_CLICKED)
+                ProcessPage_OnShowAllProcesses();
+            break;
+        case IDC_SHOWALLPROCESSES_ELEVATE:
+            if (HIWORD(wParam) == BN_CLICKED)
+                ProcessPage_OnShowAllProcessesElevated();
+            break;
         }
         break;
 

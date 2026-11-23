@@ -183,8 +183,9 @@ static DWORD WINAPI PerformancePageRefreshThread(void *lpParameter)
 
 			SetWindowTextW(hPerformancePageCommitChargePeakEdit, Text);
 
-			args[0] = CommitChargeTotal;
-			args[1] = CommitChargeLimit;
+			/* the status bar shows the commit charge in megabytes, as XP does */
+			args[0] = CommitChargeTotal / 1024;
+			args[1] = CommitChargeLimit / 1024;
 			FormatMessageW(FORMAT_MESSAGE_FROM_STRING|FORMAT_MESSAGE_ARGUMENT_ARRAY,
 			               wszMemUsage, 0, 0, Text, ARRAY_SIZE(Text), (va_list *)args);
 			SendMessageW(hStatusWnd, SB_SETTEXTW, 2, (LPARAM)Text);
@@ -318,16 +319,20 @@ PerformancePageWndProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
         /*  customize the control */
         GraphCtrl_SetRange(&PerformancePageCpuUsageHistoryGraph, 0.0, 100.0, 10);
         GraphCtrl_SetBackgroundColor(&PerformancePageCpuUsageHistoryGraph, RGB(0, 0, 0)) ;
-        GraphCtrl_SetGridColor(&PerformancePageCpuUsageHistoryGraph, RGB(152, 205, 152)) ;
-        GraphCtrl_SetPlotColor(&PerformancePageCpuUsageHistoryGraph, 0, RGB(255, 0, 0)) ;
-        GraphCtrl_SetPlotColor(&PerformancePageCpuUsageHistoryGraph, 1, RGB(0, 255, 0)) ;
+        /* XP: the total in green, the kernel's share in red (with Show Kernel Times), on a dark green grid */
+        GraphCtrl_SetGridColor(&PerformancePageCpuUsageHistoryGraph, RGB(0, 128, 64)) ;
+        GraphCtrl_SetPlotColor(&PerformancePageCpuUsageHistoryGraph, 0, RGB(0, 255, 0)) ;
+        GraphCtrl_SetPlotColor(&PerformancePageCpuUsageHistoryGraph, 1, RGB(255, 0, 0)) ;
+        GraphCtrl_SetPlotCount(&PerformancePageCpuUsageHistoryGraph, TaskManagerSettings.ShowKernelTimes ? 2 : 1);
 
         GetClientRect(hPerformancePageMemUsageHistoryGraph, &rc);
         GraphCtrl_Create(&PerformancePageMemUsageHistoryGraph, hPerformancePageMemUsageHistoryGraph, hDlg, IDC_MEM_USAGE_HISTORY_GRAPH);
         GraphCtrl_SetRange(&PerformancePageMemUsageHistoryGraph, 0.0, 100.0, 10) ;
         GraphCtrl_SetBackgroundColor(&PerformancePageMemUsageHistoryGraph, RGB(0, 0, 0)) ;
-        GraphCtrl_SetGridColor(&PerformancePageMemUsageHistoryGraph, RGB(152, 215, 152)) ;
+        /* XP: one yellow line, the commit charge */
+        GraphCtrl_SetGridColor(&PerformancePageMemUsageHistoryGraph, RGB(0, 128, 64)) ;
         GraphCtrl_SetPlotColor(&PerformancePageMemUsageHistoryGraph, 0, RGB(255, 255, 0)) ;
+        GraphCtrl_SetPlotCount(&PerformancePageMemUsageHistoryGraph, 1);
 		/*  Start our refresh thread */
 #ifdef RUN_PERF_PAGE
         CloseHandle( CreateThread(NULL, 0, PerformancePageRefreshThread, NULL, 0, NULL));
@@ -449,6 +454,7 @@ void PerformancePage_OnViewShowKernelTimes(void)
 		CheckMenuItem(hViewMenu, ID_VIEW_SHOWKERNELTIMES, MF_BYCOMMAND|MF_CHECKED);
 		TaskManagerSettings.ShowKernelTimes = TRUE;
 	}
+	GraphCtrl_SetPlotCount(&PerformancePageCpuUsageHistoryGraph, TaskManagerSettings.ShowKernelTimes ? 2 : 1);
 
 	RefreshPerformancePage();
 }
