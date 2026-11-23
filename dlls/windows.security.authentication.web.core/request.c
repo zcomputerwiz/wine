@@ -22,13 +22,6 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(webcore);
 
-static HRESULT hstring_copy( HSTRING source, HSTRING *dest )
-{
-    UINT32 length;
-    const WCHAR *buffer = WindowsGetStringRawBuffer( source, &length );
-    return WindowsCreateString( buffer, length, dest );
-}
-
 struct web_token_request
 {
     IWebTokenRequest IWebTokenRequest_iface;
@@ -49,68 +42,54 @@ static inline struct web_token_request *impl_from_IWebTokenRequest( IWebTokenReq
     return CONTAINING_RECORD( iface, struct web_token_request, IWebTokenRequest_iface );
 }
 
-static inline struct web_token_request *impl_from_IWebTokenRequest2( IWebTokenRequest2 *iface )
+static HRESULT WINAPI web_token_request_QueryInterface( IWebTokenRequest *iface, REFIID iid, void **out )
 {
-    return CONTAINING_RECORD( iface, struct web_token_request, IWebTokenRequest2_iface );
-}
+    struct web_token_request *impl = impl_from_IWebTokenRequest( iface );
 
-static inline struct web_token_request *impl_from_IWebTokenRequest3( IWebTokenRequest3 *iface )
-{
-    return CONTAINING_RECORD( iface, struct web_token_request, IWebTokenRequest3_iface );
-}
-
-static HRESULT web_token_request_QueryInterface( struct web_token_request *impl, REFIID iid, void **out )
-{
-    TRACE( "impl %p, iid %s, out %p.\n", impl, debugstr_guid( iid ), out );
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
 
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IWebTokenRequest ))
-    {
         *out = &impl->IWebTokenRequest_iface;
-        IInspectable_AddRef( *out );
-        return S_OK;
-    }
-
-    if (IsEqualGUID( iid, &IID_IWebTokenRequest2 ))
-    {
+    else if (IsEqualGUID( iid, &IID_IWebTokenRequest2 ))
         *out = &impl->IWebTokenRequest2_iface;
-        IInspectable_AddRef( *out );
-        return S_OK;
-    }
-
-    if (IsEqualGUID( iid, &IID_IWebTokenRequest3 ))
-    {
+    else if (IsEqualGUID( iid, &IID_IWebTokenRequest3 ))
         *out = &impl->IWebTokenRequest3_iface;
-        IInspectable_AddRef( *out );
-        return S_OK;
+    else
+    {
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+        *out = NULL;
+        return E_NOINTERFACE;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
-    *out = NULL;
-    return E_NOINTERFACE;
+    IInspectable_AddRef( *out );
+    return S_OK;
 }
 
-static ULONG web_token_request_AddRef( struct web_token_request *impl )
+static ULONG WINAPI web_token_request_AddRef( IWebTokenRequest *iface )
 {
+    struct web_token_request *impl = impl_from_IWebTokenRequest( iface );
     ULONG ref = InterlockedIncrement( &impl->ref );
-    TRACE( "impl %p, ref %lu.\n", impl, ref );
+    TRACE( "iface %p, ref %lu.\n", iface, ref );
     return ref;
 }
 
-static ULONG web_token_request_Release( struct web_token_request *impl )
+static ULONG WINAPI web_token_request_Release( IWebTokenRequest *iface )
 {
+    struct web_token_request *impl = impl_from_IWebTokenRequest( iface );
     ULONG ref = InterlockedDecrement( &impl->ref );
-    TRACE( "impl %p, ref %lu.\n", impl, ref );
+
+    TRACE( "iface %p, ref %lu.\n", iface, ref );
 
     if (!ref)
     {
         if (impl->app_properties) IMap_HSTRING_HSTRING_Release( impl->app_properties );
         if (impl->properties) IMap_HSTRING_HSTRING_Release( impl->properties );
-        if (impl->correlation_id) WindowsDeleteString( impl->correlation_id );
-        if (impl->client_id) WindowsDeleteString( impl->client_id );
-        if (impl->scope) WindowsDeleteString( impl->scope );
+        WindowsDeleteString( impl->correlation_id );
+        WindowsDeleteString( impl->client_id );
+        WindowsDeleteString( impl->scope );
         if (impl->provider) IWebAccountProvider_Release( impl->provider );
         free( impl );
     }
@@ -118,53 +97,23 @@ static ULONG web_token_request_Release( struct web_token_request *impl )
     return ref;
 }
 
-static HRESULT web_token_request_GetIids( struct web_token_request *impl, ULONG *iid_count, IID **iids )
+static HRESULT WINAPI web_token_request_GetIids( IWebTokenRequest *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "impl %p, iid_count %p, iids %p stub!\n", impl, iid_count, iids );
+    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
     return E_NOTIMPL;
 }
 
-static HRESULT web_token_request_GetRuntimeClassName( struct web_token_request *impl, HSTRING *class_name )
+static HRESULT WINAPI web_token_request_GetRuntimeClassName( IWebTokenRequest *iface, HSTRING *class_name )
 {
     return WindowsCreateString( L"Windows.Security.Authentication.Web.Core.WebTokenRequest",
-                                ARRAY_SIZE(L"Windows.Security.Authentication.Web.Core.WebTokenRequest"),
+                                ARRAY_SIZE(L"Windows.Security.Authentication.Web.Core.WebTokenRequest") - 1,
                                 class_name );
 }
 
-static HRESULT web_token_request_GetTrustLevel( struct web_token_request *impl, TrustLevel *trust_level )
+static HRESULT WINAPI web_token_request_GetTrustLevel( IWebTokenRequest *iface, TrustLevel *trust_level )
 {
-    FIXME( "impl %p, trust_level %p stub!\n", impl, trust_level );
+    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
     return E_NOTIMPL;
-}
-
-static HRESULT WINAPI web_token_request_IWebTokenRequest_QueryInterface( IWebTokenRequest *iface, REFIID iid, void **out )
-{
-    return web_token_request_QueryInterface( impl_from_IWebTokenRequest( iface ), iid, out );
-}
-
-static ULONG WINAPI web_token_request_IWebTokenRequest_AddRef( IWebTokenRequest *iface )
-{
-    return web_token_request_AddRef( impl_from_IWebTokenRequest( iface ) );
-}
-
-static ULONG WINAPI web_token_request_IWebTokenRequest_Release( IWebTokenRequest *iface )
-{
-    return web_token_request_Release( impl_from_IWebTokenRequest( iface ) );
-}
-
-static HRESULT WINAPI web_token_request_IWebTokenRequest_GetIids( IWebTokenRequest *iface, ULONG *iid_count, IID **iids )
-{
-    return web_token_request_GetIids( impl_from_IWebTokenRequest( iface ), iid_count, iids );
-}
-
-static HRESULT WINAPI web_token_request_IWebTokenRequest_GetRuntimeClassName( IWebTokenRequest *iface, HSTRING *class_name )
-{
-    return web_token_request_GetRuntimeClassName( impl_from_IWebTokenRequest( iface ), class_name );
-}
-
-static HRESULT WINAPI web_token_request_IWebTokenRequest_GetTrustLevel( IWebTokenRequest *iface, TrustLevel *trust_level )
-{
-    return web_token_request_GetTrustLevel( impl_from_IWebTokenRequest( iface ), trust_level );
 }
 
 static HRESULT WINAPI web_token_request_get_WebAccountProvider( IWebTokenRequest *iface, IWebAccountProvider **value )
@@ -174,37 +123,28 @@ static HRESULT WINAPI web_token_request_get_WebAccountProvider( IWebTokenRequest
     TRACE( "iface %p, value %p.\n", iface, value );
 
     if (!value) return E_POINTER;
-    if (impl->provider) IWebAccountProvider_AddRef( (*value = impl->provider) );
-    else *value = NULL;
+    if ((*value = impl->provider)) IWebAccountProvider_AddRef( *value );
     return S_OK;
 }
 
 static HRESULT WINAPI web_token_request_get_Scope( IWebTokenRequest *iface, HSTRING *value )
 {
     struct web_token_request *impl = impl_from_IWebTokenRequest( iface );
-    HRESULT hr;
 
     TRACE( "iface %p, value %p.\n", iface, value );
 
     if (!value) return E_POINTER;
-    *value = NULL;
-
-    if (!impl->scope) return S_OK;
-    return hstring_copy( impl->scope, value );
+    return WindowsDuplicateString( impl->scope, value );
 }
 
 static HRESULT WINAPI web_token_request_get_ClientId( IWebTokenRequest *iface, HSTRING *value )
 {
     struct web_token_request *impl = impl_from_IWebTokenRequest( iface );
-    HRESULT hr;
 
     TRACE( "iface %p, value %p.\n", iface, value );
 
     if (!value) return E_POINTER;
-    *value = NULL;
-
-    if (!impl->client_id) return S_OK;
-    return hstring_copy( impl->client_id, value );
+    return WindowsDuplicateString( impl->client_id, value );
 }
 
 static HRESULT WINAPI web_token_request_get_PromptType( IWebTokenRequest *iface, WebTokenRequestPromptType *value )
@@ -221,13 +161,10 @@ static HRESULT WINAPI web_token_request_get_PromptType( IWebTokenRequest *iface,
 static HRESULT WINAPI web_token_request_get_Properties( IWebTokenRequest *iface, IMap_HSTRING_HSTRING **requestProperties )
 {
     struct web_token_request *impl = impl_from_IWebTokenRequest( iface );
-    HRESULT hr;
 
     TRACE( "iface %p, requestProperties %p.\n", iface, requestProperties );
 
     if (!requestProperties) return E_POINTER;
-
-    if (!impl->properties && FAILED(hr = map_hstring_create( &impl->properties ))) return hr;
     IMap_HSTRING_HSTRING_AddRef( (*requestProperties = impl->properties) );
     return S_OK;
 }
@@ -235,13 +172,13 @@ static HRESULT WINAPI web_token_request_get_Properties( IWebTokenRequest *iface,
 static const struct IWebTokenRequestVtbl web_token_request_vtbl =
 {
     /* IUnknown methods */
-    web_token_request_IWebTokenRequest_QueryInterface,
-    web_token_request_IWebTokenRequest_AddRef,
-    web_token_request_IWebTokenRequest_Release,
+    web_token_request_QueryInterface,
+    web_token_request_AddRef,
+    web_token_request_Release,
     /* IInspectable methods */
-    web_token_request_IWebTokenRequest_GetIids,
-    web_token_request_IWebTokenRequest_GetRuntimeClassName,
-    web_token_request_IWebTokenRequest_GetTrustLevel,
+    web_token_request_GetIids,
+    web_token_request_GetRuntimeClassName,
+    web_token_request_GetTrustLevel,
     /* IWebTokenRequest methods */
     web_token_request_get_WebAccountProvider,
     web_token_request_get_Scope,
@@ -250,46 +187,15 @@ static const struct IWebTokenRequestVtbl web_token_request_vtbl =
     web_token_request_get_Properties,
 };
 
-static HRESULT WINAPI web_token_request_IWebTokenRequest2_QueryInterface( IWebTokenRequest2 *iface, REFIID iid, void **out )
-{
-    return web_token_request_QueryInterface( impl_from_IWebTokenRequest2( iface ), iid, out );
-}
-
-static ULONG WINAPI web_token_request_IWebTokenRequest2_AddRef( IWebTokenRequest2 *iface )
-{
-    return web_token_request_AddRef( impl_from_IWebTokenRequest2( iface ) );
-}
-
-static ULONG WINAPI web_token_request_IWebTokenRequest2_Release( IWebTokenRequest2 *iface )
-{
-    return web_token_request_Release( impl_from_IWebTokenRequest2( iface ) );
-}
-
-static HRESULT WINAPI web_token_request_IWebTokenRequest2_GetIids( IWebTokenRequest2 *iface, ULONG *iid_count, IID **iids )
-{
-    return web_token_request_GetIids( impl_from_IWebTokenRequest2( iface ), iid_count, iids );
-}
-
-static HRESULT WINAPI web_token_request_IWebTokenRequest2_GetRuntimeClassName( IWebTokenRequest2 *iface, HSTRING *class_name )
-{
-    return web_token_request_GetRuntimeClassName( impl_from_IWebTokenRequest2( iface ), class_name );
-}
-
-static HRESULT WINAPI web_token_request_IWebTokenRequest2_GetTrustLevel( IWebTokenRequest2 *iface, TrustLevel *trust_level )
-{
-    return web_token_request_GetTrustLevel( impl_from_IWebTokenRequest2( iface ), trust_level );
-}
+DEFINE_IINSPECTABLE( web_token_request2, IWebTokenRequest2, struct web_token_request, IWebTokenRequest_iface )
 
 static HRESULT WINAPI web_token_request_get_AppProperties( IWebTokenRequest2 *iface, IMap_HSTRING_HSTRING **requestProperties )
 {
     struct web_token_request *impl = impl_from_IWebTokenRequest2( iface );
-    HRESULT hr;
 
     TRACE( "iface %p, requestProperties %p.\n", iface, requestProperties );
 
     if (!requestProperties) return E_POINTER;
-
-    if (!impl->app_properties && FAILED(hr = map_hstring_create( &impl->app_properties ))) return hr;
     IMap_HSTRING_HSTRING_AddRef( (*requestProperties = impl->app_properties) );
     return S_OK;
 }
@@ -297,91 +203,53 @@ static HRESULT WINAPI web_token_request_get_AppProperties( IWebTokenRequest2 *if
 static const struct IWebTokenRequest2Vtbl web_token_request2_vtbl =
 {
     /* IUnknown methods */
-    web_token_request_IWebTokenRequest2_QueryInterface,
-    web_token_request_IWebTokenRequest2_AddRef,
-    web_token_request_IWebTokenRequest2_Release,
+    web_token_request2_QueryInterface,
+    web_token_request2_AddRef,
+    web_token_request2_Release,
     /* IInspectable methods */
-    web_token_request_IWebTokenRequest2_GetIids,
-    web_token_request_IWebTokenRequest2_GetRuntimeClassName,
-    web_token_request_IWebTokenRequest2_GetTrustLevel,
+    web_token_request2_GetIids,
+    web_token_request2_GetRuntimeClassName,
+    web_token_request2_GetTrustLevel,
     /* IWebTokenRequest2 methods */
     web_token_request_get_AppProperties,
 };
 
-static HRESULT WINAPI web_token_request_IWebTokenRequest3_QueryInterface( IWebTokenRequest3 *iface, REFIID iid, void **out )
-{
-    return web_token_request_QueryInterface( impl_from_IWebTokenRequest3( iface ), iid, out );
-}
-
-static ULONG WINAPI web_token_request_IWebTokenRequest3_AddRef( IWebTokenRequest3 *iface )
-{
-    return web_token_request_AddRef( impl_from_IWebTokenRequest3( iface ) );
-}
-
-static ULONG WINAPI web_token_request_IWebTokenRequest3_Release( IWebTokenRequest3 *iface )
-{
-    return web_token_request_Release( impl_from_IWebTokenRequest3( iface ) );
-}
-
-static HRESULT WINAPI web_token_request_IWebTokenRequest3_GetIids( IWebTokenRequest3 *iface, ULONG *iid_count, IID **iids )
-{
-    return web_token_request_GetIids( impl_from_IWebTokenRequest3( iface ), iid_count, iids );
-}
-
-static HRESULT WINAPI web_token_request_IWebTokenRequest3_GetRuntimeClassName( IWebTokenRequest3 *iface, HSTRING *class_name )
-{
-    return web_token_request_GetRuntimeClassName( impl_from_IWebTokenRequest3( iface ), class_name );
-}
-
-static HRESULT WINAPI web_token_request_IWebTokenRequest3_GetTrustLevel( IWebTokenRequest3 *iface, TrustLevel *trust_level )
-{
-    return web_token_request_GetTrustLevel( impl_from_IWebTokenRequest3( iface ), trust_level );
-}
+DEFINE_IINSPECTABLE( web_token_request3, IWebTokenRequest3, struct web_token_request, IWebTokenRequest_iface )
 
 static HRESULT WINAPI web_token_request_get_CorrelationId( IWebTokenRequest3 *iface, HSTRING *value )
 {
     struct web_token_request *impl = impl_from_IWebTokenRequest3( iface );
-    HRESULT hr;
 
     TRACE( "iface %p, value %p.\n", iface, value );
 
     if (!value) return E_POINTER;
-    *value = NULL;
-
-    if (!impl->correlation_id) return S_OK;
-    return hstring_copy( impl->correlation_id, value );
+    return WindowsDuplicateString( impl->correlation_id, value );
 }
 
 static HRESULT WINAPI web_token_request_put_CorrelationId( IWebTokenRequest3 *iface, HSTRING value )
 {
     struct web_token_request *impl = impl_from_IWebTokenRequest3( iface );
+    HSTRING copy;
     HRESULT hr;
 
     TRACE( "iface %p, value %s.\n", iface, debugstr_hstring( value ) );
 
-    if (impl->correlation_id)
-    {
-        WindowsDeleteString( impl->correlation_id );
-        impl->correlation_id = NULL;
-    }
-
-    if (value)
-    {
-        if (FAILED(hr = hstring_copy( value, &impl->correlation_id ))) return hr;
-    }
+    if (FAILED(hr = WindowsDuplicateString( value, &copy ))) return hr;
+    WindowsDeleteString( impl->correlation_id );
+    impl->correlation_id = copy;
     return S_OK;
 }
 
 static const struct IWebTokenRequest3Vtbl web_token_request3_vtbl =
 {
     /* IUnknown methods */
-    web_token_request_IWebTokenRequest3_QueryInterface,
-    web_token_request_IWebTokenRequest3_AddRef,
-    web_token_request_IWebTokenRequest3_Release,
+    web_token_request3_QueryInterface,
+    web_token_request3_AddRef,
+    web_token_request3_Release,
     /* IInspectable methods */
-    web_token_request_IWebTokenRequest3_GetIids,
-    web_token_request_IWebTokenRequest3_GetRuntimeClassName,
-    web_token_request_IWebTokenRequest3_GetTrustLevel,
+    web_token_request3_GetIids,
+    web_token_request3_GetRuntimeClassName,
+    web_token_request3_GetTrustLevel,
     /* IWebTokenRequest3 methods */
     web_token_request_get_CorrelationId,
     web_token_request_put_CorrelationId,
@@ -402,16 +270,19 @@ static HRESULT web_token_request_create_internal( IWebAccountProvider *provider,
     impl->prompt_type = prompt_type;
 
     if ((impl->provider = provider)) IWebAccountProvider_AddRef( impl->provider );
-    if (scope && FAILED(hr = hstring_copy( scope, &impl->scope ))) goto fail;
-    if (client_id && FAILED(hr = hstring_copy( client_id, &impl->client_id ))) goto fail;
+    /* the maps exist from the start: no lazy creation that two threads could race */
+    if (FAILED(hr = WindowsDuplicateString( scope, &impl->scope )) ||
+        FAILED(hr = WindowsDuplicateString( client_id, &impl->client_id )) ||
+        FAILED(hr = map_hstring_create( &impl->properties )) ||
+        FAILED(hr = map_hstring_create( &impl->app_properties )))
+    {
+        web_token_request_Release( &impl->IWebTokenRequest_iface );
+        return hr;
+    }
 
     *out = &impl->IWebTokenRequest_iface;
     TRACE( "created IWebTokenRequest %p\n", *out );
     return S_OK;
-
-fail:
-    web_token_request_Release( impl );
-    return hr;
 }
 
 struct web_token_request_factory

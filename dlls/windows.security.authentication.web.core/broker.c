@@ -107,22 +107,24 @@ static BOOL server_is_own_user( HANDLE pipe, const SID *own )
     return ret;
 }
 
-static void start_broker( void )
+static BOOL start_broker( void )
 {
+    static const WCHAR name[] = L"\\tokenbroker.exe";
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi;
     WCHAR path[MAX_PATH];
     UINT len;
 
-    if (!(len = GetSystemDirectoryW( path, MAX_PATH )) || len + 17 > MAX_PATH) return;
-    wcscat( path, L"\\tokenbroker.exe" );
+    if (!(len = GetSystemDirectoryW( path, MAX_PATH )) || len + ARRAY_SIZE(name) > MAX_PATH) return FALSE;
+    wcscat( path, name );
     if (!CreateProcessW( path, NULL, NULL, NULL, FALSE, CREATE_NO_WINDOW | DETACHED_PROCESS, NULL, NULL, &si, &pi ))
     {
         WARN( "cannot start the token broker: %lu\n", GetLastError() );
-        return;
+        return FALSE;
     }
     CloseHandle( pi.hThread );
     CloseHandle( pi.hProcess );
+    return TRUE;
 }
 
 /* the user's broker, started when it does not run */
@@ -145,7 +147,8 @@ static HANDLE connect_broker( const SID *own )
         if (GetLastError() == ERROR_PIPE_BUSY) WaitNamedPipeW( name, 1000 );
         else if (GetLastError() == ERROR_FILE_NOT_FOUND && !started)
         {
-            start_broker();
+            /* no broker to wait for: the call is answered as without one at once */
+            if (!start_broker()) return INVALID_HANDLE_VALUE;
             started = TRUE;
         }
         else if (GetLastError() != ERROR_FILE_NOT_FOUND) return INVALID_HANDLE_VALUE;
@@ -329,6 +332,12 @@ static void provider_fields( IWebAccountProvider *provider, HSTRING *id, HSTRING
     }
 }
 
+/* a Microsoft account (the "consumers" authority) is reported as WebAccountState_None, an organization's as Connected */
+static WebAccountState account_state( IWebAccountProvider *provider )
+{
+    return provider_is_consumers( provider ) ? WebAccountState_None : WebAccountState_Connected;
+}
+
 /* the broker's answer to a token request as a WebTokenRequestResult */
 static HRESULT token_result( const struct broker_reply *reply, IWebAccountProvider *provider, IWebTokenRequestResult **out )
 {
@@ -340,15 +349,30 @@ static HRESULT token_result( const struct broker_reply *reply, IWebAccountProvid
     HSTRING message = NULL, token = NULL;
     HRESULT hr;
 
+    if (reply->status < WebTokenRequestStatus_Success || reply->status > WebTokenRequestStatus_ProviderError)
+    {
+        WARN( "the token broker's status %d is not valid\n", reply->status );
+        return E_FAIL;
+    }
     if (reply->status == WebTokenRequestStatus_Success)
     {
-        if (reply->field[TOKENBROKER_REPLY_ACCOUNT_ID].len &&
-            FAILED(hr = web_account_create( provider, reply->field[TOKENBROKER_REPLY_ACCOUNT_ID].text,
-                                            reply->field[TOKENBROKER_REPLY_ACCOUNT_ID].len,
-                                            reply->field[TOKENBROKER_REPLY_USER_NAME].text,
-                                            reply->field[TOKENBROKER_REPLY_USER_NAME].len, WebAccountState_Connected,
-                                            &account )))
-            goto done;
+        if (reply->field[TOKENBROKER_REPLY_ACCOUNT_ID].len)
+        {
+            IMap_HSTRING_HSTRING *account_properties;
+
+            if (FAILED(hr = web_account_create( provider, reply->field[TOKENBROKER_REPLY_ACCOUNT_ID].text,
+                                                reply->field[TOKENBROKER_REPLY_ACCOUNT_ID].len,
+                                                reply->field[TOKENBROKER_REPLY_USER_NAME].text,
+                                                reply->field[TOKENBROKER_REPLY_USER_NAME].len,
+                                                account_state( provider ), &account )))
+                goto done;
+            if (SUCCEEDED(properties_from_pairs( reply->field[TOKENBROKER_REPLY_ACCOUNT_PROPERTIES],
+                                                 &account_properties )))
+            {
+                web_account_set_properties( account, account_properties );
+                IMap_HSTRING_HSTRING_Release( account_properties );
+            }
+        }
         if (FAILED(hr = properties_from_pairs( reply->field[TOKENBROKER_REPLY_PROPERTIES], &properties ))) goto done;
         if (FAILED(hr = WindowsCreateString( reply->field[TOKENBROKER_REPLY_TOKEN].text,
                                              reply->field[TOKENBROKER_REPLY_TOKEN].len, &token )))
@@ -453,6 +477,7 @@ HRESULT token_broker_find_accounts( IWebAccountProvider *provider, HSTRING clien
     IWebAccount **accounts = NULL;
     UINT32 count = 0, max, i;
     struct broker_reply reply;
+    WebAccountState state;
     HRESULT hr;
 
     *result = NULL;
@@ -464,7 +489,14 @@ HRESULT token_broker_find_accounts( IWebAccountProvider *provider, HSTRING clien
     WindowsDeleteString( provider_id );
     WindowsDeleteString( authority );
     if (FAILED(hr)) return hr;
+    if (reply.status < FindAllWebAccountsStatus_Success || reply.status > FindAllWebAccountsStatus_ProviderError)
+    {
+        WARN( "the token broker's status %d is not valid\n", reply.status );
+        free_reply( &reply );
+        return E_FAIL;
+    }
 
+    state = account_state( provider );
     rest = reply.field[TOKENBROKER_REPLY_ACCOUNTS];
     max = rest.len / 2 + 1;
     if (!(accounts = calloc( max, sizeof(*accounts) )))
@@ -474,8 +506,7 @@ HRESULT token_broker_find_accounts( IWebAccountProvider *provider, HSTRING clien
     }
     while (count < max && next_string( &rest, &id ) && next_string( &rest, &name ))
     {
-        if (FAILED(hr = web_account_create( provider, id.text, id.len, name.text, name.len, WebAccountState_Connected,
-                                            &accounts[count] )))
+        if (FAILED(hr = web_account_create( provider, id.text, id.len, name.text, name.len, state, &accounts[count] )))
             goto done;
         count++;
     }
@@ -516,11 +547,11 @@ HRESULT token_broker_find_account( IWebAccountProvider *provider, HSTRING id, IW
     WindowsDeleteString( provider_id );
     WindowsDeleteString( authority );
     if (FAILED(hr)) return hr;
-    if (!reply.status && reply.field[TOKENBROKER_REPLY_ACCOUNT_ID].len)
+    if (reply.status == TOKENBROKER_ACCOUNT_FOUND && reply.field[TOKENBROKER_REPLY_ACCOUNT_ID].len)
         hr = web_account_create( provider, reply.field[TOKENBROKER_REPLY_ACCOUNT_ID].text,
                                  reply.field[TOKENBROKER_REPLY_ACCOUNT_ID].len,
                                  reply.field[TOKENBROKER_REPLY_USER_NAME].text,
-                                 reply.field[TOKENBROKER_REPLY_USER_NAME].len, WebAccountState_Connected, account );
+                                 reply.field[TOKENBROKER_REPLY_USER_NAME].len, account_state( provider ), account );
     free_reply( &reply );
     return hr;
 }
