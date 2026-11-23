@@ -5207,12 +5207,21 @@ HRESULT WINAPI DCompositionCreateDevice3(IUnknown *rendering_device, REFIID iid,
 
 /*
  * Export 1040 of the real dcomp.dll, named DCompositionCreateSharedVisualHandle (tests/uwp/alpc/dcomp-exports-probe.c): imported
- * by ordinal by dcompi.dll of the Windows App Runtime. The signature is not known (it is not the shape of
- * DCompositionCreateSurfaceHandle: Windows 11 answers E_INVALIDARG to that, tests/uwp/alpc/dcomp-visualhandle-probe.c); the
- * arguments are logged and the call is refused until it is.
+ * by ordinal by dcompi.dll of the Windows App Runtime. The signature is HRESULT (HANDLE *out) (read from the caller in dcompi.dll
+ * and confirmed on Windows 11 with tests/uwp/alpc/dcomp-visualhandle-probe.c: a NULL out is E_INVALIDARG, otherwise the handle is
+ * an object of type "Composition"). The compositor passes the handle on in a property of a visual; here the handle is an
+ * anonymous event, which is what a caller can do with it (duplicate it, close it) until there is a system compositor to share
+ * the visual with.
  */
-HRESULT WINAPI DCompositionCreateSharedVisualHandle(void *a, void *b, void *c, void *d)
+HRESULT WINAPI DCompositionCreateSharedVisualHandle(HANDLE *out)
 {
-    FIXME("(%p, %p, %p, %p): stub (caller %p)\n", a, b, c, d, __builtin_return_address(0));
-    return E_NOTIMPL;
+    HANDLE handle;
+
+    TRACE("(%p)\n", out);
+
+    if (!out) return E_INVALIDARG;
+    *out = NULL;
+    if (!(handle = CreateEventW(NULL, TRUE, FALSE, NULL))) return HRESULT_FROM_WIN32(GetLastError());
+    *out = handle;
+    return S_OK;
 }
