@@ -8,7 +8,7 @@
 @ stub GetApplicationLayoutDirection
 @ stub GetClosenessOfUnIsoRegionTags
 @ stub GetCompositeRegionCode
-@ stub GetDistanceOfClosestLanguageInList
+@ stdcall GetDistanceOfClosestLanguageInList(wstr wstr long ptr)
 @ stub GetLanguageDirectionality
 @ stub GetMrtDisplayLanguageList
 @ stub GetParentCompositeRegionCode
