@@ -128,14 +128,14 @@ static HRESULT WINAPI package_manager_AddPackageAsync( IPackageManager *iface, I
     IIterable_Uri *dependencies, DeploymentOptions options, IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
     FIXME( "iface %p, uri %p, dependencies %p, options %d, operation %p stub!\n", iface, uri, dependencies, options, operation );
-    return E_NOTIMPL;
+    return start_install( uri, options, FALSE, operation );
 }
 
 static HRESULT WINAPI package_manager_UpdatePackageAsync( IPackageManager *iface, IUriRuntimeClass *uri, IIterable_Uri *dependencies,
     DeploymentOptions options, IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
     FIXME( "iface %p, uri %p, dependencies %p, options %d, operation %p stub!\n", iface, uri, dependencies, options, operation );
-    return E_NOTIMPL;
+    return start_install( uri, options, FALSE, operation );
 }
 
 static HRESULT WINAPI package_manager_RemovePackageAsync( IPackageManager *iface, HSTRING name,
@@ -149,7 +149,7 @@ static HRESULT WINAPI package_manager_StagePackageAsync( IPackageManager *iface,
     IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
     FIXME( "iface %p, uri %p, dependencies %p, operation %p stub!\n", iface, uri, dependencies, operation );
-    return E_NOTIMPL;
+    return start_install( uri, DeploymentOptions_None, FALSE, operation );
 }
 
 static HRESULT WINAPI package_manager_RegisterPackageAsync( IPackageManager *iface, IUriRuntimeClass *uri, IIterable_Uri *dependencies,
@@ -272,7 +272,7 @@ static HRESULT WINAPI package_manager2_StagePackageWithOptionsAsync( IPackageMan
     DeploymentOptions options, IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
     FIXME( "iface %p, uri %p, dependencies %p, options %d, operation %p stub!\n", iface, uri, dependencies, options, operation );
-    return E_NOTIMPL;
+    return start_install( uri, options, FALSE, operation );
 }
 
 static HRESULT WINAPI package_manager2_RegisterPackageByFullNameAsync( IPackageManager2 *iface, HSTRING name, IIterable_HSTRING *dependencies,
@@ -355,7 +355,7 @@ static const struct IPackageManager2Vtbl package_manager2_vtbl =
 DEFINE_IINSPECTABLE( package_manager6, IPackageManager6, struct package_manager, IPackageManager_iface );
 
 /* The staging and the provisioning calls of Windows 10 2004 and later: Office Click-to-Run stages its own packages through them.
- * They fail with E_NOTIMPL for now (the caller sees an error it handles, not a missing interface). */
+ * The provisioning and the app installer calls fail with E_NOTIMPL for now (the caller sees an error it handles). */
 #define PM6_FAIL( name, ... ) \
     static HRESULT WINAPI package_manager6_##name( IPackageManager6 *iface, __VA_ARGS__ ) \
     { \
@@ -363,22 +363,29 @@ DEFINE_IINSPECTABLE( package_manager6, IPackageManager6, struct package_manager,
         *operation = NULL; \
         return E_NOTIMPL; \
     }
-typedef IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress async_operation;
 
 PM6_FAIL( ProvisionPackageForAllUsersAsync, HSTRING family_name, async_operation **operation )
 PM6_FAIL( AddPackageByAppInstallerFileAsync, IUriRuntimeClass *uri, AddPackageByAppInstallerOptions options,
           IPackageVolume *volume, async_operation **operation )
 PM6_FAIL( RequestAddPackageByAppInstallerFileAsync, IUriRuntimeClass *uri, AddPackageByAppInstallerOptions options,
           IPackageVolume *volume, async_operation **operation )
-PM6_FAIL( AddPackageToVolumeAndRelatedSetAsync, IUriRuntimeClass *uri, IIterable_Uri *dependencies, DeploymentOptions options,
-          IPackageVolume *volume, IIterable_HSTRING *optional_family_names, IIterable_Uri *uris_to_install,
-          IIterable_Uri *related_uris, async_operation **operation )
-PM6_FAIL( StagePackageToVolumeAndRelatedSetAsync, IUriRuntimeClass *uri, IIterable_Uri *dependencies, DeploymentOptions options,
-          IPackageVolume *volume, IIterable_HSTRING *optional_family_names, IIterable_Uri *uris_to_install,
-          IIterable_Uri *related_uris, async_operation **operation )
-PM6_FAIL( RequestAddPackageAsync, IUriRuntimeClass *uri, IIterable_Uri *dependencies, DeploymentOptions options,
-          IPackageVolume *volume, IIterable_HSTRING *optional_family_names, IIterable_Uri *related_uris,
-          async_operation **operation )
+/* the three that name a package by Uri install it (stage.c); the volume, the optional packages and the related packages are
+ * not honoured yet */
+#define PM6_INSTALL( name, ... ) \
+    static HRESULT WINAPI package_manager6_##name( IPackageManager6 *iface, __VA_ARGS__ ) \
+    { \
+        TRACE( "iface %p, " #name ".\n", iface ); \
+        return start_install( uri, options, FALSE, operation ); \
+    }
+PM6_INSTALL( AddPackageToVolumeAndRelatedSetAsync, IUriRuntimeClass *uri, IIterable_Uri *dependencies, DeploymentOptions options,
+             IPackageVolume *volume, IIterable_HSTRING *optional_family_names, IIterable_Uri *uris_to_install,
+             IIterable_Uri *related_uris, async_operation **operation )
+PM6_INSTALL( StagePackageToVolumeAndRelatedSetAsync, IUriRuntimeClass *uri, IIterable_Uri *dependencies, DeploymentOptions options,
+             IPackageVolume *volume, IIterable_HSTRING *optional_family_names, IIterable_Uri *uris_to_install,
+             IIterable_Uri *related_uris, async_operation **operation )
+PM6_INSTALL( RequestAddPackageAsync, IUriRuntimeClass *uri, IIterable_Uri *dependencies, DeploymentOptions options,
+             IPackageVolume *volume, IIterable_HSTRING *optional_family_names, IIterable_Uri *related_uris,
+             async_operation **operation )
 
 static const struct IPackageManager6Vtbl package_manager6_vtbl =
 {

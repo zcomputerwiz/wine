@@ -1,9 +1,12 @@
 MODULE  = appxdeploymentclient.dll
-IMPORTS = combase
+IMPORTS = combase shlwapi
 
 SOURCES = \
+	async.c \
+	async_private.idl \
 	classes.idl \
 	main.c \
 	options.c \
 	package.c \
+	stage.c \
 	vector.c
