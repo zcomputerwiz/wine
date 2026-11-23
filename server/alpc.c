@@ -658,7 +658,10 @@ recv:
         reply->pid          = msg->pid;
         reply->tid          = msg->tid;
         reply->status       = msg->status;
-        reply->has_context  = msg->type != (ALPC_TYPE_CONNECTION_REQUEST | ALPC_TYPE_RECEIVED_FLAG);
+        /* no context attribute for a connection request nor for a datagram a server sent to its own connection port (measured on
+         * Windows 11, tests/uwp/alpc/alpc-selfdg.c: ValidAttributes 0); a reply to a client has one */
+        reply->has_context  = msg->type != (ALPC_TYPE_CONNECTION_REQUEST | ALPC_TYPE_RECEIVED_FLAG) &&
+                              (msg->from || port->type != CONNECTION_PORT);
         reply->port_context = msg->from ? msg->from->context : (mem_size_t)req->handle;
         reply->sequence     = ++port->sequence;
         if (msg->from && (msg->type & ALPC_TYPE_RECEIVED_FLAG))

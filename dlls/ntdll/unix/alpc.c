@@ -126,16 +126,19 @@ static void fill_attributes( ALPC_MESSAGE_ATTRIBUTES *attrs, const struct alpc_r
 {
     if (!attrs) return;
     attrs->ValidAttributes = 0;
-    if (r->has_msg && r->has_context && (attrs->AllocatedAttributes & ALPC_MESSAGE_CONTEXT_ATTRIBUTE))
+    if (r->has_msg && (attrs->AllocatedAttributes & ALPC_MESSAGE_CONTEXT_ATTRIBUTE))
     {
         ALPC_CONTEXT_ATTR *ctx = get_attribute( attrs, ALPC_MESSAGE_CONTEXT_ATTRIBUTE );
 
-        ctx->PortContext = (void *)r->port_context;
+        /* Windows 11 fills the structure even where the attribute is not marked valid (a connection request, a datagram
+         * a server sent to its own connection port), with a null port context: a program that reads it unchecked sees no
+         * stale value */
+        ctx->PortContext = r->has_context ? (void *)r->port_context : NULL;
         ctx->MessageContext = NULL;
         ctx->Sequence = r->sequence;
         ctx->MessageId = r->id;
         ctx->CallbackId = r->callback_id;
-        attrs->ValidAttributes |= ALPC_MESSAGE_CONTEXT_ATTRIBUTE;
+        if (r->has_context) attrs->ValidAttributes |= ALPC_MESSAGE_CONTEXT_ATTRIBUTE;
     }
 }
 

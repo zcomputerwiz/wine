@@ -427,7 +427,8 @@ static inline ALPC_MESSAGE_ATTRIBUTES32 *alpc_port_message_attributes_64to32( AL
     if (out->AllocatedAttributes & ALPC_MESSAGE_VIEW_ATTRIBUTE)
         current_to_attr += sizeof(ALPC_VIEW_ATTR32);
 
-    if (in->ValidAttributes & ALPC_MESSAGE_CONTEXT_ATTRIBUTE)
+    /* the structure is filled even where the attribute is not marked valid (null port context), see unix/alpc.c */
+    if (in->AllocatedAttributes & ALPC_MESSAGE_CONTEXT_ATTRIBUTE)
     {
         const ALPC_CONTEXT_ATTR *from_attr = AlpcGetMessageAttribute( in, ALPC_MESSAGE_CONTEXT_ATTRIBUTE );
         ALPC_CONTEXT_ATTR32 *to_attr = (ALPC_CONTEXT_ATTR32 *)current_to_attr;

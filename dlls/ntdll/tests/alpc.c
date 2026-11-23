@@ -1003,6 +1003,51 @@ done:
     CloseHandle(process_token);
 }
 
+/* a datagram that a server sends to its own connection port (CoreMessaging wakes its receive loop with it): it arrives as a
+ * datagram without the context attribute (measured on Windows 11, ValidAttributes 0) and the structure has no port context */
+static void test_alpc_self_datagram(void)
+{
+    UNICODE_STRING name = RTL_CONSTANT_STRING(L"\\RPC Control\\test_alpc_self_datagram");
+    char attr_buffer[256];
+    ALPC_MESSAGE_ATTRIBUTES *attrs = (ALPC_MESSAGE_ATTRIBUTES *)attr_buffer;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    struct test_msg msg, recv;
+    ALPC_CONTEXT_ATTR *ctx;
+    LARGE_INTEGER timeout;
+    OBJECT_ATTRIBUTES attr;
+    NTSTATUS status;
+    HANDLE port;
+    SIZE_T size, req;
+
+    if (!pNtAlpcCreatePort || !pNtAlpcSendWaitReceivePort) return;
+
+    InitializeObjectAttributes(&attr, &name, 0, NULL, NULL);
+    init_port_attr(&port_attr, 0, 0x1000);
+    status = pNtAlpcCreatePort(&port, &attr, &port_attr);
+    ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+    if (status) return;
+
+    init_test_msg(&msg, "wakeup");
+    status = pNtAlpcSendWaitReceivePort(port, 0x10000, &msg.header, NULL, NULL, NULL, NULL, NULL);
+    ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+
+    memset(&recv, 0xcc, sizeof(recv));
+    memset(attr_buffer, 0xa5, sizeof(attr_buffer));
+    pAlpcInitializeMessageAttribute(ALPC_MESSAGE_CONTEXT_ATTRIBUTE, attrs, sizeof(attr_buffer), &req);
+    size = sizeof(recv);
+    timeout.QuadPart = -100000000;
+    status = pNtAlpcSendWaitReceivePort(port, 0, NULL, NULL, &recv.header, &size, attrs, &timeout);
+    ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+    ok(recv.header.Type == 3, "Got unexpected type %#x.\n", recv.header.Type);
+    ok(recv.header.DataLength == 6 && !memcmp(recv.data, "wakeup", 6), "Got unexpected data.\n");
+    ok(attrs->ValidAttributes == 0, "Got unexpected attributes %#lx.\n", attrs->ValidAttributes);
+    ctx = pAlpcGetMessageAttribute(attrs, ALPC_MESSAGE_CONTEXT_ATTRIBUTE);
+    ok(ctx != NULL, "Got no context attribute.\n");
+    if (ctx) ok(!ctx->PortContext && !ctx->MessageContext, "Got unexpected context %p, %p.\n", ctx->PortContext, ctx->MessageContext);
+
+    CloseHandle(port);
+}
+
 START_TEST(alpc)
 {
     init_functions();
@@ -1014,4 +1059,5 @@ START_TEST(alpc)
     test_alpc_messages();
     test_alpc_security();
     test_alpc_impersonation_token();
+    test_alpc_self_datagram();
 }
