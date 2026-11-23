@@ -100,6 +100,8 @@ static HRESULT WINAPI activation_factory_QueryInterface( IActivationFactory *ifa
         *out = &impl->ICoreApplication2_iface;
     else if (IsEqualGUID( iid, &IID_ICoreImmersiveApplication ))
         *out = &impl->ICoreImmersiveApplication_iface;
+    else if (IsEqualGUID( iid, &IID_IStaticLifetime_twinapi ))
+        *out = get_static_lifetime();
     else
     {
         FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
