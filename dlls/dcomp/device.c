@@ -4078,10 +4078,6 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
     /* Content IUnknown each binding was prepared from (no ref held); used to
      * dedupe duplicate producers by the underlying object, not the interface. */
     IUnknown *binding_content[WINE_DCOMP_MAX_CONTENTS];
-    /* Targets whose auxiliary producer must be revoked, deferred until the
-     * commit is known to succeed so a failed transaction keeps it intact. */
-    struct dcomp_target *aux_release[WINE_DCOMP_MAX_CONTENTS];
-    unsigned int aux_release_count = 0;
     struct dcomp_visual *pending_nodes[WINE_DCOMP_MAX_LAYERS], *old_nodes[WINE_DCOMP_MAX_LAYERS];
     unsigned int old_count = 0;
     unsigned int contents = 0, visuals = 0, targets = 0, count = 0, i, j, c = 0;
@@ -4213,17 +4209,7 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
                     scene->target_hwnd, scene)))
                 goto done;
         }
-        else if (target->aux_binding)
-        {
-            /* The scene has a real producer (or no content): the auxiliary
-             * producer is revoked, but only once the commit is known to succeed. */
-            aux_release[aux_release_count++] = target;
-        }
     }
-    /* A target whose scene went away keeps no auxiliary producer (deferred). */
-    LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
-        if (!target->pending_root && target->aux_binding)
-            aux_release[aux_release_count++] = target;
     /* Retain the old active tree before any activation so its nodes stay alive
      * while the new graph is built; a failed commit releases these extra refs
      * and leaves the old tree untouched. */
@@ -4277,10 +4263,15 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
             }
             if (target->active_root) dcomp_visual_apply_commit(target->active_root, now_100ns);
         }
-        /* The commit succeeded: now revoke the auxiliary producers that are no
-         * longer needed. */
-        for (i = 0; i < aux_release_count; ++i)
-            dcomp_target_release_aux_producer(aux_release[i]);
+        /* The commit succeeded: now revoke the auxiliary producers this commit
+         * does not present through (a real producer, no content, or no scene).
+         * A failed commit keeps them, with the previous scene. */
+        LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
+        {
+            if (!target->aux_binding) continue;
+            for (j = 0; j < count && bindings[j] != target->aux_binding; ++j) {}
+            if (j == count) dcomp_target_release_aux_producer(target);
+        }
     }
 done:
     for (i = 0; i < old_count; ++i) IDCompositionVisual2_Release(&old_nodes[i]->IDCompositionVisual2_iface);
