@@ -95,7 +95,7 @@ static HRESULT WINAPI vecview_wtr_GetIids( IVectorView_WebTokenResponse *iface, 
 static HRESULT WINAPI vecview_wtr_GetRuntimeClassName( IVectorView_WebTokenResponse *iface, HSTRING *class_name )
 {
     return WindowsCreateString( L"Windows.Foundation.Collections.IVectorView`1<Windows.Security.Authentication.Web.Core.WebTokenResponse>",
-                                ARRAY_SIZE(L"Windows.Foundation.Collections.IVectorView`1<Windows.Security.Authentication.Web.Core.WebTokenResponse>"),
+                                ARRAY_SIZE(L"Windows.Foundation.Collections.IVectorView`1<Windows.Security.Authentication.Web.Core.WebTokenResponse>") - 1,
                                 class_name );
 }
 
@@ -282,7 +282,7 @@ static HRESULT WINAPI vecview_wa_GetIids( IVectorView_WebAccount *iface, ULONG *
 static HRESULT WINAPI vecview_wa_GetRuntimeClassName( IVectorView_WebAccount *iface, HSTRING *class_name )
 {
     return WindowsCreateString( L"Windows.Foundation.Collections.IVectorView`1<Windows.Security.Credentials.WebAccount>",
-                                ARRAY_SIZE(L"Windows.Foundation.Collections.IVectorView`1<Windows.Security.Credentials.WebAccount>"),
+                                ARRAY_SIZE(L"Windows.Foundation.Collections.IVectorView`1<Windows.Security.Credentials.WebAccount>") - 1,
                                 class_name );
 }
 
@@ -470,7 +470,7 @@ static HRESULT WINAPI web_provider_error_GetIids( IWebProviderError *iface, ULON
 static HRESULT WINAPI web_provider_error_GetRuntimeClassName( IWebProviderError *iface, HSTRING *class_name )
 {
     return WindowsCreateString( L"Windows.Security.Authentication.Web.Core.WebProviderError",
-                                ARRAY_SIZE(L"Windows.Security.Authentication.Web.Core.WebProviderError"),
+                                ARRAY_SIZE(L"Windows.Security.Authentication.Web.Core.WebProviderError") - 1,
                                 class_name );
 }
 
@@ -494,35 +494,21 @@ static HRESULT WINAPI web_provider_error_get_ErrorCode( IWebProviderError *iface
 static HRESULT WINAPI web_provider_error_get_ErrorMessage( IWebProviderError *iface, HSTRING *value )
 {
     struct web_provider_error *impl = impl_from_IWebProviderError( iface );
-    HRESULT hr;
 
     TRACE( "iface %p, value %p.\n", iface, value );
 
     if (!value) return E_POINTER;
-    *value = NULL;
-
-    if (!impl->error_message) return S_OK;
-
-    {
-        UINT32 length;
-        const WCHAR *buffer = WindowsGetStringRawBuffer( impl->error_message, &length );
-        if (SUCCEEDED(hr = WindowsCreateString( buffer, length, value ))) return S_OK;
-    }
-    return hr;
+    return WindowsDuplicateString( impl->error_message, value );
 }
 
 static HRESULT WINAPI web_provider_error_get_Properties( IWebProviderError *iface, IMap_HSTRING_HSTRING **value )
 {
     struct web_provider_error *impl = impl_from_IWebProviderError( iface );
-    HRESULT hr;
 
     TRACE( "iface %p, value %p.\n", iface, value );
 
     if (!value) return E_POINTER;
-
-    if (!impl->properties && FAILED(hr = map_hstring_create( &impl->properties ))) return hr;
-    IMap_HSTRING_HSTRING_AddRef( (*value = impl->properties) );
-    return S_OK;
+    return map_hstring_get( &impl->properties, value );
 }
 
 static const struct IWebProviderErrorVtbl web_provider_error_vtbl =
@@ -552,15 +538,10 @@ static HRESULT web_provider_error_create_internal( UINT32 error_code, HSTRING er
     impl->ref = 1;
     impl->error_code = error_code;
 
-    if (error_message)
+    if (FAILED(hr = WindowsDuplicateString( error_message, &impl->error_message )))
     {
-        UINT32 length;
-        const WCHAR *buffer = WindowsGetStringRawBuffer( error_message, &length );
-        if (FAILED(hr = WindowsCreateString( buffer, length, &impl->error_message )))
-        {
-            free( impl );
-            return hr;
-        }
+        free( impl );
+        return hr;
     }
 
     *out = &impl->IWebProviderError_iface;
@@ -777,7 +758,7 @@ static HRESULT WINAPI web_token_response_GetIids( IWebTokenResponse *iface, ULON
 static HRESULT WINAPI web_token_response_GetRuntimeClassName( IWebTokenResponse *iface, HSTRING *class_name )
 {
     return WindowsCreateString( L"Windows.Security.Authentication.Web.Core.WebTokenResponse",
-                                ARRAY_SIZE(L"Windows.Security.Authentication.Web.Core.WebTokenResponse"),
+                                ARRAY_SIZE(L"Windows.Security.Authentication.Web.Core.WebTokenResponse") - 1,
                                 class_name );
 }
 
@@ -790,21 +771,11 @@ static HRESULT WINAPI web_token_response_GetTrustLevel( IWebTokenResponse *iface
 static HRESULT WINAPI web_token_response_get_Token( IWebTokenResponse *iface, HSTRING *value )
 {
     struct web_token_response *impl = impl_from_IWebTokenResponse( iface );
-    HRESULT hr;
 
     TRACE( "iface %p, value %p.\n", iface, value );
 
     if (!value) return E_POINTER;
-    *value = NULL;
-
-    if (!impl->token) return S_OK;
-
-    {
-        UINT32 length;
-        const WCHAR *buffer = WindowsGetStringRawBuffer( impl->token, &length );
-        if (SUCCEEDED(hr = WindowsCreateString( buffer, length, value ))) return S_OK;
-    }
-    return hr;
+    return WindowsDuplicateString( impl->token, value );
 }
 
 static HRESULT WINAPI web_token_response_get_ProviderError( IWebTokenResponse *iface, IWebProviderError **value )
@@ -834,15 +805,11 @@ static HRESULT WINAPI web_token_response_get_WebAccount( IWebTokenResponse *ifac
 static HRESULT WINAPI web_token_response_get_Properties( IWebTokenResponse *iface, IMap_HSTRING_HSTRING **value )
 {
     struct web_token_response *impl = impl_from_IWebTokenResponse( iface );
-    HRESULT hr;
 
     TRACE( "iface %p, value %p.\n", iface, value );
 
     if (!value) return E_POINTER;
-
-    if (!impl->properties && FAILED(hr = map_hstring_create( &impl->properties ))) return hr;
-    IMap_HSTRING_HSTRING_AddRef( (*value = impl->properties) );
-    return S_OK;
+    return map_hstring_get( &impl->properties, value );
 }
 
 static const struct IWebTokenResponseVtbl web_token_response_vtbl =
@@ -889,15 +856,10 @@ static HRESULT web_token_response_create_internal( HSTRING token, IWebAccount *w
     impl->IWebTokenResponse_iface.lpVtbl = &web_token_response_vtbl;
     impl->ref = 1;
 
-    if (token)
+    if (FAILED(hr = WindowsDuplicateString( token, &impl->token )))
     {
-        UINT32 length;
-        const WCHAR *buffer = WindowsGetStringRawBuffer( token, &length );
-        if (FAILED(hr = WindowsCreateString( buffer, length, &impl->token )))
-        {
-            free( impl );
-            return hr;
-        }
+        free( impl );
+        return hr;
     }
     if ((impl->web_account = web_account)) IWebAccount_AddRef( impl->web_account );
     if ((impl->provider_error = error)) IWebProviderError_AddRef( impl->provider_error );
@@ -1130,7 +1092,7 @@ static HRESULT WINAPI web_token_request_result_GetIids( IWebTokenRequestResult *
 static HRESULT WINAPI web_token_request_result_GetRuntimeClassName( IWebTokenRequestResult *iface, HSTRING *class_name )
 {
     return WindowsCreateString( L"Windows.Security.Authentication.Web.Core.WebTokenRequestResult",
-                                ARRAY_SIZE(L"Windows.Security.Authentication.Web.Core.WebTokenRequestResult"),
+                                ARRAY_SIZE(L"Windows.Security.Authentication.Web.Core.WebTokenRequestResult") - 1,
                                 class_name );
 }
 
@@ -1292,7 +1254,7 @@ static HRESULT WINAPI find_all_accounts_result_GetIids( IFindAllAccountsResult *
 static HRESULT WINAPI find_all_accounts_result_GetRuntimeClassName( IFindAllAccountsResult *iface, HSTRING *class_name )
 {
     return WindowsCreateString( L"Windows.Security.Authentication.Web.Core.FindAllAccountsResult",
-                                ARRAY_SIZE(L"Windows.Security.Authentication.Web.Core.FindAllAccountsResult"),
+                                ARRAY_SIZE(L"Windows.Security.Authentication.Web.Core.FindAllAccountsResult") - 1,
                                 class_name );
 }
 

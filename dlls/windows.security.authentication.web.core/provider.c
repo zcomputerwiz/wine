@@ -44,47 +44,61 @@ BOOL diagnostic_provider_enabled( void )
     return TRUE;
 }
 
-/* the error of a silent request that needs the user, as Windows 11's Microsoft account provider gives it (checked
- * with a client id that is not registered): 0x80860006 "Error" for the consumers authority, 0xcaa10001 "Need user
- * interaction to continue." for organizations. Programs read it without a check for NULL. */
+/* the "consumers" authority: personal Microsoft accounts, as against an organization's */
+BOOL authority_is_consumers( HSTRING authority )
+{
+    static const WCHAR consumers[] = L"consumers";
+    const WCHAR *text;
+    UINT32 len;
+
+    text = WindowsGetStringRawBuffer( authority, &len );
+    return len == ARRAY_SIZE(consumers) - 1 && !wcsncmp( text, consumers, len );
+}
+
+BOOL provider_is_consumers( IWebAccountProvider *provider )
+{
+    IWebAccountProvider2 *provider2;
+    HSTRING authority = NULL;
+    BOOL ret;
+
+    if (!provider || FAILED(IWebAccountProvider_QueryInterface( provider, &IID_IWebAccountProvider2, (void **)&provider2 )))
+        return FALSE;
+    if (FAILED(IWebAccountProvider2_get_Authority( provider2, &authority ))) authority = NULL;
+    IWebAccountProvider2_Release( provider2 );
+    ret = authority_is_consumers( authority );
+    WindowsDeleteString( authority );
+    return ret;
+}
+
+/* the errors of a silent request that needs the user, as Windows 11's Microsoft account provider gives them (checked
+ * with a client id that is not registered) */
+#define E_MSA_INTERACTION_REQUIRED  0x80860006  /* the consumers authority: "Error" */
+#define E_AAD_INTERACTION_REQUIRED  0xcaa10001  /* organizations: "Need user interaction to continue." */
+
+/* that error for the request's provider; programs read it without a check for NULL */
 void diagnostic_interaction_error( IInspectable *request, UINT32 *code, const WCHAR **message )
 {
     IWebAccountProvider *provider = NULL;
-    IWebAccountProvider2 *provider2;
     IWebTokenRequest *token_request;
-    HSTRING authority = NULL;
-    INT32 cmp = 1;
+    BOOL consumers = FALSE;
 
     if (request && SUCCEEDED(IInspectable_QueryInterface( request, &IID_IWebTokenRequest, (void **)&token_request )))
     {
         if (SUCCEEDED(IWebTokenRequest_get_WebAccountProvider( token_request, &provider )) && provider)
         {
-            if (SUCCEEDED(IWebAccountProvider_QueryInterface( provider, &IID_IWebAccountProvider2, (void **)&provider2 )))
-            {
-                if (SUCCEEDED(IWebAccountProvider2_get_Authority( provider2, &authority )))
-                {
-                    HSTRING consumers;
-                    if (SUCCEEDED(WindowsCreateString( L"consumers", 9, &consumers )))
-                    {
-                        WindowsCompareStringOrdinal( authority, consumers, &cmp );
-                        WindowsDeleteString( consumers );
-                    }
-                    WindowsDeleteString( authority );
-                }
-                IWebAccountProvider2_Release( provider2 );
-            }
+            consumers = provider_is_consumers( provider );
             IWebAccountProvider_Release( provider );
         }
         IWebTokenRequest_Release( token_request );
     }
-    if (!cmp)
+    if (consumers)
     {
-        *code = 0x80860006;
+        *code = E_MSA_INTERACTION_REQUIRED;
         *message = L"Error";
     }
     else
     {
-        *code = 0xcaa10001;
+        *code = E_AAD_INTERACTION_REQUIRED;
         *message = L"Need user interaction to continue.";
     }
 }

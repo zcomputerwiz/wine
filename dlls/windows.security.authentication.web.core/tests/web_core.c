@@ -269,9 +269,27 @@ static void test_manager(void)
     ok( hr == S_OK, "got hr %#lx.\n", hr );
     if (SUCCEEDED(hr))
     {
+        IWebProviderError *error = NULL;
+
         hr = IWebTokenRequestResult_get_ResponseStatus( result, &status );
         ok( hr == S_OK, "got hr %#lx.\n", hr );
         ok( status == WebTokenRequestStatus_AccountProviderNotAvailable, "got status %u.\n", status );
+        hr = IWebTokenRequestResult_get_ResponseError( result, &error );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        if (error)
+        {
+            const WCHAR *text;
+            HSTRING message;
+            UINT32 len;
+
+            /* the message's length is its text's, without a terminator */
+            hr = IWebProviderError_get_ErrorMessage( error, &message );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            text = WindowsGetStringRawBuffer( message, &len );
+            ok( len == wcslen( text ), "got length %u for %s.\n", len, debugstr_w( text ) );
+            WindowsDeleteString( message );
+            IWebProviderError_Release( error );
+        }
         IWebTokenRequestResult_Release( result );
     }
     IAsyncOperation_WebTokenRequestResult_Release( result_op );
@@ -321,10 +339,46 @@ static WebTokenRequestStatus request_status( IAsyncOperation_WebTokenRequestResu
     return status;
 }
 
+#define SETTINGS_KEY L"Software\\Wine\\WebAuthentication"
+
+/* a switch under HKCU\Software\Wine\WebAuthentication as it was before a test, put back after it */
+struct saved_setting
+{
+    const WCHAR *name;
+    BOOL present;
+    DWORD type;
+    DWORD size;
+    BYTE data[1024];
+};
+
+static void save_setting( struct saved_setting *saved, const WCHAR *name )
+{
+    saved->name = name;
+    saved->size = sizeof(saved->data);
+    saved->present = !RegGetValueW( HKEY_CURRENT_USER, SETTINGS_KEY, name, RRF_RT_ANY | RRF_NOEXPAND, &saved->type,
+                                    saved->data, &saved->size );
+}
+
+/* puts the switch back; the key goes when nothing else is left in it */
+static void restore_setting( const struct saved_setting *saved )
+{
+    DWORD values = 0, subkeys = 0;
+    HKEY key;
+
+    if (RegOpenKeyExW( HKEY_CURRENT_USER, SETTINGS_KEY, 0, KEY_ALL_ACCESS, &key )) return;
+    if (saved->present) RegSetValueExW( key, saved->name, 0, saved->type, saved->data, saved->size );
+    else RegDeleteValueW( key, saved->name );
+    if (RegQueryInfoKeyW( key, NULL, NULL, NULL, &subkeys, NULL, NULL, &values, NULL, NULL, NULL, NULL ))
+        values = 1;
+    RegCloseKey( key );
+    if (!values && !subkeys) RegDeleteKeyW( HKEY_CURRENT_USER, SETTINGS_KEY );
+}
+
 /* Wine's diagnostic provider (HKCU\Software\Wine\WebAuthentication "DiagnosticProvider" = 1): a provider object for
  * any id and authority, token requests that fail; Wine only */
 static void test_diagnostic_provider(void)
 {
+    struct saved_setting saved;
     IWebAuthenticationCoreManagerStatics *statics;
     IAsyncOperation_WebAccountProvider *provider_op;
     IAsyncOperation_WebTokenRequestResult *result_op;
@@ -350,8 +404,8 @@ static void test_diagnostic_provider(void)
     ok( hr == S_OK, "got hr %#lx.\n", hr );
     IActivationFactory_Release( factory );
 
-    res = RegCreateKeyExW( HKEY_CURRENT_USER, L"Software\\Wine\\WebAuthentication", 0, NULL, 0, KEY_ALL_ACCESS, NULL,
-                           &key, NULL );
+    save_setting( &saved, L"DiagnosticProvider" );
+    res = RegCreateKeyExW( HKEY_CURRENT_USER, SETTINGS_KEY, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &key, NULL );
     ok( !res, "got %ld.\n", res );
     res = RegSetValueExW( key, L"DiagnosticProvider", 0, REG_DWORD, (BYTE *)&one, sizeof(one) );
     ok( !res, "got %ld.\n", res );
@@ -408,7 +462,6 @@ static void test_diagnostic_provider(void)
     /* off again: no provider */
     RegDeleteValueW( key, L"DiagnosticProvider" );
     RegCloseKey( key );
-    RegDeleteKeyW( HKEY_CURRENT_USER, L"Software\\Wine\\WebAuthentication" );
     provider = (void *)0xdeadbeef;
     hr = IWebAuthenticationCoreManagerStatics_FindAccountProviderWithAuthorityAsync( statics, id, authority, &provider_op );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
@@ -421,12 +474,14 @@ static void test_diagnostic_provider(void)
     WindowsDeleteString( id );
     WindowsDeleteString( authority );
     IWebAuthenticationCoreManagerStatics_Release( statics );
+    restore_setting( &saved );
 }
 
 /*
  * The token broker with its test provider (WineExplorer's tokenbroker.exe, tests/wam/run-broker-tests.sh): runs only
  * when WEBCORE_TEST_AUTHORITY names the local test authority (tests/wam/test_authority.py); the test sets
- * HKCU\Software\Wine\WebAuthentication "Broker" and "TestAuthority" for its run and removes them. Wine only.
+ * HKCU\Software\Wine\WebAuthentication "Broker", "TestAuthority" and "TestWindow" for its run and puts back what was
+ * there before. Wine only.
  */
 
 #define TEST_PROVIDER L"https://login.wine.test"
@@ -939,10 +994,14 @@ static void test_broker(void)
     IWebAccount *account = NULL;
     IActivationFactory *factory;
     struct broker_result r;
+    static const WCHAR *saved_names[] = { L"Broker", L"TestAuthority", L"TestWindow" };
+    struct saved_setting saved[ARRAY_SIZE(saved_names)];
     WCHAR authority[256], first_token[128], nested_token[1024], found_id[128];
     DWORD size = sizeof(authority), one = 1, code;
     const WCHAR *p1, *p2, *p3, *p4;
+    unsigned int i;
     HWND window;
+    HRESULT hr;
     HKEY key;
 
     if (!winetest_platform_is_wine || !(size = GetEnvironmentVariableW( L"WEBCORE_TEST_AUTHORITY", authority,
@@ -952,16 +1011,21 @@ static void test_broker(void)
         skip( "the token broker's test provider: no WEBCORE_TEST_AUTHORITY.\n" );
         return;
     }
-    if (RegCreateKeyExW( HKEY_CURRENT_USER, L"Software\\Wine\\WebAuthentication", 0, NULL, 0, KEY_ALL_ACCESS, NULL,
-                         &key, NULL ))
+    for (i = 0; i < ARRAY_SIZE(saved); i++) save_setting( &saved[i], saved_names[i] );
+    if (RegCreateKeyExW( HKEY_CURRENT_USER, SETTINGS_KEY, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &key, NULL ))
         return;
     RegSetValueExW( key, L"Broker", 0, REG_DWORD, (BYTE *)&one, sizeof(one) );
     RegSetValueExW( key, L"TestAuthority", 0, REG_SZ, (BYTE *)authority, (wcslen( authority ) + 1) * sizeof(WCHAR) );
+    RegDeleteValueW( key, L"TestWindow" );
     RegCloseKey( key );
-    if (!(factory = get_factory( L"Windows.Security.Authentication.Web.Core.WebAuthenticationCoreManager" ))) return;
-    IActivationFactory_QueryInterface( factory, &IID_IWebAuthenticationCoreManagerStatics, (void **)&statics );
-    IActivationFactory_QueryInterface( factory, &IID_IWebAuthenticationCoreManagerStatics4, (void **)&statics4 );
-    IActivationFactory_QueryInterface( factory, &IID_IWebAuthenticationCoreManagerInterop, (void **)&interop );
+    if (!(factory = get_factory( L"Windows.Security.Authentication.Web.Core.WebAuthenticationCoreManager" )))
+        goto restore;
+    hr = IActivationFactory_QueryInterface( factory, &IID_IWebAuthenticationCoreManagerStatics, (void **)&statics );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IActivationFactory_QueryInterface( factory, &IID_IWebAuthenticationCoreManagerStatics4, (void **)&statics4 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IActivationFactory_QueryInterface( factory, &IID_IWebAuthenticationCoreManagerInterop, (void **)&interop );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
     IActivationFactory_Release( factory );
     window = CreateWindowExW( 0, L"static", L"web_core broker test", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100,
                               NULL, NULL, NULL, NULL );
@@ -1187,11 +1251,12 @@ static void test_broker(void)
     }
 
 done:
-    RegDeleteKeyW( HKEY_CURRENT_USER, L"Software\\Wine\\WebAuthentication" );
     DestroyWindow( window );
     IWebAuthenticationCoreManagerInterop_Release( interop );
     IWebAuthenticationCoreManagerStatics4_Release( statics4 );
     IWebAuthenticationCoreManagerStatics_Release( statics );
+restore:
+    for (i = 0; i < ARRAY_SIZE(saved); i++) restore_setting( &saved[i] );
 }
 
 START_TEST(web_core)

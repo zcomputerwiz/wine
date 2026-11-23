@@ -163,13 +163,16 @@ static HRESULT WINAPI web_account2_get_Id( IWebAccount2 *iface, HSTRING *value )
 static HRESULT WINAPI web_account2_get_Properties( IWebAccount2 *iface, IMapView_HSTRING_HSTRING **value )
 {
     struct web_account *impl = impl_from_IWebAccount2( iface );
+    IMap_HSTRING_HSTRING *map;
     HRESULT hr;
 
     TRACE( "iface %p, value %p.\n", iface, value );
 
     if (!value) return E_POINTER;
-    if (!impl->properties && FAILED(hr = map_hstring_create( &impl->properties ))) return hr;
-    return IMap_HSTRING_HSTRING_GetView( impl->properties, value );
+    if (FAILED(hr = map_hstring_get( &impl->properties, &map ))) return hr;
+    hr = IMap_HSTRING_HSTRING_GetView( map, value );
+    IMap_HSTRING_HSTRING_Release( map );
+    return hr;
 }
 
 static HRESULT WINAPI web_account2_GetPictureAsync( IWebAccount2 *iface, WebAccountPictureSize size,
