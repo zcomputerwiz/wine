@@ -1,0 +1,124 @@
+/*
+ * Windows spell checking API (spellcheck.h)
+ *
+ * Copyright 2026 WineExplorer contributors
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+import "unknwn.idl";
+import "objidl.idl";
+
+interface ISpellChecker;
+interface ISpellingError;
+interface IEnumSpellingError;
+interface IOptionDescription;
+
+typedef enum CORRECTIVE_ACTION
+{
+    CORRECTIVE_ACTION_NONE = 0,
+    CORRECTIVE_ACTION_GET_SUGGESTIONS = 1,
+    CORRECTIVE_ACTION_REPLACE = 2,
+    CORRECTIVE_ACTION_DELETE = 3
+} CORRECTIVE_ACTION;
+
+[
+    object,
+    uuid(b7c82d61-fbe8-4b47-9b27-6c0d2e0de0a3),
+    pointer_default(unique)
+]
+interface ISpellingError : IUnknown
+{
+    HRESULT get_StartIndex([out, retval] ULONG *value);
+    HRESULT get_Length([out, retval] ULONG *value);
+    HRESULT get_CorrectiveAction([out, retval] CORRECTIVE_ACTION *value);
+    HRESULT get_Replacement([out, string, retval] LPWSTR *value);
+}
+
+[
+    object,
+    uuid(803e3bd4-2828-4410-8290-418d1d73c762),
+    pointer_default(unique)
+]
+interface IEnumSpellingError : IUnknown
+{
+    HRESULT Next([out, retval] ISpellingError **value);
+}
+
+[
+    object,
+    uuid(432e5f85-35cf-4606-a801-6f70277e1d7a),
+    pointer_default(unique)
+]
+interface IOptionDescription : IUnknown
+{
+    HRESULT get_Id([out, string, retval] LPWSTR *value);
+    HRESULT get_Heading([out, string, retval] LPWSTR *value);
+    HRESULT get_Description([out, string, retval] LPWSTR *value);
+    HRESULT get_Labels([out, retval] IEnumString **value);
+}
+
+[
+    object,
+    uuid(0b83a5b0-792f-4eab-9799-acf52c5ed08a),
+    pointer_default(unique)
+]
+interface ISpellCheckerChangedEventHandler : IUnknown
+{
+    HRESULT Invoke([in] ISpellChecker *sender);
+}
+
+[
+    object,
+    uuid(b6fd0b71-e2bc-4653-8d05-f197e412770b),
+    pointer_default(unique)
+]
+interface ISpellChecker : IUnknown
+{
+    HRESULT get_LanguageTag([out, string, retval] LPWSTR *value);
+    HRESULT Check([in, string] LPCWSTR text, [out, retval] IEnumSpellingError **value);
+    HRESULT Suggest([in, string] LPCWSTR word, [out, retval] IEnumString **value);
+    HRESULT Add([in, string] LPCWSTR word);
+    HRESULT Ignore([in, string] LPCWSTR word);
+    HRESULT AutoCorrect([in, string] LPCWSTR from, [in, string] LPCWSTR to);
+    HRESULT GetOptionValue([in, string] LPCWSTR optionId, [out, retval] BYTE *value);
+    HRESULT get_OptionIds([out, retval] IEnumString **value);
+    HRESULT get_Id([out, string, retval] LPWSTR *value);
+    HRESULT get_LocalizedName([out, string, retval] LPWSTR *value);
+    HRESULT add_SpellCheckerChanged([in] ISpellCheckerChangedEventHandler *handler, [out, retval] DWORD *eventCookie);
+    HRESULT remove_SpellCheckerChanged([in] DWORD eventCookie);
+    HRESULT GetOptionDescription([in, string] LPCWSTR optionId, [out, retval] IOptionDescription **value);
+    HRESULT ComprehensiveCheck([in, string] LPCWSTR text, [out, retval] IEnumSpellingError **value);
+}
+
+[
+    object,
+    uuid(8e018a9d-2415-4677-bf08-794ea61f94bb),
+    pointer_default(unique)
+]
+interface ISpellCheckerFactory : IUnknown
+{
+    HRESULT get_SupportedLanguages([out, retval] IEnumString **value);
+    HRESULT IsSupported([in, string] LPCWSTR languageTag, [out, retval] BOOL *value);
+    HRESULT CreateSpellChecker([in, string] LPCWSTR languageTag, [out, retval] ISpellChecker **value);
+}
+
+[
+    uuid(7ab36653-1796-484b-bdfa-e74f1db7c1dc)
+]
+coclass SpellCheckerFactory
+{
+    interface ISpellCheckerFactory;
+}
