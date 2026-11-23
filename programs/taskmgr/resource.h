@@ -243,6 +243,85 @@
 #define IDS_APPLICATION_TASK            32870
 #define IDS_APPLICATION_STATUS          32871
 #define IDS_DEBUG_CHANNEL               32872
+
+/* Shut Down menu (commands, then the items' names) */
+#define ID_SHUTDOWN_STANDBY             32873
+#define ID_SHUTDOWN_HIBERNATE           32874
+#define ID_SHUTDOWN_POWEROFF            32875
+#define ID_SHUTDOWN_REBOOT              32876
+#define ID_SHUTDOWN_LOGOFF              32877
+#define ID_SHUTDOWN_SWITCHUSER          32878
+#define ID_SHUTDOWN_LOCKCOMPUTER        32879
+#define IDS_SHUTDOWN_STANDBY            32880
+#define IDS_SHUTDOWN_HIBERNATE          32881
+#define IDS_SHUTDOWN_POWEROFF           32882
+#define IDS_SHUTDOWN_REBOOT             32883
+#define IDS_SHUTDOWN_LOGOFF             32884
+#define IDS_SHUTDOWN_SWITCHUSER         32885
+#define IDS_SHUTDOWN_LOCKCOMPUTER       32886
+
+/* Networking and Users pages */
+#define IDD_NETWORK_PAGE                160
+#define IDD_USERS_PAGE                  161
+#define IDD_NET_COLUMNS_DIALOG          162
+#define IDD_USER_COLUMNS_DIALOG         163
+#define IDR_USERS_PAGE_CONTEXT          164
+#define IDI_USER                        165
+
+#define IDC_NETWORK_ADAPTERS            1080
+#define IDC_NETWORK_GRAPHAREA           1081
+#define IDC_NETWORK_NOADAPTERS          1082
+#define IDC_USERLIST                    1083
+#define IDC_DISCONNECT                  1084
+#define IDC_LOGOFF                      1085
+#define IDC_SENDMESSAGE                 1086
+#define IDC_SHOWALLPROCESSES_ELEVATE    1087
+#define IDC_NETCOL_FIRST                1100    /* to 1125 */
+#define IDC_USERCOL_FIRST               1130    /* to 1134 */
+
+#define ID_OPTIONS_NET_TABALWAYSACTIVE  32890
+#define ID_OPTIONS_NET_SHOWCUMULATIVE   32891
+#define ID_OPTIONS_NET_AUTOSCALE        32892
+#define ID_OPTIONS_NET_RESET            32893
+#define ID_OPTIONS_NET_SHOWSCALE        32894
+#define ID_VIEW_NETHISTORY_SENT         32895
+#define ID_VIEW_NETHISTORY_RECEIVED     32896
+#define ID_VIEW_NETHISTORY_TOTAL        32897
+#define ID_OPTIONS_USERS_FULLNAME       32898
+#define ID_USERS_SENDMESSAGE            32899
+#define ID_USERS_CONNECT                32900
+#define ID_USERS_DISCONNECT             32901
+#define ID_USERS_LOGOFF                 32902
+#define ID_USERS_REMOTECONTROL          32903
+#define ID_PROCESS_PAGE_SHOWALL_ELEVATED 32904
+
+#define IDS_NETWORKING                  32910
+#define IDS_USERS                       32911
+#define IDS_VIEW_NETHISTORY             32912
+#define IDS_NET_COL_FIRST               32920   /* to 32945 */
+#define IDS_USER_COL_FIRST              32950   /* to 32954 */
+#define IDS_OPT_NET_TABALWAYSACTIVE     32960
+#define IDS_OPT_NET_SHOWCUMULATIVE      32961
+#define IDS_OPT_NET_AUTOSCALE           32962
+#define IDS_OPT_NET_RESET               32963
+#define IDS_OPT_NET_SHOWSCALE           32964
+#define IDS_NETHISTORY_SENT             32965
+#define IDS_NETHISTORY_RECEIVED         32966
+#define IDS_NETHISTORY_TOTAL            32967
+#define IDS_OPT_USERS_FULLNAME          32968
+#define IDS_NET_OPERATIONAL             32970
+#define IDS_NET_NONOPERATIONAL          32971
+#define IDS_NET_DISCONNECTED            32972
+#define IDS_NET_CONNECTING              32973
+#define IDS_NET_UNREACHABLE             32974
+#define IDS_USERS_ACTIVE                32975
+#define IDS_USERS_DISCONNECTED          32976
+#define IDS_USERS_LOGOFF_CONFIRM        32977
+#define IDS_NET_NOADAPTERS              32978
+#define IDS_USERS_CONSOLE               32979
+#define IDS_USERS_LOGOFF_TITLE          32980
+#define IDS_ACCESS_DENIED               32981
+
 #define IDC_STATIC                      -1
 
 /*

@@ -27,6 +27,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <winnt.h>
+#include <tlhelp32.h>
 
 #include "taskmgr.h"
 #include "perfdata.h"
@@ -92,6 +93,39 @@ void ProcessPage_OnEndProcess(void)
     CloseHandle(hProcess);
 }
 
+/* End the descendants of a process, the deepest first, as XP's End Process Tree does */
+static void terminate_children(DWORD parent, int depth)
+{
+    PROCESSENTRY32W entry = { sizeof(entry) };
+    HANDLE snapshot, process;
+    DWORD children[256];
+    int count = 0, i;
+
+    if (depth > 32) return;
+    snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return;
+    if (Process32FirstW(snapshot, &entry))
+    {
+        do
+        {
+            if (entry.th32ParentProcessID == parent && entry.th32ProcessID != parent &&
+                entry.th32ProcessID != GetCurrentProcessId() && count < ARRAY_SIZE(children))
+                children[count++] = entry.th32ProcessID;
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+
+    for (i = 0; i < count; i++)
+    {
+        terminate_children(children[i], depth + 1);
+        if ((process = OpenProcess(PROCESS_TERMINATE, FALSE, children[i])))
+        {
+            TerminateProcess(process, 1);
+            CloseHandle(process);
+        }
+    }
+}
+
 void ProcessPage_OnEndProcessTree(void)
 {
     LVITEMW          lvitem;
@@ -124,6 +158,7 @@ void ProcessPage_OnEndProcessTree(void)
     if (MessageBoxW(hMainWnd, wszWarnMsg, wszWarnTitle, MB_YESNO|MB_ICONWARNING) != IDYES)
         return;
 
+    terminate_children(dwProcessId, 0);
     hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, dwProcessId);
 
     if (!hProcess)
