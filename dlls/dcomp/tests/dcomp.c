@@ -375,6 +375,95 @@ static void test_DCompositionCreateDevice3(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+/* The shared visuals of the Windows App Runtime: DCompositionCreateSharedVisualHandle, the private interfaces of the device and its
+ * method that opens a handle as a visual or a target (slot 29 of the vtable of IDCompositionDesktopDevice, after the public methods).
+ * Observed on Windows 11. */
+static void test_shared_visual(void)
+{
+    static const GUID IID_alias_a = {0xd14b6158, 0xc3fa, 0x4bce, {0x9c, 0x1f, 0xb6, 0x1d, 0x86, 0x65, 0xea, 0xb0}};
+    static const GUID IID_alias_b = {0x28d6ad3d, 0xee2a, 0x4bcd, {0x94, 0x19, 0x7d, 0x54, 0x80, 0x04, 0x35, 0xb1}};
+    static const GUID IID_visual_private = {0x2c4eef28, 0x1bc0, 0x4736, {0xb7, 0xdd, 0xb6, 0x26, 0x92, 0xf9, 0xbd, 0x67}};
+    typedef HRESULT (WINAPI *create_handle_t)(HANDLE *);
+    typedef HRESULT (STDMETHODCALLTYPE *open_t)(void *iface, HANDLE handle, REFIID iid, void **out);
+    create_handle_t create_handle;
+    IDCompositionDesktopDevice *desktop;
+    IDCompositionDevice *device;
+    IDCompositionVisual *visual;
+    IDCompositionTarget *target;
+    IUnknown *alias_a, *alias_b;
+    HANDLE handle, handle2;
+    open_t open;
+    void *out;
+    HRESULT hr;
+
+    create_handle = (void *)GetProcAddress(GetModuleHandleW(L"dcomp.dll"), "DCompositionCreateSharedVisualHandle");
+    if (!create_handle || !pDCompositionCreateDevice3)
+    {
+        win_skip("DCompositionCreateSharedVisualHandle() or DCompositionCreateDevice3() is unavailable.\n");
+        return;
+    }
+
+    hr = create_handle(NULL);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+    handle = NULL;
+    hr = create_handle(&handle);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(handle != NULL && handle != INVALID_HANDLE_VALUE, "Got handle %p.\n", handle);
+    hr = create_handle(&handle2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = pDCompositionCreateDevice3(NULL, &IID_IDCompositionDesktopDevice, (void **)&desktop);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr)) goto done;
+
+    /* two other IIDs answer with the very interface of IDCompositionDesktopDevice */
+    hr = IDCompositionDesktopDevice_QueryInterface(desktop, &IID_alias_a, (void **)&alias_a);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(alias_a == (IUnknown *)desktop, "Got %p, expected %p.\n", alias_a, desktop);
+    if (SUCCEEDED(hr)) IUnknown_Release(alias_a);
+    hr = IDCompositionDesktopDevice_QueryInterface(desktop, &IID_alias_b, (void **)&alias_b);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(alias_b == (IUnknown *)desktop, "Got %p, expected %p.\n", alias_b, desktop);
+    if (SUCCEEDED(hr)) IUnknown_Release(alias_b);
+
+    open = (*(open_t **)desktop)[29];
+
+    hr = open(desktop, handle, &IID_IDCompositionVisual, (void **)&visual);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        /* the visuals of the system dcomp answer a private interface */
+        out = NULL;
+        hr = IDCompositionVisual_QueryInterface(visual, &IID_visual_private, &out);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        if (SUCCEEDED(hr)) IUnknown_Release((IUnknown *)out);
+        IDCompositionVisual_Release(visual);
+    }
+
+    hr = open(desktop, handle, &IID_IDCompositionTarget, (void **)&target);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr)) IDCompositionTarget_Release(target);
+
+    out = (void *)0xdeadbeef;
+    hr = open(desktop, (HANDLE)0x12345678, &IID_IDCompositionVisual, &out);
+    ok(FAILED(hr), "Got unexpected hr %#lx.\n", hr);
+    ok(!out, "Got %p.\n", out);
+
+    out = (void *)0xdeadbeef;
+    hr = open(desktop, handle2, &IID_IDispatch, &out);
+    ok(hr == E_NOINTERFACE, "Got unexpected hr %#lx.\n", hr);
+    ok(!out, "Got %p.\n", out);
+
+    hr = IDCompositionDesktopDevice_QueryInterface(desktop, &IID_IDCompositionDevice, (void **)&device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr)) IDCompositionDevice_Release(device);
+    IDCompositionDesktopDevice_Release(desktop);
+
+done:
+    CloseHandle(handle);
+    CloseHandle(handle2);
+}
+
 /* Based on Wine-Staging patch 0007 by Zhiyi Zhang */
 static void test_device_CreateTargetForHwnd(void)
 {
@@ -2330,6 +2419,7 @@ START_TEST(dcomp)
     test_DCompositionCreateDevice();
     test_DCompositionCreateDevice2();
     test_DCompositionCreateDevice3();
+    test_shared_visual();
     test_device_CreateTargetForHwnd();
     test_device_CreateVisual();
     test_device_CreateSurfaceFactory();
