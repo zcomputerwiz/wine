@@ -70,6 +70,61 @@ static SID *process_user( HANDLE process )
     return sid;
 }
 
+/* is the pipe's server the machine's token broker, outside any AppContainer? The pipe exists only once a broker runs,
+ * so a sandboxed process of the same user (a Store app) could create it first and answer for the broker: the user's
+ * SID alone does not tell them apart. The image must be tokenbroker.exe in the system directory (system32 for the
+ * 64-bit broker, syswow64 for the 32-bit one), which a user cannot write where the machine tree belongs to wexsys
+ * (in a stock prefix it is the user's own folder, and the image check adds nothing). Its token must be a normal
+ * user's: a sandbox that starts the real image suspended gives it the sandbox's token (below medium integrity or
+ * restricted). Wine's sandboxes are the same Unix user: this is defence in depth, not a sandbox boundary. */
+static BOOL token_is_normal( HANDLE token )
+{
+    BYTE buffer[sizeof(TOKEN_MANDATORY_LABEL) + SECURITY_MAX_SID_SIZE];
+    TOKEN_MANDATORY_LABEL *label = (TOKEN_MANDATORY_LABEL *)buffer;
+    DWORD restricted = 1, len;
+    SID *sid;
+
+    if (!GetTokenInformation( token, TokenIsRestricted, &restricted, sizeof(restricted), &len ) || restricted)
+        return FALSE;
+    if (!GetTokenInformation( token, TokenIntegrityLevel, buffer, sizeof(buffer), &len )) return FALSE;
+    sid = label->Label.Sid;
+    if (!IsValidSid( sid ) || !*GetSidSubAuthorityCount( sid )) return FALSE;
+    return *GetSidSubAuthority( sid, *GetSidSubAuthorityCount( sid ) - 1 ) >= SECURITY_MANDATORY_MEDIUM_RID;
+}
+
+static BOOL server_is_broker( HANDLE process, ULONG pid )
+{
+    static const WCHAR *const dirs[] = { L"\\system32\\tokenbroker.exe", L"\\syswow64\\tokenbroker.exe" };
+    WCHAR image[MAX_PATH], expected[MAX_PATH];
+    DWORD size = ARRAY_SIZE(image), container = 0, len;
+    HANDLE token;
+    UINT windir, i;
+
+    if (!OpenProcessToken( process, TOKEN_QUERY, &token )) return FALSE;
+    if (!GetTokenInformation( token, TokenIsAppContainer, &container, sizeof(container), &len )) container = 1;
+    if (!container && !token_is_normal( token )) container = 1;
+    CloseHandle( token );
+    if (container)
+    {
+        WARN( "the pipe's server process %04lx runs in an AppContainer or with a sandbox's token\n", pid );
+        return FALSE;
+    }
+    if (!QueryFullProcessImageNameW( process, 0, image, &size ))
+    {
+        WARN( "no image name for the pipe's server process %04lx: %lu\n", pid, GetLastError() );
+        return FALSE;
+    }
+    if (!(windir = GetWindowsDirectoryW( expected, MAX_PATH )) || windir >= MAX_PATH) return FALSE;
+    for (i = 0; i < ARRAY_SIZE(dirs); i++)
+    {
+        if (windir + wcslen( dirs[i] ) >= MAX_PATH) continue;
+        wcscpy( expected + windir, dirs[i] );
+        if (!wcsicmp( image, expected )) return TRUE;
+    }
+    WARN( "the pipe's server process %04lx is %s, not the token broker\n", pid, debugstr_w( image ) );
+    return FALSE;
+}
+
 /* is the pipe's server a process of this program's user? (the pipe's name and descriptor say so; this checks it) */
 static BOOL server_is_own_user( HANDLE pipe, const SID *own )
 {
@@ -92,7 +147,7 @@ static BOOL server_is_own_user( HANDLE pipe, const SID *own )
     }
     if ((sid = process_user( process )))
     {
-        ret = EqualSid( sid, (SID *)own );
+        ret = EqualSid( sid, (SID *)own ) && server_is_broker( process, pid );
         if (!ret && WARN_ON(webcore))
         {
             WCHAR *server_text = NULL, *own_text = NULL;
