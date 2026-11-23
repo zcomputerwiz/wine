@@ -556,7 +556,7 @@ DWORD __cdecl svcctl_GetServiceDisplayNameW(
     scmdatabase_lock(manager->db);
 
     entry = scmdatabase_find_service(manager->db, lpServiceName);
-    if (forward_mode && (!entry || !is_session_service(entry->name, entry->config.dwServiceType)))
+    if (forward_mode && (!entry || !service_is_session_service(entry)))
     {
         SC_RPC_HANDLE remote;
 
@@ -608,7 +608,7 @@ DWORD __cdecl svcctl_GetServiceKeyNameW(
     scmdatabase_lock(manager->db);
 
     entry = scmdatabase_find_service_by_displayname(manager->db, lpServiceDisplayName);
-    if (forward_mode && (!entry || !is_session_service(entry->name, entry->config.dwServiceType)))
+    if (forward_mode && (!entry || !service_is_session_service(entry)))
     {
         SC_RPC_HANDLE remote;
 
@@ -691,7 +691,7 @@ DWORD __cdecl svcctl_OpenServiceW(
 
     /* T5.4: a service that is not the session's own, or one this session does not know (made since it started),
      * is session 0's */
-    if (forward_mode && (!entry || !is_session_service(entry->name, entry->config.dwServiceType)))
+    if (forward_mode && (!entry || !service_is_session_service(entry)))
     {
         SC_RPC_HANDLE remote_manager, remote_service = NULL;
 
@@ -819,7 +819,7 @@ static DWORD create_serviceW(
         return err;
 
     /* T5.4: a new service that is not a session's own is made in session 0, which checks the caller again */
-    if (forward_mode && lpServiceName && !is_session_service(lpServiceName, dwServiceType))
+    if (forward_mode && lpServiceName && !is_session_service(lpServiceName, dwServiceType, SESSION_SERVICE_DEFAULT))
     {
         SC_RPC_HANDLE remote_manager, remote_service = NULL;
 
@@ -1368,7 +1368,14 @@ DWORD __cdecl svcctl_QueryServiceStatusEx(
     LPSERVICE_STATUS_PROCESS pSvcStatusData;
 
     if (remote_of(hService))
-        return forward_QueryServiceStatusEx(remote_of(hService), InfoLevel, lpBuffer, cbBufSize, pcbBytesNeeded);
+    {
+        /* B85: session 0's process id names another process, or none, in this session's server (process ids are
+         * per server): 0, as the pipe bridge reports for its callers */
+        err = forward_QueryServiceStatusEx(remote_of(hService), InfoLevel, lpBuffer, cbBufSize, pcbBytesNeeded);
+        if (!err && InfoLevel == SC_STATUS_PROCESS_INFO && cbBufSize >= sizeof(SERVICE_STATUS_PROCESS))
+            ((SERVICE_STATUS_PROCESS *)lpBuffer)->dwProcessId = 0;
+        return err;
+    }
     memset(lpBuffer, 0, cbBufSize);
 
     if ((err = validate_service_handle(hService, SERVICE_QUERY_STATUS, &service)) != 0)
@@ -1837,7 +1844,7 @@ static DWORD enum_merged(struct sc_manager_handle *manager, BOOL ex, DWORD type,
     {
         SERVICE_STATUS_PROCESS status;
 
-        if (!is_session_service(service->name, service->config.dwServiceType)) continue;
+        if (!service_is_session_service(service)) continue;
         if (group && service->config.lpLoadOrderGroup && !wcsicmp(group, service->config.lpLoadOrderGroup))
             group_found = TRUE;
         if (!(service->status.dwServiceType & type) || !map_state(service->status.dwCurrentState, state)) continue;
@@ -1882,7 +1889,8 @@ static DWORD enum_merged(struct sc_manager_handle *manager, BOOL ex, DWORD type,
                 memset(&status, 0, sizeof(status));
                 if (ex) status = rex->service_status_process;
                 else memcpy(&status, &rplain->service_status, sizeof(rplain->service_status));
-                if (is_session_service(name, status.dwServiceType)) continue;  /* session 0's own copy */
+                if (is_session_service_name(manager->db, name, status.dwServiceType)) continue;  /* session 0's own copy */
+                status.dwProcessId = 0;  /* B85: a process id of session 0's server means nothing here */
                 if (!add_enum_item(&items, &count, &capacity, name, display, &status))
                     err = ERROR_NOT_ENOUGH_SERVER_MEMORY;
             }

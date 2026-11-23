@@ -234,6 +234,20 @@ static void load_service_security(HKEY hKey, struct service_entry *entry)
     entry->security_size = size;
 }
 
+/* WineExplorer T5.4: the service's WexSessionService value (is_session_service); a value of another type or
+ * another number is reported and leaves the default */
+static void load_session_service(HKEY hKey, struct service_entry *entry)
+{
+    DWORD type, value, size = sizeof(value);
+
+    entry->session_service = SESSION_SERVICE_DEFAULT;
+    if (RegQueryValueExW(hKey, L"WexSessionService", NULL, &type, (BYTE *)&value, &size)) return;
+    if (type == REG_DWORD && size == sizeof(value) && value <= 1)
+        entry->session_service = value ? SESSION_SERVICE_EVERY_SESSION : SESSION_SERVICE_SESSION0;
+    else
+        WINE_WARN("%s: WexSessionService is not 0 or 1, ignored\n", wine_dbgstr_w(entry->name));
+}
+
 static DWORD load_service_config(HKEY hKey, struct service_entry *entry)
 {
     DWORD err, value = 0;
@@ -257,6 +271,7 @@ static DWORD load_service_config(HKEY hKey, struct service_entry *entry)
         entry->is_wow64 = TRUE;
     if (load_reg_dword(hKey, L"DelayedAutoStart", &value) == 0 && value == 1)
         entry->delayed_autostart = TRUE;
+    load_session_service(hKey, entry);
 
     WINE_TRACE("Image path           = %s\n", wine_dbgstr_w(entry->config.lpBinaryPathName) );
     WINE_TRACE("Group                = %s\n", wine_dbgstr_w(entry->config.lpLoadOrderGroup) );
@@ -613,7 +628,7 @@ static void scmdatabase_autostart_services(struct scmdatabase *db)
             release_service(service);
             continue;
         }
-        if (forward_mode && !is_session_service(service->name, service->config.dwServiceType))
+        if (forward_mode && !service_is_session_service(service))
         {
             TRACE("%s is session 0's\n", wine_dbgstr_w(service->name));
             release_service(service);
@@ -1495,8 +1510,15 @@ static DWORD WINAPI process_monitor_thread_proc( void *arg )
  * and Wine's services that work on the session's devices, desktop, processes or user (printing, scanners, smart
  * cards, WMI, terminal services, scheduled tasks and transfers run as the user, msiexec's installs, E1's broker
  * until T6). Session 0 runs them for itself too. Every other service, in practice those that programs install,
- * runs once, in session 0. */
-BOOL is_session_service(const WCHAR *name, DWORD type)
+ * runs once, in session 0.
+ *
+ * A service's own key can say otherwise: WexSessionService (REG_DWORD) 1 makes it a service of every session, 0 one
+ * of session 0 only; without the value the defaults below decide. A program's service that has to share process ids
+ * or handles with that program's processes, which session 0 cannot (each server numbers its own), is set to 1 (B76:
+ * Office's ClickToRunSvc). The value lives with the service in the machine registry (only administrators can write a
+ * service's key), goes with it when it is deleted, and is read when the service manager loads the service. Drivers
+ * and their hosts are always the session's: each server loads its own. */
+static BOOL default_session_service(const WCHAR *name)
 {
     static const WCHAR * const session_services[] =
     {
@@ -1506,11 +1528,35 @@ BOOL is_session_service(const WCHAR *name, DWORD type)
     };
     unsigned int i;
 
-    if (type & (SERVICE_KERNEL_DRIVER | SERVICE_FILE_SYSTEM_DRIVER)) return TRUE;
-    if (!wcsnicmp(name, L"Winedevice", 10)) return TRUE;  /* the driver hosts (add_winedevice_service) */
     for (i = 0; i < ARRAY_SIZE(session_services); i++)
         if (!wcsicmp(name, session_services[i])) return TRUE;
     return FALSE;
+}
+
+/* configured: the service's WexSessionService value (SESSION_SERVICE_*) */
+BOOL is_session_service(const WCHAR *name, DWORD type, int configured)
+{
+    if (type & (SERVICE_KERNEL_DRIVER | SERVICE_FILE_SYSTEM_DRIVER)) return TRUE;
+    if (!wcsnicmp(name, L"Winedevice", 10)) return TRUE;  /* the driver hosts (add_winedevice_service) */
+    if (configured != SESSION_SERVICE_DEFAULT) return configured == SESSION_SERVICE_EVERY_SESSION;
+    return default_session_service(name);
+}
+
+BOOL service_is_session_service(const struct service_entry *entry)
+{
+    return is_session_service(entry->name, entry->config.dwServiceType, entry->session_service);
+}
+
+/* a service known by name (and type) only: this session's entry of that name decides, when there is one */
+BOOL is_session_service_name(struct scmdatabase *db, const WCHAR *name, DWORD type)
+{
+    struct service_entry *entry;
+    int configured = SESSION_SERVICE_DEFAULT;
+
+    scmdatabase_lock(db);
+    if ((entry = scmdatabase_find_service(db, name))) configured = entry->session_service;
+    scmdatabase_unlock(db);
+    return is_session_service(name, type, configured);
 }
 
 /* a session whose server reaches session 0 (its service manager answers) forwards; session 0 and a machine
@@ -1520,7 +1566,8 @@ static void init_forward_mode(void)
     DWORD session = 0;
 
     if (!ProcessIdToSessionId(GetCurrentProcessId(), &session) || !session) return;
-    if ((forward_mode = forward_available())) WINE_TRACE("services that are not the session's are session 0's\n");
+    if ((forward_mode = forward_available()))
+        WINE_TRACE("services that are not the session's are session 0's\n");
 }
 
 int __cdecl main(int argc, char *argv[])
