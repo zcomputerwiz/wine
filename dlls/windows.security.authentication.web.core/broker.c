@@ -73,7 +73,25 @@ static SID *process_user( HANDLE process )
 /* is the pipe's server the machine's token broker, outside any AppContainer? The pipe exists only once a broker runs,
  * so a sandboxed process of the same user (a Store app) could create it first and answer for the broker: the user's
  * SID alone does not tell them apart. The image must be tokenbroker.exe in the system directory (system32 for the
- * 64-bit broker, syswow64 for the 32-bit one), which a user cannot write. */
+ * 64-bit broker, syswow64 for the 32-bit one), which a user cannot write where the machine tree belongs to wexsys
+ * (in a stock prefix it is the user's own folder, and the image check adds nothing). Its token must be a normal
+ * user's: a sandbox that starts the real image suspended gives it the sandbox's token (below medium integrity or
+ * restricted). Wine's sandboxes are the same Unix user: this is defence in depth, not a sandbox boundary. */
+static BOOL token_is_normal( HANDLE token )
+{
+    BYTE buffer[sizeof(TOKEN_MANDATORY_LABEL) + SECURITY_MAX_SID_SIZE];
+    TOKEN_MANDATORY_LABEL *label = (TOKEN_MANDATORY_LABEL *)buffer;
+    DWORD restricted = 1, len;
+    SID *sid;
+
+    if (!GetTokenInformation( token, TokenIsRestricted, &restricted, sizeof(restricted), &len ) || restricted)
+        return FALSE;
+    if (!GetTokenInformation( token, TokenIntegrityLevel, buffer, sizeof(buffer), &len )) return FALSE;
+    sid = label->Label.Sid;
+    if (!IsValidSid( sid ) || !*GetSidSubAuthorityCount( sid )) return FALSE;
+    return *GetSidSubAuthority( sid, *GetSidSubAuthorityCount( sid ) - 1 ) >= SECURITY_MANDATORY_MEDIUM_RID;
+}
+
 static BOOL server_is_broker( HANDLE process, ULONG pid )
 {
     static const WCHAR *const dirs[] = { L"\\system32\\tokenbroker.exe", L"\\syswow64\\tokenbroker.exe" };
@@ -84,10 +102,11 @@ static BOOL server_is_broker( HANDLE process, ULONG pid )
 
     if (!OpenProcessToken( process, TOKEN_QUERY, &token )) return FALSE;
     if (!GetTokenInformation( token, TokenIsAppContainer, &container, sizeof(container), &len )) container = 1;
+    if (!container && !token_is_normal( token )) container = 1;
     CloseHandle( token );
     if (container)
     {
-        WARN( "the pipe's server process %04lx runs in an AppContainer\n", pid );
+        WARN( "the pipe's server process %04lx runs in an AppContainer or with a sandbox's token\n", pid );
         return FALSE;
     }
     if (!QueryFullProcessImageNameW( process, 0, image, &size ))
