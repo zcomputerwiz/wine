@@ -353,6 +353,45 @@ static void test_low_integrity_client(void)
     ok( code == 0, "Low integrity client: exit code %lu (1 no pipe, 2 server check failed)\n", code );
 }
 
+/* A process without a window on the desktop may not read it (the pipe's name is not scoped to a desktop).
+ * The child exits 0 when its read of hwnd is refused, 1 without a pipe, 2 when it is answered. */
+static void test_windowless_reader( HWND hwnd )
+{
+    WCHAR cmd[MAX_PATH + 64], exe[MAX_PATH];
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi;
+    DWORD code = 0xff;
+
+    GetModuleFileNameW( NULL, exe, ARRAY_SIZE(exe) );
+    swprintf( cmd, ARRAY_SIZE(cmd), L"\"%s\" dwm_channel readchild %lx", exe, HandleToUlong( hwnd ) );
+    if (!CreateProcessW( NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi )) return;
+    WaitForSingleObject( pi.hProcess, 20000 );
+    GetExitCodeProcess( pi.hProcess, &code );
+    CloseHandle( pi.hProcess );
+    CloseHandle( pi.hThread );
+    ok( code == 0, "windowless reader: exit code %lu (1 no pipe, 2 answered)\n", code );
+}
+
+/* each connection holds a broker thread: a process gets a few, the rest are closed at once */
+static void test_connection_cap(void)
+{
+    HANDLE pipes[12];
+    unsigned char payload[4] = { 1, 2, 3, 4 }, reply[4];
+    unsigned int i, answered = 0;
+    uint32_t len;
+
+    Sleep( 300 );   /* earlier connections of this process are gone */
+    for (i = 0; i < ARRAY_SIZE(pipes); i++) pipes[i] = open_broker();
+    Sleep( 300 );
+    for (i = 0; i < ARRAY_SIZE(pipes); i++)
+        if (pipes[i] != INVALID_HANDLE_VALUE &&
+            !raw_call( pipes[i], DWM_OP_ECHO, 0, DWM_PROTOCOL_VERSION, payload, sizeof(payload), reply, sizeof(reply),
+                       &len, NULL )) answered++;
+    ok( answered >= 1 && answered <= 8, "%u of %u connections answered\n", answered, (unsigned int)ARRAY_SIZE(pipes) );
+    for (i = 0; i < ARRAY_SIZE(pipes); i++) if (pipes[i] != INVALID_HANDLE_VALUE) CloseHandle( pipes[i] );
+    Sleep( 300 );
+}
+
 static void test_no_handle_leak(void)
 {
     ULONG before = 0, after = 0;
@@ -378,6 +417,16 @@ START_TEST(dwm_channel)
         if ((pipe = open_broker()) == INVALID_HANDLE_VALUE) ExitProcess( 1 );
         ExitProcess( wex_pipe_server_is( pipe, L"dwm.exe" ) ? 0 : 2 );
     }
+    if (winetest_get_mainargs( &argv ) >= 4 && !strcmp( argv[2], "readchild" ))
+    {
+        struct dwm_attr_get get = { DWMWA_CAPTION_COLOR };
+        struct dwm_attr_reply rep;
+        uint32_t len;
+
+        if ((pipe = open_broker()) == INVALID_HANDLE_VALUE) ExitProcess( 1 );
+        ExitProcess( raw_call( pipe, DWM_OP_GET_ATTR, strtoul( argv[3], NULL, 16 ), DWM_PROTOCOL_VERSION, &get,
+                               sizeof(get), &rep, sizeof(rep), &len, NULL ) == STATUS_ACCESS_DENIED ? 0 : 2 );
+    }
 
     module = GetModuleHandleW( L"dwmapi.dll" );
     if (!module) module = LoadLibraryW( L"dwmapi.dll" );
@@ -399,5 +448,11 @@ START_TEST(dwm_channel)
     test_window_checks();
     test_thumbnail_connection();
     test_low_integrity_client();
+    {
+        HWND hwnd = CreateWindowExW( 0, L"static", L"dwm_pipe_read", WS_POPUP, 0, 0, 10, 10, 0, 0, 0, NULL );
+        test_windowless_reader( hwnd );
+        DestroyWindow( hwnd );
+    }
+    test_connection_cap();
     test_no_handle_leak();
 }

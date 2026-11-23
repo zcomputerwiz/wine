@@ -161,10 +161,12 @@ C_ASSERT( offsetof(struct dwm_clock_page, qpc_period) == 24 );
  * start, so that a client sees a new broker and hands it its state again.
  */
 #define DWM_PIPE_PREFIX L"\\\\.\\pipe\\WineExplorer\\Dwm\\"
-/* %s: the broker's user SID. Everyone who can own a window on the desktop: the user, SYSTEM (sysrun), interactive
+/* %s: the broker's user SID, which alone may create instances (GA). Clients get 0x12018b, FILE_GENERIC_READ |
+ * FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES (SetNamedPipeHandleState): not GW, whose FILE_APPEND_DATA bit is
+ * FILE_CREATE_PIPE_INSTANCE. Clients are everyone who can own a window on the desktop: SYSTEM (sysrun), interactive
  * users (an over-the-shoulder administrator has its own logon id), AppContainers; Low may write (no write-up). The
  * broker's per-message checks are the authorization. */
-#define DWM_PIPE_SDDL_FMT L"D:P(A;;GA;;;%s)(A;;GRGW;;;SY)(A;;GRGW;;;IU)(A;;GRGW;;;AC)S:(ML;;NW;;;LW)"
+#define DWM_PIPE_SDDL_FMT L"D:P(A;;GA;;;%s)(A;;0x12018b;;;SY)(A;;0x12018b;;;IU)(A;;0x12018b;;;AC)S:(ML;;NW;;;LW)"
 
 struct dwm_request { uint32_t opcode; uint32_t length; uint32_t window; uint32_t version; };
 struct dwm_reply   { uint32_t status; uint32_t length; uint64_t generation; };
