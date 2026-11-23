@@ -183,38 +183,43 @@ static inline BOOL wex_pipe_server_is( HANDLE pipe, const WCHAR *image_name )
 
 /* For a broker: let every AppContainer (ALL APPLICATION PACKAGES, S-1-15-2-1) query this process with the limited
  * right and read its token, the minimum for an AppContainer client to run wex_pipe_server_is (measured on Windows 11:
- * without these grants an AppContainer cannot open a medium process at all). */
+ * without these grants an AppContainer cannot open a medium process at all).
+ * The new DACLs are the token's default DACL plus that ACE, which is what Windows gives a new process and its token
+ * anyway. Never the DACL GetSecurityInfo reports: Wine keeps no descriptor on a process and reports a made-up default,
+ * (A;CIIO;GR;;;DU)(A;;GA;;;BA), and writing that back left only Administrators, deny-only for a limited administrator,
+ * so under elevation enforcement no other process of the user could open the broker. */
 static inline void wex_pipe_grant_appcontainers(void)
 {
     EXPLICIT_ACCESSW ea = { 0 };
-    PSECURITY_DESCRIPTOR sd;
-    PACL dacl, new_dacl;
+    TOKEN_DEFAULT_DACL *def = NULL;
+    PACL new_dacl;
     PSID all_packages;
     HANDLE objects[2] = { GetCurrentProcess(), NULL };
-    DWORD rights[2] = { PROCESS_QUERY_LIMITED_INFORMATION, TOKEN_QUERY };
+    DWORD rights[2] = { PROCESS_QUERY_LIMITED_INFORMATION, TOKEN_QUERY }, len = 0;
     unsigned int i;
 
-    if (!ConvertStringSidToSidW( L"S-1-15-2-1", &all_packages )) return;
-    if (!OpenProcessToken( GetCurrentProcess(), READ_CONTROL | WRITE_DAC, &objects[1] )) objects[1] = NULL;
-    ea.grfAccessMode = GRANT_ACCESS;
-    ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
-    ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
-    ea.Trustee.ptstrName = all_packages;
-    for (i = 0; i < ARRAY_SIZE(objects); i++)
+    if (!OpenProcessToken( GetCurrentProcess(), TOKEN_QUERY | READ_CONTROL | WRITE_DAC, &objects[1] )) return;
+    GetTokenInformation( objects[1], TokenDefaultDacl, NULL, 0, &len );
+    if (len && (def = LocalAlloc( LMEM_FIXED, len )) &&
+        GetTokenInformation( objects[1], TokenDefaultDacl, def, len, &len ) && def->DefaultDacl &&
+        ConvertStringSidToSidW( L"S-1-15-2-1", &all_packages ))
     {
-        if (!objects[i]) continue;
-        sd = NULL;
-        new_dacl = NULL;
-        ea.grfAccessPermissions = rights[i];
-        /* an object without a DACL already lets everyone in: a DACL made of this one ACE would lock its owner out */
-        if (!GetSecurityInfo( objects[i], SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &dacl, NULL, &sd ) &&
-            dacl && !SetEntriesInAclW( 1, &ea, dacl, &new_dacl ))
-            SetSecurityInfo( objects[i], SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, new_dacl, NULL );
-        LocalFree( new_dacl );
-        LocalFree( sd );
+        ea.grfAccessMode = GRANT_ACCESS;
+        ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+        ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+        ea.Trustee.ptstrName = all_packages;
+        for (i = 0; i < ARRAY_SIZE(objects); i++)
+        {
+            new_dacl = NULL;
+            ea.grfAccessPermissions = rights[i];
+            if (!SetEntriesInAclW( 1, &ea, def->DefaultDacl, &new_dacl ))
+                SetSecurityInfo( objects[i], SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, new_dacl, NULL );
+            LocalFree( new_dacl );
+        }
+        LocalFree( all_packages );
     }
-    if (objects[1]) CloseHandle( objects[1] );
-    LocalFree( all_packages );
+    LocalFree( def );
+    CloseHandle( objects[1] );
 }
 
 #endif /* __WINE_WEX_PIPE_H */
