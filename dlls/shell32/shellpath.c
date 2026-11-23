@@ -2487,7 +2487,7 @@ static HRESULT _SHGetUserProfilePath(HANDLE hToken, DWORD dwFlags, BYTE folder,
                     szValueName = &buffer[0];
                 }
 
-                hr = _SHGetUserShellFolderPath(hRootKey, userPrefix, szValueName, pszPath);
+                hr = _SHGetUserShellFolderPath(hToken, hRootKey, userPrefix, szValueName, pszPath);
                 if (FAILED(hr)) hr = E_FAIL;
                 if (userPrefix != NULL && userPrefix != DefaultW)
                     LocalFree((HLOCAL) userPrefix);
