@@ -37,6 +37,18 @@
 #include "windows.management.deployment.h"
 
 extern IActivationFactory *package_manager_factory;
+extern IActivationFactory *stage_package_options_factory;
+
+/* vector.c (a copy of dlls/windows.applicationmodel/vector.c) */
+struct vector_iids
+{
+    const GUID *iterable;
+    const GUID *iterator;
+    const GUID *vector;
+    const GUID *view;
+};
+HRESULT vector_hstring_create( IVector_HSTRING **out );
+HRESULT vector_inspectable_create( const struct vector_iids *iids, IVector_IInspectable **out );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \
