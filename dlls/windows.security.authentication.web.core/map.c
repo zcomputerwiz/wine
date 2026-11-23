@@ -34,6 +34,8 @@ struct hstring_map
     IIterable_IKeyValuePair_HSTRING_HSTRING IIterable_IKeyValuePair_HSTRING_HSTRING_iface;
     IMapView_HSTRING_HSTRING IMapView_HSTRING_HSTRING_iface;
     LONG ref;
+    /* the entries: a request's maps are read on the broker's thread while the program may change them */
+    CRITICAL_SECTION cs;
     struct hstring_map_entry *entries;
     UINT32 count;
     UINT32 capacity;
@@ -44,13 +46,19 @@ static inline struct hstring_map *impl_from_IMap_HSTRING_HSTRING( IMap_HSTRING_H
     return CONTAINING_RECORD( iface, struct hstring_map, IMap_HSTRING_HSTRING_iface );
 }
 
-static HRESULT hstring_copy( HSTRING source, HSTRING *dest )
+/* room for another entry; the caller holds the lock */
+static BOOL hstring_map_grow( struct hstring_map *impl )
 {
-    UINT32 length;
-    const WCHAR *buffer = WindowsGetStringRawBuffer( source, &length );
-    return WindowsCreateString( buffer, length, dest );
+    UINT32 capacity = impl->capacity ? impl->capacity * 2 : 4;
+    struct hstring_map_entry *entries = realloc( impl->entries, capacity * sizeof(*entries) );
+
+    if (!entries) return FALSE;
+    impl->entries = entries;
+    impl->capacity = capacity;
+    return TRUE;
 }
 
+/* the caller holds the lock */
 static int hstring_map_find( struct hstring_map *impl, HSTRING key )
 {
     UINT32 i;
@@ -117,6 +125,8 @@ static ULONG WINAPI hstring_map_Release( IMap_HSTRING_HSTRING *iface )
             WindowsDeleteString( impl->entries[i].value );
         }
         free( impl->entries );
+        impl->cs.DebugInfo->Spare[0] = 0;
+        DeleteCriticalSection( &impl->cs );
         free( impl );
     }
 
@@ -132,7 +142,7 @@ static HRESULT WINAPI hstring_map_GetIids( IMap_HSTRING_HSTRING *iface, ULONG *i
 static HRESULT WINAPI hstring_map_GetRuntimeClassName( IMap_HSTRING_HSTRING *iface, HSTRING *class_name )
 {
     return WindowsCreateString( L"Windows.Foundation.Collections.IMap`2<System.String, System.String>",
-                                ARRAY_SIZE(L"Windows.Foundation.Collections.IMap`2<System.String, System.String>"),
+                                ARRAY_SIZE(L"Windows.Foundation.Collections.IMap`2<System.String, System.String>") - 1,
                                 class_name );
 }
 
@@ -145,6 +155,7 @@ static HRESULT WINAPI hstring_map_GetTrustLevel( IMap_HSTRING_HSTRING *iface, Tr
 static HRESULT WINAPI hstring_map_Lookup( IMap_HSTRING_HSTRING *iface, HSTRING key, HSTRING *value )
 {
     struct hstring_map *impl = impl_from_IMap_HSTRING_HSTRING( iface );
+    HRESULT hr = E_BOUNDS;
     int index;
 
     TRACE( "iface %p, key %s, value %p.\n", iface, debugstr_hstring( key ), value );
@@ -152,10 +163,11 @@ static HRESULT WINAPI hstring_map_Lookup( IMap_HSTRING_HSTRING *iface, HSTRING k
     if (!value) return E_POINTER;
     *value = NULL;
 
-    index = hstring_map_find( impl, key );
-    if (index < 0) return E_BOUNDS;
-
-    return hstring_copy( impl->entries[index].value, value );
+    EnterCriticalSection( &impl->cs );
+    if ((index = hstring_map_find( impl, key )) >= 0)
+        hr = WindowsDuplicateString( impl->entries[index].value, value );
+    LeaveCriticalSection( &impl->cs );
+    return hr;
 }
 
 static HRESULT WINAPI hstring_map_get_Size( IMap_HSTRING_HSTRING *iface, UINT32 *value )
@@ -165,20 +177,22 @@ static HRESULT WINAPI hstring_map_get_Size( IMap_HSTRING_HSTRING *iface, UINT32 
     TRACE( "iface %p, value %p.\n", iface, value );
 
     if (!value) return E_POINTER;
+    EnterCriticalSection( &impl->cs );
     *value = impl->count;
+    LeaveCriticalSection( &impl->cs );
     return S_OK;
 }
 
 static HRESULT WINAPI hstring_map_HasKey( IMap_HSTRING_HSTRING *iface, HSTRING key, boolean *value )
 {
     struct hstring_map *impl = impl_from_IMap_HSTRING_HSTRING( iface );
-    int index;
 
     TRACE( "iface %p, key %s, value %p.\n", iface, debugstr_hstring( key ), value );
 
     if (!value) return E_POINTER;
-    index = hstring_map_find( impl, key );
-    *value = index >= 0;
+    EnterCriticalSection( &impl->cs );
+    *value = hstring_map_find( impl, key ) >= 0;
+    LeaveCriticalSection( &impl->cs );
     return S_OK;
 }
 
@@ -198,6 +212,7 @@ static HRESULT WINAPI hstring_map_GetView( IMap_HSTRING_HSTRING *iface, IMapView
 static HRESULT WINAPI hstring_map_Insert( IMap_HSTRING_HSTRING *iface, HSTRING key, HSTRING value, boolean *replaced )
 {
     struct hstring_map *impl = impl_from_IMap_HSTRING_HSTRING( iface );
+    HSTRING new_key = NULL, new_value;
     int index;
     HRESULT hr;
 
@@ -205,51 +220,50 @@ static HRESULT WINAPI hstring_map_Insert( IMap_HSTRING_HSTRING *iface, HSTRING k
 
     if (!replaced) return E_POINTER;
     *replaced = FALSE;
+    if (FAILED(hr = WindowsDuplicateString( value, &new_value ))) return hr;
 
-    index = hstring_map_find( impl, key );
-    if (index >= 0)
+    EnterCriticalSection( &impl->cs );
+    if ((index = hstring_map_find( impl, key )) >= 0)
     {
-        HSTRING new_value;
-        if (FAILED(hr = hstring_copy( value, &new_value ))) return hr;
         WindowsDeleteString( impl->entries[index].value );
         impl->entries[index].value = new_value;
         *replaced = TRUE;
-        return S_OK;
     }
-
-    if (impl->count == impl->capacity)
+    else if (impl->count == impl->capacity && !hstring_map_grow( impl ))
+        hr = E_OUTOFMEMORY;
+    else if (SUCCEEDED(hr = WindowsDuplicateString( key, &new_key )))
     {
-        UINT32 new_capacity = impl->capacity ? impl->capacity * 2 : 4;
-        struct hstring_map_entry *new_entries = realloc( impl->entries, new_capacity * sizeof(*new_entries) );
-        if (!new_entries) return E_OUTOFMEMORY;
-        impl->entries = new_entries;
-        impl->capacity = new_capacity;
+        impl->entries[impl->count].key = new_key;
+        impl->entries[impl->count].value = new_value;
+        impl->count++;
     }
+    LeaveCriticalSection( &impl->cs );
 
-    if (FAILED(hr = hstring_copy( key, &impl->entries[impl->count].key ))) return hr;
-    if (FAILED(hr = hstring_copy( value, &impl->entries[impl->count].value )))
-    {
-        WindowsDeleteString( impl->entries[impl->count].key );
-        return hr;
-    }
-    impl->count++;
-    return S_OK;
+    if (FAILED(hr)) WindowsDeleteString( new_value );
+    return hr;
 }
 
 static HRESULT WINAPI hstring_map_Remove( IMap_HSTRING_HSTRING *iface, HSTRING key )
 {
     struct hstring_map *impl = impl_from_IMap_HSTRING_HSTRING( iface );
+    HSTRING old_key = NULL, old_value = NULL;
     int index;
 
     TRACE( "iface %p, key %s.\n", iface, debugstr_hstring( key ) );
 
-    index = hstring_map_find( impl, key );
-    if (index < 0) return E_BOUNDS;
+    EnterCriticalSection( &impl->cs );
+    if ((index = hstring_map_find( impl, key )) >= 0)
+    {
+        old_key = impl->entries[index].key;
+        old_value = impl->entries[index].value;
+        memmove( &impl->entries[index], &impl->entries[index + 1], (impl->count - index - 1) * sizeof(*impl->entries) );
+        impl->count--;
+    }
+    LeaveCriticalSection( &impl->cs );
 
-    WindowsDeleteString( impl->entries[index].key );
-    WindowsDeleteString( impl->entries[index].value );
-    memmove( &impl->entries[index], &impl->entries[index + 1], (impl->count - index - 1) * sizeof(*impl->entries) );
-    impl->count--;
+    if (index < 0) return E_BOUNDS;
+    WindowsDeleteString( old_key );
+    WindowsDeleteString( old_value );
     return S_OK;
 }
 
@@ -260,12 +274,14 @@ static HRESULT WINAPI hstring_map_Clear( IMap_HSTRING_HSTRING *iface )
 
     TRACE( "iface %p.\n", iface );
 
+    EnterCriticalSection( &impl->cs );
     for (i = 0; i < impl->count; i++)
     {
         WindowsDeleteString( impl->entries[i].key );
         WindowsDeleteString( impl->entries[i].value );
     }
     impl->count = 0;
+    LeaveCriticalSection( &impl->cs );
     return S_OK;
 }
 
@@ -319,7 +335,7 @@ static HRESULT WINAPI hstring_view_GetIids( IMapView_HSTRING_HSTRING *iface, ULO
 static HRESULT WINAPI hstring_view_GetRuntimeClassName( IMapView_HSTRING_HSTRING *iface, HSTRING *class_name )
 {
     return WindowsCreateString( L"Windows.Foundation.Collections.IMapView`2<System.String, System.String>",
-                                ARRAY_SIZE(L"Windows.Foundation.Collections.IMapView`2<System.String, System.String>"),
+                                ARRAY_SIZE(L"Windows.Foundation.Collections.IMapView`2<System.String, System.String>") - 1,
                                 class_name );
 }
 
@@ -469,7 +485,8 @@ static HRESULT hstring_pair_create( HSTRING key, HSTRING value, IKeyValuePair_HS
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IKeyValuePair_HSTRING_HSTRING_iface.lpVtbl = &hstring_pair_vtbl;
     impl->ref = 1;
-    if (FAILED(hr = hstring_copy( key, &impl->key )) || FAILED(hr = hstring_copy( value, &impl->value )))
+    if (FAILED(hr = WindowsDuplicateString( key, &impl->key )) ||
+        FAILED(hr = WindowsDuplicateString( value, &impl->value )))
     {
         hstring_pair_Release( &impl->IKeyValuePair_HSTRING_HSTRING_iface );
         return hr;
@@ -653,7 +670,7 @@ static HRESULT WINAPI hstring_map_iterable_First( IIterable_IKeyValuePair_HSTRIN
 {
     struct hstring_map *map = impl_from_IIterable_IKeyValuePair_HSTRING_HSTRING( iface );
     struct hstring_iterator *impl;
-    HRESULT hr;
+    HRESULT hr = S_OK;
     UINT32 i;
 
     TRACE( "iface %p, value %p.\n", iface, value );
@@ -663,19 +680,16 @@ static HRESULT WINAPI hstring_map_iterable_First( IIterable_IKeyValuePair_HSTRIN
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IIterator_IKeyValuePair_HSTRING_HSTRING_iface.lpVtbl = &hstring_iterator_vtbl;
     impl->ref = 1;
-    if (map->count && !(impl->pairs = calloc( map->count, sizeof(*impl->pairs) )))
+    EnterCriticalSection( &map->cs );
+    if (map->count && !(impl->pairs = calloc( map->count, sizeof(*impl->pairs) ))) hr = E_OUTOFMEMORY;
+    for (i = 0; SUCCEEDED(hr) && i < map->count; i++)
+        if (SUCCEEDED(hr = hstring_pair_create( map->entries[i].key, map->entries[i].value, &impl->pairs[i] )))
+            impl->count++;
+    LeaveCriticalSection( &map->cs );
+    if (FAILED(hr))
     {
-        free( impl );
-        return E_OUTOFMEMORY;
-    }
-    for (i = 0; i < map->count; i++)
-    {
-        if (FAILED(hr = hstring_pair_create( map->entries[i].key, map->entries[i].value, &impl->pairs[i] )))
-        {
-            hstring_iterator_Release( &impl->IIterator_IKeyValuePair_HSTRING_HSTRING_iface );
-            return hr;
-        }
-        impl->count++;
+        hstring_iterator_Release( &impl->IIterator_IKeyValuePair_HSTRING_HSTRING_iface );
+        return hr;
     }
     *value = &impl->IIterator_IKeyValuePair_HSTRING_HSTRING_iface;
     return S_OK;
@@ -700,8 +714,10 @@ void map_hstring_dump( IMap_HSTRING_HSTRING *iface, const char *prefix )
 
     if (!iface || iface->lpVtbl != &hstring_map_vtbl) return;
     impl = impl_from_IMap_HSTRING_HSTRING( iface );
+    EnterCriticalSection( &impl->cs );
     for (i = 0; i < impl->count; i++)
         FIXME( "%s%s = %s\n", prefix, debugstr_hstring( impl->entries[i].key ), debugstr_hstring( impl->entries[i].value ) );
+    LeaveCriticalSection( &impl->cs );
 }
 
 /* the pairs of a map made by map_hstring_create, as the token broker's protocol carries them ("key\0value\0...",
@@ -717,14 +733,18 @@ HRESULT map_hstring_pairs( IMap_HSTRING_HSTRING *iface, WCHAR **text, UINT32 *le
     *len = 0;
     if (!iface || iface->lpVtbl != &hstring_map_vtbl) return S_OK;
     impl = impl_from_IMap_HSTRING_HSTRING( iface );
+    EnterCriticalSection( &impl->cs );
     for (i = 0; i < impl->count; i++)
     {
         WindowsGetStringRawBuffer( impl->entries[i].key, &key_len );
         WindowsGetStringRawBuffer( impl->entries[i].value, &value_len );
         total += key_len + value_len + 2;
     }
-    if (!total) return S_OK;
-    if (!(buffer = malloc( total * sizeof(WCHAR) ))) return E_OUTOFMEMORY;
+    if (!total || !(buffer = malloc( total * sizeof(WCHAR) )))
+    {
+        LeaveCriticalSection( &impl->cs );
+        return total ? E_OUTOFMEMORY : S_OK;
+    }
     for (i = 0, pos = buffer; i < impl->count; i++)
     {
         key = WindowsGetStringRawBuffer( impl->entries[i].key, &key_len );
@@ -737,6 +757,7 @@ HRESULT map_hstring_pairs( IMap_HSTRING_HSTRING *iface, WCHAR **text, UINT32 *le
         pos += value_len;
         *pos++ = 0;
     }
+    LeaveCriticalSection( &impl->cs );
     *text = buffer;
     *len = pos - buffer;
     return S_OK;
@@ -752,8 +773,26 @@ HRESULT map_hstring_create( IMap_HSTRING_HSTRING **out )
     impl->IIterable_IKeyValuePair_HSTRING_HSTRING_iface.lpVtbl = &hstring_map_iterable_vtbl;
     impl->IMapView_HSTRING_HSTRING_iface.lpVtbl = &hstring_view_vtbl;
     impl->ref = 1;
+    InitializeCriticalSectionEx( &impl->cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO );
+    impl->cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": hstring_map.cs");
 
     *out = &impl->IMap_HSTRING_HSTRING_iface;
     TRACE( "created IMap_HSTRING_HSTRING %p\n", *out );
+    return S_OK;
+}
+
+/* the map in *slot, created on first use (when two threads race, one map is kept and the other freed), with a
+ * reference for the caller */
+HRESULT map_hstring_get( IMap_HSTRING_HSTRING **slot, IMap_HSTRING_HSTRING **out )
+{
+    IMap_HSTRING_HSTRING *map;
+    HRESULT hr;
+
+    if (!*slot)
+    {
+        if (FAILED(hr = map_hstring_create( &map ))) return hr;
+        if (InterlockedCompareExchangePointer( (void **)slot, map, NULL )) IMap_HSTRING_HSTRING_Release( map );
+    }
+    IMap_HSTRING_HSTRING_AddRef( (*out = *slot) );
     return S_OK;
 }
