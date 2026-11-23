@@ -1079,6 +1079,8 @@ static void test_broker_impostor(void)
         if (!wait_pipe( name )) skip( "tokenbroker.exe made no pipe with a low integrity token.\n" );
         else
         {
+            /* the suite requires the client's "with a sandbox's token" warning after this line */
+            trace( "B86: the low integrity token broker runs\n" );
             code = run_child( NULL );
             ok( (code >> 16) != WebTokenRequestStatus_Success, "the low integrity broker served the request: %#lx.\n",
                 code );
