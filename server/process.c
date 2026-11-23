@@ -1942,6 +1942,37 @@ DECL_HANDLER(get_process_vm_counters)
     release_object( process );
 }
 
+/* Retrieve a process's I/O counters; zero where the host does not say (as before this request existed) */
+DECL_HANDLER(get_process_io_counters)
+{
+    struct process *process = get_process_from_handle( req->handle, PROCESS_QUERY_LIMITED_INFORMATION );
+
+    if (!process) return;
+#ifdef linux
+    if (process->unix_pid != -1)
+    {
+        FILE *f;
+        char proc_path[32], line[256];
+        unsigned long long value;
+
+        snprintf( proc_path, sizeof(proc_path), "/proc/%u/io", process->unix_pid );
+        if ((f = fopen( proc_path, "r" )))
+        {
+            /* rchar/wchar count the bytes of every read and write call, syscr/syscw the calls */
+            while (fgets( line, sizeof(line), f ))
+            {
+                if (sscanf( line, "rchar: %llu", &value )) reply->read_bytes = value;
+                else if (sscanf( line, "wchar: %llu", &value )) reply->write_bytes = value;
+                else if (sscanf( line, "syscr: %llu", &value )) reply->read_operations = value;
+                else if (sscanf( line, "syscw: %llu", &value )) reply->write_operations = value;
+            }
+            fclose( f );
+        }
+    }
+#endif
+    release_object( process );
+}
+
 void set_process_base_priority( struct process *process, int base_priority )
 {
     struct thread *thread;
