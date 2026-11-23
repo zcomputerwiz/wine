@@ -415,84 +415,12 @@ static void STDMETHODCALLTYPE dxgi_factory_UnregisterOcclusionStatus(IWineDXGIFa
     FIXME("iface %p, cookie %#lx stub!\n", iface, cookie);
 }
 
-/* Derive the visible destination rectangle and the matching back buffer source
- * rectangle from the unclipped destination and the clip. Cropping only the
- * destination would squash the whole image into the clipped area. */
-static void dcomp_layer_compute_placement(const struct wine_dcomp_layer_params *params,
-        unsigned int bb_width, unsigned int bb_height, RECT *dst, RECT *src, BOOL *fully_clipped)
+/* The swapchain is no longer a composition target's content: Present draws into its own window again. */
+void dcomp_swapchain_clear_target(struct d3d11_swapchain *swapchain)
 {
-    RECT full, visible;
-    LONGLONG w, h;
-
-    SetRect(&full, params->offset_x, params->offset_y,
-            params->offset_x + params->width, params->offset_y + params->height);
-    w = params->width;
-    h = params->height;
-    visible = full;
-    SetRectEmpty(src);
-    *fully_clipped = FALSE;
-
-    if (params->has_clip && !IntersectRect(&visible, &full, &params->clip_rect))
-        *fully_clipped = TRUE;
-    if (w <= 0 || h <= 0 || IsRectEmpty(&visible) || !bb_width || !bb_height)
-        *fully_clipped = TRUE;
-
-    if (*fully_clipped)
-    {
-        SetRectEmpty(dst);
-        return;
-    }
-
-    *dst = visible;
-    src->left = (visible.left - full.left) * (LONGLONG)bb_width / w;
-    src->top = (visible.top - full.top) * (LONGLONG)bb_height / h;
-    src->right = ((visible.right - full.left) * (LONGLONG)bb_width + w - 1) / w;
-    src->bottom = ((visible.bottom - full.top) * (LONGLONG)bb_height + h - 1) / h;
-    if (src->right > (LONG)bb_width) src->right = bb_width;
-    if (src->bottom > (LONG)bb_height) src->bottom = bb_height;
-    if (IsRectEmpty(src))
-        *fully_clipped = TRUE;
-}
-
-void dcomp_swapchain_apply_target(struct d3d11_swapchain *swapchain, WPARAM mode, LPARAM lparam)
-{
-    HWND target_hwnd = NULL;
-
-    if ((mode == WINE_DCOMP_SET_TARGET_PARAMS || mode == WINE_DCOMP_SET_TARGET_PARAMS_OWNED) && lparam)
-    {
-        const struct wine_dcomp_layer_params *params = (const struct wine_dcomp_layer_params *)lparam;
-        struct wined3d_swapchain_desc desc;
-        RECT dst, src;
-        BOOL clipped;
-
-        target_hwnd = params->target_hwnd;
-
-        wined3d_mutex_lock();
-        wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &desc);
-        dcomp_layer_compute_placement(params, desc.backbuffer_width, desc.backbuffer_height,
-                &dst, &src, &clipped);
-        swapchain->target_hwnd = target_hwnd;
-        swapchain->has_dst_rect = TRUE;
-        swapchain->fully_clipped = clipped;
-        swapchain->dst_rect = dst;
-        swapchain->src_rect = src;
-        wined3d_mutex_unlock();
-    }
-    else
-    {
-        target_hwnd = (HWND)lparam;
-        wined3d_mutex_lock();
-        swapchain->target_hwnd = target_hwnd;
-        swapchain->has_dst_rect = FALSE;
-        swapchain->fully_clipped = FALSE;
-        wined3d_mutex_unlock();
-    }
-
-    if (target_hwnd)
-    {
-        TRACE("DComp: binding swapchain %p to target_hwnd %p.\n", swapchain, target_hwnd);
-        wined3d_swapchain_set_window(swapchain->wined3d_swapchain, target_hwnd);
-    }
+    wined3d_mutex_lock();
+    swapchain->target_hwnd = NULL;
+    wined3d_mutex_unlock();
 }
 
 static LRESULT CALLBACK dcomp_swapchain_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
@@ -522,17 +450,6 @@ static LRESULT CALLBACK dcomp_swapchain_wndproc(HWND hwnd, UINT msg, WPARAM wpar
             PAINTSTRUCT ps;
             BeginPaint(hwnd, &ps);
             EndPaint(hwnd, &ps);
-            return 0;
-        }
-        case WM_WINE_DCOMP_SET_TARGET:
-        {
-            IDXGISwapChain4 *iface = (IDXGISwapChain4 *)GetPropW(hwnd, L"__wine_dcomp_swapchain");
-
-            if (iface)
-                dcomp_swapchain_apply_target(d3d11_swapchain_from_IDXGISwapChain4(iface), wparam, lparam);
-            /* Owned parameter blocks are freed even if the swapchain is gone. */
-            if (wparam == WINE_DCOMP_SET_TARGET_PARAMS_OWNED && lparam)
-                HeapFree(GetProcessHeap(), 0, (void *)lparam);
             return 0;
         }
     }
@@ -566,7 +483,6 @@ static BOOL dcomp_register_window_class(void)
 static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWineDXGIFactory *iface,
         IUnknown *device, const DXGI_SWAP_CHAIN_DESC1 *desc, IDXGIOutput *output, IDXGISwapChain1 **swapchain)
 {
-    WCHAR prop_name[64];
     HWND window;
     HRESULT hr;
 
@@ -608,9 +524,6 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
         d3d11_sc->comp_wnd = window;
         d3d11_sc->composition_alpha_mode = desc->AlphaMode;
 
-        swprintf(prop_name, ARRAY_SIZE(prop_name),
-                WINE_DCOMP_WND_PROP_FMT, GetCurrentProcessId(), (UINT_PTR)*swapchain);
-        SetPropW(GetDesktopWindow(), prop_name, (HANDLE)window);
         SetPropW(window, L"__wine_dcomp_swapchain", (HANDLE)*swapchain);
         TRACE("Created composition window %p (%ux%u) for swapchain %p.\n",
                 window, desc->Width, desc->Height, *swapchain);

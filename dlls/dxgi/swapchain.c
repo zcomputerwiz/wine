@@ -283,10 +283,6 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
         IWineDXGIDevice *device = swapchain->device;
         if (swapchain->comp_wnd)
         {
-            WCHAR prop_name[64];
-            swprintf(prop_name, ARRAY_SIZE(prop_name),
-                    WINE_DCOMP_WND_PROP_FMT, GetCurrentProcessId(), (UINT_PTR)&swapchain->IDXGISwapChain4_iface);
-            RemovePropW(GetDesktopWindow(), prop_name);
             AcquireSRWLockExclusive(&dcomp_binding_lock);
             if (swapchain->target_hwnd && GetPropW(swapchain->target_hwnd,
                     WINE_DCOMP_REPAINT_SINK_PROP) == swapchain->comp_wnd)
@@ -423,37 +419,6 @@ static ULONG STDMETHODCALLTYPE dcomp_binding_Release(IWineDCompSwapChain *iface)
     return d3d11_swapchain_Release(&impl_from_IWineDCompSwapChain(iface)->IDXGISwapChain4_iface);
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_binding_set_target(IWineDCompSwapChain *iface,
-        HWND target, const RECT *destination, const RECT *clip)
-{
-    struct d3d11_swapchain *swapchain = impl_from_IWineDCompSwapChain(iface);
-    struct wine_dcomp_layer_params params = {0};
-    RECT empty = {0};
-
-    if (target && !destination) return E_INVALIDARG;
-    AcquireSRWLockExclusive(&dcomp_binding_lock);
-    if (!target)
-    {
-        if (swapchain->target_hwnd)
-            wined3d_swapchain_present(swapchain->wined3d_swapchain, &empty, &empty,
-                    swapchain->target_hwnd, 0, WINED3D_PRESENT_CLEAR | WINED3D_PRESENT_CLEAR_ONLY);
-        dcomp_swapchain_apply_target(swapchain, WINE_DCOMP_SET_TARGET_LEGACY, 0);
-        ReleaseSRWLockExclusive(&dcomp_binding_lock);
-        return S_OK;
-    }
-    params.target_hwnd = target;
-    params.offset_x = destination->left;
-    params.offset_y = destination->top;
-    params.width = destination->right - destination->left;
-    params.height = destination->bottom - destination->top;
-    params.has_clip = !!clip;
-    if (clip) params.clip_rect = *clip;
-    params.opacity = 1.0f;
-    dcomp_swapchain_apply_target(swapchain, WINE_DCOMP_SET_TARGET_PARAMS, (LPARAM)&params);
-    ReleaseSRWLockExclusive(&dcomp_binding_lock);
-    return S_OK;
-}
-
 /* CPU copy of a composition surface's texture as a retained frame. Runs on the committing thread through the
  * surface device's immediate context; WineD3D's CS thread owns all GL work. The immediate context is shared with
  * the app thread (which draws and calls EndDraw on it), so the copy is serialized with ID3D11Multithread, the same
@@ -536,7 +501,7 @@ static HRESULT dcomp_binding_target_scene(IWineDCompSwapChain *iface,
                 WINE_DCOMP_REPAINT_SINK_PROP) == swapchain->comp_wnd)
             RemovePropW(swapchain->target_hwnd, WINE_DCOMP_REPAINT_SINK_PROP);
         hr = wined3d_swapchain_set_target_scene(swapchain->wined3d_swapchain, NULL, FALSE);
-        dcomp_swapchain_apply_target(swapchain, WINE_DCOMP_SET_TARGET_LEGACY, 0);
+        dcomp_swapchain_clear_target(swapchain);
         ReleaseSRWLockExclusive(&dcomp_binding_lock);
         return hr;
     }
@@ -635,8 +600,6 @@ static HRESULT dcomp_binding_target_scene(IWineDCompSwapChain *iface,
             RemovePropW(swapchain->target_hwnd, WINE_DCOMP_REPAINT_SINK_PROP);
         swapchain->target_hwnd = target;
         SetPropW(target, WINE_DCOMP_REPAINT_SINK_PROP, swapchain->comp_wnd);
-        swapchain->has_dst_rect = FALSE;
-        swapchain->fully_clipped = FALSE;
         wined3d_swapchain_set_window(swapchain->wined3d_swapchain, target);
         /* Commit redraws the retained frames, never the unpresented back buffer. */
         hr = wined3d_swapchain_present(swapchain->wined3d_swapchain, &empty, &empty,
@@ -664,7 +627,6 @@ static const struct IWineDCompSwapChainVtbl dcomp_binding_vtbl =
     dcomp_binding_QueryInterface,
     dcomp_binding_AddRef,
     dcomp_binding_Release,
-    dcomp_binding_set_target,
     dcomp_binding_set_target_scene,
     dcomp_binding_prepare_target_scene,
 };
@@ -781,9 +743,6 @@ static HRESULT d3d11_swapchain_present_locked(struct d3d11_swapchain *swapchain,
         unsigned int sync_interval, unsigned int flags, const DXGI_PRESENT_PARAMETERS *parameters)
 {
     HWND target_hwnd;
-    BOOL has_dst_rect;
-    BOOL fully_clipped;
-    RECT src_rect, dst_rect;
     HWND hwnd;
     HRESULT hr;
     BOOL history_ready = FALSE;
@@ -798,10 +757,6 @@ static HRESULT d3d11_swapchain_present_locked(struct d3d11_swapchain *swapchain,
     AcquireSRWLockShared(&dcomp_binding_lock);
     wined3d_mutex_lock();
     target_hwnd = swapchain->target_hwnd;
-    has_dst_rect = swapchain->has_dst_rect;
-    fully_clipped = swapchain->fully_clipped;
-    src_rect = swapchain->src_rect;
-    dst_rect = swapchain->dst_rect;
     wined3d_mutex_unlock();
 
     hwnd = target_hwnd ? target_hwnd : d3d11_swapchain_get_hwnd(swapchain);
@@ -831,22 +786,16 @@ static HRESULT d3d11_swapchain_present_locked(struct d3d11_swapchain *swapchain,
      * that frame without drawing it; Commit must not require a second Present. */
     capture_only = swapchain->comp_wnd && !target_hwnd;
 
-    if (!fully_clipped)
+    hr = d3d11_present_prepare(swapchain, parameters);
+    if (FAILED(hr))
     {
-        hr = d3d11_present_prepare(swapchain, parameters);
-        if (FAILED(hr))
-        {
-            ReleaseSRWLockShared(&dcomp_binding_lock);
-            return hr;
-        }
-        history_ready = hr == S_OK;
+        ReleaseSRWLockShared(&dcomp_binding_lock);
+        return hr;
     }
-    hr = wined3d_swapchain_present(swapchain->wined3d_swapchain,
-            has_dst_rect ? &src_rect : NULL,
-            has_dst_rect ? &dst_rect : NULL,
+    history_ready = hr == S_OK;
+    hr = wined3d_swapchain_present(swapchain->wined3d_swapchain, NULL, NULL,
             target_hwnd, sync_interval, capture_only ? WINED3D_PRESENT_CAPTURE_ONLY
-                    : swapchain->comp_wnd ? WINED3D_PRESENT_CLEAR
-                    | (fully_clipped ? WINED3D_PRESENT_CLEAR_ONLY : 0) : 0);
+                    : swapchain->comp_wnd ? WINED3D_PRESENT_CLEAR : 0);
     if (hr == WINED3DOK_PRESENT_OCCLUDED)
     {
         ReleaseSRWLockShared(&dcomp_binding_lock);
