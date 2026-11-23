@@ -392,10 +392,16 @@ static void scmdatabase_remove_service(struct scmdatabase *db, struct service_en
     service->entry.next = service->entry.prev = NULL;
 }
 
+static BOOL always_started(const struct service_entry *service);
+
 static int __cdecl compare_service(const void *a, const void *b)
 {
     struct service_entry *service_a = *(struct service_entry **)a;
     struct service_entry *service_b = *(struct service_entry **)b;
+    /* the services that always run (always_started: SamSs, a demand-start service) before the auto-start ones,
+     * whose start-up may need them (B44) */
+    if (always_started(service_a) != always_started(service_b))
+        return always_started(service_a) ? -1 : 1;
     if (service_a->config.dwStartType != service_b->config.dwStartType)
         return service_a->config.dwStartType - service_b->config.dwStartType;
     return service_a->config.dwTagId - service_b->config.dwTagId;
