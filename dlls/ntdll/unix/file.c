@@ -7756,7 +7756,7 @@ NTSTATUS WINAPI NtQueryObject( HANDLE handle, OBJECT_INFORMATION_CLASS info_clas
 {
     unsigned int status;
 
-    handle = regvirt_underlying( handle );  /* a virtualized key (system tier T2b) */
+    handle = wexkey_underlying( handle );  /* a virtualized key (system tier T2b) */
 
     TRACE("(%p,0x%08x,%p,0x%08x,%p)\n", handle, info_class, ptr, len, used_len);
 
@@ -7773,8 +7773,7 @@ NTSTATUS WINAPI NtQueryObject( HANDLE handle, OBJECT_INFORMATION_CLASS info_clas
         SERVER_START_REQ( get_object_info )
         {
             req->handle = wine_server_obj_handle( handle );
-            status = regsrv_is_handle( handle ) ? regsrv_call( req, handle, &req->handle, NULL )
-                                            : wine_server_call( req );
+            status = wexkey_server_call( req, handle, &req->handle );
             if (status == STATUS_SUCCESS)
             {
                 memset( p, 0, sizeof(*p) );
@@ -7797,8 +7796,7 @@ NTSTATUS WINAPI NtQueryObject( HANDLE handle, OBJECT_INFORMATION_CLASS info_clas
             req->handle = wine_server_obj_handle( handle );
             if (len > sizeof(*p) + sizeof(WCHAR))
                 wine_server_set_reply( req, p + 1, len - sizeof(*p) - sizeof(WCHAR) );
-            status = regsrv_is_handle( handle ) ? regsrv_call( req, handle, &req->handle, NULL )
-                                            : wine_server_call( req );
+            status = wexkey_server_call( req, handle, &req->handle );
             if (status == STATUS_SUCCESS)
             {
                 if (!reply->total)  /* no name */
@@ -7837,8 +7835,7 @@ NTSTATUS WINAPI NtQueryObject( HANDLE handle, OBJECT_INFORMATION_CLASS info_clas
         {
             req->handle = wine_server_obj_handle( handle );
             wine_server_set_reply( req, buffer, sizeof(buffer) );
-            status = regsrv_is_handle( handle ) ? regsrv_call( req, handle, &req->handle, NULL )
-                                            : wine_server_call( req );
+            status = wexkey_server_call( req, handle, &req->handle );
         }
         SERVER_END_REQ;
         if (status) break;
