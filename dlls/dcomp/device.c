@@ -4503,6 +4503,9 @@ static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateSurface(type *iface, \
             &dev->rendering_device_iid, width, height, pixel_format, alpha_mode, surface); \
 }
 
+static const GUID IID_dcomp_alias_a = {0xd14b6158, 0xc3fa, 0x4bce, {0x9c, 0x1f, 0xb6, 0x1d, 0x86, 0x65, 0xea, 0xb0}};
+static const GUID IID_dcomp_alias_b = {0x28d6ad3d, 0xee2a, 0x4bcd, {0x94, 0x19, 0x7d, 0x54, 0x80, 0x04, 0x35, 0xb1}};
+
 static HRESULT STDMETHODCALLTYPE dcomp_device_QueryInterface(IDCompositionDevice *iface,
         REFIID iid, void **out)
 {
@@ -4526,8 +4529,11 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_QueryInterface(IDCompositionDevice
         IDCompositionDevice_AddRef(iface);
         return S_OK;
     }
-    else if (dev->version >= 2 && IsEqualGUID(iid, &IID_IDCompositionDesktopDevice))
+    else if (dev->version >= 2 && (IsEqualGUID(iid, &IID_IDCompositionDesktopDevice) ||
+             IsEqualGUID(iid, &IID_dcomp_alias_a) || IsEqualGUID(iid, &IID_dcomp_alias_b)))
     {
+        /* Windows 11 answers {d14b6158-...} and {28d6ad3d-...}, which dcompi.dll of the Windows App Runtime asks the device for
+         * (tests/uwp/alpc/dcomp-privqi-probe.c), with the very interface of IDCompositionDesktopDevice */
         *out = &dev->IDCompositionDesktopDevice_iface;
         IDCompositionDevice_AddRef(iface);
         return S_OK;
