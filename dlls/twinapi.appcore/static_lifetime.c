@@ -239,11 +239,23 @@ static HRESULT WINAPI lifetime_unused( void *iface )
     return E_NOTIMPL;
 }
 
+/*
+ * The interface has more methods than C++/WinRT declares. The Windows App Runtime calls the one in slot 11 from
+ * LiftedIXP\framework\UnhandledErrorDetected.cpp with six arguments (two of them pointers, a line number 0x22, the name of
+ * its source file, and a null pointer) and treats an error as fatal: a null slot there ended Notepad with a call through a
+ * null pointer. What it does is not known; the call is answered with success and logged.
+ */
+static HRESULT WINAPI lifetime_slot( void *iface, void *a, void *b, void *c, DWORD d, const void *e, void *f )
+{
+    FIXME( "iface %p, %p, %p, %p, %#lx, %p, %p: semi-stub\n", iface, a, b, c, d, e, f );
+    return S_OK;
+}
+
 static const struct lifetime_vtbl lifetime_vtbl =
 {
     lifetime_QueryInterface, object_AddRef, object_Release, object_GetIids, object_GetRuntimeClassName,
     object_GetTrustLevel,
-    { lifetime_unused, lifetime_GetCollection },
+    { lifetime_unused, lifetime_GetCollection, lifetime_slot, lifetime_slot, lifetime_slot, lifetime_slot, lifetime_slot },
 };
 
 static struct lifetime_object lifetime_object = { &lifetime_vtbl };
