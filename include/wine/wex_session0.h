@@ -107,7 +107,14 @@ struct wex_session0_hive_save
  * display, drive and port mappings, computer name state, the service manager's instance counter, Safe Mode's
  * SafeBoot\Option, which each session's wineboot writes from the boot mode, the volatile hardware tree).
  * Paths relative to \Registry\Machine and \Registry\User\.Default; a key matches
- * when its path equals an entry or continues it with a backslash. Compared without regard to case. */
+ * when its path equals an entry or continues it with a backslash (wex_session_key_match). Compared without regard
+ * to case.
+ *
+ * The one list for both uses: ntdll opens these keys in the program's own server instead of session 0 (routing),
+ * and a server that shares a machine hive file never merges its copy of them into that file (persistence,
+ * is_per_session_key in server/registry.c). The server also keeps a few values per session (the PROCESSOR_* values
+ * of Session Manager\Environment, is_per_session_value); ntdll has no such list, since every session runs on the
+ * same processors and session 0's values are right for all of them. */
 #define WEX_SESSION_MACHINE_KEYS \
     "Hardware", \
     "System\\ControlSet001\\Enum", \
@@ -138,5 +145,23 @@ struct wex_session0_hive_save
 #define WEX_SESSION_DEFAULT_USER_KEYS \
     "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders", \
     "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders"
+
+/* the number of characters of path (count characters) that an ASCII prefix matches, when the match ends with the
+ * path or at a backslash; 0 when it does not match. Without regard to case (ASCII letters). */
+static inline unsigned int wex_session_key_match( const WCHAR *path, unsigned int count, const char *prefix )
+{
+    unsigned int i;
+
+    for (i = 0; prefix[i]; i++)
+    {
+        WCHAR ch = path[i];
+        unsigned char p = prefix[i];
+        if (i >= count) return 0;
+        if (ch >= 'A' && ch <= 'Z') ch += 'a' - 'A';
+        if (p >= 'A' && p <= 'Z') p += 'a' - 'A';
+        if (ch != p) return 0;
+    }
+    return (count == i || path[i] == '\\') ? i : 0;
+}
 
 #endif /* __WINE_WINE_WEX_SESSION0_H */

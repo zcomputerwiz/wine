@@ -33,8 +33,9 @@
 #include "winbase.h"
 #include "winternl.h"
 #include "winuser.h"
+#include "winreg.h"
 #include "dwmapi.h"
-#include "wine/dwm_protocol.h"
+#include "dwm_client.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dwmapi);
@@ -55,6 +56,11 @@ static HANDLE cached_handle;
 static HDESK cached_desktop;
 static uint64_t cached_epoch;
 
+/* The broker generation this process last reached: the server's desktop epoch, which changes whenever a broker
+ * registers or goes away. A new one means a broker that does not hold this process's attributes yet. */
+static uint64_t known_epoch;
+static BOOL broker_changed;
+
 static HDESK fail_desktop;
 static ULONGLONG fail_tick;
 static NTSTATUS fail_status;
@@ -70,6 +76,21 @@ static void close_cached_channel(void)
     cached_epoch = 0;
 }
 
+/* The DwmService gate (HKCU\Software\WineExplorer\Shell), read once per process: without it no desktop starts a
+ * broker, so the attribute and thumbnail calls do not ask for one. */
+static BOOL broker_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+    {
+        DWORD value = 0, size = sizeof(value);
+        enabled = !RegGetValueW( HKEY_CURRENT_USER, L"Software\\WineExplorer\\Shell", L"DwmService",
+                                 RRF_RT_REG_DWORD, NULL, &value, &size ) && value;
+    }
+    return enabled;
+}
+
 static void record_failure( HDESK desktop, NTSTATUS status )
 {
     fail_desktop = desktop;
@@ -83,7 +104,7 @@ static void record_failure( HDESK desktop, NTSTATUS status )
  * Open a waitable client channel bound to the calling thread's current desktop.
  * Never called from DllMain.
  */
-NTSTATUS dwm_client_connect( HANDLE *ret_handle, uint64_t *ret_epoch )
+static NTSTATUS dwm_client_connect( HANDLE *ret_handle, uint64_t *ret_epoch )
 {
     struct dwm_channel_call call;
     NTSTATUS status;
@@ -109,14 +130,9 @@ NTSTATUS dwm_client_connect( HANDLE *ret_handle, uint64_t *ret_epoch )
     return STATUS_SUCCESS;
 }
 
-/***********************************************************************
- *           dwm_client_call
- *
- * Perform a bounded synchronous request/reply call to the current desktop's
- * DWM broker with brief failure caching when no broker is registered.
- */
-NTSTATUS dwm_client_call_window( uint32_t opcode, HWND hwnd, const void *in, uint32_t in_len,
-                                 void *out, uint32_t *out_len, uint32_t timeout_ms )
+/* one request and its reply over the cached channel; called with dwm_client_cs held */
+static NTSTATUS call_locked( uint32_t opcode, HWND hwnd, const void *in, uint32_t in_len,
+                             void *out, uint32_t *out_len, uint32_t timeout_ms )
 {
     unsigned char req_buf[sizeof(struct dwm_msg_header) + DWM_MAX_MESSAGE_SIZE];
     unsigned char rep_buf[sizeof(struct dwm_msg_header) + DWM_MAX_MESSAGE_SIZE];
@@ -125,12 +141,6 @@ NTSTATUS dwm_client_call_window( uint32_t opcode, HWND hwnd, const void *in, uin
     HDESK cur_desktop;
     BOOL retried = FALSE;
     NTSTATUS status;
-
-    if (in_len > DWM_MAX_MESSAGE_SIZE) return STATUS_PORT_MESSAGE_TOO_LONG;
-    if (in_len && !in) return STATUS_INVALID_PARAMETER;
-    if (out_len && *out_len && !out) return STATUS_INVALID_PARAMETER;
-
-    EnterCriticalSection( &dwm_client_cs );
 
     cur_desktop = GetThreadDesktop( GetCurrentThreadId() );
 
@@ -141,12 +151,7 @@ NTSTATUS dwm_client_call_window( uint32_t opcode, HWND hwnd, const void *in, uin
     /* Brief failure cache so missing-broker calls do not spin in reconnect loops. */
     if (!cached_handle && fail_status && fail_desktop == cur_desktop)
     {
-        if (GetTickCount64() - fail_tick < DWM_FAIL_CACHE_MS)
-        {
-            status = fail_status;
-            LeaveCriticalSection( &dwm_client_cs );
-            return status;
-        }
+        if (GetTickCount64() - fail_tick < DWM_FAIL_CACHE_MS) return fail_status;
         fail_status = STATUS_SUCCESS;
     }
 
@@ -157,7 +162,6 @@ retry_connect:
         if (status)
         {
             record_failure( cur_desktop, status );
-            LeaveCriticalSection( &dwm_client_cs );
             return status;
         }
         cached_desktop = cur_desktop;
@@ -193,16 +197,16 @@ retry_connect:
             goto retry_connect;
         }
         record_failure( cur_desktop, status );
-        LeaveCriticalSection( &dwm_client_cs );
         return status;
     }
-    if (status)
-    {
-        LeaveCriticalSection( &dwm_client_cs );
-        return status;
-    }
+    if (status) return status;
 
     cached_epoch = call.epoch;
+    if (call.epoch != known_epoch)
+    {
+        known_epoch = call.epoch;
+        broker_changed = TRUE;
+    }
 
     for (;;)
     {
@@ -228,9 +232,7 @@ retry_connect:
             if (wait_status != STATUS_WAIT_0)
             {
                 close_cached_channel();
-                status = (wait_status == STATUS_TIMEOUT) ? STATUS_IO_TIMEOUT : wait_status;
-                LeaveCriticalSection( &dwm_client_cs );
-                return status;
+                return (wait_status == STATUS_TIMEOUT) ? STATUS_IO_TIMEOUT : wait_status;
             }
             continue;
         }
@@ -244,52 +246,60 @@ retry_connect:
             close_cached_channel();
             record_failure( cur_desktop, status );
         }
-        LeaveCriticalSection( &dwm_client_cs );
         return status;
     }
 
     fail_status = STATUS_SUCCESS;
 
-    if (call.status)
-    {
-        status = (NTSTATUS)call.status;
-        LeaveCriticalSection( &dwm_client_cs );
-        return status;
-    }
-
-    if (call.out_len < sizeof(rep_hdr))
-    {
-        LeaveCriticalSection( &dwm_client_cs );
-        return STATUS_INVALID_NETWORK_RESPONSE;
-    }
+    if (call.status) return (NTSTATUS)call.status;
+    if (call.out_len < sizeof(rep_hdr)) return STATUS_INVALID_NETWORK_RESPONSE;
 
     memcpy( &rep_hdr, rep_buf, sizeof(rep_hdr) );
     if (rep_hdr.version != DWM_PROTOCOL_VERSION ||
         rep_hdr.length != call.out_len - sizeof(rep_hdr))
-    {
-        LeaveCriticalSection( &dwm_client_cs );
         return STATUS_INVALID_NETWORK_RESPONSE;
-    }
 
     if (out_len)
     {
         uint32_t avail = *out_len;
         *out_len = rep_hdr.length;
-        if (avail < rep_hdr.length)
-        {
-            LeaveCriticalSection( &dwm_client_cs );
-            return STATUS_BUFFER_TOO_SMALL;
-        }
+        if (avail < rep_hdr.length) return STATUS_BUFFER_TOO_SMALL;
         if (rep_hdr.length && out)
             memcpy( out, rep_buf + sizeof(rep_hdr), rep_hdr.length );
     }
-
-    LeaveCriticalSection( &dwm_client_cs );
     return STATUS_SUCCESS;
 }
 
-NTSTATUS dwm_client_call( uint32_t opcode, const void *in, uint32_t in_len,
-                          void *out, uint32_t *out_len, uint32_t timeout_ms )
+/***********************************************************************
+ *           dwm_client_call_window
+ *
+ * Perform a bounded synchronous request/reply call to the current desktop's
+ * DWM broker with brief failure caching when no broker is registered.
+ * The first call that reaches a new broker hands it this process's attributes and thumbnails.
+ */
+static NTSTATUS dwm_client_call_window( uint32_t opcode, HWND hwnd, const void *in, uint32_t in_len,
+                                        void *out, uint32_t *out_len, uint32_t timeout_ms )
+{
+    NTSTATUS status;
+    BOOL resend;
+
+    if (in_len > DWM_MAX_MESSAGE_SIZE) return STATUS_PORT_MESSAGE_TOO_LONG;
+    if (in_len && !in) return STATUS_INVALID_PARAMETER;
+    if (out_len && *out_len && !out) return STATUS_INVALID_PARAMETER;
+
+    EnterCriticalSection( &dwm_client_cs );
+    status = call_locked( opcode, hwnd, in, in_len, out, out_len, timeout_ms );
+    resend = broker_changed;
+    broker_changed = FALSE;
+    LeaveCriticalSection( &dwm_client_cs );
+
+    /* outside the lock: the tables' lock is taken before this one */
+    if (resend) dwm_resend_state();
+    return status;
+}
+
+static NTSTATUS dwm_client_call( uint32_t opcode, const void *in, uint32_t in_len,
+                                 void *out, uint32_t *out_len, uint32_t timeout_ms )
 {
     return dwm_client_call_window( opcode, NULL, in, in_len, out, out_len, timeout_ms );
 }
@@ -300,8 +310,10 @@ NTSTATUS dwm_client_set_attr( HWND hwnd, DWORD attribute, DWORD value )
     struct dwm_attr_set req = { attribute, value };
     struct dwm_attr_reply rep;
     uint32_t len = sizeof(rep);
-    NTSTATUS status = dwm_client_call_window( DWM_OP_SET_ATTR, hwnd, &req, sizeof(req), &rep, &len, 2000 );
+    NTSTATUS status;
 
+    if (!broker_enabled()) return STATUS_PORT_DISCONNECTED;
+    status = dwm_client_call_window( DWM_OP_SET_ATTR, hwnd, &req, sizeof(req), &rep, &len, 2000 );
     if (!status && len == sizeof(rep) && !rep.found) status = STATUS_UNSUCCESSFUL;
     return status;
 }
@@ -312,8 +324,10 @@ NTSTATUS dwm_client_get_attr( HWND hwnd, DWORD attribute, BOOL *found, DWORD *va
     struct dwm_attr_get req = { attribute };
     struct dwm_attr_reply rep;
     uint32_t len = sizeof(rep);
-    NTSTATUS status = dwm_client_call_window( DWM_OP_GET_ATTR, hwnd, &req, sizeof(req), &rep, &len, 2000 );
+    NTSTATUS status;
 
+    if (!broker_enabled()) return STATUS_PORT_DISCONNECTED;
+    status = dwm_client_call_window( DWM_OP_GET_ATTR, hwnd, &req, sizeof(req), &rep, &len, 2000 );
     if (status) return status;
     if (len != sizeof(rep)) return STATUS_INVALID_NETWORK_RESPONSE;
     *found = rep.found != 0;
@@ -327,6 +341,7 @@ NTSTATUS dwm_client_thumb_set( HWND dest, UINT handle, HWND src, const struct dw
     struct dwm_thumb_set req;
 
     if (!set) return STATUS_INVALID_PARAMETER;
+    if (!broker_enabled()) return STATUS_PORT_DISCONNECTED;
     req = *set;
     req.handle = handle;
     req.src    = HandleToUlong( src );
@@ -337,6 +352,7 @@ NTSTATUS dwm_client_thumb_del( HWND dest, UINT handle )
 {
     struct dwm_thumb_del del = { handle, 0 };
 
+    if (!broker_enabled()) return STATUS_PORT_DISCONNECTED;
     return dwm_client_call_window( DWM_OP_THUMB_DEL, dest, &del, sizeof(del), NULL, NULL, 2000 );
 }
 

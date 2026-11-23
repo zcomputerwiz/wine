@@ -151,7 +151,6 @@ struct dcomp_visual
     struct dcomp_visual *active_parent;
     struct dcomp_visual *active_children;
     struct dcomp_visual *active_next_sibling;
-    HWND last_comp_wnd;
 };
 
 enum dcomp_transform_type
@@ -913,20 +912,25 @@ static HRESULT dcomp_surface_resize(struct dcomp_surface *surface, UINT width, U
     if (!width || !height || width > 16384 || height > 16384)
         return E_INVALIDARG;
 
+    /* the whole resize under the device lock: a committing thread reads physical_surface and the size */
     EnterCriticalSection(&device->cs);
     if (device->drawing_surface)
     {
         LeaveCriticalSection(&device->cs);
         return DCOMPOSITION_ERROR_SURFACE_BEING_RENDERED;
     }
-    LeaveCriticalSection(&device->cs);
-
     if (width == surface->width && height == surface->height)
+    {
+        LeaveCriticalSection(&device->cs);
         return S_OK;
+    }
 
     if (FAILED(hr = dcomp_get_d3d11_device(surface->rendering_device,
             &surface->rendering_device_iid, &d3d11_device)))
+    {
+        LeaveCriticalSection(&device->cs);
         return hr;
+    }
     ID3D11Texture2D_GetDesc(surface->physical_surface, &desc);
     desc.Width = width;
     desc.Height = height;
@@ -969,6 +973,7 @@ static HRESULT dcomp_surface_resize(struct dcomp_surface *surface, UINT width, U
         else
             ID3D11Texture2D_Release(texture);
     }
+    LeaveCriticalSection(&device->cs);
     ID3D11Device_Release(d3d11_device);
     return hr;
 }
@@ -2886,12 +2891,6 @@ static ULONG STDMETHODCALLTYPE dcomp_visual_Release(IDCompositionVisual2 *iface)
     {
         struct dcomp_device *device = visual->device;
         EnterCriticalSection(&device->cs);
-        if (visual->last_comp_wnd && IsWindow(visual->last_comp_wnd))
-        {
-            SendMessageW(visual->last_comp_wnd, WM_WINE_DCOMP_SET_TARGET, WINE_DCOMP_SET_TARGET_LEGACY, 0);
-            visual->last_comp_wnd = NULL;
-        }
-
         dcomp_visual_state_cleanup(&visual->pending);
         dcomp_visual_state_cleanup(&visual->active);
 
@@ -3803,19 +3802,15 @@ static HRESULT dcomp_target_create(struct dcomp_device *device, HWND hwnd, BOOL 
  * IDCompositionDevice Traversal and Commit
  * ===================================================================== */
 
-static HRESULT dcomp_bind_content(IUnknown *content, HWND hwnd, const RECT *dst, const RECT *clip)
+/* the content no longer shows in a target: revoke its swapchain's scene */
+static void dcomp_unbind_content(IUnknown *content)
 {
     IWineDCompSwapChain *binding;
-    HRESULT hr;
 
-    if (!content) return S_OK;
-    if (FAILED(hr = IUnknown_QueryInterface(content, &IID_IWineDCompSwapChain, (void **)&binding)))
-        return E_NOTIMPL;
-    if (!hwnd)
-        IWineDCompSwapChain_set_target_scene(binding, NULL, NULL);
-    hr = IWineDCompSwapChain_set_target(binding, hwnd, dst, clip);
+    if (!content || FAILED(IUnknown_QueryInterface(content, &IID_IWineDCompSwapChain, (void **)&binding)))
+        return;
+    IWineDCompSwapChain_set_target_scene(binding, NULL, NULL);
     IWineDCompSwapChain_Release(binding);
-    return hr;
 }
 
 static void dcomp_visual_unbind_tree(struct dcomp_visual *visual)
@@ -3823,7 +3818,7 @@ static void dcomp_visual_unbind_tree(struct dcomp_visual *visual)
     struct dcomp_visual *child;
 
     if (!visual) return;
-    dcomp_bind_content(visual->active.content, NULL, NULL, NULL);
+    dcomp_unbind_content(visual->active.content);
     for (child = visual->active_children; child; child = child->active_next_sibling)
         dcomp_visual_unbind_tree(child);
 }
@@ -3836,7 +3831,7 @@ static void dcomp_visual_apply_commit(struct dcomp_visual *visual, LONGLONG now_
 
     /* Detach while the old active content still owns its COM reference. */
     if (visual->active.content != visual->pending.content)
-        dcomp_bind_content(visual->active.content, NULL, NULL, NULL);
+        dcomp_unbind_content(visual->active.content);
     /* Apply visual state: pending -> active */
     dcomp_visual_state_copy(&visual->active, &visual->pending);
 
@@ -4153,10 +4148,6 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
     /* Content IUnknown each binding was prepared from (no ref held); used to
      * dedupe duplicate producers by the underlying object, not the interface. */
     IUnknown *binding_content[WINE_DCOMP_MAX_CONTENTS];
-    /* Targets whose auxiliary producer must be revoked, deferred until the
-     * commit is known to succeed so a failed transaction keeps it intact. */
-    struct dcomp_target *aux_release[WINE_DCOMP_MAX_CONTENTS];
-    unsigned int aux_release_count = 0;
     struct dcomp_visual *pending_nodes[WINE_DCOMP_MAX_LAYERS], *old_nodes[WINE_DCOMP_MAX_LAYERS];
     unsigned int old_count = 0;
     unsigned int contents = 0, visuals = 0, targets = 0, count = 0, i, j, c = 0;
@@ -4288,17 +4279,7 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
                     scene->target_hwnd, scene)))
                 goto done;
         }
-        else if (target->aux_binding)
-        {
-            /* The scene has a real producer (or no content): the auxiliary
-             * producer is revoked, but only once the commit is known to succeed. */
-            aux_release[aux_release_count++] = target;
-        }
     }
-    /* A target whose scene went away keeps no auxiliary producer (deferred). */
-    LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
-        if (!target->pending_root && target->aux_binding)
-            aux_release[aux_release_count++] = target;
     /* Retain the old active tree before any activation so its nodes stay alive
      * while the new graph is built; a failed commit releases these extra refs
      * and leaves the old tree untouched. */
@@ -4328,7 +4309,7 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
         {
             struct dcomp_visual *visual = old_nodes[i];
             for (j = 0; j < visuals && pending_nodes[j] != visual; ++j) {}
-            if (j == visuals) dcomp_bind_content(visual->active.content, NULL, NULL, NULL);
+            if (j == visuals) dcomp_unbind_content(visual->active.content);
             while (visual->active_children)
             {
                 struct dcomp_visual *child = visual->active_children;
@@ -4352,10 +4333,15 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
             }
             if (target->active_root) dcomp_visual_apply_commit(target->active_root, now_100ns);
         }
-        /* The commit succeeded: now revoke the auxiliary producers that are no
-         * longer needed. */
-        for (i = 0; i < aux_release_count; ++i)
-            dcomp_target_release_aux_producer(aux_release[i]);
+        /* The commit succeeded: now revoke the auxiliary producers this commit
+         * does not present through (a real producer, no content, or no scene).
+         * A failed commit keeps them, with the previous scene. */
+        LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
+        {
+            if (!target->aux_binding) continue;
+            for (j = 0; j < count && bindings[j] != target->aux_binding; ++j) {}
+            if (j == count) dcomp_target_release_aux_producer(target);
+        }
     }
 done:
     for (i = 0; i < old_count; ++i) IDCompositionVisual2_Release(&old_nodes[i]->IDCompositionVisual2_iface);

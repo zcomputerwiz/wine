@@ -32,6 +32,7 @@
 #include "winternl.h"
 #include "unix_private.h"
 #include "wine/debug.h"
+#include "wine/wex_session0.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(reg);
 
@@ -203,23 +204,6 @@ static BOOL regvirt_qualifies(void)
     return TRUE;
 }
 
-/* characters of path matched by an ASCII prefix that ends there or at a backslash, without regard to case */
-static unsigned int regvirt_match( const WCHAR *path, unsigned int count, const char *prefix )
-{
-    unsigned int i, len = strlen( prefix );
-
-    if (count < len) return 0;
-    for (i = 0; i < len; i++)
-    {
-        WCHAR ch = path[i];
-        unsigned char p = prefix[i];
-        if (ch >= 'A' && ch <= 'Z') ch += 'a' - 'A';
-        if (p >= 'A' && p <= 'Z') p += 'a' - 'A';
-        if (ch != p) return 0;
-    }
-    return (count == len || path[len] == '\\') ? len : 0;
-}
-
 /* the part of an absolute HKLM\Software path below Software (and below Wow6432Node) that is virtualized;
  * FALSE outside the scope */
 static BOOL regvirt_scope( const UNICODE_STRING *path, const WCHAR **rest, unsigned int *rest_count )
@@ -228,17 +212,17 @@ static BOOL regvirt_scope( const UNICODE_STRING *path, const WCHAR **rest, unsig
     unsigned int count = path->Length / sizeof(WCHAR), n, i;
     const WCHAR *p = path->Buffer;
 
-    if (!(n = regvirt_match( p, count, "\\Registry\\Machine\\Software" ))) return FALSE;
+    if (!(n = wex_session_key_match( p, count, "\\Registry\\Machine\\Software" ))) return FALSE;
     if (n == count) return FALSE;  /* Software itself */
     p += n + 1;
     count -= n + 1;
-    if ((n = regvirt_match( p, count, "Wow6432Node" )))
+    if ((n = wex_session_key_match( p, count, "Wow6432Node" )))
     {
         if (n == count) return FALSE;
         p += n + 1;
         count -= n + 1;
     }
-    for (i = 0; i < ARRAY_SIZE(excluded); i++) if (regvirt_match( p, count, excluded[i] )) return FALSE;
+    for (i = 0; i < ARRAY_SIZE(excluded); i++) if (wex_session_key_match( p, count, excluded[i] )) return FALSE;
     *rest = p;
     *rest_count = count;
     return TRUE;

@@ -318,23 +318,6 @@ static const char * const regsrv_session_default_keys[] = { WEX_SESSION_DEFAULT_
 
 static int get_unix_tid(void);
 
-/* characters of path matched by an ASCII prefix that ends there or at a backslash, without regard to case */
-static unsigned int regsrv_match( const WCHAR *path, unsigned int count, const char *prefix )
-{
-    unsigned int i, len = strlen( prefix );
-
-    if (count < len) return 0;
-    for (i = 0; i < len; i++)
-    {
-        WCHAR ch = path[i];
-        unsigned char p = prefix[i];
-        if (ch >= 'A' && ch <= 'Z') ch += 'a' - 'A';
-        if (p >= 'A' && p <= 'Z') p += 'a' - 'A';
-        if (ch != p) return 0;
-    }
-    return (count == len || path[len] == '\\') ? len : 0;
-}
-
 /* the path starts with an ASCII prefix, without regard to case */
 static BOOL regsrv_match_start( const WCHAR *path, unsigned int count, const char *prefix )
 {
@@ -356,7 +339,7 @@ static BOOL regsrv_in_list( const WCHAR *rest, unsigned int count, const char * 
 {
     unsigned int i;
 
-    for (i = 0; i < n; i++) if (regsrv_match( rest, count, list[i] )) return TRUE;
+    for (i = 0; i < n; i++) if (wex_session_key_match( rest, count, list[i] )) return TRUE;
     return FALSE;
 }
 
@@ -366,10 +349,10 @@ static BOOL regsrv_machine_path( const WCHAR *path, USHORT len )
     unsigned int count = len / sizeof(WCHAR), n;
 
     if (!path) return FALSE;
-    if ((n = regsrv_match( path, count, "\\Registry\\Machine" )))
+    if ((n = wex_session_key_match( path, count, "\\Registry\\Machine" )))
         return n == count || !regsrv_in_list( path + n + 1, count - n - 1, regsrv_session_machine_keys,
                                               ARRAY_SIZE(regsrv_session_machine_keys) );
-    if ((n = regsrv_match( path, count, "\\Registry\\User\\.Default" )))
+    if ((n = wex_session_key_match( path, count, "\\Registry\\User\\.Default" )))
         return n == count || !regsrv_in_list( path + n + 1, count - n - 1, regsrv_session_default_keys,
                                               ARRAY_SIZE(regsrv_session_default_keys) );
     return FALSE;
@@ -412,9 +395,9 @@ static BOOL regsrv_user_path( const WCHAR *path, USHORT len )
     unsigned int count = len / sizeof(WCHAR);
 
     if (!regsrv_user_hive || !regsrv_user_prefix[0] || !path) return FALSE;
-    if (regsrv_match( path, count, regsrv_user_prefix )) return TRUE;
+    if (wex_session_key_match( path, count, regsrv_user_prefix )) return TRUE;
     snprintf( classes, sizeof(classes), "%s_Classes", regsrv_user_prefix );
-    return regsrv_match( path, count, classes ) != 0;
+    return wex_session_key_match( path, count, classes ) != 0;
 }
 
 static void regsrv_lock( sigset_t *old )

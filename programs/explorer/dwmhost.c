@@ -159,7 +159,12 @@ void stop_dwm_broker(void)
 {
     if (!dwm_thread) return;
     SetEvent( dwm_stop_event );
-    WaitForSingleObject( dwm_thread, 5000 );
+    if (WaitForSingleObject( dwm_thread, 5000 ))
+    {
+        /* the supervisor still runs and waits on the event: keep both, and start no second one */
+        ERR( "the dwm.exe supervisor did not stop\n" );
+        return;
+    }
     CloseHandle( dwm_thread );
     CloseHandle( dwm_stop_event );
     dwm_thread = dwm_stop_event = NULL;

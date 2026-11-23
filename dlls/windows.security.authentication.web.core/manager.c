@@ -41,14 +41,14 @@ static HRESULT create_not_available_result( IWebTokenRequestResult **out )
     HRESULT hr;
 
     if (FAILED(hr = WindowsCreateString( L"No account provider is available.",
-                                         ARRAY_SIZE(L"No account provider is available."), &message )))
+                                         ARRAY_SIZE(L"No account provider is available.") - 1, &message )))
         return hr;
-    if (FAILED(hr = vector_view_webtokenresponse_create_empty( &response_data )))
+    if (FAILED(hr = vector_view_webtokenresponse_create( NULL, 0, &response_data )))
     {
         WindowsDeleteString( message );
         return hr;
     }
-    if (FAILED(hr = webprovidererror_create( 0x80070490, message, &response_error )))
+    if (FAILED(hr = webprovidererror_create( HRESULT_FROM_WIN32(ERROR_NOT_FOUND), message, &response_error )))
     {
         WindowsDeleteString( message );
         IVectorView_WebTokenResponse_Release( response_data );
@@ -67,7 +67,7 @@ static HRESULT create_find_all_result( IFindAllAccountsResult **out )
     IVectorView_WebAccount *accounts;
     HRESULT hr;
 
-    if (FAILED(hr = vector_view_webaccount_create_empty( &accounts ))) return hr;
+    if (FAILED(hr = vector_view_webaccount_create( NULL, 0, &accounts ))) return hr;
     hr = findallaccountsresult_create( FindAllWebAccountsStatus_NotSupportedByProvider, accounts, NULL, out );
     IVectorView_WebAccount_Release( accounts );
     return hr;
@@ -115,7 +115,7 @@ static HRESULT fallback_token_result( const char *method, IInspectable *request,
     if (status == WebTokenRequestStatus_UserInteractionRequired) diagnostic_interaction_error( request, &code, &text );
     FIXME( "diagnostic: status %d, error %#x %s.\n", status, code, debugstr_w( text ) );
     if (FAILED(hr = WindowsCreateString( text, wcslen( text ), &message ))) return hr;
-    if (FAILED(hr = vector_view_webtokenresponse_create_empty( &response_data )))
+    if (FAILED(hr = vector_view_webtokenresponse_create( NULL, 0, &response_data )))
     {
         WindowsDeleteString( message );
         return hr;
@@ -145,6 +145,7 @@ enum broker_call_type
     BROKER_CALL_TOKEN,
     BROKER_CALL_FIND_ACCOUNTS,
     BROKER_CALL_FIND_ACCOUNT,
+    BROKER_CALL_SIGN_OUT,
 };
 
 struct broker_call
@@ -153,13 +154,12 @@ struct broker_call
     LONG ref;
     enum broker_call_type type;
     const char *method;
-    IInspectable *request;              /* BROKER_CALL_TOKEN */
-    IInspectable *account;              /* the WebAccount the request names, or NULL */
+    IInspectable *request;              /* BROKER_CALL_TOKEN: for the answer without a broker */
+    struct token_broker_call *prepared; /* the request as the broker's message, read when the call was made, or NULL */
     WebTokenRequestStatus status;       /* the answer without a broker */
-    BOOL silent;
-    HWND window;
-    IWebAccountProvider *provider;      /* BROKER_CALL_FIND_ACCOUNTS, BROKER_CALL_FIND_ACCOUNT */
+    IWebAccountProvider *provider;      /* BROKER_CALL_FIND_ACCOUNTS, BROKER_CALL_FIND_ACCOUNT, BROKER_CALL_SIGN_OUT */
     HSTRING string;                     /* the client id, or the account id */
+    HSTRING client_id;                  /* BROKER_CALL_SIGN_OUT: the client whose tokens go, or NULL */
 };
 
 static inline struct broker_call *impl_from_IUnknown( IUnknown *iface )
@@ -192,9 +192,10 @@ static ULONG WINAPI broker_call_Release( IUnknown *iface )
     if (!ref)
     {
         if (impl->request) IInspectable_Release( impl->request );
-        if (impl->account) IInspectable_Release( impl->account );
+        token_broker_free( impl->prepared );
         if (impl->provider) IWebAccountProvider_Release( impl->provider );
         WindowsDeleteString( impl->string );
+        WindowsDeleteString( impl->client_id );
         free( impl );
     }
     return ref;
@@ -221,7 +222,7 @@ static HRESULT broker_call_callback( IUnknown *invoker, IUnknown *param, PROPVAR
     switch (call->type)
     {
     case BROKER_CALL_TOKEN:
-        if (FAILED(token_broker_request( call->request, call->account, call->silent, call->window, &token_result )) &&
+        if ((!call->prepared || FAILED(token_broker_run( call->prepared, &token_result ))) &&
             FAILED(hr = fallback_token_result( call->method, call->request, call->status, &token_result )))
             return hr;
         object = (IInspectable *)token_result;
@@ -236,6 +237,9 @@ static HRESULT broker_call_callback( IUnknown *invoker, IUnknown *param, PROPVAR
         if (FAILED(token_broker_find_account( call->provider, call->string, &account ))) account = NULL;
         object = (IInspectable *)account;
         break;
+    case BROKER_CALL_SIGN_OUT:
+        result->vt = VT_EMPTY;
+        return token_broker_sign_out( call->provider, call->string, call->client_id );
     }
     if (object)
     {
@@ -287,10 +291,12 @@ static HRESULT request_token( const char *method, IInspectable *request, IInspec
         call->type = BROKER_CALL_TOKEN;
         call->method = method;
         IInspectable_AddRef( (call->request = request) );
-        if ((call->account = account)) IInspectable_AddRef( account );
         call->status = status;
-        call->silent = status == WebTokenRequestStatus_UserInteractionRequired;
-        call->window = window;
+        /* read now: the program may change its request once the call returns; when it cannot be read, the call is
+         * answered as without a broker */
+        if (FAILED(token_broker_prepare( request, account, status == WebTokenRequestStatus_UserInteractionRequired,
+                                         window, &call->prepared )))
+            call->prepared = NULL;
         return broker_call_start( call, &IID_IAsyncOperation_WebTokenRequestResult, riid, out );
     }
 
@@ -354,13 +360,42 @@ static HRESULT find_account( IWebAccountProvider *provider, HSTRING id, IAsyncOp
     return create_completed_operation( &IID_IAsyncOperation_WebAccount, NULL, (void **)out );
 }
 
+static HRESULT completed_action_callback( IUnknown *invoker, IUnknown *param, PROPVARIANT *result, BOOL called_async )
+{
+    result->vt = VT_EMPTY;
+    return S_OK;
+}
+
+/* an action that is complete at once (nothing to do without a broker, or nothing kept to invalidate) */
+HRESULT completed_action_create( IAsyncAction **out )
+{
+    return async_action_create( NULL, NULL, completed_action_callback, out );
+}
+
+/* WebAccount.SignOutAsync: the account's tokens for client_id, or for the client ids the calling program has used
+ * when it is NULL (the broker never signs every client out) */
+HRESULT sign_out_async( IWebAccountProvider *provider, HSTRING account_id, HSTRING client_id, IAsyncAction **out )
+{
+    struct broker_call *call;
+    HRESULT hr;
+
+    *out = NULL;
+    if (!token_broker_enabled() || !provider) return completed_action_create( out );
+    if (!(call = broker_call_alloc())) return E_OUTOFMEMORY;
+    call->type = BROKER_CALL_SIGN_OUT;
+    IWebAccountProvider_AddRef( (call->provider = provider) );
+    if (SUCCEEDED(hr = WindowsDuplicateString( account_id, &call->string )) &&
+        SUCCEEDED(hr = WindowsDuplicateString( client_id, &call->client_id )))
+        hr = async_action_create( NULL, &call->IUnknown_iface, broker_call_callback, out );
+    broker_call_Release( &call->IUnknown_iface );
+    return hr;
+}
+
 /* the display name of a provider the token broker serves */
 static const WCHAR *broker_provider_name( HSTRING id, HSTRING authority )
 {
-    const WCHAR *text = WindowsGetStringRawBuffer( authority, NULL );
-
     if (wcscmp( WindowsGetStringRawBuffer( id, NULL ), L"https://login.microsoft.com" )) return L"Web account";
-    if (!wcscmp( text, L"consumers" )) return L"Microsoft account";
+    if (authority_is_consumers( authority )) return L"Microsoft account";
     return L"Work or school account";
 }
 
@@ -400,130 +435,69 @@ static inline struct manager *impl_from_IActivationFactory( IActivationFactory *
     return CONTAINING_RECORD( iface, struct manager, IActivationFactory_iface );
 }
 
-static inline struct manager *impl_from_IWebAuthenticationCoreManagerStatics( IWebAuthenticationCoreManagerStatics *iface )
+static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
 {
-    return CONTAINING_RECORD( iface, struct manager, IWebAuthenticationCoreManagerStatics_iface );
-}
+    struct manager *impl = impl_from_IActivationFactory( iface );
 
-static inline struct manager *impl_from_IWebAuthenticationCoreManagerStatics4( IWebAuthenticationCoreManagerStatics4 *iface )
-{
-    return CONTAINING_RECORD( iface, struct manager, IWebAuthenticationCoreManagerStatics4_iface );
-}
-
-static inline struct manager *impl_from_IWebAuthenticationCoreManagerInterop( IWebAuthenticationCoreManagerInterop *iface )
-{
-    return CONTAINING_RECORD( iface, struct manager, IWebAuthenticationCoreManagerInterop_iface );
-}
-
-static HRESULT manager_QueryInterface( struct manager *impl, REFIID iid, void **out )
-{
-    TRACE( "impl %p, iid %s, out %p.\n", impl, debugstr_guid( iid ), out );
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
 
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IActivationFactory ))
-    {
         *out = &impl->IActivationFactory_iface;
-        IInspectable_AddRef( *out );
-        return S_OK;
-    }
-
-    if (IsEqualGUID( iid, &IID_IWebAuthenticationCoreManagerStatics ))
-    {
+    else if (IsEqualGUID( iid, &IID_IWebAuthenticationCoreManagerStatics ))
         *out = &impl->IWebAuthenticationCoreManagerStatics_iface;
-        IInspectable_AddRef( *out );
-        return S_OK;
-    }
-
-    if (IsEqualGUID( iid, &IID_IWebAuthenticationCoreManagerStatics4 ))
-    {
+    else if (IsEqualGUID( iid, &IID_IWebAuthenticationCoreManagerStatics4 ))
         *out = &impl->IWebAuthenticationCoreManagerStatics4_iface;
-        IInspectable_AddRef( *out );
-        return S_OK;
-    }
-
-    if (IsEqualGUID( iid, &IID_IWebAuthenticationCoreManagerInterop ))
-    {
+    else if (IsEqualGUID( iid, &IID_IWebAuthenticationCoreManagerInterop ))
         *out = &impl->IWebAuthenticationCoreManagerInterop_iface;
-        IInspectable_AddRef( *out );
-        return S_OK;
+    else
+    {
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+        *out = NULL;
+        return E_NOINTERFACE;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
-    *out = NULL;
-    return E_NOINTERFACE;
+    IInspectable_AddRef( *out );
+    return S_OK;
 }
 
-static ULONG manager_AddRef( struct manager *impl )
+static ULONG WINAPI factory_AddRef( IActivationFactory *iface )
 {
+    struct manager *impl = impl_from_IActivationFactory( iface );
     ULONG ref = InterlockedIncrement( &impl->ref );
-    TRACE( "impl %p, ref %lu.\n", impl, ref );
+    TRACE( "iface %p, ref %lu.\n", iface, ref );
     return ref;
 }
 
-static ULONG manager_Release( struct manager *impl )
+static ULONG WINAPI factory_Release( IActivationFactory *iface )
 {
+    struct manager *impl = impl_from_IActivationFactory( iface );
     ULONG ref = InterlockedDecrement( &impl->ref );
-    TRACE( "impl %p, ref %lu.\n", impl, ref );
+    TRACE( "iface %p, ref %lu.\n", iface, ref );
     return ref;
 }
 
-static HRESULT manager_GetIids( struct manager *impl, ULONG *iid_count, IID **iids )
+static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "impl %p, iid_count %p, iids %p stub!\n", impl, iid_count, iids );
+    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
     return E_NOTIMPL;
 }
 
-static HRESULT manager_GetRuntimeClassName( struct manager *impl, HSTRING *class_name )
+static HRESULT WINAPI factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
 {
-    FIXME( "impl %p, class_name %p stub!\n", impl, class_name );
+    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
     return E_NOTIMPL;
 }
 
-static HRESULT manager_GetTrustLevel( struct manager *impl, TrustLevel *trust_level )
+static HRESULT WINAPI factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
 {
-    FIXME( "impl %p, trust_level %p stub!\n", impl, trust_level );
+    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
     return E_NOTIMPL;
 }
 
-/*
- *
- * IActivationFactory
- *
- */
-
-static HRESULT WINAPI manager_IActivationFactory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
-{
-    return manager_QueryInterface( impl_from_IActivationFactory( iface ), iid, out );
-}
-
-static ULONG WINAPI manager_IActivationFactory_AddRef( IActivationFactory *iface )
-{
-    return manager_AddRef( impl_from_IActivationFactory( iface ) );
-}
-
-static ULONG WINAPI manager_IActivationFactory_Release( IActivationFactory *iface )
-{
-    return manager_Release( impl_from_IActivationFactory( iface ) );
-}
-
-static HRESULT WINAPI manager_IActivationFactory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
-{
-    return manager_GetIids( impl_from_IActivationFactory( iface ), iid_count, iids );
-}
-
-static HRESULT WINAPI manager_IActivationFactory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
-{
-    return manager_GetRuntimeClassName( impl_from_IActivationFactory( iface ), class_name );
-}
-
-static HRESULT WINAPI manager_IActivationFactory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
-{
-    return manager_GetTrustLevel( impl_from_IActivationFactory( iface ), trust_level );
-}
-
-static HRESULT WINAPI manager_IActivationFactory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
 {
     FIXME( "iface %p, instance %p stub!\n", iface, instance );
     return E_NOTIMPL;
@@ -531,15 +505,15 @@ static HRESULT WINAPI manager_IActivationFactory_ActivateInstance( IActivationFa
 
 static const struct IActivationFactoryVtbl manager_activation_factory_vtbl =
 {
-    manager_IActivationFactory_QueryInterface,
-    manager_IActivationFactory_AddRef,
-    manager_IActivationFactory_Release,
+    factory_QueryInterface,
+    factory_AddRef,
+    factory_Release,
     /* IInspectable methods */
-    manager_IActivationFactory_GetIids,
-    manager_IActivationFactory_GetRuntimeClassName,
-    manager_IActivationFactory_GetTrustLevel,
+    factory_GetIids,
+    factory_GetRuntimeClassName,
+    factory_GetTrustLevel,
     /* IActivationFactory methods */
-    manager_IActivationFactory_ActivateInstance,
+    factory_ActivateInstance,
 };
 
 /*
@@ -548,35 +522,7 @@ static const struct IActivationFactoryVtbl manager_activation_factory_vtbl =
  *
  */
 
-static HRESULT WINAPI manager_statics_QueryInterface( IWebAuthenticationCoreManagerStatics *iface, REFIID iid, void **out )
-{
-    return manager_QueryInterface( impl_from_IWebAuthenticationCoreManagerStatics( iface ), iid, out );
-}
-
-static ULONG WINAPI manager_statics_AddRef( IWebAuthenticationCoreManagerStatics *iface )
-{
-    return manager_AddRef( impl_from_IWebAuthenticationCoreManagerStatics( iface ) );
-}
-
-static ULONG WINAPI manager_statics_Release( IWebAuthenticationCoreManagerStatics *iface )
-{
-    return manager_Release( impl_from_IWebAuthenticationCoreManagerStatics( iface ) );
-}
-
-static HRESULT WINAPI manager_statics_GetIids( IWebAuthenticationCoreManagerStatics *iface, ULONG *iid_count, IID **iids )
-{
-    return manager_GetIids( impl_from_IWebAuthenticationCoreManagerStatics( iface ), iid_count, iids );
-}
-
-static HRESULT WINAPI manager_statics_GetRuntimeClassName( IWebAuthenticationCoreManagerStatics *iface, HSTRING *class_name )
-{
-    return manager_GetRuntimeClassName( impl_from_IWebAuthenticationCoreManagerStatics( iface ), class_name );
-}
-
-static HRESULT WINAPI manager_statics_GetTrustLevel( IWebAuthenticationCoreManagerStatics *iface, TrustLevel *trust_level )
-{
-    return manager_GetTrustLevel( impl_from_IWebAuthenticationCoreManagerStatics( iface ), trust_level );
-}
+DEFINE_IINSPECTABLE( manager_statics, IWebAuthenticationCoreManagerStatics, struct manager, IActivationFactory_iface )
 
 static HRESULT WINAPI manager_statics_GetTokenSilentlyAsync( IWebAuthenticationCoreManagerStatics *iface,
                                                              IWebTokenRequest *request,
@@ -701,35 +647,7 @@ static const struct IWebAuthenticationCoreManagerStaticsVtbl manager_statics_vtb
  *
  */
 
-static HRESULT WINAPI manager_statics4_QueryInterface( IWebAuthenticationCoreManagerStatics4 *iface, REFIID iid, void **out )
-{
-    return manager_QueryInterface( impl_from_IWebAuthenticationCoreManagerStatics4( iface ), iid, out );
-}
-
-static ULONG WINAPI manager_statics4_AddRef( IWebAuthenticationCoreManagerStatics4 *iface )
-{
-    return manager_AddRef( impl_from_IWebAuthenticationCoreManagerStatics4( iface ) );
-}
-
-static ULONG WINAPI manager_statics4_Release( IWebAuthenticationCoreManagerStatics4 *iface )
-{
-    return manager_Release( impl_from_IWebAuthenticationCoreManagerStatics4( iface ) );
-}
-
-static HRESULT WINAPI manager_statics4_GetIids( IWebAuthenticationCoreManagerStatics4 *iface, ULONG *iid_count, IID **iids )
-{
-    return manager_GetIids( impl_from_IWebAuthenticationCoreManagerStatics4( iface ), iid_count, iids );
-}
-
-static HRESULT WINAPI manager_statics4_GetRuntimeClassName( IWebAuthenticationCoreManagerStatics4 *iface, HSTRING *class_name )
-{
-    return manager_GetRuntimeClassName( impl_from_IWebAuthenticationCoreManagerStatics4( iface ), class_name );
-}
-
-static HRESULT WINAPI manager_statics4_GetTrustLevel( IWebAuthenticationCoreManagerStatics4 *iface, TrustLevel *trust_level )
-{
-    return manager_GetTrustLevel( impl_from_IWebAuthenticationCoreManagerStatics4( iface ), trust_level );
-}
+DEFINE_IINSPECTABLE( manager_statics4, IWebAuthenticationCoreManagerStatics4, struct manager, IActivationFactory_iface )
 
 static HRESULT WINAPI manager_statics4_FindAllAccountsAsync( IWebAuthenticationCoreManagerStatics4 *iface,
                                                              IWebAccountProvider *provider,
@@ -817,35 +735,7 @@ static const struct IWebAuthenticationCoreManagerStatics4Vtbl manager_statics4_v
  *
  */
 
-static HRESULT WINAPI manager_interop_QueryInterface( IWebAuthenticationCoreManagerInterop *iface, REFIID iid, void **out )
-{
-    return manager_QueryInterface( impl_from_IWebAuthenticationCoreManagerInterop( iface ), iid, out );
-}
-
-static ULONG WINAPI manager_interop_AddRef( IWebAuthenticationCoreManagerInterop *iface )
-{
-    return manager_AddRef( impl_from_IWebAuthenticationCoreManagerInterop( iface ) );
-}
-
-static ULONG WINAPI manager_interop_Release( IWebAuthenticationCoreManagerInterop *iface )
-{
-    return manager_Release( impl_from_IWebAuthenticationCoreManagerInterop( iface ) );
-}
-
-static HRESULT WINAPI manager_interop_GetIids( IWebAuthenticationCoreManagerInterop *iface, ULONG *iid_count, IID **iids )
-{
-    return manager_GetIids( impl_from_IWebAuthenticationCoreManagerInterop( iface ), iid_count, iids );
-}
-
-static HRESULT WINAPI manager_interop_GetRuntimeClassName( IWebAuthenticationCoreManagerInterop *iface, HSTRING *class_name )
-{
-    return manager_GetRuntimeClassName( impl_from_IWebAuthenticationCoreManagerInterop( iface ), class_name );
-}
-
-static HRESULT WINAPI manager_interop_GetTrustLevel( IWebAuthenticationCoreManagerInterop *iface, TrustLevel *trust_level )
-{
-    return manager_GetTrustLevel( impl_from_IWebAuthenticationCoreManagerInterop( iface ), trust_level );
-}
+DEFINE_IINSPECTABLE( manager_interop, IWebAuthenticationCoreManagerInterop, struct manager, IActivationFactory_iface )
 
 static HRESULT WINAPI manager_interop_RequestTokenForWindowAsync( IWebAuthenticationCoreManagerInterop *iface, HWND appWindow,
                                                                   IInspectable *request, REFIID riid, void **asyncInfo )

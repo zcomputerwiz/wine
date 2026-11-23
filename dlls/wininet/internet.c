@@ -3331,6 +3331,11 @@ DWORD INET_SetOption(object_header_t *hdr, DWORD option, void *buf, DWORD size)
         if (!buf || size != sizeof(ULONG)) return ERROR_INVALID_PARAMETER;
         hdr->data_receive_timeout = *(ULONG *)buf;
         return ERROR_SUCCESS;
+    case INTERNET_OPTION_LISTEN_TIMEOUT:
+        /* only meaningful for the listening socket of an FTP session; Windows accepts it on any handle */
+        if (!buf || size != sizeof(ULONG)) return ERROR_INVALID_PARAMETER;
+        TRACE("INTERNET_OPTION_LISTEN_TIMEOUT %lu ignored\n", *(ULONG *)buf);
+        return ERROR_SUCCESS;
     }
 
     return ERROR_INTERNET_INVALID_OPTION;
@@ -3396,6 +3401,13 @@ static DWORD set_global_option(DWORD option, void *buf, DWORD size)
             return ERROR_BAD_ARGUMENTS;
 
         receive_timeout = *(ULONG*)buf;
+        return ERROR_SUCCESS;
+
+    case INTERNET_OPTION_LISTEN_TIMEOUT:
+        TRACE("INTERNET_OPTION_LISTEN_TIMEOUT\n");
+
+        if(size != sizeof(ULONG))
+            return ERROR_INTERNET_BAD_OPTION_LENGTH;
         return ERROR_SUCCESS;
 
     case INTERNET_OPTION_DATA_SEND_TIMEOUT:

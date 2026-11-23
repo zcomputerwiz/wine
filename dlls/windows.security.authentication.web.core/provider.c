@@ -44,47 +44,61 @@ BOOL diagnostic_provider_enabled( void )
     return TRUE;
 }
 
-/* the error of a silent request that needs the user, as Windows 11's Microsoft account provider gives it (checked
- * with a client id that is not registered): 0x80860006 "Error" for the consumers authority, 0xcaa10001 "Need user
- * interaction to continue." for organizations. Programs read it without a check for NULL. */
+/* the "consumers" authority: personal Microsoft accounts, as against an organization's */
+BOOL authority_is_consumers( HSTRING authority )
+{
+    static const WCHAR consumers[] = L"consumers";
+    const WCHAR *text;
+    UINT32 len;
+
+    text = WindowsGetStringRawBuffer( authority, &len );
+    return len == ARRAY_SIZE(consumers) - 1 && !wcsncmp( text, consumers, len );
+}
+
+BOOL provider_is_consumers( IWebAccountProvider *provider )
+{
+    IWebAccountProvider2 *provider2;
+    HSTRING authority = NULL;
+    BOOL ret;
+
+    if (!provider || FAILED(IWebAccountProvider_QueryInterface( provider, &IID_IWebAccountProvider2, (void **)&provider2 )))
+        return FALSE;
+    if (FAILED(IWebAccountProvider2_get_Authority( provider2, &authority ))) authority = NULL;
+    IWebAccountProvider2_Release( provider2 );
+    ret = authority_is_consumers( authority );
+    WindowsDeleteString( authority );
+    return ret;
+}
+
+/* the errors of a silent request that needs the user, as Windows 11's Microsoft account provider gives them (checked
+ * with a client id that is not registered) */
+#define E_MSA_INTERACTION_REQUIRED  0x80860006  /* the consumers authority: "Error" */
+#define E_AAD_INTERACTION_REQUIRED  0xcaa10001  /* organizations: "Need user interaction to continue." */
+
+/* that error for the request's provider; programs read it without a check for NULL */
 void diagnostic_interaction_error( IInspectable *request, UINT32 *code, const WCHAR **message )
 {
     IWebAccountProvider *provider = NULL;
-    IWebAccountProvider2 *provider2;
     IWebTokenRequest *token_request;
-    HSTRING authority = NULL;
-    INT32 cmp = 1;
+    BOOL consumers = FALSE;
 
     if (request && SUCCEEDED(IInspectable_QueryInterface( request, &IID_IWebTokenRequest, (void **)&token_request )))
     {
         if (SUCCEEDED(IWebTokenRequest_get_WebAccountProvider( token_request, &provider )) && provider)
         {
-            if (SUCCEEDED(IWebAccountProvider_QueryInterface( provider, &IID_IWebAccountProvider2, (void **)&provider2 )))
-            {
-                if (SUCCEEDED(IWebAccountProvider2_get_Authority( provider2, &authority )))
-                {
-                    HSTRING consumers;
-                    if (SUCCEEDED(WindowsCreateString( L"consumers", 9, &consumers )))
-                    {
-                        WindowsCompareStringOrdinal( authority, consumers, &cmp );
-                        WindowsDeleteString( consumers );
-                    }
-                    WindowsDeleteString( authority );
-                }
-                IWebAccountProvider2_Release( provider2 );
-            }
+            consumers = provider_is_consumers( provider );
             IWebAccountProvider_Release( provider );
         }
         IWebTokenRequest_Release( token_request );
     }
-    if (!cmp)
+    if (consumers)
     {
-        *code = 0x80860006;
+        *code = E_MSA_INTERACTION_REQUIRED;
         *message = L"Error";
     }
     else
     {
-        *code = 0xcaa10001;
+        *code = E_AAD_INTERACTION_REQUIRED;
         *message = L"Need user interaction to continue.";
     }
 }
@@ -102,11 +116,6 @@ struct provider
 static inline struct provider *impl_from_IWebAccountProvider( IWebAccountProvider *iface )
 {
     return CONTAINING_RECORD( iface, struct provider, IWebAccountProvider_iface );
-}
-
-static inline struct provider *impl_from_IWebAccountProvider2( IWebAccountProvider2 *iface )
-{
-    return CONTAINING_RECORD( iface, struct provider, IWebAccountProvider2_iface );
 }
 
 static HRESULT WINAPI provider_QueryInterface( IWebAccountProvider *iface, REFIID iid, void **out )
@@ -212,35 +221,7 @@ static const struct IWebAccountProviderVtbl provider_vtbl =
     provider_get_IconUri,
 };
 
-static HRESULT WINAPI provider2_QueryInterface( IWebAccountProvider2 *iface, REFIID iid, void **out )
-{
-    return provider_QueryInterface( &impl_from_IWebAccountProvider2( iface )->IWebAccountProvider_iface, iid, out );
-}
-
-static ULONG WINAPI provider2_AddRef( IWebAccountProvider2 *iface )
-{
-    return provider_AddRef( &impl_from_IWebAccountProvider2( iface )->IWebAccountProvider_iface );
-}
-
-static ULONG WINAPI provider2_Release( IWebAccountProvider2 *iface )
-{
-    return provider_Release( &impl_from_IWebAccountProvider2( iface )->IWebAccountProvider_iface );
-}
-
-static HRESULT WINAPI provider2_GetIids( IWebAccountProvider2 *iface, ULONG *iid_count, IID **iids )
-{
-    return provider_GetIids( &impl_from_IWebAccountProvider2( iface )->IWebAccountProvider_iface, iid_count, iids );
-}
-
-static HRESULT WINAPI provider2_GetRuntimeClassName( IWebAccountProvider2 *iface, HSTRING *class_name )
-{
-    return provider_GetRuntimeClassName( &impl_from_IWebAccountProvider2( iface )->IWebAccountProvider_iface, class_name );
-}
-
-static HRESULT WINAPI provider2_GetTrustLevel( IWebAccountProvider2 *iface, TrustLevel *trust_level )
-{
-    return provider_GetTrustLevel( &impl_from_IWebAccountProvider2( iface )->IWebAccountProvider_iface, trust_level );
-}
+DEFINE_IINSPECTABLE( provider2, IWebAccountProvider2, struct provider, IWebAccountProvider_iface )
 
 static HRESULT WINAPI provider2_get_DisplayPurpose( IWebAccountProvider2 *iface, HSTRING *value )
 {
