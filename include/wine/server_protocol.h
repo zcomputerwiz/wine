@@ -6505,6 +6505,99 @@ struct alpc_create_port_reply
 
 
 
+struct alpc_connect_request
+{
+    struct request_header __header;
+    unsigned int        flags;
+    /* VARARG(obj_attr,object_attributes); */
+    /* VARARG(data,bytes); */
+};
+struct alpc_connect_reply
+{
+    struct reply_header __header;
+    obj_handle_t        handle;
+    unsigned int        msg_id;
+};
+
+
+
+struct alpc_accept_request
+{
+    struct request_header __header;
+    obj_handle_t        handle;
+    unsigned int        msg_id;
+    int                 accept;
+    mem_size_t          context;
+    /* VARARG(data,bytes); */
+};
+struct alpc_accept_reply
+{
+    struct reply_header __header;
+    obj_handle_t        handle;
+    char __pad_12[4];
+};
+
+
+
+struct alpc_send_receive_request
+{
+    struct request_header __header;
+    obj_handle_t        handle;
+    unsigned int        flags;
+    int                 has_send;
+    int                 has_recv;
+    unsigned int        msg_id;
+    unsigned int        max_recv;
+    /* VARARG(data,bytes); */
+    char __pad_36[4];
+};
+struct alpc_send_receive_reply
+{
+    struct reply_header __header;
+    int                 has_msg;
+    unsigned int        type;
+    unsigned int        msg_id;
+    unsigned int        callback_id;
+    unsigned int        pid;
+    unsigned int        tid;
+    unsigned int        status;
+    unsigned int        data_len;
+    unsigned int        sequence;
+    int                 has_context;
+    mem_size_t          port_context;
+    unsigned int        sent_id;
+    /* VARARG(data,bytes); */
+    char __pad_60[4];
+};
+
+
+
+struct alpc_disconnect_request
+{
+    struct request_header __header;
+    obj_handle_t        handle;
+};
+struct alpc_disconnect_reply
+{
+    struct reply_header __header;
+};
+
+
+
+struct alpc_impersonate_request
+{
+    struct request_header __header;
+    obj_handle_t        handle;
+    unsigned int        pid;
+    unsigned int        tid;
+};
+struct alpc_impersonate_reply
+{
+    struct reply_header __header;
+};
+
+
+
 struct dwm_connect_request
 {
     struct request_header __header;
@@ -6967,6 +7060,11 @@ enum request
     REQ_d3dkmt_sync_wait,
     REQ_d3dkmt_sync_signal,
     REQ_alpc_create_port,
+    REQ_alpc_connect,
+    REQ_alpc_accept,
+    REQ_alpc_send_receive,
+    REQ_alpc_disconnect,
+    REQ_alpc_impersonate,
     REQ_dwm_connect,
     REQ_dwm_get_broker_capability,
     REQ_dwm_broker_register,
@@ -7305,6 +7403,11 @@ union generic_request
     struct d3dkmt_sync_wait_request d3dkmt_sync_wait_request;
     struct d3dkmt_sync_signal_request d3dkmt_sync_signal_request;
     struct alpc_create_port_request alpc_create_port_request;
+    struct alpc_connect_request alpc_connect_request;
+    struct alpc_accept_request alpc_accept_request;
+    struct alpc_send_receive_request alpc_send_receive_request;
+    struct alpc_disconnect_request alpc_disconnect_request;
+    struct alpc_impersonate_request alpc_impersonate_request;
     struct dwm_connect_request dwm_connect_request;
     struct dwm_get_broker_capability_request dwm_get_broker_capability_request;
     struct dwm_broker_register_request dwm_broker_register_request;
@@ -7641,6 +7744,11 @@ union generic_reply
     struct d3dkmt_sync_wait_reply d3dkmt_sync_wait_reply;
     struct d3dkmt_sync_signal_reply d3dkmt_sync_signal_reply;
     struct alpc_create_port_reply alpc_create_port_reply;
+    struct alpc_connect_reply alpc_connect_reply;
+    struct alpc_accept_reply alpc_accept_reply;
+    struct alpc_send_receive_reply alpc_send_receive_reply;
+    struct alpc_disconnect_reply alpc_disconnect_reply;
+    struct alpc_impersonate_reply alpc_impersonate_reply;
     struct dwm_connect_reply dwm_connect_reply;
     struct dwm_get_broker_capability_reply dwm_get_broker_capability_reply;
     struct dwm_broker_register_reply dwm_broker_register_reply;
@@ -7651,6 +7759,6 @@ union generic_reply
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 986
+#define SERVER_PROTOCOL_VERSION 988
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
