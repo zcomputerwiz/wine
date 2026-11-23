@@ -12,4 +12,5 @@ SOURCES = \
 	map.c \
 	provider.c \
 	request.c \
-	response.c
+	response.c \
+	vector.c

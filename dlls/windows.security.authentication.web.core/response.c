@@ -24,376 +24,49 @@ WINE_DEFAULT_DEBUG_CHANNEL(webcore);
 
 /*
  *
- * Empty IVectorView<WebTokenResponse>
+ * The result lists: IVectorView<WebTokenResponse> and IVectorView<WebAccount>, views of vector.c's IVector
  *
  */
 
-struct empty_vecview_webtokenresponse
+static const struct vector_iids webtokenresponse_iids =
 {
-    IVectorView_WebTokenResponse IVectorView_WebTokenResponse_iface;
-    LONG ref;
-    UINT32 count;
-    IWebTokenResponse **items;
+    .vector = &IID_IVector_WebTokenResponse,
+    .view = &IID_IVectorView_WebTokenResponse,
+    .iterable = &IID_IIterable_WebTokenResponse,
+    .iterator = &IID_IIterator_WebTokenResponse,
 };
 
-static inline struct empty_vecview_webtokenresponse *impl_from_IVectorView_WebTokenResponse( IVectorView_WebTokenResponse *iface )
+static const struct vector_iids webaccount_iids =
 {
-    return CONTAINING_RECORD( iface, struct empty_vecview_webtokenresponse, IVectorView_WebTokenResponse_iface );
-}
-
-static HRESULT WINAPI vecview_wtr_QueryInterface( IVectorView_WebTokenResponse *iface, REFIID iid, void **out )
-{
-    struct empty_vecview_webtokenresponse *impl = impl_from_IVectorView_WebTokenResponse( iface );
-
-    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
-
-    if (IsEqualGUID( iid, &IID_IUnknown ) ||
-        IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IVectorView_WebTokenResponse ))
-    {
-        *out = &impl->IVectorView_WebTokenResponse_iface;
-        IInspectable_AddRef( *out );
-        return S_OK;
-    }
-
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
-    *out = NULL;
-    return E_NOINTERFACE;
-}
-
-static ULONG WINAPI vecview_wtr_AddRef( IVectorView_WebTokenResponse *iface )
-{
-    struct empty_vecview_webtokenresponse *impl = impl_from_IVectorView_WebTokenResponse( iface );
-    ULONG ref = InterlockedIncrement( &impl->ref );
-    TRACE( "iface %p, ref %lu.\n", iface, ref );
-    return ref;
-}
-
-static ULONG WINAPI vecview_wtr_Release( IVectorView_WebTokenResponse *iface )
-{
-    struct empty_vecview_webtokenresponse *impl = impl_from_IVectorView_WebTokenResponse( iface );
-    ULONG ref = InterlockedDecrement( &impl->ref );
-    TRACE( "iface %p, ref %lu.\n", iface, ref );
-
-    if (!ref)
-    {
-        UINT32 i;
-        for (i = 0; i < impl->count; i++) IWebTokenResponse_Release( impl->items[i] );
-        free( impl->items );
-        free( impl );
-    }
-    return ref;
-}
-
-static HRESULT WINAPI vecview_wtr_GetIids( IVectorView_WebTokenResponse *iface, ULONG *iid_count, IID **iids )
-{
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
-}
-
-static HRESULT WINAPI vecview_wtr_GetRuntimeClassName( IVectorView_WebTokenResponse *iface, HSTRING *class_name )
-{
-    return WindowsCreateString( L"Windows.Foundation.Collections.IVectorView`1<Windows.Security.Authentication.Web.Core.WebTokenResponse>",
-                                ARRAY_SIZE(L"Windows.Foundation.Collections.IVectorView`1<Windows.Security.Authentication.Web.Core.WebTokenResponse>") - 1,
-                                class_name );
-}
-
-static HRESULT WINAPI vecview_wtr_GetTrustLevel( IVectorView_WebTokenResponse *iface, TrustLevel *trust_level )
-{
-    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
-    return E_NOTIMPL;
-}
-
-static HRESULT WINAPI vecview_wtr_GetAt( IVectorView_WebTokenResponse *iface, UINT32 index, IWebTokenResponse **value )
-{
-    struct empty_vecview_webtokenresponse *impl = impl_from_IVectorView_WebTokenResponse( iface );
-
-    TRACE( "iface %p, index %u, value %p.\n", iface, index, value );
-
-    if (!value) return E_POINTER;
-    *value = NULL;
-    if (index >= impl->count) return E_BOUNDS;
-    IWebTokenResponse_AddRef( (*value = impl->items[index]) );
-    return S_OK;
-}
-
-static HRESULT WINAPI vecview_wtr_get_Size( IVectorView_WebTokenResponse *iface, UINT32 *value )
-{
-    TRACE( "iface %p, value %p.\n", iface, value );
-
-    if (!value) return E_POINTER;
-    *value = impl_from_IVectorView_WebTokenResponse( iface )->count;
-    return S_OK;
-}
-
-static HRESULT WINAPI vecview_wtr_IndexOf( IVectorView_WebTokenResponse *iface, IWebTokenResponse *element, UINT32 *index, boolean *found )
-{
-    struct empty_vecview_webtokenresponse *impl = impl_from_IVectorView_WebTokenResponse( iface );
-    UINT32 i;
-
-    TRACE( "iface %p, element %p, index %p, found %p.\n", iface, element, index, found );
-
-    if (!found) return E_POINTER;
-    *found = FALSE;
-    if (index) *index = 0;
-    for (i = 0; i < impl->count; i++)
-    {
-        if (impl->items[i] != element) continue;
-        *found = TRUE;
-        if (index) *index = i;
-        break;
-    }
-    return S_OK;
-}
-
-static HRESULT WINAPI vecview_wtr_GetMany( IVectorView_WebTokenResponse *iface, UINT32 start_index, UINT32 items_size,
-                                           IWebTokenResponse **items, UINT32 *count )
-{
-    struct empty_vecview_webtokenresponse *impl = impl_from_IVectorView_WebTokenResponse( iface );
-    UINT32 i;
-
-    TRACE( "iface %p, start_index %u, items_size %u, items %p, count %p.\n", iface, start_index, items_size, items, count );
-
-    if (!count) return E_POINTER;
-    *count = 0;
-    if (start_index > impl->count) return E_BOUNDS;
-    for (i = start_index; i < impl->count && i - start_index < items_size; i++)
-        IWebTokenResponse_AddRef( (items[i - start_index] = impl->items[i]) );
-    *count = i - start_index;
-    return S_OK;
-}
-
-static const struct IVectorView_WebTokenResponseVtbl vecview_wtr_vtbl =
-{
-    /* IUnknown methods */
-    vecview_wtr_QueryInterface,
-    vecview_wtr_AddRef,
-    vecview_wtr_Release,
-    /* IInspectable methods */
-    vecview_wtr_GetIids,
-    vecview_wtr_GetRuntimeClassName,
-    vecview_wtr_GetTrustLevel,
-    /* IVectorView methods */
-    vecview_wtr_GetAt,
-    vecview_wtr_get_Size,
-    vecview_wtr_IndexOf,
-    vecview_wtr_GetMany,
+    .vector = &IID_IVector_WebAccount,
+    .view = &IID_IVectorView_WebAccount,
+    .iterable = &IID_IIterable_WebAccount,
+    .iterator = &IID_IIterator_WebAccount,
 };
 
 /* a view of count items (each one AddRef'ed), or an empty one */
+static HRESULT vector_view_create( const struct vector_iids *iids, IInspectable **items, UINT32 count, void **out )
+{
+    IVector_IInspectable *vector;
+    HRESULT hr;
+    UINT32 i;
+
+    *out = NULL;
+    if (FAILED(hr = vector_create( iids, (void **)&vector ))) return hr;
+    for (i = 0; SUCCEEDED(hr) && i < count; i++) hr = IVector_IInspectable_Append( vector, items[i] );
+    if (SUCCEEDED(hr)) hr = IVector_IInspectable_GetView( vector, (IVectorView_IInspectable **)out );
+    IVector_IInspectable_Release( vector );
+    return hr;
+}
+
 HRESULT vector_view_webtokenresponse_create( IWebTokenResponse **items, UINT32 count, IVectorView_WebTokenResponse **out )
 {
-    struct empty_vecview_webtokenresponse *impl;
-    UINT32 i;
-
-    *out = NULL;
-    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
-    impl->IVectorView_WebTokenResponse_iface.lpVtbl = &vecview_wtr_vtbl;
-    impl->ref = 1;
-    if (count && !(impl->items = calloc( count, sizeof(*impl->items) )))
-    {
-        free( impl );
-        return E_OUTOFMEMORY;
-    }
-    for (i = 0; i < count; i++) IWebTokenResponse_AddRef( (impl->items[i] = items[i]) );
-    impl->count = count;
-
-    *out = &impl->IVectorView_WebTokenResponse_iface;
-    TRACE( "created IVectorView_WebTokenResponse %p\n", *out );
-    return S_OK;
+    return vector_view_create( &webtokenresponse_iids, (IInspectable **)items, count, (void **)out );
 }
 
-HRESULT vector_view_webtokenresponse_create_empty( IVectorView_WebTokenResponse **out )
-{
-    return vector_view_webtokenresponse_create( NULL, 0, out );
-}
-
-/*
- *
- * Empty IVectorView<WebAccount>
- *
- */
-
-struct empty_vecview_webaccount
-{
-    IVectorView_WebAccount IVectorView_WebAccount_iface;
-    LONG ref;
-    UINT32 count;
-    IWebAccount **items;
-};
-
-static inline struct empty_vecview_webaccount *impl_from_IVectorView_WebAccount( IVectorView_WebAccount *iface )
-{
-    return CONTAINING_RECORD( iface, struct empty_vecview_webaccount, IVectorView_WebAccount_iface );
-}
-
-static HRESULT WINAPI vecview_wa_QueryInterface( IVectorView_WebAccount *iface, REFIID iid, void **out )
-{
-    struct empty_vecview_webaccount *impl = impl_from_IVectorView_WebAccount( iface );
-
-    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
-
-    if (IsEqualGUID( iid, &IID_IUnknown ) ||
-        IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IVectorView_WebAccount ))
-    {
-        *out = &impl->IVectorView_WebAccount_iface;
-        IInspectable_AddRef( *out );
-        return S_OK;
-    }
-
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
-    *out = NULL;
-    return E_NOINTERFACE;
-}
-
-static ULONG WINAPI vecview_wa_AddRef( IVectorView_WebAccount *iface )
-{
-    struct empty_vecview_webaccount *impl = impl_from_IVectorView_WebAccount( iface );
-    ULONG ref = InterlockedIncrement( &impl->ref );
-    TRACE( "iface %p, ref %lu.\n", iface, ref );
-    return ref;
-}
-
-static ULONG WINAPI vecview_wa_Release( IVectorView_WebAccount *iface )
-{
-    struct empty_vecview_webaccount *impl = impl_from_IVectorView_WebAccount( iface );
-    ULONG ref = InterlockedDecrement( &impl->ref );
-    TRACE( "iface %p, ref %lu.\n", iface, ref );
-
-    if (!ref)
-    {
-        UINT32 i;
-        for (i = 0; i < impl->count; i++) IWebAccount_Release( impl->items[i] );
-        free( impl->items );
-        free( impl );
-    }
-    return ref;
-}
-
-static HRESULT WINAPI vecview_wa_GetIids( IVectorView_WebAccount *iface, ULONG *iid_count, IID **iids )
-{
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
-}
-
-static HRESULT WINAPI vecview_wa_GetRuntimeClassName( IVectorView_WebAccount *iface, HSTRING *class_name )
-{
-    return WindowsCreateString( L"Windows.Foundation.Collections.IVectorView`1<Windows.Security.Credentials.WebAccount>",
-                                ARRAY_SIZE(L"Windows.Foundation.Collections.IVectorView`1<Windows.Security.Credentials.WebAccount>") - 1,
-                                class_name );
-}
-
-static HRESULT WINAPI vecview_wa_GetTrustLevel( IVectorView_WebAccount *iface, TrustLevel *trust_level )
-{
-    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
-    return E_NOTIMPL;
-}
-
-static HRESULT WINAPI vecview_wa_GetAt( IVectorView_WebAccount *iface, UINT32 index, IWebAccount **value )
-{
-    struct empty_vecview_webaccount *impl = impl_from_IVectorView_WebAccount( iface );
-
-    TRACE( "iface %p, index %u, value %p.\n", iface, index, value );
-
-    if (!value) return E_POINTER;
-    *value = NULL;
-    if (index >= impl->count) return E_BOUNDS;
-    IWebAccount_AddRef( (*value = impl->items[index]) );
-    return S_OK;
-}
-
-static HRESULT WINAPI vecview_wa_get_Size( IVectorView_WebAccount *iface, UINT32 *value )
-{
-    TRACE( "iface %p, value %p.\n", iface, value );
-
-    if (!value) return E_POINTER;
-    *value = impl_from_IVectorView_WebAccount( iface )->count;
-    return S_OK;
-}
-
-static HRESULT WINAPI vecview_wa_IndexOf( IVectorView_WebAccount *iface, IWebAccount *element, UINT32 *index, boolean *found )
-{
-    struct empty_vecview_webaccount *impl = impl_from_IVectorView_WebAccount( iface );
-    UINT32 i;
-
-    TRACE( "iface %p, element %p, index %p, found %p.\n", iface, element, index, found );
-
-    if (!found) return E_POINTER;
-    *found = FALSE;
-    if (index) *index = 0;
-    for (i = 0; i < impl->count; i++)
-    {
-        if (impl->items[i] != element) continue;
-        *found = TRUE;
-        if (index) *index = i;
-        break;
-    }
-    return S_OK;
-}
-
-static HRESULT WINAPI vecview_wa_GetMany( IVectorView_WebAccount *iface, UINT32 start_index, UINT32 items_size,
-                                          IWebAccount **items, UINT32 *count )
-{
-    struct empty_vecview_webaccount *impl = impl_from_IVectorView_WebAccount( iface );
-    UINT32 i;
-
-    TRACE( "iface %p, start_index %u, items_size %u, items %p, count %p.\n", iface, start_index, items_size, items, count );
-
-    if (!count) return E_POINTER;
-    *count = 0;
-    if (start_index > impl->count) return E_BOUNDS;
-    for (i = start_index; i < impl->count && i - start_index < items_size; i++)
-        IWebAccount_AddRef( (items[i - start_index] = impl->items[i]) );
-    *count = i - start_index;
-    return S_OK;
-}
-
-static const struct IVectorView_WebAccountVtbl vecview_wa_vtbl =
-{
-    /* IUnknown methods */
-    vecview_wa_QueryInterface,
-    vecview_wa_AddRef,
-    vecview_wa_Release,
-    /* IInspectable methods */
-    vecview_wa_GetIids,
-    vecview_wa_GetRuntimeClassName,
-    vecview_wa_GetTrustLevel,
-    /* IVectorView methods */
-    vecview_wa_GetAt,
-    vecview_wa_get_Size,
-    vecview_wa_IndexOf,
-    vecview_wa_GetMany,
-};
-
-/* a view of count items (each one AddRef'ed), or an empty one */
 HRESULT vector_view_webaccount_create( IWebAccount **items, UINT32 count, IVectorView_WebAccount **out )
 {
-    struct empty_vecview_webaccount *impl;
-    UINT32 i;
-
-    *out = NULL;
-    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
-    impl->IVectorView_WebAccount_iface.lpVtbl = &vecview_wa_vtbl;
-    impl->ref = 1;
-    if (count && !(impl->items = calloc( count, sizeof(*impl->items) )))
-    {
-        free( impl );
-        return E_OUTOFMEMORY;
-    }
-    for (i = 0; i < count; i++) IWebAccount_AddRef( (impl->items[i] = items[i]) );
-    impl->count = count;
-
-    *out = &impl->IVectorView_WebAccount_iface;
-    TRACE( "created IVectorView_WebAccount %p\n", *out );
-    return S_OK;
-}
-
-HRESULT vector_view_webaccount_create_empty( IVectorView_WebAccount **out )
-{
-    return vector_view_webaccount_create( NULL, 0, out );
+    return vector_view_create( &webaccount_iids, (IInspectable **)items, count, (void **)out );
 }
 
 /*
@@ -1139,10 +812,15 @@ static HRESULT WINAPI web_token_request_result_get_ResponseError( IWebTokenReque
     return S_OK;
 }
 
+/* A completed action: the broker's cached access token is not dropped (the result does not know its request, and the
+ * protocol has no such request yet); the next silent request answers from the cache until the token expires. */
 static HRESULT WINAPI web_token_request_result_InvalidateCacheAsync( IWebTokenRequestResult *iface, IAsyncAction **asyncInfo )
 {
-    FIXME( "iface %p, asyncInfo %p stub!\n", iface, asyncInfo );
-    return E_NOTIMPL;
+    static int once;
+
+    if (!once++) FIXME( "iface %p, asyncInfo %p semi-stub!\n", iface, asyncInfo );
+    if (!asyncInfo) return E_POINTER;
+    return completed_action_create( asyncInfo );
 }
 
 static const struct IWebTokenRequestResultVtbl web_token_request_result_vtbl =

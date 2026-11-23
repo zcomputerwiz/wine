@@ -118,11 +118,6 @@ static inline struct provider *impl_from_IWebAccountProvider( IWebAccountProvide
     return CONTAINING_RECORD( iface, struct provider, IWebAccountProvider_iface );
 }
 
-static inline struct provider *impl_from_IWebAccountProvider2( IWebAccountProvider2 *iface )
-{
-    return CONTAINING_RECORD( iface, struct provider, IWebAccountProvider2_iface );
-}
-
 static HRESULT WINAPI provider_QueryInterface( IWebAccountProvider *iface, REFIID iid, void **out )
 {
     struct provider *impl = impl_from_IWebAccountProvider( iface );
@@ -226,35 +221,7 @@ static const struct IWebAccountProviderVtbl provider_vtbl =
     provider_get_IconUri,
 };
 
-static HRESULT WINAPI provider2_QueryInterface( IWebAccountProvider2 *iface, REFIID iid, void **out )
-{
-    return provider_QueryInterface( &impl_from_IWebAccountProvider2( iface )->IWebAccountProvider_iface, iid, out );
-}
-
-static ULONG WINAPI provider2_AddRef( IWebAccountProvider2 *iface )
-{
-    return provider_AddRef( &impl_from_IWebAccountProvider2( iface )->IWebAccountProvider_iface );
-}
-
-static ULONG WINAPI provider2_Release( IWebAccountProvider2 *iface )
-{
-    return provider_Release( &impl_from_IWebAccountProvider2( iface )->IWebAccountProvider_iface );
-}
-
-static HRESULT WINAPI provider2_GetIids( IWebAccountProvider2 *iface, ULONG *iid_count, IID **iids )
-{
-    return provider_GetIids( &impl_from_IWebAccountProvider2( iface )->IWebAccountProvider_iface, iid_count, iids );
-}
-
-static HRESULT WINAPI provider2_GetRuntimeClassName( IWebAccountProvider2 *iface, HSTRING *class_name )
-{
-    return provider_GetRuntimeClassName( &impl_from_IWebAccountProvider2( iface )->IWebAccountProvider_iface, class_name );
-}
-
-static HRESULT WINAPI provider2_GetTrustLevel( IWebAccountProvider2 *iface, TrustLevel *trust_level )
-{
-    return provider_GetTrustLevel( &impl_from_IWebAccountProvider2( iface )->IWebAccountProvider_iface, trust_level );
-}
+DEFINE_IINSPECTABLE( provider2, IWebAccountProvider2, struct provider, IWebAccountProvider_iface )
 
 static HRESULT WINAPI provider2_get_DisplayPurpose( IWebAccountProvider2 *iface, HSTRING *value )
 {

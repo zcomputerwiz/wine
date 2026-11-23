@@ -52,7 +52,8 @@ enum tokenbroker_kind
     TOKENBROKER_FIND_ACCOUNTS,      /* FindAllAccountsAsync: the reply's status is a FindAllWebAccountsStatus */
     TOKENBROKER_FIND_ACCOUNT,       /* FindAccountAsync by ACCOUNT_ID: TOKENBROKER_ACCOUNT_FOUND and the account, or
                                      * TOKENBROKER_ACCOUNT_NONE */
-    TOKENBROKER_SIGN_OUT,           /* WebAccount.SignOutAsync: the account's tokens (for CLIENT_ID if not empty) */
+    TOKENBROKER_SIGN_OUT,           /* WebAccount.SignOutAsync: the account's tokens for CLIENT_ID, or with an empty
+                                     * one, for the client ids the calling process has used */
 };
 
 /* the status of a FIND_ACCOUNT reply */
