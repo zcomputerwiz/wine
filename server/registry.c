@@ -61,6 +61,7 @@
 #include "e1s_token.h"
 #include "e1s_profile.h"
 #include "wine/wex_profile.h"
+#include "wine/wex_session0.h"
 
 #include "winternl.h"
 #if defined(WEX_E1S13_HKU_TEST) && defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
@@ -328,22 +329,10 @@ static WCHAR *build_relative_key_path( const struct key *key, const struct key *
     return path;
 }
 
+/* pathlen in bytes; the prefix matches up to a backslash or the end */
 static bool match_ascii_prefix_ci( const WCHAR *path, data_size_t pathlen, const char *prefix )
 {
-    size_t plen = strlen( prefix );
-    size_t wlen = pathlen / sizeof(WCHAR);
-    size_t i;
-
-    if (wlen < plen) return false;
-    for (i = 0; i < plen; i++)
-    {
-        WCHAR c1 = path[i];
-        WCHAR c2 = (unsigned char)prefix[i];
-        if (c1 >= 'A' && c1 <= 'Z') c1 += 'a' - 'A';
-        if (c2 >= 'A' && c2 <= 'Z') c2 += 'a' - 'A';
-        if (c1 != c2) return false;
-    }
-    return (wlen == plen || path[plen] == '\\');
+    return wex_session_key_match( path, pathlen / sizeof(WCHAR), prefix ) != 0;
 }
 
 static bool ascii_equals_unicode( const char *ascii, const WCHAR *uni, data_size_t unilen )
@@ -363,35 +352,9 @@ static bool ascii_equals_unicode( const char *ascii, const WCHAR *uni, data_size
     return true;
 }
 
-static const char * const hklm_ephemeral_prefixes[] =
-{
-    "System\\ControlSet001\\Enum",
-    "System\\CurrentControlSet\\Enum",
-    "System\\ControlSet001\\Control\\Class",
-    "System\\CurrentControlSet\\Control\\Class",
-    "System\\ControlSet001\\Control\\Video",
-    "System\\CurrentControlSet\\Control\\Video",
-    "System\\ControlSet001\\Control\\DeviceClasses",
-    "System\\CurrentControlSet\\Control\\DeviceClasses",
-    "System\\ControlSet001\\Control\\Print",
-    "System\\CurrentControlSet\\Control\\Print",
-    "System\\ControlSet001\\Control\\ComputerName",
-    "System\\CurrentControlSet\\Control\\ComputerName",
-    "System\\ControlSet001\\Services\\Tcpip\\Parameters",
-    "System\\CurrentControlSet\\Services\\Tcpip\\Parameters",
-    "Software\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList",
-    "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders",
-    "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders",
-    "Software\\Wine\\Drives",
-    "Software\\Wine\\Ports",
-    "Software\\Wow6432Node\\Wine\\Ports",
-};
-
-static const char * const hku_default_ephemeral_prefixes[] =
-{
-    "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders",
-    "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders",
-};
+/* the keys of each session: one list with ntdll's routing (wine/wex_session0.h) */
+static const char * const hklm_ephemeral_prefixes[] = { WEX_SESSION_MACHINE_KEYS };
+static const char * const hku_default_ephemeral_prefixes[] = { WEX_SESSION_DEFAULT_USER_KEYS };
 
 static bool is_per_session_key( const struct key *key )
 {
