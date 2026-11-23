@@ -1325,6 +1325,19 @@ typedef volatile struct
 @END
 
 
+/* Retrieve a process's I/O counters */
+@REQ(get_process_io_counters)
+    obj_handle_t handle;                        /* process handle */
+@REPLY
+    file_pos_t read_operations;                 /* read calls */
+    file_pos_t write_operations;                /* write calls */
+    file_pos_t other_operations;                /* other I/O calls */
+    file_pos_t read_bytes;                      /* bytes read */
+    file_pos_t write_bytes;                     /* bytes written */
+    file_pos_t other_bytes;                     /* bytes of the other calls */
+@END
+
+
 /* Set a process information */
 @REQ(set_process_info)
     obj_handle_t handle;       /* process handle */
