@@ -146,9 +146,9 @@ static inline BOOL wex_token_is_ordinary( HANDLE token )
  * Windows directory) running with an ordinary token? Once per connection, never per message. A sandboxed process can
  * create the name first, or start the real image suspended with its own token: the image alone does not prove the
  * server. Wine's sandboxes are the same Unix user, so this is defence in depth. Any failed query is a refusal.
- * Windows needs only PROCESS_QUERY_LIMITED_INFORMATION to open a process's token (measured on Windows 11; the broker
- * grants it to AppContainers, wex_pipe_grant_appcontainers). Wine's server asks for PROCESS_QUERY_INFORMATION while
- * elevation is enforced, so that is tried when the token cannot be opened. */
+ * PROCESS_QUERY_LIMITED_INFORMATION opens a process's token for TOKEN_QUERY, as on Windows (measured on Windows 11;
+ * the broker grants it to AppContainers, wex_pipe_grant_appcontainers), also under Wine's elevation enforcement since
+ * claude/token-read-limited 3dd91565, so Low-integrity clients can run the check. */
 static inline BOOL wex_pipe_server_is( HANDLE pipe, const WCHAR *image_name )
 {
     static const WCHAR *const dirs[] = { L"\\system32\\", L"\\syswow64\\" };
@@ -161,12 +161,7 @@ static inline BOOL wex_pipe_server_is( HANDLE pipe, const WCHAR *image_name )
 
     if (!GetNamedPipeServerProcessId( pipe, &pid ) || !pid) return FALSE;
     if (!(process = OpenProcess( PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid ))) return FALSE;
-    if (!OpenProcessToken( process, TOKEN_QUERY, &token ))
-    {
-        HANDLE full = OpenProcess( PROCESS_QUERY_INFORMATION, FALSE, pid );
-        if (full && !OpenProcessToken( full, TOKEN_QUERY, &token )) token = NULL;
-        if (full) CloseHandle( full );
-    }
+    if (!OpenProcessToken( process, TOKEN_QUERY, &token )) token = NULL;
     ordinary = token && wex_token_is_ordinary( token );
     if (token) CloseHandle( token );
     if (!ordinary || !QueryFullProcessImageNameW( process, 0, image, &size ))
