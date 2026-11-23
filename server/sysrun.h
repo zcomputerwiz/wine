@@ -23,6 +23,8 @@
 
 #include <sys/types.h>
 #include <sys/socket.h>
+/* the launcher configuration the server reads (sysrun.c) and whose generation the lab tracks (wex_e1lab_sysrun.c) */
+#define SYSRUN_CONF "/etc/wineexplorer/sysrun.conf"
 
 /* Linux pidfd socket options (6.5) and control message, for C libraries older than the kernel */
 #ifndef SO_PASSPIDFD
