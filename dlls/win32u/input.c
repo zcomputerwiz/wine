@@ -2944,7 +2944,12 @@ BOOL WINAPI NtUserClipCursor( const RECT *rect )
  * trace of Notepad on Windows 11, each block naming the window of the application four times) and asking NtQueryCompositionInputSinkLuid for
  * their identity. Measured on Windows 11 with tests/uwp/alpc/sink-probe.c, sink-probe2.c and
  * sink-pops32.cpp (what the sink does in the window system is not known):
- *   - NtCreateCompositionInputSink( block, &handle ) takes a block of 0xe8 bytes: a size (not checked) and four entries of 0x38 bytes,
+ *   - NtCreateCompositionInputSink( block, &handle ) takes a block of 0xe8 bytes: a size (not checked) and four entries of 0x38 bytes
+ *     (how the sizes were measured: sink-probe3.c puts the block at the end of a committed page that an inaccessible page follows; the call
+ *     fails with an access violation status for a buffer of 0xe7 bytes and works for 0xe8, so it reads exactly 0xe8 bytes; clearing the
+ *     window of any one of the four entries, or moving the windows to a stride of 0x30, gives STATUS_INVALID_PARAMETER, so the windows sit at
+ *     offsets 16, 0x48, 0x80 and 0xb8, which is a stride of 0x38 after the size; the block Notepad passes, dumped with wintrace.c, has
+ *     that shape),
  *     each a kind (0, 1 or 2 are accepted, 3 is not) and a window. All four windows have to be windows (not NULL, not destroyed, not the
  *     desktop window): STATUS_INVALID_PARAMETER; a window of another process gives STATUS_ACCESS_DENIED; windows may differ and may be
  *     child windows; the other fields are not looked at. A NULL block or handle pointer is STATUS_INVALID_PARAMETER. On failure the handle
