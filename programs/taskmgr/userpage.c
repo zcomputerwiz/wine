@@ -69,7 +69,7 @@ static void add_columns(void)
         LoadStringW(hInst, IDS_USER_COL_FIRST + i, text, ARRAY_SIZE(text));
         column.mask = LVCF_TEXT | LVCF_FMT | LVCF_WIDTH;
         column.fmt = i == USERCOL_ID ? LVCFMT_RIGHT : LVCFMT_LEFT;
-        column.cx = TaskManagerSettings.UserColumnWidths[i];
+        column.cx = max(TaskManagerSettings.UserColumnWidths[i], TaskManager_HeaderWidth(hUserList, text));
         column.pszText = text;
         SendMessageW(hUserList, LVM_INSERTCOLUMNW, column_count, (LPARAM)&column);
         column_map[column_count++] = i;

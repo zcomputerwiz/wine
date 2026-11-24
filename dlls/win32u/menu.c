@@ -2151,7 +2151,8 @@ static void calc_menu_item_size( HDC hdc, struct menu_item *item, HWND owner, IN
                 p += 1; /* advance past the Tab */
                 /* get text size after the tab */
                 h = DrawTextW( hdc, p, -1, &r, DT_SINGLELINE | DT_CALCRECT );
-                item->xTab += txt_width;
+                /* the space for the tab goes before the short cut, not after it */
+                item->xTab += txt_width + menucharsize.cx;
                 txt_height = max( txt_height, h );
                 /* space for the tab and the short cut */
                 txt_width += menucharsize.cx + r.right - r.left;

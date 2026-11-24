@@ -1,5 +1,6 @@
 MODULE    = taskmgr.exe
 IMPORTS   = shell32 shlwapi comctl32 user32 gdi32 advapi32 iphlpapi
+DELAYIMPORTS = uxtheme
 
 EXTRADLLFLAGS = -mwindows
 

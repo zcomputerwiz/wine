@@ -462,8 +462,8 @@ BEGIN
                     LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_OWNERDATA |
                     WS_BORDER | WS_TABSTOP,5,7,235,177
     CONTROL         "&Show processes from all users",IDC_SHOWALLPROCESSES,
-                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,5,191,111,10
-    PUSHBUTTON      "&Show processes from all users",IDC_SHOWALLPROCESSES_ELEVATE,5,189,120,14,NOT WS_VISIBLE
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,5,191,150,10
+    PUSHBUTTON      "&Show processes from all users",IDC_SHOWALLPROCESSES_ELEVATE,5,189,150,14,NOT WS_VISIBLE
     PUSHBUTTON      "&End Process",IDC_ENDPROCESS,174,189,66,14
 END
 
