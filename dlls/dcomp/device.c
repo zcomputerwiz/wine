@@ -4648,7 +4648,8 @@ static const GUID IID_dcomp_alias_b = {0x28d6ad3d, 0xee2a, 0x4bcd, {0x94, 0x19, 
  * releases up to UniversalApiContract 17, the one that runs on Wine) asks for it in DCompPrivates_SetCommitCompletionEvent and calls slot 8
  * with the event handle (traced on Wine with a logging object). Windows 11 build 26300 answers the same slot differently (it removes 12
  * bytes on 32-bit Windows, two arguments, and returns E_INVALIDARG for an event handle: tests/uwp/alpc/dcomp-dslot32b.cpp), because there the
- * runtime goes through a system-side module instead; so the slot is implemented for the helper that calls it here, not for that Windows.
+ * runtime goes through a system-side module instead. Slot 8 is implemented for the caller on Wine, not measured on Windows 11: the call
+ * shape observed at the caller is (event handle, 0, 0, a pointer).
  * The event is duplicated and signaled when a Commit has completed, which here is when Commit returns, successful or not, so a waiter
  * cannot hang on a failed commit. A NULL handle clears the event. The other slots raise the stub exception: their argument counts are not known. */
 static const GUID IID_dcomp_commit = {0x6b556968, 0x2d25, 0x11e2, {0x99, 0xf6, 0x8b, 0xc3, 0x60, 0x88, 0x70, 0x9b}};
