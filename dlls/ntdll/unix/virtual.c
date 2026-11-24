@@ -923,6 +923,34 @@ static SIZE_T get_vprot_range_size( char *base, SIZE_T size, BYTE mask, BYTE *vp
     return size;
 }
 
+#ifdef _WIN64
+/***********************************************************************
+ *           fill_page_vprot
+ *
+ * Fill protection bytes in one block of the table. Clearing a large range
+ * gives its whole host pages back instead of writing zeros into them: a
+ * reservation of 1 TB (as a Chromium renderer makes) needs 256 MB of table,
+ * which would otherwise all become resident, and stay so after the release.
+ */
+static void fill_page_vprot( BYTE *ptr, BYTE vprot, size_t count )
+{
+#ifdef __linux__
+    BYTE *start = ROUND_ADDR( ptr + host_page_mask, host_page_mask );
+    BYTE *end = ROUND_ADDR( ptr + count, host_page_mask );
+
+    /* a private anonymous page reads as zero after MADV_DONTNEED on Linux */
+    if (!vprot && end > start && (size_t)(end - start) >= 16 * host_page_size &&
+        !madvise( start, end - start, MADV_DONTNEED ))
+    {
+        memset( ptr, 0, start - ptr );
+        memset( end, 0, ptr + count - end );
+        return;
+    }
+#endif
+    memset( ptr, vprot, count );
+}
+#endif
+
 /***********************************************************************
  *           set_page_vprot
  *
@@ -937,10 +965,10 @@ static void set_page_vprot( const void *addr, size_t size, BYTE vprot )
     while (idx >> pages_vprot_shift != end >> pages_vprot_shift)
     {
         size_t dir_size = pages_vprot_mask + 1 - (idx & pages_vprot_mask);
-        memset( pages_vprot[idx >> pages_vprot_shift] + (idx & pages_vprot_mask), vprot, dir_size );
+        fill_page_vprot( pages_vprot[idx >> pages_vprot_shift] + (idx & pages_vprot_mask), vprot, dir_size );
         idx += dir_size;
     }
-    memset( pages_vprot[idx >> pages_vprot_shift] + (idx & pages_vprot_mask), vprot, end - idx );
+    fill_page_vprot( pages_vprot[idx >> pages_vprot_shift] + (idx & pages_vprot_mask), vprot, end - idx );
 #else
     memset( pages_vprot + idx, vprot, end - idx );
 #endif
