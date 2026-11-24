@@ -85,7 +85,7 @@
 2571 stub SetCoreWindow  # NtUserSetCoreWindow
 2572 stub @
 2573 stub @
-2574 stub @
+2574 stdcall -noname UserOrdinal2574(long)
 2575 stub @
 2576 stub -noname SetCoreWindowPartner  # NtUserSetCoreWindowPartner
 
@@ -696,7 +696,7 @@
 @ stdcall GetUserObjectSecurity(long ptr ptr long ptr)
 # @ stub GetWinStationInfo
 @ stdcall GetWindow(long long)
-# @ stub GetWindowBand
+@ stdcall GetWindowBand(long ptr)
 # @ stub GetWindowCompositionAttribute
 # @ stub GetWindowCompositionInfo
 @ stdcall GetWindowContextHelpId(long) NtUserGetWindowContextHelpId
