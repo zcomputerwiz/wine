@@ -471,8 +471,9 @@ static struct e1s_hive *e1s_load_hive( struct token *token, obj_handle_t context
     e1s_populate_volatile_env( m->user, &m->storage, &m->account, m->sd );
     {
         struct save_branch_info *info = &save_branch_info[save_branch_count++];
-        memset( info, 0, sizeof(*info) ); list_init( &info->tombstones );
+        memset( info, 0, sizeof(*info) );
         info->key = (struct key *)grab_object( m->user );
+        info->kind = HIVE_MANAGED;
         info->managed = m;
         info->filename = "<managed-profile>"; /* diagnostics only, never opened */
     }
@@ -619,7 +620,7 @@ static int e1s_unload_hive( struct e1s_hive *m )
             return e1s_deny( STATUS_CANNOT_DELETE, "unload-open-key" );
     /* Check save registration before any I/O or destructive step. */
     for (i = 3; i < save_branch_count; i++) if (save_branch_info[i].managed == m) break;
-    if (i == save_branch_count || save_branch_info[i].key != m->user || !list_empty( &save_branch_info[i].tombstones ))
+    if (i == save_branch_count || save_branch_info[i].key != m->user || save_branch_info[i].kind != HIVE_MANAGED)
         return e1s_deny( STATUS_REGISTRY_CORRUPT, "unload-save-registration" );
     m->phase = E1S_UNLOADING;
     if (!e1s_save_hive( m )) return 0;
@@ -634,7 +635,6 @@ static int e1s_unload_hive( struct e1s_hive *m )
         }
     release_object( save_branch_info[i].key );
     if (i != --save_branch_count) save_branch_info[i] = save_branch_info[save_branch_count];
-    list_init( &save_branch_info[i].tombstones ); /* managed lists are always empty */
     memset( &save_branch_info[save_branch_count], 0, sizeof(save_branch_info[0]) );
     unlink_named_object( &m->alias->obj );
     unlink_named_object( &m->user->obj );
