@@ -224,18 +224,21 @@ void security_set_thread_token( struct thread *thread, obj_handle_t handle )
                                                               &token_ops );
         if (token && thread->process->token)
         {
-            /* WineExplorer B99, from Windows' SeTokenCanImpersonate: without SeImpersonatePrivilege, a token of a
-             * higher integrity than the thread's process, or elevated while the process is not, goes to the thread
-             * as an identification-level copy. Measured on Windows 11: a Low integrity process may open and duplicate
-             * a Medium token of its user, but SetThreadToken and ImpersonateLoggedOnUser with it give its thread an
-             * identification token. The rule's other part (another user's token) is left to the pipe servers
+            /* WineExplorer B99, from Windows' SeTokenCanImpersonate: a token of a higher integrity than the thread's
+             * process, also with SeImpersonatePrivilege, and without that privilege an elevated token while the
+             * process is not elevated, goes to the thread as an identification-level copy. Measured: on Windows 11 a
+             * Low integrity process may open and duplicate a Medium token of its user, but SetThreadToken and
+             * ImpersonateLoggedOnUser with it give its thread an identification token; on Windows 10 the same holds
+             * for a Low copy of an elevated administrator's token (SeImpersonatePrivilege enabled) and its High
+             * parent. The rule's other part (another user's token) is left to the pipe servers
              * (token_impersonation_level): Windows lets a process impersonate a token it got from LogonUser. */
             struct token *process_token = thread->process->token;
             int had = token->primary ? SecurityImpersonation : token->impersonation_level;
 
-            if (had > SecurityIdentification && !token_has_privilege( process_token, SeImpersonatePrivilege ) &&
+            if (had > SecurityIdentification &&
                 (token->integrity_rid > process_token->integrity_rid ||
-                 (token->elevation == TokenElevationTypeFull && process_token->elevation != TokenElevationTypeFull)))
+                 (!token_has_privilege( process_token, SeImpersonatePrivilege ) &&
+                  token->elevation == TokenElevationTypeFull && process_token->elevation != TokenElevationTypeFull)))
             {
                 struct token *copy = token_duplicate( token, FALSE, SecurityIdentification, NULL, NULL, 0, NULL, 0, FALSE );
 
