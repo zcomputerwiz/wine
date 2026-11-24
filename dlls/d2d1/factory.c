@@ -104,7 +104,9 @@ static HRESULT d2d_factory_reload_sysmetrics(struct d2d_factory *factory)
  * to the factory and its other methods succeed and log, except slot 15, which creates a device (see there). On Windows (multithreaded
  * factory) Notepad calls slots 4, 5, 6 and 15; slots 4 to 6 write nothing through their arguments.
  */
+#ifdef __x86_64__
 static const GUID IID_d2d_private = {0x6f72c0a2, 0x6db7, 0x46e9, {0x9b, 0x62, 0xb5, 0x8a, 0x23, 0xf4, 0x92, 0x8b}};
+#endif
 
 static struct d2d_factory *impl_from_private(void *iface)
 {
@@ -184,12 +186,16 @@ static HRESULT STDMETHODCALLTYPE d2d_factory_QueryInterface(ID2D1Factory7 *iface
 
     TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
 
+#ifdef __x86_64__
+    /* only where the argument sizes of its methods are measured: elsewhere a wrong argument count of a stdcall slot
+     * would unbalance the stack */
     if (IsEqualGUID(iid, &IID_d2d_private))
     {
         ID2D1Factory7_AddRef(iface);
         *out = &factory->private_iface;
         return S_OK;
     }
+#endif
 
     if ((IsEqualGUID(iid, &IID_ID2D1Factory7) && d2d_settings.max_version_factory >= 7)
             || (IsEqualGUID(iid, &IID_ID2D1Factory6) && d2d_settings.max_version_factory >= 6)

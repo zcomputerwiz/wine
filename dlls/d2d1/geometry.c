@@ -4147,8 +4147,12 @@ static HRESULT STDMETHODCALLTYPE d2d_path_geometry_CompareWithGeometry(ID2D1Path
     return E_NOTIMPL;
 }
 
-static void d2d_geometry_flatten_cubic(ID2D1SimplifiedGeometrySink *sink, const D2D1_POINT_2F *p0,
-        const D2D1_BEZIER_SEGMENT *b, float tolerance)
+/* NaN control points never give a deviation below the tolerance, and huge ones need very many steps: the recursion
+ * is limited to a depth of 16 (at most 65536 lines per curve), and a NaN deviation ends it at once. */
+#define D2D_FLATTEN_MAX_DEPTH 16
+
+static void d2d_geometry_flatten_cubic_depth(ID2D1SimplifiedGeometrySink *sink, const D2D1_POINT_2F *p0,
+        const D2D1_BEZIER_SEGMENT *b, float tolerance, unsigned int depth)
 {
     D2D1_BEZIER_SEGMENT b0, b1;
     D2D1_POINT_2F q;
@@ -4170,7 +4174,7 @@ static void d2d_geometry_flatten_cubic(ID2D1SimplifiedGeometrySink *sink, const 
     d2d_point_lerp(&q, &b->point1, &b->point3, 0.5f);
     d2d_point_subtract(&q, &b->point2, &q);
     d += fabsf(q.x) + fabsf(q.y);
-    if (d < tolerance)
+    if (d < tolerance || isnan(d) || depth >= D2D_FLATTEN_MAX_DEPTH)
     {
         ID2D1SimplifiedGeometrySink_AddLines(sink, &b->point3, 1);
         return;
@@ -4186,10 +4190,16 @@ static void d2d_geometry_flatten_cubic(ID2D1SimplifiedGeometrySink *sink, const 
     d2d_point_lerp(&b0.point2, &b0.point1, &q, 0.5f);
     d2d_point_lerp(&b0.point3, &b0.point2, &b1.point1, 0.5f);
 
-    d2d_geometry_flatten_cubic(sink, p0, &b0, tolerance);
+    d2d_geometry_flatten_cubic_depth(sink, p0, &b0, tolerance, depth + 1);
     ID2D1SimplifiedGeometrySink_SetSegmentFlags(sink, D2D1_PATH_SEGMENT_FORCE_ROUND_LINE_JOIN);
-    d2d_geometry_flatten_cubic(sink, &b0.point3, &b1, tolerance);
+    d2d_geometry_flatten_cubic_depth(sink, &b0.point3, &b1, tolerance, depth + 1);
     ID2D1SimplifiedGeometrySink_SetSegmentFlags(sink, D2D1_PATH_SEGMENT_NONE);
+}
+
+static void d2d_geometry_flatten_cubic(ID2D1SimplifiedGeometrySink *sink, const D2D1_POINT_2F *p0,
+        const D2D1_BEZIER_SEGMENT *b, float tolerance)
+{
+    d2d_geometry_flatten_cubic_depth(sink, p0, b, tolerance, 0);
 }
 
 static void d2d_figure_simplify(const struct d2d_figure *figure,

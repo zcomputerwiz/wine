@@ -40,6 +40,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(d2d);
 #define COMBINE_MAX_COORD 2097152.0
 /* the edge pairs are tested one against the other: a limit on the work */
 #define COMBINE_MAX_EDGES 16384
+/* the pieces after splitting are classified against each other: a limit on that work too */
+#define COMBINE_MAX_PIECES 32768
 
 struct combine_point
 {
@@ -202,10 +204,26 @@ static HRESULT combine_collect(ID2D1Geometry *geometry, const D2D1_MATRIX_3X2_F 
         struct combine_shape *shape)
 {
     struct combine_sink sink = {{&combine_sink_vtbl}};
+    D2D1_RECT_F bounds;
     HRESULT hr;
 
     shape->fill_mode = D2D1_FILL_MODE_ALTERNATE;
     sink.shape = shape;
+    /* NaN, infinite or very large coordinates are refused before Simplify flattens the curves */
+    if (transform && (!isfinite(transform->_11) || !isfinite(transform->_12) || !isfinite(transform->_21)
+            || !isfinite(transform->_22) || !isfinite(transform->_31) || !isfinite(transform->_32)))
+        return D2DERR_BAD_NUMBER;
+    /* the bounds, where the geometry has them (not every geometry of Wine implements GetBounds; the flattening is guarded
+     * against NaN and very large points too, and combine_snap checks every point it gets) */
+    if (SUCCEEDED(ID2D1Geometry_GetBounds(geometry, transform, &bounds)))
+    {
+        /* an empty geometry has inverted (infinite) bounds; NaN bounds always fail */
+        if (isnan(bounds.left) || isnan(bounds.top) || isnan(bounds.right) || isnan(bounds.bottom))
+            return D2DERR_BAD_NUMBER;
+        if (bounds.left <= bounds.right && (fabsf(bounds.left) > COMBINE_MAX_COORD || fabsf(bounds.right) > COMBINE_MAX_COORD
+                || fabsf(bounds.top) > COMBINE_MAX_COORD || fabsf(bounds.bottom) > COMBINE_MAX_COORD))
+            return D2DERR_BAD_NUMBER;
+    }
     hr = ID2D1Geometry_Simplify(geometry, D2D1_GEOMETRY_SIMPLIFICATION_OPTION_LINES, transform, tolerance,
             &sink.ID2D1SimplifiedGeometrySink_iface);
     if (SUCCEEDED(hr) && sink.bad_number) hr = D2DERR_BAD_NUMBER;
@@ -471,6 +489,12 @@ HRESULT d2d_geometry_combine(ID2D1Geometry *geometry1, ID2D1Geometry *geometry2,
             struct combine_edge *e;
 
             if (combine_point_equal(&prev, &next)) continue;
+            if (piece_count >= COMBINE_MAX_PIECES)
+            {
+                FIXME("More than %u pieces after splitting are not supported.\n", COMBINE_MAX_PIECES);
+                hr = E_NOTIMPL;
+                goto done;
+            }
             /* the piece, directed as its edge, in the outline of its own geometry: the outlines of the pieces stay closed
              * (both edges of a crossing are split at the same snapped point), and the inside tests below use them, so
              * that a piece next to a snapped crossing is tested against itself, not against the unsplit edge */
