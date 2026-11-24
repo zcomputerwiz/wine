@@ -967,14 +967,9 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
             process->handles = alloc_handle_table( process, 0 );
         /* Note: for security reasons, starting a new process does not attempt
          * to use the current impersonation token for the new process */
+        /* R7: token_duplicate keeps a descriptor of Windows' (token_keep_descriptor): a service's process its service
+         * descriptor, a system process's child its parent's */
         process->token = token_duplicate( token ? token : parent->token, TRUE, 0, NULL, NULL, 0, NULL, 0, FALSE );
-        /* R7: the new primary token keeps the descriptor of the token it was made from (a service's, from
-         * create_service_token; a system process's, from its parent) */
-        if (process->token && !token_keep_descriptor( process->token, token ? token : parent->token ))
-        {
-            release_object( process->token );
-            process->token = NULL;
-        }
         if (token && token_e1s_account( token )) process->e1s_profile_issued = (struct token *)grab_object( token );
         process->affinity = parent->affinity;
     }

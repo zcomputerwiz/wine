@@ -911,6 +911,17 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
         }
     }
 
+    /* R7: a copy of a token that has Windows' descriptor (token_protect_system, token_protect_elevated) keeps it and
+     * its mark, unless the caller gave a descriptor of its own. A new process's primary token so keeps its service
+     * descriptor, and an elevated client's impersonation copy (a pipe server's) does not get the default DACL that
+     * came with its label, which grants the user's limited token everything (a TOKEN_QUERY handle of it could be
+     * duplicated into TOKEN_IMPERSONATE). The label was handled above. */
+    if (!sd && !token_keep_descriptor( token, src_token ))
+    {
+        release_object( token );
+        return NULL;
+    }
+
     /* Copying an unchanged security context into a new object preserves its version. */
     if (modified_id) token->modified_id = *modified_id;
     return token;
