@@ -85,6 +85,7 @@ struct pipe_end
     struct named_pipe   *pipe;
     struct pipe_end     *connection; /* the other end of the pipe */
     process_id_t         client_pid; /* process that created the client */
+    unsigned int         client_lease; /* a bridge: the lease of client_pid's block (R6), 0 for a local client */
     unsigned int         client_session; /* its session (a bridge: the session of the server that opened it) */
     process_id_t         server_pid; /* process that created the server */
     struct token        *client_token; /* token of the thread that opened the client end (elevation enforced) */
@@ -1389,12 +1390,16 @@ static void pipe_end_get_connection_attribute( struct pipe_end *pipe_end )
 {
     const char *attr = get_req_data();
     data_size_t value_size, attr_size = get_req_data_size();
+    process_id_t client_pid = pipe_end->client_pid;
     void *value;
 
     if (attr_size == sizeof("ClientProcessId") && !memcmp( attr, "ClientProcessId", attr_size ))
     {
-        value = &pipe_end->client_pid;
-        value_size = sizeof(pipe_end->client_pid);
+        /* a bridged opener's id, once its block went to another server, may name another process: 0 then */
+        if (pipe_end->client_lease && !session0_id_lease_current( client_pid, pipe_end->client_lease ))
+            client_pid = 0;
+        value = &client_pid;
+        value_size = sizeof(client_pid);
     }
     else if (attr_size == sizeof("ServerProcessId") && !memcmp( attr, "ServerProcessId", attr_size ))
     {
@@ -1562,6 +1567,7 @@ static void init_pipe_end( struct pipe_end *pipe_end, struct named_pipe *pipe,
     memset( &pipe_end->client_modified_id, 0, sizeof(pipe_end->client_modified_id) );
     pipe_end->client_impersonated = 0;
     pipe_end->client_session = 0;
+    pipe_end->client_lease = 0;
     memset( &pipe_end->consumed_writer, 0, sizeof(pipe_end->consumed_writer) );
     pipe_end->binding_reads = 0;
     pipe_end->consumed_valid = 0;
@@ -1703,6 +1709,7 @@ static struct object *named_pipe_open_file( struct object *obj, unsigned int acc
         server->pipe_end.connection = client;
         client->connection = &server->pipe_end;
         server->pipe_end.client_pid = client->client_pid;
+        server->pipe_end.client_lease = 0;  /* a local client (the instance may have served a bridge before) */
         server->pipe_end.client_session = client->client_session;
         client->server_pid = server->pipe_end.server_pid;
         list_remove( &server->entry );
@@ -2427,7 +2434,7 @@ unsigned int pipe_bridge_query( const WCHAR *name, data_size_t len, uid_t uid, i
 }
 
 unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_size_t len, int sock, uid_t uid,
-                                 int session, unsigned int client_pid )
+                                 int session, unsigned int client_pid, unsigned int lease )
 {
     unsigned int access = FILE_GENERIC_READ | FILE_GENERIC_WRITE, count = 0, status = STATUS_SUCCESS;
     struct pipe_bridge *bridge, *other;
@@ -2479,6 +2486,8 @@ unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_si
        could check (also no stale id of an earlier client) */
     bridge->pipe_end.client_pid = client_pid;
     server->pipe_end.client_pid = client_pid;
+    bridge->pipe_end.client_lease = client_pid ? lease : 0;
+    server->pipe_end.client_lease = bridge->pipe_end.client_lease;
     bridge->pipe_end.client_session = session > 0 ? session : 0;
     server->pipe_end.client_session = bridge->pipe_end.client_session;  /* R9: the session of the opener's server */
     list_remove( &server->entry );
