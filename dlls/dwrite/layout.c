@@ -4976,6 +4976,7 @@ static HRESULT WINAPI dwritetextlayout4_GetFontAxisValues(IDWriteTextLayout4 *if
 
     TRACE("%p, %u, %p, %u, %p.\n", iface, pos, values, num_values, r);
 
+    if (num_values && !values) return E_INVALIDARG;
     if (!(range = get_layout_range_by_pos(layout, pos)))
     {
         if (num_values) memset(values, 0, num_values * sizeof(*values));

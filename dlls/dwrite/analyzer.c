@@ -2773,6 +2773,7 @@ static HRESULT WINAPI fontfallback1_MapCharacters(IDWriteFontFallback1 *iface, I
     TRACE("%p, %p, %u, %u, %p, %s, %p, %u, %p, %p, %p.\n", iface, source, position, length, basecollection,
             debugstr_w(basefamily), axis_values, values_count, mapped_length, scale, ret_fontface);
 
+    if (!ret_fontface || !mapped_length || !scale) return E_INVALIDARG;
     *ret_fontface = NULL;
     if (values_count && !axis_values)
     {
