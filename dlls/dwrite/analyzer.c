@@ -2719,7 +2719,9 @@ static HRESULT WINAPI fontfallback_MapCharacters(IDWriteFontFallback1 *iface, ID
 }
 
 /* The font properties that the registered axes stand for: weight (wght), stretch (wdth, the nearest of the nine widths in
- * percent), style (ital, slnt). */
+ * percent), style (ital 0..1, slnt -90..90). The DWriteCore specification (MIT, github.com/microsoft/WindowsAppSDK,
+ * specs/dwritecore/DWriteCore.md, "Typographic Font Selection") matches oblique fonts as if they were slanted by 20 degrees, so a
+ * slant of at least half of that counts as oblique here. */
 static void fallback_props_from_axis_values(DWRITE_FONT_AXIS_VALUE const *values, UINT32 count, DWRITE_FONT_WEIGHT *weight,
         DWRITE_FONT_STYLE *style, DWRITE_FONT_STRETCH *stretch)
 {
@@ -2746,7 +2748,7 @@ static void fallback_props_from_axis_values(DWRITE_FONT_AXIS_VALUE const *values
             if (values[i].value >= 0.5f) *style = DWRITE_FONT_STYLE_ITALIC;
             break;
         case DWRITE_FONT_AXIS_TAG_SLANT:
-            if (values[i].value != 0.0f && *style == DWRITE_FONT_STYLE_NORMAL) *style = DWRITE_FONT_STYLE_OBLIQUE;
+            if (fabsf(values[i].value) >= 10.0f && *style == DWRITE_FONT_STYLE_NORMAL) *style = DWRITE_FONT_STYLE_OBLIQUE;
             break;
         default:
             ;
