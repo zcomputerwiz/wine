@@ -176,6 +176,7 @@ struct d2d_device_context
     ID2D1GdiInteropRenderTarget ID2D1GdiInteropRenderTarget_iface;
     IDWriteTextRenderer IDWriteTextRenderer_iface;
     IUnknown IUnknown_iface;
+    const void * const *private_vtbl;   /* the private interface {2ea67ed7-...} that the compositor asks for (64-bit) */
     LONG refcount;
 
     IUnknown *outer_unknown;
