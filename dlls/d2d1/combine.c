@@ -36,6 +36,10 @@
 WINE_DEFAULT_DEBUG_CHANNEL(d2d);
 
 #define COMBINE_SCALE 256.0
+/* coordinates are kept below 2^21 DIPs: the products of combine_cross stay well inside 64 bits */
+#define COMBINE_MAX_COORD 2097152.0
+/* the edge pairs are tested one against the other: a limit on the work */
+#define COMBINE_MAX_EDGES 16384
 
 struct combine_point
 {
@@ -60,7 +64,7 @@ struct combine_sink
     ID2D1SimplifiedGeometrySink ID2D1SimplifiedGeometrySink_iface;
     struct combine_shape *shape;
     struct combine_point first, last;
-    BOOL in_figure, hollow, failed;
+    BOOL in_figure, hollow, failed, bad_number;
 };
 
 static inline struct combine_sink *impl_from_ID2D1SimplifiedGeometrySink(ID2D1SimplifiedGeometrySink *iface)
@@ -68,10 +72,16 @@ static inline struct combine_sink *impl_from_ID2D1SimplifiedGeometrySink(ID2D1Si
     return CONTAINING_RECORD(iface, struct combine_sink, ID2D1SimplifiedGeometrySink_iface);
 }
 
-static struct combine_point combine_snap(D2D1_POINT_2F p)
+static struct combine_point combine_snap(struct combine_sink *sink, D2D1_POINT_2F p)
 {
-    struct combine_point ret;
+    struct combine_point ret = {0, 0};
 
+    /* NaN, infinities and very large coordinates are refused (D2DERR_BAD_NUMBER) */
+    if (!isfinite(p.x) || !isfinite(p.y) || fabs(p.x) > COMBINE_MAX_COORD || fabs(p.y) > COMBINE_MAX_COORD)
+    {
+        sink->bad_number = TRUE;
+        return ret;
+    }
     ret.x = llround(p.x * COMBINE_SCALE);
     ret.y = llround(p.y * COMBINE_SCALE);
     return ret;
@@ -127,7 +137,7 @@ static void STDMETHODCALLTYPE combine_sink_BeginFigure(ID2D1SimplifiedGeometrySi
 {
     struct combine_sink *sink = impl_from_ID2D1SimplifiedGeometrySink(iface);
 
-    sink->first = sink->last = combine_snap(p);
+    sink->first = sink->last = combine_snap(sink, p);
     sink->in_figure = TRUE;
     sink->hollow = begin == D2D1_FIGURE_BEGIN_HOLLOW;
 }
@@ -142,7 +152,7 @@ static void STDMETHODCALLTYPE combine_sink_AddLines(ID2D1SimplifiedGeometrySink 
     if (!sink->in_figure) return;
     for (i = 0; i < count; ++i)
     {
-        p = combine_snap(points[i]);
+        p = combine_snap(sink, points[i]);
         if (!sink->hollow && !combine_shape_add_edge(sink->shape, &sink->last, &p)) sink->failed = TRUE;
         sink->last = p;
     }
@@ -198,7 +208,8 @@ static HRESULT combine_collect(ID2D1Geometry *geometry, const D2D1_MATRIX_3X2_F 
     sink.shape = shape;
     hr = ID2D1Geometry_Simplify(geometry, D2D1_GEOMETRY_SIMPLIFICATION_OPTION_LINES, transform, tolerance,
             &sink.ID2D1SimplifiedGeometrySink_iface);
-    if (SUCCEEDED(hr) && sink.failed) hr = E_OUTOFMEMORY;
+    if (SUCCEEDED(hr) && sink.bad_number) hr = D2DERR_BAD_NUMBER;
+    else if (SUCCEEDED(hr) && sink.failed) hr = E_OUTOFMEMORY;
     return hr;
 }
 
@@ -414,7 +425,7 @@ static void combine_write_figure(ID2D1SimplifiedGeometrySink *sink, const struct
 HRESULT d2d_geometry_combine(ID2D1Geometry *geometry1, ID2D1Geometry *geometry2, D2D1_COMBINE_MODE mode,
         const D2D1_MATRIX_3X2_F *transform, float tolerance, ID2D1SimplifiedGeometrySink *sink)
 {
-    struct combine_shape shapes[2] = {{0}};
+    struct combine_shape shapes[2] = {{0}}, piece_shapes[2] = {{0}};
     struct combine_splits *splits = NULL;
     struct combine_edge *all = NULL, *pieces = NULL;
     struct combine_result_edge *result = NULL;
@@ -433,6 +444,14 @@ HRESULT d2d_geometry_combine(ID2D1Geometry *geometry1, ID2D1Geometry *geometry2,
 
     /* split every edge where it meets another one */
     all_count = shapes[0].count + shapes[1].count;
+    if (all_count > COMBINE_MAX_EDGES)
+    {
+        FIXME("%Iu edges, more than %u, are not supported.\n", all_count, COMBINE_MAX_EDGES);
+        hr = E_NOTIMPL;
+        goto done;
+    }
+    piece_shapes[0].fill_mode = shapes[0].fill_mode;
+    piece_shapes[1].fill_mode = shapes[1].fill_mode;
     if (all_count && (!(all = malloc(all_count * sizeof(*all))) || !(splits = calloc(all_count, sizeof(*splits)))))
         goto done;
     if (shapes[0].count) memcpy(all, shapes[0].edges, shapes[0].count * sizeof(*all));
@@ -452,6 +471,10 @@ HRESULT d2d_geometry_combine(ID2D1Geometry *geometry1, ID2D1Geometry *geometry2,
             struct combine_edge *e;
 
             if (combine_point_equal(&prev, &next)) continue;
+            /* the piece, directed as its edge, in the outline of its own geometry: the outlines of the pieces stay closed
+             * (both edges of a crossing are split at the same snapped point), and the inside tests below use them, so
+             * that a piece next to a snapped crossing is tested against itself, not against the unsplit edge */
+            if (!combine_shape_add_edge(&piece_shapes[i < shapes[0].count ? 0 : 1], &prev, &next)) goto done;
             if (!d2d_array_reserve((void **)&pieces, &piece_size, piece_count + 1, sizeof(*pieces))) goto done;
             e = &pieces[piece_count++];
             /* undirected: the smaller point first, so that the same piece from both geometries is found twice */
@@ -475,13 +498,13 @@ HRESULT d2d_geometry_combine(ID2D1Geometry *geometry1, ID2D1Geometry *geometry2,
         nx = -(double)(e->b.y - e->a.y);
         ny = (double)(e->b.x - e->a.x);
         len = sqrt(nx * nx + ny * ny);
-        /* a quarter of a grid unit to each side */
-        nx = nx / len * 0.25;
-        ny = ny / len * 0.25;
-        left = combine_result(mode, combine_shape_contains(&shapes[0], mx + nx, my + ny),
-                combine_shape_contains(&shapes[1], mx + nx, my + ny));
-        right = combine_result(mode, combine_shape_contains(&shapes[0], mx - nx, my - ny),
-                combine_shape_contains(&shapes[1], mx - nx, my - ny));
+        /* a small step to each side of the piece's own midpoint (1/1024 of a grid unit), tested against the split outlines */
+        nx = nx / len / 1024.0;
+        ny = ny / len / 1024.0;
+        left = combine_result(mode, combine_shape_contains(&piece_shapes[0], mx + nx, my + ny),
+                combine_shape_contains(&piece_shapes[1], mx + nx, my + ny));
+        right = combine_result(mode, combine_shape_contains(&piece_shapes[0], mx - nx, my - ny),
+                combine_shape_contains(&piece_shapes[1], mx - nx, my - ny));
         if (left == right) continue;
         if (!d2d_array_reserve((void **)&result, &result_size, result_count + 1, sizeof(*result))) goto done;
         if (left) { result[result_count].a = e->a; result[result_count].b = e->b; }
@@ -585,5 +608,7 @@ done:
     free(all);
     free(shapes[0].edges);
     free(shapes[1].edges);
+    free(piece_shapes[0].edges);
+    free(piece_shapes[1].edges);
     return hr;
 }

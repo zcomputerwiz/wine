@@ -10394,7 +10394,18 @@ static void test_subresource_surface(BOOL d3d11)
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
     if (SUCCEEDED(hr))
     {
+        IDXGISurface *surface2, *texture_surface = NULL;
+
         ok(ID2D1Bitmap1_GetOptions(bitmap) == desc.bitmapOptions, "Got options %#x.\n", ID2D1Bitmap1_GetOptions(bitmap));
+        ID3D11Texture2D_QueryInterface(texture, &IID_IDXGISurface, (void **)&texture_surface);
+        hr = ID2D1Bitmap1_GetSurface(bitmap, &surface2);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        /* the surface of the texture, not the subresource surface */
+        ok(surface2 == texture_surface, "Got surface %p, expected the texture's %p.\n", surface2, texture_surface);
+        if (surface2)
+            IDXGISurface_Release(surface2);
+        if (texture_surface)
+            IDXGISurface_Release(texture_surface);
         ID2D1Bitmap1_Release(bitmap);
     }
 
@@ -10408,10 +10419,10 @@ static void test_subresource_surface(BOOL d3d11)
 }
 
 /* The private interface {46fdbfea-53f8-440c-b9e2-81dfec612a72} of the device, which the lifted compositor of the Windows App SDK asks
- * for; slot 5 as it calls it. Only 64-bit is measured. */
+ * for; slot 5 as it calls it. Only x86_64 is measured, and Wine answers the interface there only. */
 static void test_device_private(BOOL d3d11)
 {
-#ifdef _WIN64
+#ifdef __x86_64__
     static const GUID iid_private = {0x46fdbfea, 0x53f8, 0x440c, {0xb9, 0xe2, 0x81, 0xdf, 0xec, 0x61, 0x2a, 0x72}};
     typedef HRESULT (STDMETHODCALLTYPE *method5_t)(void *, UINT_PTR, UINT_PTR, DWORD *);
     static const UINT_PTR args[][2] = {{2000, 0x1e0000}, {0, 0}, {0xffffffff, 0}, {2000, 0xffffffff}};
@@ -10454,16 +10465,15 @@ static void test_device_private(BOOL d3d11)
     ok(unk == (IUnknown *)device, "Did not get the device.\n");
     IUnknown_Release(unk);
 
+    /* the return value is not an HRESULT on Windows (it varies, the bits of a float were seen): only the output is checked */
     for (i = 0; i < ARRAY_SIZE(args); ++i)
     {
         out[0] = out[1] = 0xaaaaaaaa;
-        hr = ((method5_t)(*(void ***)priv)[5])(priv, args[i][0], args[i][1], out);
-        ok(hr == S_OK, "%u: Got unexpected hr %#lx.\n", i, hr);
+        ((method5_t)(*(void ***)priv)[5])(priv, args[i][0], args[i][1], out);
         ok(out[0] == 1, "%u: Got unexpected value %#lx.\n", i, out[0]);
         ok(out[1] == 0xaaaaaaaa, "%u: Got unexpected value %#lx after it.\n", i, out[1]);
     }
-    hr = ((method5_t)(*(void ***)priv)[5])(priv, 2000, 0x1e0000, NULL);
-    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ((method5_t)(*(void ***)priv)[5])(priv, 2000, 0x1e0000, NULL);
 
     /* a device context does not answer it */
     hr = ID2D1Device_CreateDeviceContext(device, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &context);
@@ -11842,6 +11852,78 @@ static void test_combine_geometry(BOOL d3d11)
             D2D1_COMBINE_MODE_UNION, NULL, -1.0f, (ID2D1SimplifiedGeometrySink *)&sink.ID2D1GeometrySink_iface);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
     geometry_sink_cleanup(&sink);
+
+    /* curved geometries: the union and the intersection of two ellipses, checked by the inside test of the result at points
+     * clear of both outlines (the pieces next to crossings that are not on the grid must be classified right) */
+    {
+        static const D2D1_ELLIPSE ellipse_desc[2] = {{{100.0f, 100.0f}, 60.0f, 40.0f}, {{140.0f, 120.0f}, 50.0f, 70.0f}};
+        static const D2D1_COMBINE_MODE modes[2] = {D2D1_COMBINE_MODE_UNION, D2D1_COMBINE_MODE_INTERSECT};
+        ID2D1EllipseGeometry *ellipses[2];
+        unsigned int m, bad;
+        int x, y;
+
+        for (i = 0; i < 2; ++i)
+        {
+            hr = ID2D1Factory_CreateEllipseGeometry(ctx.factory, &ellipse_desc[i], &ellipses[i]);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        }
+        for (m = 0; m < ARRAY_SIZE(modes); ++m)
+        {
+            ID2D1PathGeometry *path;
+            ID2D1GeometrySink *path_sink;
+
+            winetest_push_context("Ellipses, mode %u", modes[m]);
+            hr = ID2D1Factory_CreatePathGeometry(ctx.factory, &path);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            hr = ID2D1PathGeometry_Open(path, &path_sink);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            hr = ID2D1EllipseGeometry_CombineWithGeometry(ellipses[0], (ID2D1Geometry *)ellipses[1], modes[m], NULL, 0.25f,
+                    (ID2D1SimplifiedGeometrySink *)path_sink);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            hr = ID2D1GeometrySink_Close(path_sink);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            ID2D1GeometrySink_Release(path_sink);
+            for (y = 50, bad = 0; y <= 200; y += 3)
+            {
+                for (x = 30; x <= 200; x += 3)
+                {
+                    D2D1_POINT_2F p = {x + 0.5f, y + 0.5f};
+                    float d[2];
+                    BOOL in[2], expect, contains = FALSE;
+
+                    for (i = 0; i < 2; ++i)
+                    {
+                        float dx = (p.x - ellipse_desc[i].point.x) / ellipse_desc[i].radiusX;
+                        float dy = (p.y - ellipse_desc[i].point.y) / ellipse_desc[i].radiusY;
+
+                        d[i] = dx * dx + dy * dy;
+                        in[i] = d[i] < 1.0f;
+                    }
+                    if (fabsf(d[0] - 1.0f) < 0.06f || fabsf(d[1] - 1.0f) < 0.06f) continue;   /* near an outline */
+                    expect = m ? in[0] && in[1] : in[0] || in[1];
+                    hr = ID2D1PathGeometry_FillContainsPoint(path, p, NULL, 0.25f, &contains);
+                    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                    if (!!contains != expect) ++bad;
+                }
+            }
+            ok(!bad, "%u points are on the wrong side of the result.\n", bad);
+            ID2D1PathGeometry_Release(path);
+            winetest_pop_context();
+        }
+
+        /* a transform with a NaN */
+        {
+            D2D1_MATRIX_3X2_F nan_matrix = {{{1.0f, 0.0f, 0.0f, 1.0f, NAN, 0.0f}}};
+
+            geometry_sink_init(&sink);
+            hr = ID2D1EllipseGeometry_CombineWithGeometry(ellipses[0], (ID2D1Geometry *)ellipses[1], D2D1_COMBINE_MODE_UNION,
+                    &nan_matrix, 0.25f, (ID2D1SimplifiedGeometrySink *)&sink.ID2D1GeometrySink_iface);
+            ok(hr == D2DERR_BAD_NUMBER, "Got unexpected hr %#lx.\n", hr);
+            geometry_sink_cleanup(&sink);
+        }
+        for (i = 0; i < 2; ++i)
+            ID2D1EllipseGeometry_Release(ellipses[i]);
+    }
 
     for (i = 0; i < ARRAY_SIZE(rects); ++i)
         ID2D1RectangleGeometry_Release(geometries[i]);

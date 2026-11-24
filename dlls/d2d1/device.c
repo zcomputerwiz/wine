@@ -281,8 +281,9 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_private_method12(void *iface
 
     TRACE("iface %p, bitmap %p, desc %p, out %p.\n", iface, bitmap, desc, out);
 
+    if (!out) return E_POINTER;
     *out = NULL;
-    if (!(src = unsafe_impl_from_ID2D1Bitmap((ID2D1Bitmap *)bitmap))) return E_INVALIDARG;
+    if (!(src = d2d_bitmap_from_iface_checked((ID2D1Bitmap *)bitmap))) return E_INVALIDARG;
 
     props.pixelFormat = src->format;
     props.dpiX = src->dpi_x;
@@ -297,11 +298,11 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_private_method12(void *iface
             props.pixelFormat.format = desc->pixelFormat.format;
             props.pixelFormat.alphaMode = desc->pixelFormat.alphaMode;
         }
-        if (desc->dpiX != 0.0f || desc->dpiY != 0.0f)
-        {
+        /* a dpi of 0 takes the source's, each axis on its own */
+        if (desc->dpiX != 0.0f)
             props.dpiX = desc->dpiX;
+        if (desc->dpiY != 0.0f)
             props.dpiY = desc->dpiY;
-        }
         props.colorContext = desc->colorContext;
     }
 

@@ -140,7 +140,9 @@ D2D_PRIVATE_SLOT(9) D2D_PRIVATE_SLOT(10) D2D_PRIVATE_SLOT(11) D2D_PRIVATE_SLOT(1
 /* Slot 15 creates a Direct2D device. Measured on 64-bit Windows 11 (wintrace d2d1.dll!factorymt@{6f72c0a2-...}[15] in Notepad):
  * the compositor of the Windows App SDK (dwmcorei.dll) calls it once with 4, its Direct3D 11 device and an output pointer, which
  * receives a Direct2D device object (its vtable is next to that of the device of ID2D1Factory1::CreateDevice); it returns 0. The
- * meaning of the 4 is not known. Here the device is made with CreateDevice on the DXGI device of the given device. */
+ * meaning of the 4 is not known. Here the device is made with CreateDevice on the DXGI device of the given device. The argument
+ * layout is measured on x86_64 only: elsewhere the slot raises the stub exception. */
+#ifdef __x86_64__
 static HRESULT STDMETHODCALLTYPE d2d_private_slot15(void *iface, UINT_PTR options, IUnknown *device, ID2D1Device **out)
 {
     struct d2d_factory *factory = impl_from_private(iface);
@@ -158,6 +160,15 @@ static HRESULT STDMETHODCALLTYPE d2d_private_slot15(void *iface, UINT_PTR option
     IDXGIDevice_Release(dxgi_device);
     return hr;
 }
+#else
+static void STDMETHODCALLTYPE d2d_private_slot15(void)
+{
+    ULONG_PTR args[2] = {(ULONG_PTR)L"d2d1.dll", (ULONG_PTR)"factory private slot 15"};
+
+    ERR("Factory private slot 15 is not implemented on this architecture.\n");
+    RaiseException(0x80000100 /* EXCEPTION_WINE_STUB */, EXCEPTION_NONCONTINUABLE, 2, args);
+}
+#endif
 
 static const void *const d2d_private_vtbl[] =
 {

@@ -539,7 +539,13 @@ static HRESULT d2d_get_surface_resource(IDXGISurface *surface, REFIID iid, void 
     hr = IDXGISurface2_GetResource(surface2, iid, out, &index);
     IDXGISurface2_Release(surface2);
     if (SUCCEEDED(hr) && index)
+    {
+        /* the views here cover subresource 0: drawing would go to the wrong subresource */
         FIXME("Subresource %u of the resource is not supported.\n", index);
+        IUnknown_Release((IUnknown *)*out);
+        *out = NULL;
+        hr = E_INVALIDARG;
+    }
     return hr;
 }
 
@@ -693,6 +699,7 @@ HRESULT d2d_bitmap_create_shared(struct d2d_device_context *context, REFIID iid,
 
         d2d_bitmap_init(*bitmap, context, resource, pixel_size, &d);
         ID3D11Resource_Release(resource);
+        /* GetSurface gives the surface of the resource, not a subresource surface the bitmap was made from (measured) */
         TRACE("Created bitmap %p.\n", *bitmap);
 
         return S_OK;
@@ -811,6 +818,14 @@ HRESULT d2d_bitmap_create_from_wic_bitmap(struct d2d_device_context *context, IW
     free(data);
 
     return hr;
+}
+
+/* NULL for a bitmap that is not one of ours (an application may pass any object to a private method) */
+struct d2d_bitmap *d2d_bitmap_from_iface_checked(ID2D1Bitmap *iface)
+{
+    if (!iface || iface->lpVtbl != (ID2D1BitmapVtbl *)&d2d_bitmap_vtbl)
+        return NULL;
+    return CONTAINING_RECORD(iface, struct d2d_bitmap, ID2D1Bitmap1_iface);
 }
 
 struct d2d_bitmap *unsafe_impl_from_ID2D1Bitmap(ID2D1Bitmap *iface)

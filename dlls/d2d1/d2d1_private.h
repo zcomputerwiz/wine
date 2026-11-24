@@ -460,6 +460,7 @@ HRESULT d2d_bitmap_create_from_wic_bitmap(struct d2d_device_context *context, IW
         const D2D1_BITMAP_PROPERTIES1 *desc, struct d2d_bitmap **bitmap);
 unsigned int d2d_get_bitmap_options_for_surface(IDXGISurface *surface);
 struct d2d_bitmap *unsafe_impl_from_ID2D1Bitmap(ID2D1Bitmap *iface);
+struct d2d_bitmap *d2d_bitmap_from_iface_checked(ID2D1Bitmap *iface);
 
 struct d2d_sprite
 {
