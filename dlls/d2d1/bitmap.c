@@ -524,13 +524,38 @@ HRESULT d2d_bitmap_create(struct d2d_device_context *context, D2D1_SIZE_U size, 
     return *bitmap ? S_OK : E_OUTOFMEMORY;
 }
 
+/* The resource of a DXGI surface. A surface made by IDXGIResource1::CreateSubresourceSurface does not answer QueryInterface
+ * for the resource (measured on Windows 11), but IDXGISurface2::GetResource gives it, and Direct2D takes such a surface. */
+static HRESULT d2d_get_surface_resource(IDXGISurface *surface, REFIID iid, void **out)
+{
+    IDXGISurface2 *surface2;
+    UINT index;
+    HRESULT hr;
+
+    if (SUCCEEDED(hr = IDXGISurface_QueryInterface(surface, iid, out)))
+        return hr;
+    if (FAILED(IDXGISurface_QueryInterface(surface, &IID_IDXGISurface2, (void **)&surface2)))
+        return hr;
+    hr = IDXGISurface2_GetResource(surface2, iid, out, &index);
+    IDXGISurface2_Release(surface2);
+    if (SUCCEEDED(hr) && index)
+    {
+        /* the views here cover subresource 0: drawing would go to the wrong subresource */
+        FIXME("Subresource %u of the resource is not supported.\n", index);
+        IUnknown_Release((IUnknown *)*out);
+        *out = NULL;
+        hr = E_INVALIDARG;
+    }
+    return hr;
+}
+
 unsigned int d2d_get_bitmap_options_for_surface(IDXGISurface *surface)
 {
     D3D11_TEXTURE2D_DESC desc;
     unsigned int options = 0;
     ID3D11Texture2D *texture;
 
-    if (FAILED(IDXGISurface_QueryInterface(surface, &IID_ID3D11Texture2D, (void **)&texture)))
+    if (FAILED(d2d_get_surface_resource(surface, &IID_ID3D11Texture2D, (void **)&texture)))
         return 0;
 
     ID3D11Texture2D_GetDesc(texture, &desc);
@@ -621,7 +646,7 @@ HRESULT d2d_bitmap_create_shared(struct d2d_device_context *context, REFIID iid,
         ID3D11Device *device;
         HRESULT hr;
 
-        if (FAILED(IDXGISurface_QueryInterface(surface, &IID_ID3D11Resource, (void **)&resource)))
+        if (FAILED(d2d_get_surface_resource(surface, &IID_ID3D11Resource, (void **)&resource)))
         {
             WARN("Failed to get d3d resource from dxgi surface.\n");
             return E_FAIL;
@@ -674,6 +699,7 @@ HRESULT d2d_bitmap_create_shared(struct d2d_device_context *context, REFIID iid,
 
         d2d_bitmap_init(*bitmap, context, resource, pixel_size, &d);
         ID3D11Resource_Release(resource);
+        /* GetSurface gives the surface of the resource, not a subresource surface the bitmap was made from (measured) */
         TRACE("Created bitmap %p.\n", *bitmap);
 
         return S_OK;
@@ -792,6 +818,14 @@ HRESULT d2d_bitmap_create_from_wic_bitmap(struct d2d_device_context *context, IW
     free(data);
 
     return hr;
+}
+
+/* NULL for a bitmap that is not one of ours (an application may pass any object to a private method) */
+struct d2d_bitmap *d2d_bitmap_from_iface_checked(ID2D1Bitmap *iface)
+{
+    if (!iface || iface->lpVtbl != (ID2D1BitmapVtbl *)&d2d_bitmap_vtbl)
+        return NULL;
+    return CONTAINING_RECORD(iface, struct d2d_bitmap, ID2D1Bitmap1_iface);
 }
 
 struct d2d_bitmap *unsafe_impl_from_ID2D1Bitmap(ID2D1Bitmap *iface)

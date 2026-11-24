@@ -50,6 +50,16 @@ enum dxgi_frame_latency
     DXGI_FRAME_LATENCY_MAX     = 16,
 };
 
+/* whether a handle can be set with SetEvent (EVENT_MODIFY_STATE), checked without touching its state */
+static inline BOOL dxgi_event_handle_valid(HANDLE event)
+{
+    OBJECT_BASIC_INFORMATION info;
+
+    if (!event || NtQueryObject(event, ObjectBasicInformation, &info, sizeof(info), NULL))
+        return FALSE;
+    return !!(info.GrantedAccess & EVENT_MODIFY_STATE);
+}
+
 /* Layered device */
 enum dxgi_device_layer_id
 {
@@ -126,6 +136,7 @@ struct dxgi_factory
     HWND device_window;
     struct list adapters_changed;   /* struct dxgi_adapters_changed, under the wined3d mutex */
     DWORD next_adapters_changed_cookie;
+    struct list occlusion_events;   /* struct dxgi_adapters_changed (event and cookie), under the wined3d mutex */
 };
 
 struct dxgi_adapters_changed
@@ -150,6 +161,7 @@ struct dxgi_device
     struct wined3d_device *wined3d_device;
     struct wined3d_swapchain *implicit_swapchain;
     IWineDXGIAdapter *adapter;
+    BOOL queries_lost;   /* an EnqueueSetEvent query never completed (device loss): later calls do not wait */
 };
 
 HRESULT dxgi_device_init(struct dxgi_device *device, struct dxgi_device_layer *layer,

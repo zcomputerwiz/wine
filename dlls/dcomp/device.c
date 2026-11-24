@@ -2805,6 +2805,17 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_private_method41(IDCompositionVisu
     return S_OK;
 }
 
+#ifdef __x86_64__
+/* Slot 35, measured on 64-bit Windows 11 (wintrace dcomp.dll!visual[35] in Notepad): called by the framework of the Windows App SDK for
+ * its input state manager with one small value that looks like a kernel handle, returns 0 and writes nothing through its arguments.
+ * Its size on the stack of i386 is not measured, so 32-bit callers still get the stub exception. */
+static HRESULT STDMETHODCALLTYPE dcomp_visual_private_method35(IDCompositionVisual2 *iface, HANDLE handle)
+{
+    FIXME("iface %p, visual private method 35: %p semi-stub\n", iface, handle);
+    return S_OK;
+}
+#endif
+
 #define DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(n) \
 static void STDMETHODCALLTYPE dcomp_visual_private_unimplemented##n(void) \
 { \
@@ -2825,7 +2836,9 @@ DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(31)
 DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(32)
 DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(33)
 DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(34)
+#ifndef __x86_64__
 DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(35)
+#endif
 DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(36)
 DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(37)
 DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(38)
@@ -3613,7 +3626,11 @@ static const struct dcomp_visual_ext_vtbl dcomp_visual_vtbl =
     dcomp_visual_private_unimplemented32,
     dcomp_visual_private_unimplemented33,
     dcomp_visual_private_unimplemented34,
+#ifdef __x86_64__
+    dcomp_visual_private_method35,
+#else
     dcomp_visual_private_unimplemented35,
+#endif
     dcomp_visual_private_unimplemented36,
     dcomp_visual_private_unimplemented37,
     dcomp_visual_private_unimplemented38,
@@ -5463,7 +5480,10 @@ static void STDMETHODCALLTYPE dcomp_desktop_device_private##n(void) \
 DCOMP_PRIVATE_STUB(27) DCOMP_PRIVATE_STUB(28) DCOMP_PRIVATE_STUB(30) DCOMP_PRIVATE_STUB(31) DCOMP_PRIVATE_STUB(32)
 DCOMP_PRIVATE_STUB(33) DCOMP_PRIVATE_STUB(34) DCOMP_PRIVATE_STUB(35) DCOMP_PRIVATE_STUB(36) DCOMP_PRIVATE_STUB(37)
 DCOMP_PRIVATE_STUB(38) DCOMP_PRIVATE_STUB(39) DCOMP_PRIVATE_STUB(40) DCOMP_PRIVATE_STUB(41) DCOMP_PRIVATE_STUB(42)
-DCOMP_PRIVATE_STUB(43) DCOMP_PRIVATE_STUB(44) DCOMP_PRIVATE_STUB(45) DCOMP_PRIVATE_STUB(47)
+DCOMP_PRIVATE_STUB(43) DCOMP_PRIVATE_STUB(44) DCOMP_PRIVATE_STUB(47)
+#ifndef __x86_64__
+DCOMP_PRIVATE_STUB(45)
+#endif
 
 /* Method 46 of the batch-query interface ({28d6ad3d-...}, the very interface of the desktop device) takes one pointer (on 32-bit Windows 11 it
  * removes 8 bytes: the interface and one argument) and stores a dword in it: the id of the newest batch of changes that the composition has
@@ -5471,6 +5491,33 @@ DCOMP_PRIVATE_STUB(43) DCOMP_PRIVATE_STUB(44) DCOMP_PRIVATE_STUB(45) DCOMP_PRIVA
  * value rise 1, 1, 2, 3, 3, 4, 4 as it submits batches): 0 on a device nothing was submitted to; the second dword of an eight-byte block is
  * not touched. The submit methods are not known and not implemented, so no batch is ever submitted here and the answer is 0.
  * (The other registers of the call that a trace shows belong to the caller; they are not arguments.) */
+#ifdef __x86_64__
+/* Method 45 stores the id of the newest batch submitted to the composition. Measured on 64-bit Windows 11 (wintrace dcomp.dll!desktop[45]
+ * and [46] in Notepad): the dword rises 3, 4, 5, ... with each submitted batch, and method 46 (completed) follows it one step behind. No
+ * batch is submitted here, so the answer is 0, the same as that of method 46: nothing is outstanding. Its size on the stack of i386 is not
+ * measured, so 32-bit callers still get the stub exception. */
+static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_private45(IDCompositionDesktopDevice *iface, DWORD *submitted)
+{
+    HRESULT hr = S_OK;
+
+    TRACE("iface %p, submitted %p.\n", iface, submitted);
+
+    if (!submitted) return E_POINTER;
+
+    __TRY
+    {
+        *submitted = 0;
+    }
+    __EXCEPT_PAGE_FAULT
+    {
+        hr = E_POINTER;
+    }
+    __ENDTRY
+
+    return hr;
+}
+#endif
+
 static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_private46(IDCompositionDesktopDevice *iface, DWORD *completed)
 {
     HRESULT hr = S_OK;
@@ -5658,5 +5705,75 @@ HRESULT WINAPI DCompositionCreateSharedVisualHandle(HANDLE *out)
     if (!(handle = CreateEventW(NULL, TRUE, FALSE, NULL))) return HRESULT_FROM_WIN32(GetLastError());
     dcomp_shared_forget(handle);
     *out = handle;
+    return S_OK;
+}
+
+/* The compositor clock (documented in the Windows SDK, dcomp.h). Wine has no system compositor, so the clock is a fixed 60 Hz clock
+ * of the performance counter: frame N starts at N / 60 seconds. The compositor of the Windows App SDK paces its frames with
+ * DCompositionWaitForCompositorClock (on Windows 11 it calls it with no handles and a timeout of 80 ms, and gets 0, the number of
+ * handles, at each tick). */
+#define DCOMP_CLOCK_HZ 60
+#define DCOMP_MAX_WAIT_HANDLES 32   /* DCOMPOSITION_MAX_WAITFORCOMPOSITORCLOCK_OBJECTS */
+
+static UINT64 dcomp_clock_frame(LARGE_INTEGER *freq_out)
+{
+    LARGE_INTEGER now, freq;
+
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    if (freq_out) *freq_out = freq;
+    return (UINT64)now.QuadPart * DCOMP_CLOCK_HZ / (UINT64)freq.QuadPart;
+}
+
+DWORD WINAPI DCompositionWaitForCompositorClock(UINT count, const HANDLE *handles, DWORD timeout)
+{
+    LARGE_INTEGER freq, now;
+    UINT64 frame, next_tick;
+    DWORD to_tick, ret;
+
+    TRACE("count %u, handles %p, timeout %lu.\n", count, handles, timeout);
+
+    if (count > DCOMP_MAX_WAIT_HANDLES || (count && !handles))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return WAIT_FAILED;
+    }
+
+    frame = dcomp_clock_frame(&freq);
+    QueryPerformanceCounter(&now);
+    next_tick = (frame + 1) * (UINT64)freq.QuadPart / DCOMP_CLOCK_HZ;
+    to_tick = (DWORD)(((next_tick > (UINT64)now.QuadPart ? next_tick - now.QuadPart : 0) * 1000 + freq.QuadPart - 1)
+            / freq.QuadPart);
+
+    if (count)
+    {
+        ret = WaitForMultipleObjects(count, handles, FALSE, min(timeout, to_tick));
+        if (ret != WAIT_TIMEOUT) return ret;   /* a handle (or an abandoned mutex), or a failure */
+    }
+    else Sleep(min(timeout, to_tick));
+
+    return timeout < to_tick ? WAIT_TIMEOUT : count;
+}
+
+typedef enum
+{
+    COMPOSITION_FRAME_ID_CREATED,
+    COMPOSITION_FRAME_ID_CONFIRMED,
+    COMPOSITION_FRAME_ID_COMPLETED,
+} COMPOSITION_FRAME_ID_TYPE;
+
+/* every frame of the clock is created, confirmed and completed at its start here */
+HRESULT WINAPI DCompositionGetFrameId(COMPOSITION_FRAME_ID_TYPE type, UINT64 *id)
+{
+    TRACE("type %d, id %p.\n", type, id);
+
+    if (!id || (unsigned int)type > COMPOSITION_FRAME_ID_COMPLETED) return E_INVALIDARG;
+    *id = dcomp_clock_frame(NULL);
+    return S_OK;
+}
+
+HRESULT WINAPI DCompositionBoostCompositorClock(BOOL enable)
+{
+    TRACE("enable %d.\n", enable);
     return S_OK;
 }

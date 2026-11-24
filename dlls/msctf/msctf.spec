@@ -2,6 +2,7 @@
 @ stdcall -private DllGetClassObject(ptr ptr ptr)
 @ stdcall -private DllRegisterServer()
 @ stdcall -private DllUnregisterServer()
+@ stdcall -arch=win64 RegisterHandwritingInputRoutingCallback(ptr ptr ptr)
 @ stdcall SetInputScope(long long)
 @ stub SetInputScopeXML
 @ stdcall SetInputScopes(long ptr long ptr long wstr wstr)

@@ -101,9 +101,12 @@ static HRESULT d2d_factory_reload_sysmetrics(struct d2d_factory *factory)
  * {6f72c0a2-6db7-46e9-9b62-b58a23f4928b}: an interface of the factory that Windows 11 answers (a separate object, like
  * ID2D1Multithread; tests/uwp/alpc/d2dqi-probe.c) and that dwmcorei.dll of the Windows App Runtime queries in its DllMain, failing
  * to load when it is refused. What it does is not known: it calls the method in slot 6 with 0. The object here forwards IUnknown
- * to the factory and all its other methods succeed and log.
+ * to the factory and its other methods succeed and log, except slot 15, which creates a device (see there). On Windows (multithreaded
+ * factory) Notepad calls slots 4, 5, 6 and 15; slots 4 to 6 write nothing through their arguments.
  */
+#ifdef __x86_64__
 static const GUID IID_d2d_private = {0x6f72c0a2, 0x6db7, 0x46e9, {0x9b, 0x62, 0xb5, 0x8a, 0x23, 0xf4, 0x92, 0x8b}};
+#endif
 
 static struct d2d_factory *impl_from_private(void *iface)
 {
@@ -135,7 +138,39 @@ static ULONG STDMETHODCALLTYPE d2d_private_Release(void *iface)
     }
 D2D_PRIVATE_SLOT(3) D2D_PRIVATE_SLOT(4) D2D_PRIVATE_SLOT(5) D2D_PRIVATE_SLOT(6) D2D_PRIVATE_SLOT(7) D2D_PRIVATE_SLOT(8)
 D2D_PRIVATE_SLOT(9) D2D_PRIVATE_SLOT(10) D2D_PRIVATE_SLOT(11) D2D_PRIVATE_SLOT(12) D2D_PRIVATE_SLOT(13) D2D_PRIVATE_SLOT(14)
-D2D_PRIVATE_SLOT(15)
+
+/* Slot 15 creates a Direct2D device. Measured on 64-bit Windows 11 (wintrace d2d1.dll!factorymt@{6f72c0a2-...}[15] in Notepad):
+ * the compositor of the Windows App SDK (dwmcorei.dll) calls it once with 4, its Direct3D 11 device and an output pointer, which
+ * receives a Direct2D device object (its vtable is next to that of the device of ID2D1Factory1::CreateDevice); it returns 0. The
+ * meaning of the 4 is not known. Here the device is made with CreateDevice on the DXGI device of the given device. The argument
+ * layout is measured on x86_64 only: elsewhere the slot raises the stub exception. */
+#ifdef __x86_64__
+static HRESULT STDMETHODCALLTYPE d2d_private_slot15(void *iface, UINT_PTR options, IUnknown *device, ID2D1Device **out)
+{
+    struct d2d_factory *factory = impl_from_private(iface);
+    IDXGIDevice *dxgi_device;
+    HRESULT hr;
+
+    FIXME("iface %p, options %#Ix, device %p, out %p semi-stub.\n", iface, options, device, out);
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!device) return E_INVALIDARG;
+    if (FAILED(hr = IUnknown_QueryInterface(device, &IID_IDXGIDevice, (void **)&dxgi_device)))
+        return hr;
+    hr = ID2D1Factory1_CreateDevice((ID2D1Factory1 *)&factory->ID2D1Factory7_iface, dxgi_device, out);
+    IDXGIDevice_Release(dxgi_device);
+    return hr;
+}
+#else
+static void STDMETHODCALLTYPE d2d_private_slot15(void)
+{
+    ULONG_PTR args[2] = {(ULONG_PTR)L"d2d1.dll", (ULONG_PTR)"factory private slot 15"};
+
+    ERR("Factory private slot 15 is not implemented on this architecture.\n");
+    RaiseException(0x80000100 /* EXCEPTION_WINE_STUB */, EXCEPTION_NONCONTINUABLE, 2, args);
+}
+#endif
 
 static const void *const d2d_private_vtbl[] =
 {
@@ -151,12 +186,16 @@ static HRESULT STDMETHODCALLTYPE d2d_factory_QueryInterface(ID2D1Factory7 *iface
 
     TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
 
+#ifdef __x86_64__
+    /* only where the argument sizes of its methods are measured: elsewhere a wrong argument count of a stdcall slot
+     * would unbalance the stack */
     if (IsEqualGUID(iid, &IID_d2d_private))
     {
         ID2D1Factory7_AddRef(iface);
         *out = &factory->private_iface;
         return S_OK;
     }
+#endif
 
     if ((IsEqualGUID(iid, &IID_ID2D1Factory7) && d2d_settings.max_version_factory >= 7)
             || (IsEqualGUID(iid, &IID_ID2D1Factory6) && d2d_settings.max_version_factory >= 6)

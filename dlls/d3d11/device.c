@@ -5962,9 +5962,11 @@ static D3D_FEATURE_LEVEL STDMETHODCALLTYPE d3d11_device_GetFeatureLevel(ID3D11De
 
 static UINT STDMETHODCALLTYPE d3d11_device_GetCreationFlags(ID3D11Device5 *iface)
 {
-    FIXME("iface %p stub!\n", iface);
+    struct d3d_device *device = impl_from_ID3D11Device5(iface);
 
-    return 0;
+    TRACE("iface %p.\n", iface);
+
+    return device->creation_flags;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_device_GetDeviceRemovedReason(ID3D11Device5 *iface)
@@ -6571,6 +6573,112 @@ static const struct ID3D11Device5Vtbl d3d11_device_vtbl =
     d3d11_device_CreateFence,
 };
 
+/* The private interface {26c5dc23-e49c-4b0a-8f79-e7b1ac804d32} of the device. The compositor of the Windows App SDK (dcompi.dll)
+ * asks the device for it and calls it without checking the result. Measured black box on 64-bit Windows 11: the device answers it
+ * with an object of its own (not the device); the compositor of Notepad calls slots 3, 6, 7, 8 and 12. Each returns 0 and writes
+ * nothing through its arguments (slots 6 to 8 take a resource of the device; slot 12 takes small numbers such as the width of a
+ * window); what they change is state of the device and of the resource. Here they do nothing and return S_OK. The other slots are
+ * not known: calling one raises the stub exception. The argument sizes are not measured on i386, so 32-bit callers do not get the
+ * interface. */
+#ifdef __x86_64__
+static const GUID d3d11_compositor_private_iid = {0x26c5dc23, 0xe49c, 0x4b0a, {0x8f, 0x79, 0xe7, 0xb1, 0xac, 0x80, 0x4d, 0x32}};
+
+static inline struct d3d_device *impl_from_compositor_private(void *iface)
+{
+    return CONTAINING_RECORD(iface, struct d3d_device, compositor_private_vtbl);
+}
+
+static HRESULT STDMETHODCALLTYPE d3d11_compositor_private_QueryInterface(void *iface, REFIID iid, void **out)
+{
+    struct d3d_device *device = impl_from_compositor_private(iface);
+
+    TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
+
+    if (IsEqualGUID(iid, &d3d11_compositor_private_iid))
+    {
+        *out = iface;
+        ID3D11Device5_AddRef(&device->ID3D11Device5_iface);
+        return S_OK;
+    }
+    return ID3D11Device5_QueryInterface(&device->ID3D11Device5_iface, iid, out);
+}
+
+static ULONG STDMETHODCALLTYPE d3d11_compositor_private_AddRef(void *iface)
+{
+    return ID3D11Device5_AddRef(&impl_from_compositor_private(iface)->ID3D11Device5_iface);
+}
+
+static ULONG STDMETHODCALLTYPE d3d11_compositor_private_Release(void *iface)
+{
+    return ID3D11Device5_Release(&impl_from_compositor_private(iface)->ID3D11Device5_iface);
+}
+
+#define D3D11_COMPOSITOR_PRIVATE_NOP(n) \
+static HRESULT STDMETHODCALLTYPE d3d11_compositor_private_method##n(void *iface, void *arg1, void *arg2, void *arg3) \
+{ \
+    FIXME("iface %p, private method " #n ": %p, %p, %p, semi-stub.\n", iface, arg1, arg2, arg3); \
+    return S_OK; \
+}
+D3D11_COMPOSITOR_PRIVATE_NOP(3) D3D11_COMPOSITOR_PRIVATE_NOP(6) D3D11_COMPOSITOR_PRIVATE_NOP(7) D3D11_COMPOSITOR_PRIVATE_NOP(8)
+D3D11_COMPOSITOR_PRIVATE_NOP(12)
+
+#define D3D11_COMPOSITOR_PRIVATE_STUB(n) \
+static void STDMETHODCALLTYPE d3d11_compositor_private_unimplemented##n(void) \
+{ \
+    ULONG_PTR args[2] = {(ULONG_PTR)L"d3d11.dll", (ULONG_PTR)"compositor private method " #n}; \
+    ERR("compositor private method " #n " is not implemented.\n"); \
+    RaiseException(0x80000100 /* EXCEPTION_WINE_STUB */, EXCEPTION_NONCONTINUABLE, 2, args); \
+}
+D3D11_COMPOSITOR_PRIVATE_STUB(4)  D3D11_COMPOSITOR_PRIVATE_STUB(5)  D3D11_COMPOSITOR_PRIVATE_STUB(9)  D3D11_COMPOSITOR_PRIVATE_STUB(10)
+D3D11_COMPOSITOR_PRIVATE_STUB(11) D3D11_COMPOSITOR_PRIVATE_STUB(13) D3D11_COMPOSITOR_PRIVATE_STUB(14) D3D11_COMPOSITOR_PRIVATE_STUB(15)
+D3D11_COMPOSITOR_PRIVATE_STUB(16) D3D11_COMPOSITOR_PRIVATE_STUB(17) D3D11_COMPOSITOR_PRIVATE_STUB(18) D3D11_COMPOSITOR_PRIVATE_STUB(19)
+D3D11_COMPOSITOR_PRIVATE_STUB(20) D3D11_COMPOSITOR_PRIVATE_STUB(21) D3D11_COMPOSITOR_PRIVATE_STUB(22) D3D11_COMPOSITOR_PRIVATE_STUB(23)
+D3D11_COMPOSITOR_PRIVATE_STUB(24) D3D11_COMPOSITOR_PRIVATE_STUB(25) D3D11_COMPOSITOR_PRIVATE_STUB(26) D3D11_COMPOSITOR_PRIVATE_STUB(27)
+D3D11_COMPOSITOR_PRIVATE_STUB(28) D3D11_COMPOSITOR_PRIVATE_STUB(29) D3D11_COMPOSITOR_PRIVATE_STUB(30) D3D11_COMPOSITOR_PRIVATE_STUB(31)
+D3D11_COMPOSITOR_PRIVATE_STUB(32) D3D11_COMPOSITOR_PRIVATE_STUB(33) D3D11_COMPOSITOR_PRIVATE_STUB(34) D3D11_COMPOSITOR_PRIVATE_STUB(35)
+
+/* the length of the vtable is not known: the slots after the last one measured raise the stub exception too */
+static const void * const d3d11_compositor_private_vtbl[] =
+{
+    d3d11_compositor_private_QueryInterface,
+    d3d11_compositor_private_AddRef,
+    d3d11_compositor_private_Release,
+    d3d11_compositor_private_method3,
+    d3d11_compositor_private_unimplemented4,
+    d3d11_compositor_private_unimplemented5,
+    d3d11_compositor_private_method6,
+    d3d11_compositor_private_method7,
+    d3d11_compositor_private_method8,
+    d3d11_compositor_private_unimplemented9,
+    d3d11_compositor_private_unimplemented10,
+    d3d11_compositor_private_unimplemented11,
+    d3d11_compositor_private_method12,
+    d3d11_compositor_private_unimplemented13,
+    d3d11_compositor_private_unimplemented14,
+    d3d11_compositor_private_unimplemented15,
+    d3d11_compositor_private_unimplemented16,
+    d3d11_compositor_private_unimplemented17,
+    d3d11_compositor_private_unimplemented18,
+    d3d11_compositor_private_unimplemented19,
+    d3d11_compositor_private_unimplemented20,
+    d3d11_compositor_private_unimplemented21,
+    d3d11_compositor_private_unimplemented22,
+    d3d11_compositor_private_unimplemented23,
+    d3d11_compositor_private_unimplemented24,
+    d3d11_compositor_private_unimplemented25,
+    d3d11_compositor_private_unimplemented26,
+    d3d11_compositor_private_unimplemented27,
+    d3d11_compositor_private_unimplemented28,
+    d3d11_compositor_private_unimplemented29,
+    d3d11_compositor_private_unimplemented30,
+    d3d11_compositor_private_unimplemented31,
+    d3d11_compositor_private_unimplemented32,
+    d3d11_compositor_private_unimplemented33,
+    d3d11_compositor_private_unimplemented34,
+    d3d11_compositor_private_unimplemented35,
+};
+#endif
+
 /* Inner IUnknown methods */
 
 static inline struct d3d_device *impl_from_IUnknown(IUnknown *iface)
@@ -6616,6 +6724,12 @@ static HRESULT STDMETHODCALLTYPE d3d_device_inner_QueryInterface(IUnknown *iface
     {
         *out = &device->ID3D11VideoDevice1_iface;
     }
+#ifdef __x86_64__
+    else if (IsEqualGUID(riid, &d3d11_compositor_private_iid))
+    {
+        *out = &device->compositor_private_vtbl;
+    }
+#endif
     else
     {
         WARN("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(riid));
@@ -9233,6 +9347,9 @@ void d3d_device_init(struct d3d_device *device, void *outer_unknown)
     device->ID3D10Multithread_iface.lpVtbl = &d3d10_multithread_vtbl;
     device->ID3D11VideoDevice1_iface.lpVtbl = &d3d11_video_device1_vtbl;
     device->IWineDXGIDeviceParent_iface.lpVtbl = &d3d_dxgi_device_parent_vtbl;
+#ifdef __x86_64__
+    device->compositor_private_vtbl = d3d11_compositor_private_vtbl;
+#endif
     device->device_parent.ops = &d3d_wined3d_device_parent_ops;
     device->refcount = 1;
     /* COM aggregation always takes place */

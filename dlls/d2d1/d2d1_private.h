@@ -176,6 +176,7 @@ struct d2d_device_context
     ID2D1GdiInteropRenderTarget ID2D1GdiInteropRenderTarget_iface;
     IDWriteTextRenderer IDWriteTextRenderer_iface;
     IUnknown IUnknown_iface;
+    const void * const *private_vtbl;   /* the private interface {2ea67ed7-...} that the compositor asks for (64-bit) */
     LONG refcount;
 
     IUnknown *outer_unknown;
@@ -459,6 +460,7 @@ HRESULT d2d_bitmap_create_from_wic_bitmap(struct d2d_device_context *context, IW
         const D2D1_BITMAP_PROPERTIES1 *desc, struct d2d_bitmap **bitmap);
 unsigned int d2d_get_bitmap_options_for_surface(IDXGISurface *surface);
 struct d2d_bitmap *unsafe_impl_from_ID2D1Bitmap(ID2D1Bitmap *iface);
+struct d2d_bitmap *d2d_bitmap_from_iface_checked(ID2D1Bitmap *iface);
 
 struct d2d_sprite
 {
@@ -675,6 +677,7 @@ struct d2d_geometry_realization *unsafe_impl_from_ID2D1GeometryRealization(ID2D1
 struct d2d_device
 {
     ID2D1Device6 ID2D1Device6_iface;
+    const void * const *private_vtbl;   /* the private interface {46fdbfea-...} that the compositor asks for (64-bit) */
     LONG refcount;
     ID2D1Factory1 *factory;
     IDXGIDevice *dxgi_device;
@@ -965,6 +968,9 @@ void d2d_command_list_fill_opacity_mask(struct d2d_command_list *command_list, c
 void d2d_command_list_push_layer(struct d2d_command_list *command_list, const struct d2d_device_context *context,
         const D2D1_LAYER_PARAMETERS1 *params);
 void d2d_command_list_pop_layer(struct d2d_command_list *command_list);
+
+HRESULT d2d_geometry_combine(ID2D1Geometry *geometry1, ID2D1Geometry *geometry2, D2D1_COMBINE_MODE mode,
+        const D2D1_MATRIX_3X2_F *transform, float tolerance, ID2D1SimplifiedGeometrySink *sink);
 
 static inline BOOL d2d_array_reserve(void **elements, size_t *capacity, size_t count, size_t size)
 {

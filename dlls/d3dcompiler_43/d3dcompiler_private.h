@@ -531,4 +531,26 @@ void SlDeleteShader(struct bwriter_shader *shader);
 #define TAG_XNAP MAKE_TAG('X', 'N', 'A', 'P')
 #define TAG_XNAS MAKE_TAG('X', 'N', 'A', 'S')
 
+/* library.c: shader-library modules, module instances, function linking graphs and the linker */
+struct d3d11_module;
+struct flg_graph;
+
+HRESULT d3d11_module_instance_create(struct d3d11_module *module, struct flg_graph *graph, const char *namespace,
+        ID3D11ModuleInstance **instance);
+BOOL d3d11_module_instance_is_library(ID3D11ModuleInstance *instance);
+struct flg_graph *flg_graph_create(void);
+void flg_graph_addref(struct flg_graph *graph);
+void flg_graph_release(struct flg_graph *graph);
+HRESULT flg_graph_get_messages(struct flg_graph *graph, ID3DBlob **blob);
+HRESULT flg_graph_set_signature(struct flg_graph *graph, BOOL output, const D3D11_PARAMETER_DESC *desc, UINT count,
+        ID3D11LinkingNode **node);
+HRESULT flg_graph_call_function(struct flg_graph *graph, const char *namespace, ID3D11Module *module, const char *name,
+        ID3D11LinkingNode **node);
+HRESULT flg_graph_pass_value(struct flg_graph *graph, ID3D11LinkingNode *src, int src_index, const char *src_swizzle,
+        ID3D11LinkingNode *dst, int dst_index, const char *dst_swizzle);
+HRESULT flg_graph_generate_hlsl(struct flg_graph *graph, ID3DBlob **blob);
+HRESULT flg_graph_create_instance(struct flg_graph *graph, ID3D11ModuleInstance **instance);
+HRESULT d3d11_link(ID3D11ModuleInstance *entry, ID3D11ModuleInstance **libraries, unsigned int library_count,
+        const char *target, ID3DBlob **shader, ID3DBlob **error);
+
 #endif /* __WINE_D3DCOMPILER_PRIVATE_H */

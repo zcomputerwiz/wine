@@ -82,6 +82,11 @@ static ULONG STDMETHODCALLTYPE dxgi_factory_Release(IWineDXGIFactory *iface)
             CloseHandle(entry->event);
             free(entry);
         }
+        LIST_FOR_EACH_ENTRY_SAFE(entry, next, &factory->occlusion_events, struct dxgi_adapters_changed, entry)
+        {
+            CloseHandle(entry->event);
+            free(entry);
+        }
 
         if (factory->device_window)
             DestroyWindow(factory->device_window);
@@ -410,17 +415,82 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_RegisterStereoStatusWindow(IWineDX
     return E_NOTIMPL;
 }
 
+/* As measured on Windows 11 (WineExplorer tests/uwp/alpc/occlusion-kmt-probe.c): the event is set at once, reporting the current
+ * status; cookies count from 1 and the smallest free one is used again; a NULL event or cookie, and an event already registered, give
+ * DXGI_ERROR_INVALID_CALL. Windows are never reported as occluded here, so the event is not set again later. The compositor of the
+ * Windows App SDK waits for this event before it renders. */
 static HRESULT STDMETHODCALLTYPE dxgi_factory_RegisterOcclusionStatusEvent(IWineDXGIFactory *iface,
         HANDLE event, DWORD *cookie)
 {
-    FIXME("iface %p, event %p, cookie %p stub!\n", iface, event, cookie);
+    struct dxgi_factory *factory = impl_from_IWineDXGIFactory(iface);
+    struct dxgi_adapters_changed *entry, *other;
+    HANDLE duplicate;
+    DWORD free_cookie;
+    BOOL taken;
 
-    return E_NOTIMPL;
+    TRACE("iface %p, event %p, cookie %p.\n", iface, event, cookie);
+
+    if (!event || !cookie)
+        return DXGI_ERROR_INVALID_CALL;
+    /* the event is set at once and on every change: a handle without EVENT_MODIFY_STATE would fail silently */
+    if (!dxgi_event_handle_valid(event))
+        return DXGI_ERROR_INVALID_CALL;   /* measured */
+
+    if (!DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        return DXGI_ERROR_INVALID_CALL;
+
+    if (!(entry = calloc(1, sizeof(*entry))))
+    {
+        CloseHandle(duplicate);
+        return E_OUTOFMEMORY;
+    }
+    entry->event = duplicate;
+
+    wined3d_mutex_lock();
+    LIST_FOR_EACH_ENTRY(other, &factory->occlusion_events, struct dxgi_adapters_changed, entry)
+    {
+        if (!NtCompareObjects(other->event, duplicate))   /* the same event again */
+        {
+            wined3d_mutex_unlock();
+            CloseHandle(duplicate);
+            free(entry);
+            return DXGI_ERROR_INVALID_CALL;
+        }
+    }
+    for (free_cookie = 1;; ++free_cookie)
+    {
+        taken = FALSE;
+        LIST_FOR_EACH_ENTRY(other, &factory->occlusion_events, struct dxgi_adapters_changed, entry)
+            if (other->cookie == free_cookie) taken = TRUE;
+        if (!taken) break;
+    }
+    entry->cookie = free_cookie;
+    list_add_tail(&factory->occlusion_events, &entry->entry);
+    *cookie = entry->cookie;
+    SetEvent(entry->event);
+    wined3d_mutex_unlock();
+
+    return S_OK;
 }
 
 static void STDMETHODCALLTYPE dxgi_factory_UnregisterOcclusionStatus(IWineDXGIFactory *iface, DWORD cookie)
 {
-    FIXME("iface %p, cookie %#lx stub!\n", iface, cookie);
+    struct dxgi_factory *factory = impl_from_IWineDXGIFactory(iface);
+    struct dxgi_adapters_changed *entry;
+
+    TRACE("iface %p, cookie %#lx.\n", iface, cookie);
+
+    wined3d_mutex_lock();
+    LIST_FOR_EACH_ENTRY(entry, &factory->occlusion_events, struct dxgi_adapters_changed, entry)
+    {
+        if (entry->cookie != cookie) continue;
+        list_remove(&entry->entry);
+        wined3d_mutex_unlock();
+        CloseHandle(entry->event);
+        free(entry);
+        return;
+    }
+    wined3d_mutex_unlock();
 }
 
 /* The swapchain is no longer a composition target's content: Present draws into its own window again. */
@@ -884,6 +954,7 @@ static HRESULT dxgi_factory_init(struct dxgi_factory *factory, BOOL extended)
     factory->IWineDXGIFactory_iface.lpVtbl = &dxgi_factory_vtbl;
     factory->refcount = 1;
     list_init(&factory->adapters_changed);
+    list_init(&factory->occlusion_events);
     wined3d_private_store_init(&factory->private_store);
 
     wined3d_mutex_lock();

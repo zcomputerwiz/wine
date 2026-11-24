@@ -316,11 +316,68 @@ static HRESULT STDMETHODCALLTYPE dxgi_device_ReclaimResources(IWineDXGIDevice *i
     return E_NOTIMPL;
 }
 
+/* The event is set once the commands submitted so far are complete. Windows returns at once and sets the event later; here the
+ * call waits for an event query behind those commands, so the event is never set too early. The compositor of the Windows App SDK
+ * calls this every frame (it failed fast on E_NOTIMPL). */
 static HRESULT STDMETHODCALLTYPE dxgi_device_EnqueueSetEvent(IWineDXGIDevice *iface, HANDLE event)
 {
-    FIXME("iface %p, event %p stub!\n", iface, event);
+    struct dxgi_device *device = impl_from_IWineDXGIDevice(iface);
+    struct wined3d_query *query;
+    DWORD start, spins = 0;
+    BOOL done;
+    HRESULT hr;
 
-    return E_NOTIMPL;
+    TRACE("iface %p, event %p.\n", iface, event);
+
+    /* an event this call cannot set fails before any work (measured: NULL E_INVALIDARG, no EVENT_MODIFY_STATE E_ACCESSDENIED) */
+    if (!event)
+        return E_INVALIDARG;
+    if (!dxgi_event_handle_valid(event))
+        return E_ACCESSDENIED;
+    /* after a query that never completed, waiting again would cost the full bound on every call */
+    if (device->queries_lost)
+    {
+        SetEvent(event);
+        return DXGI_ERROR_DEVICE_REMOVED;
+    }
+
+    wined3d_mutex_lock();
+    hr = wined3d_query_create(device->wined3d_device, WINED3D_QUERY_TYPE_EVENT, NULL,
+            &dxgi_null_wined3d_parent_ops, &query);
+    if (SUCCEEDED(hr))
+        wined3d_device_context_issue_query(wined3d_device_get_immediate_context(device->wined3d_device),
+                query, WINED3DISSUE_END);
+    wined3d_mutex_unlock();
+    if (FAILED(hr))
+    {
+        WARN("Failed to create an event query, hr %#lx.\n", hr);
+        return hr;
+    }
+
+    /* bounded: after a device loss the query may never complete; the event is set anyway then */
+    start = GetTickCount();
+    for (;;)
+    {
+        wined3d_mutex_lock();
+        hr = wined3d_query_get_data(query, &done, sizeof(done), WINED3DGETDATA_FLUSH);
+        wined3d_mutex_unlock();
+        if (hr != S_FALSE) break;
+        if (GetTickCount() - start > 2000)
+        {
+            WARN("The query did not complete in 2 s; setting the event, the device counts as lost.\n");
+            device->queries_lost = TRUE;
+            hr = DXGI_ERROR_DEVICE_REMOVED;
+            break;
+        }
+        Sleep(++spins < 64 ? 0 : 1);
+    }
+    wined3d_mutex_lock();
+    wined3d_query_decref(query);
+    wined3d_mutex_unlock();
+    if (FAILED(hr)) WARN("Failed to wait for the query, hr %#lx.\n", hr);
+
+    if (!SetEvent(event)) return HRESULT_FROM_WIN32(GetLastError());
+    return device->queries_lost ? DXGI_ERROR_DEVICE_REMOVED : S_OK;
 }
 
 static void STDMETHODCALLTYPE dxgi_device_Trim(IWineDXGIDevice *iface)

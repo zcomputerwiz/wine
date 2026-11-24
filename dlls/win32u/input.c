@@ -2763,11 +2763,15 @@ BOOL WINAPI NtUserEnableMouseInPointer( BOOL enable )
 /**********************************************************************
  *       NtUserEnableMouseInPointerForThread    (win32u.@)
  */
+/* Mouse input of the windows of the calling thread arrives as pointer messages, as with EnableMouseInPointer for the process. It
+ * returns TRUE on Windows 11 (measured in Notepad of the Windows App SDK, whose input state manager falls back to an input site of
+ * InputHost.dll, which Wine has not, and fails fast when this fails). */
 BOOL WINAPI NtUserEnableMouseInPointerForThread( void )
 {
-    FIXME( "stub!\n" );
-    RtlSetLastWin32Error( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
+    TRACE( "\n" );
+
+    get_user_thread_info()->mouse_in_pointer = TRUE;
+    return TRUE;
 }
 
 /**********************************************************************
@@ -2780,9 +2784,10 @@ BOOL WINAPI NtUserIsMouseInPointerEnabled(void)
     return ret;
 }
 
+/* for the messages that the calling thread receives */
 BOOL is_mouse_in_pointer_enabled( HWND hwnd )
 {
-    return ReadNoFence( &enable_mouse_in_pointer ) == 1;
+    return ReadNoFence( &enable_mouse_in_pointer ) == 1 || get_user_thread_info()->mouse_in_pointer;
 }
 
 static BOOL is_captured_by_system(void)
