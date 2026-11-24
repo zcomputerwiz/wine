@@ -269,6 +269,159 @@ static void reserve_session_ids(void)
     reserved_session_id = reserved;  /* without the file, ids are still unique for this run */
 }
 
+/* ---- R6 (docs/SESSION0_PROCESS_IDS.md): blocks of process and thread ids ---------------------------------------
+ * Session 0 hands each linked server blocks of ids, so the ids of different servers never meet. Block 0 is session
+ * 0's own. A block belongs to one server process (account, session, Unix pid and its start time) until that process
+ * has ended: a server that links again after session 0 restarted gets its blocks back, and a block whose server is
+ * gone is handed out again. The table is kept in session0.blocks next to session0.ids. */
+#define ID_BLOCKS_PER_SERVER 64
+
+static int connect_session0( int nonblock );
+static int link_request( int sock, unsigned int type, unsigned int last, const void *desc, data_size_t desc_size,
+                         const void *extra, data_size_t extra_size, int fd, struct wex_session0_reply *answer );
+
+struct id_block
+{
+    uid_t              uid;
+    unsigned int       session;
+    pid_t              pid;     /* 0: free */
+    unsigned long long start;   /* the process's start time (/proc/<pid>/stat), so a reused pid is not the owner */
+};
+
+static struct id_block id_blocks[WEX_ID_BLOCK_COUNT];
+static int id_blocks_loaded;
+
+/* the start time of a process, in clock ticks since boot; 0 when it does not exist */
+static unsigned long long process_start_time( pid_t pid )
+{
+    char path[64], buf[1024], *p;
+    unsigned long long start = 0;
+    int fd, field;
+    ssize_t n;
+
+    snprintf( path, sizeof(path), "/proc/%d/stat", (int)pid );
+    if ((fd = open( path, O_RDONLY | O_CLOEXEC )) == -1) return 0;
+    n = read( fd, buf, sizeof(buf) - 1 );
+    close( fd );
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    if (!(p = strrchr( buf, ')' ))) return 0;  /* the name may hold anything but ends at the last parenthesis */
+    for (field = 2; field < 22 && p; field++) p = strchr( p + 1, ' ' );
+    if (p) start = strtoull( p + 1, NULL, 10 );
+    return start;
+}
+
+static int id_block_owner_alive( const struct id_block *b )
+{
+    return b->pid && process_start_time( b->pid ) == b->start;
+}
+
+static void load_id_blocks(void)
+{
+    char buf[256];
+    FILE *f;
+    int fd;
+
+    id_blocks_loaded = 1;
+    if ((fd = openat( config_dir_fd, "session0.blocks", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC )) == -1)
+        return;
+    if (!(f = fdopen( fd, "r" )))
+    {
+        close( fd );
+        return;
+    }
+    while (fgets( buf, sizeof(buf), f ))
+    {
+        unsigned int block, uid, session;
+        int pid;
+        unsigned long long start;
+
+        if (sscanf( buf, "%u %u %u %d %llu", &block, &uid, &session, &pid, &start ) != 5) continue;
+        if (!block || block >= WEX_ID_BLOCK_COUNT || pid <= 0) continue;
+        id_blocks[block].uid = uid;
+        id_blocks[block].session = session;
+        id_blocks[block].pid = pid;
+        id_blocks[block].start = start;
+    }
+    fclose( f );
+}
+
+static int save_id_blocks(void)
+{
+    static const char name[] = "session0.blocks", tmp[] = "session0.blocks.tmp";
+    unsigned int i;
+    FILE *f;
+    int fd, ok;
+
+    if ((fd = openat( config_dir_fd, tmp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600 )) == -1)
+        return 0;
+    if (!(f = fdopen( fd, "w" )))
+    {
+        close( fd );
+        return 0;
+    }
+    for (i = 1; i < WEX_ID_BLOCK_COUNT; i++)
+        if (id_blocks[i].pid)
+            fprintf( f, "%u %u %u %d %llu\n", i, (unsigned int)id_blocks[i].uid, id_blocks[i].session,
+                     (int)id_blocks[i].pid, id_blocks[i].start );
+    ok = !fflush( f ) && !fsync( fileno( f ) );
+    if (fclose( f )) ok = 0;
+    ok = ok && !renameat( config_dir_fd, tmp, config_dir_fd, name );
+    if (!ok) unlinkat( config_dir_fd, tmp, 0 );
+    return ok;
+}
+
+/* a block for the server process pid of uid and session: wanted again, or a new one; 0 when there is none */
+static unsigned int grant_id_block( uid_t uid, unsigned int session, pid_t pid, unsigned int wanted )
+{
+    unsigned long long start = process_start_time( pid );
+    unsigned int i, held = 0, block = 0;
+    struct id_block *b;
+
+    if (!start || wanted >= WEX_ID_BLOCK_COUNT) return 0;
+    if (!id_blocks_loaded) load_id_blocks();
+    for (i = 1; i < WEX_ID_BLOCK_COUNT; i++)
+        if (id_blocks[i].pid == pid && id_blocks[i].start == start) held++;
+    if (wanted)
+    {
+        b = &id_blocks[wanted];
+        if (b->pid == pid && b->start == start && b->uid == uid) return wanted;  /* this server's already */
+        if (id_block_owner_alive( b )) return 0;  /* another live server's */
+        block = wanted;
+    }
+    else
+    {
+        if (held >= ID_BLOCKS_PER_SERVER) return 0;
+        for (i = 1; i < WEX_ID_BLOCK_COUNT && !block; i++)
+            if (!id_block_owner_alive( &id_blocks[i] )) block = i;
+        if (!block) return 0;
+    }
+    b = &id_blocks[block];
+    b->uid = uid;
+    b->session = session;
+    b->pid = pid;
+    b->start = start;
+    if (!save_id_blocks())
+        fprintf( stderr, "session0: cannot keep the id blocks in session0.blocks: %s\n", strerror( errno ));
+    return block;
+}
+
+/* A new block of ids for this server's own processes, or block again after session 0 restarted; 0 when there is
+ * none. Session 0 grants its own blocks; a user's server asks session 0. */
+unsigned int session0_new_id_block( unsigned int wanted )
+{
+    struct wex_session0_reply answer;
+    int sock;
+
+    if (session0_server) return grant_id_block( getuid(), 0, getpid(), wanted );
+    if (!session0_client || (sock = connect_session0( 0 )) == -1) return 0;
+    if (link_request( sock, WEX_SESSION0_BLOCK, wanted, NULL, 0, NULL, 0, -1, &answer ) ||
+        answer.status || !answer.value || answer.value >= WEX_ID_BLOCK_COUNT || (wanted && answer.value != wanted))
+        answer.value = 0;
+    close( sock );
+    return answer.value;
+}
+
 static void init_link( struct session0_socket *link )
 {
     link->kind = LINK_REQUEST;
@@ -506,8 +659,14 @@ static void relink( void *private )
     if (session_link) return;
     if (request_session_id( default_session_id ))
     {
+        unsigned int i, block;
+
         fprintf( stderr, "wineserver: linked to session 0 again as session %u\n", default_session_id );
         relink_delay = 0;
+        /* R6: the blocks of ids this server holds are its own again in session 0's table */
+        for (i = 0; (block = ptid_block( i )); i++)
+            if (session0_new_id_block( block ) != block)
+                fprintf( stderr, "wineserver: session 0 did not give back the id block %u\n", block );
         return;
     }
     schedule_relink( relink_delay < 30 ? relink_delay * 2 : 60 );
@@ -683,6 +842,7 @@ void session0_init( int server_mode )
         session0_server = 1;
         default_session_id = 0;  /* T5.3: session 0's own programs (its services) are in session 0, as on Windows */
         init_listener();
+        ptid_add_block( 0 );  /* R6: block 0 of the ids is session 0's own */
         return;
     }
     /* a launcher-started server uses the configuration only: the user controls the environment */
@@ -719,8 +879,19 @@ void session0_init( int server_mode )
                      SESSION0_CONF );
     /* a launcher-started server is a logon session only with an id from session 0: without one it does not start
      * (an id it made up could be another session's); a development server keeps 1 */
-    if (session0_client && !request_session_id( 0 ) && sysrun_active)
-        fatal_error( "session 0 at %s did not register this session\n", session0_path );
+    if (session0_client)
+    {
+        unsigned int block;
+
+        if (!request_session_id( 0 ))
+        {
+            if (sysrun_active) fatal_error( "session 0 at %s did not register this session\n", session0_path );
+        }
+        /* R6: the ids of this server's processes and threads come from blocks that session 0 leases to it, so they
+         * never name another server's; a development server without one keeps the stock numbering */
+        else if ((block = session0_new_id_block( 0 ))) ptid_add_block( block );
+        else if (sysrun_active) fatal_error( "session 0 at %s gave this session no block of ids\n", session0_path );
+    }
 }
 
 uid_t session0_hive_owner(void)
@@ -1002,9 +1173,10 @@ static void session0_link_event( struct fd *fd, int event )
         (is_pipe_request( hdr->type ) && (hdr->desc_size > n - sizeof(*hdr) ||
                                           hdr->name_size != n - sizeof(*hdr) - hdr->desc_size)) ||
         (hdr->type != WEX_SESSION0_CHANNEL && hdr->type != WEX_SESSION0_USER_HIVE &&
-         hdr->type != WEX_SESSION0_SESSION_ID && !is_pipe_request( hdr->type )) ||
+         hdr->type != WEX_SESSION0_SESSION_ID && hdr->type != WEX_SESSION0_BLOCK && !is_pipe_request( hdr->type )) ||
         ((hdr->type == WEX_SESSION0_CHANNEL || hdr->type == WEX_SESSION0_PIPE) && channel == -1) ||
-        (hdr->type == WEX_SESSION0_PIPE_WAIT && channel != -1))
+        ((hdr->type == WEX_SESSION0_PIPE_WAIT || hdr->type == WEX_SESSION0_BLOCK) && channel != -1) ||
+        (hdr->type == WEX_SESSION0_BLOCK && hdr->desc_size))
         reply.status = STATUS_INVALID_PARAMETER;
     else if (!link->trusted)
         reply.status = STATUS_ACCESS_DENIED;
@@ -1044,6 +1216,16 @@ static void session0_link_event( struct fd *fd, int event )
             session0_send_order( link, WEX_SESSION0_ORDER_PING, 0 );
             return;
         }
+    }
+    else if (hdr->type == WEX_SESSION0_BLOCK)
+    {
+        /* R6: a block of ids for the linked server at the other end (its session link names its session) */
+        int session = peer_session( link );
+
+        if (session <= 0) reply.status = STATUS_ACCESS_DENIED;
+        else if (!(reply.value = grant_id_block( link->peer_uid, session, link->peer_pid, hdr->block )))
+            reply.status = STATUS_INSUFFICIENT_RESOURCES;
+        else reply.status = STATUS_SUCCESS;
     }
     else if (hdr->type == WEX_SESSION0_PIPE_WAIT)
     {

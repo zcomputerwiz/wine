@@ -67,6 +67,7 @@
 #include "e1s_token.h"
 #include "sysrun.h"
 #include "session0.h"
+#include "wine/wex_session0.h"
 
 /* process object */
 
@@ -529,70 +530,136 @@ struct ptid_entry
     unsigned int next;  /* next free entry */
 };
 
-static struct ptid_entry *ptid_entries;     /* array of ptid entries */
-static unsigned int used_ptid_entries;      /* number of entries in use */
-static unsigned int alloc_ptid_entries;     /* number of allocated entries */
-static unsigned int next_free_ptid;         /* next free entry */
-static unsigned int last_free_ptid;         /* last free entry */
+static struct ptid_entry *ptid_entries;     /* array of ptid entries, by slot */
+static unsigned int used_ptid_entries;      /* number of slots in use */
+static unsigned int alloc_ptid_entries;     /* number of allocated slots */
+static unsigned int next_free_ptid;         /* next free slot + 1, 0 for none */
+static unsigned int last_free_ptid;         /* last free slot + 1, 0 for none */
 static unsigned int num_free_ptids;         /* number of free ptids */
 
 static void kill_all_processes(void);
 
 #define PTID_OFFSET 8  /* offset for first ptid value */
 
+/* WineExplorer R6 (docs/SESSION0_PROCESS_IDS.md): with session 0 the ids come from blocks that session 0 leases to
+ * each server (block 0 is session 0's own), so the ids of different servers never meet. Slot s is then index
+ * blocks[s / WEX_ID_BLOCK_SIZE] * WEX_ID_BLOCK_SIZE + s % WEX_ID_BLOCK_SIZE; without blocks it is s + PTID_OFFSET,
+ * as in stock Wine. */
+#define PTID_MAX_BLOCKS 64
+static unsigned int ptid_blocks[PTID_MAX_BLOCKS];
+static unsigned int ptid_block_count;
+
 static unsigned int index_from_ptid(unsigned int id) { return id / 4; }
 static unsigned int ptid_from_index(unsigned int index) { return index * 4; }
+
+static unsigned int index_of_slot( unsigned int slot )
+{
+    if (!ptid_block_count) return slot + PTID_OFFSET;
+    return ptid_blocks[slot / WEX_ID_BLOCK_SIZE] * WEX_ID_BLOCK_SIZE + slot % WEX_ID_BLOCK_SIZE;
+}
+
+/* the slot in use of an index; 0 when the index is not one of this server's */
+static int slot_of_index( unsigned int index, unsigned int *slot )
+{
+    unsigned int i;
+
+    if (!ptid_block_count)
+    {
+        if (index < PTID_OFFSET) return 0;
+        *slot = index - PTID_OFFSET;
+        return *slot < used_ptid_entries;
+    }
+    for (i = 0; i < ptid_block_count; i++)
+    {
+        if (ptid_blocks[i] != index / WEX_ID_BLOCK_SIZE) continue;
+        *slot = i * WEX_ID_BLOCK_SIZE + index % WEX_ID_BLOCK_SIZE;
+        return *slot < used_ptid_entries;
+    }
+    return 0;
+}
+
+/* R6: one more block of ids (block 0: session 0's own, whose first PTID_OFFSET indices stay unused as in stock
+ * Wine). The first one only before any id was given out. 1 when it was added. */
+int ptid_add_block( unsigned int block )
+{
+    unsigned int count = (ptid_block_count + 1) * WEX_ID_BLOCK_SIZE;
+    struct ptid_entry *entries;
+
+    if (ptid_block_count >= PTID_MAX_BLOCKS || block >= WEX_ID_BLOCK_COUNT) return 0;
+    if (!ptid_block_count && used_ptid_entries) return 0;  /* the stock numbering is in use */
+    if (ptid_block_count && !block) return 0;
+    if (!(entries = realloc( ptid_entries, count * sizeof(*entries) ))) return 0;
+    memset( entries + ptid_block_count * WEX_ID_BLOCK_SIZE, 0, WEX_ID_BLOCK_SIZE * sizeof(*entries) );
+    ptid_entries = entries;
+    alloc_ptid_entries = count;
+    if (!ptid_block_count && !block) used_ptid_entries = PTID_OFFSET;
+    ptid_blocks[ptid_block_count++] = block;
+    return 1;
+}
+
+/* the i-th block of ids this server holds; 0 after the last (and for session 0's block 0) */
+unsigned int ptid_block( unsigned int i )
+{
+    return i < ptid_block_count ? ptid_blocks[i] : 0;
+}
 
 /* allocate a new process or thread id */
 unsigned int alloc_ptid( void *ptr )
 {
-    struct ptid_entry *entry;
-    unsigned int index;
+    unsigned int slot;
 
     if (used_ptid_entries < alloc_ptid_entries)
-    {
-        index = used_ptid_entries + PTID_OFFSET;
-        entry = &ptid_entries[used_ptid_entries++];
-    }
+        slot = used_ptid_entries++;
     else if (next_free_ptid && num_free_ptids >= 256)
     {
-        index = next_free_ptid;
-        entry = &ptid_entries[index - PTID_OFFSET];
-        if (!(next_free_ptid = entry->next)) last_free_ptid = 0;
+        slot = next_free_ptid - 1;
+        if (!(next_free_ptid = ptid_entries[slot].next)) last_free_ptid = 0;
         num_free_ptids--;
     }
-    else  /* need to grow the array */
+    else if (ptid_block_count)  /* R6: another block of ids from session 0 */
     {
-        unsigned int count = alloc_ptid_entries + (alloc_ptid_entries / 2);
-        if (!count) count = 512;
-        if (!(entry = realloc( ptid_entries, count * sizeof(*entry) )))
+        unsigned int block = ptid_block_count < PTID_MAX_BLOCKS ? session0_new_id_block( 0 ) : 0;
+
+        if (!block || !ptid_add_block( block ))
         {
             set_error( STATUS_NO_MEMORY );
             return 0;
         }
-        ptid_entries = entry;
+        slot = used_ptid_entries++;
+    }
+    else  /* need to grow the array */
+    {
+        unsigned int count = alloc_ptid_entries + (alloc_ptid_entries / 2);
+        struct ptid_entry *entries;
+
+        if (!count) count = 512;
+        if (!(entries = realloc( ptid_entries, count * sizeof(*entries) )))
+        {
+            set_error( STATUS_NO_MEMORY );
+            return 0;
+        }
+        ptid_entries = entries;
         alloc_ptid_entries = count;
-        index = used_ptid_entries + PTID_OFFSET;
-        entry = &ptid_entries[used_ptid_entries++];
+        slot = used_ptid_entries++;
     }
 
-    entry->ptr = ptr;
-    return ptid_from_index( index );
+    ptid_entries[slot].ptr = ptr;
+    return ptid_from_index( index_of_slot( slot ));
 }
 
 /* free a process or thread id */
 void free_ptid( unsigned int id )
 {
-    unsigned int index = index_from_ptid( id );
-    struct ptid_entry *entry = &ptid_entries[index - PTID_OFFSET];
+    unsigned int slot;
 
-    entry->ptr  = NULL;
-    entry->next = 0;
+    if (!slot_of_index( index_from_ptid( id ), &slot )) return;
+    ptid_entries[slot].ptr  = NULL;
+    ptid_entries[slot].next = 0;
 
     /* append to end of free list so that we don't reuse it too early */
-    if (last_free_ptid) ptid_entries[last_free_ptid - PTID_OFFSET].next = index;
-    else next_free_ptid = index;
-    last_free_ptid = index;
+    if (last_free_ptid) ptid_entries[last_free_ptid - 1].next = slot + 1;
+    else next_free_ptid = slot + 1;
+    last_free_ptid = slot + 1;
     num_free_ptids++;
 }
 
@@ -613,10 +680,10 @@ int any_process( int (*cb)(struct process *, void *), void *user )
 /* retrieve the pointer corresponding to a process or thread id */
 void *get_ptid_entry( unsigned int id )
 {
-    unsigned int index = index_from_ptid( id );
-    if (index < PTID_OFFSET) return NULL;
-    if (index - PTID_OFFSET >= used_ptid_entries) return NULL;
-    return ptid_entries[index - PTID_OFFSET].ptr;
+    unsigned int slot;
+
+    if (!slot_of_index( index_from_ptid( id ), &slot )) return NULL;
+    return ptid_entries[slot].ptr;
 }
 
 /* return the main thread of the process */
