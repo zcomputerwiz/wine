@@ -1429,6 +1429,235 @@ static D3D11_PARAMETER_DESC linker_param(const char *name, const char *semantic,
     return desc;
 }
 
+/* The DXBC checksum: MD5 over the container from offset 20 with the padding of DXBC (after vkd3d-shader's checksum.c,
+ * little-endian only), so that a library changed below still loads. */
+#define MD5_F1(x, y, z) (z ^ (x & (y ^ z)))
+#define MD5_F2(x, y, z) MD5_F1(z, x, y)
+#define MD5_F3(x, y, z) (x ^ y ^ z)
+#define MD5_F4(x, y, z) (y ^ (x | ~z))
+#define MD5_STEP(f, w, x, y, z, data, s) (w += f(x, y, z) + data, w = w << s | w >> (32 - s), w += x)
+
+static void md5_transform(unsigned int buf[4], const unsigned int in[16])
+{
+    static const unsigned int k[64] =
+    {
+        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
+        0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
+        0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+        0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed, 0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
+        0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
+        0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+        0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
+    };
+    static const unsigned char s[4][4] = {{7, 12, 17, 22}, {5, 9, 14, 20}, {4, 11, 16, 23}, {6, 10, 15, 21}};
+    unsigned int a = buf[0], b = buf[1], c = buf[2], d = buf[3], i, g, t;
+
+    for (i = 0; i < 64; ++i)
+    {
+        switch (i / 16)
+        {
+            case 0: g = i; MD5_STEP(MD5_F1, a, b, c, d, in[g] + k[i], s[0][i % 4]); break;
+            case 1: g = (5 * i + 1) % 16; MD5_STEP(MD5_F2, a, b, c, d, in[g] + k[i], s[1][i % 4]); break;
+            case 2: g = (3 * i + 5) % 16; MD5_STEP(MD5_F3, a, b, c, d, in[g] + k[i], s[2][i % 4]); break;
+            default: g = (7 * i) % 16; MD5_STEP(MD5_F4, a, b, c, d, in[g] + k[i], s[3][i % 4]); break;
+        }
+        t = d; d = c; c = b; b = a; a = t;
+    }
+    buf[0] += a; buf[1] += b; buf[2] += c; buf[3] += d;
+}
+
+static void dxbc_update_checksum(BYTE *data, size_t size)
+{
+    unsigned int buf[4] = {0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476}, block[16], bits, count, length;
+    const BYTE *p = data + 20;
+    size_t len = size - 20;
+    unsigned char in[64];
+
+    bits = (unsigned int)(len << 3);
+    for (; len >= 64; p += 64, len -= 64)
+    {
+        memcpy(block, p, 64);
+        md5_transform(buf, block);
+    }
+    count = (unsigned int)len;
+    memcpy(in, p, count);
+    in[count++] = 0x80;
+    if (64 - count < 8)
+    {
+        memset(in + count, 0, 64 - count);
+        memcpy(block, in, 64);
+        md5_transform(buf, block);
+        memset(in, 0, 64);
+        memcpy(in, &bits, 4);
+    }
+    else
+    {
+        /* the length in bits goes first, the block is padded to 60 bytes */
+        memmove(in + 4, in, count);
+        memset(in + 4 + count, 0, 64 - 4 - count);
+        memcpy(in, &bits, 4);
+    }
+    length = bits >> 2 | 1;
+    memcpy(in + 60, &length, 4);
+    memcpy(block, in, 64);
+    md5_transform(buf, block);
+    memcpy(data + 4, buf, 16);
+}
+
+/* the code of library function `index` of a copy of a library, and the container of that function */
+static DWORD *library_function_code(BYTE *lib, unsigned int index, BYTE **container, DWORD *container_size)
+{
+    const DWORD *u = (const DWORD *)lib;
+    unsigned int i, n = 0, j;
+
+    for (i = 0; i < u[7]; ++i)
+    {
+        BYTE *chunk = lib + u[8 + i];
+        const DWORD *v;
+
+        if (memcmp(chunk, "LIBF", 4) || n++ != index) continue;
+        *container = chunk + 8;
+        *container_size = *(const DWORD *)(chunk + 4);
+        v = (const DWORD *)*container;
+        for (j = 0; j < v[7]; ++j)
+        {
+            BYTE *inner = *container + v[8 + j];
+
+            if (!memcmp(inner, "SHDR", 4) || !memcmp(inner, "SHEX", 4)) return (DWORD *)(inner + 8);
+        }
+    }
+    return NULL;
+}
+
+static DWORD *find_instruction(DWORD *code, DWORD opcode)
+{
+    DWORD *p = code + 2, *end = code + code[1];
+
+    while (p < end)
+    {
+        DWORD op = *p & 0x7ff, len = op == 0x35 ? p[1] : (*p >> 24) & 0x7f;
+
+        if (op == opcode) return p;
+        if (!len) break;
+        p += len;
+    }
+    return NULL;
+}
+
+/* link Scale (and Sample, when asked) of a library changed by the caller; the link must not crash or hang */
+static HRESULT link_changed_library(const BYTE *lib, SIZE_T size, BOOL with_sample)
+{
+    ID3D11LinkingNode *in, *out, *scale, *sample = NULL;
+    ID3D11ModuleInstance *instance, *graph_instance;
+    D3D11_PARAMETER_DESC in_desc[1], out_desc[1];
+    ID3D11FunctionLinkingGraph *graph;
+    ID3D10Blob *code = NULL, *errors = NULL;
+    ID3D11Linker *linker;
+    ID3D11Module *module;
+    HRESULT hr;
+
+    if (FAILED(hr = D3DLoadModule(lib, size, &module)))
+        return hr;
+    module->lpVtbl->CreateInstance(module, "", &instance);
+    instance->lpVtbl->BindConstantBuffer(instance, 0, 0, 0);
+    instance->lpVtbl->BindResource(instance, 0, 0, 1);
+    instance->lpVtbl->BindSampler(instance, 0, 0, 1);
+    D3DCreateFunctionLinkingGraph(0, &graph);
+    in_desc[0] = linker_param("position", "SV_POSITION", 4, D3D_PF_IN);
+    graph->lpVtbl->SetInputSignature(graph, in_desc, 1, &in);
+    graph->lpVtbl->CallFunction(graph, "", module, "Scale", &scale);
+    graph->lpVtbl->PassValue(graph, in, 0, scale, 0);
+    graph->lpVtbl->PassValue(graph, in, 0, scale, 1);
+    if (with_sample)
+    {
+        graph->lpVtbl->CallFunction(graph, "", module, "Sample", &sample);
+        graph->lpVtbl->PassValueWithSwizzle(graph, in, 0, "xy", sample, 0, "xy");
+    }
+    out_desc[0] = linker_param("target", "SV_TARGET", 4, D3D_PF_OUT);
+    graph->lpVtbl->SetOutputSignature(graph, out_desc, 1, &out);
+    graph->lpVtbl->PassValueWithSwizzle(graph, scale, D3D_RETURN_PARAMETER_INDEX, "xyz", out, 0, "xyz");
+    if (sample)
+        graph->lpVtbl->PassValueWithSwizzle(graph, sample, D3D_RETURN_PARAMETER_INDEX, "w", out, 0, "w");
+    hr = graph->lpVtbl->CreateModuleInstance(graph, &graph_instance, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    D3DCreateLinker(&linker);
+    linker->lpVtbl->UseLibrary(linker, instance);
+    /* ps_4_0: a level 9 pixel shader cannot read SV_Position, which Scale takes here */
+    hr = linker->lpVtbl->Link(linker, graph_instance, "main", "ps_4_0", 0, &code, &errors);
+    if (code) ID3D10Blob_Release(code);
+    if (errors) ID3D10Blob_Release(errors);
+    linker->lpVtbl->Release(linker);
+    graph_instance->lpVtbl->Release(graph_instance);
+    out->lpVtbl->Release(out);
+    if (sample) sample->lpVtbl->Release(sample);
+    scale->lpVtbl->Release(scale);
+    in->lpVtbl->Release(in);
+    graph->lpVtbl->Release(graph);
+    instance->lpVtbl->Release(instance);
+    module->lpVtbl->Release(module);
+    return hr;
+}
+
+/* libraries with bad tokens in the code of a function, through Link */
+static void test_linker_malformed(void)
+{
+    BYTE lib[sizeof(test_library)], *container;
+    DWORD container_size, *code, *p;
+    HRESULT hr;
+
+    /* unchanged (with the checksums recomputed): links */
+    memcpy(lib, test_library, sizeof(lib));
+    code = library_function_code(lib, 1, &container, &container_size);
+    ok(!!code, "Scale not found.\n");
+    if (!code) return;
+    dxbc_update_checksum(container, container_size);
+    dxbc_update_checksum(lib, sizeof(lib));
+    ok(!memcmp(lib, test_library, sizeof(lib)), "The checksum is computed differently.\n");
+    hr = link_changed_library(lib, sizeof(lib), TRUE);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* the code ends right after the opcode of dcl_temps */
+    memcpy(lib, test_library, sizeof(lib));
+    code = library_function_code(lib, 1, &container, &container_size);
+    if ((p = find_instruction(code, 0x68)))
+    {
+        code[1] = (DWORD)(p - code) + 1;
+        dxbc_update_checksum(container, container_size);
+        dxbc_update_checksum(lib, sizeof(lib));
+        hr = link_changed_library(lib, sizeof(lib), FALSE);
+        ok(FAILED(hr), "Got unexpected hr %#lx.\n", hr);
+    }
+
+    /* a constant buffer declaration of two tokens */
+    memcpy(lib, test_library, sizeof(lib));
+    code = library_function_code(lib, 1, &container, &container_size);
+    ok(!!(p = find_instruction(code, 0x59)), "No constant buffer declaration.\n");
+    if (p)
+    {
+        *p = (*p & ~(0x7fu << 24)) | (2u << 24);
+        dxbc_update_checksum(container, container_size);
+        dxbc_update_checksum(lib, sizeof(lib));
+        hr = link_changed_library(lib, sizeof(lib), TRUE);
+        ok(FAILED(hr), "Got unexpected hr %#lx.\n", hr);
+    }
+
+    /* an immediate constant buffer in Scale (instead of the declaration of an input), then the declarations of Sample */
+    memcpy(lib, test_library, sizeof(lib));
+    code = library_function_code(lib, 1, &container, &container_size);
+    ok(!!(p = find_instruction(code, 0x5f)), "No input declaration.\n");
+    if (p && ((*p >> 24) & 0x7f) == 3)
+    {
+        p[0] = 0x35 | (3u << 11);
+        p[1] = 3;
+        p[2] = 0x3f800000;
+        dxbc_update_checksum(container, container_size);
+        dxbc_update_checksum(lib, sizeof(lib));
+        hr = link_changed_library(lib, sizeof(lib), TRUE);
+        ok(hr == S_OK || hr == E_FAIL, "Got unexpected hr %#lx.\n", hr);
+    }
+}
+
 /* graphs and libraries an application gets wrong must fail, not crash */
 static void test_linker_invalid(void)
 {
@@ -1797,5 +2026,6 @@ START_TEST(hlsl_d3d11)
 #if D3D_COMPILER_VERSION >= 47
     test_linker();
     test_linker_invalid();
+    test_linker_malformed();
 #endif
 }

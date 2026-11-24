@@ -267,7 +267,8 @@ static HRESULT parse_library_function(struct library_function *f, const void *da
     int ret;
 
     if (!dxbc_chunk_table_fits(data, size)) return E_FAIL;
-    if ((ret = vkd3d_shader_parse_dxbc(&code, VKD3D_SHADER_PARSE_DXBC_IGNORE_CHECKSUM, &desc, NULL)) < 0)
+    /* the checksum of each function's container is checked, as on Windows (measured: a changed byte fails the load) */
+    if ((ret = vkd3d_shader_parse_dxbc(&code, 0, &desc, NULL)) < 0)
     {
         WARN("Failed to parse a library function, ret %d.\n", ret);
         return E_FAIL;
@@ -1462,7 +1463,8 @@ static void add_resource_declaration(struct link_context *ctx, const uint32_t *i
         /* the operand token and its first index have the same position in both */
         if (step < 3 || SM4_OPCODE(d[0]) != opcode || ((d[1] >> 12) & 0xff) != ((ins[1] >> 12) & 0xff) || d[2] != ins[2])
             continue;
-        if (opcode == SM4_OP_DCL_CONSTANT_BUFFER && len > 3 && d[3] < ins[3]) d[3] = ins[3];
+        /* both constant buffer declarations have their size token (checked in inline_function) */
+        if (opcode == SM4_OP_DCL_CONSTANT_BUFFER && step >= 4 && len >= 4 && d[3] < ins[3]) d[3] = ins[3];
         return;
     }
     for (i = 0; i < len; ++i) put_token(&ctx->decls, ins[i]);
@@ -1533,6 +1535,12 @@ static void inline_function(struct link_context *ctx, const struct callee_map *m
             case SM4_OP_DCL_RESOURCE: case SM4_OP_DCL_CONSTANT_BUFFER: case SM4_OP_DCL_SAMPLER: case SM5_OP_DCL_UAV_TYPED:
             case SM5_OP_DCL_UAV_RAW: case SM5_OP_DCL_UAV_STRUCTURED: case SM5_OP_DCL_RESOURCE_RAW:
             case SM5_OP_DCL_RESOURCE_STRUCTURED:
+                /* the operand token and its index; a constant buffer also has its size */
+                if (len < 3 || (opcode == SM4_OP_DCL_CONSTANT_BUFFER && len < 4))
+                {
+                    link_error(ctx, "error: a declaration of %u tokens is too short in function '%s'\n", len, f->name);
+                    break;
+                }
                 if (!rewrite_operand(ctx, p + 1, ins_end, map)) break;
                 add_resource_declaration(ctx, p, len);
                 break;
