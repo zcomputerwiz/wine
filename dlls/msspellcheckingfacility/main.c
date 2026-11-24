@@ -38,6 +38,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(spellcheck);
 
 static HRESULT WINAPI enum_string_QueryInterface( IEnumString *iface, REFIID iid, void **out )
 {
+    if (!out) return E_POINTER;
     if (IsEqualIID( iid, &IID_IUnknown ) || IsEqualIID( iid, &IID_IEnumString ))
     {
         *out = iface;
@@ -76,6 +77,7 @@ static HRESULT WINAPI enum_string_Reset( IEnumString *iface )
 
 static HRESULT WINAPI enum_string_Clone( IEnumString *iface, IEnumString **out )
 {
+    if (!out) return E_POINTER;
     *out = iface;
     return S_OK;
 }
@@ -97,6 +99,7 @@ static HRESULT WINAPI factory_QueryInterface( ISpellCheckerFactory *iface, REFII
 {
     TRACE( "%p, %s, %p\n", iface, debugstr_guid( iid ), out );
 
+    if (!out) return E_POINTER;
     if (IsEqualIID( iid, &IID_IUnknown ) || IsEqualIID( iid, &IID_ISpellCheckerFactory ))
     {
         *out = iface;
@@ -159,6 +162,7 @@ static ISpellCheckerFactory factory = { &factory_vtbl };
 
 static HRESULT WINAPI class_factory_QueryInterface( IClassFactory *iface, REFIID iid, void **out )
 {
+    if (!out) return E_POINTER;
     if (IsEqualIID( iid, &IID_IUnknown ) || IsEqualIID( iid, &IID_IClassFactory ))
     {
         *out = iface;
@@ -182,6 +186,7 @@ static HRESULT WINAPI class_factory_CreateInstance( IClassFactory *iface, IUnkno
 {
     TRACE( "%p, %p, %s, %p\n", iface, outer, debugstr_guid( iid ), out );
 
+    if (!out) return E_POINTER;
     *out = NULL;
     if (outer) return CLASS_E_NOAGGREGATION;
     return ISpellCheckerFactory_QueryInterface( &factory, iid, out );
@@ -207,6 +212,8 @@ HRESULT WINAPI DllGetClassObject( REFCLSID clsid, REFIID iid, void **out )
 {
     TRACE( "%s, %s, %p\n", debugstr_guid( clsid ), debugstr_guid( iid ), out );
 
+    if (!out) return E_POINTER;
+    *out = NULL;
     if (!IsEqualCLSID( clsid, &CLSID_SpellCheckerFactory )) return CLASS_E_CLASSNOTAVAILABLE;
     return IClassFactory_QueryInterface( &class_factory, iid, out );
 }
