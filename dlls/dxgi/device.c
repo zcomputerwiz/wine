@@ -334,6 +334,12 @@ static HRESULT STDMETHODCALLTYPE dxgi_device_EnqueueSetEvent(IWineDXGIDevice *if
         return E_INVALIDARG;
     if (!dxgi_event_handle_valid(event))
         return E_ACCESSDENIED;
+    /* after a query that never completed, waiting again would cost the full bound on every call */
+    if (device->queries_lost)
+    {
+        SetEvent(event);
+        return DXGI_ERROR_DEVICE_REMOVED;
+    }
 
     wined3d_mutex_lock();
     hr = wined3d_query_create(device->wined3d_device, WINED3D_QUERY_TYPE_EVENT, NULL,
@@ -358,7 +364,9 @@ static HRESULT STDMETHODCALLTYPE dxgi_device_EnqueueSetEvent(IWineDXGIDevice *if
         if (hr != S_FALSE) break;
         if (GetTickCount() - start > 2000)
         {
-            WARN("The query did not complete in 2 s; setting the event.\n");
+            WARN("The query did not complete in 2 s; setting the event, the device counts as lost.\n");
+            device->queries_lost = TRUE;
+            hr = DXGI_ERROR_DEVICE_REMOVED;
             break;
         }
         Sleep(++spins < 64 ? 0 : 1);
@@ -369,7 +377,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_device_EnqueueSetEvent(IWineDXGIDevice *if
     if (FAILED(hr)) WARN("Failed to wait for the query, hr %#lx.\n", hr);
 
     if (!SetEvent(event)) return HRESULT_FROM_WIN32(GetLastError());
-    return S_OK;
+    return device->queries_lost ? DXGI_ERROR_DEVICE_REMOVED : S_OK;
 }
 
 static void STDMETHODCALLTYPE dxgi_device_Trim(IWineDXGIDevice *iface)

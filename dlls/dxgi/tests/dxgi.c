@@ -7729,13 +7729,17 @@ static void test_occlusion_status(void)
     IDXGIFactory2_UnregisterOcclusionStatus(factory, cookie2);
 
     /* a handle that cannot set the event */
+    limited = NULL;
     ok(DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(), &limited, SYNCHRONIZE, FALSE, 0),
             "DuplicateHandle failed, error %lu.\n", GetLastError());
-    cookie = 0xdeadbeef;
-    hr = IDXGIFactory2_RegisterOcclusionStatusEvent(factory, limited, &cookie);
-    ok(hr == DXGI_ERROR_INVALID_CALL, "Got unexpected hr %#lx.\n", hr);
-    if (SUCCEEDED(hr))
-        IDXGIFactory2_UnregisterOcclusionStatus(factory, cookie);
+    if (limited)
+    {
+        cookie = 0xdeadbeef;
+        hr = IDXGIFactory2_RegisterOcclusionStatusEvent(factory, limited, &cookie);
+        ok(hr == DXGI_ERROR_INVALID_CALL, "Got unexpected hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+            IDXGIFactory2_UnregisterOcclusionStatus(factory, cookie);
+    }
 
     if ((device = create_device(0)))
     {
@@ -7746,8 +7750,11 @@ static void test_occlusion_status(void)
             ok(!WaitForSingleObject(event, 5000), "The event is not set.\n");
             hr = IDXGIDevice3_EnqueueSetEvent(device3, NULL);
             ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
-            hr = IDXGIDevice3_EnqueueSetEvent(device3, limited);
-            ok(hr == E_ACCESSDENIED, "Got unexpected hr %#lx.\n", hr);
+            if (limited)
+            {
+                hr = IDXGIDevice3_EnqueueSetEvent(device3, limited);
+                ok(hr == E_ACCESSDENIED, "Got unexpected hr %#lx.\n", hr);
+            }
             IDXGIDevice3_Release(device3);
         }
         else
@@ -7757,7 +7764,8 @@ static void test_occlusion_status(void)
         IDXGIDevice_Release(device);
     }
 
-    CloseHandle(limited);
+    if (limited)
+        CloseHandle(limited);
     CloseHandle(event2);
     CloseHandle(event);
     IDXGIFactory2_Release(factory);
