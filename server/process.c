@@ -927,6 +927,11 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
          * run as LocalSystem. Only session 0's account starts programs here */
         process->handles = alloc_handle_table( process, 0 );
         process->token = token_create_service( SERVICE_ACCOUNT_SYSTEM, default_session_id );
+        if (process->token && !token_protect_system( process->token, 0 ))  /* R7: as a system process's */
+        {
+            release_object( process->token );
+            process->token = NULL;
+        }
         process->affinity = ~0;
     }
     else if (!parent)
@@ -963,6 +968,13 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
         /* Note: for security reasons, starting a new process does not attempt
          * to use the current impersonation token for the new process */
         process->token = token_duplicate( token ? token : parent->token, TRUE, 0, NULL, NULL, 0, NULL, 0, FALSE );
+        /* R7: the new primary token keeps the descriptor of the token it was made from (a service's, from
+         * create_service_token; a system process's, from its parent) */
+        if (process->token && !token_keep_descriptor( process->token, token ? token : parent->token ))
+        {
+            release_object( process->token );
+            process->token = NULL;
+        }
         if (token && token_e1s_account( token )) process->e1s_profile_issued = (struct token *)grab_object( token );
         process->affinity = parent->affinity;
     }

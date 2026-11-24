@@ -442,10 +442,16 @@ void sysrun_main_image( struct process *process, struct fd *fd )
         if (machine_image_roles( &st, IMAGE_SYSTEM ) &&
             (token = token_create_service( SERVICE_ACCOUNT_SYSTEM, process->session_id )))
         {
-            release_object( process->token );
-            process->token = token;
-            if (broker) pin_broker( process );
-            return;
+            /* R7: the descriptor of a system process that is not a service (its services get theirs from
+             * create_service_token); without it the process is ended below */
+            if (token_protect_system( token, 0 ))
+            {
+                release_object( process->token );
+                process->token = token;
+                if (broker) pin_broker( process );
+                return;
+            }
+            release_object( token );
         }
     }
     fprintf( stderr, "wineserver: process %04x has the system group but its image is not a system program of the machine root\n",
