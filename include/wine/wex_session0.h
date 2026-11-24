@@ -30,7 +30,7 @@
 /* the link message from a user's server to session 0: header, then the token description; SCM_RIGHTS carries
  * the channel. Session 0 answers with a reply. One message per connection. */
 #define WEX_SESSION0_MAGIC    0x30535857  /* "WXS0" */
-#define WEX_SESSION0_VERSION  6
+#define WEX_SESSION0_VERSION  7
 #define WEX_SESSION0_MAX_MSG  65536
 
 struct wex_session0_request
@@ -69,7 +69,8 @@ struct wex_session0_request
 #define WEX_SESSION0_SESSION_ID   4
 #define WEX_SESSION0_HIVE_SAVED   5
 /* PIPE (T5.2): a program of the session opens a pipe of session 0 (\pipe\WexSession0\<name> in the session). The
- * token description is followed by the pipe's name (machine: its size in bytes, UTF-16); SCM_RIGHTS: one end of
+ * token description is followed by the pipe's name (machine: its size in bytes, UTF-16) and, since version 7, the
+ * opener's process id (4 bytes; 0: none, as PIPE_WAIT has none); SCM_RIGHTS: one end of
  * a stream socket, on which session 0 joins the pipe (each message: a 4-byte length, then the data). One
  * message, then the link closes. */
 #define WEX_SESSION0_PIPE         6

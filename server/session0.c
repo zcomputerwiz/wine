@@ -286,10 +286,12 @@ struct id_block
     unsigned int       session;
     pid_t              pid;     /* 0: free */
     unsigned long long start;   /* the process's start time (/proc/<pid>/stat), so a reused pid is not the owner */
+    unsigned int       serial;  /* this lease, in this session 0 only (not saved): a new owner gets a new one */
 };
 
 static struct id_block id_blocks[WEX_ID_BLOCK_COUNT];
 static int id_blocks_loaded;
+static unsigned int id_block_serial;
 
 /* the start time of a process, in clock ticks since boot; 0 when it does not exist */
 static unsigned long long process_start_time( pid_t pid )
@@ -350,6 +352,7 @@ static void load_id_blocks(void)
         id_blocks[block].session = session;
         id_blocks[block].pid = pid;
         id_blocks[block].start = start;
+        id_blocks[block].serial = ++id_block_serial;
     }
     fclose( f );
 }
@@ -410,6 +413,7 @@ static unsigned int grant_id_block( uid_t uid, unsigned int session, pid_t pid, 
     b->session = session;
     b->pid = pid;
     b->start = start;
+    b->serial = ++id_block_serial;
     /* a block is given only once it is on disk: after a restart session 0 knows every block it gave */
     if (!save_id_blocks())
     {
@@ -420,14 +424,28 @@ static unsigned int grant_id_block( uid_t uid, unsigned int session, pid_t pid, 
     return block;
 }
 
-/* R6 step 2: is a process or thread id in a block that session 0 leased to the server at the other end of link? */
-static int id_of_peer( unsigned int id, const struct session0_socket *link )
+/* R6 step 2: is a process or thread id in a block that session 0 leased to the server at the other end of link (its
+ * pid, account and start time, so not an earlier server whose pid was reused)? The lease's serial, or 0 */
+static unsigned int id_of_peer( unsigned int id, const struct session0_socket *link )
 {
     unsigned int block = id / 4 / WEX_ID_BLOCK_SIZE;
+    const struct id_block *b;
 
     if (!id || !block || block >= WEX_ID_BLOCK_COUNT) return 0;
     if (!id_blocks_loaded) load_id_blocks();
-    return id_blocks[block].pid == link->peer_pid && id_blocks[block].uid == link->peer_uid;
+    b = &id_blocks[block];
+    if (b->pid != link->peer_pid || b->uid != link->peer_uid || b->start != process_start_time( link->peer_pid ))
+        return 0;
+    return b->serial;
+}
+
+/* session 0: is the lease (serial) that a bridged opener's id came from still the block's lease? Once the block went
+ * to another server the id may name another process, so it is not reported any more */
+int session0_id_lease_current( unsigned int id, unsigned int serial )
+{
+    unsigned int block = id / 4 / WEX_ID_BLOCK_SIZE;
+
+    return serial && block && block < WEX_ID_BLOCK_COUNT && id_blocks[block].serial == serial;
 }
 
 /* A new block of ids for this server's own processes, or block again after session 0 restarted; 0 when there is
@@ -1287,16 +1305,16 @@ static void session0_link_event( struct fd *fd, int event )
         else
         {
             int session = peer_session( link );  /* R9: the session of the bridge's peer server */
-            unsigned int client_pid;
+            unsigned int client_pid, lease;
 
             memcpy( name, (const char *)(hdr + 1) + hdr->desc_size, hdr->name_size );
             /* R6 step 2: the opener's process id, after the name; kept only when it is in a block of the peer
-             * server's (an id no other server has), else 0 as before */
+             * server's (an id no other server has), else 0 as before; the lease goes with it */
             memcpy( &client_pid, (const char *)(hdr + 1) + hdr->desc_size + hdr->name_size, sizeof(client_pid) );
-            if (!id_of_peer( client_pid, link )) client_pid = 0;
+            if (!(lease = id_of_peer( client_pid, link ))) client_pid = 0;
             fcntl( channel, F_SETFL, O_NONBLOCK );
             reply.status = pipe_bridge_accept( token, name, hdr->name_size, channel, link->peer_uid, session,
-                                               client_pid );
+                                               client_pid, lease );
         }
         channel = -1;  /* the bridge owns it now, or it was closed */
         free( name );
