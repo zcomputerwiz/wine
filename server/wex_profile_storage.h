@@ -42,7 +42,6 @@ struct wex_profile_storage
     int profile_fd, hive_fd; /* owned by successful recipient; close both */
     int sid_lock_fd; /* S14 stable SID lock, independent of replaceable hive inode */
     struct stat hive_identity;
-    unsigned int test_crash_step; /* honored only by WEX_E1S14_CRASH_TEST */
     uint64_t profile_generation;
     int reused, acl_pending; /* acl_pending is ALWAYS 1, never launch readiness */
     char acl_intent[320];
