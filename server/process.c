@@ -857,6 +857,8 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->debug_children  = 1;
     process->is_terminating  = 0;
     process->imagelen        = 0;
+    process->cmdline         = NULL;
+    process->cmdlinelen      = 0;
     process->image           = NULL;
     process->job             = NULL;
     process->console         = NULL;
@@ -1030,6 +1032,7 @@ static void process_destroy( struct object *obj )
     free( process->rawinput_devices );
     free( process->dir_cache );
     free( process->image );
+    free( process->cmdline );
 }
 
 /* dump a process on stdout for debugging purposes */
@@ -1664,6 +1667,16 @@ DECL_HANDLER(new_process)
     process->machine = req->machine;
     process->startup_info = (struct startup_info *)grab_object( info );
 
+    /* keep the command line for ProcessCommandLineInformation: the startup data is freed once the process runs,
+     * and reading it from the process's memory needs more access than a limited query has */
+    if (info->data->cmdline_len)
+    {
+        const char *str = (const char *)(info->data + 1) + info->data->imagepath_len + info->data->curdir_len +
+                          info->data->dllpath_len;
+        if ((process->cmdline = memdup( str, info->data->cmdline_len )))
+            process->cmdlinelen = info->data->cmdline_len;
+    }
+
     job = isolate ? NULL : parent->job;
     while (job)
     {
@@ -1919,6 +1932,43 @@ DECL_HANDLER(get_process_debug_info)
     reply->debug_children = process->debug_children;
     if (!process->debug_obj) set_error( STATUS_PORT_NOT_SET );
     else reply->debug = alloc_handle( current->process, process->debug_obj, MAXIMUM_ALLOWED, 0 );
+    release_object( process );
+}
+
+/* the command line a process was given (ProcessCommandLineInformation), with the limited query right as on Windows;
+ * for a process started without startup data (from Unix) it is read from its PEB */
+DECL_HANDLER(get_process_command_line)
+{
+    struct process *process;
+    WCHAR *buffer = NULL;
+    data_size_t len = 0;
+
+    if (!(process = get_process_from_handle( req->handle, PROCESS_QUERY_LIMITED_INFORMATION ))) return;
+
+    if (process->cmdline) len = process->cmdlinelen;
+    else if (process->peb && process->running_threads)
+    {
+        ULONG64 params;
+        UNICODE_STRING64 str;
+
+        if (read_process_memory( process, process->peb + offsetof( PEB64, ProcessParameters ), sizeof(params),
+                                 (char *)&params ) &&
+            read_process_memory( process, params + offsetof( RTL_USER_PROCESS_PARAMETERS64, CommandLine ),
+                                 sizeof(str), (char *)&str ) &&
+            (!str.Length || ((buffer = mem_alloc( str.Length )) &&
+                             read_process_memory( process, str.Buffer, str.Length, (char *)buffer ))))
+            len = str.Length;
+        else
+        {
+            free( buffer );
+            release_object( process );
+            return;  /* the read set the error */
+        }
+    }
+    reply->len = len;
+    if (len > get_reply_max_size()) set_error( STATUS_BUFFER_TOO_SMALL );
+    else if (len) set_reply_data( buffer ? buffer : process->cmdline, len );
+    free( buffer );
     release_object( process );
 }
 

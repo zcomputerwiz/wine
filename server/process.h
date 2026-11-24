@@ -74,6 +74,8 @@ struct process
     unsigned int         is_terminating:1;/* is process terminating? */
     data_size_t          imagelen;        /* length of image path in bytes */
     WCHAR               *image;           /* main exe image full path */
+    data_size_t          cmdlinelen;      /* length of the command line in bytes */
+    WCHAR               *cmdline;         /* command line given at creation (ProcessCommandLineInformation) */
     struct job          *job;             /* job object associated with this process */
     struct list          job_entry;       /* list entry for job object */
     struct list          asyncs;          /* list of async object owned by the process */

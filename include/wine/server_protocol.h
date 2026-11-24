@@ -1377,6 +1377,21 @@ struct get_process_image_name_reply
 
 
 
+struct get_process_command_line_request
+{
+    struct request_header __header;
+    obj_handle_t handle;
+};
+struct get_process_command_line_reply
+{
+    struct reply_header __header;
+    data_size_t  len;
+    /* VARARG(cmdline,unicode_str); */
+    char __pad_12[4];
+};
+
+
+
 struct get_process_vm_counters_request
 {
     struct request_header __header;
@@ -6688,6 +6703,7 @@ enum request
     REQ_get_process_debug_info,
     REQ_get_process_handle_table,
     REQ_get_process_image_name,
+    REQ_get_process_command_line,
     REQ_get_process_vm_counters,
     REQ_get_process_io_counters,
     REQ_set_process_info,
@@ -7026,6 +7042,7 @@ union generic_request
     struct get_process_debug_info_request get_process_debug_info_request;
     struct get_process_handle_table_request get_process_handle_table_request;
     struct get_process_image_name_request get_process_image_name_request;
+    struct get_process_command_line_request get_process_command_line_request;
     struct get_process_vm_counters_request get_process_vm_counters_request;
     struct get_process_io_counters_request get_process_io_counters_request;
     struct set_process_info_request set_process_info_request;
@@ -7362,6 +7379,7 @@ union generic_reply
     struct get_process_debug_info_reply get_process_debug_info_reply;
     struct get_process_handle_table_reply get_process_handle_table_reply;
     struct get_process_image_name_reply get_process_image_name_reply;
+    struct get_process_command_line_reply get_process_command_line_reply;
     struct get_process_vm_counters_reply get_process_vm_counters_reply;
     struct get_process_io_counters_reply get_process_io_counters_reply;
     struct set_process_info_reply set_process_info_reply;
@@ -7682,6 +7700,6 @@ union generic_reply
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 993
+#define SERVER_PROTOCOL_VERSION 994
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

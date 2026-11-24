@@ -1312,6 +1312,15 @@ typedef volatile struct
 @END
 
 
+/* Retrieve the command line of a process */
+@REQ(get_process_command_line)
+    obj_handle_t handle;           /* process handle */
+@REPLY
+    data_size_t  len;              /* len in bytes of the command line */
+    VARARG(cmdline,unicode_str);   /* command line */
+@END
+
+
 /* Retrieve information about a process memory usage */
 @REQ(get_process_vm_counters)
     obj_handle_t handle;                        /* process handle */

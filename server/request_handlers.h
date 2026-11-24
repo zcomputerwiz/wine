@@ -20,6 +20,7 @@ DECL_HANDLER(get_process_info);
 DECL_HANDLER(get_process_debug_info);
 DECL_HANDLER(get_process_handle_table);
 DECL_HANDLER(get_process_image_name);
+DECL_HANDLER(get_process_command_line);
 DECL_HANDLER(get_process_vm_counters);
 DECL_HANDLER(get_process_io_counters);
 DECL_HANDLER(set_process_info);
@@ -355,6 +356,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_get_process_debug_info,
     (req_handler)req_get_process_handle_table,
     (req_handler)req_get_process_image_name,
+    (req_handler)req_get_process_command_line,
     (req_handler)req_get_process_vm_counters,
     (req_handler)req_get_process_io_counters,
     (req_handler)req_set_process_info,
@@ -832,6 +834,10 @@ C_ASSERT( offsetof(struct get_process_image_name_request, win32) == 20 );
 C_ASSERT( sizeof(struct get_process_image_name_request) == 24 );
 C_ASSERT( offsetof(struct get_process_image_name_reply, len) == 8 );
 C_ASSERT( sizeof(struct get_process_image_name_reply) == 16 );
+C_ASSERT( offsetof(struct get_process_command_line_request, handle) == 12 );
+C_ASSERT( sizeof(struct get_process_command_line_request) == 16 );
+C_ASSERT( offsetof(struct get_process_command_line_reply, len) == 8 );
+C_ASSERT( sizeof(struct get_process_command_line_reply) == 16 );
 C_ASSERT( offsetof(struct get_process_vm_counters_request, handle) == 12 );
 C_ASSERT( sizeof(struct get_process_vm_counters_request) == 16 );
 C_ASSERT( offsetof(struct get_process_vm_counters_reply, peak_virtual_size) == 8 );
