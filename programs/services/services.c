@@ -628,7 +628,7 @@ static void scmdatabase_autostart_services(struct scmdatabase *db)
             release_service(service);
             continue;
         }
-        if (forward_mode && !service_is_session_service(service))
+        if (service_is_session0s(service))
         {
             TRACE("%s is session 0's\n", wine_dbgstr_w(service->name));
             release_service(service);
@@ -1545,6 +1545,13 @@ BOOL is_session_service(const WCHAR *name, DWORD type, int configured)
 BOOL service_is_session_service(const struct service_entry *entry)
 {
     return is_session_service(entry->name, entry->config.dwServiceType, entry->session_service);
+}
+
+/* the calls on a service go to session 0: this session forwards, and the service is not its own, or this session
+ * does not know it (entry NULL: made since it started) */
+BOOL service_is_session0s(const struct service_entry *entry)
+{
+    return forward_mode && (!entry || !service_is_session_service(entry));
 }
 
 /* a service known by name (and type) only: this session's entry of that name decides, when there is one */

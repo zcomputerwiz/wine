@@ -556,7 +556,7 @@ DWORD __cdecl svcctl_GetServiceDisplayNameW(
     scmdatabase_lock(manager->db);
 
     entry = scmdatabase_find_service(manager->db, lpServiceName);
-    if (forward_mode && (!entry || !service_is_session_service(entry)))
+    if (service_is_session0s(entry))
     {
         SC_RPC_HANDLE remote;
 
@@ -608,7 +608,7 @@ DWORD __cdecl svcctl_GetServiceKeyNameW(
     scmdatabase_lock(manager->db);
 
     entry = scmdatabase_find_service_by_displayname(manager->db, lpServiceDisplayName);
-    if (forward_mode && (!entry || !service_is_session_service(entry)))
+    if (service_is_session0s(entry))
     {
         SC_RPC_HANDLE remote;
 
@@ -691,7 +691,7 @@ DWORD __cdecl svcctl_OpenServiceW(
 
     /* T5.4: a service that is not the session's own, or one this session does not know (made since it started),
      * is session 0's */
-    if (forward_mode && (!entry || !service_is_session_service(entry)))
+    if (service_is_session0s(entry))
     {
         SC_RPC_HANDLE remote_manager, remote_service = NULL;
 
