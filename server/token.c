@@ -150,6 +150,7 @@ struct token
     struct list    capabilities;    /* capability SIDs */
     struct uwp_context *package;    /* package context (UWP compatibility) */
     int            package_pending; /* no process image has been checked against the context yet */
+    int            windows_sd;      /* R7: Windows' descriptor was given (token_protect_system, token_protect_elevated) */
 };
 
 struct privilege
@@ -638,6 +639,7 @@ static struct token *create_token( unsigned int primary, unsigned int session_id
         token->is_restricted = 0;
         token->package = NULL;
         token->package_pending = 0;
+        token->windows_sd = 0;
 
         /* copy user */
         token->user = memdup( user, sid_len( user ));
@@ -1239,6 +1241,7 @@ int token_protect_elevated( struct token *token )
     set_ace( ace_next( ace ), &builtin_admins_sid, ACCESS_ALLOWED_ACE_TYPE, 0, GENERIC_ALL );
     ret = set_sd_defaults_from_token( &token->obj, sd, DACL_SECURITY_INFORMATION, token );
     free( sd );
+    if (ret) token->windows_sd = 1;
     return ret;
 }
 
@@ -1288,28 +1291,20 @@ int token_protect_system( struct token *token, int service )
     ret = set_sd_defaults_from_token( &token->obj, sd, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
                                       DACL_SECURITY_INFORMATION, token );
     free( sd );
+    if (ret) token->windows_sd = 1;
     return ret;
 }
 
-/* does the token object have a DACL of its own? (most tokens have a descriptor that holds only their integrity label,
- * and an object without a DACL grants every access) */
-static int token_has_dacl( const struct token *token )
-{
-    const struct acl *dacl;
-    int present;
-
-    if (!token->obj.sd) return 0;
-    dacl = sd_get_dacl( token->obj.sd, &present );
-    return present && dacl;
-}
-
 /* a process's new primary token (dst, a duplicate of src, which copied src's label) gets src's owner, group and DACL
- * when src has a descriptor: a service's process keeps its service descriptor (token_protect_system) */
+ * when src has Windows' descriptor (token_protect_system, token_protect_elevated): a service's process keeps its
+ * service descriptor. Any other token's descriptor (most have the default DACL their label came with) is not copied. */
 int token_keep_descriptor( struct token *dst, const struct token *src )
 {
-    if (!token_has_dacl( src )) return 1;
-    return set_sd_defaults_from_token( &dst->obj, src->obj.sd, OWNER_SECURITY_INFORMATION |
-                                       GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, NULL );
+    if (!src->windows_sd || !src->obj.sd) return 1;
+    if (!set_sd_defaults_from_token( &dst->obj, src->obj.sd, OWNER_SECURITY_INFORMATION |
+                                     GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, NULL )) return 0;
+    dst->windows_sd = 1;
+    return 1;
 }
 
 /* a token of a process that was elevated: the full half of a split administrator token */
@@ -2028,9 +2023,11 @@ DECL_HANDLER(open_token)
 {
     /* Windows needs only the limited query right on the process or thread (OpenProcessToken from Low integrity works
      * there), and the token's own descriptor decides the rest. With elevation enforced, so does this server for a
-     * token that has a descriptor (R7): the system role's (token_protect_system) and elevated ones
-     * (token_protect_elevated). A token without one would grant everything, so for it the limited right still opens
-     * it only for reading: duplicating, impersonating, assigning or adjusting needs the full query right. */
+     * token that has Windows' descriptor (R7): the system role's (token_protect_system) and elevated primary tokens
+     * (token_protect_elevated), marked windows_sd. Any other token, also one with a DACL (most have the default DACL
+     * that came with their label, which grants their user everything, and an elevated client's impersonation copy
+     * has one too), keeps the stricter rule: the limited right opens it only for reading; duplicating, impersonating,
+     * assigning or adjusting needs the full query right. */
     unsigned int query = sysrun_active && elevation_enforced();
     unsigned int read_only = token_access_is_query( req->access );
 
@@ -2038,7 +2035,7 @@ DECL_HANDLER(open_token)
     {
         struct thread *thread = get_thread_from_handle( req->handle, query ? THREAD_QUERY_LIMITED_INFORMATION : 0 );
 
-        if (thread && query && !read_only && thread->token && !token_has_dacl( thread->token ))
+        if (thread && query && !read_only && thread->token && !thread->token->windows_sd)
         {
             release_object( thread );
             thread = get_thread_from_handle( req->handle, THREAD_QUERY_INFORMATION );
@@ -2068,7 +2065,7 @@ DECL_HANDLER(open_token)
     {
         struct process *process = get_process_from_handle( req->handle, query ? PROCESS_QUERY_LIMITED_INFORMATION : 0 );
 
-        if (process && query && !read_only && process->token && !token_has_dacl( process->token ))
+        if (process && query && !read_only && process->token && !process->token->windows_sd)
         {
             release_object( process );
             process = get_process_from_handle( req->handle, PROCESS_QUERY_INFORMATION );
