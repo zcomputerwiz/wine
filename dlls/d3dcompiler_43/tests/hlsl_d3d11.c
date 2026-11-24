@@ -1429,6 +1429,131 @@ static D3D11_PARAMETER_DESC linker_param(const char *name, const char *semantic,
     return desc;
 }
 
+/* graphs and libraries an application gets wrong must fail, not crash */
+static void test_linker_invalid(void)
+{
+    static const DWORD truncated[8] = {0x43425844, 0, 0, 0, 0, 1, 32, 1000};   /* "DXBC", 1000 chunks in 32 bytes */
+    ID3D11LinkingNode *in, *in2, *out, *bias, *scale, *node;
+    D3D11_PARAMETER_DESC in_desc[2], out_desc[1];
+    ID3D11FunctionLinkingGraph *graph, *graph2;
+    ID3D11ModuleInstance *instance, *graph_instance;
+    char long_name[1200];
+    ID3D10Blob *blob, *errors;
+    ID3D11Module *module;
+    HRESULT hr;
+
+    hr = D3DLoadModule(truncated, sizeof(truncated), &module);
+    ok(FAILED(hr), "Got unexpected hr %#lx.\n", hr);
+    hr = D3DLoadModule(test_library, 40, &module);
+    ok(FAILED(hr), "Got unexpected hr %#lx.\n", hr);
+
+    hr = D3DLoadModule(test_library, sizeof(test_library), &module);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr))
+        return;
+    hr = module->lpVtbl->CreateInstance(module, "", &instance);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* a matrix of UINT_MAX rows */
+    hr = D3DCreateFunctionLinkingGraph(0, &graph);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    in_desc[0] = linker_param("m", "TEXCOORD0", 4, D3D_PF_IN);
+    in_desc[0].Class = D3D_SVC_MATRIX_ROWS;
+    in_desc[0].Rows = UINT_MAX;
+    hr = graph->lpVtbl->SetInputSignature(graph, in_desc, 1, &in);
+    ok(FAILED(hr), "Got unexpected hr %#lx.\n", hr);
+    graph->lpVtbl->Release(graph);
+
+    /* a long name and a missing name in GenerateHlsl; INT_MAX as a parameter index */
+    memset(long_name, 'a', sizeof(long_name) - 1);
+    long_name[sizeof(long_name) - 1] = 0;
+    hr = D3DCreateFunctionLinkingGraph(0, &graph);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    in_desc[0] = linker_param(long_name, "SV_POSITION", 4, D3D_PF_IN);
+    in_desc[1] = linker_param(NULL, "COLOR0", 4, D3D_PF_IN);
+    hr = graph->lpVtbl->SetInputSignature(graph, in_desc, 2, &in);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = graph->lpVtbl->CallFunction(graph, "", module, "Scale", &scale);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = graph->lpVtbl->PassValue(graph, in, 0, scale, 0);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = graph->lpVtbl->PassValue(graph, in, 1, scale, 1);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = graph->lpVtbl->GenerateHlsl(graph, 0, &blob);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        ok(!!strstr(ID3D10Blob_GetBufferPointer(blob), long_name), "The long name is missing.\n");
+        ID3D10Blob_Release(blob);
+    }
+    hr = graph->lpVtbl->PassValue(graph, in, 0, scale, INT_MAX);
+    ok(FAILED(hr), "Got unexpected hr %#lx.\n", hr);
+    scale->lpVtbl->Release(scale);
+    in->lpVtbl->Release(in);
+    graph->lpVtbl->Release(graph);
+
+    /* a node of another graph */
+    hr = D3DCreateFunctionLinkingGraph(0, &graph);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = D3DCreateFunctionLinkingGraph(0, &graph2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    in_desc[0] = linker_param("position", "SV_POSITION", 4, D3D_PF_IN);
+    hr = graph->lpVtbl->SetInputSignature(graph, in_desc, 1, &in);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = graph2->lpVtbl->SetInputSignature(graph2, in_desc, 1, &in2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = graph->lpVtbl->CallFunction(graph, "", module, "Bias", &bias);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    /* accepted; the graph must stay usable after the other graph is gone */
+    hr = graph->lpVtbl->PassValue(graph, in2, 0, bias, 0);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    in2->lpVtbl->Release(in2);
+    graph2->lpVtbl->Release(graph2);
+    hr = graph->lpVtbl->GenerateHlsl(graph, 0, &blob);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+        ID3D10Blob_Release(blob);
+    bias->lpVtbl->Release(bias);
+    in->lpVtbl->Release(in);
+    graph->lpVtbl->Release(graph);
+
+    /* a value passed from a call added after the call it goes to */
+    instance->lpVtbl->BindConstantBuffer(instance, 0, 0, 0);
+    hr = D3DCreateFunctionLinkingGraph(0, &graph);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = graph->lpVtbl->SetInputSignature(graph, in_desc, 1, &in);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = graph->lpVtbl->CallFunction(graph, "", module, "Scale", &scale);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = graph->lpVtbl->CallFunction(graph, "", module, "Bias", &bias);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = graph->lpVtbl->PassValue(graph, in, 0, bias, 0);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    /* refused, and the graph refuses everything after it */
+    hr = graph->lpVtbl->PassValue(graph, bias, D3D_RETURN_PARAMETER_INDEX, scale, 0);
+    ok(hr == E_FAIL, "Got unexpected hr %#lx.\n", hr);
+    out_desc[0] = linker_param("target", "SV_TARGET", 4, D3D_PF_OUT);
+    hr = graph->lpVtbl->SetOutputSignature(graph, out_desc, 1, &out);
+    ok(hr == E_FAIL, "Got unexpected hr %#lx.\n", hr);
+    hr = graph->lpVtbl->CreateModuleInstance(graph, &graph_instance, NULL);
+    ok(hr == E_FAIL, "Got unexpected hr %#lx.\n", hr);
+    errors = NULL;
+    hr = graph->lpVtbl->GetLastError(graph, &errors);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(!!errors, "Expected errors.\n");
+    if (errors)
+        ID3D10Blob_Release(errors);
+    node = NULL;
+    bias->lpVtbl->Release(bias);
+    scale->lpVtbl->Release(scale);
+    in->lpVtbl->Release(in);
+    graph->lpVtbl->Release(graph);
+
+    instance->lpVtbl->Release(instance);
+    module->lpVtbl->Release(module);
+    (void)node;
+}
+
 static void test_linker(void)
 {
     static const float k[4] = {1.0f, 1.0f, 1.0f, 0.5f};
@@ -1671,5 +1796,6 @@ START_TEST(hlsl_d3d11)
     test_sampling();
 #if D3D_COMPILER_VERSION >= 47
     test_linker();
+    test_linker_invalid();
 #endif
 }

@@ -182,11 +182,26 @@ static char *chunk_string(const char *data, size_t size, uint32_t offset)
     return strdup(data + offset);
 }
 
+/* vkd3d_shader_parse_dxbc() reads the chunk offsets before it checks that the table of them fits in the data: check here */
+static BOOL dxbc_chunk_table_fits(const void *data, size_t size)
+{
+    const uint32_t *u = data;
+
+    return size >= 8 * sizeof(uint32_t) && u[7] <= (size - 8 * sizeof(uint32_t)) / sizeof(uint32_t);
+}
+
+/* a register holds at most four rows of four components */
+static BOOL parameter_shape_valid(UINT rows, UINT columns)
+{
+    return rows <= 4 && columns <= 4;
+}
+
 static BOOL parse_lfs0(struct library_function *f, const char *data, size_t size)
 {
     const uint32_t *u = (const uint32_t *)data;
     uint32_t count, offset, i;
 
+    if (f->params) return FALSE;   /* a second LFS0 chunk */
     if (size < 8) return FALSE;
     count = u[0];
     offset = u[1];
@@ -210,6 +225,7 @@ static BOOL parse_lfs0(struct library_function *f, const char *data, size_t size
         p->in_comp = e[9];
         p->out_reg = e[10];
         p->out_comp = e[11];
+        if (!parameter_shape_valid(p->rows, p->columns)) return FALSE;
     }
     return TRUE;
 }
@@ -220,6 +236,7 @@ static BOOL parse_rdef_bindings(struct library_function *f, const char *data, si
     const uint32_t *u = (const uint32_t *)data;
     uint32_t count, offset, i, stride;
 
+    if (f->bindings) return FALSE;   /* a second RDEF chunk */
     if (size < 7 * sizeof(uint32_t)) return FALSE;
     count = u[2];
     offset = u[3];
@@ -245,10 +262,11 @@ static HRESULT parse_library_function(struct library_function *f, const void *da
 {
     struct vkd3d_shader_code code = {data, size};
     struct vkd3d_shader_dxbc_desc desc;
-    BOOL have_code = FALSE, have_params = FALSE;
+    BOOL have_code = FALSE, have_params = FALSE, duplicate = FALSE;
     unsigned int i;
     int ret;
 
+    if (!dxbc_chunk_table_fits(data, size)) return E_FAIL;
     if ((ret = vkd3d_shader_parse_dxbc(&code, VKD3D_SHADER_PARSE_DXBC_IGNORE_CHECKSUM, &desc, NULL)) < 0)
     {
         WARN("Failed to parse a library function, ret %d.\n", ret);
@@ -265,6 +283,7 @@ static HRESULT parse_library_function(struct library_function *f, const void *da
             {
                 const uint32_t *tokens = s->data.code;
 
+                if (f->code) { duplicate = TRUE; break; }
                 if (s->data.size < 8 || tokens[1] < 2 || tokens[1] > s->data.size / sizeof(uint32_t))
                     break;
                 if (!(f->code = malloc(tokens[1] * sizeof(uint32_t)))) break;
@@ -274,17 +293,20 @@ static HRESULT parse_library_function(struct library_function *f, const void *da
                 break;
             }
             case TAG_LFS0:
-                have_params = parse_lfs0(f, s->data.code, s->data.size);
+                if (f->params) duplicate = TRUE;
+                else have_params = parse_lfs0(f, s->data.code, s->data.size);
                 break;
             case TAG_RDEF:
-                parse_rdef_bindings(f, s->data.code, s->data.size);
+                if (f->bindings) duplicate = TRUE;
+                else parse_rdef_bindings(f, s->data.code, s->data.size);
                 break;
         }
     }
     vkd3d_shader_free_dxbc(&desc);
-    if (!have_code || !have_params || !f->param_count)
+    if (!have_code || !have_params || !f->param_count || duplicate)
     {
-        WARN("Library function without code (%d) or parameters (%d).\n", have_code, have_params);
+        WARN("Library function without code (%d) or parameters (%d), or with a chunk twice (%d).\n", have_code, have_params,
+                duplicate);
         return E_FAIL;
     }
     return S_OK;
@@ -376,6 +398,7 @@ HRESULT WINAPI D3DLoadModule(const void *data, SIZE_T size, ID3D11Module **modul
 
     if (!data || !module) return E_INVALIDARG;
     *module = NULL;
+    if (!dxbc_chunk_table_fits(data, size)) return E_FAIL;
     if ((ret = vkd3d_shader_parse_dxbc(&code, 0, &desc, NULL)) < 0)
     {
         WARN("Failed to parse the library, ret %d.\n", ret);
@@ -420,6 +443,12 @@ HRESULT WINAPI D3DLoadModule(const void *data, SIZE_T size, ID3D11Module **modul
                     && (libh_size - u[4]) / 8 > i)
                 f->name = chunk_string(libh, libh_size, ((const uint32_t *)(libh + u[4]))[i * 2 + 1]);
             if (!f->name && f->params[0].name) f->name = strdup(f->params[0].name);
+            if (!f->name)
+            {
+                WARN("Library function %u has no name.\n", i);
+                hr = E_FAIL;
+                break;
+            }
             TRACE("Function %u %s: %u parameters, %u tokens, %u bindings.\n", i, debugstr_a(f->name), f->param_count - 1,
                     f->code_count, f->binding_count);
         }
@@ -685,11 +714,15 @@ HRESULT d3d11_module_instance_create(struct d3d11_module *module, struct flg_gra
     struct d3d11_module_instance *object;
 
     if (!(object = calloc(1, sizeof(*object)))) return E_OUTOFMEMORY;
+    if (!(object->namespace = strdup(namespace ? namespace : "")))
+    {
+        free(object);
+        return E_OUTOFMEMORY;
+    }
     object->ID3D11ModuleInstance_iface.lpVtbl = &d3d11_module_instance_vtbl;
     object->refcount = 1;
     if ((object->module = module)) (&module->ID3D11Module_iface)->lpVtbl->AddRef(&module->ID3D11Module_iface);
     if ((object->graph = graph)) flg_graph_addref(graph);
-    object->namespace = strdup(namespace ? namespace : "");
     *instance = &object->ID3D11ModuleInstance_iface;
     return S_OK;
 }
@@ -706,6 +739,7 @@ struct flg_node
 {
     ID3D11LinkingNode ID3D11LinkingNode_iface;
     LONG refcount;
+    struct flg_graph *graph;   /* the graph that owns the node; NULL once that graph is gone */
     enum flg_node_kind kind;
     unsigned int index;
     struct d3d11_module *module;
@@ -832,7 +866,21 @@ void flg_graph_release(struct flg_graph *graph)
     unsigned int i;
 
     if (InterlockedDecrement(&graph->refcount)) return;
-    for (i = 0; i < graph->node_count; ++i) (&graph->nodes[i]->ID3D11LinkingNode_iface)->lpVtbl->Release(&graph->nodes[i]->ID3D11LinkingNode_iface);
+    for (i = 0; i < graph->edge_count; ++i)
+    {
+        ID3D11LinkingNode *src = &graph->edges[i].src->ID3D11LinkingNode_iface, *dst = &graph->edges[i].dst->ID3D11LinkingNode_iface;
+
+        src->lpVtbl->Release(src);
+        dst->lpVtbl->Release(dst);
+    }
+    for (i = 0; i < graph->node_count; ++i)
+    {
+        ID3D11LinkingNode *node = &graph->nodes[i]->ID3D11LinkingNode_iface;
+
+        /* a node the application still holds must not name a freed graph */
+        graph->nodes[i]->graph = NULL;
+        node->lpVtbl->Release(node);
+    }
     free(graph->nodes);
     free(graph->edges);
     free(graph->messages);
@@ -868,6 +916,7 @@ static struct flg_node *flg_add_node(struct flg_graph *graph, enum flg_node_kind
     if (!(node = calloc(1, sizeof(*node)))) return NULL;
     node->ID3D11LinkingNode_iface.lpVtbl = &flg_node_vtbl;
     node->refcount = 1;
+    node->graph = graph;
     node->kind = kind;
     node->index = graph->node_count;
     graph->nodes[graph->node_count++] = node;
@@ -898,6 +947,8 @@ static HRESULT flg_graph_set_signature_unchecked(struct flg_graph *graph, BOOL o
     unsigned int i, j;
 
     if (!desc && count) return E_INVALIDARG;
+    for (i = 0; i < count; ++i)
+        if (!parameter_shape_valid(desc[i].Rows, desc[i].Columns)) return E_INVALIDARG;
     if (output ? graph->output : graph->input)
     {
         flg_message(graph, "error X9017: ID3D11FunctionLinkingGraph::Set%sSignature: the signature is already set\n",
@@ -945,7 +996,7 @@ static HRESULT flg_graph_call_function_unchecked(struct flg_graph *graph, const 
     n->module = module;
     module_iface->lpVtbl->AddRef(module_iface);
     n->function = function;
-    n->namespace = strdup(namespace ? namespace : "");
+    if (!(n->namespace = strdup(namespace ? namespace : ""))) return E_OUTOFMEMORY;   /* the graph is failed from now on */
     if (node)
     {
         *node = &n->ID3D11LinkingNode_iface;
@@ -959,10 +1010,11 @@ static const struct library_parameter *node_parameter(const struct flg_node *nod
 {
     if (node->kind == FLG_NODE_CALL)
     {
-        if (index < -1 || index + 1 >= (int)node->function->param_count) return NULL;
+        /* in 64 bits: index + 1 must not overflow for INT_MAX */
+        if (index < -1 || (INT64)index + 1 >= (INT64)node->function->param_count) return NULL;
         return &node->function->params[index + 1];
     }
-    if (index < 0 || index >= (int)node->param_count) return NULL;
+    if (index < 0 || (INT64)index >= (INT64)node->param_count) return NULL;
     return &node->params[index];
 }
 
@@ -984,6 +1036,14 @@ static HRESULT flg_graph_pass_value_unchecked(struct flg_graph *graph, ID3D11Lin
     struct flg_edge *e;
 
     if (!src || !dst) return E_INVALIDARG;
+    /* a value cannot come from a call added after the call it goes to (measured: E_FAIL). A node of another graph is
+     * accepted (measured); the edge keeps a reference to both nodes, and Link refuses such an edge. */
+    if (src->kind == FLG_NODE_CALL && dst->kind == FLG_NODE_CALL && src->graph == graph && dst->graph == graph
+            && src->index > dst->index)
+    {
+        flg_message(graph, "error X9006: ID3D11FunctionLinkingGraph::PassValue: the source is called after the destination\n");
+        return E_FAIL;
+    }
     if (!node_parameter(src, src_index) || !node_parameter(dst, dst_index) || dst->kind == FLG_NODE_INPUT
             || src->kind == FLG_NODE_OUTPUT || !valid_swizzle(src_swizzle) || !valid_swizzle(dst_swizzle))
     {
@@ -1002,8 +1062,10 @@ static HRESULT flg_graph_pass_value_unchecked(struct flg_graph *graph, ID3D11Lin
     e = &graph->edges[graph->edge_count++];
     memset(e, 0, sizeof(*e));
     e->src = src;
+    src_iface->lpVtbl->AddRef(src_iface);
     e->src_index = src_index;
     e->dst = dst;
+    dst_iface->lpVtbl->AddRef(dst_iface);
     e->dst_index = dst_index;
     if (src_swizzle) strcpy(e->src_swizzle, src_swizzle);
     if (dst_swizzle) strcpy(e->dst_swizzle, dst_swizzle);
@@ -1031,25 +1093,38 @@ static const char *hlsl_type(const struct library_parameter *p, char *buffer, si
     return buffer;
 }
 
-static void append(char **text, size_t *len, const char *format, ...)
+/* append formatted text of any length (the names come from the application's libraries and descriptions) */
+static void WINAPIV append(char **text, size_t *len, const char *format, ...)
 {
-    char buffer[512], *t;
     va_list args;
+    char *t;
     int n;
 
     va_start(args, format);
-    n = vsnprintf(buffer, sizeof(buffer), format, args);
+    n = vsnprintf(NULL, 0, format, args);
     va_end(args);
     if (n < 0 || !(t = realloc(*text, *len + n + 1))) return;
-    memcpy(t + *len, buffer, n + 1);
+    va_start(args, format);
+    vsnprintf(t + *len, n + 1, format, args);
+    va_end(args);
     *text = t;
     *len += n;
+}
+
+/* the name of a parameter of a signature, or a made-up one when the description has none */
+static const char *signature_param_name(const struct flg_node *node, int index, char *buffer, size_t size)
+{
+    const char *name = node->params[index].name;
+
+    if (name) return name;
+    snprintf(buffer, size, "%s%d", node->kind == FLG_NODE_OUTPUT ? "out" : "in", index);
+    return buffer;
 }
 
 /* the HLSL of the graph, in the form of the one of Windows (the declarations of the functions, then main) */
 HRESULT flg_graph_generate_hlsl(struct flg_graph *graph, ID3DBlob **blob)
 {
-    char *text = NULL, type[32];
+    char *text = NULL, type[32], name[32], name2[32];
     unsigned int i, j, k;
     size_t len = 0;
     HRESULT hr;
@@ -1074,7 +1149,7 @@ HRESULT flg_graph_generate_hlsl(struct flg_graph *graph, ID3DBlob **blob)
 
         for (j = 0; n && j < n->param_count; ++j)
             append(&text, &len, "%s%s %s %s : %s", (k || j) ? ", " : "", k ? "out" : "in",
-                    hlsl_type(&n->params[j], type, sizeof(type)), n->params[j].name ? n->params[j].name : "",
+                    hlsl_type(&n->params[j], type, sizeof(type)), signature_param_name(n, j, name, sizeof(name)),
                     n->params[j].semantic ? n->params[j].semantic : "");
     }
     append(&text, &len, ")\n{\n");
@@ -1096,7 +1171,7 @@ HRESULT flg_graph_generate_hlsl(struct flg_graph *graph, ID3DBlob **blob)
 
             if (e->dst != n) continue;
             if (e->src->kind == FLG_NODE_INPUT)
-                src_name = e->src->params[e->src_index].name;
+                src_name = signature_param_name(e->src, e->src_index, name, sizeof(name));
             else
                 src_name = NULL;
             if (src_name)
@@ -1121,10 +1196,11 @@ HRESULT flg_graph_generate_hlsl(struct flg_graph *graph, ID3DBlob **blob)
 
         if (e->dst != graph->output) continue;
         if (e->src->kind == FLG_NODE_INPUT)
-            append(&text, &len, "    %s%s%s = %s%s%s;\n", graph->output->params[e->dst_index].name, *e->dst_swizzle ? "." : "",
-                    e->dst_swizzle, e->src->params[e->src_index].name, *e->src_swizzle ? "." : "", e->src_swizzle);
+            append(&text, &len, "    %s%s%s = %s%s%s;\n", signature_param_name(graph->output, e->dst_index, name, sizeof(name)),
+                    *e->dst_swizzle ? "." : "", e->dst_swizzle,
+                    signature_param_name(e->src, e->src_index, name2, sizeof(name2)), *e->src_swizzle ? "." : "", e->src_swizzle);
         else
-            append(&text, &len, "    %s%s%s = %s_n%u_%d%s%s;\n", graph->output->params[e->dst_index].name,
+            append(&text, &len, "    %s%s%s = %s_n%u_%d%s%s;\n", signature_param_name(graph->output, e->dst_index, name, sizeof(name)),
                     *e->dst_swizzle ? "." : "", e->dst_swizzle, e->src->function->name, e->src->index, e->src_index + 1,
                     *e->src_swizzle ? "." : "", e->src_swizzle);
     }
@@ -1185,6 +1261,7 @@ HRESULT flg_graph_create_instance(struct flg_graph *graph, ID3D11ModuleInstance 
 struct node_outputs
 {
     unsigned int out[32];   /* o register of the function -> temporary register */
+    BOOL linked;            /* the call is inlined already: its outputs are written */
 };
 
 struct link_context
@@ -1194,7 +1271,7 @@ struct link_context
     unsigned int library_count;
     unsigned int shader_type;            /* D3D10_SB_TOKENIZED_PROGRAM_TYPE: 0 pixel, 1 vertex, ... */
     unsigned int major, minor;
-    struct token_buffer decls, body;
+    struct token_buffer decls, body, icb;   /* icb: the immediate constant buffer of a function, if any */
     unsigned int temp_count, indexable_temp_count;
     uint32_t global_flags;
     BOOL have_icb;
@@ -1369,14 +1446,22 @@ static const uint32_t *rewrite_operand(struct link_context *ctx, uint32_t *p, co
 static void add_resource_declaration(struct link_context *ctx, const uint32_t *ins, unsigned int len)
 {
     uint32_t opcode = SM4_OPCODE(ins[0]);
-    size_t i;
+    size_t i, step;
 
-    for (i = 0; i < ctx->decls.count; i += SM4_INSTRUCTION_LENGTH(ctx->decls.data[i]))
+    if (len < 3)
+    {
+        link_error(ctx, "error: a declaration of %u tokens is too short\n", len);
+        return;
+    }
+    /* ctx->decls holds only declarations with an instruction length (the immediate constant buffer is kept apart) */
+    for (i = 0; i < ctx->decls.count; i += step)
     {
         uint32_t *d = &ctx->decls.data[i];
 
+        if (!(step = SM4_INSTRUCTION_LENGTH(d[0])) || i + step > ctx->decls.count) break;
         /* the operand token and its first index have the same position in both */
-        if (SM4_OPCODE(d[0]) != opcode || ((d[1] >> 12) & 0xff) != ((ins[1] >> 12) & 0xff) || d[2] != ins[2]) continue;
+        if (step < 3 || SM4_OPCODE(d[0]) != opcode || ((d[1] >> 12) & 0xff) != ((ins[1] >> 12) & 0xff) || d[2] != ins[2])
+            continue;
         if (opcode == SM4_OP_DCL_CONSTANT_BUFFER && len > 3 && d[3] < ins[3]) d[3] = ins[3];
         return;
     }
@@ -1406,14 +1491,17 @@ static void inline_function(struct link_context *ctx, const struct callee_map *m
             {
                 if (ctx->have_icb)
                     link_error(ctx, "error: more than one function with an immediate constant buffer is not supported\n");
+                else if (len > (size_t)(code_end - p))
+                    link_error(ctx, "error: truncated immediate constant buffer in function '%s'\n", f->name);
                 else
                 {
                     unsigned int i;
 
                     ctx->have_icb = TRUE;
-                    for (i = 0; i < len && p + i < code_end; ++i) put_token(&ctx->decls, p[i]);
+                    for (i = 0; i < len; ++i) put_token(&ctx->icb, p[i]);
                 }
             }
+            if (len > (size_t)(code_end - p)) break;
             p += len;
             continue;
         }
@@ -1450,7 +1538,7 @@ static void inline_function(struct link_context *ctx, const struct callee_map *m
                 break;
 
             case SM4_OP_RET:
-                if (ins_end != code_end)
+                if (len != 1 || ins_end != code_end)
                     link_error(ctx, "error: a return before the end of function '%s' is not supported\n", f->name);
                 break;
 
@@ -1495,9 +1583,10 @@ static unsigned int temp_count_of(const struct library_function *f, unsigned int
     {
         uint32_t opcode = SM4_OPCODE(p[0]), len = opcode == SM4_OP_CUSTOMDATA ? (p + 1 < end ? p[1] : 0) : SM4_INSTRUCTION_LENGTH(p[0]);
 
-        if (!len) break;
-        if (opcode == SM4_OP_DCL_TEMPS && len >= 2) temps = max(temps, p[1]);
-        if (opcode == SM4_OP_DCL_INDEXABLE_TEMP && len >= 2) *indexable = max(*indexable, p[1] + 1);
+        /* a zero or truncated length ends the scan (inline_function reports the error) */
+        if (!len || len > (size_t)(end - p)) break;
+        if (opcode == SM4_OP_DCL_TEMPS && len >= 2) temps = max(temps, min(p[1], 4096));
+        if (opcode == SM4_OP_DCL_INDEXABLE_TEMP && len >= 2) *indexable = max(*indexable, min(p[1], 4095) + 1);
         p += len;
     }
     return temps;
@@ -1618,11 +1707,22 @@ static struct value_location node_output_location(struct link_context *ctx, cons
     const struct library_parameter *p = node_parameter(node, index);
     struct value_location l = {SM4_RT_TEMP, 0, 0};
 
+    if (node->graph != ctx->graph)
+    {
+        link_error(ctx, "error X9006: ID3D11Linker::Link: a value is passed from a node of another graph\n");
+        return l;
+    }
     if (node->kind == FLG_NODE_INPUT)
     {
         l.type = SM4_RT_INPUT;
         l.reg = ctx->input_regs[index];
         l.comp = 0;
+        return l;
+    }
+    if (!ctx->outputs[node->index].linked)
+    {
+        /* a value passed from a call that comes later in the graph */
+        link_error(ctx, "error: function '%s' is called after the function it passes a value to\n", node->function->name);
         return l;
     }
     l.reg = ctx->outputs[node->index].out[min(p->out_reg, 31)];
@@ -1685,6 +1785,7 @@ static void link_call(struct link_context *ctx, const struct flg_node *node)
     ctx->indexable_temp_count += indexable;
     inline_function(ctx, &map);
     memcpy(ctx->outputs[node->index].out, map.out, sizeof(map.out));
+    ctx->outputs[node->index].linked = TRUE;
 }
 
 static void put_operand_reg(struct token_buffer *b, uint32_t type, uint32_t reg, unsigned int mask)
@@ -1874,6 +1975,7 @@ HRESULT d3d11_link(ID3D11ModuleInstance *entry_iface, ID3D11ModuleInstance **lib
         put_token(&program, (ctx.shader_type << 16) | (ctx.major << 4) | ctx.minor);
         put_token(&program, 0);
         if (ctx.global_flags) put_token(&program, SM4_OP_DCL_GLOBAL_FLAGS | (1u << 24) | (ctx.global_flags << 11));
+        for (i = 0; i < ctx.icb.count; ++i) put_token(&program, ctx.icb.data[i]);
         for (i = 0; i < ctx.decls.count; ++i) put_token(&program, ctx.decls.data[i]);
         for (i = 0; graph->input && i < graph->input->param_count; ++i)
         {
@@ -1950,7 +2052,7 @@ HRESULT d3d11_link(ID3D11ModuleInstance *entry_iface, ID3D11ModuleInstance **lib
         }
         for (i = 0; i < ctx.body.count; ++i) put_token(&program, ctx.body.data[i]);
         put_token(&program, SM4_OP_RET | (1u << 24));
-        if (program.failed || ctx.decls.failed || ctx.body.failed) ctx.hr = E_OUTOFMEMORY;
+        if (program.failed || ctx.decls.failed || ctx.body.failed || ctx.icb.failed) ctx.hr = E_OUTOFMEMORY;
         else program.data[1] = program.count;
     }
     if (SUCCEEDED(ctx.hr))
@@ -1995,6 +2097,7 @@ HRESULT d3d11_link(ID3D11ModuleInstance *entry_iface, ID3D11ModuleInstance **lib
     free(ctx.input_regs);
     free(ctx.output_regs);
     free(ctx.decls.data);
+    free(ctx.icb.data);
     free(ctx.body.data);
     free(program.data);
     free(isgn.data);
