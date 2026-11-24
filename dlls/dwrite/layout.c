@@ -46,7 +46,8 @@ enum layout_range_attr_kind {
     LAYOUT_RANGE_ATTR_LOCALE,
     LAYOUT_RANGE_ATTR_FONTFAMILY,
     LAYOUT_RANGE_ATTR_SPACING,
-    LAYOUT_RANGE_ATTR_TYPOGRAPHY
+    LAYOUT_RANGE_ATTR_TYPOGRAPHY,
+    LAYOUT_RANGE_ATTR_AXES
 };
 
 struct layout_range_attr_value {
@@ -70,6 +71,10 @@ struct layout_range_attr_value {
             FLOAT min_advance;
         } spacing;
         IDWriteTypography *typography;
+        struct {
+            const DWRITE_FONT_AXIS_VALUE *values;
+            UINT32 count;
+        } axes;
     } u;
 };
 
@@ -99,7 +104,28 @@ struct layout_range {
     IDWriteFontCollection *collection;
     WCHAR locale[LOCALE_NAME_MAX_LENGTH];
     WCHAR *fontfamily;
+    DWRITE_FONT_AXIS_VALUE *axis_values;
+    UINT32 axis_values_count;
 };
+
+/* Font axis values of a range: a copy that the range owns. */
+static BOOL copy_layout_axis_values(DWRITE_FONT_AXIS_VALUE **dest, UINT32 *dest_count, const DWRITE_FONT_AXIS_VALUE *values,
+        UINT32 count)
+{
+    *dest = NULL;
+    *dest_count = 0;
+    if (!count) return TRUE;
+    if (!(*dest = malloc(count * sizeof(**dest)))) return FALSE;
+    memcpy(*dest, values, count * sizeof(**dest));
+    *dest_count = count;
+    return TRUE;
+}
+
+static BOOL is_same_axis_values(const DWRITE_FONT_AXIS_VALUE *left, UINT32 left_count, const DWRITE_FONT_AXIS_VALUE *right,
+        UINT32 right_count)
+{
+    return left_count == right_count && (!left_count || !memcmp(left, right, left_count * sizeof(*left)));
+}
 
 struct layout_range_bool {
     struct layout_range_header h;
@@ -2693,6 +2719,8 @@ static BOOL is_same_layout_attrvalue(struct layout_range_header const *h, enum l
                range_spacing->min_advance == value->u.spacing.min_advance;
     case LAYOUT_RANGE_ATTR_TYPOGRAPHY:
         return range_iface->iface == (IUnknown*)value->u.typography;
+    case LAYOUT_RANGE_ATTR_AXES:
+        return is_same_axis_values(range->axis_values, range->axis_values_count, value->u.axes.values, value->u.axes.count);
     default:
         ;
     }
@@ -2716,7 +2744,8 @@ static inline BOOL is_same_layout_attributes(struct layout_range_header const *h
                left->pair_kerning == right->pair_kerning &&
                left->collection == right->collection &&
               !wcsicmp(left->locale, right->locale) &&
-              !wcscmp(left->fontfamily, right->fontfamily);
+              !wcscmp(left->fontfamily, right->fontfamily) &&
+               is_same_axis_values(left->axis_values, left->axis_values_count, right->axis_values, right->axis_values_count);
     }
     case LAYOUT_RANGE_UNDERLINE:
     case LAYOUT_RANGE_STRIKETHROUGH:
@@ -2774,6 +2803,15 @@ static struct layout_range_header *alloc_layout_range(struct dwrite_textlayout *
         range->fontfamily = wcsdup(layout->format.family_name);
         if (!range->fontfamily)
         {
+            free(range);
+            return NULL;
+        }
+
+        /* a new range takes the axis values of the format, like its other font properties */
+        if (!copy_layout_axis_values(&range->axis_values, &range->axis_values_count, layout->format.axis_values,
+                layout->format.axis_values_count))
+        {
+            free(range->fontfamily);
             free(range);
             return NULL;
         }
@@ -2848,6 +2886,13 @@ static struct layout_range_header *alloc_layout_range_from(struct layout_range_h
             free(range);
             return NULL;
         }
+        if (!copy_layout_axis_values(&range->axis_values, &range->axis_values_count, from->axis_values,
+                from->axis_values_count))
+        {
+            free(range->fontfamily);
+            free(range);
+            return NULL;
+        }
 
         /* update refcounts */
         if (range->object)
@@ -2913,6 +2958,7 @@ static void free_layout_range(struct layout_range_header *h)
         if (range->collection)
             IDWriteFontCollection_Release(range->collection);
         free(range->fontfamily);
+        free(range->axis_values);
         break;
     }
     case LAYOUT_RANGE_EFFECT:
@@ -3071,6 +3117,16 @@ static BOOL set_layout_range_attrval(struct layout_range_header *h, enum layout_
     case LAYOUT_RANGE_ATTR_TYPOGRAPHY:
         changed = set_layout_range_iface_attr(&dest_iface->iface, (IUnknown*)value->u.typography);
         break;
+    case LAYOUT_RANGE_ATTR_AXES:
+        changed = !is_same_axis_values(dest->axis_values, dest->axis_values_count, value->u.axes.values, value->u.axes.count);
+        if (changed)
+        {
+            free(dest->axis_values);
+            if (!copy_layout_axis_values(&dest->axis_values, &dest->axis_values_count, value->u.axes.values,
+                    value->u.axes.count))
+                WARN("Failed to copy axis values.\n");
+        }
+        break;
     default:
         ;
     }
@@ -3117,6 +3173,7 @@ static HRESULT set_layout_range_attr(struct dwrite_textlayout *layout, enum layo
     case LAYOUT_RANGE_ATTR_FONTCOLL:
     case LAYOUT_RANGE_ATTR_LOCALE:
     case LAYOUT_RANGE_ATTR_FONTFAMILY:
+    case LAYOUT_RANGE_ATTR_AXES:
         ranges = &layout->ranges;
         break;
     case LAYOUT_RANGE_ATTR_UNDERLINE:
@@ -4882,27 +4939,57 @@ static HRESULT WINAPI dwritetextlayout3_GetLineMetrics(IDWriteTextLayout4 *iface
     return max_count >= layout->metrics.lineCount ? S_OK : E_NOT_SUFFICIENT_BUFFER;
 }
 
+/* The axis values of a range are kept like its other font properties (split and merged with the ranges). The font selection of
+ * the layout does not use them yet, as it does not use those of the format. */
 static HRESULT WINAPI dwritetextlayout4_SetFontAxisValues(IDWriteTextLayout4 *iface,
         DWRITE_FONT_AXIS_VALUE const *axis_values, UINT32 num_values, DWRITE_TEXT_RANGE range)
 {
-    FIXME("%p, %p, %u, %s.\n", iface, axis_values, num_values, debugstr_range(&range));
+    struct dwrite_textlayout *layout = impl_from_IDWriteTextLayout4(iface);
+    struct layout_range_attr_value value;
 
-    return E_NOTIMPL;
+    TRACE("%p, %p, %u, %s.\n", iface, axis_values, num_values, debugstr_range(&range));
+
+    if (num_values && !axis_values) return E_INVALIDARG;
+
+    value.range = range;
+    value.u.axes.values = axis_values;
+    value.u.axes.count = num_values;
+    return set_layout_range_attr(layout, LAYOUT_RANGE_ATTR_AXES, &value);
 }
 
 static UINT32 WINAPI dwritetextlayout4_GetFontAxisValueCount(IDWriteTextLayout4 *iface, UINT32 pos)
 {
-    FIXME("%p, %u.\n", iface, pos);
+    struct dwrite_textlayout *layout = impl_from_IDWriteTextLayout4(iface);
+    struct layout_range *range;
 
-    return 0;
+    TRACE("%p, %u.\n", iface, pos);
+
+    if (!(range = get_layout_range_by_pos(layout, pos))) return 0;
+    return range->axis_values_count;
 }
 
 static HRESULT WINAPI dwritetextlayout4_GetFontAxisValues(IDWriteTextLayout4 *iface, UINT32 pos,
-        DWRITE_FONT_AXIS_VALUE *values, UINT32 num_values, DWRITE_TEXT_RANGE *range)
+        DWRITE_FONT_AXIS_VALUE *values, UINT32 num_values, DWRITE_TEXT_RANGE *r)
 {
-    FIXME("%p, %u, %p, %u, %p.\n", iface, pos, values, num_values, range);
+    struct dwrite_textlayout *layout = impl_from_IDWriteTextLayout4(iface);
+    struct layout_range *range;
 
-    return E_NOTIMPL;
+    TRACE("%p, %u, %p, %u, %p.\n", iface, pos, values, num_values, r);
+
+    if (!(range = get_layout_range_by_pos(layout, pos)))
+    {
+        if (num_values) memset(values, 0, num_values * sizeof(*values));
+        return E_INVALIDARG;
+    }
+    /* as for the text format: no values clears the buffer, a buffer that is too small fails */
+    if (!range->axis_values_count)
+    {
+        if (num_values) memset(values, 0, num_values * sizeof(*values));
+        return return_range(&range->h, r);
+    }
+    if (num_values < range->axis_values_count) return E_NOT_SUFFICIENT_BUFFER;
+    memcpy(values, range->axis_values, range->axis_values_count * sizeof(*values));
+    return return_range(&range->h, r);
 }
 
 static DWRITE_AUTOMATIC_FONT_AXES WINAPI dwritetextlayout4_GetAutomaticFontAxes(IDWriteTextLayout4 *iface)
