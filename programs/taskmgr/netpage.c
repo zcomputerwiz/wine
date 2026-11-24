@@ -457,7 +457,7 @@ static void add_columns(void)
         LoadStringW(hInst, IDS_NET_COL_FIRST + i, text, ARRAY_SIZE(text));
         column.mask = LVCF_TEXT | LVCF_FMT | LVCF_WIDTH;
         column.fmt = (i == NETCOL_NAME || i == NETCOL_DESCRIPTION) ? LVCFMT_LEFT : LVCFMT_RIGHT;
-        column.cx = TaskManagerSettings.NetColumnWidths[i];
+        column.cx = max(TaskManagerSettings.NetColumnWidths[i], TaskManager_HeaderWidth(hAdapterList, text));
         column.pszText = text;
         SendMessageW(hAdapterList, LVM_INSERTCOLUMNW, column_count, (LPARAM)&column);
         column_map[column_count++] = i;

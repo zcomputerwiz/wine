@@ -26,6 +26,8 @@
 
 #include <windows.h>
 #include <commctrl.h>
+#include <uxtheme.h>
+#include <vssym32.h>
 #include <winnt.h>
 
 #include "resource.h"
@@ -76,6 +78,105 @@ static void Draw3dRect(HDC hDC, int x, int y, int cx, int cy, COLORREF clrTopLef
     FillSolidRect2(hDC, x, y + cy, cx, -1, clrBottomRight);
 }
 
+/* Width a list view column needs to show its whole heading (text and the header's margins) */
+int TaskManager_HeaderWidth(HWND hList, LPCWSTR heading)
+{
+    HWND header = (HWND)SendMessageW(hList, LVM_GETHEADER, 0, 0);
+    HDC hdc = GetDC(header);
+    HFONT old = SelectObject(hdc, (HFONT)SendMessageW(header, WM_GETFONT, 0, 0));
+    HTHEME theme = GetWindowTheme(header);
+    RECT rc = { 0 }, item = { 0, 0, 200, 20 }, content;
+    int width;
+
+    DrawTextW(hdc, heading, -1, &rc, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+    /* the header's margins (3 edges on each side) and its divider */
+    width = rc.right + 8 * GetSystemMetrics(SM_CXEDGE);
+    /* a visual style draws the text inside the item's content rectangle */
+    if (theme && SUCCEEDED(GetThemeBackgroundContentRect(theme, hdc, HP_HEADERITEM, HIS_NORMAL, &item, &content)))
+        width += (content.left - item.left) + (item.right - content.right);
+    SelectObject(hdc, old);
+    ReleaseDC(header, hdc);
+    return width;
+}
+
+/* Width of a text in the status bar's font, with room for the part's borders */
+static int status_string_width(const WCHAR *text)
+{
+    HFONT font = (HFONT)SendMessageW(hStatusWnd, WM_GETFONT, 0, 0), created = NULL, old;
+    NONCLIENTMETRICSW ncm = { sizeof(ncm) };
+    HDC hdc = GetDC(hStatusWnd);
+    SIZE size = { 0 };
+
+    /* without WM_SETFONT the status bar draws with the status font of the non-client metrics */
+    if (!font && SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0))
+        font = created = CreateFontIndirectW(&ncm.lfStatusFont);
+    old = SelectObject(hdc, font);
+    GetTextExtentPoint32W(hdc, text, lstrlenW(text), &size);
+    SelectObject(hdc, old);
+    if (created) DeleteObject(created);
+    ReleaseDC(hStatusWnd, hdc);
+    return size.cx + 2 * GetSystemMetrics(SM_CXEDGE) + 2;
+}
+
+static int status_text_width(UINT id, int value)
+{
+    WCHAR format[255], text[255];
+
+    LoadStringW(hInst, id, format, ARRAY_SIZE(format));
+    wsprintfW(text, format, value);
+    return status_string_width(text);
+}
+
+/* Width of the text now shown in a part */
+static int status_part_width(int part)
+{
+    WCHAR text[256];
+
+    if (LOWORD(SendMessageW(hStatusWnd, SB_GETTEXTLENGTHW, part, 0)) >= ARRAY_SIZE(text)) return 0;
+    text[0] = 0;
+    SendMessageW(hStatusWnd, SB_GETTEXTW, part, (LPARAM)text);
+    return text[0] ? status_string_width(text) : 0;
+}
+
+/* Processes, CPU Usage and Commit Charge: the first two are as wide as their widest text, at least XP's 100 and
+ * 110 pixels; the last one reaches the right edge. When Commit Charge and the size grip would not fit (a large DPI
+ * or commit charge), the first two give up their spare room, down to the text they show. */
+void TaskManager_UpdateStatusParts(void)
+{
+    int parts[3], widths[2], shown[2], i, over;
+    RECT rc;
+
+    if (bInMenuLoop) return;
+    widths[0] = max(100, status_text_width(IDS_STATUS_BAR_PROCESSES, 999));
+    widths[1] = max(110, status_text_width(IDS_STATUS_BAR_CPU_USAGE, 99));
+    GetClientRect(hStatusWnd, &rc);
+    /* the size grip, and the text's offset into its part */
+    over = widths[0] + widths[1] + status_part_width(2) + GetSystemMetrics(SM_CXVSCROLL)
+           + 4 * GetSystemMetrics(SM_CXEDGE) - rc.right;
+    for (i = 1; i >= 0 && over > 0; i--)
+    {
+        int spare;
+
+        /* an empty part keeps room for its text with a value of 0 */
+        if (!(shown[i] = status_part_width(i)))
+            shown[i] = status_text_width(i ? IDS_STATUS_BAR_CPU_USAGE : IDS_STATUS_BAR_PROCESSES, 0);
+        spare = widths[i] - shown[i];
+        if (spare <= 0) continue;
+        spare = min(spare, over);
+        widths[i] -= spare;
+        over -= spare;
+    }
+    parts[0] = widths[0];
+    parts[1] = widths[0] + widths[1];
+    parts[2] = -1;
+    SendMessageW(hStatusWnd, SB_SETPARTS, 3, (LPARAM)parts);
+}
+
+static void set_status_parts(void)
+{
+    TaskManager_UpdateStatusParts();
+}
+
 static BOOL OnCreate(HWND hWnd)
 {
     HMENU   hMenu;
@@ -84,7 +185,6 @@ static BOOL OnCreate(HWND hWnd)
     HMENU   hUpdateSpeedMenu;
     HMENU   hCPUHistoryMenu;
     int     nActivePage;
-    int     nParts[3];
     RECT    rc;
     TCITEMW item;
     WINDOWPLACEMENT wp;
@@ -121,10 +221,7 @@ static BOOL OnCreate(HWND hWnd)
         return FALSE;
 
     /* Create the status bar panes */
-    nParts[0] = 100;
-    nParts[1] = 210;
-    nParts[2] = 400;
-    SendMessageW(hStatusWnd, SB_SETPARTS, 3, (LPARAM)nParts);
+    set_status_parts();
 
     /* Create tab pages */
     hTabWnd = GetDlgItem(hWnd, IDC_TAB);
@@ -284,7 +381,6 @@ static HWND get_page(int index)
 static void OnSize( UINT nType, int cx, int cy )
 {
     int     i;
-    int     nParts[3];
     int     nXDifference;
     int     nYDifference;
     RECT    rc;
@@ -308,10 +404,12 @@ static void OnSize( UINT nType, int cx, int cy )
     SendMessageW(hStatusWnd, WM_SIZE, nType, MAKELPARAM(cx, cy + (rc.bottom - rc.top)));
 
     /* Update the status bar pane sizes */
-    nParts[0] = bInMenuLoop ? -1 : 100;
-    nParts[1] = 210;
-    nParts[2] = cx;
-    SendMessageW(hStatusWnd, SB_SETPARTS, bInMenuLoop ? 1 : 3, (LPARAM)nParts);
+    if (bInMenuLoop)
+    {
+        int part = -1;
+        SendMessageW(hStatusWnd, SB_SETPARTS, 1, (LPARAM)&part);
+    }
+    else set_status_parts();
 
     /* Resize the tab control */
     GetWindowRect(hTabWnd, &rc);
@@ -484,8 +582,6 @@ static void TaskManager_OnEnterMenuLoop(HWND hWnd)
 
 static void TaskManager_OnExitMenuLoop(HWND hWnd)
 {
-    RECT  rc;
-    int   nParts[3];
     WCHAR text[256];
 
     WCHAR wszCPU_Usage[255];
@@ -496,11 +592,7 @@ static void TaskManager_OnExitMenuLoop(HWND hWnd)
 
     bInMenuLoop = FALSE;
     /* Update the status bar pane sizes */
-    GetClientRect(hWnd, &rc);
-    nParts[0] = 100;
-    nParts[1] = 210;
-    nParts[2] = rc.right;
-    SendMessageW(hStatusWnd, SB_SETPARTS, 3, (LPARAM)nParts);
+    set_status_parts();
     SendMessageW(hStatusWnd, SB_SETTEXTW, 0, 0);
     wsprintfW(text, wszCPU_Usage, PerfDataGetProcessorUsage());
     SendMessageW(hStatusWnd, SB_SETTEXTW, 1, (LPARAM)text);

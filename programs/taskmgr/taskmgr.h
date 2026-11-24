@@ -187,6 +187,8 @@ void TaskManager_OnOptionsShow16BitTasks(void);
 void TaskManager_OnFileNew(void);
 
 LPWSTR GetLastErrorText( LPWSTR lpwszBuf, DWORD dwSize );
+int TaskManager_HeaderWidth(HWND hList, LPCWSTR heading);
+void TaskManager_UpdateStatusParts(void);
 
 void OnAbout(void);
 
