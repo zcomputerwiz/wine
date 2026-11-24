@@ -5265,13 +5265,16 @@ DCOMP_PRIVATE_STUB(33) DCOMP_PRIVATE_STUB(34) DCOMP_PRIVATE_STUB(35) DCOMP_PRIVA
 DCOMP_PRIVATE_STUB(38) DCOMP_PRIVATE_STUB(39) DCOMP_PRIVATE_STUB(40) DCOMP_PRIVATE_STUB(41) DCOMP_PRIVATE_STUB(42)
 DCOMP_PRIVATE_STUB(43) DCOMP_PRIVATE_STUB(44) DCOMP_PRIVATE_STUB(45) DCOMP_PRIVATE_STUB(47)
 
-/* Method 46 of the batch-query interface ({28d6ad3d-...}, the very interface of the desktop device): the Windows App Runtime's composition
- * engine (dwmcorei.dll) opens its session with it and then asks which of its submitted batches have completed. Measured on Windows 11
- * (tests/uwp/alpc/fudk-sys-probe.c and a trace of the engine; docs/uwp/WINAPPSDK.md):
- *   - with a block `b` (the first call, a descriptor of the session) the first dword of `a` becomes 1; `b` and the rest of `a` are not touched;
- *   - without it (`b` NULL) `code` is the id of a submitted batch and the first dword of `a` becomes the id of the newest completed batch,
- *     never above `code`; the second dword is not touched.
- * Nothing here is asynchronous: every submitted batch has completed when it is asked for, so the answer is `code`. */
+/* Method 46 of the batch-query interface ({28d6ad3d-...}, the very interface of the desktop device): the Windows App
+ * Runtime's composition engine (dwmcorei.dll) opens its session with it and then asks which of its submitted batches
+ * have completed. Measured on Windows 11 (tests/uwp/alpc/fudk-sys-probe.c and a trace of the engine;
+ * docs/uwp/WINAPPSDK.md):
+ *   - with a block `b` (the first call, a descriptor of the session) the first dword of `a` becomes 1; `b` and the
+ *     rest of `a` are not touched;
+ *   - without it (`b` NULL) `code` is the id of a submitted batch and the first dword of `a` becomes the id of the
+ *     newest completed batch, never above `code`; the second dword is not touched.
+ * Nothing here is asynchronous: every submitted batch has completed when it is asked for, so the answer is `code`.
+ * The batch ids themselves come through other private methods that are still stubs. */
 static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_private46(IDCompositionDesktopDevice *iface, void *a, void *b, UINT code)
 {
     HRESULT hr = S_OK;

@@ -426,21 +426,49 @@ static void test_shared_visual(void)
     ok(alias_b == (IUnknown *)desktop, "Got %p, expected %p.\n", alias_b, desktop);
     if (SUCCEEDED(hr)) IUnknown_Release(alias_b);
 
-    /* private method 46: the composition engine of the Windows App Runtime asks which of its submitted batches have completed (id in
-     * `code`, answer in the first dword of the block, never above the id, the second dword untouched). Observed on Windows 11. */
+    /* Private method 46: the composition engine of the Windows App Runtime asks which of its submitted batches have
+     * completed (id in `code`, answer in the first dword of the block, never above the id, the second dword untouched).
+     * Observed on Windows 11 only: older Windows may not have the method. The session-open form (`b` not NULL) and the
+     * NULL block are checked on Wine, where they were not measured with a real engine block. */
     {
         typedef HRESULT (STDMETHODCALLTYPE *method46_t)(void *iface, void *a, void *b, UINT code);
+        typedef LONG (WINAPI *rtl_get_version_t)(RTL_OSVERSIONINFOW *);
+        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        BOOL is_wine = !!GetProcAddress(ntdll, "wine_get_version");
+        rtl_get_version_t get_version = (void *)GetProcAddress(ntdll, "RtlGetVersion");
+        RTL_OSVERSIONINFOW version = {sizeof(version)};
         method46_t method46 = (*(method46_t **)desktop)[46];
-        UINT64 block;
+        UINT64 block, descriptor[32] = {0};
         UINT code;
 
-        for (code = 1; code <= 3; ++code)
+        if (get_version) get_version(&version);
+        if (!is_wine && version.dwBuildNumber < 22000)
         {
-            block = 0xdeadbeef00000000ull;
-            hr = method46(desktop, &block, NULL, code);
-            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-            ok((block >> 32) == 0xdeadbeef, "Got block %#I64x.\n", block);
-            ok((UINT)block >= 1 && (UINT)block <= code, "Got completed id %u for batch %u.\n", (UINT)block, code);
+            win_skip("Private method 46 is only known on Windows 11.\n");
+        }
+        else
+        {
+            for (code = 1; code <= 3; ++code)
+            {
+                block = 0xdeadbeef00000000ull;
+                hr = method46(desktop, &block, NULL, code);
+                ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                ok((block >> 32) == 0xdeadbeef, "Got block %#I64x.\n", block);
+                ok((UINT)block >= 1 && (UINT)block <= code, "Got completed id %u for batch %u.\n", (UINT)block, code);
+            }
+
+            if (is_wine)
+            {
+                block = 0xdeadbeef00000000ull;
+                descriptor[0] = 0x1234;
+                hr = method46(desktop, &block, descriptor, 0xfffbffff);
+                ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                ok(block == 0xdeadbeef00000001ull, "Got block %#I64x.\n", block);
+                ok(descriptor[0] == 0x1234, "Got descriptor %#I64x.\n", descriptor[0]);
+
+                hr = method46(desktop, NULL, NULL, 1);
+                ok(hr == E_POINTER, "Got unexpected hr %#lx.\n", hr);
+            }
         }
     }
 
