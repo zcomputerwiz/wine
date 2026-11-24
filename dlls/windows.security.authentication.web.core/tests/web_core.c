@@ -452,7 +452,7 @@ static void test_diagnostic_provider(void)
         ok( hr == S_OK, "got hr %#lx.\n", hr );
         ok( request_status( result_op ) == WebTokenRequestStatus_UserInteractionRequired, "wrong silent status.\n" );
         /* Windows 11's Microsoft account provider, consumers authority (its error is always there) */
-        ok( last_error_code == 0x80860006, "got error %#x.\n", last_error_code );
+        ok( last_error_code == 0x80070525, "got error %#x.\n", last_error_code );
         hr = IWebAuthenticationCoreManagerStatics_RequestTokenAsync( statics, request, &result_op );
         ok( hr == S_OK, "got hr %#lx.\n", hr );
         ok( request_status( result_op ) == WebTokenRequestStatus_ProviderError, "wrong interactive status.\n" );
@@ -1236,7 +1236,7 @@ static void test_broker(void)
     ok( broker_accounts( statics4, provider, NULL ) == 0, "accounts already.\n" );
     broker_silent( statics, provider, NULL, L"user.read", &r );
     ok( r.status == WebTokenRequestStatus_UserInteractionRequired, "got status %d.\n", r.status );
-    ok( r.error == 0x80860006, "got error %#x.\n", r.error );
+    ok( r.error == 0x80070525, "got error %#x.\n", r.error );
 
     /* the interactive sign-in through the test hook */
     broker_interactive( interop, window, provider, L"user.read", L"ok@wine.test", &r );
@@ -1344,7 +1344,7 @@ static void test_broker(void)
     /* but another process that asks for that other client id, without ever having used the account's, is not served
      * through this process's use of it: the user is needed */
     code = run_child_args( NULL, "broker_child_other" );
-    ok( code == ((WebTokenRequestStatus_UserInteractionRequired << 16) | 0x0006), "another process, other client id: got %#lx.\n",
+    ok( code == ((WebTokenRequestStatus_UserInteractionRequired << 16) | 0x0525), "another process, other client id: got %#lx.\n",
         code );
 
     /* cancelled: a page waits for the user and the window is closed; the authority's access_denied */

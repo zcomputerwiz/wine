@@ -72,7 +72,9 @@ BOOL provider_is_consumers( IWebAccountProvider *provider )
 
 /* the errors of a silent request that needs the user, as Windows 11's Microsoft account provider gives them (checked
  * with a client id that is not registered) */
-#define E_MSA_INTERACTION_REQUIRED  0x80860006  /* the consumers authority: "Error" */
+#define E_MSA_INTERACTION_REQUIRED  0x80070525  /* the consumers authority, no account named: "Error" (rechecked
+                                                 * 2026-11-24 on Windows 11 26300 with and without a Microsoft account
+                                                 * in WAM, for registered and unregistered client ids) */
 #define E_AAD_INTERACTION_REQUIRED  0xcaa10001  /* organizations: "Need user interaction to continue." */
 
 /* that error for the request's provider; programs read it without a check for NULL */
