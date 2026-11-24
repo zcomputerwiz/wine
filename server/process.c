@@ -620,12 +620,18 @@ unsigned int alloc_ptid( void *ptr )
     {
         unsigned int block = ptid_block_count < PTID_MAX_BLOCKS ? session0_new_id_block( 0 ) : 0;
 
-        if (!block || !ptid_add_block( block ))
+        if (block && ptid_add_block( block )) slot = used_ptid_entries++;
+        else if (next_free_ptid)  /* no more blocks: a freed id sooner than usual */
+        {
+            slot = next_free_ptid - 1;
+            if (!(next_free_ptid = ptid_entries[slot].next)) last_free_ptid = 0;
+            num_free_ptids--;
+        }
+        else
         {
             set_error( STATUS_NO_MEMORY );
             return 0;
         }
-        slot = used_ptid_entries++;
     }
     else  /* need to grow the array */
     {

@@ -311,9 +311,17 @@ static unsigned long long process_start_time( pid_t pid )
     return start;
 }
 
+/* Is the block's server still running? Only a process that does not exist, or a process with another start time
+ * (a reused pid), has ended: when /proc cannot be read for another reason the owner counts as alive. */
 static int id_block_owner_alive( const struct id_block *b )
 {
-    return b->pid && process_start_time( b->pid ) == b->start;
+    char path[64];
+    unsigned long long start;
+
+    if (!b->pid) return 0;
+    if ((start = process_start_time( b->pid ))) return start == b->start;
+    snprintf( path, sizeof(path), "/proc/%d", (int)b->pid );
+    return access( path, F_OK ) == -1 && errno == ENOENT ? 0 : 1;
 }
 
 static void load_id_blocks(void)
@@ -376,7 +384,7 @@ static unsigned int grant_id_block( uid_t uid, unsigned int session, pid_t pid, 
 {
     unsigned long long start = process_start_time( pid );
     unsigned int i, held = 0, block = 0;
-    struct id_block *b;
+    struct id_block *b, saved;
 
     if (!start || wanted >= WEX_ID_BLOCK_COUNT) return 0;
     if (!id_blocks_loaded) load_id_blocks();
@@ -387,22 +395,28 @@ static unsigned int grant_id_block( uid_t uid, unsigned int session, pid_t pid, 
         b = &id_blocks[wanted];
         if (b->pid == pid && b->start == start && b->uid == uid) return wanted;  /* this server's already */
         if (id_block_owner_alive( b )) return 0;  /* another live server's */
-        block = wanted;
     }
+    if (held >= ID_BLOCKS_PER_SERVER) return 0;
+    if (wanted) block = wanted;
     else
     {
-        if (held >= ID_BLOCKS_PER_SERVER) return 0;
         for (i = 1; i < WEX_ID_BLOCK_COUNT && !block; i++)
             if (!id_block_owner_alive( &id_blocks[i] )) block = i;
         if (!block) return 0;
     }
     b = &id_blocks[block];
+    saved = *b;
     b->uid = uid;
     b->session = session;
     b->pid = pid;
     b->start = start;
+    /* a block is given only once it is on disk: after a restart session 0 knows every block it gave */
     if (!save_id_blocks())
+    {
         fprintf( stderr, "session0: cannot keep the id blocks in session0.blocks: %s\n", strerror( errno ));
+        *b = saved;
+        return 0;
+    }
     return block;
 }
 
@@ -414,7 +428,10 @@ unsigned int session0_new_id_block( unsigned int wanted )
     int sock;
 
     if (session0_server) return grant_id_block( getuid(), 0, getpid(), wanted );
-    if (!session0_client || (sock = connect_session0( 0 )) == -1) return 0;
+    /* non-blocking, as the pipe and channel requests: a session 0 that does not answer within link_request's 2 s
+     * costs this request, never the server's loop. A grant whose answer is lost stays counted for this server in
+     * session 0's table until the server ends (at most ID_BLOCKS_PER_SERVER) */
+    if (!session0_client || (sock = connect_session0( 1 )) == -1) return 0;
     if (link_request( sock, WEX_SESSION0_BLOCK, wanted, NULL, 0, NULL, 0, -1, &answer ) ||
         answer.status || !answer.value || answer.value >= WEX_ID_BLOCK_COUNT || (wanted && answer.value != wanted))
         answer.value = 0;
@@ -842,7 +859,7 @@ void session0_init( int server_mode )
         session0_server = 1;
         default_session_id = 0;  /* T5.3: session 0's own programs (its services) are in session 0, as on Windows */
         init_listener();
-        ptid_add_block( 0 );  /* R6: block 0 of the ids is session 0's own */
+        if (!ptid_add_block( 0 )) fatal_error( "session 0: no table for its block of ids\n" );  /* R6: block 0 */
         return;
     }
     /* a launcher-started server uses the configuration only: the user controls the environment */
@@ -888,9 +905,19 @@ void session0_init( int server_mode )
             if (sysrun_active) fatal_error( "session 0 at %s did not register this session\n", session0_path );
         }
         /* R6: the ids of this server's processes and threads come from blocks that session 0 leases to it, so they
-         * never name another server's; a development server without one keeps the stock numbering */
-        else if ((block = session0_new_id_block( 0 ))) ptid_add_block( block );
-        else if (sysrun_active) fatal_error( "session 0 at %s gave this session no block of ids\n", session0_path );
+         * never name another server's. Session 0 may be busy for seconds at a logon (B26): a few tries. A development
+         * server without one keeps the stock numbering, and says so */
+        else
+        {
+            unsigned int i;
+
+            for (i = 0, block = 0; i < 15 && !block; i++) block = session0_new_id_block( 0 );
+            if (!block || !ptid_add_block( block ))
+            {
+                if (sysrun_active) fatal_error( "session 0 at %s gave this session no block of ids\n", session0_path );
+                fprintf( stderr, "wineserver: no block of ids from session 0: this server's ids may be another's\n" );
+            }
+        }
     }
 }
 
