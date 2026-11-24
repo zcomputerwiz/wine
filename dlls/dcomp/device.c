@@ -213,6 +213,7 @@ struct dcomp_device
     IDCompositionDesktopDevice IDCompositionDesktopDevice_iface;
     const void *const *commit_iface;   /* the interface {6b556968-...}: dcomp_commit_vtbl */
     HANDLE commit_event;
+    LONG batch;   /* the id of the newest batch submitted (methods 45 and 46); a Commit completes before it returns */
     int version;
     LONG refcount;
     struct list targets;
@@ -4472,6 +4473,7 @@ static HRESULT dcomp_device_commit(struct dcomp_device *dev)
     HRESULT hr = dcomp_device_internal_commit(dev);
 
     EnterCriticalSection(&dev->cs);
+    ++dev->batch;
     if (dev->commit_event) SetEvent(dev->commit_event);
     LeaveCriticalSection(&dev->cs);
     return hr;
@@ -4481,7 +4483,11 @@ static HRESULT dcomp_device_commit(struct dcomp_device *dev)
 static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_Commit(type *iface) \
 { \
     struct dcomp_device *dev = impl(iface); \
-    return dcomp_device_commit(dev); \
+    HRESULT hr; \
+    TRACE("iface %p.\n", iface); \
+    hr = dcomp_device_commit(dev); \
+    TRACE("iface %p, hr %#lx, batch %ld.\n", iface, hr, dev->batch); \
+    return hr; \
 }
 
 #define DCOMP_DEVICE_WAIT_FOR_COMMIT_COMPLETION(prefix, type, impl) \
@@ -5481,13 +5487,14 @@ DCOMP_PRIVATE_STUB(45)
  * removes 8 bytes: the interface and one argument) and stores a dword in it: the id of the newest batch of changes that the composition has
  * completed. Measured on Windows 11 (tests/uwp/alpc/dcomp-dslot32.cpp; a trace of the composition engine of the Windows App Runtime shows the
  * value rise 1, 1, 2, 3, 3, 4, 4 as it submits batches): 0 on a device nothing was submitted to; the second dword of an eight-byte block is
- * not touched. The submit methods are not known and not implemented, so no batch is ever submitted here and the answer is 0.
- * (The other registers of the call that a trace shows belong to the caller; they are not arguments.) */
+ * not touched. Here each Commit submits a batch and completes it before it returns, so the answer counts the Commits of the device
+ * (from 0) and equals that of method 45. (Windows reads 1 in Notepad before its first Commit and lags one batch behind; neither is
+ * needed by the compositor, which commits either way. The other registers of the call that a trace shows belong to the caller.) */
 #ifdef __x86_64__
 /* Method 45 stores the id of the newest batch submitted to the composition. Measured on 64-bit Windows 11 (wintrace dcomp.dll!desktop[45]
- * and [46] in Notepad): the dword rises 3, 4, 5, ... with each submitted batch, and method 46 (completed) follows it one step behind. No
- * batch is submitted here, so the answer is 0, the same as that of method 46: nothing is outstanding. Its size on the stack of i386 is not
- * measured, so 32-bit callers still get the stub exception. */
+ * and [46] in Notepad): the dword rises 3, 4, 5, ... with each submitted batch (one per Commit), and method 46 (completed) follows it one
+ * step behind. Here it counts the Commits of the device, which complete before Commit returns: nothing is outstanding. Its size on the
+ * stack of i386 is not measured, so 32-bit callers still get the stub exception. */
 static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_private45(IDCompositionDesktopDevice *iface, DWORD *submitted)
 {
     HRESULT hr = S_OK;
@@ -5498,7 +5505,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_private45(IDCompositionDes
 
     __TRY
     {
-        *submitted = 0;
+        *submitted = ReadNoFence(&impl_from_IDCompositionDesktopDevice(iface)->batch);
     }
     __EXCEPT_PAGE_FAULT
     {
@@ -5520,7 +5527,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_private46(IDCompositionDes
 
     __TRY
     {
-        *completed = 0;
+        *completed = ReadNoFence(&impl_from_IDCompositionDesktopDevice(iface)->batch);
     }
     __EXCEPT_PAGE_FAULT
     {
