@@ -1956,6 +1956,38 @@ static void test_get_set_textmargin(void)
     }
 }
 
+static void test_shield(void)
+{
+    SIZE plain = {0}, shielded = {0}, cleared = {0};
+    HWND hwnd;
+    LRESULT ret;
+
+    hwnd = CreateWindowA(WC_BUTTONA, "Show processes from all users", BS_PUSHBUTTON | WS_POPUP,
+                         0, 0, 200, 25, NULL, NULL, 0, NULL);
+    ok(hwnd != NULL, "Expect hwnd not null\n");
+
+    ret = SendMessageA(hwnd, BCM_GETIDEALSIZE, 0, (LPARAM)&plain);
+    ok(ret, "Expect BCM_GETIDEALSIZE to succeed\n");
+
+    ret = SendMessageA(hwnd, BCM_SETSHIELD, 0, TRUE);
+    ok(ret == 1, "Expect BCM_SETSHIELD to return 1, got %Id\n", ret);
+    /* the shield is not the image of BM_SETIMAGE */
+    ok(!SendMessageA(hwnd, BM_GETIMAGE, IMAGE_ICON, 0), "Expect no icon\n");
+    ok(!SendMessageA(hwnd, BM_GETIMAGE, IMAGE_BITMAP, 0), "Expect no bitmap\n");
+    ret = SendMessageA(hwnd, BCM_GETIDEALSIZE, 0, (LPARAM)&shielded);
+    ok(ret, "Expect BCM_GETIDEALSIZE to succeed\n");
+    ok(shielded.cx > plain.cx, "Expect the shield to widen the button: %ld, without it %ld\n", shielded.cx, plain.cx);
+
+    ret = SendMessageA(hwnd, BCM_SETSHIELD, 0, FALSE);
+    ok(ret == 1, "Expect BCM_SETSHIELD to return 1, got %Id\n", ret);
+    ret = SendMessageA(hwnd, BCM_GETIDEALSIZE, 0, (LPARAM)&cleared);
+    ok(ret, "Expect BCM_GETIDEALSIZE to succeed\n");
+    ok(cleared.cx == plain.cx && cleared.cy == plain.cy, "Expect %ldx%ld, got %ldx%ld\n",
+       plain.cx, plain.cy, cleared.cx, cleared.cy);
+
+    DestroyWindow(hwnd);
+}
+
 static void test_state(void)
 {
     HWND hwnd;
@@ -2584,6 +2616,7 @@ START_TEST(button)
     test_bm_get_set_image();
     test_get_set_imagelist();
     test_get_set_textmargin();
+    test_shield();
     test_state();
     test_bcm_get_ideal_size();
     test_style();
