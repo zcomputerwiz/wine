@@ -150,6 +150,7 @@ struct token
     struct list    capabilities;    /* capability SIDs */
     struct uwp_context *package;    /* package context (UWP compatibility) */
     int            package_pending; /* no process image has been checked against the context yet */
+    int            windows_sd;      /* R7: Windows' descriptor was given (token_protect_system, token_protect_elevated) */
 };
 
 struct privilege
@@ -638,6 +639,7 @@ static struct token *create_token( unsigned int primary, unsigned int session_id
         token->is_restricted = 0;
         token->package = NULL;
         token->package_pending = 0;
+        token->windows_sd = 0;
 
         /* copy user */
         token->user = memdup( user, sid_len( user ));
@@ -1239,7 +1241,70 @@ int token_protect_elevated( struct token *token )
     set_ace( ace_next( ace ), &builtin_admins_sid, ACCESS_ALLOWED_ACE_TYPE, 0, GENERIC_ALL );
     ret = set_sd_defaults_from_token( &token->obj, sd, DACL_SECURITY_INFORMATION, token );
     free( sd );
+    if (ret) token->windows_sd = 1;
     return ret;
+}
+
+/* WineExplorer (R7 of docs/SESSION0_SPLIT_REVIEW.md): the descriptor Windows gives the token of a system process,
+ * measured black box on Windows 10 (2026-11-24: OpenProcessToken for each right from an elevated administrator, the
+ * descriptors read as SYSTEM). The mandatory label is kept. Users get nothing in either kind.
+ * - service: a service's token (services.exe asks for one per service, create_service_token). Owner and group the
+ *   account; SYSTEM all; the account all, standing in for the service's own SID (S-1-5-80-...), which Windows grants
+ *   all and Wine's tokens do not have; Administrators TOKEN_QUERY only.
+ * - otherwise, a system process that is not a service (services.exe, wineboot, session 0's own programs; on Windows
+ *   wininit, services, lsass, winlogon). Owner Administrators, group SYSTEM; SYSTEM all; Administrators assign,
+ *   duplicate, impersonate, query, query source and read control. */
+int token_protect_system( struct token *token, int service )
+{
+    const unsigned int admin_mask = service ? TOKEN_QUERY : TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE |
+                                                            TOKEN_QUERY | TOKEN_QUERY_SOURCE | READ_CONTROL;
+    const struct sid *owner = service ? token->user : &builtin_admins_sid;
+    const struct sid *group = service ? token->user : &local_system_sid;
+    const int account_ace = service && !equal_sid( token->user, &local_system_sid );
+    size_t acl_size = sizeof(struct acl) + (account_ace ? 3 : 2) * sizeof(struct ace) + sid_len( &local_system_sid ) +
+                      (account_ace ? sid_len( token->user ) : 0) + sid_len( &builtin_admins_sid );
+    size_t size = sizeof(struct security_descriptor) + sid_len( owner ) + sid_len( group ) + acl_size;
+    struct security_descriptor *sd;
+    struct acl *acl;
+    struct ace *ace;
+    char *ptr;
+    int ret;
+
+    if (!(sd = mem_alloc( size ))) return 0;
+    memset( sd, 0, size );
+    sd->control = SE_DACL_PRESENT;
+    sd->owner_len = sid_len( owner );
+    sd->group_len = sid_len( group );
+    sd->dacl_len = acl_size;
+    ptr = (char *)(sd + 1);
+    memcpy( ptr, owner, sd->owner_len );
+    ptr += sd->owner_len;
+    memcpy( ptr, group, sd->group_len );
+    ptr += sd->group_len;
+    acl = (struct acl *)ptr;
+    acl->revision = ACL_REVISION;
+    acl->size = acl_size;
+    acl->count = account_ace ? 3 : 2;
+    ace = set_ace( ace_first( acl ), &local_system_sid, ACCESS_ALLOWED_ACE_TYPE, 0, TOKEN_ALL_ACCESS );
+    if (account_ace) ace = set_ace( ace_next( ace ), token->user, ACCESS_ALLOWED_ACE_TYPE, 0, TOKEN_ALL_ACCESS );
+    set_ace( ace_next( ace ), &builtin_admins_sid, ACCESS_ALLOWED_ACE_TYPE, 0, admin_mask );
+    ret = set_sd_defaults_from_token( &token->obj, sd, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                                      DACL_SECURITY_INFORMATION, token );
+    free( sd );
+    if (ret) token->windows_sd = 1;
+    return ret;
+}
+
+/* a process's new primary token (dst, a duplicate of src, which copied src's label) gets src's owner, group and DACL
+ * when src has Windows' descriptor (token_protect_system, token_protect_elevated): a service's process keeps its
+ * service descriptor. Any other token's descriptor (most have the default DACL their label came with) is not copied. */
+int token_keep_descriptor( struct token *dst, const struct token *src )
+{
+    if (!src->windows_sd || !src->obj.sd) return 1;
+    if (!set_sd_defaults_from_token( &dst->obj, src->obj.sd, OWNER_SECURITY_INFORMATION |
+                                     GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, NULL )) return 0;
+    dst->windows_sd = 1;
+    return 1;
 }
 
 /* a token of a process that was elevated: the full half of a split administrator token */
@@ -1280,7 +1345,8 @@ DECL_HANDLER(create_service_token)
     }
     if ((token = token_create_service( req->account, caller->session_id )))
     {
-        reply->token = alloc_handle_no_access_check( current->process, token, TOKEN_ALL_ACCESS, 0 );
+        if (token_protect_system( token, 1 ))
+            reply->token = alloc_handle_no_access_check( current->process, token, TOKEN_ALL_ACCESS, 0 );
         release_object( token );
     }
 }
@@ -1956,17 +2022,24 @@ static int token_access_is_query( unsigned int access )
 DECL_HANDLER(open_token)
 {
     /* Windows needs only the limited query right on the process or thread (OpenProcessToken from Low integrity works
-     * there), and the token's own descriptor decides the rest. Here the tokens of the system role (token_create_service)
-     * have no DACL, and users have the limited query on those processes (sysrun.c, protect_object), so with elevation
-     * enforced the limited right opens a token only for reading it: duplicating, impersonating, assigning or adjusting
-     * still needs the full query right, until those tokens get a descriptor as on Windows. */
+     * there), and the token's own descriptor decides the rest. With elevation enforced, so does this server for a
+     * token that has Windows' descriptor (R7): the system role's (token_protect_system) and elevated primary tokens
+     * (token_protect_elevated), marked windows_sd. Any other token, also one with a DACL (most have the default DACL
+     * that came with their label, which grants their user everything, and an elevated client's impersonation copy
+     * has one too), keeps the stricter rule: the limited right opens it only for reading; duplicating, impersonating,
+     * assigning or adjusting needs the full query right. */
     unsigned int query = sysrun_active && elevation_enforced();
     unsigned int read_only = token_access_is_query( req->access );
 
     if (req->flags & OPEN_TOKEN_THREAD)
     {
-        struct thread *thread = get_thread_from_handle( req->handle, !query ? 0 : read_only ?
-                                                        THREAD_QUERY_LIMITED_INFORMATION : THREAD_QUERY_INFORMATION );
+        struct thread *thread = get_thread_from_handle( req->handle, query ? THREAD_QUERY_LIMITED_INFORMATION : 0 );
+
+        if (thread && query && !read_only && thread->token && !thread->token->windows_sd)
+        {
+            release_object( thread );
+            thread = get_thread_from_handle( req->handle, THREAD_QUERY_INFORMATION );
+        }
         if (thread)
         {
             if (thread->token)
@@ -1990,8 +2063,13 @@ DECL_HANDLER(open_token)
     }
     else
     {
-        struct process *process = get_process_from_handle( req->handle, !query ? 0 : read_only ?
-                                                           PROCESS_QUERY_LIMITED_INFORMATION : PROCESS_QUERY_INFORMATION );
+        struct process *process = get_process_from_handle( req->handle, query ? PROCESS_QUERY_LIMITED_INFORMATION : 0 );
+
+        if (process && query && !read_only && process->token && !process->token->windows_sd)
+        {
+            release_object( process );
+            process = get_process_from_handle( req->handle, PROCESS_QUERY_INFORMATION );
+        }
         if (process)
         {
             if (process->token)

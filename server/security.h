@@ -73,6 +73,9 @@ extern void token_copy_auth_id( struct token *dst, const struct token *src );
 extern int token_service_account( const struct token *token );
 extern int token_is_elevated( const struct token *token );
 extern int token_protect_elevated( struct token *token );
+/* R7: Windows' descriptor for the token of a system process: a service's (service) or another's */
+extern int token_protect_system( struct token *token, int service );
+extern int token_keep_descriptor( struct token *dst, const struct token *src );
 extern void token_make_filtered( struct token *token );
 extern void token_make_full( struct token *token );
 extern void token_make_standard( struct token *token );
