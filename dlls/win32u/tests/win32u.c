@@ -3148,6 +3148,24 @@ static void test_composition_input_sink(void)
     status = NtCloseCompositionInputSink( sink );
     ok( status == STATUS_INVALID_HANDLE, "Got status %#lx.\n", status );
 
+    /* a sink closed with CloseHandle, whose handle value is taken by an unrelated object: the close call leaves that object alone */
+    FILL( 2, hwnd, hwnd, hwnd, hwnd );
+    sink2 = NULL;
+    status = NtCreateCompositionInputSink( block, &sink2 );
+    ok( !status, "Got status %#lx.\n", status );
+    if (!status)
+    {
+        HANDLE event;
+        DWORD flags;
+
+        CloseHandle( sink2 );
+        event = CreateEventW( NULL, TRUE, FALSE, NULL );
+        status = NtCloseCompositionInputSink( event );
+        ok( status, "Got status %#lx.\n", status );
+        ok( GetHandleInformation( event, &flags ), "The unrelated handle %p was closed.\n", event );
+        CloseHandle( event );
+    }
+
     DestroyWindow( hwnd2 );
     FILL( 2, hwnd, hwnd2, hwnd, hwnd );
     sink2 = NULL;

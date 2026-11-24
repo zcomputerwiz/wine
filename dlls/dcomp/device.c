@@ -4649,7 +4649,8 @@ static const GUID IID_dcomp_alias_b = {0x28d6ad3d, 0xee2a, 0x4bcd, {0x94, 0x19, 
  * (traced on Wine with a logging object). Windows 11 build 26300 answers the same slot differently (it removes 12 bytes on 32-bit Windows,
  * two arguments, and returns E_INVALIDARG for an event handle: tests/uwp/alpc/dcomp-dslot32b.cpp); a trace there shows the runtime reaching
  * the device through a system-side module. Slot 8 is implemented for the caller on Wine, not measured on Windows 11: the call shape
- * observed at the caller is (event handle, 0, 0, a pointer).
+ * observed at the caller is (event handle, 0, 0, a pointer) in the registers of a 64-bit run. The shape on i386 is not measured: the registers
+ * would make four arguments, but Windows 11 removes 12 bytes on 32-bit Windows, so what this function takes there is not known.
  * The event is duplicated and signaled when a Commit has completed, which here is when Commit returns, successful or not, so a waiter
  * cannot hang on a failed commit. A NULL handle clears the event. The other slots raise the stub exception: their argument counts are not known. */
 static const GUID IID_dcomp_commit = {0x6b556968, 0x2d25, 0x11e2, {0x99, 0xf6, 0x8b, 0xc3, 0x60, 0x88, 0x70, 0x9b}};
@@ -5394,9 +5395,10 @@ static void dcomp_shared_forget(HANDLE handle)
 static HRESULT dcomp_shared_open_visual(struct dcomp_device *dev, HANDLE handle, REFIID iid, void **out)
 {
     struct dcomp_shared *shared, *found = NULL;
-    struct dcomp_visual *visual;
+    struct dcomp_visual *visual = NULL;
     HRESULT hr;
 
+    /* the lookup and the insert are one step under the lock, so two opens of a handle at the same time find the same visual */
     AcquireSRWLockExclusive(&dcomp_shared_lock);
     LIST_FOR_EACH_ENTRY(shared, &dcomp_shared_list, struct dcomp_shared, entry)
         if (shared->handle == handle && shared->device == dev) { found = shared; break; }
@@ -5406,11 +5408,15 @@ static HRESULT dcomp_shared_open_visual(struct dcomp_device *dev, HANDLE handle,
         ReleaseSRWLockExclusive(&dcomp_shared_lock);
         return hr;
     }
-    ReleaseSRWLockExclusive(&dcomp_shared_lock);
 
-    if (!(found = calloc(1, sizeof(*found)))) return E_OUTOFMEMORY;
+    if (!(found = calloc(1, sizeof(*found))))
+    {
+        ReleaseSRWLockExclusive(&dcomp_shared_lock);
+        return E_OUTOFMEMORY;
+    }
     if (FAILED(hr = dcomp_visual_create(dev, &visual)))
     {
+        ReleaseSRWLockExclusive(&dcomp_shared_lock);
         free(found);
         return hr;
     }
@@ -5418,13 +5424,12 @@ static HRESULT dcomp_shared_open_visual(struct dcomp_device *dev, HANDLE handle,
     found->handle = handle;
     found->device = dev;
     found->visual = visual;
-
-    AcquireSRWLockExclusive(&dcomp_shared_lock);
     list_add_tail(&dcomp_shared_list, &found->entry);
+    hr = IDCompositionVisual2_QueryInterface(&visual->IDCompositionVisual2_iface, iid, out);
     ReleaseSRWLockExclusive(&dcomp_shared_lock);
 
-    hr = IDCompositionVisual2_QueryInterface(&visual->IDCompositionVisual2_iface, iid, out);
-    /* the reference of dcomp_visual_create belongs to the caller of this function now */
+    /* the reference of dcomp_visual_create belongs to the caller of this function now; releasing it takes the lock, so it is done outside
+     * (the visual cannot die before: the caller's reference from the query is still held, or the release below ends it when the query failed) */
     IDCompositionVisual2_Release(&visual->IDCompositionVisual2_iface);
     return hr;
 }
@@ -5634,12 +5639,13 @@ HRESULT WINAPI DCompositionCreateDevice3(IUnknown *rendering_device, REFIID iid,
 }
 
 /*
- * Export 1040 of the real dcomp.dll, named DCompositionCreateSharedVisualHandle (tests/uwp/alpc/dcomp-exports-probe.c): called
- * by dcompi.dll of the Windows App Runtime (the Wine log names the ordinal). The signature is HRESULT (HANDLE *out), measured on Windows 11 with
+ * Export 1040 of the real dcomp.dll (tests/uwp/alpc/dcomp-exports-probe.c: a GetProcAddress sweep finds the ordinal, and the name
+ * DCompositionCreateSharedVisualHandle resolves to the same address); dcompi.dll of the Windows App Runtime asks for it (the Wine
+ * loader's message for the missing import names ordinal 1040). The signature is HRESULT (HANDLE *out), measured on Windows 11 with
  * tests/uwp/alpc/dcomp-visualhandle-probe.c: a NULL out is E_INVALIDARG, otherwise the handle is an object of type "Composition".
  * The compositor passes the handle on in a property of a visual; here the handle is an
  * anonymous event, which is what a caller can do with it (duplicate it, close it) until there is a system compositor to share
- * the visual with.
+ * the visual with. (Windows returns an object of the type "Composition", here it is an event: NtQueryObject tells them apart.)
  */
 HRESULT WINAPI DCompositionCreateSharedVisualHandle(HANDLE *out)
 {

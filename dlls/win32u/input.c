@@ -2960,13 +2960,16 @@ BOOL WINAPI NtUserClipCursor( const RECT *rect )
  *   - NtCloseCompositionInputSink( sink ) closes the handle (a later query or close: STATUS_INVALID_HANDLE).
  * 32-bit callers are not supported: the layout of their block is not known.
  * A sink is an event object here, remembered in a list so that the other calls know it; NtQueryObject gives "Event" instead of
- * "Composition".
+ * "Composition". The list keeps a second handle to the event: when the application closes a sink with NtClose and the handle value is
+ * reused for another object, NtCompareObjects tells that the value no longer names the sink, and the entry is dropped instead of acting on
+ * the unrelated handle. (The event lives on until the stale entry is found or the process ends.)
  */
 
 struct composition_input_sink
 {
     struct list entry;
     HANDLE handle;
+    HANDLE keep;   /* a second handle of ours to the same event: the entry is valid only while `handle` still names that object */
     LUID luid;
 };
 
@@ -3000,7 +3003,17 @@ NTSTATUS WINAPI NtCreateCompositionInputSink( const void *params, HANDLE *sink )
     TRACE( "params %p, sink %p\n", params, sink );
 
     if (!sink) return STATUS_INVALID_PARAMETER;
-    *sink = INVALID_HANDLE_VALUE;
+    status = STATUS_SUCCESS;
+    __TRY
+    {
+        *sink = INVALID_HANDLE_VALUE;
+    }
+    __EXCEPT
+    {
+        status = STATUS_ACCESS_VIOLATION;
+    }
+    __ENDTRY
+    if (status) return status;
     if (!params) return STATUS_INVALID_PARAMETER;
 
     __TRY
@@ -3027,6 +3040,7 @@ NTSTATUS WINAPI NtCreateCompositionInputSink( const void *params, HANDLE *sink )
 
     if (!(obj = malloc( sizeof(*obj) ))) return STATUS_NO_MEMORY;
     if ((status = NtCreateEvent( &handle, EVENT_ALL_ACCESS, NULL, NotificationEvent, FALSE )) ||
+        (status = NtDuplicateObject( NtCurrentProcess(), handle, NtCurrentProcess(), &obj->keep, 0, 0, DUPLICATE_SAME_ACCESS )) ||
         (status = NtAllocateLocallyUniqueId( &obj->luid )))
     {
         if (handle) NtClose( handle );
@@ -3061,11 +3075,20 @@ static BOOL take_composition_input_sink( HANDLE handle, BOOL remove, LUID *luid 
     LIST_FOR_EACH_ENTRY( obj, &composition_input_sinks, struct composition_input_sink, entry )
     {
         if (obj->handle != handle) continue;
+        if (NtCompareObjects( obj->keep, handle ))
+        {
+            /* the application closed the sink with NtClose and the value now names something else */
+            list_remove( &obj->entry );
+            NtClose( obj->keep );
+            free( obj );
+            break;
+        }
         found = TRUE;
         if (luid) *luid = obj->luid;
         if (remove)
         {
             list_remove( &obj->entry );
+            NtClose( obj->keep );
             free( obj );
         }
         break;
