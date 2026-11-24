@@ -2503,6 +2503,56 @@ static void test_system_fontcollection_replacements(void)
     RegCloseKey(key);
 }
 
+struct system_collection_thread_data
+{
+    IDWriteFactory *factory;
+    LONG failures;
+};
+
+static DWORD WINAPI system_collection_thread_proc(void *arg)
+{
+    struct system_collection_thread_data *data = arg;
+    unsigned int i;
+
+    for (i = 0; i < 400; ++i)
+    {
+        IDWriteFontCollection *collection;
+        IDWriteTextFormat *format;
+        HRESULT hr;
+
+        /* the collection is dropped with the last reference here, and the other threads ask for it at the same time */
+        if (FAILED(hr = IDWriteFactory_GetSystemFontCollection(data->factory, &collection, FALSE)))
+        {
+            InterlockedIncrement(&data->failures);
+            continue;
+        }
+        hr = IDWriteFactory_CreateTextFormat(data->factory, L"Tahoma", collection, DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 16.0f, L"en-us", &format);
+        if (FAILED(hr)) InterlockedIncrement(&data->failures);
+        else IDWriteTextFormat_Release(format);
+        IDWriteFontCollection_Release(collection);
+    }
+    return 0;
+}
+
+/* Several threads get the system collection and drop it again. The factory finds a collection that another thread is about to destroy, or
+ * releases a reference that it does not own, when the cache of the collection is not safe (a freed collection is used afterwards). */
+static void test_system_fontcollection_threads(void)
+{
+    struct system_collection_thread_data data = {0};
+    HANDLE threads[4];
+    unsigned int i;
+
+    data.factory = create_factory();
+    for (i = 0; i < ARRAY_SIZE(threads); ++i)
+        threads[i] = CreateThread(NULL, 0, system_collection_thread_proc, &data, 0, NULL);
+    WaitForMultipleObjects(ARRAY_SIZE(threads), threads, TRUE, INFINITE);
+    for (i = 0; i < ARRAY_SIZE(threads); ++i)
+        CloseHandle(threads[i]);
+    ok(!data.failures, "Got %ld failures.\n", data.failures);
+    IDWriteFactory_Release(data.factory);
+}
+
 static void test_system_fontcollection(void)
 {
     IDWriteFontCollection *collection, *coll2;
@@ -11059,6 +11109,7 @@ START_TEST(font)
     test_CreateFontFace();
     test_GetMetrics();
     test_system_fontcollection();
+    test_system_fontcollection_threads();
     test_system_fontcollection_replacements();
     test_fontset_named_instances();
     test_fontface_named_instances();
