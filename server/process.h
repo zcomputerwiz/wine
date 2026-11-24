@@ -129,6 +129,8 @@ struct process
 /* process functions */
 
 extern unsigned int alloc_ptid( void *ptr );
+extern int ptid_add_block( unsigned int block );
+extern unsigned int ptid_block( unsigned int i );
 extern void free_ptid( unsigned int id );
 extern int process_e1s_profile_busy( const struct sid * );
 extern int wex_handle_allowed( struct process *dst, struct object *obj );

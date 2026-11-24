@@ -30,7 +30,7 @@
 /* the link message from a user's server to session 0: header, then the token description; SCM_RIGHTS carries
  * the channel. Session 0 answers with a reply. One message per connection. */
 #define WEX_SESSION0_MAGIC    0x30535857  /* "WXS0" */
-#define WEX_SESSION0_VERSION  5
+#define WEX_SESSION0_VERSION  6
 #define WEX_SESSION0_MAX_MSG  65536
 
 struct wex_session0_request
@@ -45,6 +45,7 @@ struct wex_session0_request
         unsigned int saved;       /* HIVE_SAVED: 1 written, 0 not */
         unsigned int name_size;   /* PIPE, PIPE_WAIT: the size in bytes of the pipe name after the description */
         unsigned int session_id;  /* SESSION_ID: the id the server asks for (0: any) */
+        unsigned int block;       /* BLOCK: the block of ids the server asks for again (0: a new one) */
         unsigned int unused;      /* USER_HIVE, HIVE_UNLOAD: 0 */
     };
 };
@@ -75,6 +76,13 @@ struct wex_session0_request
 /* PIPE_WAIT: a program of the session waits for a pipe of session 0 (FSCTL_PIPE_WAIT); the same message as PIPE,
  * without a socket. The status says whether session 0 has the pipe; no instance is taken. */
 #define WEX_SESSION0_PIPE_WAIT    7
+/* BLOCK (R6, docs/SESSION0_PROCESS_IDS.md): a linked server asks for a block of process and thread ids, a new one
+ * (block 0) or one it held before session 0 restarted; the reply's value is the block (WEX_ID_BLOCK_SIZE indices
+ * from block * WEX_ID_BLOCK_SIZE; ids are indices * 4). Session 0 gives a block to one live server at a time, so
+ * the ids of different servers never meet. No token description, no descriptor. */
+#define WEX_SESSION0_BLOCK        8
+#define WEX_ID_BLOCK_SIZE         4096
+#define WEX_ID_BLOCK_COUNT        4096  /* indices below 2^24: ids below 2^26, as on Windows */
 
 /* orders */
 #define WEX_SESSION0_ORDER_PING   1   /* answered with the server's session id */

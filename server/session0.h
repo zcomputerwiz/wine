@@ -42,6 +42,8 @@ extern void session0_init( int server_mode );
 extern uid_t session0_hive_owner(void);
 /* the requests a registry-only client may make */
 extern int session0_request_allowed( enum request req );
+/* R6: a block of process and thread ids for this server (wanted: one it held before; 0: a new one); 0 for none */
+extern unsigned int session0_new_id_block( unsigned int wanted );
 /* session 0: report a change to a registry-only client's relay */
 extern void session0_relay_notify( struct process *process, unsigned int cookie );
 /* a user's server: drop a process's relay, setting its pending events */
