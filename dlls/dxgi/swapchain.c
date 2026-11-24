@@ -265,6 +265,27 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_AddRef(IDXGISwapChain4 *iface)
     return refcount;
 }
 
+/* The window surface a target is drawn into may be its top-level window's (a child target, as Chromium's): that
+ * surface's flushes (an expose when a window above goes away, a region change) must ask for the retained frames
+ * again too, so the top-level window gets the same repaint sink unless it has one of its own. */
+static void dcomp_set_repaint_sink(HWND target, HWND sink)
+{
+    HWND root = GetAncestor(target, GA_ROOT);
+
+    SetPropW(target, WINE_DCOMP_REPAINT_SINK_PROP, sink);
+    if (root && root != target && !GetPropW(root, WINE_DCOMP_REPAINT_SINK_PROP))
+        SetPropW(root, WINE_DCOMP_REPAINT_SINK_PROP, sink);
+}
+
+static void dcomp_remove_repaint_sink(HWND target, HWND sink)
+{
+    HWND root = GetAncestor(target, GA_ROOT);
+
+    if (GetPropW(target, WINE_DCOMP_REPAINT_SINK_PROP) == sink) RemovePropW(target, WINE_DCOMP_REPAINT_SINK_PROP);
+    if (root && root != target && GetPropW(root, WINE_DCOMP_REPAINT_SINK_PROP) == sink)
+        RemovePropW(root, WINE_DCOMP_REPAINT_SINK_PROP);
+}
+
 static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
 {
     struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
@@ -284,11 +305,9 @@ static ULONG STDMETHODCALLTYPE d3d11_swapchain_Release(IDXGISwapChain4 *iface)
         if (swapchain->comp_wnd)
         {
             AcquireSRWLockExclusive(&dcomp_binding_lock);
-            if (swapchain->target_hwnd && GetPropW(swapchain->target_hwnd,
-                    WINE_DCOMP_REPAINT_SINK_PROP) == swapchain->comp_wnd)
-                RemovePropW(swapchain->target_hwnd, WINE_DCOMP_REPAINT_SINK_PROP);
+            if (swapchain->target_hwnd) dcomp_remove_repaint_sink(swapchain->target_hwnd, swapchain->comp_wnd);
             ReleaseSRWLockExclusive(&dcomp_binding_lock);
-            DestroyWindow(swapchain->comp_wnd);
+            dcomp_destroy_window(swapchain->comp_wnd);
         }
         if (swapchain->target)
         {
@@ -497,9 +516,7 @@ static HRESULT dcomp_binding_target_scene(IWineDCompSwapChain *iface,
         }
         /* WineD3D restores the current application underlay while revoking
          * this scene, without consuming another transaction's prepared scene. */
-        if (swapchain->target_hwnd && GetPropW(swapchain->target_hwnd,
-                WINE_DCOMP_REPAINT_SINK_PROP) == swapchain->comp_wnd)
-            RemovePropW(swapchain->target_hwnd, WINE_DCOMP_REPAINT_SINK_PROP);
+        if (swapchain->target_hwnd) dcomp_remove_repaint_sink(swapchain->target_hwnd, swapchain->comp_wnd);
         hr = wined3d_swapchain_set_target_scene(swapchain->wined3d_swapchain, NULL, FALSE);
         dcomp_swapchain_clear_target(swapchain);
         ReleaseSRWLockExclusive(&dcomp_binding_lock);
@@ -595,11 +612,10 @@ static HRESULT dcomp_binding_target_scene(IWineDCompSwapChain *iface,
     if (SUCCEEDED(hr) && !prepare)
     {
         RECT empty = {0};
-        if (swapchain->target_hwnd && swapchain->target_hwnd != target
-                && GetPropW(swapchain->target_hwnd, WINE_DCOMP_REPAINT_SINK_PROP) == swapchain->comp_wnd)
-            RemovePropW(swapchain->target_hwnd, WINE_DCOMP_REPAINT_SINK_PROP);
+        if (swapchain->target_hwnd && swapchain->target_hwnd != target)
+            dcomp_remove_repaint_sink(swapchain->target_hwnd, swapchain->comp_wnd);
         swapchain->target_hwnd = target;
-        SetPropW(target, WINE_DCOMP_REPAINT_SINK_PROP, swapchain->comp_wnd);
+        dcomp_set_repaint_sink(target, swapchain->comp_wnd);
         wined3d_swapchain_set_window(swapchain->wined3d_swapchain, target);
         /* Commit redraws the retained frames, never the unpresented back buffer. */
         hr = wined3d_swapchain_present(swapchain->wined3d_swapchain, &empty, &empty,

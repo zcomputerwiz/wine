@@ -480,6 +480,92 @@ static BOOL dcomp_register_window_class(void)
     return TRUE;
 }
 
+/* Composition windows live on a thread of their own that always handles messages: WM_WINE_DCOMP_REPAINT, which asks
+ * for a target's retained frames again, must reach them while the thread that made the swapchain handles none
+ * (Chromium's compositor thread, say). */
+#define WM_DCOMP_HELPER_CREATE (WM_USER + 1)
+
+struct dcomp_window_params
+{
+    UINT width, height;
+    HWND window;
+    DWORD error;
+};
+
+static HWND dcomp_helper;
+static INIT_ONCE dcomp_helper_once = INIT_ONCE_STATIC_INIT;
+
+static LRESULT CALLBACK dcomp_helper_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    if (msg == WM_DCOMP_HELPER_CREATE)
+    {
+        struct dcomp_window_params *params = (struct dcomp_window_params *)lparam;
+
+        params->window = CreateWindowExW(WS_EX_NOPARENTNOTIFY, L"WineDCompSwapchain", L"DComp Swapchain",
+                WS_CHILD, 0, 0, params->width, params->height, GetDesktopWindow(), NULL, GetModuleHandleW(NULL), NULL);
+        if (!params->window) params->error = GetLastError();
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+static DWORD WINAPI dcomp_helper_thread(void *ready)
+{
+    WNDCLASSW wc = {0};
+    MSG msg;
+
+    SetThreadDescription(GetCurrentThread(), L"wine_dxgi_dcomp");
+    wc.lpfnWndProc = dcomp_helper_wndproc;
+    wc.lpszClassName = L"WineDCompHelper";
+    wc.hInstance = GetModuleHandleW(NULL);
+    if (RegisterClassW(&wc) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS)
+        dcomp_helper = CreateWindowExW(0, L"WineDCompHelper", NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, NULL,
+                GetModuleHandleW(NULL), NULL);
+    SetEvent(ready);
+    if (!dcomp_helper) return 1;
+    while (GetMessageW(&msg, NULL, 0, 0))
+    {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    return 0;
+}
+
+static BOOL WINAPI dcomp_helper_init(INIT_ONCE *once, void *param, void **context)
+{
+    HANDLE ready, thread;
+
+    if (!(ready = CreateEventW(NULL, TRUE, FALSE, NULL))) return TRUE;
+    if ((thread = CreateThread(NULL, 0, dcomp_helper_thread, ready, 0, NULL)))
+    {
+        WaitForSingleObject(ready, INFINITE);
+        CloseHandle(thread);
+    }
+    CloseHandle(ready);
+    if (!dcomp_helper) WARN("No composition window thread; windows are made by the caller's thread.\n");
+    return TRUE;
+}
+
+static HWND dcomp_create_window(UINT width, UINT height)
+{
+    struct dcomp_window_params params = {width, height};
+
+    InitOnceExecuteOnce(&dcomp_helper_once, dcomp_helper_init, NULL, NULL);
+    if (!dcomp_helper)
+        return CreateWindowExW(WS_EX_NOPARENTNOTIFY, L"WineDCompSwapchain", L"DComp Swapchain",
+                WS_CHILD, 0, 0, width, height, GetDesktopWindow(), NULL, GetModuleHandleW(NULL), NULL);
+    SendMessageW(dcomp_helper, WM_DCOMP_HELPER_CREATE, 0, (LPARAM)&params);
+    if (!params.window) SetLastError(params.error);
+    return params.window;
+}
+
+/* Only the window's own thread can destroy it. */
+void dcomp_destroy_window(HWND window)
+{
+    if (GetWindowThreadProcessId(window, NULL) == GetCurrentThreadId()) DestroyWindow(window);
+    else SendMessageW(window, WM_CLOSE, 0, 0);
+}
+
 static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWineDXGIFactory *iface,
         IUnknown *device, const DXGI_SWAP_CHAIN_DESC1 *desc, IDXGIOutput *output, IDXGISwapChain1 **swapchain)
 {
@@ -498,10 +584,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
     if (!dcomp_register_window_class())
         return E_FAIL;
 
-    window = CreateWindowExW(WS_EX_NOPARENTNOTIFY,
-            L"WineDCompSwapchain", L"DComp Swapchain",
-            WS_CHILD, 0, 0, desc->Width, desc->Height,
-            GetDesktopWindow(), NULL, GetModuleHandleW(NULL), NULL);
+    window = dcomp_create_window(desc->Width, desc->Height);
     if (!window)
     {
         ERR("Failed to create composition window, error %lu.\n", GetLastError());
@@ -518,7 +601,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
             /* A D3D12/custom swapchain is not a d3d11_swapchain structure. */
             IDXGISwapChain1_Release(*swapchain);
             *swapchain = NULL;
-            DestroyWindow(window);
+            dcomp_destroy_window(window);
             return E_NOTIMPL;
         }
         d3d11_sc->comp_wnd = window;
@@ -531,7 +614,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
     else
     {
         ERR("CreateSwapChainForHwnd failed, hr %#lx.\n", hr);
-        DestroyWindow(window);
+        dcomp_destroy_window(window);
     }
 
     return hr;

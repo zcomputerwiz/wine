@@ -23,6 +23,7 @@
 #include "wined3d_private.h"
 #include "wined3d_gl.h"
 #include "wined3d_vk.h"
+#include "wine/dcomp_underlay.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(d3d);
 WINE_DECLARE_DEBUG_CHANNEL(d3d_perf);
@@ -204,6 +205,9 @@ void wined3d_swapchain_cleanup(struct wined3d_swapchain *swapchain)
         wined3d_texture_decref(swapchain->composite_texture);
         swapchain->composite_texture = NULL;
     }
+    /* the window keeps its last region: a new swapchain of the same window may already have queued its own */
+    free(swapchain->dcomp_shape);
+    swapchain->dcomp_shape = NULL;
 
     /* Restore the screen resolution if we rendered in fullscreen.
      * This will restore the screen resolution to what it was before creating
@@ -1371,24 +1375,13 @@ done:
     return success;
 }
 
-static BOOL swapchain_composite_layers(struct wined3d_swapchain *swapchain, struct wined3d_context *context)
+/* CPU pixels for every layer and the inverse of each layer's transform. */
+static BOOL dcomp_prepare_layers(const struct wined3d_dcomp_target_scene *scene, struct wined3d_context *context,
+        struct dcomp_sample_transform *transforms, BOOL *soft_border)
 {
-    const struct wined3d_dcomp_target_scene *scene = &swapchain->target_scene;
-    struct dcomp_sample_transform transforms[WINED3D_DCOMP_MAX_LAYERS];
-    unsigned int width, height, pitch, slice_pitch, i, x, y, sx, sy;
-    struct dcomp_color color, background, sample;
-    BOOL soft_border = FALSE;
-    uint32_t *row;
-    RECT client;
+    unsigned int i;
 
-    if (!GetClientRect(swapchain->win_handle, &client) || client.right <= 0 || client.bottom <= 0)
-        return FALSE;
-    width = client.right;
-    height = client.bottom;
-    if (!swapchain->composite_texture || swapchain->composite_texture->resource.width != width
-            || swapchain->composite_texture->resource.height != height)
-        return FALSE;
-
+    *soft_border = FALSE;
     for (i = 0; i < scene->layer_count; ++i)
     {
         const struct wined3d_dcomp_layer *layer = &scene->layers[i];
@@ -1401,8 +1394,30 @@ static BOOL swapchain_composite_layers(struct wined3d_swapchain *swapchain, stru
         transforms[i].inv12 = -layer->m12 / det;
         transforms[i].inv21 = -layer->m21 / det;
         transforms[i].inv22 = layer->m11 / det;
-        soft_border |= layer->soft_border;
+        *soft_border |= layer->soft_border;
     }
+    return TRUE;
+}
+
+static BOOL swapchain_composite_layers(struct wined3d_swapchain *swapchain, struct wined3d_context *context)
+{
+    const struct wined3d_dcomp_target_scene *scene = &swapchain->target_scene;
+    struct dcomp_sample_transform transforms[WINED3D_DCOMP_MAX_LAYERS];
+    unsigned int width, height, pitch, slice_pitch, x, y, sx, sy;
+    struct dcomp_color color, background, sample;
+    BOOL soft_border;
+    uint32_t *row;
+    RECT client;
+
+    if (!GetClientRect(swapchain->win_handle, &client) || client.right <= 0 || client.bottom <= 0)
+        return FALSE;
+    width = client.right;
+    height = client.bottom;
+    if (!swapchain->composite_texture || swapchain->composite_texture->resource.width != width
+            || swapchain->composite_texture->resource.height != height)
+        return FALSE;
+
+    if (!dcomp_prepare_layers(scene, context, transforms, &soft_border)) return FALSE;
 
     /* A fully covering opaque retained image makes an inaccessible foreign
      * GDI backing irrelevant. Never skip it for partial/translucent scenes. */
@@ -1527,6 +1542,232 @@ static BOOL dcomp_alpha_window(const struct wined3d_swapchain *swapchain)
     return !swapchain->dcomp_background && GetPropW(swapchain->win_handle, L"__wine_dwm_alpha");
 }
 
+/* A target in a glass sheet (a top-level window given DwmExtendFrameIntoClientArea with a negative margin, which dwmapi
+ * marks when WineExplorer's DwmAlpha is off): nothing blends its alpha, so its transparent pixels, which show what is
+ * below on Windows, would be black. The pixels at least half covered become the top-level window's region instead:
+ * translucent popups (Chromium's bubbles and menus, whose targets are child windows) keep their shape without a black
+ * box; only their soft shadows are lost. */
+static BOOL dcomp_shape_root(HWND root)
+{
+    return GetPropW(root, L"__wine_dwm_sheet") && !GetPropW(root, L"__wine_dwm_alpha");
+}
+
+/* Setting the region of another process's window waits for its thread (the window position is updated there), and
+ * that thread may be waiting for this present: a worker applies the newest region of each window instead. */
+struct dcomp_shape_request
+{
+    struct list entry;
+    HWND hwnd;
+    HWND target;    /* the composition target inside it, drawn again once the region is set */
+    HRGN region;    /* NULL removes the region */
+};
+
+static struct list dcomp_shape_requests = LIST_INIT(dcomp_shape_requests);
+static BOOL dcomp_shape_worker_running;
+static CRITICAL_SECTION dcomp_shape_cs;
+static CRITICAL_SECTION_DEBUG dcomp_shape_cs_debug =
+{
+    0, 0, &dcomp_shape_cs,
+    { &dcomp_shape_cs_debug.ProcessLocksList, &dcomp_shape_cs_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": dcomp_shape_cs") }
+};
+static CRITICAL_SECTION dcomp_shape_cs = { &dcomp_shape_cs_debug, -1, 0, 0, 0, 0 };
+
+static DWORD WINAPI dcomp_shape_worker(void *arg)
+{
+    struct dcomp_shape_request *request;
+
+    for (;;)
+    {
+        EnterCriticalSection(&dcomp_shape_cs);
+        if (list_empty(&dcomp_shape_requests))
+        {
+            dcomp_shape_worker_running = FALSE;
+            LeaveCriticalSection(&dcomp_shape_cs);
+            return 0;
+        }
+        request = LIST_ENTRY(list_head(&dcomp_shape_requests), struct dcomp_shape_request, entry);
+        list_remove(&request->entry);
+        LeaveCriticalSection(&dcomp_shape_cs);
+
+        TRACE("Window %p, target %p, region %p.\n", request->hwnd, request->target, request->region);
+        /* Without a redraw, which would paint the window over the composed content. The window's surface is
+         * flushed again all the same, and a static target presents no more: the target's retained frames are asked
+         * for (dxgi gives the top-level window the target's repaint sink, so its later flushes do the same). */
+        if (SetWindowRgn(request->hwnd, request->region, FALSE))
+        {
+            HWND sink = GetPropW(request->target, WINE_DCOMP_REPAINT_SINK_PROP);
+            if (sink) PostMessageW(sink, WM_WINE_DCOMP_REPAINT, 0, 0);
+        }
+        else if (request->region) DeleteObject(request->region);
+        free(request);
+    }
+}
+
+/* Takes ownership of region. */
+static void dcomp_queue_shape(HWND hwnd, HWND target, HRGN region)
+{
+    struct dcomp_shape_request *request;
+
+    EnterCriticalSection(&dcomp_shape_cs);
+    LIST_FOR_EACH_ENTRY(request, &dcomp_shape_requests, struct dcomp_shape_request, entry)
+    {
+        if (request->hwnd != hwnd) continue;
+        if (request->region) DeleteObject(request->region);
+        request->target = target;
+        request->region = region;
+        LeaveCriticalSection(&dcomp_shape_cs);
+        return;
+    }
+    if (!(request = malloc(sizeof(*request))))
+    {
+        LeaveCriticalSection(&dcomp_shape_cs);
+        if (region) DeleteObject(region);
+        return;
+    }
+    request->hwnd = hwnd;
+    request->target = target;
+    request->region = region;
+    list_add_tail(&dcomp_shape_requests, &request->entry);
+    if (!dcomp_shape_worker_running)
+    {
+        if (QueueUserWorkItem(dcomp_shape_worker, NULL, WT_EXECUTEDEFAULT)) dcomp_shape_worker_running = TRUE;
+        else ERR("Failed to queue the window shape worker.\n");
+    }
+    LeaveCriticalSection(&dcomp_shape_cs);
+}
+
+/* The region, in window coordinates, of the composed pixels whose alpha is at least one half. Rows with the same
+ * runs share their rectangles. */
+static RGNDATA *dcomp_shape_region(struct wined3d_swapchain *swapchain, struct wined3d_context *context,
+        const RECT *client, int dx, int dy)
+{
+    const struct wined3d_dcomp_target_scene *scene = &swapchain->target_scene;
+    struct dcomp_sample_transform transforms[WINED3D_DCOMP_MAX_LAYERS];
+    unsigned int count = 0, capacity = 64, row_start = 0, row_count = 0, prev_start = 0, prev_count = 0, i;
+    RGNDATA *data;
+    RECT *rects, *grown, bound;
+    struct dcomp_color color;
+    BOOL soft_border, inside, same;
+    int x, y, run;
+
+    if (!scene->layer_count || !dcomp_prepare_layers(scene, context, transforms, &soft_border)) return NULL;
+    if (!(rects = malloc(capacity * sizeof(*rects)))) return NULL;
+    SetRectEmpty(&bound);
+    for (y = 0; y < client->bottom; ++y)
+    {
+        row_start = count;
+        row_count = 0;
+        for (x = 0, run = -1; x <= client->right; ++x)
+        {
+            inside = FALSE;
+            if (x < client->right)
+            {
+                color = (struct dcomp_color){0};
+                dcomp_render_pixel(scene, transforms, 0, x + 0.5f, y + 0.5f, x + 0.5f, y + 0.5f, 1.0f, &color);
+                inside = color.a >= 0.5f;
+            }
+            if (inside && run < 0) run = x;
+            if (inside || run < 0) continue;
+            if (count == capacity)
+            {
+                if (!(grown = realloc(rects, capacity * 2 * sizeof(*rects)))) goto failed;
+                rects = grown;
+                capacity *= 2;
+            }
+            SetRect(&rects[count++], run + dx, y + dy, x + dx, y + dy + 1);
+            ++row_count;
+            run = -1;
+        }
+        /* the same runs as the row above: that row's rectangles grow instead */
+        same = row_count && row_count == prev_count;
+        for (i = 0; same && i < row_count; ++i)
+            same = rects[row_start + i].left == rects[prev_start + i].left
+                    && rects[row_start + i].right == rects[prev_start + i].right
+                    && rects[prev_start + i].bottom == y + dy;
+        if (same)
+        {
+            for (i = 0; i < row_count; ++i) ++rects[prev_start + i].bottom;
+            count = row_start;
+            continue;
+        }
+        prev_start = row_start;
+        prev_count = row_count;
+    }
+    /* Nothing drawn yet: the window stays as it is until there is content. (An empty region also leaves the target
+     * child of another process with an empty visible region after later regions, so it is never given.) */
+    if (!count) goto failed;
+    for (i = 0; i < count; ++i) UnionRect(&bound, &bound, &rects[i]);
+
+    if (!(data = malloc(sizeof(data->rdh) + count * sizeof(RECT)))) goto failed;
+    data->rdh.dwSize = sizeof(data->rdh);
+    data->rdh.iType = RDH_RECTANGLES;
+    data->rdh.nCount = count;
+    data->rdh.nRgnSize = count * sizeof(RECT);
+    data->rdh.rcBound = bound;
+    memcpy(data->Buffer, rects, count * sizeof(RECT));
+    free(rects);
+    return data;
+
+failed:
+    free(rects);
+    return NULL;
+}
+
+static void dcomp_update_shape(struct wined3d_swapchain *swapchain, struct wined3d_context *context)
+{
+    HWND hwnd = swapchain->win_handle, root = GetAncestor(hwnd, GA_ROOT);
+    HRGN region = NULL, current;
+    RECT client, window;
+    POINT origin = {0, 0};
+    RGNDATA *data = NULL;
+    int kind, dx = 0, dy = 0;
+
+    if (!root) return;
+    if (dcomp_shape_root(root))
+    {
+        if (!GetClientRect(hwnd, &client) || client.right <= 0 || client.bottom <= 0
+                || !GetWindowRect(root, &window) || !ClientToScreen(hwnd, &origin))
+            return;
+        dx = origin.x - window.left;
+        dy = origin.y - window.top;
+        /* an opaque layer over the whole target leaves nothing to cut */
+        if (!dcomp_has_opaque_cover(&swapchain->target_scene, &client)
+                && !(data = dcomp_shape_region(swapchain, context, &client, dx, dy)))
+            return;
+    }
+    if (!data && !swapchain->dcomp_shape) return;
+    if (data && swapchain->dcomp_shape && data->rdh.nCount == swapchain->dcomp_shape->rdh.nCount
+            && !memcmp(data, swapchain->dcomp_shape, sizeof(data->rdh) + data->rdh.nRgnSize))
+    {
+        free(data);
+        return;
+    }
+    if (data && !swapchain->dcomp_shape)
+    {
+        /* a region the application set itself stays */
+        current = CreateRectRgn(0, 0, 0, 0);
+        kind = GetWindowRgn(root, current);
+        DeleteObject(current);
+        if (kind != ERROR)
+        {
+            free(data);
+            return;
+        }
+    }
+    /* The rest of the sheet, outside the target, is the window's own drawing, black or blank where it is meant
+     * to be clear (Chromium's popups while their target grows): it is cut too. */
+    if (data && !(region = ExtCreateRegion(NULL, sizeof(data->rdh) + data->rdh.nRgnSize, data)))
+    {
+        free(data);
+        return;
+    }
+    TRACE("Window %p of target %p, %lu rectangles.\n", root, hwnd, data ? data->rdh.nCount : 0);
+    free(swapchain->dcomp_shape);
+    swapchain->dcomp_shape = data;
+    dcomp_queue_shape(root, hwnd, region);
+}
+
 static BOOL swapchain_dcomp_present_gdi(struct wined3d_swapchain *swapchain, struct wined3d_context *context)
 {
     BITMAPINFO info = {{ sizeof(BITMAPINFOHEADER) }};
@@ -1583,6 +1824,8 @@ static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
         /* CPU reference composition, followed by Wine's normal drawable blit.
          * The drawable belongs to the real swapchain, NOT the scratch texture. */
         if (!(flags & WINED3D_PRESENT_CLEAR_ONLY)) swapchain_capture_frame(swapchain, context, FALSE);
+        /* also at a Commit, which redraws the retained frames */
+        dcomp_update_shape(swapchain, context);
         if (dcomp_alpha_window(swapchain))
         {
             if (!swapchain_dcomp_present_gdi(swapchain, context)) ERR("Failed to present transparent composition.\n");
