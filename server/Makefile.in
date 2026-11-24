@@ -55,6 +55,11 @@ SOURCES = \
 	user.c \
 	uwp_context.c \
 	uwp_context.h \
+	wex_e1lab.h \
+	wex_e1lab_pipe.c \
+	wex_e1lab_registry.h \
+	wex_e1lab_sysrun.c \
+	wex_e1lab_token.h \
 	wex_profile_storage.c \
 	wex_profile_storage.h \
 	window.c \

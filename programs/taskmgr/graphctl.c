@@ -85,6 +85,7 @@ static void GraphCtrl_Init(TGraphCtrl* this)
     /*  these are public variables and can be set directly */
     this->m_crBackColor = RGB(  0,   0,   0);  /*  see also SetBackgroundColor */
     this->m_crGridColor = RGB(  0, 255, 255);  /*  see also SetGridColor */
+    this->m_nPlots = MAX_PLOTS;                   /*  see also SetPlotCount */
     this->m_crPlotColor[0] = RGB(255, 255, 255);  /*  see also SetPlotColor */
     this->m_crPlotColor[1] = RGB(100, 255, 255);  /*  see also SetPlotColor */
     this->m_crPlotColor[2] = RGB(255, 100, 255);  /*  see also SetPlotColor */
@@ -216,23 +217,21 @@ static void GraphCtrl_InvalidateCtrl(TGraphCtrl* this)
      *  finer dotted line and a more "technical" look
      */
 
-    for (i=this->m_rectPlot.left; i<this->m_rectPlot.right; i+=2) 
+    /* XP's grid: solid lines 12 pixels apart, counted from the bottom right corner */
+    solidPen = CreatePen(PS_SOLID, 0, this->m_crGridColor);
+    oldPen = SelectObject(this->m_dcGrid, solidPen);
+    for (j=this->m_rectPlot.bottom - 12; j>this->m_rectPlot.top; j-=12)
     {
-        for (j=this->m_rectPlot.bottom; j>=this->m_rectPlot.top; j-=10)
-        {
-            SetPixel(this->m_dcGrid, i, j, this->m_crGridColor);
-        }
+        MoveToEx(this->m_dcGrid, this->m_rectPlot.left, j, NULL);
+        LineTo(this->m_dcGrid, this->m_rectPlot.right + 1, j);
     }
-
-    for (i=this->m_rectPlot.left; i<this->m_rectPlot.right; i+=10)
+    for (i=this->m_rectPlot.right - 12; i>this->m_rectPlot.left; i-=12)
     {
-        for (j=this->m_rectPlot.top; j<this->m_rectPlot.bottom; j+=2)
-        {
-            SetPixel(this->m_dcGrid, i, j, this->m_crGridColor);
-            /*       SetPixel(m_dcGrid, i, j, m_crGridColor); */
-            /*       SetPixel(m_dcGrid, i, j, m_crGridColor); */
-        }
+        MoveToEx(this->m_dcGrid, i, this->m_rectPlot.top, NULL);
+        LineTo(this->m_dcGrid, i, this->m_rectPlot.bottom + 1);
     }
+    SelectObject(this->m_dcGrid, oldPen);
+    DeleteObject(solidPen);
 
     /*  at this point we are done filling the grid bitmap,  */
     /*  no more drawing to this bitmap is needed until the settings are changed */
@@ -282,6 +281,12 @@ void GraphCtrl_SetPlotColor(TGraphCtrl* this, int plot, COLORREF color)
     GraphCtrl_InvalidateCtrl(this);
 }
 
+/* Draw only the first count plots (XP's page file graph has one line, the CPU graph two with kernel times) */
+void GraphCtrl_SetPlotCount(TGraphCtrl* this, int count)
+{
+    this->m_nPlots = max(1, min(count, MAX_PLOTS));
+}
+
 void GraphCtrl_SetBackgroundColor(TGraphCtrl* this, COLORREF color)
 {
     this->m_crBackColor = color;
@@ -326,7 +331,7 @@ static void GraphCtrl_DrawPoint(TGraphCtrl* this)
         FillRect(this->m_dcPlot, &rectCleanUp, this->m_brushBack);
 
         /*  draw the next line segment */
-        for (i = 0; i < MAX_PLOTS; i++) 
+        for (i = 0; i < this->m_nPlots; i++)
         {
             /*  grab the plotting pen */
             oldPen = SelectObject(this->m_dcPlot, this->m_penPlot[i]);

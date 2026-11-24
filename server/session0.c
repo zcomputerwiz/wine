@@ -711,6 +711,12 @@ void session0_init( int server_mode )
             session0_client = 0;
         }
     }
+    /* The launcher without session 0 is retired (WineExplorer R4, docs/SESSION0_SPLIT_REVIEW.md, decision 2): only
+     * session 0 writes the machine hives, so a launcher-started server never runs as a machine registry of its own.
+     * A configuration without session 0 is not an installed system's; such a server does not start. */
+    if (sysrun_active && !session0_client)
+        fatal_error( "the launcher's configuration %s names no session 0; a launcher-started server needs it\n",
+                     SESSION0_CONF );
     /* a launcher-started server is a logon session only with an id from session 0: without one it does not start
      * (an id it made up could be another session's); a development server keeps 1 */
     if (session0_client && !request_session_id( 0 ) && sysrun_active)

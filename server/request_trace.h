@@ -269,6 +269,21 @@ static void dump_get_process_vm_counters_reply( const struct get_process_vm_coun
     dump_uint64( ", peak_pagefile_usage=", &req->peak_pagefile_usage );
 }
 
+static void dump_get_process_io_counters_request( const struct get_process_io_counters_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+}
+
+static void dump_get_process_io_counters_reply( const struct get_process_io_counters_reply *req )
+{
+    dump_uint64( " read_operations=", &req->read_operations );
+    dump_uint64( ", write_operations=", &req->write_operations );
+    dump_uint64( ", other_operations=", &req->other_operations );
+    dump_uint64( ", read_bytes=", &req->read_bytes );
+    dump_uint64( ", write_bytes=", &req->write_bytes );
+    dump_uint64( ", other_bytes=", &req->other_bytes );
+}
+
 static void dump_set_process_info_request( const struct set_process_info_request *req )
 {
     fprintf( stderr, " handle=%04x", req->handle );
@@ -3836,6 +3851,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_process_handle_table_request,
     (dump_func)dump_get_process_image_name_request,
     (dump_func)dump_get_process_vm_counters_request,
+    (dump_func)dump_get_process_io_counters_request,
     (dump_func)dump_set_process_info_request,
     (dump_func)dump_get_thread_info_request,
     (dump_func)dump_get_thread_page_priority_request,
@@ -4170,6 +4186,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_process_handle_table_reply,
     (dump_func)dump_get_process_image_name_reply,
     (dump_func)dump_get_process_vm_counters_reply,
+    (dump_func)dump_get_process_io_counters_reply,
     NULL,
     (dump_func)dump_get_thread_info_reply,
     (dump_func)dump_get_thread_page_priority_reply,
@@ -4504,6 +4521,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "get_process_handle_table",
     "get_process_image_name",
     "get_process_vm_counters",
+    "get_process_io_counters",
     "set_process_info",
     "get_thread_info",
     "get_thread_page_priority",

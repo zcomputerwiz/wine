@@ -2035,6 +2035,36 @@ static void test_query_process_io(void)
     {
         ok( pii.OtherOperationCount > 0, "Expected an OtherOperationCount > 0\n");
     }
+
+    /* a write and a read of a file count in the process's counters */
+    {
+        IO_COUNTERS after;
+        char path[MAX_PATH], dir[MAX_PATH], buffer[4096] = { 1 };
+        HANDLE file;
+        DWORD done;
+
+        GetTempPathA(sizeof(dir), dir);
+        GetTempFileNameA(dir, "ioc", 0, path);
+        file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                           FILE_FLAG_DELETE_ON_CLOSE, NULL);
+        ok( file != INVALID_HANDLE_VALUE, "CreateFile failed, error %lu\n", GetLastError());
+        status = NtQueryInformationProcess( GetCurrentProcess(), ProcessIoCounters, &pii, sizeof(pii), NULL);
+        ok( !status, "got %08lx\n", status);
+        WriteFile(file, buffer, sizeof(buffer), &done, NULL);
+        SetFilePointer(file, 0, NULL, FILE_BEGIN);
+        ReadFile(file, buffer, sizeof(buffer), &done, NULL);
+        status = NtQueryInformationProcess( GetCurrentProcess(), ProcessIoCounters, &after, sizeof(after), NULL);
+        ok( !status, "got %08lx\n", status);
+        ok( after.WriteOperationCount > pii.WriteOperationCount, "write operations %s -> %s\n",
+            wine_dbgstr_longlong(pii.WriteOperationCount), wine_dbgstr_longlong(after.WriteOperationCount));
+        ok( after.ReadOperationCount > pii.ReadOperationCount, "read operations %s -> %s\n",
+            wine_dbgstr_longlong(pii.ReadOperationCount), wine_dbgstr_longlong(after.ReadOperationCount));
+        ok( after.WriteTransferCount >= pii.WriteTransferCount + sizeof(buffer), "write bytes %s -> %s\n",
+            wine_dbgstr_longlong(pii.WriteTransferCount), wine_dbgstr_longlong(after.WriteTransferCount));
+        ok( after.ReadTransferCount >= pii.ReadTransferCount + sizeof(buffer), "read bytes %s -> %s\n",
+            wine_dbgstr_longlong(pii.ReadTransferCount), wine_dbgstr_longlong(after.ReadTransferCount));
+        CloseHandle(file);
+    }
 }
 
 static void test_query_process_times(void)

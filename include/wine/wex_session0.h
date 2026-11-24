@@ -117,11 +117,9 @@ struct wex_session0_hive_save
  * when its path equals an entry or continues it with a backslash (wex_session_key_match). Compared without regard
  * to case.
  *
- * The one list for both uses: ntdll opens these keys in the program's own server instead of session 0 (routing),
- * and a server that shares a machine hive file never merges its copy of them into that file (persistence,
- * is_per_session_key in server/registry.c). The server also keeps a few values per session (the PROCESSOR_* values
- * of Session Manager\Environment, is_per_session_value); ntdll has no such list, since every session runs on the
- * same processors and session 0's values are right for all of them. */
+ * ntdll opens these keys in the program's own server instead of session 0 (routing). The server's copy of the
+ * machine hives keeps them and is never written: only session 0 writes the machine hives (R4 of
+ * docs/SESSION0_SPLIT_REVIEW.md retired the merge of a shared hive file, which used this list too). */
 #define WEX_SESSION_MACHINE_KEYS \
     "Hardware", \
     "System\\ControlSet001\\Enum", \

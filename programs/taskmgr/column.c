@@ -100,7 +100,8 @@ static int InsertColumn(int nCol, LPCWSTR lpszColumnHeading, int nFormat, int nW
     if (nWidth != -1)
     {
         column.mask |= LVCF_WIDTH;
-        column.cx = nWidth;
+        /* never narrower than the heading in this font and DPI */
+        column.cx = max(nWidth, TaskManager_HeaderWidth(hProcessPageListCtrl, lpszColumnHeading));
     }
 
     if (nSubItem != -1)

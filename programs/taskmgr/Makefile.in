@@ -1,5 +1,6 @@
 MODULE    = taskmgr.exe
-IMPORTS   = shell32 shlwapi comctl32 user32 gdi32 advapi32
+IMPORTS   = shell32 shlwapi comctl32 user32 gdi32 advapi32 iphlpapi
+DELAYIMPORTS = uxtheme
 
 EXTRADLLFLAGS = -mwindows
 
@@ -16,6 +17,7 @@ SOURCES = \
 	endproc.c \
 	graph.c \
 	graphctl.c \
+	netpage.c \
 	optnmenu.c \
 	perfdata.c \
 	perfpage.c \
@@ -23,7 +25,9 @@ SOURCES = \
 	proclist.c \
 	procpage.c \
 	run.c \
+	shutdown.c \
 	taskmgr.c \
 	taskmgr.rc \
 	taskmgr.svg \
-	trayicon.c
+	trayicon.c \
+	userpage.c
