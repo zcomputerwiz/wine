@@ -7698,6 +7698,71 @@ static void test_cursor_clipping(IUnknown *device, BOOL is_d3d12)
     ok(refcount == !is_d3d12, "Got unexpected refcount %lu.\n", refcount);
 }
 
+/* RegisterOcclusionStatusEvent sets the event at once; cookies count from 1. EnqueueSetEvent sets the event once the commands
+ * submitted so far are complete. Both need an event they can set. */
+static void test_occlusion_status(void)
+{
+    HANDLE event, event2, limited;
+    DWORD cookie, cookie2;
+    IDXGIFactory2 *factory;
+    IDXGIDevice3 *device3;
+    IDXGIDevice *device;
+    HRESULT hr;
+
+    if (FAILED(hr = CreateDXGIFactory(&IID_IDXGIFactory2, (void **)&factory)))
+    {
+        win_skip("IDXGIFactory2 is not available.\n");
+        return;
+    }
+    event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    event2 = CreateEventW(NULL, FALSE, FALSE, NULL);
+
+    cookie = 0xdeadbeef;
+    hr = IDXGIFactory2_RegisterOcclusionStatusEvent(factory, event, &cookie);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(cookie == 1, "Got unexpected cookie %#lx.\n", cookie);
+    ok(!WaitForSingleObject(event, 0), "The event is not set.\n");
+    hr = IDXGIFactory2_RegisterOcclusionStatusEvent(factory, event2, &cookie2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(cookie2 == 2, "Got unexpected cookie %#lx.\n", cookie2);
+    IDXGIFactory2_UnregisterOcclusionStatus(factory, cookie);
+    IDXGIFactory2_UnregisterOcclusionStatus(factory, cookie2);
+
+    /* a handle that cannot set the event */
+    ok(DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(), &limited, SYNCHRONIZE, FALSE, 0),
+            "DuplicateHandle failed, error %lu.\n", GetLastError());
+    cookie = 0xdeadbeef;
+    hr = IDXGIFactory2_RegisterOcclusionStatusEvent(factory, limited, &cookie);
+    ok(hr == DXGI_ERROR_INVALID_CALL, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+        IDXGIFactory2_UnregisterOcclusionStatus(factory, cookie);
+
+    if ((device = create_device(0)))
+    {
+        if (SUCCEEDED(IDXGIDevice_QueryInterface(device, &IID_IDXGIDevice3, (void **)&device3)))
+        {
+            hr = IDXGIDevice3_EnqueueSetEvent(device3, event);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            ok(!WaitForSingleObject(event, 5000), "The event is not set.\n");
+            hr = IDXGIDevice3_EnqueueSetEvent(device3, NULL);
+            ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+            hr = IDXGIDevice3_EnqueueSetEvent(device3, limited);
+            ok(hr == E_ACCESSDENIED, "Got unexpected hr %#lx.\n", hr);
+            IDXGIDevice3_Release(device3);
+        }
+        else
+        {
+            win_skip("IDXGIDevice3 is not available.\n");
+        }
+        IDXGIDevice_Release(device);
+    }
+
+    CloseHandle(limited);
+    CloseHandle(event2);
+    CloseHandle(event);
+    IDXGIFactory2_Release(factory);
+}
+
 static void test_factory_adapters_changed_event(void)
 {
     IDXGIFactory7 *factory, *factory2;
@@ -9206,6 +9271,7 @@ START_TEST(dxgi)
     queue_test(test_object_wrapping);
     queue_test(test_factory_check_feature_support);
     queue_test(test_factory_adapters_changed_event);
+    queue_test(test_occlusion_status);
     queue_test(test_video_memory_budget_notification);
 
     run_queued_tests();

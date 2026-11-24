@@ -323,10 +323,17 @@ static HRESULT STDMETHODCALLTYPE dxgi_device_EnqueueSetEvent(IWineDXGIDevice *if
 {
     struct dxgi_device *device = impl_from_IWineDXGIDevice(iface);
     struct wined3d_query *query;
+    DWORD start, spins = 0;
     BOOL done;
     HRESULT hr;
 
     TRACE("iface %p, event %p.\n", iface, event);
+
+    /* an event this call cannot set fails before any work (measured: NULL E_INVALIDARG, no EVENT_MODIFY_STATE E_ACCESSDENIED) */
+    if (!event)
+        return E_INVALIDARG;
+    if (!dxgi_event_handle_valid(event))
+        return E_ACCESSDENIED;
 
     wined3d_mutex_lock();
     hr = wined3d_query_create(device->wined3d_device, WINED3D_QUERY_TYPE_EVENT, NULL,
@@ -341,13 +348,20 @@ static HRESULT STDMETHODCALLTYPE dxgi_device_EnqueueSetEvent(IWineDXGIDevice *if
         return hr;
     }
 
+    /* bounded: after a device loss the query may never complete; the event is set anyway then */
+    start = GetTickCount();
     for (;;)
     {
         wined3d_mutex_lock();
         hr = wined3d_query_get_data(query, &done, sizeof(done), WINED3DGETDATA_FLUSH);
         wined3d_mutex_unlock();
         if (hr != S_FALSE) break;
-        Sleep(0);
+        if (GetTickCount() - start > 2000)
+        {
+            WARN("The query did not complete in 2 s; setting the event.\n");
+            break;
+        }
+        Sleep(++spins < 64 ? 0 : 1);
     }
     wined3d_mutex_lock();
     wined3d_query_decref(query);

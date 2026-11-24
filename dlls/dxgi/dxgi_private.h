@@ -50,6 +50,16 @@ enum dxgi_frame_latency
     DXGI_FRAME_LATENCY_MAX     = 16,
 };
 
+/* whether a handle can be set with SetEvent (EVENT_MODIFY_STATE), checked without touching its state */
+static inline BOOL dxgi_event_handle_valid(HANDLE event)
+{
+    OBJECT_BASIC_INFORMATION info;
+
+    if (!event || NtQueryObject(event, ObjectBasicInformation, &info, sizeof(info), NULL))
+        return FALSE;
+    return !!(info.GrantedAccess & EVENT_MODIFY_STATE);
+}
+
 /* Layered device */
 enum dxgi_device_layer_id
 {

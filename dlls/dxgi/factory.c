@@ -432,6 +432,9 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_RegisterOcclusionStatusEvent(IWine
 
     if (!event || !cookie)
         return DXGI_ERROR_INVALID_CALL;
+    /* the event is set at once and on every change: a handle without EVENT_MODIFY_STATE would fail silently */
+    if (!dxgi_event_handle_valid(event))
+        return DXGI_ERROR_INVALID_CALL;   /* measured */
 
     if (!DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS))
         return DXGI_ERROR_INVALID_CALL;
