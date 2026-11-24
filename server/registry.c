@@ -212,6 +212,7 @@ struct save_branch_info
     const char     *filename;
     enum hive_storage kind;
     bool            loaded;   /* read from its file at startup: clean until it changes */
+    bool            warned;   /* HIVE_MACHINE_COPY outside the launcher: said once that changes are not saved */
     struct e1s_hive *managed; /* HIVE_MANAGED: the profile */
     void           *agent;    /* HIVE_AGENT: the user's server that saves this hive */
     struct security_descriptor *owner_sd; /* T4a: default descriptor of the hive's keys, for its user */
@@ -2706,6 +2707,7 @@ static FILE *fopen_machine_hive( const char *filename )
  * machine root */
 static int load_init_registry_from_file( const char *filename, struct key *key, bool machine )
 {
+    struct stat st;
     FILE *f;
     struct save_branch_info *info;
 
@@ -2715,7 +2717,7 @@ static int load_init_registry_from_file( const char *filename, struct key *key, 
 
     if ((f = machine ? fopen_machine_hive( filename ) : fopen( filename, "r" )))
     {
-        info->loaded = true;
+        info->loaded = !fstat( fileno( f ), &st );
         load_keys( key, filename, f, 0 );
         fclose( f );
         if (get_error() == STATUS_NOT_REGISTRY_FILE)
@@ -3058,15 +3060,18 @@ static void save_registry( struct key *key, obj_handle_t handle )
     }
 }
 
-/* save a branch of the server's own (HIVE_FILE) to its file, as stock Wine does: through a temporary file that is
- * renamed over it, or straight into a file that is not a regular one or has more links */
+/* Save a branch of the server's own (HIVE_FILE) to its file: a hive reached through a symbolic link is written
+ * where the link points; a temporary file next to it, with the old file's mode, is renamed over it. A file or
+ * directory that this server may not write is left as it is and the changes stay in memory (as before R4c). */
 static int do_save_branch( struct save_branch_info *info )
 {
     struct key *key = info->key;
     const char *filename = info->filename;
-    struct stat st;
-    char tmp[32];
-    int fd, count = 0, ret = 0;
+    char target_path[PATH_MAX], target_dir[PATH_MAX], tmp[PATH_MAX];
+    struct stat st, lst;
+    const char *slash;
+    int fd = -1, count = 0, ret = 0, exists;
+    mode_t mode = 0664;
     FILE *f;
 
     if (!(key->flags & KEY_DIRTY))
@@ -3074,51 +3079,62 @@ static int do_save_branch( struct save_branch_info *info )
         if (debug_level > 1) dump_operation( key, NULL, "Not saving clean" );
         return 1;
     }
-    tmp[0] = 0;
 
-    if ((fd = open( filename, O_WRONLY )) != -1)
+    if (!lstat( filename, &lst ) && S_ISLNK( lst.st_mode ))
     {
-        if (!lstat( filename, &st ) && (!S_ISREG(st.st_mode) || st.st_nlink > 1))
+        if (!realpath( filename, target_path ))
         {
-            if (ftruncate( fd, 0 )) { close( fd ); goto done; }
-            goto save;
+            ssize_t len = readlink( filename, target_path, sizeof(target_path) - 1 );
+            if (len < 0) return 0;
+            target_path[len] = 0;
         }
-        close( fd );
+    }
+    else if (snprintf( target_path, sizeof(target_path), "%s", filename ) >= (int)sizeof(target_path)) return 0;
+
+    if ((slash = strrchr( target_path, '/' )))
+    {
+        size_t dirlen = slash == target_path ? 1 : slash - target_path;
+        if (dirlen >= sizeof(target_dir)) return 0;
+        memcpy( target_dir, target_path, dirlen );
+        target_dir[dirlen] = 0;
+    }
+    else strcpy( target_dir, "." );
+
+    exists = !stat( target_path, &st );
+    if (exists) mode = st.st_mode & 0777;
+    if ((exists && access( target_path, W_OK ) && (errno == EACCES || errno == EROFS)) ||
+        (access( target_dir, W_OK ) && (errno == EACCES || errno == EROFS)))
+    {
+        make_clean( key );  /* not ours to write: the changes stay in memory */
+        return 1;
     }
 
     for (;;)
     {
-        snprintf( tmp, sizeof(tmp), "reg%lx%04x.tmp", (long)getpid(), count++ );
-        if ((fd = open( tmp, O_CREAT | O_EXCL | O_WRONLY, 0666 )) != -1) break;
-        if (errno != EEXIST) goto done;
-        close( fd );
+        if (snprintf( tmp, sizeof(tmp), "%s/reg%lx%04x.tmp", target_dir, (long)getpid(), count++ ) >= (int)sizeof(tmp))
+            return 0;
+        if ((fd = open( tmp, O_CREAT | O_EXCL | O_WRONLY, 0600 )) != -1) break;
+        if (errno != EEXIST) return 0;
     }
 
- save:
     if (!(f = fdopen( fd, "w" )))
     {
-        if (tmp[0]) unlink( tmp );
+        unlink( tmp );
         close( fd );
-        goto done;
+        return 0;
     }
 
     if (debug_level > 1)
     {
-        fprintf( stderr, "%s: ", filename );
+        fprintf( stderr, "%s: ", target_path );
         dump_operation( key, NULL, "saving" );
     }
 
     save_all_subkeys( key, f );
-    ret = !fflush( f ) && !fsync( fileno( f ) );
+    ret = !fflush( f ) && !fsync( fileno( f ) ) && !fchmod( fileno( f ), mode );
     if (fclose( f )) ret = 0;
-
-    if (tmp[0])
-    {
-        if (ret) ret = !rename( tmp, filename );
-        if (!ret) unlink( tmp );
-    }
-
-done:
+    if (ret) ret = !rename( tmp, target_path );
+    if (!ret) unlink( tmp );
     if (ret) make_clean( key );
     return ret;
 }
@@ -3341,7 +3357,15 @@ static int save_branch( struct save_branch_info *info )
     case HIVE_AGENT:
         return session0_save_user_hive( info );
     case HIVE_MACHINE_COPY:
-        return 1;  /* session 0 writes the machine hives; this copy is for the per-session keys and start-up reads */
+        /* session 0 writes the machine hives; this copy is for the per-session keys and start-up reads. A server
+         * the launcher did not start, whose prefix links its hive into the machine root, is told once. */
+        if (!sysrun_active && !session0_client && (info->key->flags & KEY_DIRTY) && !info->warned)
+        {
+            fprintf( stderr, "wineserver: %s is the machine root's hive, which only session 0 writes: changes made "
+                     "by this server are not saved\n", info->filename );
+            info->warned = true;
+        }
+        return 1;
     case HIVE_FILE:
         break;
     }
