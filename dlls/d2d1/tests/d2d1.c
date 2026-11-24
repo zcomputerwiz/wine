@@ -25,6 +25,7 @@
 #include "d2d1_3.h"
 #include "d2d1effectauthor.h"
 #include "d3d11.h"
+#include "dxgi1_2.h"
 #include "wincrypt.h"
 #include "wine/test.h"
 #include "initguid.h"
@@ -10336,6 +10337,76 @@ static void test_bitmap_surface(BOOL d3d11)
     release_test_context(&ctx);
 }
 
+/* A surface made by IDXGIResource1::CreateSubresourceSurface does not answer QueryInterface for the texture, but Direct2D takes it
+ * as a target (the lifted compositor of the Windows App SDK draws into composition surfaces this way). */
+static void test_subresource_surface(BOOL d3d11)
+{
+    D3D11_TEXTURE2D_DESC texture_desc = {64, 32, 1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, {1, 0}, D3D11_USAGE_DEFAULT,
+            D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, 0, 0};
+    D2D1_BITMAP_PROPERTIES1 desc = {{DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED}, 96.0f, 96.0f,
+            D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW, NULL};
+    ID2D1DeviceContext *context;
+    struct d2d1_test_context ctx;
+    ID3D11Texture2D *texture, *texture2;
+    ID3D11Device *d3d_device;
+    IDXGIResource1 *resource;
+    IDXGISurface2 *surface;
+    ID2D1Bitmap1 *bitmap;
+    ID2D1Device *device;
+    unsigned int index;
+    HRESULT hr;
+
+    if (!d3d11 || !init_test_context(&ctx, d3d11))
+        return;
+    if (!ctx.factory1)
+    {
+        win_skip("ID2D1Factory1 is not supported.\n");
+        release_test_context(&ctx);
+        return;
+    }
+    hr = IDXGIDevice_QueryInterface(ctx.device, &IID_ID3D11Device, (void **)&d3d_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID3D11Device_CreateTexture2D(d3d_device, &texture_desc, NULL, &texture);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIResource1, (void **)&resource);
+    if (FAILED(hr))
+    {
+        win_skip("IDXGIResource1 is not supported.\n");
+        ID3D11Texture2D_Release(texture);
+        ID3D11Device_Release(d3d_device);
+        release_test_context(&ctx);
+        return;
+    }
+    hr = IDXGIResource1_CreateSubresourceSurface(resource, 0, &surface);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDXGISurface2_QueryInterface(surface, &IID_ID3D11Texture2D, (void **)&texture2);
+    ok(hr == E_NOINTERFACE, "Got unexpected hr %#lx.\n", hr);
+    hr = IDXGISurface2_GetResource(surface, &IID_ID3D11Texture2D, (void **)&texture2, &index);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(texture2 == texture && !index, "Got texture %p, index %u.\n", texture2, index);
+    ID3D11Texture2D_Release(texture2);
+
+    hr = ID2D1Factory1_CreateDevice(ctx.factory1, ctx.device, &device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1Device_CreateDeviceContext(device, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &context);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1DeviceContext_CreateBitmapFromDxgiSurface(context, (IDXGISurface *)surface, &desc, &bitmap);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        ok(ID2D1Bitmap1_GetOptions(bitmap) == desc.bitmapOptions, "Got options %#x.\n", ID2D1Bitmap1_GetOptions(bitmap));
+        ID2D1Bitmap1_Release(bitmap);
+    }
+
+    ID2D1DeviceContext_Release(context);
+    ID2D1Device_Release(device);
+    IDXGISurface2_Release(surface);
+    IDXGIResource1_Release(resource);
+    ID3D11Texture2D_Release(texture);
+    ID3D11Device_Release(d3d_device);
+    release_test_context(&ctx);
+}
+
 /* The private interface {46fdbfea-53f8-440c-b9e2-81dfec612a72} of the device, which the lifted compositor of the Windows App SDK asks
  * for; slot 5 as it calls it. Only 64-bit is measured. */
 static void test_device_private(BOOL d3d11)
@@ -18583,6 +18654,7 @@ START_TEST(d2d1)
     queue_test(test_bitmap_surface);
     queue_test(test_device_context);
     queue_test(test_device_private);
+    queue_test(test_subresource_surface);
     queue_d3d10_test(test_invert_matrix);
     queue_d3d10_test(test_skew_matrix);
     queue_test(test_command_list);
