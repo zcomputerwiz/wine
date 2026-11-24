@@ -66,7 +66,8 @@ struct combine_sink
     ID2D1SimplifiedGeometrySink ID2D1SimplifiedGeometrySink_iface;
     struct combine_shape *shape;
     struct combine_point first, last;
-    BOOL in_figure, hollow, failed, bad_number;
+    size_t max_edges;   /* more edges than this are not collected: the limit applies while Simplify writes */
+    BOOL in_figure, hollow, failed, bad_number, too_many;
 };
 
 static inline struct combine_sink *impl_from_ID2D1SimplifiedGeometrySink(ID2D1SimplifiedGeometrySink *iface)
@@ -102,6 +103,15 @@ static BOOL combine_shape_add_edge(struct combine_shape *shape, const struct com
     shape->edges[shape->count].b = *b;
     ++shape->count;
     return TRUE;
+}
+
+static void combine_sink_add_edge(struct combine_sink *sink, const struct combine_point *a, const struct combine_point *b)
+{
+    if (combine_point_equal(a, b) || sink->failed || sink->too_many) return;
+    if (sink->shape->count >= sink->max_edges)
+        sink->too_many = TRUE;
+    else if (!combine_shape_add_edge(sink->shape, a, b))
+        sink->failed = TRUE;
 }
 
 static HRESULT STDMETHODCALLTYPE combine_sink_QueryInterface(ID2D1SimplifiedGeometrySink *iface, REFIID iid, void **out)
@@ -155,7 +165,7 @@ static void STDMETHODCALLTYPE combine_sink_AddLines(ID2D1SimplifiedGeometrySink 
     for (i = 0; i < count; ++i)
     {
         p = combine_snap(sink, points[i]);
-        if (!sink->hollow && !combine_shape_add_edge(sink->shape, &sink->last, &p)) sink->failed = TRUE;
+        if (!sink->hollow) combine_sink_add_edge(sink, &sink->last, &p);
         sink->last = p;
     }
 }
@@ -176,8 +186,7 @@ static void STDMETHODCALLTYPE combine_sink_EndFigure(ID2D1SimplifiedGeometrySink
     struct combine_sink *sink = impl_from_ID2D1SimplifiedGeometrySink(iface);
 
     /* an open figure is filled as if it were closed */
-    if (sink->in_figure && !sink->hollow && !combine_shape_add_edge(sink->shape, &sink->last, &sink->first))
-        sink->failed = TRUE;
+    if (sink->in_figure && !sink->hollow) combine_sink_add_edge(sink, &sink->last, &sink->first);
     sink->in_figure = FALSE;
 }
 
@@ -201,7 +210,7 @@ static const ID2D1SimplifiedGeometrySinkVtbl combine_sink_vtbl =
 };
 
 static HRESULT combine_collect(ID2D1Geometry *geometry, const D2D1_MATRIX_3X2_F *transform, float tolerance,
-        struct combine_shape *shape)
+        size_t max_edges, struct combine_shape *shape)
 {
     struct combine_sink sink = {{&combine_sink_vtbl}};
     D2D1_RECT_F bounds;
@@ -209,6 +218,7 @@ static HRESULT combine_collect(ID2D1Geometry *geometry, const D2D1_MATRIX_3X2_F 
 
     shape->fill_mode = D2D1_FILL_MODE_ALTERNATE;
     sink.shape = shape;
+    sink.max_edges = max_edges;
     /* NaN, infinite or very large coordinates are refused before Simplify flattens the curves */
     if (transform && (!isfinite(transform->_11) || !isfinite(transform->_12) || !isfinite(transform->_21)
             || !isfinite(transform->_22) || !isfinite(transform->_31) || !isfinite(transform->_32)))
@@ -228,6 +238,11 @@ static HRESULT combine_collect(ID2D1Geometry *geometry, const D2D1_MATRIX_3X2_F 
             &sink.ID2D1SimplifiedGeometrySink_iface);
     if (SUCCEEDED(hr) && sink.bad_number) hr = D2DERR_BAD_NUMBER;
     else if (SUCCEEDED(hr) && sink.failed) hr = E_OUTOFMEMORY;
+    else if (SUCCEEDED(hr) && sink.too_many)
+    {
+        FIXME("More than %Iu edges in all are not supported.\n", (size_t)COMBINE_MAX_EDGES);
+        hr = E_NOTIMPL;
+    }
     return hr;
 }
 
@@ -456,18 +471,14 @@ HRESULT d2d_geometry_combine(ID2D1Geometry *geometry1, ID2D1Geometry *geometry2,
     if (!(tolerance > 0.0f)) tolerance = D2D1_DEFAULT_FLATTENING_TOLERANCE;
 
     /* the transform applies to the second geometry only */
-    if (FAILED(hr = combine_collect(geometry1, NULL, tolerance, &shapes[0]))) goto done;
-    if (FAILED(hr = combine_collect(geometry2, transform, tolerance, &shapes[1]))) goto done;
+    /* the edge limit applies to both geometries together, while they are collected */
+    if (FAILED(hr = combine_collect(geometry1, NULL, tolerance, COMBINE_MAX_EDGES, &shapes[0]))) goto done;
+    if (FAILED(hr = combine_collect(geometry2, transform, tolerance, COMBINE_MAX_EDGES - shapes[0].count, &shapes[1])))
+        goto done;
     hr = E_OUTOFMEMORY;
 
     /* split every edge where it meets another one */
     all_count = shapes[0].count + shapes[1].count;
-    if (all_count > COMBINE_MAX_EDGES)
-    {
-        FIXME("%Iu edges, more than %u, are not supported.\n", all_count, COMBINE_MAX_EDGES);
-        hr = E_NOTIMPL;
-        goto done;
-    }
     piece_shapes[0].fill_mode = shapes[0].fill_mode;
     piece_shapes[1].fill_mode = shapes[1].fill_mode;
     if (all_count && (!(all = malloc(all_count * sizeof(*all))) || !(splits = calloc(all_count, sizeof(*splits)))))
