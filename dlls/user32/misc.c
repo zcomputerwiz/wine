@@ -575,3 +575,41 @@ LRESULT WINAPI ImeWndProcW( HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam )
     if (!imm_ime_wnd_proc) return DefWindowProcW(hwnd, msg, wParam, lParam);
     return imm_ime_wnd_proc( hwnd, msg, wParam, lParam, FALSE );
 }
+
+/***********************************************************************
+ *		GetWindowBand (USER32.@)
+ *
+ * The z-order band of a window (undocumented). Wine has one band: ZBID_DEFAULT, 1, for every window, including the desktop and the
+ * windows of other processes (as measured on Windows 11 with a plain window, a popup, the shell tray and the desktop window,
+ * tests/uwp/alpc/windowband-probe.c). A NULL or an invalid window is ERROR_INVALID_WINDOW_HANDLE, a NULL output pointer fails
+ * without an error code.
+ */
+BOOL WINAPI GetWindowBand( HWND hwnd, DWORD *band )
+{
+    if (!hwnd || !IsWindow( hwnd ))
+    {
+        SetLastError( ERROR_INVALID_WINDOW_HANDLE );
+        return FALSE;
+    }
+    if (!band) return FALSE;
+    *band = 1;  /* ZBID_DEFAULT */
+    return TRUE;
+}
+
+/***********************************************************************
+ *		UserOrdinal2574 (USER32.2574)
+ *
+ * An unnamed export of user32 on Windows 11 that takes a window handle and returns a BOOL. The Windows App Runtime calls it with a
+ * window (the Wine log shows the abort at the call). What it asks is not known: on Windows 11 (tests/uwp/alpc/user32-ordinal-probe.c) it returns FALSE for the desktop window and
+ * for a plain window of the process, and FALSE with ERROR_INVALID_PARAMETER for a NULL or an invalid handle, which is what this does.
+ */
+BOOL WINAPI UserOrdinal2574( HWND hwnd )
+{
+    FIXME( "(%p) semi-stub\n", hwnd );
+    if (!hwnd || !IsWindow( hwnd ))
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+    return FALSE;
+}

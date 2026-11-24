@@ -2938,6 +2938,213 @@ BOOL WINAPI NtUserClipCursor( const RECT *rect )
 }
 
 /**********************************************************************
+ * Composition input sinks.
+ *
+ * The Windows App Runtime was seen creating sinks with NtCreateCompositionInputSink (calls from Microsoft.InputStateManager.dll in a
+ * trace of Notepad on Windows 11, each block naming the window of the application four times) and asking NtQueryCompositionInputSinkLuid for
+ * their identity. Measured on Windows 11 with tests/uwp/alpc/sink-probe.c, sink-probe2.c and
+ * sink-pops32.cpp (what the sink does in the window system is not known):
+ *   - NtCreateCompositionInputSink( block, &handle ) takes a block of 0xe8 bytes: a size (not checked) and four entries of 0x38 bytes
+ *     (how the sizes were measured: sink-probe3.c puts the block at the end of a committed page that an inaccessible page follows; the call
+ *     fails with an access violation status for a buffer of 0xe7 bytes and works for 0xe8, so it reads exactly 0xe8 bytes; clearing the
+ *     window of any one of the four entries, or moving the windows to a stride of 0x30, gives STATUS_INVALID_PARAMETER, so the windows sit at
+ *     offsets 16, 0x48, 0x80 and 0xb8, which is a stride of 0x38 after the size; the block Notepad passes, dumped with wintrace.c, has
+ *     that shape),
+ *     each a kind (0, 1 or 2 are accepted, 3 is not) and a window. All four windows have to be windows (not NULL, not destroyed, not the
+ *     desktop window): STATUS_INVALID_PARAMETER; a window of another process gives STATUS_ACCESS_DENIED; windows may differ and may be
+ *     child windows; the other fields are not looked at. A NULL block or handle pointer is STATUS_INVALID_PARAMETER. On failure the handle
+ *     is INVALID_HANDLE_VALUE. The object has the type "Composition" there.
+ *   - NtQueryCompositionInputSinkLuid( sink, &luid ) gives a LUID that is the same every time for one sink; a NULL pointer is an access
+ *     violation status, an invalid handle STATUS_INVALID_HANDLE, a handle of another kind of object (a shared visual handle, which is a
+ *     "Composition" object too) STATUS_OBJECT_TYPE_MISMATCH.
+ *   - NtCloseCompositionInputSink( sink ) closes the handle (a later query or close: STATUS_INVALID_HANDLE).
+ * 32-bit callers are not supported: the layout of their block is not known.
+ * A sink is an event object here, remembered in a list so that the other calls know it; NtQueryObject gives "Event" instead of
+ * "Composition". The list keeps a second handle to the event: when the application closes a sink with NtClose and the handle value is
+ * reused for another object, NtCompareObjects tells that the value no longer names the sink, and the entry is dropped instead of acting on
+ * the unrelated handle. (The event lives on until the stale entry is found or the process ends.)
+ */
+
+struct composition_input_sink
+{
+    struct list entry;
+    HANDLE handle;
+    HANDLE keep;   /* a second handle of ours to the same event: the entry is valid only while `handle` still names that object */
+    LUID luid;
+};
+
+static struct list composition_input_sinks = LIST_INIT( composition_input_sinks );
+static pthread_mutex_t composition_input_sink_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+#define COMPOSITION_INPUT_SINK_SIZE   0xe8
+#define COMPOSITION_INPUT_SINK_ENTRY  0x38
+
+static NTSTATUS check_composition_input_sink_window( HWND hwnd )
+{
+    DWORD pid = 0;
+
+    if (!hwnd || !is_window( hwnd ) || hwnd == get_desktop_window()) return STATUS_INVALID_PARAMETER;
+    if (!get_window_thread( hwnd, &pid )) return STATUS_INVALID_PARAMETER;
+    if (pid != HandleToULong( NtCurrentTeb()->ClientId.UniqueProcess )) return STATUS_ACCESS_DENIED;
+    return STATUS_SUCCESS;
+}
+
+/**********************************************************************
+ *       NtCreateCompositionInputSink    (win32u.@)
+ */
+NTSTATUS WINAPI NtCreateCompositionInputSink( const void *params, HANDLE *sink )
+{
+    struct composition_input_sink *obj;
+    BYTE block[COMPOSITION_INPUT_SINK_SIZE];
+    HANDLE handle = NULL;
+    NTSTATUS status;
+    unsigned int i;
+
+    TRACE( "params %p, sink %p\n", params, sink );
+
+    if (!sink) return STATUS_INVALID_PARAMETER;
+    status = STATUS_SUCCESS;
+    __TRY
+    {
+        *sink = INVALID_HANDLE_VALUE;
+    }
+    __EXCEPT
+    {
+        status = STATUS_ACCESS_VIOLATION;
+    }
+    __ENDTRY
+    if (status) return status;
+    if (!params) return STATUS_INVALID_PARAMETER;
+
+    __TRY
+    {
+        memcpy( block, params, sizeof(block) );
+        status = STATUS_SUCCESS;
+    }
+    __EXCEPT
+    {
+        status = STATUS_ACCESS_VIOLATION;
+    }
+    __ENDTRY
+    if (status) return status;
+
+    for (i = 0; i < 4; i++)
+    {
+        const BYTE *entry = block + sizeof(ULONG_PTR) + i * COMPOSITION_INPUT_SINK_ENTRY;
+        ULONG_PTR kind = *(const ULONG_PTR *)entry;
+        HWND hwnd = *(HWND const *)(entry + sizeof(ULONG_PTR));
+
+        if (kind > 2) return STATUS_INVALID_PARAMETER;
+        if ((status = check_composition_input_sink_window( hwnd ))) return status;
+    }
+
+    if (!(obj = malloc( sizeof(*obj) ))) return STATUS_NO_MEMORY;
+    if ((status = NtCreateEvent( &handle, EVENT_ALL_ACCESS, NULL, NotificationEvent, FALSE )) ||
+        (status = NtDuplicateObject( NtCurrentProcess(), handle, NtCurrentProcess(), &obj->keep, 0, 0, DUPLICATE_SAME_ACCESS )) ||
+        (status = NtAllocateLocallyUniqueId( &obj->luid )))
+    {
+        if (handle) NtClose( handle );
+        free( obj );
+        return status;
+    }
+    obj->handle = handle;
+
+    pthread_mutex_lock( &composition_input_sink_mutex );
+    list_add_tail( &composition_input_sinks, &obj->entry );
+    pthread_mutex_unlock( &composition_input_sink_mutex );
+
+    __TRY
+    {
+        *sink = handle;
+    }
+    __EXCEPT
+    {
+        status = STATUS_ACCESS_VIOLATION;
+    }
+    __ENDTRY
+    if (status) NtCloseCompositionInputSink( handle );
+    return status;
+}
+
+static BOOL take_composition_input_sink( HANDLE handle, BOOL remove, LUID *luid )
+{
+    struct composition_input_sink *obj;
+    BOOL found = FALSE;
+
+    pthread_mutex_lock( &composition_input_sink_mutex );
+    LIST_FOR_EACH_ENTRY( obj, &composition_input_sinks, struct composition_input_sink, entry )
+    {
+        if (obj->handle != handle) continue;
+        if (NtCompareObjects( obj->keep, handle ))
+        {
+            /* the application closed the sink with NtClose and the value now names something else */
+            list_remove( &obj->entry );
+            NtClose( obj->keep );
+            free( obj );
+            break;
+        }
+        found = TRUE;
+        if (luid) *luid = obj->luid;
+        if (remove)
+        {
+            list_remove( &obj->entry );
+            NtClose( obj->keep );
+            free( obj );
+        }
+        break;
+    }
+    pthread_mutex_unlock( &composition_input_sink_mutex );
+    return found;
+}
+
+/**********************************************************************
+ *       NtQueryCompositionInputSinkLuid    (win32u.@)
+ */
+NTSTATUS WINAPI NtQueryCompositionInputSinkLuid( HANDLE sink, LUID *luid )
+{
+    OBJECT_BASIC_INFORMATION info;
+    LUID value;
+    NTSTATUS status;
+
+    TRACE( "sink %p, luid %p\n", sink, luid );
+
+    if (!take_composition_input_sink( sink, FALSE, &value ))
+    {
+        if (NtQueryObject( sink, ObjectBasicInformation, &info, sizeof(info), NULL )) return STATUS_INVALID_HANDLE;
+        return STATUS_OBJECT_TYPE_MISMATCH;
+    }
+
+    status = STATUS_SUCCESS;
+    __TRY
+    {
+        *luid = value;
+    }
+    __EXCEPT
+    {
+        status = STATUS_ACCESS_VIOLATION;
+    }
+    __ENDTRY
+    return status;
+}
+
+/**********************************************************************
+ *       NtCloseCompositionInputSink    (win32u.@)
+ */
+NTSTATUS WINAPI NtCloseCompositionInputSink( HANDLE sink )
+{
+    OBJECT_BASIC_INFORMATION info;
+
+    TRACE( "sink %p\n", sink );
+
+    if (!take_composition_input_sink( sink, TRUE, NULL ))
+    {
+        if (NtQueryObject( sink, ObjectBasicInformation, &info, sizeof(info), NULL )) return STATUS_INVALID_HANDLE;
+        return STATUS_OBJECT_TYPE_MISMATCH;
+    }
+    return NtClose( sink );
+}
+
+/**********************************************************************
  *       NtUserRegisterTouchPadCapable    (win32u.@)
  */
 BOOL WINAPI NtUserRegisterTouchPadCapable( BOOL capable )

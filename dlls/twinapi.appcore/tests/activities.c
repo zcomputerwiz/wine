@@ -316,6 +316,60 @@ static void test_JumpList(void)
     IJumpListStatics_Release( statics );
 }
 
+/* IUserActivityRequestManagerInterop {dd69f876-...}, the second interface of the factory (useractivityinterop.h): GetForWindow is the
+ * method after the IInspectable ones. Microsoft.UI.Xaml calls it with its window. */
+static void test_UserActivityRequestManagerInterop(void)
+{
+    static const GUID IID_interop = {0xdd69f876, 0x9699, 0x4715, {0x90, 0x95, 0xe3, 0x7e, 0xa3, 0x0d, 0xfa, 0x1b}};
+    typedef HRESULT (WINAPI *get_for_window_t)( void *iface, HWND window, REFIID riid, void **value );
+    static const WCHAR *class_name = L"Windows.ApplicationModel.UserActivities.UserActivityRequestManager";
+    IUserActivityRequestManager *manager, *manager2;
+    IActivationFactory *factory;
+    get_for_window_t get_for_window;
+    void *interop;
+    HSTRING str;
+    HWND hwnd;
+    HRESULT hr;
+
+    WindowsCreateString( class_name, wcslen( class_name ), &str );
+    hr = RoGetActivationFactory( str, &IID_interop, &interop );
+    WindowsDeleteString( str );
+    if (hr == REGDB_E_CLASSNOTREG)
+    {
+        win_skip( "%s is not available.\n", debugstr_w( class_name ) );
+        return;
+    }
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (FAILED(hr)) return;
+
+    hr = IUnknown_QueryInterface( (IUnknown *)interop, &IID_IActivationFactory, (void **)&factory );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED(hr)) IActivationFactory_Release( factory );
+
+    get_for_window = (*(get_for_window_t **)interop)[6];
+    hwnd = CreateWindowW( L"static", L"interop", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, NULL, NULL, NULL, NULL );
+    ok( hwnd != NULL, "CreateWindow failed.\n" );
+
+    manager = NULL;
+    hr = get_for_window( interop, hwnd, &IID_IUserActivityRequestManager, (void **)&manager );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( manager != NULL, "got no manager.\n" );
+    manager2 = NULL;
+    hr = get_for_window( interop, hwnd, &IID_IUserActivityRequestManager, (void **)&manager2 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( manager2 == manager, "got %p and %p.\n", manager, manager2 );
+    if (manager2) IUserActivityRequestManager_Release( manager2 );
+    if (manager) IUserActivityRequestManager_Release( manager );
+
+    manager = (void *)0xdeadbeef;
+    hr = get_for_window( interop, (HWND)0x12345678, &IID_IUserActivityRequestManager, (void **)&manager );
+    ok( FAILED(hr), "got hr %#lx.\n", hr );
+    ok( !manager, "got %p.\n", manager );
+
+    DestroyWindow( hwnd );
+    IUnknown_Release( (IUnknown *)interop );
+}
+
 START_TEST(activities)
 {
     HRESULT hr;
@@ -325,6 +379,7 @@ START_TEST(activities)
 
     test_UserActivityChannel();
     test_JumpList();
+    test_UserActivityRequestManagerInterop();
 
     RoUninitialize();
 }

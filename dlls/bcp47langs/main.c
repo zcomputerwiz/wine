@@ -80,3 +80,23 @@ HRESULT WINAPI GetUserLanguages(WCHAR delim, HSTRING *langs)
     }
     return WindowsCreateString(buffer, p - buffer, langs);
 }
+
+/* the languages of the application: without an override (there is no override store here) those of the user. The first
+ * argument is NULL when the Windows App SDK asks for the current application */
+HRESULT WINAPI GetApplicationLanguages(const void *app, WCHAR delim, HSTRING *langs)
+{
+    TRACE("%p, %lc, %p\n", app, delim, langs);
+    if (app) FIXME("application %p not supported\n", app);
+    return GetUserLanguages(delim, langs);
+}
+
+/* the MUI form of a language list: the tags are already in the form MUI uses, so the list stays as it is */
+HRESULT WINAPI LanguageListAsMuiForm(WCHAR delim, HSTRING list, DWORD flags, HSTRING *out)
+{
+    TRACE("%lc, %p, %#lx, %p\n", delim, list, flags, out);
+
+    if (!out) return E_INVALIDARG;
+    *out = NULL;
+    if (flags) FIXME("flags %#lx not supported\n", flags);
+    return WindowsDuplicateString(list, out);
+}

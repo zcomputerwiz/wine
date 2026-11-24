@@ -375,6 +375,231 @@ static void test_DCompositionCreateDevice3(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+/* The shared visuals of the Windows App Runtime: DCompositionCreateSharedVisualHandle, the private interfaces of the device and its
+ * method that opens a handle as a visual or a target (slot 29 of the vtable of IDCompositionDesktopDevice, after the public methods).
+ * Observed on Windows 11. */
+static void test_shared_visual(void)
+{
+    static const GUID IID_alias_a = {0xd14b6158, 0xc3fa, 0x4bce, {0x9c, 0x1f, 0xb6, 0x1d, 0x86, 0x65, 0xea, 0xb0}};
+    static const GUID IID_alias_b = {0x28d6ad3d, 0xee2a, 0x4bcd, {0x94, 0x19, 0x7d, 0x54, 0x80, 0x04, 0x35, 0xb1}};
+    static const GUID IID_visual_private = {0x2c4eef28, 0x1bc0, 0x4736, {0xb7, 0xdd, 0xb6, 0x26, 0x92, 0xf9, 0xbd, 0x67}};
+    typedef HRESULT (WINAPI *create_handle_t)(HANDLE *);
+    typedef HRESULT (STDMETHODCALLTYPE *open_t)(void *iface, HANDLE handle, REFIID iid, void **out);
+    create_handle_t create_handle;
+    IDCompositionDesktopDevice *desktop;
+    IDCompositionDevice *device;
+    IDCompositionVisual *visual;
+    IDCompositionTarget *target;
+    IUnknown *alias_a, *alias_b;
+    HANDLE handle, handle2;
+    open_t open;
+    void *out;
+    HRESULT hr;
+
+    create_handle = (void *)GetProcAddress(GetModuleHandleW(L"dcomp.dll"), "DCompositionCreateSharedVisualHandle");
+    if (!create_handle || !pDCompositionCreateDevice3)
+    {
+        win_skip("DCompositionCreateSharedVisualHandle() or DCompositionCreateDevice3() is unavailable.\n");
+        return;
+    }
+
+    hr = create_handle(NULL);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+    handle = NULL;
+    hr = create_handle(&handle);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(handle != NULL && handle != INVALID_HANDLE_VALUE, "Got handle %p.\n", handle);
+    hr = create_handle(&handle2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = pDCompositionCreateDevice3(NULL, &IID_IDCompositionDesktopDevice, (void **)&desktop);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr)) goto done;
+
+    /* two other IIDs answer with the very interface of IDCompositionDesktopDevice */
+    hr = IDCompositionDesktopDevice_QueryInterface(desktop, &IID_alias_a, (void **)&alias_a);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(alias_a == (IUnknown *)desktop, "Got %p, expected %p.\n", alias_a, desktop);
+    if (SUCCEEDED(hr)) IUnknown_Release(alias_a);
+    hr = IDCompositionDesktopDevice_QueryInterface(desktop, &IID_alias_b, (void **)&alias_b);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(alias_b == (IUnknown *)desktop, "Got %p, expected %p.\n", alias_b, desktop);
+    if (SUCCEEDED(hr)) IUnknown_Release(alias_b);
+
+    /* Private method 46 (one pointer argument: 8 bytes removed on 32-bit Windows 11): stores the id of the newest completed batch of
+     * changes in a dword, 0 when nothing was submitted; the second dword of an eight-byte block is not touched. Observed on Windows
+     * 11 only: older Windows may not have the method. The NULL pointer is checked on Wine, where it was not measured. */
+    {
+        typedef HRESULT (STDMETHODCALLTYPE *method46_t)(void *iface, void *completed);
+        typedef LONG (WINAPI *rtl_get_version_t)(RTL_OSVERSIONINFOW *);
+        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        BOOL is_wine = !!GetProcAddress(ntdll, "wine_get_version");
+        rtl_get_version_t get_version = (void *)GetProcAddress(ntdll, "RtlGetVersion");
+        RTL_OSVERSIONINFOW version = {sizeof(version)};
+        method46_t method46 = (*(method46_t **)desktop)[46];
+        UINT64 block;
+
+        if (get_version) get_version(&version);
+        if (!is_wine && version.dwBuildNumber < 22000)
+        {
+            win_skip("Private method 46 is only known on Windows 11.\n");
+        }
+        else
+        {
+            block = 0xdeadbeef00000000ull;
+            hr = method46(desktop, &block);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            ok(block == 0xdeadbeef00000000ull, "Got block %#I64x.\n", block);
+
+            if (is_wine)
+            {
+                hr = method46(desktop, NULL);
+                ok(hr == E_POINTER, "Got unexpected hr %#lx.\n", hr);
+            }
+        }
+    }
+
+    /* The interface {6b556968-...} of the device. Windows 11 answers the query; its slot 8 is not the one the runtime's helper
+     * calls there (it removes 12 bytes and returns E_INVALIDARG for an event handle), so the slot is checked on Wine only: it takes
+     * the commit completion event, which Commit signals, also when it fails. */
+    {
+        static const GUID IID_commit = {0x6b556968, 0x2d25, 0x11e2, {0x99, 0xf6, 0x8b, 0xc3, 0x60, 0x88, 0x70, 0x9b}};
+        typedef HRESULT (STDMETHODCALLTYPE *set_event_t)(void *iface, HANDLE event, void *arg);
+        BOOL is_wine = !!GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version");
+        HANDLE event = CreateEventW(NULL, TRUE, FALSE, NULL);
+        set_event_t set_event;
+        void *commit = NULL;
+
+        hr = IDCompositionDesktopDevice_QueryInterface(desktop, &IID_commit, &commit);
+        ok(hr == S_OK || broken(hr == E_NOINTERFACE), "Got unexpected hr %#lx.\n", hr);
+        if (hr == S_OK && is_wine)
+        {
+            IDCompositionTarget *failing_target;
+            IDCompositionVisual2 *root;
+            HWND window;
+
+            set_event = (*(set_event_t **)commit)[8];
+            hr = set_event(commit, event, NULL);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            ok(WaitForSingleObject(event, 0) == WAIT_TIMEOUT, "The event is signaled before a commit.\n");
+            hr = IDCompositionDesktopDevice_Commit(desktop);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            ok(WaitForSingleObject(event, 0) == WAIT_OBJECT_0, "The event is not signaled after a commit.\n");
+            ResetEvent(event);
+
+            /* a commit that fails (the window of a target is gone) signals it as well */
+            window = CreateWindowW(L"static", L"test", WS_POPUP, 0, 0, 1, 1, 0, 0, 0, 0);
+            hr = IDCompositionDesktopDevice_CreateVisual(desktop, &root);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            hr = IDCompositionDesktopDevice_CreateTargetForHwnd(desktop, window, TRUE, &failing_target);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            hr = IDCompositionTarget_SetRoot(failing_target, (IDCompositionVisual *)root);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            DestroyWindow(window);
+            hr = IDCompositionDesktopDevice_Commit(desktop);
+            ok(FAILED(hr), "Got unexpected hr %#lx.\n", hr);
+            ok(WaitForSingleObject(event, 0) == WAIT_OBJECT_0, "The event is not signaled after a failed commit.\n");
+            ResetEvent(event);
+            IDCompositionTarget_SetRoot(failing_target, NULL);
+            IDCompositionTarget_Release(failing_target);
+            IDCompositionVisual2_Release(root);
+
+            hr = set_event(commit, NULL, NULL);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            IDCompositionDesktopDevice_Commit(desktop);
+            ok(WaitForSingleObject(event, 0) == WAIT_TIMEOUT, "The cleared event is signaled.\n");
+        }
+        if (commit) IUnknown_Release((IUnknown *)commit);
+        CloseHandle(event);
+    }
+
+    open = (*(open_t **)desktop)[29];
+
+    hr = open(desktop, handle, &IID_IDCompositionVisual, (void **)&visual);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        /* the visuals of the system dcomp answer a private interface: the visual itself, the same pointer as for IUnknown, with its
+         * reference count (observed on Windows 11) */
+        IUnknown *unknown = NULL;
+
+        out = NULL;
+        hr = IDCompositionVisual_QueryInterface(visual, &IID_visual_private, &out);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ok(out == (void *)visual, "Got %p, expected %p.\n", out, visual);
+        if (SUCCEEDED(hr))
+        {
+            hr = IUnknown_QueryInterface((IUnknown *)out, &IID_IUnknown, (void **)&unknown);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            ok(unknown == (IUnknown *)visual, "Got %p, expected %p.\n", unknown, visual);
+            if (SUCCEEDED(hr)) IUnknown_Release(unknown);
+            IUnknown_Release((IUnknown *)out);
+        }
+        IDCompositionVisual_Release(visual);
+    }
+
+    /* the visual of a shared handle is not kept alive, and does not keep the device alive, when nobody holds it: the device has no
+     * other reference than ours (Wine; the handle model of Windows 11 is not known) */
+    {
+        BOOL is_wine = !!GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version");
+        IDCompositionDesktopDevice *desktop2;
+        IDCompositionVisual *visual1, *visual2;
+        ULONG refcount;
+
+        if (is_wine)
+        {
+            refcount = IDCompositionDesktopDevice_AddRef(desktop);
+            ok(refcount == 2, "Got refcount %lu.\n", refcount);
+            IDCompositionDesktopDevice_Release(desktop);
+
+            /* another device opening the same handle gets a visual of its own */
+            hr = pDCompositionCreateDevice3(NULL, &IID_IDCompositionDesktopDevice, (void **)&desktop2);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            hr = open(desktop, handle, &IID_IDCompositionVisual, (void **)&visual1);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            hr = ((open_t)(*(open_t **)desktop2)[29])(desktop2, handle, &IID_IDCompositionVisual, (void **)&visual2);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            ok(visual1 != visual2, "The two devices got the same visual %p.\n", visual1);
+            hr = ((open_t)(*(open_t **)desktop2)[29])(desktop2, handle, &IID_IDCompositionTarget, (void **)&target);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            hr = IDCompositionTarget_SetRoot(target, visual2);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            IDCompositionTarget_SetRoot(target, NULL);
+            IDCompositionTarget_Release(target);
+            IDCompositionVisual_Release(visual2);
+            IDCompositionVisual_Release(visual1);
+            refcount = IDCompositionDesktopDevice_Release(desktop2);
+            ok(!refcount, "Device 2 has %lu references left.\n", refcount);
+            refcount = IDCompositionDesktopDevice_AddRef(desktop);
+            ok(refcount == 2, "Got refcount %lu.\n", refcount);
+            IDCompositionDesktopDevice_Release(desktop);
+        }
+    }
+
+    hr = open(desktop, handle, &IID_IDCompositionTarget, (void **)&target);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr)) IDCompositionTarget_Release(target);
+
+    out = (void *)0xdeadbeef;
+    hr = open(desktop, (HANDLE)0x12345678, &IID_IDCompositionVisual, &out);
+    ok(FAILED(hr), "Got unexpected hr %#lx.\n", hr);
+    ok(!out, "Got %p.\n", out);
+
+    out = (void *)0xdeadbeef;
+    hr = open(desktop, handle2, &IID_IDispatch, &out);
+    ok(hr == E_NOINTERFACE, "Got unexpected hr %#lx.\n", hr);
+    ok(!out, "Got %p.\n", out);
+
+    hr = IDCompositionDesktopDevice_QueryInterface(desktop, &IID_IDCompositionDevice, (void **)&device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr)) IDCompositionDevice_Release(device);
+    IDCompositionDesktopDevice_Release(desktop);
+
+done:
+    CloseHandle(handle);
+    CloseHandle(handle2);
+}
+
 /* Based on Wine-Staging patch 0007 by Zhiyi Zhang */
 static void test_device_CreateTargetForHwnd(void)
 {
@@ -2330,6 +2555,7 @@ START_TEST(dcomp)
     test_DCompositionCreateDevice();
     test_DCompositionCreateDevice2();
     test_DCompositionCreateDevice3();
+    test_shared_visual();
     test_device_CreateTargetForHwnd();
     test_device_CreateVisual();
     test_device_CreateSurfaceFactory();

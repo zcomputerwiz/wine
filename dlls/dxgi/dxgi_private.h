@@ -40,6 +40,7 @@
 #include "initguid.h"
 #endif
 #include "wine/d3dkmt_desc.h"
+#include "wine/list.h"
 #include "wine/wined3d.h"
 #include "wine/winedxgi.h"
 #include "wine/dcomp_layer.h"
@@ -123,6 +124,15 @@ struct dxgi_factory
     struct wined3d *wined3d;
     BOOL extended;
     HWND device_window;
+    struct list adapters_changed;   /* struct dxgi_adapters_changed, under the wined3d mutex */
+    DWORD next_adapters_changed_cookie;
+};
+
+struct dxgi_adapters_changed
+{
+    struct list entry;
+    DWORD cookie;
+    HANDLE event;   /* a duplicate of the application's handle */
 };
 
 HRESULT dxgi_factory_create(REFIID riid, void **factory, BOOL extended);

@@ -218,6 +218,14 @@ static HRESULT WINAPI session_slot12( void *iface, void *a, void *b, void *c, vo
     return S_OK;
 }
 
+/* slot 13 is called the same way as slot 12 (a function of the runtime, a context, a pointer to the object, a pointer) by the
+ * newer start-up path the runtime takes when UniversalApiContract is 19 or higher; a failure is fatal there */
+static HRESULT WINAPI session_slot13( void *iface, void *a, void *b, void *c, void *d )
+{
+    FIXME( "iface %p, slot 13: %p, %p, %p, %p semi-stub\n", iface, a, b, c, d );
+    return S_OK;
+}
+
 /* slot 3 is called (from the wrappers of FrameworkUdk that ask an object for this interface and call one of its methods) with
  * the address of an interface pointer first, and the result is asked for IUnknown: it creates something and gives it back */
 static HRESULT WINAPI session_slot3( void *iface, void **out, void *b, void *c )
@@ -229,7 +237,7 @@ static HRESULT WINAPI session_slot3( void *iface, void **out, void *b, void *c )
 }
 
 SESSION_STUB(4) SESSION_STUB(5) SESSION_STUB(6) SESSION_STUB(7) SESSION_STUB(9) SESSION_STUB(10)
-SESSION_STUB(11) SESSION_STUB(13) SESSION_STUB(14) SESSION_STUB(15) SESSION_STUB(16) SESSION_STUB(17)
+SESSION_STUB(11) SESSION_STUB(14) SESSION_STUB(15) SESSION_STUB(16) SESSION_STUB(17)
 SESSION_STUB(18) SESSION_STUB(19) SESSION_STUB(20) SESSION_STUB(21) SESSION_STUB(22) SESSION_STUB(23)
 
 static const void *const session_vtbl[] =

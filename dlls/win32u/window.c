@@ -2513,7 +2513,14 @@ static BOOL apply_window_pos( HWND hwnd, HWND insert_after, UINT swp_flags, stru
 
         owner_hint = NtUserGetWindowRelative(hwnd, GW_OWNER);
         /* fallback to any window that is right below our top left corner */
-        if (!owner_hint) owner_hint = NtUserWindowFromPoint(new_rects->window.left - 1, new_rects->window.top - 1);
+        if (!owner_hint)
+        {
+            POINT pt = { new_rects->window.left - 1, new_rects->window.top - 1 };
+            INT hittest;
+
+            /* a hit test of the geometry only: WM_NCHITTEST is not sent to the application from inside SetWindowPos */
+            owner_hint = window_from_point( 0, pt, &hittest, FALSE );
+        }
         if (owner_hint) owner_hint = NtUserGetAncestor(owner_hint, GA_ROOT);
 
         user_driver->pWindowPosChanged( hwnd, insert_after, owner_hint, swp_flags, &monitor_rects,

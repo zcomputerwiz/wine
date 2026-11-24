@@ -75,6 +75,14 @@ static ULONG STDMETHODCALLTYPE dxgi_factory_Release(IWineDXGIFactory *iface)
 
     if (!refcount)
     {
+        struct dxgi_adapters_changed *entry, *next;
+
+        LIST_FOR_EACH_ENTRY_SAFE(entry, next, &factory->adapters_changed, struct dxgi_adapters_changed, entry)
+        {
+            CloseHandle(entry->event);
+            free(entry);
+        }
+
         if (factory->device_window)
             DestroyWindow(factory->device_window);
 
@@ -649,17 +657,67 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_EnumAdapterByGpuPreference(IWineDX
 static HRESULT STDMETHODCALLTYPE dxgi_factory_RegisterAdaptersChangedEvent(IWineDXGIFactory *iface,
         HANDLE event, DWORD *cookie)
 {
-    FIXME("iface %p, event %p, cookie %p stub!\n", iface, event, cookie);
+    struct dxgi_factory *factory = impl_from_IWineDXGIFactory(iface);
+    struct dxgi_adapters_changed *entry, *other;
+    HANDLE duplicate;
 
-    return E_NOTIMPL;
+    TRACE("iface %p, event %p, cookie %p.\n", iface, event, cookie);
+
+    /* The adapters of this process never change, so the event is never signaled; as on Windows the registration keeps
+     * a duplicate of the handle (the composition engine of the Windows App Runtime treats a failure here as fatal). */
+    if (!event || !cookie)
+        return DXGI_ERROR_INVALID_CALL;
+
+    if (!DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        return E_OUTOFMEMORY;
+
+    if (!(entry = calloc(1, sizeof(*entry))))
+    {
+        CloseHandle(duplicate);
+        return E_OUTOFMEMORY;
+    }
+    entry->event = duplicate;
+
+    wined3d_mutex_lock();
+    LIST_FOR_EACH_ENTRY(other, &factory->adapters_changed, struct dxgi_adapters_changed, entry)
+    {
+        if (!NtCompareObjects(other->event, duplicate))   /* the same event again */
+        {
+            wined3d_mutex_unlock();
+            CloseHandle(duplicate);
+            free(entry);
+            return DXGI_ERROR_INVALID_CALL;
+        }
+    }
+    entry->cookie = ++factory->next_adapters_changed_cookie;
+    list_add_tail(&factory->adapters_changed, &entry->entry);
+    *cookie = entry->cookie;
+    wined3d_mutex_unlock();
+
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE dxgi_factory_UnregisterAdaptersChangedEvent(IWineDXGIFactory *iface,
         DWORD cookie)
 {
-    FIXME("iface %p, cookie %#lx stub!\n", iface, cookie);
+    struct dxgi_factory *factory = impl_from_IWineDXGIFactory(iface);
+    struct dxgi_adapters_changed *entry;
 
-    return E_NOTIMPL;
+    TRACE("iface %p, cookie %#lx.\n", iface, cookie);
+
+    wined3d_mutex_lock();
+    LIST_FOR_EACH_ENTRY(entry, &factory->adapters_changed, struct dxgi_adapters_changed, entry)
+    {
+        if (entry->cookie != cookie) continue;
+        list_remove(&entry->entry);
+        wined3d_mutex_unlock();
+        CloseHandle(entry->event);
+        free(entry);
+        return S_OK;
+    }
+    wined3d_mutex_unlock();
+
+    return DXGI_ERROR_NOT_FOUND;
 }
 
 static const struct IWineDXGIFactoryVtbl dxgi_factory_vtbl =
@@ -728,6 +786,7 @@ static HRESULT dxgi_factory_init(struct dxgi_factory *factory, BOOL extended)
 {
     factory->IWineDXGIFactory_iface.lpVtbl = &dxgi_factory_vtbl;
     factory->refcount = 1;
+    list_init(&factory->adapters_changed);
     wined3d_private_store_init(&factory->private_store);
 
     wined3d_mutex_lock();
