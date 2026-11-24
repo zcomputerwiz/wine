@@ -3259,6 +3259,21 @@ static HRESULT WINAPI dwritefontcollection_QueryInterface(IDWriteFontCollection3
     return E_NOINTERFACE;
 }
 
+/* Takes a reference only if the collection is not already being destroyed (its count is not 0). The factory keeps its system collections
+ * without owning a reference, so a collection can reach 0 while another thread has just found it there. */
+BOOL fontcollection_addref_if_alive(IDWriteFontCollection *iface)
+{
+    struct dwrite_fontcollection *collection = impl_from_IDWriteFontCollection3((IDWriteFontCollection3 *)iface);
+    LONG refcount, old;
+
+    for (refcount = collection->refcount; refcount; refcount = old)
+    {
+        old = InterlockedCompareExchange(&collection->refcount, refcount + 1, refcount);
+        if (old == refcount) return TRUE;
+    }
+    return FALSE;
+}
+
 static ULONG WINAPI dwritefontcollection_AddRef(IDWriteFontCollection3 *iface)
 {
     struct dwrite_fontcollection *collection = impl_from_IDWriteFontCollection3(iface);
