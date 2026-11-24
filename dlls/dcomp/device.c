@@ -5707,3 +5707,73 @@ HRESULT WINAPI DCompositionCreateSharedVisualHandle(HANDLE *out)
     *out = handle;
     return S_OK;
 }
+
+/* The compositor clock (documented in the Windows SDK, dcomp.h). Wine has no system compositor, so the clock is a fixed 60 Hz clock
+ * of the performance counter: frame N starts at N / 60 seconds. The compositor of the Windows App SDK paces its frames with
+ * DCompositionWaitForCompositorClock (on Windows 11 it calls it with no handles and a timeout of 80 ms, and gets 0, the number of
+ * handles, at each tick). */
+#define DCOMP_CLOCK_HZ 60
+#define DCOMP_MAX_WAIT_HANDLES 32   /* DCOMPOSITION_MAX_WAITFORCOMPOSITORCLOCK_OBJECTS */
+
+static UINT64 dcomp_clock_frame(LARGE_INTEGER *freq_out)
+{
+    LARGE_INTEGER now, freq;
+
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    if (freq_out) *freq_out = freq;
+    return (UINT64)now.QuadPart * DCOMP_CLOCK_HZ / (UINT64)freq.QuadPart;
+}
+
+DWORD WINAPI DCompositionWaitForCompositorClock(UINT count, const HANDLE *handles, DWORD timeout)
+{
+    LARGE_INTEGER freq, now;
+    UINT64 frame, next_tick;
+    DWORD to_tick, ret;
+
+    TRACE("count %u, handles %p, timeout %lu.\n", count, handles, timeout);
+
+    if (count > DCOMP_MAX_WAIT_HANDLES || (count && !handles))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return WAIT_FAILED;
+    }
+
+    frame = dcomp_clock_frame(&freq);
+    QueryPerformanceCounter(&now);
+    next_tick = (frame + 1) * (UINT64)freq.QuadPart / DCOMP_CLOCK_HZ;
+    to_tick = (DWORD)(((next_tick > (UINT64)now.QuadPart ? next_tick - now.QuadPart : 0) * 1000 + freq.QuadPart - 1)
+            / freq.QuadPart);
+
+    if (count)
+    {
+        ret = WaitForMultipleObjects(count, handles, FALSE, min(timeout, to_tick));
+        if (ret != WAIT_TIMEOUT) return ret;   /* a handle (or an abandoned mutex), or a failure */
+    }
+    else Sleep(min(timeout, to_tick));
+
+    return timeout < to_tick ? WAIT_TIMEOUT : count;
+}
+
+typedef enum
+{
+    COMPOSITION_FRAME_ID_CREATED,
+    COMPOSITION_FRAME_ID_CONFIRMED,
+    COMPOSITION_FRAME_ID_COMPLETED,
+} COMPOSITION_FRAME_ID_TYPE;
+
+/* every frame of the clock is created, confirmed and completed at its start here */
+HRESULT WINAPI DCompositionGetFrameId(COMPOSITION_FRAME_ID_TYPE type, UINT64 *id)
+{
+    TRACE("type %d, id %p.\n", type, id);
+
+    if (!id || (unsigned int)type > COMPOSITION_FRAME_ID_COMPLETED) return E_INVALIDARG;
+    *id = dcomp_clock_frame(NULL);
+    return S_OK;
+}
+
+HRESULT WINAPI DCompositionBoostCompositorClock(BOOL enable)
+{
+    TRACE("enable %d.\n", enable);
+    return S_OK;
+}

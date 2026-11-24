@@ -13,10 +13,13 @@
 @ stub CreateEffectDescription
 @ stub DCompositionAttachMouseDragToHwnd
 @ stub DCompositionAttachMouseWheelToHwnd
+@ stdcall DCompositionBoostCompositorClock(long)
 @ stdcall DCompositionCreateDevice2(ptr ptr ptr)
 @ stdcall DCompositionCreateDevice3(ptr ptr ptr)
 @ stdcall DCompositionCreateDevice(ptr ptr ptr)
 @ stub DCompositionCreateSurfaceHandle
+@ stdcall DCompositionGetFrameId(long ptr)
+@ stdcall DCompositionWaitForCompositorClock(long ptr long)
 @ stub DeserializeEffectDescription
 @ stdcall -private DllCanUnloadNow()
 @ stub DllGetActivationFactory
