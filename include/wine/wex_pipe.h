@@ -125,9 +125,16 @@ static inline HANDLE wex_pipe_connect( const WCHAR *name, DWORD timeout_ms )
         if (pipe != INVALID_HANDLE_VALUE) break;
         if (GetLastError() != ERROR_PIPE_BUSY) return INVALID_HANDLE_VALUE;
         elapsed = GetTickCount() - start;
-        if (elapsed >= timeout_ms || !WaitNamedPipeW( name, timeout_ms - elapsed ))
+        if (elapsed >= timeout_ms)
         {
             SetLastError( ERROR_PIPE_BUSY );
+            return INVALID_HANDLE_VALUE;
+        }
+        if (!WaitNamedPipeW( name, timeout_ms - elapsed ))
+        {
+            /* the pipe went away while busy (its server ended): say so, so a caller can start a new server;
+             * anything else is still busy */
+            if (GetLastError() != ERROR_FILE_NOT_FOUND) SetLastError( ERROR_PIPE_BUSY );
             return INVALID_HANDLE_VALUE;
         }
     }
