@@ -1,6 +1,6 @@
 @ extern -arch=win32 Wow64Transition __wine_syscall_dispatcher
 @ stub -syscall NtBindCompositionSurface
-@ stub -syscall NtCloseCompositionInputSink
+@ stdcall -syscall NtCloseCompositionInputSink(long)
 @ stub -syscall NtCompositionInputThread
 @ stub -syscall NtCompositionSetDropTarget
 @ stub -syscall NtCompositorNotifyExitWindows
@@ -8,7 +8,7 @@
 @ stub -syscall NtCompositorUpdateLastInputTime
 @ stub -syscall NtConfigureInputSpace
 @ stub -syscall NtConfirmCompositionSurfaceIndependentFlipEntry
-@ stub -syscall NtCreateCompositionInputSink
+@ stdcall -syscall NtCreateCompositionInputSink(ptr ptr)
 @ stub -syscall NtCreateCompositionSurfaceHandle
 @ stub -syscall NtCreateImplicitCompositionInputSink
 @ stub -syscall NtDCompositionAddCrossDeviceVisualChild
@@ -740,7 +740,7 @@
 @ stub -syscall NtQueryCompositionInputIsImplicit
 @ stub -syscall NtQueryCompositionInputQueueAndTransform
 @ stub -syscall NtQueryCompositionInputSink
-@ stub -syscall NtQueryCompositionInputSinkLuid
+@ stdcall -syscall NtQueryCompositionInputSinkLuid(long ptr)
 @ stub -syscall NtQueryCompositionInputSinkViewId
 @ stub -syscall NtQueryCompositionSurfaceBinding
 @ stub -syscall NtQueryCompositionSurfaceFrameRate

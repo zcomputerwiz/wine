@@ -761,6 +761,9 @@ typedef enum _USERTHREADSTATECLASS
     UserThreadStateIsForeground
 } USERTHREADSTATECLASS;
 
+W32KAPI NTSTATUS WINAPI NtCloseCompositionInputSink( HANDLE sink );
+W32KAPI NTSTATUS WINAPI NtCreateCompositionInputSink( const void *params, HANDLE *sink );
+W32KAPI NTSTATUS WINAPI NtQueryCompositionInputSinkLuid( HANDLE sink, LUID *luid );
 W32KAPI HKL     WINAPI NtUserActivateKeyboardLayout( HKL layout, UINT flags );
 W32KAPI BOOL    WINAPI NtUserAddClipboardFormatListener( HWND hwnd );
 W32KAPI ULONG   WINAPI NtUserAlterWindowStyle( HWND hwnd, UINT mask, UINT style );
