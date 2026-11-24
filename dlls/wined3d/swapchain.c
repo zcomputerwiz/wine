@@ -2195,6 +2195,7 @@ static HRESULT wined3d_swapchain_vk_create_vulkan_swapchain(struct wined3d_swapc
     const struct wined3d_vk_info *vk_info;
     VkSurfaceCapabilitiesKHR surface_caps;
     struct wined3d_adapter_vk *adapter_vk;
+    VkCompositeAlphaFlagBitsKHR composite_alpha;
     VkPresentModeKHR vk_present_mode;
     VkSwapchainKHR vk_swapchain;
     VkImageUsageFlags usage;
@@ -2275,11 +2276,21 @@ static HRESULT wined3d_swapchain_vk_create_vulkan_swapchain(struct wined3d_swapc
     if (!(usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) || !(usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT))
         WARN("Transfer not supported for swapchain images.\n");
 
-    if (!(surface_caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR))
+    /* A DirectComposition target that keeps its alpha (dcomp_argb_target) hands the premultiplied frame of the CPU
+     * composition on to the compositor. Its 32-bit window offers no opaque mode (Mesa), so the window decides then. */
+    if (dcomp_argb_target(swapchain_vk->s.win_handle)
+            && (surface_caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR))
+        composite_alpha = VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
+    else if (surface_caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
+        composite_alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    else if (surface_caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR)
+        composite_alpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+    else
     {
         FIXME("Unsupported alpha mode, %#x.\n", surface_caps.supportedCompositeAlpha);
         goto fail;
     }
+    TRACE("Composite alpha %#x of %#x.\n", composite_alpha, surface_caps.supportedCompositeAlpha);
 
     vk_present_mode = VK_PRESENT_MODE_FIFO_KHR;
     if (!swapchain_vk->s.swap_interval)
@@ -2305,7 +2316,7 @@ static HRESULT wined3d_swapchain_vk_create_vulkan_swapchain(struct wined3d_swapc
     vk_swapchain_desc.queueFamilyIndexCount = 0;
     vk_swapchain_desc.pQueueFamilyIndices = NULL;
     vk_swapchain_desc.preTransform = surface_caps.currentTransform;
-    vk_swapchain_desc.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    vk_swapchain_desc.compositeAlpha = composite_alpha;
     vk_swapchain_desc.presentMode = vk_present_mode;
     vk_swapchain_desc.clipped = VK_TRUE;
     vk_swapchain_desc.oldSwapchain = VK_NULL_HANDLE;
@@ -2582,6 +2593,8 @@ static void swapchain_vk_present(struct wined3d_swapchain *swapchain, const RECT
     if (swapchain->has_target_scene)
     {
         if (!(flags & WINED3D_PRESENT_CLEAR_ONLY)) swapchain_capture_frame(swapchain, &context_vk->c, FALSE);
+        /* as with GL: a glass window without a compositor is shaped from the frame's alpha */
+        dcomp_update_shape(swapchain, &context_vk->c);
         GetClientRect(swapchain->win_handle, &client);
         if (!swapchain_composite_layers(swapchain, &context_vk->c)) goto frame_done;
         if (!swapchain->composite_texture) goto frame_done;
