@@ -126,10 +126,35 @@ static const IUserActivityRequestManagerVtbl manager_vtbl =
     manager_remove_UserActivityRequested,
 };
 
+/*
+ * IUserActivityRequestManagerInterop {dd69f876-9699-4715-9095-e37ea30dfa1b} (useractivityinterop.h of the Windows SDK): the second
+ * interface of the factory, HRESULT GetForWindow(HWND window, REFIID riid, void **value) after the IInspectable methods. Microsoft.UI.Xaml
+ * (Notepad of the Windows App Runtime) asks for it with its window and the IID of IUserActivityRequestManager, and gets the manager of
+ * the thread of the window. Observed on Windows 11 with a debugger trace (tests/uwp/alpc/wintrace.c, factory-iid-probe.c).
+ */
+typedef struct IUserActivityRequestManagerInterop IUserActivityRequestManagerInterop;
+struct IUserActivityRequestManagerInteropVtbl
+{
+    HRESULT (WINAPI *QueryInterface)( IUserActivityRequestManagerInterop *iface, REFIID iid, void **out );
+    ULONG (WINAPI *AddRef)( IUserActivityRequestManagerInterop *iface );
+    ULONG (WINAPI *Release)( IUserActivityRequestManagerInterop *iface );
+    HRESULT (WINAPI *GetIids)( IUserActivityRequestManagerInterop *iface, ULONG *iid_count, IID **iids );
+    HRESULT (WINAPI *GetRuntimeClassName)( IUserActivityRequestManagerInterop *iface, HSTRING *class_name );
+    HRESULT (WINAPI *GetTrustLevel)( IUserActivityRequestManagerInterop *iface, TrustLevel *trust_level );
+    HRESULT (WINAPI *GetForWindow)( IUserActivityRequestManagerInterop *iface, HWND window, REFIID riid, void **value );
+};
+struct IUserActivityRequestManagerInterop
+{
+    const struct IUserActivityRequestManagerInteropVtbl *lpVtbl;
+};
+static const GUID IID_IUserActivityRequestManagerInterop =
+    {0xdd69f876, 0x9699, 0x4715, {0x90, 0x95, 0xe3, 0x7e, 0xa3, 0x0d, 0xfa, 0x1b}};
+
 struct factory
 {
     IActivationFactory IActivationFactory_iface;
     IUserActivityRequestManagerStatics IUserActivityRequestManagerStatics_iface;
+    IUserActivityRequestManagerInterop IUserActivityRequestManagerInterop_iface;
     LONG ref;
 };
 
@@ -149,6 +174,8 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
         *out = &impl->IActivationFactory_iface;
     else if (IsEqualGUID( iid, &IID_IUserActivityRequestManagerStatics ))
         *out = &impl->IUserActivityRequestManagerStatics_iface;
+    else if (IsEqualGUID( iid, &IID_IUserActivityRequestManagerInterop ))
+        *out = &impl->IUserActivityRequestManagerInterop_iface;
     else
     {
         FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
@@ -208,10 +235,29 @@ static const IActivationFactoryVtbl factory_vtbl =
 
 DEFINE_IINSPECTABLE( statics, IUserActivityRequestManagerStatics, struct factory, IActivationFactory_iface )
 
+/* the manager of a thread: made on the first call and kept (the same object on every call) */
+static HRESULT manager_for_thread( DWORD thread_id, IUserActivityRequestManager **result )
+{
+    struct request_manager *manager, *found = NULL;
+
+    EnterCriticalSection( &managers_cs );
+    LIST_FOR_EACH_ENTRY( manager, &managers, struct request_manager, entry )
+        if (manager->thread_id == thread_id) { found = manager; break; }
+    if (!found && (found = calloc( 1, sizeof(*found) )))
+    {
+        found->IUserActivityRequestManager_iface.lpVtbl = &manager_vtbl;
+        found->ref = 1;   /* the list's */
+        found->thread_id = thread_id;
+        list_add_tail( &managers, &found->entry );
+    }
+    if (found) IUserActivityRequestManager_AddRef( (*result = &found->IUserActivityRequestManager_iface) );
+    LeaveCriticalSection( &managers_cs );
+    return found ? S_OK : E_OUTOFMEMORY;
+}
+
 static HRESULT WINAPI statics_GetForCurrentView( IUserActivityRequestManagerStatics *iface, IUserActivityRequestManager **result )
 {
     ICoreApplicationView *core = core_view_for_current_thread();
-    struct request_manager *manager, *found = NULL;
 
     TRACE( "iface %p, result %p.\n", iface, result );
 
@@ -220,19 +266,7 @@ static HRESULT WINAPI statics_GetForCurrentView( IUserActivityRequestManagerStat
     if (!core) return HRESULT_FROM_WIN32( ERROR_NOT_FOUND );
     ICoreApplicationView_Release( core );
 
-    EnterCriticalSection( &managers_cs );
-    LIST_FOR_EACH_ENTRY( manager, &managers, struct request_manager, entry )
-        if (manager->thread_id == GetCurrentThreadId()) { found = manager; break; }
-    if (!found && (found = calloc( 1, sizeof(*found) )))
-    {
-        found->IUserActivityRequestManager_iface.lpVtbl = &manager_vtbl;
-        found->ref = 1;   /* the list's */
-        found->thread_id = GetCurrentThreadId();
-        list_add_tail( &managers, &found->entry );
-    }
-    if (found) IUserActivityRequestManager_AddRef( (*result = &found->IUserActivityRequestManager_iface) );
-    LeaveCriticalSection( &managers_cs );
-    return found ? S_OK : E_OUTOFMEMORY;
+    return manager_for_thread( GetCurrentThreadId(), result );
 }
 
 static const IUserActivityRequestManagerStaticsVtbl statics_vtbl =
@@ -248,10 +282,46 @@ static const IUserActivityRequestManagerStaticsVtbl statics_vtbl =
     statics_GetForCurrentView,
 };
 
+DEFINE_IINSPECTABLE( interop, IUserActivityRequestManagerInterop, struct factory, IActivationFactory_iface )
+
+static HRESULT WINAPI interop_GetForWindow( IUserActivityRequestManagerInterop *iface, HWND window, REFIID riid, void **value )
+{
+    IUserActivityRequestManager *manager;
+    DWORD thread_id, process_id;
+    HRESULT hr;
+
+    TRACE( "iface %p, window %p, riid %s, value %p.\n", iface, window, debugstr_guid( riid ), value );
+
+    if (!value) return E_POINTER;
+    *value = NULL;
+    if (!window || !riid) return E_INVALIDARG;
+    if (!(thread_id = GetWindowThreadProcessId( window, &process_id ))) return HRESULT_FROM_WIN32( ERROR_INVALID_WINDOW_HANDLE );
+    if (process_id != GetCurrentProcessId()) return E_INVALIDARG;   /* a window of another process has no manager here */
+
+    if (FAILED(hr = manager_for_thread( thread_id, &manager ))) return hr;
+    hr = IUserActivityRequestManager_QueryInterface( manager, riid, value );
+    IUserActivityRequestManager_Release( manager );
+    return hr;
+}
+
+static const struct IUserActivityRequestManagerInteropVtbl interop_vtbl =
+{
+    interop_QueryInterface,
+    interop_AddRef,
+    interop_Release,
+    /* IInspectable methods */
+    interop_GetIids,
+    interop_GetRuntimeClassName,
+    interop_GetTrustLevel,
+    /* IUserActivityRequestManagerInterop methods */
+    interop_GetForWindow,
+};
+
 static struct factory factory =
 {
     {&factory_vtbl},
     {&statics_vtbl},
+    {&interop_vtbl},
     1,
 };
 
