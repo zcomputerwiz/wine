@@ -44,6 +44,7 @@ struct wined3d_device_parent;
 #include "wine/winedxgi.h"
 #include "dcomp.h"
 #include "wine/debug.h"
+#include "wine/exception.h"
 #include "wine/list.h"
 #include "wine/dcomp_layer.h"
 #include "wine/dcomp_underlay.h"
@@ -5262,7 +5263,35 @@ static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_private##n(IDCompositionDe
 DCOMP_PRIVATE_STUB(27) DCOMP_PRIVATE_STUB(28) DCOMP_PRIVATE_STUB(30) DCOMP_PRIVATE_STUB(31) DCOMP_PRIVATE_STUB(32)
 DCOMP_PRIVATE_STUB(33) DCOMP_PRIVATE_STUB(34) DCOMP_PRIVATE_STUB(35) DCOMP_PRIVATE_STUB(36) DCOMP_PRIVATE_STUB(37)
 DCOMP_PRIVATE_STUB(38) DCOMP_PRIVATE_STUB(39) DCOMP_PRIVATE_STUB(40) DCOMP_PRIVATE_STUB(41) DCOMP_PRIVATE_STUB(42)
-DCOMP_PRIVATE_STUB(43) DCOMP_PRIVATE_STUB(44) DCOMP_PRIVATE_STUB(45) DCOMP_PRIVATE_STUB(46) DCOMP_PRIVATE_STUB(47)
+DCOMP_PRIVATE_STUB(43) DCOMP_PRIVATE_STUB(44) DCOMP_PRIVATE_STUB(45) DCOMP_PRIVATE_STUB(47)
+
+/* Method 46 of the batch-query interface ({28d6ad3d-...}, the very interface of the desktop device): the Windows App Runtime's composition
+ * engine (dwmcorei.dll) opens its session with it and then asks which of its submitted batches have completed. Measured on Windows 11
+ * (tests/uwp/alpc/fudk-sys-probe.c and a trace of the engine; docs/uwp/WINAPPSDK.md):
+ *   - with a block `b` (the first call, a descriptor of the session) the first dword of `a` becomes 1; `b` and the rest of `a` are not touched;
+ *   - without it (`b` NULL) `code` is the id of a submitted batch and the first dword of `a` becomes the id of the newest completed batch,
+ *     never above `code`; the second dword is not touched.
+ * Nothing here is asynchronous: every submitted batch has completed when it is asked for, so the answer is `code`. */
+static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_private46(IDCompositionDesktopDevice *iface, void *a, void *b, UINT code)
+{
+    HRESULT hr = S_OK;
+
+    TRACE("iface %p, a %p, b %p, code %#x.\n", iface, a, b, code);
+
+    if (!a) return E_POINTER;
+
+    __TRY
+    {
+        *(DWORD *)a = b ? 1 : code;
+    }
+    __EXCEPT_PAGE_FAULT
+    {
+        hr = E_POINTER;
+    }
+    __ENDTRY
+
+    return hr;
+}
 
 static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_OpenSharedObject(IDCompositionDesktopDevice *iface, HANDLE handle,
         REFIID iid, void **out)

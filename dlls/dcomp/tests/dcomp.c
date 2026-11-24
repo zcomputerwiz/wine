@@ -426,6 +426,24 @@ static void test_shared_visual(void)
     ok(alias_b == (IUnknown *)desktop, "Got %p, expected %p.\n", alias_b, desktop);
     if (SUCCEEDED(hr)) IUnknown_Release(alias_b);
 
+    /* private method 46: the composition engine of the Windows App Runtime asks which of its submitted batches have completed (id in
+     * `code`, answer in the first dword of the block, never above the id, the second dword untouched). Observed on Windows 11. */
+    {
+        typedef HRESULT (STDMETHODCALLTYPE *method46_t)(void *iface, void *a, void *b, UINT code);
+        method46_t method46 = (*(method46_t **)desktop)[46];
+        UINT64 block;
+        UINT code;
+
+        for (code = 1; code <= 3; ++code)
+        {
+            block = 0xdeadbeef00000000ull;
+            hr = method46(desktop, &block, NULL, code);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            ok((block >> 32) == 0xdeadbeef, "Got block %#I64x.\n", block);
+            ok((UINT)block >= 1 && (UINT)block <= code, "Got completed id %u for batch %u.\n", (UINT)block, code);
+        }
+    }
+
     open = (*(open_t **)desktop)[29];
 
     hr = open(desktop, handle, &IID_IDCompositionVisual, (void **)&visual);
