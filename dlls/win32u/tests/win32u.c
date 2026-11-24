@@ -3053,6 +3053,43 @@ void test_NtUserGetPointerDeviceRects( const char *arg )
         wine_dbgstr_rect( &display ), wine_dbgstr_rect( &screen ) );
 }
 
+static int nchittest_count;
+
+static LRESULT CALLBACK nchittest_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
+{
+    if (msg == WM_NCHITTEST) nchittest_count++;
+    return DefWindowProcW( hwnd, msg, wparam, lparam );
+}
+
+/* Positioning a window sends no WM_NCHITTEST to another window of the thread that lies under its top left corner (the owner hint of
+ * apply_window_pos is found from the geometry). Observed on Windows 11 with tests/uwp/alpc/nchittest-probe.c. */
+static void test_position_sends_no_nchittest(void)
+{
+    WNDCLASSW cls = {0};
+    HWND a, b;
+    MSG msg;
+    int before;
+
+    cls.lpfnWndProc = nchittest_proc;
+    cls.hInstance = GetModuleHandleW( NULL );
+    cls.lpszClassName = L"WineNcHitTestProbe";
+    RegisterClassW( &cls );
+    a = CreateWindowW( cls.lpszClassName, L"A", WS_POPUP | WS_VISIBLE, 100, 100, 300, 300, 0, 0, cls.hInstance, 0 );
+    b = CreateWindowW( cls.lpszClassName, L"B", WS_POPUP, 500, 500, 50, 50, 0, 0, cls.hInstance, 0 );
+    ok( a && b, "Failed to create the windows.\n" );
+    while (PeekMessageW( &msg, 0, 0, 0, PM_REMOVE )) DispatchMessageW( &msg );
+
+    before = nchittest_count;
+    SetWindowPos( b, HWND_TOP, 151, 151, 120, 120, SWP_SHOWWINDOW );
+    ok( nchittest_count == before, "WM_NCHITTEST was sent %d times during SetWindowPos.\n", nchittest_count - before );
+    SetWindowPos( b, HWND_TOP, 160, 160, 120, 120, 0 );
+    ok( nchittest_count == before, "WM_NCHITTEST was sent %d times after a second move.\n", nchittest_count - before );
+
+    DestroyWindow( b );
+    DestroyWindow( a );
+    UnregisterClassW( cls.lpszClassName, cls.hInstance );
+}
+
 /* The composition input sinks of the Windows App Runtime. Observed on Windows 11: a block of 0xe8 bytes (a size and four entries of 0x38
  * bytes, each a kind and a window), one sink handle out. The layout of a 32-bit caller's block is not known, so 32-bit is skipped. */
 static void test_composition_input_sink(void)
@@ -3234,6 +3271,7 @@ START_TEST(win32u)
     test_NtUserQueryWindow();
     test_RegisterClipboardFormat();
     test_composition_input_sink();
+    test_position_sends_no_nchittest();
     test_NtUserRegisterWindowMessage();
 
     run_in_process( argv, "NtUserEnableMouseInPointer 0" );
