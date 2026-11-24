@@ -221,10 +221,15 @@ static inline struct d2d_device_context *impl_from_ID2D1DeviceContext(ID2D1Devic
  * - Slot 12 (bitmap, const D2D1_BITMAP_PROPERTIES1 *, ID2D1Bitmap1 **out) makes a new bitmap on the surface of the given bitmap:
  *   a format that does not fit the surface is refused like CreateBitmapFromDxgiSurface refuses it, bitmap options other than those
  *   of the source give E_INVALIDARG, and NULL properties, format DXGI_FORMAT_UNKNOWN or a dpi of 0 take those of the source.
- * - Slots 9 (bitmap, pointer or NULL, pointer) and 10 (NULL, 1, 0) return 0 and write nothing through their arguments; what they
- *   change is state of the context and of the bitmap. Here they do nothing.
- * The other slots are not known: calling one raises the stub exception. 32-bit callers do not get the interface (argument sizes not
- * measured). */
+ * - Slots 9 (bitmap, pointer or NULL, pointer) and 10 (NULL, 1, 0, later a pointer and 0) return 0 and write nothing through their
+ *   arguments; what they change is state of the context and of the bitmap. Here they do nothing.
+ * - Slot 7 (an ID2D1Bitmap1 or NULL, a pointer the compositor passes as NULL) sets the target, as SetTarget does: the compositor
+ *   calls it after BeginDraw instead of SetTarget, many times per frame. It returns S_OK, also for a bitmap without
+ *   D2D1_BITMAP_OPTIONS_TARGET, which does not become the target (tests/uwp/alpc/d2d-ctx-slot7-probe.cpp, test_device_private).
+ * - Slot 15 (an object of the caller, 0) returns 0; the context holds a reference to the object for a while (its count rises by one
+ *   and is back before the next call). Called in pairs per frame. Here it does nothing and holds no reference.
+ * Notepad calls only slots 7, 9, 10, 12 and 15 (traced on 64-bit Windows 11 with all slots 3 to 15). The other slots are not known:
+ * calling one raises the stub exception. 32-bit callers do not get the interface (argument sizes not measured). */
 #ifdef __x86_64__
 static const GUID d2d_device_context_private_iid = {0x2ea67ed7, 0xd42e, 0x4c07, {0x9d, 0xd5, 0xa9, 0x1e, 0xa2, 0x3e, 0x01, 0xd2}};
 
@@ -256,6 +261,27 @@ static ULONG STDMETHODCALLTYPE d2d_device_context_private_AddRef(void *iface)
 static ULONG STDMETHODCALLTYPE d2d_device_context_private_Release(void *iface)
 {
     return ID2D1DeviceContext6_Release(&impl_from_private(iface)->ID2D1DeviceContext6_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_device_context_private_method7(void *iface, ID2D1Bitmap1 *bitmap, void *arg2)
+{
+    struct d2d_device_context *context = impl_from_private(iface);
+
+    TRACE("iface %p, bitmap %p, arg2 %p.\n", iface, bitmap, arg2);
+
+    /* the second argument is dereferenced on Windows when it is not NULL; the compositor passes NULL */
+    if (arg2) FIXME("Ignoring %p.\n", arg2);
+    ID2D1DeviceContext6_SetTarget(&context->ID2D1DeviceContext6_iface, (ID2D1Image *)bitmap);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_device_context_private_method15(void *iface, IUnknown *object, UINT_PTR arg2)
+{
+    static LONG once;
+
+    if (!InterlockedExchange(&once, 1)) FIXME("iface %p, object %p, %#Ix semi-stub.\n", iface, object, arg2);
+    else TRACE("iface %p, object %p, %#Ix.\n", iface, object, arg2);
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE d2d_device_context_private_method9(void *iface, ID2D1Bitmap1 *bitmap, void *arg2, void *arg3)
@@ -328,8 +354,8 @@ static void STDMETHODCALLTYPE d2d_device_context_private_unimplemented##n(void) 
     ERR("device context private method " #n " is not implemented.\n"); \
     RaiseException(0x80000100 /* EXCEPTION_WINE_STUB */, EXCEPTION_NONCONTINUABLE, 2, args); \
 }
-D2D_PRIVATE_STUB(3)  D2D_PRIVATE_STUB(4)  D2D_PRIVATE_STUB(5)  D2D_PRIVATE_STUB(6)  D2D_PRIVATE_STUB(7)  D2D_PRIVATE_STUB(8)
-D2D_PRIVATE_STUB(11) D2D_PRIVATE_STUB(13) D2D_PRIVATE_STUB(14) D2D_PRIVATE_STUB(15) D2D_PRIVATE_STUB(16) D2D_PRIVATE_STUB(17)
+D2D_PRIVATE_STUB(3)  D2D_PRIVATE_STUB(4)  D2D_PRIVATE_STUB(5)  D2D_PRIVATE_STUB(6)  D2D_PRIVATE_STUB(8)
+D2D_PRIVATE_STUB(11) D2D_PRIVATE_STUB(13) D2D_PRIVATE_STUB(14) D2D_PRIVATE_STUB(16) D2D_PRIVATE_STUB(17)
 D2D_PRIVATE_STUB(18) D2D_PRIVATE_STUB(19) D2D_PRIVATE_STUB(20) D2D_PRIVATE_STUB(21) D2D_PRIVATE_STUB(22) D2D_PRIVATE_STUB(23)
 D2D_PRIVATE_STUB(24) D2D_PRIVATE_STUB(25) D2D_PRIVATE_STUB(26) D2D_PRIVATE_STUB(27) D2D_PRIVATE_STUB(28) D2D_PRIVATE_STUB(29)
 
@@ -343,7 +369,7 @@ static const void * const d2d_device_context_private_vtbl[] =
     d2d_device_context_private_unimplemented4,
     d2d_device_context_private_unimplemented5,
     d2d_device_context_private_unimplemented6,
-    d2d_device_context_private_unimplemented7,
+    d2d_device_context_private_method7,
     d2d_device_context_private_unimplemented8,
     d2d_device_context_private_method9,
     d2d_device_context_private_method10,
@@ -351,7 +377,7 @@ static const void * const d2d_device_context_private_vtbl[] =
     d2d_device_context_private_method12,
     d2d_device_context_private_unimplemented13,
     d2d_device_context_private_unimplemented14,
-    d2d_device_context_private_unimplemented15,
+    d2d_device_context_private_method15,
     d2d_device_context_private_unimplemented16,
     d2d_device_context_private_unimplemented17,
     d2d_device_context_private_unimplemented18,
