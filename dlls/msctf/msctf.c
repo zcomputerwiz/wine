@@ -606,6 +606,27 @@ HRESULT WINAPI TF_GetThreadMgr(ITfThreadMgr **pptim)
     return S_OK;
 }
 
+#ifdef _WIN64
+/***********************************************************************
+ *              RegisterHandwritingInputRoutingCallback(MSCTF.@)
+ *
+ * Undocumented. Measured on 64-bit Windows 11 (WineExplorer wintrace in Notepad of the Windows App SDK, whose input state manager
+ * calls it once): a callback object, a pointer that receives a cookie (1 for the first registration) and a narrow string that
+ * names the caller; it returns S_OK. The input state manager takes another input path when the export is missing, which fails on
+ * Wine. Wine has no handwriting input to route, so the callback is never called. Its argument sizes are not measured on i386.
+ */
+HRESULT WINAPI RegisterHandwritingInputRoutingCallback(IUnknown *callback, DWORD *cookie, const char *tag)
+{
+    static LONG next_cookie;
+
+    FIXME("callback %p, cookie %p, tag %s semi-stub.\n", callback, cookie, debugstr_a(tag));
+
+    if (!cookie) return E_POINTER;
+    *cookie = InterlockedIncrement(&next_cookie);
+    return S_OK;
+}
+#endif
+
 /***********************************************************************
  *              SetInputScope(MSCTF.@)
  */
