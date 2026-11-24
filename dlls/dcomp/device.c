@@ -4857,15 +4857,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_CreateVisual(IDCompositionDevice *
     return hr;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateSurface(IDCompositionDevice *iface,
-        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
-        IDCompositionSurface **surface)
-{
-    FIXME("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p stub!\n",
-            iface, width, height, pixel_format, alpha_mode, surface);
-    return E_NOTIMPL;
-}
-
+DCOMP_DEVICE_CREATE_SURFACE(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 DCOMP_DEVICE_CREATE_VIRTUAL_SURFACE(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
 static HRESULT STDMETHODCALLTYPE dcomp_device_CreateSurfaceFromHandle(IDCompositionDevice *iface,

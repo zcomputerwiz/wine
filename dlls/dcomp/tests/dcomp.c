@@ -24,7 +24,7 @@
 #include <d2d1_1.h>
 #include <d3d10_1.h>
 #include <d3d11.h>
-#include <dxgi.h>
+#include <dxgi1_2.h>
 #include "dcomp.h"
 #include "wine/test.h"
 
@@ -1412,6 +1412,20 @@ static void test_surface_suspend_scroll_virtual(void)
         IDCompositionDevice_Release(device);
         IDXGIDevice_Release(dxgi_device);
         return;
+    }
+
+    /* the first device interface makes surfaces too; a surface is not a swap chain (a caller asks to tell them apart) */
+    hr = IDCompositionDevice_CreateSurface(device, 32, 32, DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_ALPHA_MODE_PREMULTIPLIED, &surface);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        IUnknown *unk = (IUnknown *)0xdeadbeef;
+
+        hr = IDCompositionSurface_QueryInterface(surface, &IID_IDXGISwapChain1, (void **)&unk);
+        ok(hr == E_NOINTERFACE, "Got unexpected hr %#lx.\n", hr);
+        ok(!unk, "Got unexpected pointer %p.\n", unk);
+        IDCompositionSurface_Release(surface);
     }
 
     hr = IDCompositionDevice2_CreateSurface(device2, 32, 32, DXGI_FORMAT_B8G8R8A8_UNORM,
