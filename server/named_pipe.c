@@ -2427,7 +2427,7 @@ unsigned int pipe_bridge_query( const WCHAR *name, data_size_t len, uid_t uid, i
 }
 
 unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_size_t len, int sock, uid_t uid,
-                                 int session )
+                                 int session, unsigned int client_pid )
 {
     unsigned int access = FILE_GENERIC_READ | FILE_GENERIC_WRITE, count = 0, status = STATUS_SUCCESS;
     struct pipe_bridge *bridge, *other;
@@ -2474,10 +2474,11 @@ unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_si
     server->pipe_end.connection = &bridge->pipe_end;
     bridge->pipe_end.connection = &server->pipe_end;
     bridge->pipe_end.server_pid = server->pipe_end.server_pid;
-    /* the opener is a process of another server: no process id here (process ids are per server), so that no
-       service of session 0 opens a process of its own by the client's number; also no stale id of an earlier client */
-    bridge->pipe_end.client_pid = 0;
-    server->pipe_end.client_pid = 0;
+    /* the opener is a process of another server. Its id comes from a block session 0 leased to that server (R6), so
+       it names no process here and is unique on the machine; 0 when the opener's server gave none that session 0
+       could check (also no stale id of an earlier client) */
+    bridge->pipe_end.client_pid = client_pid;
+    server->pipe_end.client_pid = client_pid;
     bridge->pipe_end.client_session = session > 0 ? session : 0;
     server->pipe_end.client_session = bridge->pipe_end.client_session;  /* R9: the session of the opener's server */
     list_remove( &server->entry );
