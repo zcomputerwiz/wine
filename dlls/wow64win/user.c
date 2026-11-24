@@ -4225,6 +4225,32 @@ NTSTATUS WINAPI wow64_NtUserRegisterRawInputDevices( UINT *args )
     return NtUserRegisterRawInputDevices( devices64, count, sizeof(*devices64) );
 }
 
+NTSTATUS WINAPI wow64_NtCloseCompositionInputSink( UINT *args )
+{
+    HANDLE sink = get_handle( &args );
+
+    return NtCloseCompositionInputSink( sink );
+}
+
+NTSTATUS WINAPI wow64_NtCreateCompositionInputSink( UINT *args )
+{
+    const void *params = get_ptr( &args );
+    ULONG *sink32 = get_ptr( &args );
+
+    /* the block of a 32-bit caller has another layout, which is not known */
+    FIXME( "params %p, sink %p: 32-bit callers are not supported\n", params, sink32 );
+    if (sink32) *sink32 = HandleToULong( INVALID_HANDLE_VALUE );
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+NTSTATUS WINAPI wow64_NtQueryCompositionInputSinkLuid( UINT *args )
+{
+    HANDLE sink = get_handle( &args );
+    LUID *luid = get_ptr( &args );
+
+    return NtQueryCompositionInputSinkLuid( sink, luid );
+}
+
 NTSTATUS WINAPI wow64_NtUserRegisterTouchPadCapable( UINT *args )
 {
     UINT capable = get_ulong( &args );

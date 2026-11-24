@@ -3053,6 +3053,110 @@ void test_NtUserGetPointerDeviceRects( const char *arg )
         wine_dbgstr_rect( &display ), wine_dbgstr_rect( &screen ) );
 }
 
+/* The composition input sinks of the Windows App Runtime. Observed on Windows 11: a block of 0xe8 bytes (a size and four entries of 0x38
+ * bytes, each a kind and a window), one sink handle out. The layout of a 32-bit caller's block is not known, so 32-bit is skipped. */
+static void test_composition_input_sink(void)
+{
+    BYTE block[0xe8];
+    HWND hwnd, hwnd2, child;
+    HANDLE sink, sink2;
+    NTSTATUS status;
+    LUID luid, luid2;
+    unsigned int i;
+
+    if (sizeof(void *) == 4)
+    {
+        skip( "The block of a 32-bit caller is not known.\n" );
+        return;
+    }
+
+    hwnd = CreateWindowW( L"static", L"sink", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, 0, 0, 0, 0 );
+    hwnd2 = CreateWindowW( L"static", L"sink2", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, 0, 0, 0, 0 );
+    child = CreateWindowW( L"static", L"child", WS_CHILD | WS_VISIBLE, 0, 0, 10, 10, hwnd, 0, 0, 0 );
+    ok( hwnd && hwnd2 && child, "Failed to create the windows.\n" );
+
+#define FILL( kind, w0, w1, w2, w3 ) \
+    do { \
+        HWND windows[4] = {(w0), (w1), (w2), (w3)}; \
+        memset( block, 0, sizeof(block) ); \
+        *(ULONG_PTR *)block = sizeof(block); \
+        for (i = 0; i < 4; i++) \
+        { \
+            *(ULONG_PTR *)(block + 8 + i * 0x38) = (kind); \
+            *(HWND *)(block + 16 + i * 0x38) = windows[i]; \
+        } \
+    } while (0)
+
+    FILL( 2, hwnd, hwnd, hwnd, hwnd );
+    sink = (HANDLE)0xdeadbeef;
+    status = NtCreateCompositionInputSink( block, &sink );
+    ok( !status, "Got status %#lx.\n", status );
+    ok( sink && sink != INVALID_HANDLE_VALUE && sink != (HANDLE)0xdeadbeef, "Got handle %p.\n", sink );
+
+    memset( &luid, 0xcc, sizeof(luid) );
+    status = NtQueryCompositionInputSinkLuid( sink, &luid );
+    ok( !status, "Got status %#lx.\n", status );
+    memset( &luid2, 0xdd, sizeof(luid2) );
+    status = NtQueryCompositionInputSinkLuid( sink, &luid2 );
+    ok( !status, "Got status %#lx.\n", status );
+    ok( !memcmp( &luid, &luid2, sizeof(luid) ), "The LUID of a sink changed.\n" );
+
+    status = NtQueryCompositionInputSinkLuid( sink, NULL );
+    ok( status == STATUS_ACCESS_VIOLATION, "Got status %#lx.\n", status );
+    status = NtQueryCompositionInputSinkLuid( (HANDLE)0x12345678, &luid2 );
+    ok( status == STATUS_INVALID_HANDLE, "Got status %#lx.\n", status );
+
+    /* different windows and a child window are fine, the kinds 0 and 1 too, the size is not looked at */
+    FILL( 2, hwnd, hwnd2, child, hwnd );
+    sink2 = NULL;
+    status = NtCreateCompositionInputSink( block, &sink2 );
+    ok( !status, "Got status %#lx.\n", status );
+    if (!status) NtCloseCompositionInputSink( sink2 );
+    FILL( 1, hwnd, hwnd, hwnd, hwnd );
+    *(ULONG_PTR *)block = 0x40;
+    status = NtCreateCompositionInputSink( block, &sink2 );
+    ok( !status, "Got status %#lx.\n", status );
+    if (!status) NtCloseCompositionInputSink( sink2 );
+
+    /* what is refused, with the handle set to INVALID_HANDLE_VALUE */
+    FILL( 3, hwnd, hwnd, hwnd, hwnd );
+    sink2 = NULL;
+    status = NtCreateCompositionInputSink( block, &sink2 );
+    ok( status == STATUS_INVALID_PARAMETER, "Got status %#lx.\n", status );
+    ok( sink2 == INVALID_HANDLE_VALUE, "Got handle %p.\n", sink2 );
+    FILL( 2, hwnd, hwnd, hwnd, NULL );
+    sink2 = NULL;
+    status = NtCreateCompositionInputSink( block, &sink2 );
+    ok( status == STATUS_INVALID_PARAMETER, "Got status %#lx.\n", status );
+    ok( sink2 == INVALID_HANDLE_VALUE, "Got handle %p.\n", sink2 );
+    FILL( 2, GetDesktopWindow(), hwnd, hwnd, hwnd );
+    sink2 = NULL;
+    status = NtCreateCompositionInputSink( block, &sink2 );
+    ok( status == STATUS_INVALID_PARAMETER, "Got status %#lx.\n", status );
+    sink2 = NULL;
+    status = NtCreateCompositionInputSink( NULL, &sink2 );
+    ok( status == STATUS_INVALID_PARAMETER, "Got status %#lx.\n", status );
+    ok( sink2 == INVALID_HANDLE_VALUE, "Got handle %p.\n", sink2 );
+    FILL( 2, hwnd, hwnd, hwnd, hwnd );
+    status = NtCreateCompositionInputSink( block, NULL );
+    ok( status == STATUS_INVALID_PARAMETER, "Got status %#lx.\n", status );
+
+    status = NtCloseCompositionInputSink( sink );
+    ok( !status, "Got status %#lx.\n", status );
+    status = NtQueryCompositionInputSinkLuid( sink, &luid2 );
+    ok( status == STATUS_INVALID_HANDLE, "Got status %#lx.\n", status );
+    status = NtCloseCompositionInputSink( sink );
+    ok( status == STATUS_INVALID_HANDLE, "Got status %#lx.\n", status );
+
+    DestroyWindow( hwnd2 );
+    FILL( 2, hwnd, hwnd2, hwnd, hwnd );
+    sink2 = NULL;
+    status = NtCreateCompositionInputSink( block, &sink2 );
+    ok( status == STATUS_INVALID_PARAMETER, "Got status %#lx.\n", status );
+    DestroyWindow( hwnd );
+#undef FILL
+}
+
 START_TEST(win32u)
 {
     char **argv;
@@ -3111,6 +3215,7 @@ START_TEST(win32u)
     test_NtUserDisplayConfigGetDeviceInfo();
     test_NtUserQueryWindow();
     test_RegisterClipboardFormat();
+    test_composition_input_sink();
     test_NtUserRegisterWindowMessage();
 
     run_in_process( argv, "NtUserEnableMouseInPointer 0" );
