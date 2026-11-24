@@ -9895,9 +9895,15 @@ static void test_impersonation_cap_child( DWORD pid )
     process = OpenProcess( PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid );
     ok( process != NULL, "OpenProcess failed with error %lu\n", GetLastError() );
     if (!process) return;
-    ret = OpenProcessToken( process, TOKEN_QUERY | TOKEN_DUPLICATE, &token );
+    /* a TOKEN_QUERY handle, upgraded with DuplicateHandle (Windows grants the same rights directly) */
+    ret = OpenProcessToken( process, TOKEN_QUERY, &copy );
     ok( ret, "OpenProcessToken failed with error %lu\n", GetLastError() );
     CloseHandle( process );
+    if (!ret) return;
+    ret = DuplicateHandle( GetCurrentProcess(), copy, GetCurrentProcess(), &token, TOKEN_QUERY | TOKEN_DUPLICATE,
+                           FALSE, 0 );
+    ok( ret, "DuplicateHandle failed with error %lu\n", GetLastError() );
+    CloseHandle( copy );
     if (!ret) return;
 
     ret = DuplicateTokenEx( token, TOKEN_QUERY | TOKEN_IMPERSONATE, NULL, SecurityImpersonation, TokenImpersonation,

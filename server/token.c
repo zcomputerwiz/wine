@@ -1378,9 +1378,12 @@ int token_has_privilege( struct token *token, struct luid priv )
 
 /* Can the caller give a process this token? Only enforced while an elevation helper is configured.
  * A token that is not at least an impersonation-level token is refused. A copy of the caller's own
- * token (same lineage: a duplicate or a filtered version) is always allowed. Anything else needs
- * SeAssignPrimaryTokenPrivilege, which Wine's service tokens do not have yet, so SeTcbPrivilege (held
- * by a full administrator token and by the planned elevation broker) stands in for it.
+ * token (same lineage: a duplicate or a filtered version) is allowed when it gives no more than the caller has:
+ * not a higher integrity, not elevated while the caller is not (B99 route 3: a Low process's token is a copy of its
+ * Medium parent's, so the parent's token has its lineage; measured on Windows 11, a Low process's CreateProcessAsUser
+ * with a primary copy of its Medium parent's token fails with ERROR_PRIVILEGE_NOT_HELD, one of its own token works).
+ * Anything else needs SeAssignPrimaryTokenPrivilege, which Wine's service tokens do not have yet, so SeTcbPrivilege
+ * (held by a full administrator token and by the planned elevation broker) stands in for it.
  * shortcut: SeTcbPrivilege stands in for SeAssignPrimaryTokenPrivilege, drop it once the broker has its own token. */
 unsigned int token_check_assign_primary( struct token *token )
 {
@@ -1389,15 +1392,19 @@ unsigned int token_check_assign_primary( struct token *token )
     if (!elevation_enforced()) return STATUS_SUCCESS;
     if (!token->primary && token->impersonation_level < SecurityImpersonation)
         return STATUS_BAD_IMPERSONATION_LEVEL;
-    if (is_equal_luid( token->lineage_id, caller->lineage_id )) return STATUS_SUCCESS;
+    if (is_equal_luid( token->lineage_id, caller->lineage_id ) && token->integrity_rid <= caller->integrity_rid &&
+        !(token->elevation == TokenElevationTypeFull && caller->elevation != TokenElevationTypeFull))
+        return STATUS_SUCCESS;
     if (token_has_privilege( caller, SeAssignPrimaryTokenPrivilege ) || token_has_privilege( caller, SeTcbPrivilege ))
         return STATUS_SUCCESS;
     return STATUS_PRIVILEGE_NOT_HELD;
 }
 
 /* Impersonation level a pipe server gets for a client token (Windows SeTokenCanImpersonate).
- * Without SeImpersonatePrivilege in the server's primary token the level drops to identification, unless the
- * client has the server's user and is neither more trusted (integrity) nor elevated while the server is not.
+ * A client of higher integrity than the server gives identification, also with SeImpersonatePrivilege (B99: measured
+ * on Windows 10 for SetThreadToken, which uses the same check). Without SeImpersonatePrivilege in the server's primary
+ * token the level drops to identification too, unless the client has the server's user and is not elevated while
+ * the server is not.
  * shortcut: the client's requested SQOS level is not sent to the server, so it is the client token's own level
  * (impersonation by default), upgrade when create_file carries SecurityQualityOfService. */
 int token_impersonation_level( struct token *client, struct token *server )
@@ -1405,6 +1412,7 @@ int token_impersonation_level( struct token *client, struct token *server )
     int level = client->primary ? SecurityImpersonation : client->impersonation_level;
 
     if (level > SecurityImpersonation) level = SecurityImpersonation;
+    if (client->integrity_rid > server->integrity_rid) return level < SecurityIdentification ? level : SecurityIdentification;
     if (token_has_privilege( server, SeImpersonatePrivilege )) return level;
     if (equal_sid( client->user, server->user ) && client->integrity_rid <= server->integrity_rid &&
         !(client->elevation == TokenElevationTypeFull && server->elevation != TokenElevationTypeFull))
