@@ -420,6 +420,16 @@ static unsigned int grant_id_block( uid_t uid, unsigned int session, pid_t pid, 
     return block;
 }
 
+/* R6 step 2: is a process or thread id in a block that session 0 leased to the server at the other end of link? */
+static int id_of_peer( unsigned int id, const struct session0_socket *link )
+{
+    unsigned int block = id / 4 / WEX_ID_BLOCK_SIZE;
+
+    if (!id || !block || block >= WEX_ID_BLOCK_COUNT) return 0;
+    if (!id_blocks_loaded) load_id_blocks();
+    return id_blocks[block].pid == link->peer_pid && id_blocks[block].uid == link->peer_uid;
+}
+
 /* A new block of ids for this server's own processes, or block again after session 0 restarted; 0 when there is
  * none. Session 0 grants its own blocks; a user's server asks session 0. */
 unsigned int session0_new_id_block( unsigned int wanted )
@@ -1198,7 +1208,8 @@ static void session0_link_event( struct fd *fd, int event )
         hdr->magic != WEX_SESSION0_MAGIC || hdr->version != WEX_SESSION0_VERSION ||
         (!is_pipe_request( hdr->type ) && hdr->desc_size != n - sizeof(*hdr)) ||
         (is_pipe_request( hdr->type ) && (hdr->desc_size > n - sizeof(*hdr) ||
-                                          hdr->name_size != n - sizeof(*hdr) - hdr->desc_size)) ||
+                                          hdr->name_size + (hdr->type == WEX_SESSION0_PIPE ? sizeof(unsigned int) : 0) !=
+                                          n - sizeof(*hdr) - hdr->desc_size)) ||
         (hdr->type != WEX_SESSION0_CHANNEL && hdr->type != WEX_SESSION0_USER_HIVE &&
          hdr->type != WEX_SESSION0_SESSION_ID && hdr->type != WEX_SESSION0_BLOCK && !is_pipe_request( hdr->type )) ||
         ((hdr->type == WEX_SESSION0_CHANNEL || hdr->type == WEX_SESSION0_PIPE) && channel == -1) ||
@@ -1276,10 +1287,16 @@ static void session0_link_event( struct fd *fd, int event )
         else
         {
             int session = peer_session( link );  /* R9: the session of the bridge's peer server */
+            unsigned int client_pid;
 
             memcpy( name, (const char *)(hdr + 1) + hdr->desc_size, hdr->name_size );
+            /* R6 step 2: the opener's process id, after the name; kept only when it is in a block of the peer
+             * server's (an id no other server has), else 0 as before */
+            memcpy( &client_pid, (const char *)(hdr + 1) + hdr->desc_size + hdr->name_size, sizeof(client_pid) );
+            if (!id_of_peer( client_pid, link )) client_pid = 0;
             fcntl( channel, F_SETFL, O_NONBLOCK );
-            reply.status = pipe_bridge_accept( token, name, hdr->name_size, channel, link->peer_uid, session );
+            reply.status = pipe_bridge_accept( token, name, hdr->name_size, channel, link->peer_uid, session,
+                                               client_pid );
         }
         channel = -1;  /* the bridge owns it now, or it was closed */
         free( name );
@@ -1741,38 +1758,55 @@ void session0_client_exit(void)
 /* T5.2, a user's server: a pipe request to session 0 (TYPE: PIPE with SOCK, one end of a stream socket that
  * session 0 joins to the pipe, or PIPE_WAIT without), for the token; session 0's status */
 static unsigned int pipe_request( unsigned int type, struct token *token, const WCHAR *name, data_size_t len,
-                                  int sock )
+                                  int sock, unsigned int client_pid )
 {
     struct wex_session0_reply answer;
-    data_size_t size;
+    data_size_t size, extra_size = len;
     unsigned int status;
+    char *extra = NULL;
     void *desc;
     int link;
 
     if (!session0_client) return STATUS_OBJECT_NAME_NOT_FOUND;
     size = token_describe( token, NULL, 0 );
-    if (size + len > WEX_SESSION0_MAX_MSG - sizeof(struct wex_session0_request)) return STATUS_NAME_TOO_LONG;
+    if (size + len + sizeof(client_pid) > WEX_SESSION0_MAX_MSG - sizeof(struct wex_session0_request))
+        return STATUS_NAME_TOO_LONG;
     if (!(desc = mem_alloc( size ))) return STATUS_NO_MEMORY;
     token_describe( token, desc, size );
+    /* PIPE: the name, then the opener's process id (R6 step 2) */
+    if (type == WEX_SESSION0_PIPE)
+    {
+        extra_size = len + sizeof(client_pid);
+        if (!(extra = mem_alloc( extra_size )))
+        {
+            free( desc );
+            return STATUS_NO_MEMORY;
+        }
+        memcpy( extra, name, len );
+        memcpy( extra + len, &client_pid, sizeof(client_pid) );
+    }
     if ((link = connect_session0( 1 )) == -1)
     {
         free( desc );
+        free( extra );
         return STATUS_PIPE_NOT_AVAILABLE;
     }
     /* the last field is the name's size (name_size) */
-    if (link_request( link, type, len, desc, size, name, len, sock, &answer ))
+    if (link_request( link, type, len, desc, size, extra ? (const void *)extra : (const void *)name, extra_size, sock,
+                      &answer ))
         status = STATUS_PIPE_NOT_AVAILABLE;
     else
         status = answer.status;
     close( link );
     free( desc );
+    free( extra );
     return status;
 }
 
 /* a user's server: whether session 0 has the pipe, for a wait (FSCTL_PIPE_WAIT) of a program in the session */
 unsigned int session0_wait_pipe( struct token *token, const WCHAR *name, data_size_t len )
 {
-    return pipe_request( WEX_SESSION0_PIPE_WAIT, token, name, len, -1 );
+    return pipe_request( WEX_SESSION0_PIPE_WAIT, token, name, len, -1, 0 );
 }
 
 /* T5.2, a user's server: ask session 0 to join one end of a stream socket to its named pipe, for the token; the
@@ -1787,7 +1821,7 @@ int session0_open_pipe( struct token *token, const WCHAR *name, data_size_t len 
         file_set_error();
         return -1;
     }
-    status = pipe_request( WEX_SESSION0_PIPE, token, name, len, sv[0] );
+    status = pipe_request( WEX_SESSION0_PIPE, token, name, len, sv[0], current ? current->process->id : 0 );
     close( sv[0] );
     if (status)
     {

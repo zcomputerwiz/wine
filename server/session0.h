@@ -67,8 +67,9 @@ struct token;
 extern int session0_open_pipe( struct token *token, const WCHAR *name, data_size_t len );
 extern unsigned int session0_wait_pipe( struct token *token, const WCHAR *name, data_size_t len );
 extern unsigned int pipe_bridge_query( const WCHAR *name, data_size_t len, uid_t uid, int session );
-/* T5.2, session 0 (named_pipe.c): connect a session's opener to a pipe here over sock (owned from now on) */
+/* T5.2, session 0 (named_pipe.c): connect a session's opener to a pipe here over sock (owned from now on);
+ * client_pid: the opener's process id, unique across servers (R6), or 0 */
 extern unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_size_t len, int sock,
-                                        uid_t uid, int session );
+                                        uid_t uid, int session, unsigned int client_pid );
 
 #endif /* __WINE_SERVER_SESSION0_H */
