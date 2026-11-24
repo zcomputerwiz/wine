@@ -230,6 +230,8 @@ BOOL WINAPI DECLSPEC_HOTPATCH DisableThreadLibraryCalls( HMODULE module )
 /***********************************************************************
  *	FreeLibrary   (kernelbase.@)
  */
+static void release_mui_module( HMODULE module );
+
 BOOL WINAPI DECLSPEC_HOTPATCH FreeLibrary( HINSTANCE module )
 {
     if (!module)
@@ -262,6 +264,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH FreeLibrary( HINSTANCE module )
             }
             RtlLeaveCriticalSection( &exclusive_datafile_list_section );
         }
+        release_mui_module( module );
         return UnmapViewOfFile( ptr );
     }
 
@@ -1087,6 +1090,55 @@ static CRITICAL_SECTION_DEBUG mui_critsect_debug =
 };
 static CRITICAL_SECTION mui_section = { &mui_critsect_debug, -1, 0, 0, 0, 0 };
 
+/* a module loaded as a data file is gone when it is freed: its satellite is freed with it (else the satellite's file
+ * stays mapped, and e.g. BeginUpdateResource on it fails) */
+static void release_mui_module( HMODULE module )
+{
+    struct mui_module *mm;
+    HMODULE mui = NULL;
+
+    if (list_empty( &mui_modules )) return;
+    RtlEnterCriticalSection( &mui_section );
+    LIST_FOR_EACH_ENTRY( mm, &mui_modules, struct mui_module, entry )
+    {
+        if (mm->module != module) continue;
+        mui = mm->mui;
+        list_remove( &mm->entry );
+        HeapFree( GetProcessHeap(), 0, mm );
+        break;
+    }
+    RtlLeaveCriticalSection( &mui_section );
+    if (mui) FreeLibrary( mui );
+}
+
+/* the file of a module; a module loaded as a data file is not known to the loader, its file is that of its mapping */
+static BOOL get_module_path( HMODULE module, WCHAR *path )
+{
+    union
+    {
+        MEMORY_SECTION_NAME info;
+        WCHAR buffer[sizeof(MEMORY_SECTION_NAME) / sizeof(WCHAR) + MAX_PATH + 4];
+    } name;
+    const WCHAR *str;
+    SIZE_T len;
+
+    if (!((ULONG_PTR)module & 3))
+    {
+        len = GetModuleFileNameW( module, path, MAX_PATH );
+        return len && len < MAX_PATH;
+    }
+    if (NtQueryVirtualMemory( GetCurrentProcess(), (void *)((ULONG_PTR)module & ~3), MemoryMappedFilenameInformation,
+                              &name, sizeof(name), NULL ))
+        return FALSE;
+    str = name.info.SectionFileName.Buffer;
+    len = name.info.SectionFileName.Length / sizeof(WCHAR);
+    /* an NT path in the DOS name space (\??\C:\...) */
+    if (len <= 4 || len - 4 >= MAX_PATH || wcsncmp( str, L"\\??\\", 4 )) return FALSE;
+    memcpy( path, str + 4, (len - 4) * sizeof(WCHAR) );
+    path[len - 4] = 0;
+    return TRUE;
+}
+
 static HMODULE load_mui_satellite( HMODULE module )
 {
     static const WCHAR fallback[] = L"en-US\0";
@@ -1095,11 +1147,9 @@ static HMODULE load_mui_satellite( HMODULE module )
     ULONG count, size = 0;
     SIZE_T dir_len, file_len, lang_len;
     HMODULE mui = NULL;
-    DWORD len;
     int pass;
 
-    len = GetModuleFileNameW( module, path, MAX_PATH );
-    if (!len || len >= MAX_PATH || !(file = wcsrchr( path, '\\' ))) return NULL;
+    if (!get_module_path( module, path ) || !(file = wcsrchr( path, '\\' ))) return NULL;
     file++;
     dir_len = file - path;
     file_len = wcslen( file );
@@ -1143,7 +1193,8 @@ static HMODULE get_mui_module( HMODULE module )
     HMODULE mui;
     DWORD err;
 
-    if (!module || ((ULONG_PTR)module & 3) || !(nt = RtlImageNtHeader( module ))) return NULL;
+    /* modules loaded as data files too (measured: Windows 11 finds the satellite of LOAD_LIBRARY_AS_DATAFILE modules) */
+    if (!module || !(nt = RtlImageNtHeader( (HMODULE)((ULONG_PTR)module & ~3) ))) return NULL;
 
     RtlEnterCriticalSection( &mui_section );
     LIST_FOR_EACH_ENTRY( mm, &mui_modules, struct mui_module, entry )
