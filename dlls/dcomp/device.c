@@ -204,6 +204,8 @@ struct dcomp_device
     IDCompositionDevice2 IDCompositionDevice2_iface;
     IDCompositionDevice3 IDCompositionDevice3_iface;
     IDCompositionDesktopDevice IDCompositionDesktopDevice_iface;
+    const void *const *commit_iface;   /* the interface {6b556968-...}: dcomp_commit_vtbl */
+    HANDLE commit_event;
     int version;
     LONG refcount;
     struct list targets;
@@ -4384,11 +4386,22 @@ static ULONG STDMETHODCALLTYPE dcomp_##prefix##_Release(type *iface) \
     return IDCompositionDevice_Release(&dev->IDCompositionDevice_iface); \
 }
 
+/* A commit has completed when dcomp_device_internal_commit returns: the event of SetCommitCompletionEvent is signaled then. */
+static HRESULT dcomp_device_commit(struct dcomp_device *dev)
+{
+    HRESULT hr = dcomp_device_internal_commit(dev);
+
+    EnterCriticalSection(&dev->cs);
+    if (SUCCEEDED(hr) && dev->commit_event) SetEvent(dev->commit_event);
+    LeaveCriticalSection(&dev->cs);
+    return hr;
+}
+
 #define DCOMP_DEVICE_COMMIT(prefix, type, impl) \
 static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_Commit(type *iface) \
 { \
     struct dcomp_device *dev = impl(iface); \
-    return dcomp_device_internal_commit(dev); \
+    return dcomp_device_commit(dev); \
 }
 
 #define DCOMP_DEVICE_WAIT_FOR_COMMIT_COMPLETION(prefix, type, impl) \
@@ -4568,6 +4581,75 @@ static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateSurface(type *iface, \
 static const GUID IID_dcomp_alias_a = {0xd14b6158, 0xc3fa, 0x4bce, {0x9c, 0x1f, 0xb6, 0x1d, 0x86, 0x65, 0xea, 0xb0}};
 static const GUID IID_dcomp_alias_b = {0x28d6ad3d, 0xee2a, 0x4bcd, {0x94, 0x19, 0x7d, 0x54, 0x80, 0x04, 0x35, 0xb1}};
 
+/* The interface {6b556968-2d25-11e2-99f6-8bc36088709b} of the device. FrameworkUdk of the Windows App Runtime asks for it in
+ * DCompPrivates_SetCommitCompletionEvent and calls its slot 8 with the event handle (traced on Wine with a logging object; Windows
+ * answers the call with S_OK). Only that method is known: the others return E_NOTIMPL. The event is duplicated and signaled when a
+ * commit has completed, which here is when Commit returns. A NULL handle clears the event (not measured on Windows). */
+static const GUID IID_dcomp_commit = {0x6b556968, 0x2d25, 0x11e2, {0x99, 0xf6, 0x8b, 0xc3, 0x60, 0x88, 0x70, 0x9b}};
+
+static struct dcomp_device *impl_from_commit_iface(const void *const **iface)
+{
+    return CONTAINING_RECORD(iface, struct dcomp_device, commit_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_commit_QueryInterface(const void *const **iface, REFIID iid, void **out)
+{
+    struct dcomp_device *dev = impl_from_commit_iface(iface);
+
+    return IDCompositionDevice_QueryInterface(&dev->IDCompositionDevice_iface, iid, out);
+}
+
+static ULONG STDMETHODCALLTYPE dcomp_commit_AddRef(const void *const **iface)
+{
+    struct dcomp_device *dev = impl_from_commit_iface(iface);
+
+    return IDCompositionDevice_AddRef(&dev->IDCompositionDevice_iface);
+}
+
+static ULONG STDMETHODCALLTYPE dcomp_commit_Release(const void *const **iface)
+{
+    struct dcomp_device *dev = impl_from_commit_iface(iface);
+
+    return IDCompositionDevice_Release(&dev->IDCompositionDevice_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_commit_SetCommitCompletionEvent(const void *const **iface, HANDLE event)
+{
+    struct dcomp_device *dev = impl_from_commit_iface(iface);
+    HANDLE copy = NULL, old;
+
+    TRACE("iface %p, event %p.\n", iface, event);
+
+    if (event && !DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(), &copy, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        return HRESULT_FROM_WIN32(GetLastError());
+
+    EnterCriticalSection(&dev->cs);
+    old = dev->commit_event;
+    dev->commit_event = copy;
+    LeaveCriticalSection(&dev->cs);
+    if (old) CloseHandle(old);
+    return S_OK;
+}
+
+#define DCOMP_COMMIT_STUB(n) \
+static HRESULT STDMETHODCALLTYPE dcomp_commit_method##n(const void *const **iface, void *a, void *b) \
+{ \
+    FIXME("iface %p, method " #n ": %p, %p stub!\n", iface, a, b); \
+    return E_NOTIMPL; \
+}
+DCOMP_COMMIT_STUB(3) DCOMP_COMMIT_STUB(4) DCOMP_COMMIT_STUB(5) DCOMP_COMMIT_STUB(6) DCOMP_COMMIT_STUB(7)
+DCOMP_COMMIT_STUB(9) DCOMP_COMMIT_STUB(10) DCOMP_COMMIT_STUB(11) DCOMP_COMMIT_STUB(12) DCOMP_COMMIT_STUB(13)
+DCOMP_COMMIT_STUB(14) DCOMP_COMMIT_STUB(15)
+
+static const void *const dcomp_commit_vtbl[] =
+{
+    dcomp_commit_QueryInterface, dcomp_commit_AddRef, dcomp_commit_Release,
+    dcomp_commit_method3, dcomp_commit_method4, dcomp_commit_method5, dcomp_commit_method6, dcomp_commit_method7,
+    dcomp_commit_SetCommitCompletionEvent,
+    dcomp_commit_method9, dcomp_commit_method10, dcomp_commit_method11, dcomp_commit_method12, dcomp_commit_method13,
+    dcomp_commit_method14, dcomp_commit_method15,
+};
+
 static HRESULT STDMETHODCALLTYPE dcomp_device_QueryInterface(IDCompositionDevice *iface,
         REFIID iid, void **out)
 {
@@ -4606,6 +4688,12 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_QueryInterface(IDCompositionDevice
         IDCompositionDevice_AddRef(iface);
         return S_OK;
     }
+    else if (dev->version >= 2 && IsEqualGUID(iid, &IID_dcomp_commit))
+    {
+        *out = &dev->commit_iface;
+        IDCompositionDevice_AddRef(iface);
+        return S_OK;
+    }
 
     WARN("Unsupported interface %s.\n", debugstr_guid(iid));
     *out = NULL;
@@ -4632,6 +4720,8 @@ static ULONG STDMETHODCALLTYPE dcomp_device_Release(IDCompositionDevice *iface)
     {
         if (dev->rendering_device)
             IUnknown_Release(dev->rendering_device);
+        if (dev->commit_event)
+            CloseHandle(dev->commit_event);
         DeleteCriticalSection(&dev->cs);
         free(dev);
     }
@@ -5383,6 +5473,7 @@ static HRESULT dcomp_device_create(int version, IUnknown *rendering_device, REFI
     dev->IDCompositionDevice2_iface.lpVtbl = &dcomp_device2_vtbl;
     dev->IDCompositionDevice3_iface.lpVtbl = &dcomp_device3_vtbl;
     dev->IDCompositionDesktopDevice_iface.lpVtbl = &dcomp_desktop_device_ext_vtbl.base;
+    dev->commit_iface = dcomp_commit_vtbl;
     dev->version = version;
     dev->refcount = 1;
     list_init(&dev->targets);

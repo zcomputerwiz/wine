@@ -472,6 +472,40 @@ static void test_shared_visual(void)
         }
     }
 
+    /* The interface {6b556968-...} of the device: FrameworkUdk calls its slot 8 with the commit completion event. Windows 11
+     * answers S_OK; the signal on Commit is checked on Wine only. */
+    {
+        static const GUID IID_commit = {0x6b556968, 0x2d25, 0x11e2, {0x99, 0xf6, 0x8b, 0xc3, 0x60, 0x88, 0x70, 0x9b}};
+        typedef HRESULT (STDMETHODCALLTYPE *set_event_t)(void *iface, HANDLE event);
+        BOOL is_wine = !!GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version");
+        HANDLE event = CreateEventW(NULL, TRUE, FALSE, NULL);
+        set_event_t set_event;
+        void *commit = NULL;
+
+        hr = IDCompositionDesktopDevice_QueryInterface(desktop, &IID_commit, &commit);
+        ok(hr == S_OK || broken(hr == E_NOINTERFACE), "Got unexpected hr %#lx.\n", hr);
+        if (hr == S_OK)
+        {
+            set_event = (*(set_event_t **)commit)[8];
+            hr = set_event(commit, event);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            if (is_wine)
+            {
+                ok(WaitForSingleObject(event, 0) == WAIT_TIMEOUT, "The event is signaled before a commit.\n");
+                hr = IDCompositionDesktopDevice_Commit(desktop);
+                ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                ok(WaitForSingleObject(event, 0) == WAIT_OBJECT_0, "The event is not signaled after a commit.\n");
+                ResetEvent(event);
+                hr = set_event(commit, NULL);
+                ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                IDCompositionDesktopDevice_Commit(desktop);
+                ok(WaitForSingleObject(event, 0) == WAIT_TIMEOUT, "The cleared event is signaled.\n");
+            }
+            IUnknown_Release((IUnknown *)commit);
+        }
+        CloseHandle(event);
+    }
+
     open = (*(open_t **)desktop)[29];
 
     hr = open(desktop, handle, &IID_IDCompositionVisual, (void **)&visual);
