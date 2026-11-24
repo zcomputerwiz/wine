@@ -9873,6 +9873,84 @@ static void test_regkey_descriptor_handle_access(void)
     RegDeleteKeyW( HKEY_CURRENT_USER, pathW );
 }
 
+static SECURITY_IMPERSONATION_LEVEL thread_token_level(void)
+{
+    SECURITY_IMPERSONATION_LEVEL level = -1;
+    HANDLE token;
+    DWORD size;
+
+    if (!OpenThreadToken( GetCurrentThread(), TOKEN_QUERY, TRUE, &token )) return -1;
+    GetTokenInformation( token, TokenImpersonationLevel, &level, sizeof(level), &size );
+    CloseHandle( token );
+    return level;
+}
+
+/* run at Low integrity: the token of the Medium parent may be opened and duplicated, but impersonating it gives an
+ * identification token only (measured on Windows 11) */
+static void test_impersonation_cap_child( DWORD pid )
+{
+    HANDLE process, token, copy;
+    BOOL ret;
+
+    process = OpenProcess( PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid );
+    ok( process != NULL, "OpenProcess failed with error %lu\n", GetLastError() );
+    if (!process) return;
+    ret = OpenProcessToken( process, TOKEN_QUERY | TOKEN_DUPLICATE, &token );
+    ok( ret, "OpenProcessToken failed with error %lu\n", GetLastError() );
+    CloseHandle( process );
+    if (!ret) return;
+
+    ret = DuplicateTokenEx( token, TOKEN_QUERY | TOKEN_IMPERSONATE, NULL, SecurityImpersonation, TokenImpersonation,
+                            &copy );
+    ok( ret, "DuplicateTokenEx failed with error %lu\n", GetLastError() );
+    if (ret)
+    {
+        ret = SetThreadToken( NULL, copy );
+        ok( ret, "SetThreadToken failed with error %lu\n", GetLastError() );
+        ok( thread_token_level() == SecurityIdentification, "got level %d\n", thread_token_level() );
+        RevertToSelf();
+        CloseHandle( copy );
+    }
+
+    ret = ImpersonateLoggedOnUser( token );
+    ok( ret, "ImpersonateLoggedOnUser failed with error %lu\n", GetLastError() );
+    ok( thread_token_level() == SecurityIdentification, "got level %d\n", thread_token_level() );
+    RevertToSelf();
+    CloseHandle( token );
+}
+
+/* a Low integrity process must not impersonate a token of higher integrity (Windows' SeTokenCanImpersonate) */
+static void test_impersonation_cap(void)
+{
+    static SID low_level = {SID_REVISION, 1, {SECURITY_MANDATORY_LABEL_AUTHORITY}, {SECURITY_MANDATORY_LOW_RID}};
+    TOKEN_MANDATORY_LABEL label = {{0}};
+    PROCESS_INFORMATION info;
+    STARTUPINFOA startup;
+    HANDLE token, low;
+    char cmd[MAX_PATH + 64];
+    BOOL ret;
+
+    ret = OpenProcessToken( GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT |
+                            TOKEN_ASSIGN_PRIMARY, &token );
+    ok( ret, "OpenProcessToken failed with error %lu\n", GetLastError() );
+    ret = DuplicateTokenEx( token, TOKEN_ALL_ACCESS, NULL, SecurityImpersonation, TokenPrimary, &low );
+    ok( ret, "DuplicateTokenEx failed with error %lu\n", GetLastError() );
+    CloseHandle( token );
+    if (!ret) return;
+    label.Label.Attributes = SE_GROUP_INTEGRITY;
+    label.Label.Sid = &low_level;
+    ret = SetTokenInformation( low, TokenIntegrityLevel, &label, sizeof(label) + GetLengthSid( &low_level ) );
+    ok( ret, "SetTokenInformation failed with error %lu\n", GetLastError() );
+
+    memset( &startup, 0, sizeof(startup) );
+    startup.cb = sizeof(startup);
+    sprintf( cmd, "%s security impersonation_cap %lu", myARGV[0], GetCurrentProcessId() );
+    ret = CreateProcessAsUserA( low, NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &info );
+    ok( ret, "CreateProcessAsUser failed with error %lu\n", GetLastError() );
+    if (ret) wait_child_process( &info );
+    CloseHandle( low );
+}
+
 START_TEST(security)
 {
     init();
@@ -9888,6 +9966,8 @@ START_TEST(security)
             test_duplicate_handle_access_child();
         else if (!strcmp(myARGV[2], "restricted"))
             test_create_process_token_child();
+        else if (!strcmp(myARGV[2], "impersonation_cap") && myARGC >= 4)
+            test_impersonation_cap_child( strtoul( myARGV[3], NULL, 10 ) );
         return;
     }
     test_kernel_objects_security();
@@ -9907,6 +9987,7 @@ START_TEST(security)
     test_security_descriptor();
     test_process_security();
     test_impersonation_level();
+    test_impersonation_cap();
     test_SetEntriesInAclW();
     test_SetEntriesInAclA();
     test_CreateDirectoryA();
