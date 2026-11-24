@@ -649,17 +649,25 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_EnumAdapterByGpuPreference(IWineDX
 static HRESULT STDMETHODCALLTYPE dxgi_factory_RegisterAdaptersChangedEvent(IWineDXGIFactory *iface,
         HANDLE event, DWORD *cookie)
 {
-    FIXME("iface %p, event %p, cookie %p stub!\n", iface, event, cookie);
+    static LONG next_cookie;
 
-    return E_NOTIMPL;
+    TRACE("iface %p, event %p, cookie %p.\n", iface, event, cookie);
+
+    /* The adapters of this process never change, so the event is never signaled; the registration only has to succeed
+     * (the composition engine of the Windows App Runtime treats a failure here as fatal). */
+    if (!event || !cookie)
+        return DXGI_ERROR_INVALID_CALL;
+
+    *cookie = InterlockedIncrement(&next_cookie);
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE dxgi_factory_UnregisterAdaptersChangedEvent(IWineDXGIFactory *iface,
         DWORD cookie)
 {
-    FIXME("iface %p, cookie %#lx stub!\n", iface, cookie);
+    TRACE("iface %p, cookie %#lx.\n", iface, cookie);
 
-    return E_NOTIMPL;
+    return S_OK;
 }
 
 static const struct IWineDXGIFactoryVtbl dxgi_factory_vtbl =
