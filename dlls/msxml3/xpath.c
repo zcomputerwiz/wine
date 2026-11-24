@@ -1830,6 +1830,13 @@ static void xpath_compile_path_expr(struct xpath_parser_context *ctxt)
         {
             int len = wcslen(name);
 
+            /* a prefixed name (prefix:local, as in ms:string-compare(...)) is one name; '::' is an axis */
+            if (ctxt->cur[len] == ':' && xml_is_ncname_startchar(ctxt->cur[len + 1]))
+            {
+                for (++len; xml_is_ncnamechar(ctxt->cur[len]); ++len)
+                    ;
+            }
+
             while (ctxt->cur[len])
             {
                 if (!xml_is_space(ctxt->cur[len]))
@@ -4991,8 +4998,10 @@ static xpath_function_ptr xpath_lookup_function(struct xpath_context *ctxt, cons
 {
     for (size_t i = 0; i < ctxt->functions.count; ++i)
     {
+        const WCHAR *entry_uri = ctxt->functions.entries[i].uri;
+
         if (wcscmp(ctxt->functions.entries[i].name, name)) continue;
-        if (uri && wcscmp(ctxt->functions.entries[i].uri, uri)) continue;
+        if (!uri != !entry_uri || (uri && wcscmp(entry_uri, uri))) continue;
         return ctxt->functions.entries[i].func;
     }
 
@@ -5527,7 +5536,9 @@ struct xpath_object * xpath_eval(const WCHAR *str, struct xpath_context *ctx)
         return NULL;
     xpath_eval_expr(ctxt);
 
-    if (ctxt->error == XPATH_EXPRESSION_OK)
+    if (ctxt->error != XPATH_EXPRESSION_OK)
+        TRACE("%s: error %d\n", debugstr_w(str), ctxt->error);
+    else
     {
         res = xpath_pop_value(ctxt);
         if (res == NULL)
@@ -7717,8 +7728,61 @@ static void xslpattern_builtin_node_name(struct xpath_parser_context *ctxt, int 
     }
 }
 
+/* ms:string-compare(string1, string2[, language[, options]]), an MSXML extension function: -1, 0 or 1 as string1
+ * sorts before, the same as or after string2 in the language (the user's locale when empty or absent); the options
+ * "i" compare without case, "u" sorts upper case first. */
+static void xpath_ms_string_compare(struct xpath_parser_context *ctxt, int nargs)
+{
+    WCHAR *str1 = NULL, *str2 = NULL, *lang = NULL, *options = NULL;
+    const WCHAR *locale = LOCALE_NAME_USER_DEFAULT, *p;
+    bool upper_first = false;
+    DWORD flags = 0;
+    int ret;
+
+    if (nargs < 2 || nargs > 4)
+        return xpath_parser_context_set_error(ctxt, XPATH_INVALID_ARITY);
+    if (ctxt->stack.count < nargs)
+        return xpath_parser_context_set_error(ctxt, XPATH_STACK_ERROR);
+
+    if (nargs == 4) options = xpath_pop_string(ctxt);
+    if (nargs >= 3) lang = xpath_pop_string(ctxt);
+    str2 = xpath_pop_string(ctxt);
+    str1 = xpath_pop_string(ctxt);
+
+    if (str1 && str2 && (nargs < 3 || lang) && (nargs < 4 || options))
+    {
+        for (p = options; p && *p; p++)
+        {
+            if (*p == 'i' || *p == 'I') flags |= NORM_IGNORECASE;
+            else if (*p == 'u' || *p == 'U') upper_first = true;
+        }
+        if (lang && *lang) locale = lang;
+
+        ret = CompareStringEx(locale, flags, str1, -1, str2, -1, NULL, NULL, 0);
+        if (!ret && locale != LOCALE_NAME_USER_DEFAULT)
+        {
+            locale = LOCALE_NAME_USER_DEFAULT;
+            ret = CompareStringEx(locale, flags, str1, -1, str2, -1, NULL, NULL, 0);
+        }
+        ret = ret ? ret - CSTR_EQUAL : 0;
+        /* the locale sorts lower case first; with "u", strings that differ only in case swap their order */
+        if (ret && upper_first && !(flags & NORM_IGNORECASE)
+                && CompareStringEx(locale, NORM_IGNORECASE, str1, -1, str2, -1, NULL, NULL, 0) == CSTR_EQUAL)
+            ret = -ret;
+        xpath_push_value(ctxt, xpath_new_number(ctxt, ret));
+    }
+
+    free(str1);
+    free(str2);
+    free(lang);
+    free(options);
+}
+
 static void xpath_register_xpath_functions(struct xpath_context *ctxt)
 {
+    /* MSXML 3.0 has no extension functions: its queries using them fail */
+    if (ctxt->properties && ctxt->properties->version >= MSXML4)
+        xpath_register_func_uri(ctxt, L"string-compare", L"urn:schemas-microsoft-com:xslt", xpath_ms_string_compare);
     xpath_register_func(ctxt, L"boolean", xpath_builtin_boolean);
     xpath_register_func(ctxt, L"ceiling", xpath_builtin_ceiling);
     xpath_register_func(ctxt, L"count", xpath_builtin_count);

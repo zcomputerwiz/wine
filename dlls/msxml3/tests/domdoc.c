@@ -19439,6 +19439,89 @@ if (hr == S_OK)
     free_bstrs();
 }
 
+static void test_ms_string_compare(void)
+{
+    static const struct
+    {
+        const char *expr;
+        HRESULT hr60;
+    }
+    tests[] =
+    {
+        /* -1 is written as 0 - 1: a negative literal on its own is a separate, older problem of Wine's parser */
+        { "ms:string-compare('a', 'b') = 0 - 1", S_OK },
+        { "ms:string-compare('b', 'a') = 1", S_OK },
+        { "ms:string-compare('a', 'a') = 0", S_OK },
+        { "ms:string-compare('a', 'A') = 0 - 1", S_OK },
+        { "ms:string-compare('A', 'a') = 1", S_OK },
+        { "ms:string-compare('a', 'A', '', 'i') = 0", S_OK },
+        { "ms:string-compare('a', 'A', '', 'u') = 1", S_OK },
+        { "ms:string-compare('A', 'a', '', 'u') = 0 - 1", S_OK },
+        { "ms:string-compare('a', 'B', '', 'u') = 0 - 1", S_OK },
+        { "ms:string-compare('a', 'A', 'en-US') = 0 - 1", S_OK },
+        { "ms:string-compare('root\\VFS\\x', 'ROOT\\vfs\\X', '', 'i') = 0", S_OK },
+        { "ms:string-compare('', 'a') < 0", S_OK },
+        { "ms:string-compare(@v, 'abc', '', 'i') = 0", S_OK },
+        { "ms:string-compare('a')", E_FAIL },
+        { "ms:string-compare('a', 'b', '', 'i', 'x')", E_FAIL },
+        { "string-compare('a', 'b') < 0", E_FAIL },
+    };
+    IXMLDOMDocument2 *doc;
+    IXMLDOMNodeList *list;
+    VARIANT_BOOL b;
+    unsigned int i;
+    char query[128];
+    LONG len;
+    HRESULT hr;
+
+    /* MSXML 6.0: the extension function, called through the prefix of its namespace */
+    if (is_clsid_supported(&CLSID_DOMDocument60, &IID_IXMLDOMDocument2))
+    {
+        doc = create_document_version(60, &IID_IXMLDOMDocument2);
+        hr = IXMLDOMDocument2_loadXML(doc, _bstr_("<r v='ABC'/>"), &b);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = IXMLDOMDocument2_setProperty(doc, _bstr_("SelectionNamespaces"),
+                _variantbstr_("xmlns:ms='urn:schemas-microsoft-com:xslt'"));
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+        for (i = 0; i < ARRAY_SIZE(tests); i++)
+        {
+            winetest_push_context("%s", tests[i].expr);
+            sprintf(query, "/r[%s]", tests[i].expr);
+            list = NULL;
+            hr = IXMLDOMDocument2_selectNodes(doc, _bstr_(query), &list);
+            ok(hr == tests[i].hr60, "Unexpected hr %#lx.\n", hr);
+            if (list)
+            {
+                len = 0;
+                hr = IXMLDOMNodeList_get_length(list, &len);
+                ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+                ok(len == 1, "Unexpected length %ld.\n", len);
+                IXMLDOMNodeList_Release(list);
+            }
+            winetest_pop_context();
+        }
+        IXMLDOMDocument2_Release(doc);
+    }
+
+    /* MSXML 3.0 has no extension functions, also with XPath as its selection language */
+    doc = create_document_version(30, &IID_IXMLDOMDocument2);
+    hr = IXMLDOMDocument2_loadXML(doc, _bstr_("<r v='ABC'/>"), &b);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IXMLDOMDocument2_setProperty(doc, _bstr_("SelectionLanguage"), _variantbstr_("XPath"));
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IXMLDOMDocument2_setProperty(doc, _bstr_("SelectionNamespaces"),
+            _variantbstr_("xmlns:ms='urn:schemas-microsoft-com:xslt'"));
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    list = NULL;
+    hr = IXMLDOMDocument2_selectNodes(doc, _bstr_("/r[ms:string-compare('a', 'b') < 0]"), &list);
+    ok(hr == E_FAIL, "Unexpected hr %#lx.\n", hr);
+    if (list) IXMLDOMNodeList_Release(list);
+    IXMLDOMDocument2_Release(doc);
+
+    free_bstrs();
+}
+
 START_TEST(domdoc)
 {
     HRESULT hr;
@@ -19555,6 +19638,7 @@ START_TEST(domdoc)
     test_element_setNamedItem();
     test_document_stream();
     test_nodeFromID();
+    test_ms_string_compare();
 
     if (is_clsid_supported(&CLSID_MXNamespaceManager40, &IID_IMXNamespaceManager))
     {
