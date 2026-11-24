@@ -588,10 +588,12 @@ struct d3d_device
     ID3D10Multithread ID3D10Multithread_iface;
     IWineDXGIDeviceParent IWineDXGIDeviceParent_iface;
     ID3D11VideoDevice1 ID3D11VideoDevice1_iface;
+    const void * const *compositor_private_vtbl;  /* the private interface {26c5dc23-...} that the compositor asks for */
     IUnknown *outer_unk;
     LONG refcount;
 
     BOOL d3d11_only;
+    UINT creation_flags;    /* the D3D11_CREATE_DEVICE_* flags that the device was created with */
 
     struct d3d_device_context_state *state;
     struct d3d11_device_context immediate_context;
