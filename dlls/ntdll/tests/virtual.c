@@ -2810,6 +2810,112 @@ static void test_NtFreeVirtualMemory(void)
     ok(status == STATUS_SUCCESS, "Unexpected status %08lx.\n", status);
 }
 
+#ifdef _WIN64
+static void check_region( void *addr, void *base, SIZE_T size, DWORD state, DWORD protect, DWORD alloc_protect,
+                          unsigned int line )
+{
+    MEMORY_BASIC_INFORMATION info;
+    NTSTATUS status;
+    SIZE_T len;
+
+    status = NtQueryVirtualMemory( NtCurrentProcess(), addr, MemoryBasicInformation, &info, sizeof(info), &len );
+    ok_(__FILE__, line)( status == STATUS_SUCCESS, "Unexpected status %08lx.\n", status );
+    ok_(__FILE__, line)( info.BaseAddress == base, "Got base %p, expected %p.\n", info.BaseAddress, base );
+    ok_(__FILE__, line)( info.RegionSize == size, "Got size %p, expected %p.\n", (void *)info.RegionSize, (void *)size );
+    ok_(__FILE__, line)( info.State == state, "Got state %#lx, expected %#lx.\n", info.State, state );
+    ok_(__FILE__, line)( info.Protect == protect, "Got protect %#lx, expected %#lx.\n", info.Protect, protect );
+    if (state != MEM_FREE)
+        ok_(__FILE__, line)( info.AllocationProtect == alloc_protect, "Got alloc protect %#lx, expected %#lx.\n",
+                             info.AllocationProtect, alloc_protect );
+}
+
+static void test_large_reservation(void)
+{
+    static const SIZE_T total = (SIZE_T)64 << 30, block = (SIZE_T)4 << 30;
+    MEMORY_BASIC_INFORMATION info;
+    SIZE_T size, offsets[4];
+    char *base, *addr;
+    NTSTATUS status;
+    unsigned int i;
+
+    /* A large reservation, pages committed at its ends and across 4 GB boundaries, released and reserved again:
+     * nothing of the first layout may show through in the second. */
+    base = NULL;
+    size = total;
+    status = NtAllocateVirtualMemory( NtCurrentProcess(), (void **)&base, 0, &size, MEM_RESERVE, PAGE_NOACCESS );
+    if (status == STATUS_NO_MEMORY || status == STATUS_COMMITMENT_LIMIT)
+    {
+        skip( "Cannot reserve %p bytes.\n", (void *)total );
+        return;
+    }
+    ok( status == STATUS_SUCCESS, "Unexpected status %08lx.\n", status );
+    if (status) return;
+    /* the region of a query starts at the queried page */
+    check_region( base, base, total, MEM_RESERVE, 0, PAGE_NOACCESS, __LINE__ );
+    check_region( base + total / 2, base + total / 2, total / 2, MEM_RESERVE, 0, PAGE_NOACCESS, __LINE__ );
+
+    offsets[0] = 0;
+    offsets[1] = block - page_size;
+    offsets[2] = 9 * block;
+    offsets[3] = total - page_size;
+    for (i = 0; i < ARRAY_SIZE(offsets); i++)
+    {
+        addr = base + offsets[i];
+        size = page_size;
+        status = NtAllocateVirtualMemory( NtCurrentProcess(), (void **)&addr, 0, &size, MEM_COMMIT, PAGE_READWRITE );
+        ok( status == STATUS_SUCCESS, "%u: unexpected status %08lx.\n", i, status );
+        *(volatile char *)(base + offsets[i]) = 1;
+    }
+    check_region( base, base, page_size, MEM_COMMIT, PAGE_READWRITE, PAGE_NOACCESS, __LINE__ );
+    check_region( base + page_size, base + page_size, block - 2 * page_size, MEM_RESERVE, 0, PAGE_NOACCESS, __LINE__ );
+    check_region( base + block - page_size, base + block - page_size, page_size, MEM_COMMIT, PAGE_READWRITE,
+                  PAGE_NOACCESS, __LINE__ );
+    check_region( base + block, base + block, 8 * block, MEM_RESERVE, 0, PAGE_NOACCESS, __LINE__ );
+    check_region( base + 9 * block + page_size, base + 9 * block + page_size, total - 9 * block - 2 * page_size,
+                  MEM_RESERVE, 0, PAGE_NOACCESS, __LINE__ );
+    check_region( base + total - page_size, base + total - page_size, page_size, MEM_COMMIT, PAGE_READWRITE,
+                  PAGE_NOACCESS, __LINE__ );
+
+    /* decommitting the whole range leaves it reserved in one piece */
+    addr = base;
+    size = total;
+    status = NtFreeVirtualMemory( NtCurrentProcess(), (void **)&addr, &size, MEM_DECOMMIT );
+    ok( status == STATUS_SUCCESS, "Unexpected status %08lx.\n", status );
+    status = NtQueryVirtualMemory( NtCurrentProcess(), base, MemoryBasicInformation, &info, sizeof(info), &size );
+    ok( status == STATUS_SUCCESS, "Unexpected status %08lx.\n", status );
+    ok( info.BaseAddress == base, "Got base %p, expected %p.\n", info.BaseAddress, base );
+    ok( info.State == MEM_RESERVE, "Got state %#lx.\n", info.State );
+    ok( !info.Protect, "Got protect %#lx.\n", info.Protect );
+    todo_wine ok( info.RegionSize == total, "Got size %p, expected %p.\n", (void *)info.RegionSize, (void *)total );
+
+    addr = base;
+    size = 0;
+    status = NtFreeVirtualMemory( NtCurrentProcess(), (void **)&addr, &size, MEM_RELEASE );
+    ok( status == STATUS_SUCCESS, "Unexpected status %08lx.\n", status );
+
+    addr = base;
+    size = total;
+    status = NtAllocateVirtualMemory( NtCurrentProcess(), (void **)&addr, 0, &size, MEM_RESERVE, PAGE_READONLY );
+    if (status == STATUS_CONFLICTING_ADDRESSES)
+    {
+        skip( "The range was taken again.\n" );
+        return;
+    }
+    ok( status == STATUS_SUCCESS, "Unexpected status %08lx.\n", status );
+    ok( addr == base, "Got %p, expected %p.\n", addr, base );
+    for (i = 0; i < ARRAY_SIZE(offsets); i++)
+        check_region( base + offsets[i], base + offsets[i], total - offsets[i], MEM_RESERVE, 0, PAGE_READONLY, __LINE__ );
+
+    size = 0;
+    status = NtFreeVirtualMemory( NtCurrentProcess(), (void **)&addr, &size, MEM_RELEASE );
+    ok( status == STATUS_SUCCESS, "Unexpected status %08lx.\n", status );
+}
+#else
+static void test_large_reservation(void)
+{
+}
+#endif
+
 static void test_NtProtectVirtualMemory(void)
 {
     void *addr, *addr2;
@@ -3796,6 +3902,7 @@ START_TEST(virtual)
     test_NtAllocateVirtualMemoryEx();
     test_NtAllocateVirtualMemoryEx_address_requirements();
     test_NtFreeVirtualMemory();
+    test_large_reservation();
     test_NtProtectVirtualMemory();
     test_RtlCreateUserStack();
     test_NtMapViewOfSection();
