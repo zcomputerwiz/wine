@@ -236,20 +236,10 @@ DWORD forward_QueryServiceConfig2W( SC_RPC_HANDLE service, DWORD level, BYTE *bu
     FORWARD( s0_svcctl_QueryServiceConfig2W( service, level, OUT_BUFFER( buffer, size ), size, needed ) );
 }
 
-DWORD forward_QueryServiceConfigEx( SC_RPC_HANDLE service, DWORD level, SC_RPC_CONFIG_INFOW *info )
-{
-    FORWARD( s0_svcctl_QueryServiceConfigEx( service, level, info ) );
-}
-
 DWORD forward_QueryServiceStatusEx( SC_RPC_HANDLE service, SC_STATUS_TYPE level, BYTE *buffer, DWORD size,
                                     DWORD *needed )
 {
     FORWARD( s0_svcctl_QueryServiceStatusEx( service, level, OUT_BUFFER( buffer, size ), size, needed ) );
-}
-
-DWORD forward_QueryServiceStatus( SC_RPC_HANDLE service, SERVICE_STATUS *status )
-{
-    FORWARD( s0_svcctl_QueryServiceStatus( service, status ) );
 }
 
 DWORD forward_StartServiceW( SC_RPC_HANDLE service, DWORD argc, LPCWSTR *argv )
@@ -262,12 +252,6 @@ DWORD forward_ControlService( SC_RPC_HANDLE service, DWORD control, SERVICE_STAT
     FORWARD( s0_svcctl_ControlService( service, control, status ) );
 }
 
-DWORD forward_ControlServiceExW( SC_RPC_HANDLE service, DWORD control, DWORD level,
-                                 SC_RPC_SERVICE_CONTROL_IN_PARAMSW *in, SC_RPC_SERVICE_CONTROL_OUT_PARAMSW *out )
-{
-    FORWARD( s0_svcctl_ControlServiceExW( service, control, level, in, out ) );
-}
-
 DWORD forward_QueryServiceObjectSecurity( SC_RPC_HANDLE service, SECURITY_INFORMATION info, BYTE *descriptor,
                                           DWORD size, DWORD *needed )
 {
@@ -278,10 +262,4 @@ DWORD forward_SetServiceObjectSecurity( SC_RPC_HANDLE service, SECURITY_INFORMAT
                                         DWORD size )
 {
     FORWARD( s0_svcctl_SetServiceObjectSecurity( service, info, descriptor, size ) );
-}
-
-DWORD forward_EnumDependentServicesW( SC_RPC_HANDLE service, DWORD state, BYTE *buffer, DWORD size, DWORD *needed,
-                                      DWORD *returned )
-{
-    FORWARD( s0_svcctl_EnumDependentServicesW( service, state, OUT_BUFFER( buffer, size ), size, needed, returned ) );
 }

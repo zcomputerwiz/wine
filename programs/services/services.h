@@ -105,6 +105,7 @@ BOOL safeboot_allows(const struct service_entry *service);
 #define SESSION_SERVICE_EVERY_SESSION  2   /* 1: every session runs it */
 BOOL is_session_service(const WCHAR *name, DWORD type, int configured);
 BOOL service_is_session_service(const struct service_entry *entry);
+BOOL service_is_session0s(const struct service_entry *entry);
 BOOL is_session_service_name(struct scmdatabase *db, const WCHAR *name, DWORD type);
 extern BOOL forward_mode;
 void notify_service_state(struct service_entry *service);

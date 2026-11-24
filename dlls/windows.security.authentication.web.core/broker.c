@@ -26,6 +26,7 @@
 #include "winreg.h"
 #include "sddl.h"
 #include "wine/tokenbroker.h"
+#include "wine/wex_pipe.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(webcore);
@@ -70,99 +71,50 @@ static SID *process_user( HANDLE process )
     return sid;
 }
 
-/* is the pipe's server the machine's token broker, outside any AppContainer? The pipe exists only once a broker runs,
- * so a sandboxed process of the same user (a Store app) could create it first and answer for the broker: the user's
- * SID alone does not tell them apart. The image must be tokenbroker.exe in the system directory (system32 for the
- * 64-bit broker, syswow64 for the 32-bit one), which a user cannot write where the machine tree belongs to wexsys
- * (in a stock prefix it is the user's own folder, and the image check adds nothing). Its token must be a normal
- * user's: a sandbox that starts the real image suspended gives it the sandbox's token (below medium integrity or
- * restricted). Wine's sandboxes are the same Unix user: this is defence in depth, not a sandbox boundary. */
-static BOOL token_is_normal( HANDLE token )
-{
-    BYTE buffer[sizeof(TOKEN_MANDATORY_LABEL) + SECURITY_MAX_SID_SIZE];
-    TOKEN_MANDATORY_LABEL *label = (TOKEN_MANDATORY_LABEL *)buffer;
-    DWORD restricted = 1, len;
-    SID *sid;
-
-    if (!GetTokenInformation( token, TokenIsRestricted, &restricted, sizeof(restricted), &len ) || restricted)
-        return FALSE;
-    if (!GetTokenInformation( token, TokenIntegrityLevel, buffer, sizeof(buffer), &len )) return FALSE;
-    sid = label->Label.Sid;
-    if (!IsValidSid( sid ) || !*GetSidSubAuthorityCount( sid )) return FALSE;
-    return *GetSidSubAuthority( sid, *GetSidSubAuthorityCount( sid ) - 1 ) >= SECURITY_MANDATORY_MEDIUM_RID;
-}
-
-static BOOL server_is_broker( HANDLE process, ULONG pid )
-{
-    static const WCHAR *const dirs[] = { L"\\system32\\tokenbroker.exe", L"\\syswow64\\tokenbroker.exe" };
-    WCHAR image[MAX_PATH], expected[MAX_PATH];
-    DWORD size = ARRAY_SIZE(image), container = 0, len;
-    HANDLE token;
-    UINT windir, i;
-
-    if (!OpenProcessToken( process, TOKEN_QUERY, &token )) return FALSE;
-    if (!GetTokenInformation( token, TokenIsAppContainer, &container, sizeof(container), &len )) container = 1;
-    if (!container && !token_is_normal( token )) container = 1;
-    CloseHandle( token );
-    if (container)
-    {
-        WARN( "the pipe's server process %04lx runs in an AppContainer or with a sandbox's token\n", pid );
-        return FALSE;
-    }
-    if (!QueryFullProcessImageNameW( process, 0, image, &size ))
-    {
-        WARN( "no image name for the pipe's server process %04lx: %lu\n", pid, GetLastError() );
-        return FALSE;
-    }
-    if (!(windir = GetWindowsDirectoryW( expected, MAX_PATH )) || windir >= MAX_PATH) return FALSE;
-    for (i = 0; i < ARRAY_SIZE(dirs); i++)
-    {
-        if (windir + wcslen( dirs[i] ) >= MAX_PATH) continue;
-        wcscpy( expected + windir, dirs[i] );
-        if (!wcsicmp( image, expected )) return TRUE;
-    }
-    WARN( "the pipe's server process %04lx is %s, not the token broker\n", pid, debugstr_w( image ) );
-    return FALSE;
-}
-
-/* is the pipe's server a process of this program's user? (the pipe's name and descriptor say so; this checks it) */
-static BOOL server_is_own_user( HANDLE pipe, const SID *own )
+/* is the pipe's server the user's token broker? The pipe exists only once a broker runs, so a sandboxed process of
+ * the same user (a Store app) could create it first and answer for the broker: the user's SID alone does not tell
+ * them apart. wex_pipe_server_is checks the image (tokenbroker.exe in system32 or syswow64, which a user cannot write
+ * where the machine tree belongs to wexsys) and the token (a normal user's, not an AppContainer's or a sandbox's that
+ * started the real image suspended); this adds that the server runs as this program's user (the pipe's name and
+ * descriptor say so). Wine's sandboxes are the same Unix user: this is defence in depth, not a sandbox boundary. */
+static BOOL server_is_own_broker( HANDLE pipe, const SID *own )
 {
     HANDLE process;
     ULONG pid;
     SID *sid;
-    BOOL ret = FALSE;
+    BOOL ret;
 
-    if (!GetNamedPipeServerProcessId( pipe, &pid ))
+    if (!wex_pipe_server_is( pipe, L"tokenbroker.exe" ))
     {
-        WARN( "no server process id for the pipe: %lu\n", GetLastError() );
+        WARN( "the pipe's server is not the token broker, or runs with a sandbox's token\n" );
         return FALSE;
     }
-    /* the query right, not only the limited one: with elevation enforced WineExplorer's server gives a process's token
-     * only to a handle with PROCESS_QUERY_INFORMATION (server/token.c, open_token) */
-    if (!(process = OpenProcess( PROCESS_QUERY_INFORMATION, FALSE, pid )))
+    if (!GetNamedPipeServerProcessId( pipe, &pid ) ||
+        !(process = OpenProcess( PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid )))
     {
-        WARN( "cannot open the pipe's server process %04lx: %lu\n", pid, GetLastError() );
+        WARN( "cannot open the pipe's server process: %lu\n", GetLastError() );
         return FALSE;
     }
-    if ((sid = process_user( process )))
-    {
-        ret = EqualSid( sid, (SID *)own ) && server_is_broker( process, pid );
-        if (!ret && WARN_ON(webcore))
-        {
-            WCHAR *server_text = NULL, *own_text = NULL;
-
-            ConvertSidToStringSidW( sid, &server_text );
-            ConvertSidToStringSidW( (SID *)own, &own_text );
-            WARN( "the pipe's server process %04lx runs as %s, this program as %s\n", pid, debugstr_w( server_text ),
-                  debugstr_w( own_text ) );
-            LocalFree( server_text );
-            LocalFree( own_text );
-        }
-        free( sid );
-    }
-    else WARN( "cannot read the user of the pipe's server process %04lx: %lu\n", pid, GetLastError() );
+    sid = process_user( process );
     CloseHandle( process );
+    if (!sid)
+    {
+        WARN( "cannot read the user of the pipe's server process %04lx: %lu\n", pid, GetLastError() );
+        return FALSE;
+    }
+    ret = EqualSid( sid, (SID *)own );
+    if (!ret && WARN_ON(webcore))
+    {
+        WCHAR *server_text = NULL, *own_text = NULL;
+
+        ConvertSidToStringSidW( sid, &server_text );
+        ConvertSidToStringSidW( (SID *)own, &own_text );
+        WARN( "the pipe's server process %04lx runs as %s, this program as %s\n", pid, debugstr_w( server_text ),
+              debugstr_w( own_text ) );
+        LocalFree( server_text );
+        LocalFree( own_text );
+    }
+    free( sid );
     return ret;
 }
 
@@ -190,7 +142,7 @@ static BOOL start_broker( void )
 static HANDLE connect_broker( const SID *own )
 {
     WCHAR name[256], *sid_string;
-    DWORD mode = PIPE_READMODE_MESSAGE, start;
+    DWORD start, elapsed;
     BOOL started = FALSE;
     HANDLE pipe;
 
@@ -200,21 +152,20 @@ static HANDLE connect_broker( const SID *own )
     start = GetTickCount();
     for (;;)
     {
-        pipe = CreateFileW( name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
-                            FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL );
+        elapsed = GetTickCount() - start;
+        if (elapsed > BROKER_START_WAIT_MS) return INVALID_HANDLE_VALUE;
+        pipe = wex_pipe_connect( name, BROKER_START_WAIT_MS - elapsed );
         if (pipe != INVALID_HANDLE_VALUE) break;
-        if (GetLastError() == ERROR_PIPE_BUSY) WaitNamedPipeW( name, 1000 );
-        else if (GetLastError() == ERROR_FILE_NOT_FOUND && !started)
+        if (GetLastError() != ERROR_FILE_NOT_FOUND) return INVALID_HANDLE_VALUE;
+        if (!started)
         {
             /* no broker to wait for: the call is answered as without one at once */
             if (!start_broker()) return INVALID_HANDLE_VALUE;
             started = TRUE;
         }
-        else if (GetLastError() != ERROR_FILE_NOT_FOUND) return INVALID_HANDLE_VALUE;
         else Sleep( 50 );
-        if (GetTickCount() - start > BROKER_START_WAIT_MS) return INVALID_HANDLE_VALUE;
     }
-    if (!SetNamedPipeHandleState( pipe, &mode, NULL, NULL ) || !server_is_own_user( pipe, own ))
+    if (!server_is_own_broker( pipe, own ))
     {
         WARN( "the token broker's pipe is not the user's\n" );
         CloseHandle( pipe );
@@ -326,34 +277,27 @@ static BOOL parse_reply( const struct tokenbroker_request *req, char *answer, DW
  * failure: then the call is answered as without a broker. */
 static HRESULT transact( const struct broker_message *msg, DWORD timeout, struct broker_reply *out )
 {
-    HANDLE token, pipe = INVALID_HANDLE_VALUE;
-    OVERLAPPED ov = {0};
+    HANDLE token, event = NULL, pipe = INVALID_HANDLE_VALUE;
     char *answer = NULL;
     SID *own = NULL;
     HRESULT hr = E_FAIL;
-    DWORD size = 0;
-    BOOL ok;
+    DWORD size = 0, err;
 
     memset( out, 0, sizeof(*out) );
     if (!OpenProcessToken( GetCurrentProcess(), TOKEN_QUERY, &token )) goto done;
     own = token_user( token );
     CloseHandle( token );
     if (!own || !(answer = malloc( TOKENBROKER_MAX_MESSAGE )) ||
-        !(ov.hEvent = CreateEventW( NULL, TRUE, FALSE, NULL )))
+        !(event = CreateEventW( NULL, TRUE, FALSE, NULL )))
         goto done;
     if ((pipe = connect_broker( own )) == INVALID_HANDLE_VALUE) goto done;
 
-    ok = TransactNamedPipe( pipe, msg->req, msg->size, answer, TOKENBROKER_MAX_MESSAGE, &size, &ov );
-    if (!ok && GetLastError() == ERROR_IO_PENDING)
+    if ((err = wex_pipe_transact( pipe, msg->req, msg->size, answer, TOKENBROKER_MAX_MESSAGE, &size, event,
+                                  timeout )))
     {
-        if (WaitForSingleObject( ov.hEvent, timeout ) != WAIT_OBJECT_0)
-        {
-            WARN( "the token broker did not answer within %lu ms\n", timeout );
-            CancelIoEx( pipe, &ov );
-        }
-        ok = GetOverlappedResult( pipe, &ov, &size, TRUE );
+        if (err == ERROR_TIMEOUT) WARN( "the token broker did not answer within %lu ms\n", timeout );
+        goto done;
     }
-    if (!ok) goto done;
     if (!parse_reply( msg->req, answer, size, out ))
     {
         WARN( "the token broker's answer is not valid\n" );
@@ -369,7 +313,7 @@ static HRESULT transact( const struct broker_message *msg, DWORD timeout, struct
 
 done:
     if (pipe != INVALID_HANDLE_VALUE) CloseHandle( pipe );
-    if (ov.hEvent) CloseHandle( ov.hEvent );
+    if (event) CloseHandle( event );
     if (answer) SecureZeroMemory( answer, TOKENBROKER_MAX_MESSAGE );
     free( answer );
     free( own );

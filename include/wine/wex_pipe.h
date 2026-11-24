@@ -1,7 +1,7 @@
 /*
  * WineExplorer Desktop Environment - wex_pipe.h
  *
- * The transport of the project's per-user brokers (DWM first; the token broker and wexelevate later): a local
+ * The transport of the project's brokers (DWM, the token broker and wexelevate's pipes): a local
  * message-mode named pipe, a client connect and an overlapped transaction, both with timeouts, and the client's
  * check that the pipe's server is the expected system program with an ordinary token. Caller policy (who may ask
  * what) and pipe names stay with each broker. Static inline: the users live in different trees and modules.
@@ -36,9 +36,14 @@
 #include "sddl.h"
 #include "aclapi.h"
 
-/* A server instance: message mode, local clients only, the descriptor from sddl. first: this must be the pipe's first
- * instance (FILE_FLAG_FIRST_PIPE_INSTANCE), so a broker that finds the name taken does not serve. */
-static inline HANDLE wex_pipe_create( const WCHAR *name, const WCHAR *sddl, BOOL first, DWORD max_message )
+/* users build with Wine's headers or with MinGW's alone (wexelevate's test builds), which have no ARRAY_SIZE */
+#define WEX_PIPE_COUNT(a) (sizeof(a) / sizeof((a)[0]))
+
+/* A server instance: message mode, local clients only, the descriptor from sddl, at most instances of them
+ * (PIPE_UNLIMITED_INSTANCES for no limit). first: this must be the pipe's first instance
+ * (FILE_FLAG_FIRST_PIPE_INSTANCE), so a broker that finds the name taken does not serve. */
+static inline HANDLE wex_pipe_create_instances( const WCHAR *name, const WCHAR *sddl, BOOL first, DWORD max_message,
+                                                DWORD instances )
 {
     SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, FALSE };
     HANDLE pipe;
@@ -48,18 +53,26 @@ static inline HANDLE wex_pipe_create( const WCHAR *name, const WCHAR *sddl, BOOL
         return INVALID_HANDLE_VALUE;
     pipe = CreateNamedPipeW( name, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | (first ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0),
                              PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                             PIPE_UNLIMITED_INSTANCES, max_message, max_message, 0, &sa );
+                             instances, max_message, max_message, 0, &sa );
     LocalFree( sa.lpSecurityDescriptor );
     return pipe;
 }
 
-/* One read or write on an overlapped pipe handle, bounded by timeout_ms (INFINITE for none). event is a manual-reset
- * event of the caller's. Returns a Win32 error; on a timeout the I/O is cancelled and ERROR_TIMEOUT returned. */
-static inline DWORD wex_pipe_io( HANDLE pipe, BOOL write, void *buffer, DWORD size, DWORD *done, HANDLE event,
-                                 DWORD timeout_ms )
+static inline HANDLE wex_pipe_create( const WCHAR *name, const WCHAR *sddl, BOOL first, DWORD max_message )
+{
+    return wex_pipe_create_instances( name, sddl, first, max_message, PIPE_UNLIMITED_INSTANCES );
+}
+
+/* One read or write on an overlapped pipe handle, bounded by timeout_ms (INFINITE for none) and ended early when stop
+ * (an event, or NULL for none) is set. event is a manual-reset event of the caller's. Returns a Win32 error; on a
+ * timeout the I/O is cancelled and ERROR_TIMEOUT returned, on stop (or a failed wait) ERROR_OPERATION_ABORTED; *done
+ * is 0 then. */
+static inline DWORD wex_pipe_io_until( HANDLE pipe, BOOL write, void *buffer, DWORD size, DWORD *done, HANDLE event,
+                                       DWORD timeout_ms, HANDLE stop )
 {
     OVERLAPPED ov = { 0 };
-    DWORD err = ERROR_SUCCESS;
+    HANDLE events[2] = { event, stop };
+    DWORD err = ERROR_SUCCESS, wait;
     BOOL ret;
 
     *done = 0;
@@ -68,16 +81,23 @@ static inline DWORD wex_pipe_io( HANDLE pipe, BOOL write, void *buffer, DWORD si
     ret = write ? WriteFile( pipe, buffer, size, NULL, &ov ) : ReadFile( pipe, buffer, size, NULL, &ov );
     if (!ret && (err = GetLastError()) == ERROR_IO_PENDING)
     {
-        if (WaitForSingleObject( event, timeout_ms ) != WAIT_OBJECT_0)
+        if ((wait = WaitForMultipleObjects( stop ? 2 : 1, events, FALSE, timeout_ms )) != WAIT_OBJECT_0)
         {
             CancelIoEx( pipe, &ov );
             GetOverlappedResult( pipe, &ov, done, TRUE );
-            return ERROR_TIMEOUT;
+            *done = 0;
+            return wait == WAIT_TIMEOUT ? ERROR_TIMEOUT : ERROR_OPERATION_ABORTED;
         }
         err = ERROR_SUCCESS;
     }
     if (!err && !GetOverlappedResult( pipe, &ov, done, FALSE )) err = GetLastError();
     return err;
+}
+
+static inline DWORD wex_pipe_io( HANDLE pipe, BOOL write, void *buffer, DWORD size, DWORD *done, HANDLE event,
+                                 DWORD timeout_ms )
+{
+    return wex_pipe_io_until( pipe, write, buffer, size, done, event, timeout_ms, NULL );
 }
 
 /* Send a request and read its reply (one message each way). *reply_size: the reply's size. */
@@ -108,9 +128,16 @@ static inline HANDLE wex_pipe_connect( const WCHAR *name, DWORD timeout_ms )
         if (pipe != INVALID_HANDLE_VALUE) break;
         if (GetLastError() != ERROR_PIPE_BUSY) return INVALID_HANDLE_VALUE;
         elapsed = GetTickCount() - start;
-        if (elapsed >= timeout_ms || !WaitNamedPipeW( name, timeout_ms - elapsed ))
+        if (elapsed >= timeout_ms)
         {
             SetLastError( ERROR_PIPE_BUSY );
+            return INVALID_HANDLE_VALUE;
+        }
+        if (!WaitNamedPipeW( name, timeout_ms - elapsed ))
+        {
+            /* the pipe went away while busy (its server ended): say so, so a caller can start a new server;
+             * anything else is still busy */
+            if (GetLastError() != ERROR_FILE_NOT_FOUND) SetLastError( ERROR_PIPE_BUSY );
             return INVALID_HANDLE_VALUE;
         }
     }
@@ -153,7 +180,7 @@ static inline BOOL wex_pipe_server_is( HANDLE pipe, const WCHAR *image_name )
 {
     static const WCHAR *const dirs[] = { L"\\system32\\", L"\\syswow64\\" };
     WCHAR image[MAX_PATH], expected[MAX_PATH];
-    DWORD size = ARRAY_SIZE(image);
+    DWORD size = WEX_PIPE_COUNT(image);
     ULONG pid = 0;
     HANDLE process, token = NULL;
     UINT windir, i;
@@ -171,7 +198,7 @@ static inline BOOL wex_pipe_server_is( HANDLE pipe, const WCHAR *image_name )
     }
     CloseHandle( process );
     if (!(windir = GetWindowsDirectoryW( expected, MAX_PATH )) || windir >= MAX_PATH) return FALSE;
-    for (i = 0; i < ARRAY_SIZE(dirs); i++)
+    for (i = 0; i < WEX_PIPE_COUNT(dirs); i++)
     {
         if (windir + wcslen( dirs[i] ) + wcslen( image_name ) >= MAX_PATH) continue;
         wcscpy( expected + windir, dirs[i] );
@@ -208,7 +235,7 @@ static inline void wex_pipe_grant_appcontainers(void)
         ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
         ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
         ea.Trustee.ptstrName = all_packages;
-        for (i = 0; i < ARRAY_SIZE(objects); i++)
+        for (i = 0; i < WEX_PIPE_COUNT(objects); i++)
         {
             new_dacl = NULL;
             ea.grfAccessPermissions = rights[i];
