@@ -1,0 +1,6 @@
+MODULE    = msspellcheckingfacility.dll
+IMPORTS   = uuid
+
+SOURCES = \
+	main.c \
+	msspellcheckingfacility.rc
