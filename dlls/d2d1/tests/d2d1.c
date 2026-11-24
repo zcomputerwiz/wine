@@ -11563,6 +11563,149 @@ static void test_colour_space(BOOL d3d11)
     }
 }
 
+/* Results of Windows 11 for shapes of straight lines (curves are kept as Bézier segments there and flattened on Wine). */
+static void test_combine_geometry(BOOL d3d11)
+{
+    static const struct geometry_segment segments[] =
+    {
+        /* 0: 0..100 */
+        {SEGMENT_LINE, {{{100.0f,   0.0f}}}}, {SEGMENT_LINE, {{{100.0f, 100.0f}}}},
+        {SEGMENT_LINE, {{{  0.0f, 100.0f}}}}, {SEGMENT_LINE, {{{  0.0f,   0.0f}}}},
+        /* 4: 20..80 */
+        {SEGMENT_LINE, {{{ 80.0f,  20.0f}}}}, {SEGMENT_LINE, {{{ 80.0f,  80.0f}}}},
+        {SEGMENT_LINE, {{{ 20.0f,  80.0f}}}}, {SEGMENT_LINE, {{{ 20.0f,  20.0f}}}},
+        /* 8: 20..80 as a hole */
+        {SEGMENT_LINE, {{{ 20.0f,  80.0f}}}}, {SEGMENT_LINE, {{{ 80.0f,  80.0f}}}},
+        {SEGMENT_LINE, {{{ 80.0f,  20.0f}}}}, {SEGMENT_LINE, {{{ 20.0f,  20.0f}}}},
+        /* 12: union of 0..100 and 50..150 */
+        {SEGMENT_LINE, {{{100.0f,   0.0f}}}}, {SEGMENT_LINE, {{{100.0f,  50.0f}}}},
+        {SEGMENT_LINE, {{{150.0f,  50.0f}}}}, {SEGMENT_LINE, {{{150.0f, 150.0f}}}},
+        {SEGMENT_LINE, {{{ 50.0f, 150.0f}}}}, {SEGMENT_LINE, {{{ 50.0f, 100.0f}}}},
+        {SEGMENT_LINE, {{{  0.0f, 100.0f}}}}, {SEGMENT_LINE, {{{  0.0f,   0.0f}}}},
+        /* 20: intersection 50..100 */
+        {SEGMENT_LINE, {{{100.0f,  50.0f}}}}, {SEGMENT_LINE, {{{100.0f, 100.0f}}}},
+        {SEGMENT_LINE, {{{ 50.0f, 100.0f}}}}, {SEGMENT_LINE, {{{ 50.0f,  50.0f}}}},
+        /* 24: 50..150 without 0..100 */
+        {SEGMENT_LINE, {{{150.0f,  50.0f}}}}, {SEGMENT_LINE, {{{150.0f, 150.0f}}}},
+        {SEGMENT_LINE, {{{ 50.0f, 150.0f}}}}, {SEGMENT_LINE, {{{ 50.0f, 100.0f}}}},
+        {SEGMENT_LINE, {{{100.0f, 100.0f}}}}, {SEGMENT_LINE, {{{100.0f,  50.0f}}}},
+        /* 30: 0..100 without 50..150 */
+        {SEGMENT_LINE, {{{100.0f,   0.0f}}}}, {SEGMENT_LINE, {{{100.0f,  50.0f}}}},
+        {SEGMENT_LINE, {{{ 50.0f,  50.0f}}}}, {SEGMENT_LINE, {{{ 50.0f, 100.0f}}}},
+        {SEGMENT_LINE, {{{  0.0f, 100.0f}}}}, {SEGMENT_LINE, {{{  0.0f,   0.0f}}}},
+        /* 36: 200..210 */
+        {SEGMENT_LINE, {{{210.0f, 200.0f}}}}, {SEGMENT_LINE, {{{210.0f, 210.0f}}}},
+        {SEGMENT_LINE, {{{200.0f, 210.0f}}}}, {SEGMENT_LINE, {{{200.0f, 200.0f}}}},
+        /* 40: the band -10..110 x 40..60 crossing 0..100, XOR: bottom part, right end, left end, top part */
+        {SEGMENT_LINE, {{{100.0f,  60.0f}}}}, {SEGMENT_LINE, {{{100.0f, 100.0f}}}},
+        {SEGMENT_LINE, {{{  0.0f, 100.0f}}}}, {SEGMENT_LINE, {{{  0.0f,  60.0f}}}},
+        {SEGMENT_LINE, {{{110.0f,  40.0f}}}}, {SEGMENT_LINE, {{{110.0f,  60.0f}}}},
+        {SEGMENT_LINE, {{{100.0f,  60.0f}}}}, {SEGMENT_LINE, {{{100.0f,  40.0f}}}},
+        {SEGMENT_LINE, {{{  0.0f,  40.0f}}}}, {SEGMENT_LINE, {{{  0.0f,  60.0f}}}},
+        {SEGMENT_LINE, {{{-10.0f,  60.0f}}}}, {SEGMENT_LINE, {{{-10.0f,  40.0f}}}},
+        {SEGMENT_LINE, {{{100.0f,   0.0f}}}}, {SEGMENT_LINE, {{{100.0f,  40.0f}}}},
+        {SEGMENT_LINE, {{{  0.0f,  40.0f}}}}, {SEGMENT_LINE, {{{  0.0f,   0.0f}}}},
+        /* 56: 30..90 x 20..80 */
+        {SEGMENT_LINE, {{{ 90.0f,  20.0f}}}}, {SEGMENT_LINE, {{{ 90.0f,  80.0f}}}},
+        {SEGMENT_LINE, {{{ 30.0f,  80.0f}}}}, {SEGMENT_LINE, {{{ 30.0f,  20.0f}}}},
+    };
+    static const struct expected_geometry_figure figures[] =
+    {
+        /* 0 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {  0.0f,   0.0f}, 4, &segments[0]},
+        /* 1 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, { 20.0f,  20.0f}, 4, &segments[4]},
+        /* 2 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, { 20.0f,  20.0f}, 4, &segments[8]},
+        /* 3 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {  0.0f,   0.0f}, 4, &segments[0]},
+        /* 4 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {  0.0f,   0.0f}, 8, &segments[12]},
+        /* 5 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, { 50.0f,  50.0f}, 4, &segments[20]},
+        /* 6 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {100.0f,  50.0f}, 6, &segments[24]},
+        /* 7 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {  0.0f,   0.0f}, 6, &segments[30]},
+        /* 8 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {  0.0f,   0.0f}, 6, &segments[30]},
+        /* 9 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {200.0f, 200.0f}, 4, &segments[36]},
+        /* 10 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {  0.0f,   0.0f}, 4, &segments[0]},
+        /* 11 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {  0.0f,  60.0f}, 4, &segments[40]},
+        /* 12 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {100.0f,  40.0f}, 4, &segments[44]},
+        /* 13 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {-10.0f,  40.0f}, 4, &segments[48]},
+        /* 14 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {  0.0f,   0.0f}, 4, &segments[52]},
+        /* 15 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, { 30.0f,  20.0f}, 4, &segments[56]},
+    };
+    static const struct
+    {
+        unsigned int first, second;
+        D2D1_COMBINE_MODE mode;
+        BOOL shift;
+        unsigned int figure_count, figure;
+    }
+    tests[] =
+    {
+        /* geometries: 0 = 0..100, 1 = 20..80 (inside), 2 = 50..150 (overlapping), 3 = 200..210 (apart),
+         * 4 = -10..110 x 40..60 (a band through 0) */
+        {0, 1, D2D1_COMBINE_MODE_UNION,     FALSE, 1, 0},
+        {0, 1, D2D1_COMBINE_MODE_INTERSECT, FALSE, 1, 1},
+        {0, 1, D2D1_COMBINE_MODE_XOR,       FALSE, 2, 2},
+        {0, 1, D2D1_COMBINE_MODE_EXCLUDE,   FALSE, 2, 2},
+        {0, 2, D2D1_COMBINE_MODE_UNION,     FALSE, 1, 4},
+        {0, 2, D2D1_COMBINE_MODE_INTERSECT, FALSE, 1, 5},
+        {0, 2, D2D1_COMBINE_MODE_XOR,       FALSE, 2, 6},
+        {0, 2, D2D1_COMBINE_MODE_EXCLUDE,   FALSE, 1, 7},
+        {0, 3, D2D1_COMBINE_MODE_UNION,     FALSE, 2, 9},
+        {0, 3, D2D1_COMBINE_MODE_INTERSECT, FALSE, 0, 0},
+        {0, 3, D2D1_COMBINE_MODE_EXCLUDE,   FALSE, 1, 10},
+        {0, 4, D2D1_COMBINE_MODE_XOR,       FALSE, 4, 11},
+        {0, 1, D2D1_COMBINE_MODE_INTERSECT, TRUE,  1, 15},
+        {0, 0, D2D1_COMBINE_MODE_UNION,     FALSE, 1, 0},
+        {0, 0, D2D1_COMBINE_MODE_EXCLUDE,   FALSE, 0, 0},
+    };
+    static const D2D1_RECT_F rects[] =
+    {
+        {0.0f, 0.0f, 100.0f, 100.0f}, {20.0f, 20.0f, 80.0f, 80.0f}, {50.0f, 50.0f, 150.0f, 150.0f},
+        {200.0f, 200.0f, 210.0f, 210.0f}, {-10.0f, 40.0f, 110.0f, 60.0f},
+    };
+    ID2D1RectangleGeometry *geometries[ARRAY_SIZE(rects)];
+    struct geometry_sink sink;
+    struct d2d1_test_context ctx;
+    D2D1_MATRIX_3X2_F matrix;
+    unsigned int i;
+    HRESULT hr;
+
+    if (!init_test_context(&ctx, d3d11))
+        return;
+
+    for (i = 0; i < ARRAY_SIZE(rects); ++i)
+    {
+        hr = ID2D1Factory_CreateRectangleGeometry(ctx.factory, &rects[i], &geometries[i]);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    }
+    set_matrix_identity(&matrix);
+    translate_matrix(&matrix, 10.0f, 0.0f);
+
+    for (i = 0; i < ARRAY_SIZE(tests); ++i)
+    {
+        winetest_push_context("Test %u", i);
+        geometry_sink_init(&sink);
+        hr = ID2D1RectangleGeometry_CombineWithGeometry(geometries[tests[i].first],
+                (ID2D1Geometry *)geometries[tests[i].second], tests[i].mode, tests[i].shift ? &matrix : NULL, 0.25f,
+                (ID2D1SimplifiedGeometrySink *)&sink.ID2D1GeometrySink_iface);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        geometry_sink_check(&sink, D2D1_FILL_MODE_ALTERNATE, tests[i].figure_count, &figures[tests[i].figure], 0);
+        geometry_sink_cleanup(&sink);
+        winetest_pop_context();
+    }
+
+    /* an invalid mode; a tolerance of 0 or less is accepted */
+    geometry_sink_init(&sink);
+    hr = ID2D1RectangleGeometry_CombineWithGeometry(geometries[0], (ID2D1Geometry *)geometries[1], 4, NULL, 0.25f,
+            (ID2D1SimplifiedGeometrySink *)&sink.ID2D1GeometrySink_iface);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1RectangleGeometry_CombineWithGeometry(geometries[0], (ID2D1Geometry *)geometries[1],
+            D2D1_COMBINE_MODE_UNION, NULL, -1.0f, (ID2D1SimplifiedGeometrySink *)&sink.ID2D1GeometrySink_iface);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    geometry_sink_cleanup(&sink);
+
+    for (i = 0; i < ARRAY_SIZE(rects); ++i)
+        ID2D1RectangleGeometry_Release(geometries[i]);
+    release_test_context(&ctx);
+}
+
 static void test_geometry_group(BOOL d3d11)
 {
     ID2D1TransformedGeometry *transformed_geometry;
@@ -18378,6 +18521,7 @@ START_TEST(d2d1)
     queue_d3d10_test(test_math);
     queue_d3d10_test(test_colour_space);
     queue_d3d10_test(test_geometry_group);
+    queue_d3d10_test(test_combine_geometry);
     queue_test(test_mt_factory);
     queue_d3d10_test(test_effect_register);
     queue_test(test_effect_context);

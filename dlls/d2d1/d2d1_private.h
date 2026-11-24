@@ -967,6 +967,9 @@ void d2d_command_list_push_layer(struct d2d_command_list *command_list, const st
         const D2D1_LAYER_PARAMETERS1 *params);
 void d2d_command_list_pop_layer(struct d2d_command_list *command_list);
 
+HRESULT d2d_geometry_combine(ID2D1Geometry *geometry1, ID2D1Geometry *geometry2, D2D1_COMBINE_MODE mode,
+        const D2D1_MATRIX_3X2_F *transform, float tolerance, ID2D1SimplifiedGeometrySink *sink);
+
 static inline BOOL d2d_array_reserve(void **elements, size_t *capacity, size_t count, size_t size)
 {
     size_t new_capacity, max_capacity;
