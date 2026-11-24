@@ -861,18 +861,6 @@ static int hive_unchanged( const struct wex_profile_storage *s )
            st.st_mtim.tv_sec == old->st_mtim.tv_sec && st.st_mtim.tv_nsec == old->st_mtim.tv_nsec &&
            st.st_ctim.tv_sec == old->st_ctim.tv_sec && st.st_ctim.tv_nsec == old->st_ctim.tv_nsec;
 }
-
-static void save_checkpoint( const struct wex_profile_storage *s, unsigned int step )
-{
-    (void)s; (void)step;
-#ifdef WEX_E1S14_CRASH_TEST
-    if (s->test_crash_step == step)
-    {
-        fprintf( stderr, "E1S14 save-crash=%u\n", step ); fflush( stderr );
-        _exit( 86 ); /* no signal handler/shutdown save */
-    }
-#endif
-}
 #endif
 
 enum wex_profile_status wex_profile_save( int prefix, const struct wex_account *a,
@@ -893,17 +881,14 @@ enum wex_profile_status wex_profile_save( int prefix, const struct wex_account *
     if (marker < 0) return errno == EEXIST ? WEX_PROFILE_RECOVERY : WEX_PROFILE_IO;
     status = WEX_PROFILE_IO;
     if (fsync( marker ) || fsync( s->profile_fd )) goto done;
-    save_checkpoint( s, 1 );
     temp = openat( s->profile_fd, ".e1s14-save", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600 );
     if (temp < 0 || flock( temp, LOCK_EX | LOCK_NB ) || !writer( temp, arg ) || fsync( temp ) ||
         fstat( temp, &st ) || !S_ISREG( st.st_mode ) || st.st_nlink != 1 || st.st_size > SEED_LIMIT ||
         st.st_uid != getuid() || st.st_gid != getgid() || (st.st_mode & 07777) != 0600 ||
         !no_reparse( temp ) || !no_posix_acl( temp ) || fsync( s->profile_fd )) goto done;
-    save_checkpoint( s, 2 );
     if (verify_existing( prefix, a, s, 1 ) || !hive_unchanged( s ) || same_edge( s->profile_fd, ".e1s14-save", temp ) ||
         same_edge( s->profile_fd, ".e1s14-state", marker )) { status = WEX_PROFILE_IDENTITY; goto done; }
     if (renameat( s->profile_fd, ".e1s14-save", s->profile_fd, "user.reg" ) || fsync( s->profile_fd )) goto done;
-    save_checkpoint( s, 3 );
     /* Do not remove the marker until the complete new hive and its directory
      * entry are durable. Any failure retains all remaining recovery material. */
     if (same_edge( s->profile_fd, "user.reg", temp ) ||

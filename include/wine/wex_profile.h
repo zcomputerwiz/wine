@@ -16,7 +16,7 @@
 #define WEX_HKU_CLASSES 6
 #define WEX_HKU_CACHE_CURRENT 7
 #define WEX_HKU_CACHE_CLASSES 8
-#define WEX_HKU_TEST_CRASH 9 /* separate WEX_E1S14_CRASH_TEST, lab broker only */
+#define WEX_HKU_TEST_CRASH 9 /* retired lab opcode (S14 crash injection); always denies, never reuse */
 #define WEX_HKU_TEST_TRANSFER 10 /* retired lab opcode; always denies, never reuse */
 #define WEX_HKU_COMMIT_PROCESS 11
 /* COMMIT: context is the retained S10 context used by LOAD, token is the exact

@@ -831,17 +831,9 @@ static void e1lab_load_e1s_profile( const struct load_e1s_profile_request *req, 
             if (e1s_unload_hive( m )) reply->managed = 1;
             goto done;
         }
-        if (req->operation == WEX_HKU_TEST_CRASH)
-        {
-#ifdef WEX_E1S14_CRASH_TEST
-            if (m->phase == E1S_LOADED && req->access >= 1 && req->access <= 3)
-            { m->storage.test_crash_step = req->access; reply->managed = 1; clear_error(); }
-#else
-            set_error( STATUS_NOT_SUPPORTED );
-#endif
-            goto done;
-        }
-        if (req->operation == WEX_HKU_TEST_TRANSFER) { set_error( STATUS_NOT_SUPPORTED ); goto done; }
+        /* retired lab opcodes (S14 crash injection, transfer): always denied */
+        if (req->operation == WEX_HKU_TEST_CRASH || req->operation == WEX_HKU_TEST_TRANSFER)
+        { set_error( STATUS_NOT_SUPPORTED ); goto done; }
     }
     if (m->phase != E1S_LOADED)
     {
