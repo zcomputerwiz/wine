@@ -56,7 +56,13 @@ struct dcomp_target;
 struct dcomp_visual;
 
 static void dcomp_visual_unbind_tree(struct dcomp_visual *visual);
-static const struct IDCompositionVisual2Vtbl dcomp_visual_vtbl;
+/* the vtable of the visuals: the public methods, then the private slots from index 22 */
+struct dcomp_visual_ext_vtbl
+{
+    struct IDCompositionVisual2Vtbl base;
+    void *private_methods[42];   /* slots 22 to 63 */
+};
+static const struct dcomp_visual_ext_vtbl dcomp_visual_vtbl;
 static const struct IDCompositionAnimationVtbl dcomp_animation_vtbl;
 struct dcomp_animation;
 static inline struct dcomp_animation *impl_from_IDCompositionAnimation(IDCompositionAnimation *iface);
@@ -139,6 +145,7 @@ struct dcomp_visual
     IDCompositionVisual2 IDCompositionVisual2_iface;
     LONG refcount;
     struct dcomp_device *device;
+    BOOL shared;   /* listed in dcomp_shared_list: the list holds no reference, Release takes the list lock first */
 
     /* Pending state (modified by setters, staged for next Commit) */
     struct dcomp_visual_state pending;
@@ -2776,73 +2783,75 @@ static void dcomp_visual_state_copy(struct dcomp_visual_state *dst, const struct
 }
 
 /*
- * {2c4eef28-1bc0-4736-b7dd-b62692f9bd67}: a private interface of the visuals of the system dcomp, which the Windows App Runtime
- * (FrameworkUdk, DCompPrivates_SetVisualRelativeSize and its relatives) queries a visual for and then calls the methods in slots 40 and
- * 41 of with a float each (observed in the code of the runtime, not yet seen from Windows 11). Its methods are not known: one object
- * with 64 methods that all succeed and log what they are given stands for it, until each is implemented.
+ * {2c4eef28-1bc0-4736-b7dd-b62692f9bd67}: the private interface of the visuals. Measured on Windows 11 (tests/uwp/alpc/dcomp-visualpriv-probe.cpp,
+ * both versions of the device): QueryInterface for it returns the visual itself, the same pointer as for IUnknown and IDCompositionVisual2, with
+ * the reference count of the visual. The private methods are therefore further slots of the vtable of the visual, after the public ones; the
+ * Windows App Runtime calls slots 40 and 41, always as a pair on one visual, each with one pointer argument (32-bit Windows removes 8 bytes: the
+ * interface pointer and one argument), and both return S_OK without any effect that a caller can see (no output, no change of the reference
+ * count). The meaning of the argument is not known. The other private slots are not known at all: their argument counts cannot be guessed on
+ * i386, so calling one raises the stub exception instead of returning.
  */
 static const GUID IID_dcomp_visual_private = {0x2c4eef28, 0x1bc0, 0x4736, {0xb7, 0xdd, 0xb6, 0x26, 0x92, 0xf9, 0xbd, 0x67}};
 
-static HRESULT STDMETHODCALLTYPE dcomp_visual_private_QueryInterface(void *iface, REFIID iid, void **out);
-
-static ULONG STDMETHODCALLTYPE dcomp_visual_private_AddRef(void *iface)
+static HRESULT STDMETHODCALLTYPE dcomp_visual_private_method40(IDCompositionVisual2 *iface, void *arg)
 {
-    return 2;
+    FIXME("iface %p, visual private method 40: %p semi-stub\n", iface, arg);
+    return S_OK;
 }
 
-static ULONG STDMETHODCALLTYPE dcomp_visual_private_Release(void *iface)
+static HRESULT STDMETHODCALLTYPE dcomp_visual_private_method41(IDCompositionVisual2 *iface, void *arg)
 {
-    return 1;
+    FIXME("iface %p, visual private method 41: %p semi-stub\n", iface, arg);
+    return S_OK;
 }
 
-#define DCOMP_VISUAL_PRIVATE_STUB(n) \
-static HRESULT STDMETHODCALLTYPE dcomp_visual_private_method##n(void *iface) \
+#define DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(n) \
+static void STDMETHODCALLTYPE dcomp_visual_private_unimplemented##n(void) \
 { \
-    FIXME("iface %p, visual private method " #n " semi-stub (caller %p)\n", iface, __builtin_return_address(0)); \
-    return S_OK; \
+    ULONG_PTR args[2] = {(ULONG_PTR)L"dcomp.dll", (ULONG_PTR)"visual private method " #n}; \
+    ERR("visual private method " #n " is not implemented\n"); \
+    RaiseException(0x80000100 /* EXCEPTION_WINE_STUB */, EXCEPTION_NONCONTINUABLE, 2, args); \
 }
-DCOMP_VISUAL_PRIVATE_STUB(3) DCOMP_VISUAL_PRIVATE_STUB(4) DCOMP_VISUAL_PRIVATE_STUB(5) DCOMP_VISUAL_PRIVATE_STUB(6)
-DCOMP_VISUAL_PRIVATE_STUB(7) DCOMP_VISUAL_PRIVATE_STUB(8) DCOMP_VISUAL_PRIVATE_STUB(9) DCOMP_VISUAL_PRIVATE_STUB(10)
-DCOMP_VISUAL_PRIVATE_STUB(11) DCOMP_VISUAL_PRIVATE_STUB(12) DCOMP_VISUAL_PRIVATE_STUB(13) DCOMP_VISUAL_PRIVATE_STUB(14)
-DCOMP_VISUAL_PRIVATE_STUB(15) DCOMP_VISUAL_PRIVATE_STUB(16) DCOMP_VISUAL_PRIVATE_STUB(17) DCOMP_VISUAL_PRIVATE_STUB(18)
-DCOMP_VISUAL_PRIVATE_STUB(19) DCOMP_VISUAL_PRIVATE_STUB(20) DCOMP_VISUAL_PRIVATE_STUB(21) DCOMP_VISUAL_PRIVATE_STUB(22)
-DCOMP_VISUAL_PRIVATE_STUB(23) DCOMP_VISUAL_PRIVATE_STUB(24) DCOMP_VISUAL_PRIVATE_STUB(25) DCOMP_VISUAL_PRIVATE_STUB(26)
-DCOMP_VISUAL_PRIVATE_STUB(27) DCOMP_VISUAL_PRIVATE_STUB(28) DCOMP_VISUAL_PRIVATE_STUB(29) DCOMP_VISUAL_PRIVATE_STUB(30)
-DCOMP_VISUAL_PRIVATE_STUB(31) DCOMP_VISUAL_PRIVATE_STUB(32) DCOMP_VISUAL_PRIVATE_STUB(33) DCOMP_VISUAL_PRIVATE_STUB(34)
-DCOMP_VISUAL_PRIVATE_STUB(35) DCOMP_VISUAL_PRIVATE_STUB(36) DCOMP_VISUAL_PRIVATE_STUB(37) DCOMP_VISUAL_PRIVATE_STUB(38)
-DCOMP_VISUAL_PRIVATE_STUB(39) DCOMP_VISUAL_PRIVATE_STUB(40) DCOMP_VISUAL_PRIVATE_STUB(41) DCOMP_VISUAL_PRIVATE_STUB(42)
-DCOMP_VISUAL_PRIVATE_STUB(43) DCOMP_VISUAL_PRIVATE_STUB(44) DCOMP_VISUAL_PRIVATE_STUB(45) DCOMP_VISUAL_PRIVATE_STUB(46)
-DCOMP_VISUAL_PRIVATE_STUB(47) DCOMP_VISUAL_PRIVATE_STUB(48) DCOMP_VISUAL_PRIVATE_STUB(49) DCOMP_VISUAL_PRIVATE_STUB(50)
-DCOMP_VISUAL_PRIVATE_STUB(51) DCOMP_VISUAL_PRIVATE_STUB(52) DCOMP_VISUAL_PRIVATE_STUB(53) DCOMP_VISUAL_PRIVATE_STUB(54)
-DCOMP_VISUAL_PRIVATE_STUB(55) DCOMP_VISUAL_PRIVATE_STUB(56) DCOMP_VISUAL_PRIVATE_STUB(57) DCOMP_VISUAL_PRIVATE_STUB(58)
-DCOMP_VISUAL_PRIVATE_STUB(59) DCOMP_VISUAL_PRIVATE_STUB(60) DCOMP_VISUAL_PRIVATE_STUB(61) DCOMP_VISUAL_PRIVATE_STUB(62)
-DCOMP_VISUAL_PRIVATE_STUB(63)
-
-#define M(n) dcomp_visual_private_method##n
-static const void *const dcomp_visual_private_vtbl[] =
-{
-    dcomp_visual_private_QueryInterface, dcomp_visual_private_AddRef, dcomp_visual_private_Release,
-    M(3), M(4), M(5), M(6), M(7), M(8), M(9), M(10), M(11), M(12), M(13), M(14), M(15), M(16), M(17), M(18), M(19), M(20), M(21),
-    M(22), M(23), M(24), M(25), M(26), M(27), M(28), M(29), M(30), M(31), M(32), M(33), M(34), M(35), M(36), M(37), M(38), M(39),
-    M(40), M(41), M(42), M(43), M(44), M(45), M(46), M(47), M(48), M(49), M(50), M(51), M(52), M(53), M(54), M(55), M(56), M(57),
-    M(58), M(59), M(60), M(61), M(62), M(63),
-};
-#undef M
-
-static const void *const *dcomp_visual_private_object = dcomp_visual_private_vtbl;
-
-static HRESULT STDMETHODCALLTYPE dcomp_visual_private_QueryInterface(void *iface, REFIID iid, void **out)
-{
-    if (!out) return E_POINTER;
-    if (IsEqualGUID(iid, &IID_IUnknown) || IsEqualGUID(iid, &IID_dcomp_visual_private))
-    {
-        *out = &dcomp_visual_private_object;
-        return S_OK;
-    }
-    WARN("Unsupported interface %s.\n", debugstr_guid(iid));
-    *out = NULL;
-    return E_NOINTERFACE;
-}
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(22)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(23)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(24)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(25)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(26)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(27)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(28)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(29)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(30)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(31)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(32)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(33)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(34)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(35)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(36)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(37)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(38)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(39)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(42)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(43)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(44)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(45)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(46)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(47)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(48)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(49)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(50)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(51)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(52)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(53)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(54)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(55)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(56)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(57)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(58)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(59)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(60)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(61)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(62)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(63)
 
 static HRESULT STDMETHODCALLTYPE dcomp_visual_QueryInterface(IDCompositionVisual2 *iface,
         REFIID iid, void **out)
@@ -2854,14 +2863,9 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_QueryInterface(IDCompositionVisual
     if (!out)
         return E_POINTER;
 
-    if (IsEqualGUID(iid, &IID_dcomp_visual_private))
-    {
-        *out = &dcomp_visual_private_object;
-        return S_OK;
-    }
-
     if (IsEqualGUID(iid, &IID_IUnknown) ||
         IsEqualGUID(iid, &IID_IDCompositionVisual) ||
+        IsEqualGUID(iid, &IID_dcomp_visual_private) ||
         (visual->device->version >= 2 && IsEqualGUID(iid, &IID_IDCompositionVisual2)))
     {
         *out = &visual->IDCompositionVisual2_iface;
@@ -2883,10 +2887,23 @@ static ULONG STDMETHODCALLTYPE dcomp_visual_AddRef(IDCompositionVisual2 *iface)
     return refcount;
 }
 
+static void dcomp_shared_lock_acquire(void);
+static void dcomp_shared_lock_release(void);
+static void dcomp_shared_remove_visual(struct dcomp_visual *visual);
+
 static ULONG STDMETHODCALLTYPE dcomp_visual_Release(IDCompositionVisual2 *iface)
 {
     struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
-    ULONG refcount = InterlockedDecrement(&visual->refcount);
+    ULONG refcount;
+
+    if (visual->shared)
+    {
+        dcomp_shared_lock_acquire();
+        refcount = InterlockedDecrement(&visual->refcount);
+        if (!refcount) dcomp_shared_remove_visual(visual);
+        dcomp_shared_lock_release();
+    }
+    else refcount = InterlockedDecrement(&visual->refcount);
 
     TRACE("iface %p, refcount %lu.\n", iface, refcount);
 
@@ -3358,7 +3375,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_AddVisual_locked(IDCompositionVisu
     if (!visual || visual == (IDCompositionVisual *)iface)
         return E_INVALIDARG;
 
-    if ((const void *)visual->lpVtbl != &dcomp_visual_vtbl) return E_NOTIMPL;
+    if ((const void *)visual->lpVtbl != &dcomp_visual_vtbl.base) return E_NOTIMPL;
 
     child = impl_from_IDCompositionVisual(visual);
     if (child->device != parent->device) return E_INVALIDARG;
@@ -3375,7 +3392,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_AddVisual_locked(IDCompositionVisu
 
     if (reference_visual)
     {
-        if ((const void *)reference_visual->lpVtbl != &dcomp_visual_vtbl) return E_NOTIMPL;
+        if ((const void *)reference_visual->lpVtbl != &dcomp_visual_vtbl.base) return E_NOTIMPL;
         if (reference_visual == visual)
             return E_INVALIDARG;
         ref = impl_from_IDCompositionVisual(reference_visual);
@@ -3556,7 +3573,8 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetBackFaceVisibility(IDCompositio
     return S_OK;
 }
 
-static const struct IDCompositionVisual2Vtbl dcomp_visual_vtbl =
+static const struct dcomp_visual_ext_vtbl dcomp_visual_vtbl =
+{
 {
     dcomp_visual_QueryInterface,
     dcomp_visual_AddRef,
@@ -3580,6 +3598,51 @@ static const struct IDCompositionVisual2Vtbl dcomp_visual_vtbl =
     dcomp_visual_SetCompositeMode,
     dcomp_visual_SetOpacityMode,
     dcomp_visual_SetBackFaceVisibility,
+},
+{
+    dcomp_visual_private_unimplemented22,
+    dcomp_visual_private_unimplemented23,
+    dcomp_visual_private_unimplemented24,
+    dcomp_visual_private_unimplemented25,
+    dcomp_visual_private_unimplemented26,
+    dcomp_visual_private_unimplemented27,
+    dcomp_visual_private_unimplemented28,
+    dcomp_visual_private_unimplemented29,
+    dcomp_visual_private_unimplemented30,
+    dcomp_visual_private_unimplemented31,
+    dcomp_visual_private_unimplemented32,
+    dcomp_visual_private_unimplemented33,
+    dcomp_visual_private_unimplemented34,
+    dcomp_visual_private_unimplemented35,
+    dcomp_visual_private_unimplemented36,
+    dcomp_visual_private_unimplemented37,
+    dcomp_visual_private_unimplemented38,
+    dcomp_visual_private_unimplemented39,
+    dcomp_visual_private_method40,
+    dcomp_visual_private_method41,
+    dcomp_visual_private_unimplemented42,
+    dcomp_visual_private_unimplemented43,
+    dcomp_visual_private_unimplemented44,
+    dcomp_visual_private_unimplemented45,
+    dcomp_visual_private_unimplemented46,
+    dcomp_visual_private_unimplemented47,
+    dcomp_visual_private_unimplemented48,
+    dcomp_visual_private_unimplemented49,
+    dcomp_visual_private_unimplemented50,
+    dcomp_visual_private_unimplemented51,
+    dcomp_visual_private_unimplemented52,
+    dcomp_visual_private_unimplemented53,
+    dcomp_visual_private_unimplemented54,
+    dcomp_visual_private_unimplemented55,
+    dcomp_visual_private_unimplemented56,
+    dcomp_visual_private_unimplemented57,
+    dcomp_visual_private_unimplemented58,
+    dcomp_visual_private_unimplemented59,
+    dcomp_visual_private_unimplemented60,
+    dcomp_visual_private_unimplemented61,
+    dcomp_visual_private_unimplemented62,
+    dcomp_visual_private_unimplemented63,
+},
 };
 
 static HRESULT dcomp_visual_create(struct dcomp_device *device, struct dcomp_visual **out)
@@ -3592,7 +3655,7 @@ static HRESULT dcomp_visual_create(struct dcomp_device *device, struct dcomp_vis
     if (!(visual = calloc(1, sizeof(*visual))))
         return E_OUTOFMEMORY;
 
-    visual->IDCompositionVisual2_iface.lpVtbl = &dcomp_visual_vtbl;
+    visual->IDCompositionVisual2_iface.lpVtbl = &dcomp_visual_vtbl.base;
     visual->refcount = 1;
     visual->device = device;
     IDCompositionDevice_AddRef(&device->IDCompositionDevice_iface);
@@ -3694,7 +3757,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_target_SetRoot_locked(IDCompositionTarget
 
     if (visual)
     {
-        if ((const void *)visual->lpVtbl != &dcomp_visual_vtbl) return E_NOTIMPL;
+        if ((const void *)visual->lpVtbl != &dcomp_visual_vtbl.base) return E_NOTIMPL;
         new_root = impl_from_IDCompositionVisual(visual);
         if (new_root->device != target->device) return E_INVALIDARG;
         if (new_root->is_root) return E_INVALIDARG;
@@ -4386,13 +4449,13 @@ static ULONG STDMETHODCALLTYPE dcomp_##prefix##_Release(type *iface) \
     return IDCompositionDevice_Release(&dev->IDCompositionDevice_iface); \
 }
 
-/* A commit has completed when dcomp_device_internal_commit returns: the event of SetCommitCompletionEvent is signaled then. */
+/* A commit has completed when dcomp_device_internal_commit returns, with success or not: the event of SetCommitCompletionEvent is signaled then. */
 static HRESULT dcomp_device_commit(struct dcomp_device *dev)
 {
     HRESULT hr = dcomp_device_internal_commit(dev);
 
     EnterCriticalSection(&dev->cs);
-    if (SUCCEEDED(hr) && dev->commit_event) SetEvent(dev->commit_event);
+    if (dev->commit_event) SetEvent(dev->commit_event);
     LeaveCriticalSection(&dev->cs);
     return hr;
 }
@@ -4581,10 +4644,13 @@ static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateSurface(type *iface, \
 static const GUID IID_dcomp_alias_a = {0xd14b6158, 0xc3fa, 0x4bce, {0x9c, 0x1f, 0xb6, 0x1d, 0x86, 0x65, 0xea, 0xb0}};
 static const GUID IID_dcomp_alias_b = {0x28d6ad3d, 0xee2a, 0x4bcd, {0x94, 0x19, 0x7d, 0x54, 0x80, 0x04, 0x35, 0xb1}};
 
-/* The interface {6b556968-2d25-11e2-99f6-8bc36088709b} of the device. FrameworkUdk of the Windows App Runtime asks for it in
- * DCompPrivates_SetCommitCompletionEvent and calls its slot 8 with the event handle (traced on Wine with a logging object; Windows
- * answers the call with S_OK). Only that method is known: the others return E_NOTIMPL. The event is duplicated and signaled when a
- * commit has completed, which here is when Commit returns. A NULL handle clears the event (not measured on Windows). */
+/* The interface {6b556968-2d25-11e2-99f6-8bc36088709b} of the device. FrameworkUdk of the Windows App Runtime (its helper for the Windows
+ * releases up to UniversalApiContract 17, the one that runs on Wine) asks for it in DCompPrivates_SetCommitCompletionEvent and calls slot 8
+ * with the event handle (traced on Wine with a logging object). Windows 11 build 26300 answers the same slot differently (it removes 12
+ * bytes on 32-bit Windows, two arguments, and returns E_INVALIDARG for an event handle: tests/uwp/alpc/dcomp-dslot32b.cpp), because there the
+ * runtime goes through a system-side module instead; so the slot is implemented for the helper that calls it here, not for that Windows.
+ * The event is duplicated and signaled when a Commit has completed, which here is when Commit returns, successful or not, so a waiter
+ * cannot hang on a failed commit. A NULL handle clears the event. The other slots raise the stub exception: their argument counts are not known. */
 static const GUID IID_dcomp_commit = {0x6b556968, 0x2d25, 0x11e2, {0x99, 0xf6, 0x8b, 0xc3, 0x60, 0x88, 0x70, 0x9b}};
 
 static struct dcomp_device *impl_from_commit_iface(const void *const **iface)
@@ -4613,12 +4679,12 @@ static ULONG STDMETHODCALLTYPE dcomp_commit_Release(const void *const **iface)
     return IDCompositionDevice_Release(&dev->IDCompositionDevice_iface);
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_commit_SetCommitCompletionEvent(const void *const **iface, HANDLE event)
+static HRESULT STDMETHODCALLTYPE dcomp_commit_SetCommitCompletionEvent(const void *const **iface, HANDLE event, void *arg)
 {
     struct dcomp_device *dev = impl_from_commit_iface(iface);
     HANDLE copy = NULL, old;
 
-    TRACE("iface %p, event %p.\n", iface, event);
+    TRACE("iface %p, event %p, arg %p.\n", iface, event, arg);
 
     if (event && !DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(), &copy, 0, FALSE, DUPLICATE_SAME_ACCESS))
         return HRESULT_FROM_WIN32(GetLastError());
@@ -4632,10 +4698,11 @@ static HRESULT STDMETHODCALLTYPE dcomp_commit_SetCommitCompletionEvent(const voi
 }
 
 #define DCOMP_COMMIT_STUB(n) \
-static HRESULT STDMETHODCALLTYPE dcomp_commit_method##n(const void *const **iface, void *a, void *b) \
+static void STDMETHODCALLTYPE dcomp_commit_method##n(void) \
 { \
-    FIXME("iface %p, method " #n ": %p, %p stub!\n", iface, a, b); \
-    return E_NOTIMPL; \
+    ULONG_PTR args[2] = {(ULONG_PTR)L"dcomp.dll", (ULONG_PTR)"commit interface method " #n}; \
+    ERR("commit interface method " #n " is not implemented\n"); \
+    RaiseException(0x80000100 /* EXCEPTION_WINE_STUB */, EXCEPTION_NONCONTINUABLE, 2, args); \
 }
 DCOMP_COMMIT_STUB(3) DCOMP_COMMIT_STUB(4) DCOMP_COMMIT_STUB(5) DCOMP_COMMIT_STUB(6) DCOMP_COMMIT_STUB(7)
 DCOMP_COMMIT_STUB(9) DCOMP_COMMIT_STUB(10) DCOMP_COMMIT_STUB(11) DCOMP_COMMIT_STUB(12) DCOMP_COMMIT_STUB(13)
@@ -5275,13 +5342,38 @@ struct dcomp_shared
 {
     struct list entry;
     HANDLE handle;
-    struct dcomp_visual *visual;
+    struct dcomp_device *device;   /* the device the visual was made for; no reference */
+    struct dcomp_visual *visual;   /* no reference: the entry goes when the last holder releases the visual */
 };
 
 static struct list dcomp_shared_list = LIST_INIT(dcomp_shared_list);
 static SRWLOCK dcomp_shared_lock = SRWLOCK_INIT;
 
-/* a new handle value is a new shared visual: forget what an older handle of the same value stood for */
+static void dcomp_shared_lock_acquire(void)
+{
+    AcquireSRWLockExclusive(&dcomp_shared_lock);
+}
+
+static void dcomp_shared_lock_release(void)
+{
+    ReleaseSRWLockExclusive(&dcomp_shared_lock);
+}
+
+/* with the lock held */
+static void dcomp_shared_remove_visual(struct dcomp_visual *visual)
+{
+    struct dcomp_shared *shared, *next;
+
+    LIST_FOR_EACH_ENTRY_SAFE(shared, next, &dcomp_shared_list, struct dcomp_shared, entry)
+    {
+        if (shared->visual != visual) continue;
+        list_remove(&shared->entry);
+        free(shared);
+    }
+}
+
+/* a new handle value is a new shared visual: forget what an older handle of the same value stood for (the visual lives on
+ * for whoever holds it, it is only no longer found by the handle) */
 static void dcomp_shared_forget(HANDLE handle)
 {
     struct dcomp_shared *shared, *next;
@@ -5291,38 +5383,48 @@ static void dcomp_shared_forget(HANDLE handle)
     {
         if (shared->handle != handle) continue;
         list_remove(&shared->entry);
-        if (shared->visual) IDCompositionVisual2_Release(&shared->visual->IDCompositionVisual2_iface);
         free(shared);
     }
     ReleaseSRWLockExclusive(&dcomp_shared_lock);
 }
 
+/* One visual per handle and device: a second device opening the handle makes its own visual, because a visual of another device
+ * cannot be put into a target of this one. A visual nobody holds any more is gone, and the handle then makes a new one. */
 static HRESULT dcomp_shared_open_visual(struct dcomp_device *dev, HANDLE handle, REFIID iid, void **out)
 {
     struct dcomp_shared *shared, *found = NULL;
+    struct dcomp_visual *visual;
     HRESULT hr;
 
     AcquireSRWLockExclusive(&dcomp_shared_lock);
     LIST_FOR_EACH_ENTRY(shared, &dcomp_shared_list, struct dcomp_shared, entry)
-        if (shared->handle == handle) { found = shared; break; }
-    if (!found)
+        if (shared->handle == handle && shared->device == dev) { found = shared; break; }
+    if (found)
     {
-        if (!(found = calloc(1, sizeof(*found))))
-        {
-            ReleaseSRWLockExclusive(&dcomp_shared_lock);
-            return E_OUTOFMEMORY;
-        }
-        found->handle = handle;
-        if (FAILED(hr = dcomp_visual_create(dev, &found->visual)))
-        {
-            ReleaseSRWLockExclusive(&dcomp_shared_lock);
-            free(found);
-            return hr;
-        }
-        list_add_tail(&dcomp_shared_list, &found->entry);
+        hr = IDCompositionVisual2_QueryInterface(&found->visual->IDCompositionVisual2_iface, iid, out);
+        ReleaseSRWLockExclusive(&dcomp_shared_lock);
+        return hr;
     }
-    hr = IDCompositionVisual2_QueryInterface(&found->visual->IDCompositionVisual2_iface, iid, out);
     ReleaseSRWLockExclusive(&dcomp_shared_lock);
+
+    if (!(found = calloc(1, sizeof(*found)))) return E_OUTOFMEMORY;
+    if (FAILED(hr = dcomp_visual_create(dev, &visual)))
+    {
+        free(found);
+        return hr;
+    }
+    visual->shared = TRUE;
+    found->handle = handle;
+    found->device = dev;
+    found->visual = visual;
+
+    AcquireSRWLockExclusive(&dcomp_shared_lock);
+    list_add_tail(&dcomp_shared_list, &found->entry);
+    ReleaseSRWLockExclusive(&dcomp_shared_lock);
+
+    hr = IDCompositionVisual2_QueryInterface(&visual->IDCompositionVisual2_iface, iid, out);
+    /* the reference of dcomp_visual_create belongs to the caller of this function now */
+    IDCompositionVisual2_Release(&visual->IDCompositionVisual2_iface);
     return hr;
 }
 
@@ -5343,39 +5445,37 @@ static HRESULT dcomp_shared_open_target(struct dcomp_device *dev, REFIID iid, vo
     return hr;
 }
 
-/* methods 27 and 28 of the private part are not known; 29 opens a shared object */
+/* Methods 29 (opens a shared object) and 46 are known. The argument counts of the others are not: guessed, a stdcall stub corrupts the
+ * stack on i386, so calling one raises the stub exception instead of returning. */
 #define DCOMP_PRIVATE_STUB(n) \
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_private##n(IDCompositionDesktopDevice *iface, void *a, void *b, void *c) \
+static void STDMETHODCALLTYPE dcomp_desktop_device_private##n(void) \
 { \
-    FIXME("iface %p, private method " #n ": %p, %p, %p stub!\n", iface, a, b, c); \
-    return E_NOTIMPL; \
+    ULONG_PTR args[2] = {(ULONG_PTR)L"dcomp.dll", (ULONG_PTR)"desktop device private method " #n}; \
+    ERR("desktop device private method " #n " is not implemented\n"); \
+    RaiseException(0x80000100 /* EXCEPTION_WINE_STUB */, EXCEPTION_NONCONTINUABLE, 2, args); \
 }
 DCOMP_PRIVATE_STUB(27) DCOMP_PRIVATE_STUB(28) DCOMP_PRIVATE_STUB(30) DCOMP_PRIVATE_STUB(31) DCOMP_PRIVATE_STUB(32)
 DCOMP_PRIVATE_STUB(33) DCOMP_PRIVATE_STUB(34) DCOMP_PRIVATE_STUB(35) DCOMP_PRIVATE_STUB(36) DCOMP_PRIVATE_STUB(37)
 DCOMP_PRIVATE_STUB(38) DCOMP_PRIVATE_STUB(39) DCOMP_PRIVATE_STUB(40) DCOMP_PRIVATE_STUB(41) DCOMP_PRIVATE_STUB(42)
 DCOMP_PRIVATE_STUB(43) DCOMP_PRIVATE_STUB(44) DCOMP_PRIVATE_STUB(45) DCOMP_PRIVATE_STUB(47)
 
-/* Method 46 of the batch-query interface ({28d6ad3d-...}, the very interface of the desktop device): the Windows App
- * Runtime's composition engine (dwmcorei.dll) opens its session with it and then asks which of its submitted batches
- * have completed. Measured on Windows 11 (tests/uwp/alpc/fudk-sys-probe.c and a trace of the engine;
- * docs/uwp/WINAPPSDK.md):
- *   - with a block `b` (the first call, a descriptor of the session) the first dword of `a` becomes 1; `b` and the
- *     rest of `a` are not touched;
- *   - without it (`b` NULL) `code` is the id of a submitted batch and the first dword of `a` becomes the id of the
- *     newest completed batch, never above `code`; the second dword is not touched.
- * Nothing here is asynchronous: every submitted batch has completed when it is asked for, so the answer is `code`.
- * The batch ids themselves come through other private methods that are still stubs. */
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_private46(IDCompositionDesktopDevice *iface, void *a, void *b, UINT code)
+/* Method 46 of the batch-query interface ({28d6ad3d-...}, the very interface of the desktop device) takes one pointer (on 32-bit Windows 11 it
+ * removes 8 bytes: the interface and one argument) and stores a dword in it: the id of the newest batch of changes that the composition has
+ * completed. Measured on Windows 11 (tests/uwp/alpc/dcomp-dslot32.cpp; a trace of the composition engine of the Windows App Runtime shows the
+ * value rise 1, 1, 2, 3, 3, 4, 4 as it submits batches): 0 on a device nothing was submitted to; the second dword of an eight-byte block is
+ * not touched. The submit methods are not known and not implemented, so no batch is ever submitted here and the answer is 0.
+ * (The other registers of the call that a trace shows belong to the caller; they are not arguments.) */
+static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_private46(IDCompositionDesktopDevice *iface, DWORD *completed)
 {
     HRESULT hr = S_OK;
 
-    TRACE("iface %p, a %p, b %p, code %#x.\n", iface, a, b, code);
+    TRACE("iface %p, completed %p.\n", iface, completed);
 
-    if (!a) return E_POINTER;
+    if (!completed) return E_POINTER;
 
     __TRY
     {
-        *(DWORD *)a = b ? 1 : code;
+        *completed = 0;
     }
     __EXCEPT_PAGE_FAULT
     {
@@ -5534,9 +5634,9 @@ HRESULT WINAPI DCompositionCreateDevice3(IUnknown *rendering_device, REFIID iid,
 
 /*
  * Export 1040 of the real dcomp.dll, named DCompositionCreateSharedVisualHandle (tests/uwp/alpc/dcomp-exports-probe.c): imported
- * by ordinal by dcompi.dll of the Windows App Runtime. The signature is HRESULT (HANDLE *out) (read from the caller in dcompi.dll
- * and confirmed on Windows 11 with tests/uwp/alpc/dcomp-visualhandle-probe.c: a NULL out is E_INVALIDARG, otherwise the handle is
- * an object of type "Composition"). The compositor passes the handle on in a property of a visual; here the handle is an
+ * by ordinal by dcompi.dll of the Windows App Runtime. The signature is HRESULT (HANDLE *out), measured on Windows 11 with
+ * tests/uwp/alpc/dcomp-visualhandle-probe.c: a NULL out is E_INVALIDARG, otherwise the handle is an object of type "Composition".
+ * The compositor passes the handle on in a property of a visual; here the handle is an
  * anonymous event, which is what a caller can do with it (duplicate it, close it) until there is a system compositor to share
  * the visual with.
  */
