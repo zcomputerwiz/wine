@@ -302,3 +302,49 @@ HRESULT WINAPI GetThemePropertyOrigin(HTHEME hTheme, int iPartId, int iStateId,
     *pOrigin = tp->origin;
     return S_OK;
 }
+
+/* The themes of Wine carry no animation data (the storyboards of the Windows themes), so the animation queries find nothing. The
+ * results for missing data and bad arguments are those of Windows 11. */
+
+/***********************************************************************
+ *      GetThemeAnimationProperty                           (UXTHEME.@)
+ */
+HRESULT WINAPI GetThemeAnimationProperty(HTHEME theme, int storyboard, int target, TA_PROPERTY property, void *value,
+                                         DWORD size, DWORD *size_out)
+{
+    TRACE("(%p, %d, %d, %d, %p, %lu, %p)\n", theme, storyboard, target, property, value, size, size_out);
+
+    if (!theme || !value || !size_out) return E_INVALIDARG;
+    if (property < TAP_FLAGS || property > TAP_ZORDER)
+    {
+        *size_out = 0;
+        return E_INVALIDARG;
+    }
+    /* every property is a DWORD (or a float of the same size) */
+    *size_out = sizeof(DWORD);
+    if (size < sizeof(DWORD)) return HRESULT_FROM_WIN32(ERROR_MORE_DATA);
+    return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+}
+
+/***********************************************************************
+ *      GetThemeAnimationTransform                          (UXTHEME.@)
+ */
+HRESULT WINAPI GetThemeAnimationTransform(HTHEME theme, int storyboard, int target, DWORD index, TA_TRANSFORM *transform,
+                                          DWORD size, DWORD *size_out)
+{
+    TRACE("(%p, %d, %d, %lu, %p, %lu, %p)\n", theme, storyboard, target, index, transform, size, size_out);
+
+    if (!theme) return E_INVALIDARG;
+    return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+}
+
+/***********************************************************************
+ *      GetThemeTimingFunction                              (UXTHEME.@)
+ */
+HRESULT WINAPI GetThemeTimingFunction(HTHEME theme, int id, TA_TIMINGFUNCTION *function, DWORD size, DWORD *size_out)
+{
+    TRACE("(%p, %d, %p, %lu, %p)\n", theme, id, function, size, size_out);
+
+    if (!theme) return E_INVALIDARG;
+    return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+}
