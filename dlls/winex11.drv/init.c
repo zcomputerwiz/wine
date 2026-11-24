@@ -241,6 +241,47 @@ void set_dc_drawable( HDC hdc, Drawable drawable, const RECT *rect, int mode )
     NtGdiExtEscape( hdc, NULL, 0, X11DRV_ESCAPE, sizeof(escape), (LPSTR)&escape, 0, NULL );
 }
 
+static int window_visual_error( Display *display, XErrorEvent *event, void *arg )
+{
+    return 1;
+}
+
+/* The visual of an X window, which may belong to another process: the default visual is wrong for a 32-bit window
+ * (a glass window with per-pixel alpha), and a copy between drawables of different depths is a fatal X error, while
+ * with the right visuals the copy converts the pixels. */
+void get_x_window_visual( Window window, XVisualInfo *visual )
+{
+    XWindowAttributes attr;
+    XVisualInfo templ, *infos;
+    Status ok;
+    int count;
+
+    *visual = default_visual;
+    if (!window) return;
+    X11DRV_expect_error( gdi_display, window_visual_error, NULL );
+    ok = XGetWindowAttributes( gdi_display, window, &attr );
+    if (X11DRV_check_error() || !ok || attr.visual == default_visual.visual) return;
+    templ.visualid = XVisualIDFromVisual( attr.visual );
+    if ((infos = XGetVisualInfo( gdi_display, VisualIDMask, &templ, &count )))
+    {
+        *visual = infos[0];
+        XFree( infos );
+    }
+}
+
+static void set_dc_drawable_visual( HDC hdc, Drawable drawable, const RECT *rect, int mode )
+{
+    struct x11drv_escape_set_drawable escape =
+    {
+        .code = X11DRV_SET_DRAWABLE,
+        .drawable = drawable,
+        .dc_rect = *rect,
+        .mode = mode,
+    };
+    get_x_window_visual( drawable, &escape.visual );
+    NtGdiExtEscape( hdc, NULL, 0, X11DRV_ESCAPE, sizeof(escape), (LPSTR)&escape, 0, NULL );
+}
+
 Drawable get_dc_drawable( HDC hdc, RECT *rect )
 {
     struct x11drv_escape_get_drawable escape = {.code = X11DRV_GET_DRAWABLE};
@@ -355,7 +396,7 @@ static void client_surface_update_offscreen( HWND hwnd, struct x11drv_client_sur
         OffsetRect( &rect, -rect.left, -rect.top );
         surface->hdc_dst = NtGdiOpenDCW( &device_str, NULL, NULL, 0, TRUE, NULL, NULL, NULL );
         surface->hdc_src = NtGdiOpenDCW( &device_str, NULL, NULL, 0, TRUE, NULL, NULL, NULL );
-        set_dc_drawable( surface->hdc_src, surface->window, &rect, IncludeInferiors );
+        set_dc_drawable_visual( surface->hdc_src, surface->window, &rect, IncludeInferiors );
 
 #ifdef SONAME_LIBXCOMPOSITE
         if (usexcomposite) pXCompositeRedirectWindow( gdi_display, surface->window, CompositeRedirectManual );
@@ -398,8 +439,9 @@ static void X11DRV_client_surface_present( struct client_surface *client, HDC hd
     TRACE( "hwnd %p %s to toplevel %p %s region %p\n", hwnd, wine_dbgstr_rect(&rect_src),
            toplevel, wine_dbgstr_rect(&rect_dst), region );
 
+    /* the toplevel window may be 32-bit (a glass window) and another process's */
     if (get_dc_drawable( surface->hdc_dst, &rect ) != window || !EqualRect( &rect, &rect_dst ))
-        set_dc_drawable( surface->hdc_dst, window, &rect_dst, IncludeInferiors );
+        set_dc_drawable_visual( surface->hdc_dst, window, &rect_dst, IncludeInferiors );
     if (region) NtGdiExtSelectClipRgn( surface->hdc_dst, region, RGN_COPY );
 
     NtGdiStretchBlt( surface->hdc_dst, 0, 0, rect_dst.right - rect_dst.left, rect_dst.bottom - rect_dst.top,

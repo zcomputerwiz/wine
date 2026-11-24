@@ -3170,7 +3170,7 @@ void X11DRV_GetDC( HDC hdc, HWND hwnd, HWND top, const RECT *win_rect,
     else
     {
         escape.drawable = X11DRV_get_whole_window( top );
-        escape.visual = default_visual; /* FIXME: use the right visual for other process window */
+        get_x_window_visual( escape.drawable, &escape.visual );
     }
 
     if (!escape.drawable) return; /* don't create a GC for foreign windows */

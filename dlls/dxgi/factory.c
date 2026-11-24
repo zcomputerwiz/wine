@@ -480,6 +480,100 @@ static BOOL dcomp_register_window_class(void)
     return TRUE;
 }
 
+/* The repaint sinks of composition targets live on a thread of dxgi's own that always handles messages:
+ * WM_WINE_DCOMP_REPAINT, which asks for a target's frames again, must reach them while the thread that made the
+ * swapchain handles none (Chromium's compositor thread, say). Only the message-only sinks live there; the
+ * composition windows themselves stay with the swapchain's thread. */
+#define WM_DCOMP_HELPER_CREATE_SINK (WM_USER + 1)
+
+static HWND dcomp_helper;
+static INIT_ONCE dcomp_helper_once = INIT_ONCE_STATIC_INIT;
+
+static LRESULT CALLBACK dcomp_sink_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    if (msg == WM_WINE_DCOMP_REPAINT)
+    {
+        MSG pending;
+        unsigned int count;
+
+        for (count = 0; count < 64; ++count)
+            if (!PeekMessageW(&pending, hwnd, WM_WINE_DCOMP_REPAINT, WM_WINE_DCOMP_REPAINT, PM_REMOVE)) break;
+        dcomp_swapchain_repaint(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+static LRESULT CALLBACK dcomp_helper_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    if (msg == WM_DCOMP_HELPER_CREATE_SINK)
+        return (LRESULT)CreateWindowExW(0, L"WineDCompRepaintSink", NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, NULL,
+                GetModuleHandleW(NULL), NULL);
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+static DWORD WINAPI dcomp_helper_thread(void *ready)
+{
+    WNDCLASSW wc = {0};
+    MSG msg;
+
+    SetThreadDescription(GetCurrentThread(), L"wine_dxgi_dcomp");
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpfnWndProc = dcomp_sink_wndproc;
+    wc.lpszClassName = L"WineDCompRepaintSink";
+    if (RegisterClassW(&wc) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS)
+    {
+        wc.lpfnWndProc = dcomp_helper_wndproc;
+        wc.lpszClassName = L"WineDCompHelper";
+        if (RegisterClassW(&wc) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS)
+            dcomp_helper = CreateWindowExW(0, L"WineDCompHelper", NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, NULL,
+                    GetModuleHandleW(NULL), NULL);
+    }
+    SetEvent(ready);
+    if (!dcomp_helper) return 1;
+    while (GetMessageW(&msg, NULL, 0, 0))
+    {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    return 0;
+}
+
+static BOOL WINAPI dcomp_helper_init(INIT_ONCE *once, void *param, void **context)
+{
+    HANDLE ready, thread;
+
+    if (!(ready = CreateEventW(NULL, TRUE, FALSE, NULL))) return TRUE;
+    if ((thread = CreateThread(NULL, 0, dcomp_helper_thread, ready, 0, NULL)))
+    {
+        WaitForSingleObject(ready, INFINITE);
+        CloseHandle(thread);
+    }
+    CloseHandle(ready);
+    if (!dcomp_helper) WARN("No repaint thread; the composition windows receive their repaints themselves.\n");
+    return TRUE;
+}
+
+/* NULL without dxgi's thread: the composition window is its own sink then. */
+HWND dcomp_create_repaint_sink(void)
+{
+    InitOnceExecuteOnce(&dcomp_helper_once, dcomp_helper_init, NULL, NULL);
+    if (!dcomp_helper) return NULL;
+    return (HWND)SendMessageW(dcomp_helper, WM_DCOMP_HELPER_CREATE_SINK, 0, 0);
+}
+
+BOOL dcomp_window_on_helper_thread(HWND window)
+{
+    return dcomp_helper && GetWindowThreadProcessId(window, NULL) == GetWindowThreadProcessId(dcomp_helper, NULL);
+}
+
+/* Only the window's own thread can destroy it. */
+void dcomp_destroy_window(HWND window)
+{
+    if (GetWindowThreadProcessId(window, NULL) == GetCurrentThreadId()) DestroyWindow(window);
+    else SendMessageW(window, WM_CLOSE, 0, 0);
+}
+
 static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWineDXGIFactory *iface,
         IUnknown *device, const DXGI_SWAP_CHAIN_DESC1 *desc, IDXGIOutput *output, IDXGISwapChain1 **swapchain)
 {
@@ -522,9 +616,12 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
             return E_NOTIMPL;
         }
         d3d11_sc->comp_wnd = window;
+        if (!(d3d11_sc->sink_wnd = dcomp_create_repaint_sink())) d3d11_sc->sink_wnd = window;
         d3d11_sc->composition_alpha_mode = desc->AlphaMode;
 
         SetPropW(window, L"__wine_dcomp_swapchain", (HANDLE)*swapchain);
+        if (d3d11_sc->sink_wnd != window)
+            SetPropW(d3d11_sc->sink_wnd, L"__wine_dcomp_swapchain", (HANDLE)*swapchain);
         TRACE("Created composition window %p (%ux%u) for swapchain %p.\n",
                 window, desc->Width, desc->Height, *swapchain);
     }

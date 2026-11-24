@@ -192,6 +192,7 @@ struct d3d11_swapchain
     LONG present_count;
     LONG in_set_fullscreen_state;
     HWND comp_wnd;
+    HWND sink_wnd;   /* receives WM_WINE_DCOMP_REPAINT for the target: on dxgi's own thread, or comp_wnd */
     DXGI_ALPHA_MODE composition_alpha_mode;
     /* The composition target window whose scene shows this swapchain; Present reads it under the wined3d mutex. */
     HWND target_hwnd;
@@ -221,6 +222,9 @@ BOOL dxgi_validate_swapchain_desc(const DXGI_SWAP_CHAIN_DESC1 *desc);
 BOOL dxgi_validate_swapchain_fullscreen_desc(const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *desc);
 void dcomp_swapchain_clear_target(struct d3d11_swapchain *swapchain);
 void dcomp_swapchain_repaint(HWND window);
+void dcomp_destroy_window(HWND window);
+BOOL dcomp_window_on_helper_thread(HWND window);
+HWND dcomp_create_repaint_sink(void);
 
 /* IDXGISurface/IDXGIResource */
 struct dxgi_resource

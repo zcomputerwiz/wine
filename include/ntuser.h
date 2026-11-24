@@ -1325,6 +1325,8 @@ enum
     NtUserGetFullWindowHandle,
     NtUserIsCurrentProcessWindow,
     NtUserIsCurrentThreadWindow,
+    /* WineExplorer: last, so that the values above stay */
+    NtUserCallHwnd_PresentClientSurfaces,
 };
 
 static inline void NtUserActivateOtherWindow( HWND hwnd )
