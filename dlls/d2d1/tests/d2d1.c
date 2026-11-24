@@ -10336,6 +10336,77 @@ static void test_bitmap_surface(BOOL d3d11)
     release_test_context(&ctx);
 }
 
+/* The private interface {46fdbfea-53f8-440c-b9e2-81dfec612a72} of the device, which the lifted compositor of the Windows App SDK asks
+ * for; slot 5 as it calls it. Only 64-bit is measured. */
+static void test_device_private(BOOL d3d11)
+{
+#ifdef _WIN64
+    static const GUID iid_private = {0x46fdbfea, 0x53f8, 0x440c, {0xb9, 0xe2, 0x81, 0xdf, 0xec, 0x61, 0x2a, 0x72}};
+    typedef HRESULT (STDMETHODCALLTYPE *method5_t)(void *, UINT_PTR, UINT_PTR, DWORD *);
+    static const UINT_PTR args[][2] = {{2000, 0x1e0000}, {0, 0}, {0xffffffff, 0}, {2000, 0xffffffff}};
+    ID2D1DeviceContext *context;
+    struct d2d1_test_context ctx;
+    IUnknown *priv, *priv2, *unk;
+    ID2D1Device *device;
+    unsigned int i;
+    DWORD out[2];
+    HRESULT hr;
+
+    if (!init_test_context(&ctx, d3d11))
+        return;
+    if (!ctx.factory1)
+    {
+        win_skip("ID2D1Factory1 is not supported.\n");
+        release_test_context(&ctx);
+        return;
+    }
+
+    hr = ID2D1Factory1_CreateDevice(ctx.factory1, ctx.device, &device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1Device_QueryInterface(device, &iid_private, (void **)&priv);
+    if (hr == E_NOINTERFACE)
+    {
+        win_skip("The private device interface is not supported.\n");
+        ID2D1Device_Release(device);
+        release_test_context(&ctx);
+        return;
+    }
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(priv != (IUnknown *)device, "Got the device itself.\n");
+
+    hr = IUnknown_QueryInterface(priv, &iid_private, (void **)&priv2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(priv2 == priv, "Got another object.\n");
+    IUnknown_Release(priv2);
+    hr = IUnknown_QueryInterface(priv, &IID_ID2D1Device, (void **)&unk);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(unk == (IUnknown *)device, "Did not get the device.\n");
+    IUnknown_Release(unk);
+
+    for (i = 0; i < ARRAY_SIZE(args); ++i)
+    {
+        out[0] = out[1] = 0xaaaaaaaa;
+        hr = ((method5_t)(*(void ***)priv)[5])(priv, args[i][0], args[i][1], out);
+        ok(hr == S_OK, "%u: Got unexpected hr %#lx.\n", i, hr);
+        ok(out[0] == 1, "%u: Got unexpected value %#lx.\n", i, out[0]);
+        ok(out[1] == 0xaaaaaaaa, "%u: Got unexpected value %#lx after it.\n", i, out[1]);
+    }
+    hr = ((method5_t)(*(void ***)priv)[5])(priv, 2000, 0x1e0000, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* a device context does not answer it */
+    hr = ID2D1Device_CreateDeviceContext(device, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &context);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1DeviceContext_QueryInterface(context, &iid_private, (void **)&unk);
+    ok(hr == E_NOINTERFACE, "Got unexpected hr %#lx.\n", hr);
+    ID2D1DeviceContext_Release(context);
+
+    IUnknown_Release(priv);
+    ID2D1Device_Release(device);
+    release_test_context(&ctx);
+#endif
+}
+
 static void test_device_context(BOOL d3d11)
 {
     D2D1_HWND_RENDER_TARGET_PROPERTIES hwnd_rt_desc;
@@ -18511,6 +18582,7 @@ START_TEST(d2d1)
     queue_test(test_create_device_context);
     queue_test(test_bitmap_surface);
     queue_test(test_device_context);
+    queue_test(test_device_private);
     queue_d3d10_test(test_invert_matrix);
     queue_d3d10_test(test_skew_matrix);
     queue_test(test_command_list);

@@ -676,6 +676,7 @@ struct d2d_geometry_realization *unsafe_impl_from_ID2D1GeometryRealization(ID2D1
 struct d2d_device
 {
     ID2D1Device6 ID2D1Device6_iface;
+    const void * const *private_vtbl;   /* the private interface {46fdbfea-...} that the compositor asks for (64-bit) */
     LONG refcount;
     ID2D1Factory1 *factory;
     IDXGIDevice *dxgi_device;

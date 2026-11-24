@@ -4680,9 +4680,106 @@ HRESULT d2d_d3d_create_render_target(struct d2d_device *device, IDXGISurface *su
     return S_OK;
 }
 
+/* The private interface {46fdbfea-53f8-440c-b9e2-81dfec612a72} of the device. The lifted compositor of the Windows App SDK asks every
+ * new device for it, and without it drops the device and the Direct3D device under it and tries again on the next frame, so nothing
+ * it composes is drawn. Measured black box on 64-bit Windows 11 (tests/uwp/alpc/d2d-qi-probe.c and wintrace of WineExplorer): the
+ * device answers it with a separate object (a device context does not); Notepad calls only slot 5, every few seconds, as
+ * (2000, 0x1e0000, out). Slot 5 returns S_OK and writes the DWORD 1 to out for any arguments, before and after the device has drawn,
+ * and takes a NULL out. The other slots are not known: calling one raises the stub exception. 32-bit callers do not get the
+ * interface (argument sizes not measured). */
+#ifdef __x86_64__
+static const GUID d2d_device_private_iid = {0x46fdbfea, 0x53f8, 0x440c, {0xb9, 0xe2, 0x81, 0xdf, 0xec, 0x61, 0x2a, 0x72}};
+
+static inline struct d2d_device *impl_from_device_private(void *iface)
+{
+    return CONTAINING_RECORD(iface, struct d2d_device, private_vtbl);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_device_private_QueryInterface(void *iface, REFIID iid, void **out)
+{
+    struct d2d_device *device = impl_from_device_private(iface);
+
+    TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
+
+    if (IsEqualGUID(iid, &d2d_device_private_iid))
+    {
+        ID2D1Device6_AddRef(&device->ID2D1Device6_iface);
+        *out = iface;
+        return S_OK;
+    }
+    return ID2D1Device6_QueryInterface(&device->ID2D1Device6_iface, iid, out);
+}
+
+static ULONG STDMETHODCALLTYPE d2d_device_private_AddRef(void *iface)
+{
+    return ID2D1Device6_AddRef(&impl_from_device_private(iface)->ID2D1Device6_iface);
+}
+
+static ULONG STDMETHODCALLTYPE d2d_device_private_Release(void *iface)
+{
+    return ID2D1Device6_Release(&impl_from_device_private(iface)->ID2D1Device6_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_device_private_method5(void *iface, UINT_PTR arg1, UINT_PTR arg2, DWORD *out)
+{
+    TRACE("iface %p, %#Ix, %#Ix, out %p.\n", iface, arg1, arg2, out);
+
+    if (out) *out = 1;
+    return S_OK;
+}
+
+#define D2D_DEVICE_PRIVATE_STUB(n) \
+static void STDMETHODCALLTYPE d2d_device_private_unimplemented##n(void) \
+{ \
+    ULONG_PTR args[2] = {(ULONG_PTR)L"d2d1.dll", (ULONG_PTR)"device private method " #n}; \
+    ERR("device private method " #n " is not implemented.\n"); \
+    RaiseException(0x80000100 /* EXCEPTION_WINE_STUB */, EXCEPTION_NONCONTINUABLE, 2, args); \
+}
+D2D_DEVICE_PRIVATE_STUB(3)  D2D_DEVICE_PRIVATE_STUB(4)  D2D_DEVICE_PRIVATE_STUB(6)  D2D_DEVICE_PRIVATE_STUB(7)
+D2D_DEVICE_PRIVATE_STUB(8)  D2D_DEVICE_PRIVATE_STUB(9)  D2D_DEVICE_PRIVATE_STUB(10) D2D_DEVICE_PRIVATE_STUB(11)
+D2D_DEVICE_PRIVATE_STUB(12) D2D_DEVICE_PRIVATE_STUB(13) D2D_DEVICE_PRIVATE_STUB(14) D2D_DEVICE_PRIVATE_STUB(15)
+D2D_DEVICE_PRIVATE_STUB(16) D2D_DEVICE_PRIVATE_STUB(17) D2D_DEVICE_PRIVATE_STUB(18) D2D_DEVICE_PRIVATE_STUB(19)
+
+/* the length of the vtable is not known: the slots after the last one measured raise the stub exception too */
+static const void * const d2d_device_private_vtbl[] =
+{
+    d2d_device_private_QueryInterface,
+    d2d_device_private_AddRef,
+    d2d_device_private_Release,
+    d2d_device_private_unimplemented3,
+    d2d_device_private_unimplemented4,
+    d2d_device_private_method5,
+    d2d_device_private_unimplemented6,
+    d2d_device_private_unimplemented7,
+    d2d_device_private_unimplemented8,
+    d2d_device_private_unimplemented9,
+    d2d_device_private_unimplemented10,
+    d2d_device_private_unimplemented11,
+    d2d_device_private_unimplemented12,
+    d2d_device_private_unimplemented13,
+    d2d_device_private_unimplemented14,
+    d2d_device_private_unimplemented15,
+    d2d_device_private_unimplemented16,
+    d2d_device_private_unimplemented17,
+    d2d_device_private_unimplemented18,
+    d2d_device_private_unimplemented19,
+};
+#endif
+
 static HRESULT WINAPI d2d_device_QueryInterface(ID2D1Device6 *iface, REFIID iid, void **out)
 {
     TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
+
+#ifdef __x86_64__
+    if (IsEqualGUID(iid, &d2d_device_private_iid))
+    {
+        struct d2d_device *device = impl_from_ID2D1Device(iface);
+
+        ID2D1Device6_AddRef(iface);
+        *out = &device->private_vtbl;
+        return S_OK;
+    }
+#endif
 
     if (IsEqualGUID(iid, &IID_ID2D1Device6)
             || IsEqualGUID(iid, &IID_ID2D1Device5)
@@ -4975,6 +5072,9 @@ HRESULT d2d_device_init(struct d2d_device *device, ID2D1Factory1 *factory, IDXGI
     ID3D10Blob *compiled;
 
     device->ID2D1Device6_iface.lpVtbl = &d2d_device_vtbl;
+#ifdef __x86_64__
+    device->private_vtbl = d2d_device_private_vtbl;
+#endif
     device->refcount = 1;
     device->factory = factory;
     ID2D1Factory1_AddRef(device->factory);
