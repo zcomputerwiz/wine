@@ -7698,6 +7698,78 @@ static void test_cursor_clipping(IUnknown *device, BOOL is_d3d12)
     ok(refcount == !is_d3d12, "Got unexpected refcount %lu.\n", refcount);
 }
 
+static void test_factory_adapters_changed_event(void)
+{
+    IDXGIFactory7 *factory, *factory2;
+    DWORD cookie, cookie2, cookie3;
+    HANDLE event, event_copy;
+    ULONG refcount;
+    HRESULT hr;
+
+    if (FAILED(hr = CreateDXGIFactory(&IID_IDXGIFactory7, (void **)&factory)))
+    {
+        win_skip("IDXGIFactory7 is not available.\n");
+        return;
+    }
+    hr = CreateDXGIFactory(&IID_IDXGIFactory7, (void **)&factory2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    ok(!!event, "Failed to create an event, error %lu.\n", GetLastError());
+
+    cookie = 0xdeadbeef;
+    hr = IDXGIFactory7_RegisterAdaptersChangedEvent(factory, NULL, &cookie);
+    ok(hr == DXGI_ERROR_INVALID_CALL, "Got unexpected hr %#lx.\n", hr);
+    ok(cookie == 0xdeadbeef, "Got unexpected cookie %#lx.\n", cookie);
+    hr = IDXGIFactory7_RegisterAdaptersChangedEvent(factory, event, NULL);
+    ok(hr == DXGI_ERROR_INVALID_CALL, "Got unexpected hr %#lx.\n", hr);
+    hr = IDXGIFactory7_RegisterAdaptersChangedEvent(factory, (HANDLE)0x1234, &cookie);
+    ok(hr == E_OUTOFMEMORY, "Got unexpected hr %#lx.\n", hr);
+    ok(cookie == 0xdeadbeef, "Got unexpected cookie %#lx.\n", cookie);
+
+    hr = IDXGIFactory7_RegisterAdaptersChangedEvent(factory, event, &cookie);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(cookie == 1, "Got unexpected cookie %#lx.\n", cookie);
+    ok(WaitForSingleObject(event, 0) == WAIT_TIMEOUT, "The event was signaled.\n");
+
+    cookie3 = 0xdeadbeef;
+    hr = IDXGIFactory7_RegisterAdaptersChangedEvent(factory, event, &cookie3);
+    ok(hr == DXGI_ERROR_INVALID_CALL, "Got unexpected hr %#lx.\n", hr);
+    ok(cookie3 == 0xdeadbeef, "Got unexpected cookie %#lx.\n", cookie3);
+    /* a second handle of the same event is the same event */
+    ok(DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(), &event_copy, 0, FALSE, DUPLICATE_SAME_ACCESS),
+            "Failed to duplicate the event.\n");
+    hr = IDXGIFactory7_RegisterAdaptersChangedEvent(factory, event_copy, &cookie3);
+    ok(hr == DXGI_ERROR_INVALID_CALL, "Got unexpected hr %#lx.\n", hr);
+    CloseHandle(event_copy);
+
+    /* cookies are per factory */
+    hr = IDXGIFactory7_RegisterAdaptersChangedEvent(factory2, event, &cookie2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(cookie2 == 1, "Got unexpected cookie %#lx.\n", cookie2);
+    hr = IDXGIFactory7_UnregisterAdaptersChangedEvent(factory2, cookie2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDXGIFactory7_UnregisterAdaptersChangedEvent(factory2, cookie2);
+    ok(hr == DXGI_ERROR_NOT_FOUND, "Got unexpected hr %#lx.\n", hr);
+
+    hr = IDXGIFactory7_UnregisterAdaptersChangedEvent(factory, 0xdeadbeef);
+    ok(hr == DXGI_ERROR_NOT_FOUND, "Got unexpected hr %#lx.\n", hr);
+    hr = IDXGIFactory7_UnregisterAdaptersChangedEvent(factory, cookie);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDXGIFactory7_UnregisterAdaptersChangedEvent(factory, cookie);
+    ok(hr == DXGI_ERROR_NOT_FOUND, "Got unexpected hr %#lx.\n", hr);
+
+    /* a registration that is left is released with the factory */
+    hr = IDXGIFactory7_RegisterAdaptersChangedEvent(factory, event, &cookie);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    CloseHandle(event);
+    refcount = IDXGIFactory7_Release(factory2);
+    ok(!refcount, "Factory has %lu references left.\n", refcount);
+    refcount = IDXGIFactory7_Release(factory);
+    ok(!refcount, "Factory has %lu references left.\n", refcount);
+}
+
 static void test_factory_check_feature_support(void)
 {
     IDXGIFactory5 *factory;
@@ -9133,6 +9205,7 @@ START_TEST(dxgi)
     queue_test(test_output_desc);
     queue_test(test_object_wrapping);
     queue_test(test_factory_check_feature_support);
+    queue_test(test_factory_adapters_changed_event);
     queue_test(test_video_memory_budget_notification);
 
     run_queued_tests();
