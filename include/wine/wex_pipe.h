@@ -36,6 +36,9 @@
 #include "sddl.h"
 #include "aclapi.h"
 
+/* users build with Wine's headers or with MinGW's alone (wexelevate's test builds), which have no ARRAY_SIZE */
+#define WEX_PIPE_COUNT(a) (sizeof(a) / sizeof((a)[0]))
+
 /* A server instance: message mode, local clients only, the descriptor from sddl, at most instances of them
  * (PIPE_UNLIMITED_INSTANCES for no limit). first: this must be the pipe's first instance
  * (FILE_FLAG_FIRST_PIPE_INSTANCE), so a broker that finds the name taken does not serve. */
@@ -177,7 +180,7 @@ static inline BOOL wex_pipe_server_is( HANDLE pipe, const WCHAR *image_name )
 {
     static const WCHAR *const dirs[] = { L"\\system32\\", L"\\syswow64\\" };
     WCHAR image[MAX_PATH], expected[MAX_PATH];
-    DWORD size = ARRAY_SIZE(image);
+    DWORD size = WEX_PIPE_COUNT(image);
     ULONG pid = 0;
     HANDLE process, token = NULL;
     UINT windir, i;
@@ -195,7 +198,7 @@ static inline BOOL wex_pipe_server_is( HANDLE pipe, const WCHAR *image_name )
     }
     CloseHandle( process );
     if (!(windir = GetWindowsDirectoryW( expected, MAX_PATH )) || windir >= MAX_PATH) return FALSE;
-    for (i = 0; i < ARRAY_SIZE(dirs); i++)
+    for (i = 0; i < WEX_PIPE_COUNT(dirs); i++)
     {
         if (windir + wcslen( dirs[i] ) + wcslen( image_name ) >= MAX_PATH) continue;
         wcscpy( expected + windir, dirs[i] );
@@ -232,7 +235,7 @@ static inline void wex_pipe_grant_appcontainers(void)
         ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
         ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
         ea.Trustee.ptstrName = all_packages;
-        for (i = 0; i < ARRAY_SIZE(objects); i++)
+        for (i = 0; i < WEX_PIPE_COUNT(objects); i++)
         {
             new_dacl = NULL;
             ea.grfAccessPermissions = rights[i];
