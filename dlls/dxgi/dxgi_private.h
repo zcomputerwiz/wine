@@ -126,6 +126,7 @@ struct dxgi_factory
     HWND device_window;
     struct list adapters_changed;   /* struct dxgi_adapters_changed, under the wined3d mutex */
     DWORD next_adapters_changed_cookie;
+    struct list occlusion_events;   /* struct dxgi_adapters_changed (event and cookie), under the wined3d mutex */
 };
 
 struct dxgi_adapters_changed
