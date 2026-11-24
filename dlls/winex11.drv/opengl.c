@@ -514,6 +514,42 @@ static BOOL x11drv_egl_describe_pixel_format( int format, struct wgl_pixel_forma
     return TRUE;
 }
 
+/* An EGL config like the one of a pixel format, but with the 32-bit visual: the client window of a DirectComposition
+ * target in a glass window then keeps the alpha it is drawn with, and the copy to the window hands it on to the
+ * compositor (as an X11 toolkit makes a transparent GL window). The contexts have no config
+ * (EGL_KHR_no_config_context), so they draw into either. NULL if there is none, or without EGL. */
+void *egl_argb_config_for_format( int format )
+{
+    static const EGLint keys[] = {EGL_RED_SIZE, EGL_GREEN_SIZE, EGL_BLUE_SIZE, EGL_DEPTH_SIZE, EGL_STENCIL_SIZE,
+                                  EGL_SAMPLES, EGL_RENDERABLE_TYPE};
+    EGLConfig base, *configs, ret = NULL;
+    EGLint count = 0, value, want, i, j;
+
+    if (!funcs || !funcs->egl_handle || !egl || !argb_visual.visualid || format <= 0) return NULL;
+    base = egl_config_for_format( format );
+    if (!funcs->p_eglGetConfigs( egl->display, NULL, 0, &count ) || !count) return NULL;
+    if (!(configs = malloc( count * sizeof(*configs) ))) return NULL;
+    funcs->p_eglGetConfigs( egl->display, configs, count, &count );
+    for (i = 0; i < count && !ret; i++)
+    {
+        if (!funcs->p_eglGetConfigAttrib( egl->display, configs[i], EGL_NATIVE_VISUAL_ID, &value ) ||
+            (VisualID)value != argb_visual.visualid) continue;
+        if (!funcs->p_eglGetConfigAttrib( egl->display, configs[i], EGL_ALPHA_SIZE, &value ) || value != 8) continue;
+        if (!funcs->p_eglGetConfigAttrib( egl->display, configs[i], EGL_SURFACE_TYPE, &value ) ||
+            !(value & EGL_WINDOW_BIT)) continue;
+        for (j = 0; j < ARRAY_SIZE(keys); j++)
+        {
+            funcs->p_eglGetConfigAttrib( egl->display, base, keys[j], &want );
+            funcs->p_eglGetConfigAttrib( egl->display, configs[i], keys[j], &value );
+            if (keys[j] == EGL_RENDERABLE_TYPE ? (value & want) != want : value != want) break;
+        }
+        if (j == ARRAY_SIZE(keys)) ret = configs[i];
+    }
+    free( configs );
+    TRACE( "format %d: argb config %p\n", format, ret );
+    return ret;
+}
+
 static BOOL x11drv_egl_surface_create( struct client_surface *client, int format, struct opengl_drawable **drawable )
 {
     struct x11drv_client_surface *surface = impl_from_client_surface( client );
@@ -537,7 +573,8 @@ static BOOL x11drv_egl_surface_create( struct client_surface *client, int format
     opengl_drawable_map_buffer( &gl->base, GL_FRONT_AND_BACK, GL_BACK );
     if (gl->base.stereo) opengl_drawable_map_buffer( &gl->base, GL_FRONT_RIGHT, GL_BACK_RIGHT );
 
-    if (!(gl->base.surface = funcs->p_eglCreateWindowSurface( egl->display, egl_config_for_format( format ),
+    if (!(gl->base.surface = funcs->p_eglCreateWindowSurface( egl->display, surface->argb_config ? surface->argb_config
+                                                              : egl_config_for_format( format ),
                                                               (void *)surface->window, NULL )))
     {
         opengl_drawable_release( &gl->base );
@@ -1559,6 +1596,11 @@ UINT X11DRV_OpenGLInit( UINT version, const struct opengl_funcs *opengl_funcs, c
 BOOL visual_from_pixel_format( int format, XVisualInfo *visual )
 {
     return FALSE;
+}
+
+void *egl_argb_config_for_format( int format )
+{
+    return NULL;
 }
 
 #endif /* defined(SONAME_LIBGL) */

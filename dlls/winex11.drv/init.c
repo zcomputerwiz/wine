@@ -34,6 +34,7 @@
 #include "x11drv.h"
 #include "xcomposite.h"
 #include "wine/debug.h"
+#include "wine/dcomp_underlay.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(x11drv);
 
@@ -471,14 +472,34 @@ struct x11drv_client_surface *impl_from_client_surface( struct client_surface *c
     return CONTAINING_RECORD( client, struct x11drv_client_surface, client );
 }
 
+static const WCHAR dcomp_argb_propW[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','a','r','g','b',0};
+
+/* A DirectComposition target (it has dxgi's repaint sink) that is a child of a glass window (DwmAlpha): its frame
+ * has alpha that only the compositor can blend, so its client window gets the 32-bit visual. */
+static BOOL client_surface_wants_argb( HWND hwnd )
+{
+    HWND root = NtUserGetAncestor( hwnd, GA_ROOT );
+
+    return argb_visual.visualid && root && root != hwnd && NtUserGetProp( hwnd, WINE_DCOMP_REPAINT_SINK_PROP ) &&
+           window_dwm_alpha( root );
+}
+
 struct client_surface *X11DRV_CreateClientSurface( HWND hwnd, int format, BOOL raw )
 {
     struct x11drv_client_surface *surface;
     XVisualInfo visual = default_visual;
+    void *argb_config = NULL;
     Colormap colormap;
     RECT rect;
 
     if (format && !visual_from_pixel_format( format, &visual )) return NULL;
+    /* GL needs an EGL config with that visual; Vulkan (no format) only the visual */
+    if (client_surface_wants_argb( hwnd ) && (!format || (argb_config = egl_argb_config_for_format( format ))))
+        visual = argb_visual;
+    /* wined3d then keeps the frame's alpha instead of shaping the window from it */
+    if (visual.visualid == argb_visual.visualid && argb_visual.visualid) NtUserSetProp( hwnd, dcomp_argb_propW, (HANDLE)1 );
+    else NtUserRemoveProp( hwnd, dcomp_argb_propW );
 
     if (visual.visualid == default_visual.visualid) colormap = default_colormap;
     else colormap = XCreateColormap( gdi_display, get_dummy_parent(), visual.visual, visual_class_alloc( visual.class ) );
@@ -486,6 +507,7 @@ struct client_surface *X11DRV_CreateClientSurface( HWND hwnd, int format, BOOL r
 
     if (!(surface = client_surface_create( &x11drv_client_surface_funcs, hwnd, format, raw ))) goto failed;
     surface->colormap = colormap;
+    surface->argb_config = argb_config;
     rect = raw ? surface->client.monitor_rect : surface->client.virtual_rect;
     if (!(surface->window = create_client_window( hwnd, rect, &visual, colormap ))) goto failed;
 

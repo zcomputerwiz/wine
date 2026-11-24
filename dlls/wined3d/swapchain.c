@@ -1459,6 +1459,32 @@ static BOOL swapchain_composite_layers(struct wined3d_swapchain *swapchain, stru
     return TRUE;
 }
 
+/* A target whose client window winex11 made 32-bit (a DirectComposition target in a glass window, DwmAlpha): its
+ * frame keeps its alpha on the way to the compositor, which blends it, soft shadows and all. */
+static BOOL dcomp_argb_target(HWND hwnd)
+{
+    HWND root = GetAncestor(hwnd, GA_ROOT);
+    return root && root != hwnd && GetPropW(hwnd, L"__wine_dcomp_argb") && GetPropW(root, L"__wine_dwm_alpha");
+}
+
+/* In a 32-bit drawable, an opaque layer (DXGI_ALPHA_MODE_IGNORE) must not carry the alpha it was drawn with. */
+static void dcomp_gl_make_opaque(struct wined3d_context_gl *context_gl, const RECT *rect, LONG height)
+{
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+
+    wined3d_context_gl_apply_fbo_state_explicit(context_gl, GL_FRAMEBUFFER, NULL, 0, NULL, 0, WINED3D_LOCATION_DRAWABLE);
+    gl_info->gl_ops.gl.p_glEnable(GL_SCISSOR_TEST);
+    gl_info->gl_ops.gl.p_glScissor(rect->left, height - rect->bottom, rect->right - rect->left, rect->bottom - rect->top);
+    gl_info->gl_ops.gl.p_glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
+    gl_info->gl_ops.gl.p_glClearColor(0, 0, 0, 1);
+    gl_info->gl_ops.gl.p_glClear(GL_COLOR_BUFFER_BIT);
+    gl_info->gl_ops.gl.p_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    gl_info->gl_ops.gl.p_glDisable(GL_SCISSOR_TEST);
+    context_invalidate_state(&context_gl->c, STATE_RASTERIZER);
+    context_invalidate_state(&context_gl->c, STATE_BLEND);
+    context_invalidate_state(&context_gl->c, STATE_FRAMEBUFFER);
+}
+
 static BOOL swapchain_gl_composite_opaque(struct wined3d_swapchain *swapchain,
         struct wined3d_context_gl *context_gl)
 {
@@ -1471,6 +1497,7 @@ static BOOL swapchain_gl_composite_opaque(struct wined3d_swapchain *swapchain,
     unsigned int i;
     int x, y;
     BOOL background_required = !!swapchain->dcomp_background;
+    BOOL argb = dcomp_argb_target(swapchain->win_handle);
 
     if (!dcomp_gpu_scene(scene) || !gl_info->fbo_ops.glBlitFramebuffer) return FALSE;
     for (i = 0; i < scene->layer_count; ++i)
@@ -1497,7 +1524,8 @@ static BOOL swapchain_gl_composite_opaque(struct wined3d_swapchain *swapchain,
             NULL, 0, NULL, 0, WINED3D_LOCATION_DRAWABLE);
     gl_info->gl_ops.gl.p_glDisable(GL_SCISSOR_TEST);
     gl_info->gl_ops.gl.p_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    gl_info->gl_ops.gl.p_glClearColor(0, 0, 0, 1);
+    /* what no layer covers is clear in a 32-bit drawable (premultiplied: transparent black) */
+    gl_info->gl_ops.gl.p_glClearColor(0, 0, 0, argb ? 0 : 1);
     gl_info->gl_ops.gl.p_glClear(GL_COLOR_BUFFER_BIT);
     context_invalidate_state(context, STATE_RASTERIZER);
     context_invalidate_state(context, STATE_BLEND);
@@ -1528,6 +1556,7 @@ static BOOL swapchain_gl_composite_opaque(struct wined3d_swapchain *swapchain,
                     WINED3D_BLIT_OP_COLOR_BLIT, context, frame->gpu_texture, 0, WINED3D_LOCATION_TEXTURE_RGB,
                     &src, back_buffer, 0, WINED3D_LOCATION_DRAWABLE, &dst, NULL, WINED3D_TEXF_POINT, NULL);
             wined3d_texture_invalidate_location(back_buffer, 0, WINED3D_LOCATION_DRAWABLE);
+            if (argb && layer->ignore_alpha) dcomp_gl_make_opaque(context_gl, &dst, client.bottom);
         }
     }
     ++swapchain->dcomp_gpu_compositions;
@@ -1550,7 +1579,10 @@ static BOOL dcomp_alpha_window(const struct wined3d_swapchain *swapchain)
  * targets are child windows) keep their shape without a black box; only their soft shadows are lost. */
 static BOOL dcomp_shape_root(HWND root, HWND target)
 {
-    return GetPropW(root, L"__wine_dwm_sheet") && (target != root || !GetPropW(root, L"__wine_dwm_alpha"));
+    if (!GetPropW(root, L"__wine_dwm_sheet")) return FALSE;
+    /* the compositor blends the alpha of a top-level target (GDI) or of a 32-bit child (dcomp_argb_target) */
+    if (target == root) return !GetPropW(root, L"__wine_dwm_alpha");
+    return !dcomp_argb_target(target);
 }
 
 /* Setting the region of another process's window waits for its thread (the window position is updated there), and

@@ -292,6 +292,7 @@ extern BOOL shape_layered_windows;
 extern const struct gdi_dc_funcs *X11DRV_XRender_Init(void);
 
 extern BOOL visual_from_pixel_format( int format, XVisualInfo *visual );
+extern void *egl_argb_config_for_format( int format );
 
 extern UINT X11DRV_OpenGLInit( UINT, const struct opengl_funcs *, const struct opengl_driver_funcs ** );
 extern UINT X11DRV_VulkanInit( UINT, void *, const struct vulkan_driver_funcs ** );
@@ -374,6 +375,7 @@ struct x11drv_client_surface
 
     HDC hdc_src;
     HDC hdc_dst;
+    void *argb_config;   /* EGL config with the 32-bit visual, for a DirectComposition target in a glass window */
 };
 
 extern struct x11drv_client_surface *impl_from_client_surface( struct client_surface *client );
