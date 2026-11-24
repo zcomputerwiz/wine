@@ -444,6 +444,30 @@ void client_surface_present( struct client_surface *surface )
     pthread_mutex_unlock( &surfaces_lock );
 }
 
+/* Copy the kept last frame of the window's offscreen client surfaces to the window again, without their renderer:
+ * the window's pixels were lost (uncovered, reshaped) and the application may not draw again. Any thread may call
+ * this; the surfaces lock keeps it apart from the renderer's own presents. Returns whether a surface was drawn. */
+static BOOL present_client_surfaces( HWND hwnd )
+{
+    struct client_surface *surface;
+    BOOL ret = FALSE;
+    HDC hdc;
+
+    pthread_mutex_lock( &surfaces_lock );
+    LIST_FOR_EACH_ENTRY( surface, &client_surfaces, struct client_surface, entry )
+    {
+        if (surface->hwnd != hwnd || !surface->offscreen) continue;
+        client_surface_update_locked( surface );
+        if (!(hdc = NtUserGetDCEx( hwnd, 0, DCX_CACHE | DCX_USESTYLE ))) continue;
+        surface->funcs->present( surface, hdc );
+        NtUserReleaseDC( hwnd, hdc );
+        ret = TRUE;
+    }
+    pthread_mutex_unlock( &surfaces_lock );
+    TRACE( "hwnd %p, presented %u\n", hwnd, ret );
+    return ret;
+}
+
 void client_surface_update( struct client_surface *surface )
 {
     pthread_mutex_lock( &surfaces_lock );
@@ -6360,6 +6384,9 @@ ULONG_PTR WINAPI NtUserCallHwnd( HWND hwnd, DWORD code )
 
     case NtUserCallHwnd_IsWindowVisible:
         return is_window_visible( hwnd );
+
+    case NtUserCallHwnd_PresentClientSurfaces:
+        return present_client_surfaces( hwnd );
 
     /* temporary exports */
     case NtUserGetFullWindowHandle:

@@ -417,14 +417,29 @@ void WINAPI WexDwmpRefreshFrame(HWND hwnd)
  */
 HRESULT WINAPI DwmExtendFrameIntoClientArea(HWND hwnd, const MARGINS* margins)
 {
-    TRACE("(%p, %p)\n", hwnd, margins);
+    if (margins)
+        TRACE("(%p, %p) %d %d %d %d\n", hwnd, margins, margins->cxLeftWidth, margins->cxRightWidth,
+              margins->cyTopHeight, margins->cyBottomHeight);
+    else
+        TRACE("(%p, %p)\n", hwnd, margins);
 
-    if (dwm_alpha_is_enabled() && margins && IsWindow(hwnd) &&
-        !(GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD))
+    if (margins && IsWindow(hwnd) && !(GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD))
     {
-        RemovePropW(hwnd, L"__wine_dwm_blur_glass");   /* the app's margins now; turning the blur off keeps them */
-        RemovePropW(hwnd, L"__wine_aero_asked");        /* nor does a frame style switch take the glass away */
-        set_glass(hwnd, margins);
+        /* Glass sheets are marked: where nothing can blend a DirectComposition target's alpha (no DwmAlpha, or a
+         * target that is a child window, whose GL output has no alpha), the target gives its window a region from
+         * the alpha instead (wined3d). */
+        if (margins->cxLeftWidth < 0 || margins->cxRightWidth < 0 ||
+            margins->cyTopHeight < 0 || margins->cyBottomHeight < 0)
+            SetPropW(hwnd, L"__wine_dwm_sheet", (HANDLE)1);
+        else
+            RemovePropW(hwnd, L"__wine_dwm_sheet");
+
+        if (dwm_alpha_is_enabled())
+        {
+            RemovePropW(hwnd, L"__wine_dwm_blur_glass");   /* the app's margins now; turning the blur off keeps them */
+            RemovePropW(hwnd, L"__wine_aero_asked");        /* nor does a frame style switch take the glass away */
+            set_glass(hwnd, margins);
+        }
     }
 
     return S_OK;

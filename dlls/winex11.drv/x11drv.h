@@ -379,6 +379,7 @@ struct x11drv_client_surface
 extern struct x11drv_client_surface *impl_from_client_surface( struct client_surface *client );
 
 extern void set_dc_drawable( HDC hdc, Drawable drawable, const RECT *rect, int mode );
+extern void get_x_window_visual( Window window, XVisualInfo *visual );
 extern Drawable get_dc_drawable( HDC hdc, RECT *rect );
 extern HRGN get_dc_monitor_region( HWND hwnd, HDC hdc );
 
