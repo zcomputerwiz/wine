@@ -4871,12 +4871,17 @@ BOOL WINAPI NtUserPostMessage( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam
 
     if (is_exiting_thread( info.dest_tid )) return TRUE;
 
-    /* message 0x60 (measured on Windows 11, any window of any thread): posting it also notifies the window at once, with the
-     * original parameters (inside the call for a window of this thread, in the sent message processing of the owner
-     * otherwise), and the posted copy has the top bit set in wparam */
+    /* message 0x60 (measured on Windows 11, any window of any thread): posting it also sends a notification with the original
+     * parameters, queued behind the sent messages already waiting (a window of this thread sees it inside the next message
+     * retrieval, never inside the call), and the posted copy has the top bit set in wparam */
     if (msg == WM_CORE_MESSAGING_COMPLETION)
     {
-        if (!send_notify_message( hwnd, msg, wparam, lparam, FALSE )) return FALSE;
+        struct send_message_info notify = info;
+        size_t reply_size = 0;
+
+        notify.type = MSG_NOTIFY;
+        notify.wm_char = WMCHAR_MAP_SENDMESSAGETIMEOUT;
+        if (!put_message_in_queue( &notify, &reply_size )) return FALSE;
         info.wparam |= 0x80000000;
     }
 

@@ -22059,24 +22059,28 @@ static void test_core_messaging_completions(void)
     ok(status == WAIT_OBJECT_0, "got %#lx.\n", status);
     ok(core_msgs.count == 1 && core_msgs.hwnd[0] == hwnd, "got %d messages, window %p.\n", core_msgs.count, core_msgs.hwnd[0]);
 
-    /* posting message 0x60: the window is notified at once with the original parameters and the posted copy has the top bit set
-     * in wparam; sending it, or sending it as a notification, delivers it once, and other messages are not changed */
+    /* posting message 0x60: a notification with the original parameters is queued as a sent message (it reaches the window
+     * procedure inside the next message retrieval, not inside PostMessage) and the posted copy has the top bit set in wparam;
+     * sending it, or sending it as a notification, delivers it once, and other messages are not changed */
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) DispatchMessageA(&msg);
     core_msgs.count = 0;
     ret = PostMessageA(hwnd, 0x60, 5, 4);
     ok(ret, "PostMessage failed, error %lu.\n", GetLastError());
-    ok(core_msgs.count == 1 && core_msgs.wp[0] == 5 && core_msgs.lp[0] == 4 && core_msgs.tid[0] == core_main_tid,
-       "got %d messages, wparam %#Ix, lparam %#Ix.\n", core_msgs.count, core_msgs.wp[0], core_msgs.lp[0]);
+    ok(!core_msgs.count, "got %d messages inside PostMessage.\n", core_msgs.count);
+    ok(HIWORD(GetQueueStatus(QS_ALLINPUT)) & QS_SENDMESSAGE, "got no sent message.\n");
     ret = PeekMessageA(&msg, hwnd, 0x60, 0x60, PM_REMOVE);
     ok(ret && msg.wParam == 0x80000005 && msg.lParam == 4, "got ret %d, wparam %#Ix, lparam %#Ix.\n", ret, msg.wParam, msg.lParam);
+    ok(core_msgs.count == 1 && core_msgs.wp[0] == 5 && core_msgs.lp[0] == 4 && core_msgs.tid[0] == core_main_tid,
+       "got %d messages, wparam %#Ix, lparam %#Ix.\n", core_msgs.count, core_msgs.wp[0], core_msgs.lp[0]);
     DispatchMessageA(&msg);
     ok(core_msgs.count == 2 && core_msgs.wp[1] == 0x80000005, "got %d messages, wparam %#Ix.\n", core_msgs.count, core_msgs.wp[1]);
     core_msgs.count = 0;
     ret = PostMessageA(hwnd, 0x60, 0x80000001, 0);
     ok(ret, "PostMessage failed.\n");
-    ok(core_msgs.count == 1 && core_msgs.wp[0] == 0x80000001, "got %d messages, wparam %#Ix.\n", core_msgs.count, core_msgs.wp[0]);
+    ok(!core_msgs.count, "got %d messages inside PostMessage.\n", core_msgs.count);
     ret = PeekMessageA(&msg, hwnd, 0x60, 0x60, PM_REMOVE);
     ok(ret && msg.wParam == 0x80000001, "got ret %d, wparam %#Ix.\n", ret, msg.wParam);
+    ok(core_msgs.count == 1 && core_msgs.wp[0] == 0x80000001, "got %d messages, wparam %#Ix.\n", core_msgs.count, core_msgs.wp[0]);
     core_msgs.count = 0;
     SendMessageA(hwnd, 0x60, 5, 4);
     ok(core_msgs.count == 1 && core_msgs.wp[0] == 5, "got %d messages, wparam %#Ix.\n", core_msgs.count, core_msgs.wp[0]);
