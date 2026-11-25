@@ -64,6 +64,13 @@ struct service_entry
     BOOL marked_for_delete;
     BOOL is_wow64;
     BOOL delayed_autostart;
+    DWORD failure_reset_period;        /* SERVICE_CONFIG_FAILURE_ACTIONS: seconds after which the failure count restarts */
+    WCHAR *reboot_msg;                 /* the "RebootMessage" value, or NULL */
+    WCHAR *failure_command;            /* the "FailureCommand" value, or NULL */
+    DWORD failure_actions_count;
+    SC_ACTION *failure_actions;        /* the actions of the "FailureActions" value, or NULL */
+    DWORD failure_count;               /* failures counted since the last reset */
+    ULONGLONG last_failure;            /* GetTickCount64() of the last failure */
     int session_service;               /* WineExplorer: the WexSessionService value, SESSION_SERVICE_* */
     BYTE *security;                    /* self-relative security descriptor of the "Security" value, NULL for the native default */
     DWORD security_size;

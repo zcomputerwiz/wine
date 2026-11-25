@@ -3168,6 +3168,126 @@ static void run_service(void)
     StartServiceCtrlDispatcherA(table);
 }
 
+static void test_failure_actions(void)
+{
+    static const WCHAR servicename[] = L"winetest_failure_actions";
+    SC_ACTION actions[2] = {{ SC_ACTION_RESTART, 5000 }, { SC_ACTION_NONE, 0 }};
+    SERVICE_FAILURE_ACTIONSW set, *got;
+    BYTE buffer[1024], value[64];
+    SC_HANDLE scm, svc, svc_query;
+    DWORD needed, err, size, type;
+    WCHAR key[MAX_PATH];
+    HKEY hkey;
+    BOOL ret;
+
+    scm = OpenSCManagerW(NULL, NULL, GENERIC_ALL);
+    if (!scm)
+    {
+        skip("Not enough rights to get a handle to the manager\n");
+        return;
+    }
+    svc = CreateServiceW(scm, servicename, servicename, GENERIC_ALL, SERVICE_WIN32_OWN_PROCESS,
+                         SERVICE_DISABLED, SERVICE_ERROR_IGNORE, L"we_dont_care.exe", NULL, NULL, NULL, NULL, NULL);
+    if (!svc)
+    {
+        skip("Could not create the service: %lu\n", GetLastError());
+        CloseServiceHandle(scm);
+        return;
+    }
+    got = (SERVICE_FAILURE_ACTIONSW *)buffer;
+
+    /* a new service has none */
+    ret = QueryServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, buffer, sizeof(buffer), &needed);
+    ok(ret, "QueryServiceConfig2W failed: %lu\n", GetLastError());
+    ok(!got->cActions && !got->lpsaActions, "got %lu actions %p\n", got->cActions, got->lpsaActions);
+
+    /* reset period and actions */
+    memset(&set, 0, sizeof(set));
+    set.dwResetPeriod = 3600;
+    set.cActions = ARRAY_SIZE(actions);
+    set.lpsaActions = actions;
+    ret = ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, &set);
+    ok(ret, "ChangeServiceConfig2W failed: %lu\n", GetLastError());
+
+    SetLastError(0xdeadbeef);
+    ret = QueryServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, NULL, 0, &needed);
+    err = GetLastError();
+    ok(!ret && err == ERROR_INSUFFICIENT_BUFFER, "got %d, error %lu\n", ret, err);
+    ok(needed >= sizeof(*got) + sizeof(actions), "needed %lu\n", needed);
+
+    memset(buffer, 0xcc, sizeof(buffer));
+    ret = QueryServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, buffer, needed, &needed);
+    ok(ret, "QueryServiceConfig2W failed: %lu\n", GetLastError());
+    ok(got->dwResetPeriod == 3600, "reset period %lu\n", got->dwResetPeriod);
+    ok(got->cActions == 2, "got %lu actions\n", got->cActions);
+    ok(got->lpsaActions && got->lpsaActions[0].Type == SC_ACTION_RESTART && got->lpsaActions[0].Delay == 5000 &&
+       got->lpsaActions[1].Type == SC_ACTION_NONE, "wrong actions\n");
+    ok(!got->lpRebootMsg || !got->lpRebootMsg[0], "reboot message %s\n", wine_dbgstr_w(got->lpRebootMsg));
+    ok(!got->lpCommand || !got->lpCommand[0], "command %s\n", wine_dbgstr_w(got->lpCommand));
+
+    /* the registry value, as Windows writes it: a header of five 32-bit fields, then the actions at offset 20 */
+    swprintf(key, ARRAY_SIZE(key), L"System\\CurrentControlSet\\Services\\%s", servicename);
+    if (!RegOpenKeyExW(HKEY_LOCAL_MACHINE, key, 0, KEY_READ, &hkey))
+    {
+        size = sizeof(value);
+        err = RegQueryValueExW(hkey, L"FailureActions", NULL, &type, value, &size);
+        ok(!err && type == REG_BINARY && size == 20 + sizeof(actions), "error %lu type %lu size %lu\n", err, type, size);
+        if (!err && size == 20 + sizeof(actions))
+        {
+            ok(*(DWORD *)value == 3600, "reset period %lu\n", *(DWORD *)value);
+            ok(*(DWORD *)(value + 12) == 2, "count %lu\n", *(DWORD *)(value + 12));
+            ok(*(DWORD *)(value + 16) == 20, "offset %lu\n", *(DWORD *)(value + 16));
+            ok(!memcmp(value + 20, actions, sizeof(actions)), "wrong actions\n");
+        }
+        RegCloseKey(hkey);
+    }
+
+    /* strings; NULL actions leave the actions and the reset period alone */
+    set.lpRebootMsg = (WCHAR *)L"reboot message";
+    set.lpCommand = (WCHAR *)L"command line";
+    set.lpsaActions = NULL;
+    set.cActions = 0;
+    set.dwResetPeriod = 1;
+    ret = ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, &set);
+    ok(ret, "ChangeServiceConfig2W failed: %lu\n", GetLastError());
+    ret = QueryServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, buffer, sizeof(buffer), &needed);
+    ok(ret, "QueryServiceConfig2W failed: %lu\n", GetLastError());
+    ok(got->dwResetPeriod == 3600 && got->cActions == 2, "reset period %lu, %lu actions\n",
+       got->dwResetPeriod, got->cActions);
+    ok(got->lpRebootMsg && !wcscmp(got->lpRebootMsg, L"reboot message"), "reboot message %s\n",
+       wine_dbgstr_w(got->lpRebootMsg));
+    ok(got->lpCommand && !wcscmp(got->lpCommand, L"command line"), "command %s\n", wine_dbgstr_w(got->lpCommand));
+
+    /* empty strings remove them, no actions remove the actions */
+    set.lpRebootMsg = (WCHAR *)L"";
+    set.lpCommand = (WCHAR *)L"";
+    set.lpsaActions = actions;
+    set.cActions = 0;
+    ret = ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, &set);
+    ok(ret, "ChangeServiceConfig2W failed: %lu\n", GetLastError());
+    ret = QueryServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, buffer, sizeof(buffer), &needed);
+    ok(ret, "QueryServiceConfig2W failed: %lu\n", GetLastError());
+    ok(!got->cActions, "got %lu actions\n", got->cActions);
+    ok(!got->lpRebootMsg || !got->lpRebootMsg[0], "reboot message %s\n", wine_dbgstr_w(got->lpRebootMsg));
+    ok(!got->lpCommand || !got->lpCommand[0], "command %s\n", wine_dbgstr_w(got->lpCommand));
+
+    /* a restart action needs a handle with SERVICE_START */
+    svc_query = OpenServiceW(scm, servicename, SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG);
+    ok(svc_query != NULL, "OpenServiceW failed: %lu\n", GetLastError());
+    set.lpRebootMsg = NULL;
+    set.lpCommand = NULL;
+    set.cActions = 1;
+    SetLastError(0xdeadbeef);
+    ret = ChangeServiceConfig2W(svc_query, SERVICE_CONFIG_FAILURE_ACTIONS, &set);
+    err = GetLastError();
+    ok(!ret && err == ERROR_ACCESS_DENIED, "got %d, error %lu\n", ret, err);
+    CloseServiceHandle(svc_query);
+
+    DeleteService(svc);
+    CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+}
+
 START_TEST(service)
 {
     SC_HANDLE scm_handle;
@@ -3205,6 +3325,7 @@ START_TEST(service)
     test_get_servicekeyname();
     test_query_svc();
     test_LockServiceDatabase();
+    test_failure_actions();
 
     /* Services may start or stop between enumeration calls, leading to
      * inconsistencies and failures. So we may need a couple attempts.

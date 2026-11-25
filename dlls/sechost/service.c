@@ -839,6 +839,15 @@ BOOL WINAPI DECLSPEC_HOTPATCH QueryServiceConfig2W( SC_HANDLE service, DWORD lev
         }
         break;
 
+    case SERVICE_CONFIG_FAILURE_ACTIONS:
+        /* the wire layout (struct service_failure_actions) is never larger than the caller's one */
+        if (!(bufptr = malloc( size > sizeof(struct service_failure_actions) ? size : sizeof(struct service_failure_actions) )))
+        {
+            SetLastError( ERROR_NOT_ENOUGH_MEMORY );
+            return FALSE;
+        }
+        break;
+
     case SERVICE_CONFIG_PRESHUTDOWN_INFO:
     case SERVICE_CONFIG_DELAYED_AUTO_START_INFO:
         bufptr = buffer;
@@ -852,7 +861,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH QueryServiceConfig2W( SC_HANDLE service, DWORD lev
 
     if (!ret_size)
     {
-        if (level == SERVICE_CONFIG_DESCRIPTION) free( bufptr );
+        if (level == SERVICE_CONFIG_DESCRIPTION || level == SERVICE_CONFIG_FAILURE_ACTIONS) free( bufptr );
         SetLastError(ERROR_INVALID_ADDRESS);
         return FALSE;
     }
@@ -902,6 +911,45 @@ BOOL WINAPI DECLSPEC_HOTPATCH QueryServiceConfig2W( SC_HANDLE service, DWORD lev
                 memcpy( desc->lpDescription, s->description, s->size );
             }
         }
+        free( bufptr );
+        break;
+    }
+    case SERVICE_CONFIG_FAILURE_ACTIONS:
+    {
+        SERVICE_FAILURE_ACTIONSW *fa = (SERVICE_FAILURE_ACTIONSW *)buffer;
+        struct service_failure_actions *w = (struct service_failure_actions *)bufptr;
+        DWORD actions_size;
+        BYTE *src, *dst;
+
+        if (err != ERROR_SUCCESS && err != ERROR_INSUFFICIENT_BUFFER)
+        {
+            free( bufptr );
+            SetLastError( err );
+            return FALSE;
+        }
+        /* the caller's structure has pointers where the wire layout has sizes */
+        *ret_size = *ret_size - sizeof(*w) + sizeof(*fa);
+        if (err == ERROR_INSUFFICIENT_BUFFER || size < *ret_size)
+        {
+            free( bufptr );
+            SetLastError( ERROR_INSUFFICIENT_BUFFER );
+            return FALSE;
+        }
+        actions_size = w->actions_count * sizeof(SC_ACTION);
+        src = (BYTE *)(w + 1);
+        dst = (BYTE *)(fa + 1);
+        fa->dwResetPeriod = w->reset_period;
+        fa->cActions = w->actions_count;
+        fa->lpsaActions = actions_size ? (SC_ACTION *)dst : NULL;
+        memcpy( dst, src, actions_size );
+        src += actions_size;
+        dst += actions_size;
+        fa->lpRebootMsg = w->reboot_msg_size ? (WCHAR *)dst : NULL;
+        memcpy( dst, src, w->reboot_msg_size );
+        src += w->reboot_msg_size;
+        dst += w->reboot_msg_size;
+        fa->lpCommand = w->command_size ? (WCHAR *)dst : NULL;
+        memcpy( dst, src, w->command_size );
         free( bufptr );
         break;
     }
