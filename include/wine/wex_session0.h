@@ -30,7 +30,7 @@
 /* the link message from a user's server to session 0: header, then the token description; SCM_RIGHTS carries
  * the channel. Session 0 answers with a reply. One message per connection. */
 #define WEX_SESSION0_MAGIC    0x30535857  /* "WXS0" */
-#define WEX_SESSION0_VERSION  7
+#define WEX_SESSION0_VERSION  8
 #define WEX_SESSION0_MAX_MSG  65536
 
 struct wex_session0_request
@@ -102,6 +102,79 @@ struct wex_session0_order_reply
     unsigned int serial;
     unsigned int status;      /* NTSTATUS; STATUS_NOT_SUPPORTED for an order the server does not know */
     unsigned int value;
+};
+
+/* X frames (version 8, docs/SESSION0_CROSS_SERVER.md, M0 and its X0 appendix): the cross-server protocol on the
+ * session link, in both directions, beside the orders. A frame is a header, a body by type and, for OPEN, the
+ * caller's token description and the name; size counts all of it and is at most WEX_SESSION0_MAX_MSG. A request
+ * carries the sender's call number, its reply the same number and the type with WEX_X_REPLY. Replies come in any
+ * order. */
+#define WEX_X_MAGIC           0x58305857  /* "WX0X" */
+
+#define WEX_X_HELLO           1   /* each side once: struct wex_x_hello; no reply */
+#define WEX_X_OPEN            2   /* holder to owner: struct wex_x_open, description, name; reply: ref, wex_x_granted */
+#define WEX_X_QUERY           3   /* reply: wex_x_granted */
+#define WEX_X_RELEASE         4   /* idempotent: always success */
+#define WEX_X_SUBSCRIBE       5   /* arms the subscription of ref */
+#define WEX_X_CANCEL          6   /* idempotent: ends the subscription */
+#define WEX_X_TRY             7   /* success (acquired) or STATUS_TIMEOUT; re-arms the subscription; never cancelled */
+#define WEX_X_NOTICE          8   /* owner to holder: ref is ready (one per arming); no reply */
+#define WEX_X_PING            9   /* the body comes back */
+#define WEX_X_REPLY           0x80000000
+
+/* OPEN kinds: none in production yet (X1: global names, X3: process ids); the lab build has its counter */
+#define WEX_X_KIND_LAB        0x7f000001
+
+/* caps on what is in flight (per account of the holder; requests per link) */
+#define WEX_X_MAX_REFS        16384
+#define WEX_X_MAX_SUBS        4096
+#define WEX_X_MAX_INFLIGHT    256
+#define WEX_X_MAX_QUEUED      (4 * 1024 * 1024)
+/* how long an owner keeps the references of a peer whose link is lost while its process lives, in seconds */
+#define WEX_X_LOST_SECONDS    120
+
+struct wex_x_header
+{
+    unsigned int       magic;      /* WEX_X_MAGIC */
+    unsigned int       size;       /* the whole frame, header included */
+    unsigned int       type;       /* WEX_X_*, with WEX_X_REPLY in a reply */
+    unsigned int       call;       /* the sender's call number, repeated in the reply; 0 in HELLO and NOTICE */
+    unsigned int       status;     /* replies: NTSTATUS; requests: 0 */
+    unsigned int       desc_size;  /* OPEN: the size of the token description after the body */
+    unsigned long long ref;        /* the reference the frame is about, or 0 */
+};
+
+/* a server's identity: it changes when the server restarts, never when a link does */
+struct wex_x_epoch
+{
+    unsigned long long nonce;      /* random, from the server's start */
+    unsigned long long start;      /* the process's start time (/proc/<pid>/stat, clock ticks since boot) */
+    unsigned int       pid;
+    unsigned int       reserved;
+};
+
+struct wex_x_hello
+{
+    struct wex_x_epoch epoch;
+    unsigned int       connection; /* session 0: its number for this connection; a user's server: 0 */
+    unsigned int       session;    /* session 0: the link's session; a user's server: its own */
+    unsigned long long peer_nonce; /* the nonce of the epoch the sender still keeps for the connecting server, or 0:
+                                    * when it is not the receiver's own, the sender started fresh (it dropped the
+                                    * peer), and the receiver ends its side of that peer too */
+};
+
+struct wex_x_open
+{
+    unsigned int       kind;       /* WEX_X_KIND_* */
+    unsigned int       access;     /* desired access */
+    unsigned int       name_size;  /* bytes of the name after the description */
+    unsigned int       reserved;
+};
+
+struct wex_x_granted
+{
+    unsigned int       access;     /* the rights the owner granted (information: the owner decides) */
+    unsigned int       ready;      /* QUERY: the object is ready (signaled) now */
 };
 
 struct wex_session0_reply
