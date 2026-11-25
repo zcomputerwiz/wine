@@ -45,8 +45,6 @@ struct process;
 extern int sysrun_active;
 
 extern void sysrun_init(void);
-/* fix the system role's value once the machine hive is loaded (init_registry) */
-extern void sysrun_latch_role(void);
 extern const char *sysrun_machine_root(void);
 
 /* One key from the shared protected sysrun.conf reader. */
