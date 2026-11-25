@@ -77,6 +77,8 @@ static SRWLOCK target_registration_lock = SRWLOCK_INIT;
 struct dcomp_device;
 struct dcomp_target;
 struct dcomp_visual;
+struct dcomp_share;
+struct dcomp_portal_snapshot;
 
 struct dcomp_effect_group
 {
@@ -145,7 +147,10 @@ struct dcomp_visual
     IDCompositionVisual2 IDCompositionVisual2_iface;
     LONG refcount;
     struct dcomp_device *device;
-    BOOL shared;   /* listed in dcomp_shared_list: the list holds no reference, Release takes the list lock first */
+    /* A visual opened from a shared visual handle: its share (a reference) and its link in the share's visuals, which holds no
+     * reference (Release takes the shared lock first). */
+    struct dcomp_share *share;
+    struct list share_entry;
 
     /* Pending state (modified by setters, staged for next Commit) */
     struct dcomp_visual_state pending;
@@ -197,11 +202,12 @@ struct dcomp_target
     BOOL topmost;
     struct dcomp_visual *pending_root;
     struct dcomp_visual *active_root;
-    /* A target opened from a shared visual handle is a portal: its committed root is shown inside the visual that the same
-     * kernel object stands for (opened as a visual, usually by another device). portal is this target's duplicate of the
-     * handle; portal_entry links it into dcomp_portal_list. */
-    HANDLE portal;
-    struct list portal_entry;
+    /* A target opened from a shared visual handle is a portal: its device publishes a snapshot of its committed tree in the
+     * share (a reference), and the visuals opened from the same object show it. */
+    struct dcomp_share *share;
+    /* A window target: the portal snapshots its active scene shows (references), kept until a later scene replaces it. */
+    struct dcomp_portal_snapshot **shown;
+    unsigned int shown_count;
     /* Lazily created auxiliary producer for scenes whose content is only
      * IDCompositionSurface layers (which have no IWineDCompSwapChain binding
      * of their own). Created from the first surface layer's rendering device. */
@@ -223,6 +229,7 @@ struct dcomp_device
     LONG refcount;
     struct list targets;
     struct list portal_targets;   /* targets opened from shared handles (no window): activated at Commit, shown elsewhere */
+    LONG serial;                  /* names the device for the shares whose visual it owns (a pointer could be reused) */
     CRITICAL_SECTION cs;
     IUnknown *rendering_device;
     GUID rendering_device_iid;
@@ -565,10 +572,9 @@ static ULONG STDMETHODCALLTYPE dcomp_surface_Release(IDCompositionSurface *iface
     {
         struct dcomp_device *device = impl_from_IDCompositionDevice(surface->device);
 
-        EnterCriticalSection(&device->cs);
-        if (device->drawing_surface == &surface->IDCompositionSurface_iface)
-            device->drawing_surface = NULL;
-        LeaveCriticalSection(&device->cs);
+        /* without the device's lock: the last reference of a surface may go where another device's lock is held (a portal
+         * snapshot), and the device's own users set this pointer only to surfaces with references */
+        InterlockedCompareExchangePointer((void **)&device->drawing_surface, NULL, &surface->IDCompositionSurface_iface);
 
         if (surface->physical_surface)
             ID3D11Texture2D_Release(surface->physical_surface);
@@ -2909,21 +2915,25 @@ static ULONG STDMETHODCALLTYPE dcomp_visual_AddRef(IDCompositionVisual2 *iface)
 
 static void dcomp_shared_lock_acquire(void);
 static void dcomp_shared_lock_release(void);
-static void dcomp_shared_remove_visual(struct dcomp_visual *visual);
-static struct dcomp_target *dcomp_shared_get_portal(struct dcomp_visual *visual);
-static unsigned int dcomp_shared_get_viewers(struct dcomp_target *target, struct dcomp_device **devices, unsigned int max);
+static void dcomp_share_release(struct dcomp_share *share);
+static struct dcomp_portal_snapshot *dcomp_share_remove_visual_locked(struct dcomp_visual *visual);
+static void dcomp_snapshot_release(struct dcomp_portal_snapshot *snapshot);
 
 static ULONG STDMETHODCALLTYPE dcomp_visual_Release(IDCompositionVisual2 *iface)
 {
     struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
     ULONG refcount;
 
-    if (visual->shared)
+    if (visual->share)
     {
+        struct dcomp_portal_snapshot *unused = NULL;
+
+        /* the share's lookup takes a reference under this lock, so the last one is dropped under it too */
         dcomp_shared_lock_acquire();
         refcount = InterlockedDecrement(&visual->refcount);
-        if (!refcount) dcomp_shared_remove_visual(visual);
+        if (!refcount) unused = dcomp_share_remove_visual_locked(visual);
         dcomp_shared_lock_release();
+        dcomp_snapshot_release(unused);
     }
     else refcount = InterlockedDecrement(&visual->refcount);
 
@@ -2965,6 +2975,7 @@ static ULONG STDMETHODCALLTYPE dcomp_visual_Release(IDCompositionVisual2 *iface)
         }
 
         LeaveCriticalSection(&device->cs);
+        if (visual->share) dcomp_share_release(visual->share);
         free(visual);
         IDCompositionDevice_Release(&device->IDCompositionDevice_iface);
     }
@@ -3733,6 +3744,9 @@ static ULONG STDMETHODCALLTYPE dcomp_target_AddRef(IDCompositionTarget *iface)
     return refcount;
 }
 
+static void dcomp_portal_target_unlink(struct dcomp_target *target);
+static void dcomp_target_release_shown(struct dcomp_target *target);
+
 static ULONG STDMETHODCALLTYPE dcomp_target_Release(IDCompositionTarget *iface)
 {
     struct dcomp_target *target = impl_from_IDCompositionTarget(iface);
@@ -3757,13 +3771,8 @@ static ULONG STDMETHODCALLTYPE dcomp_target_Release(IDCompositionTarget *iface)
         list_remove(&target->entry);
         LeaveCriticalSection(&device->cs);
 
-        if (target->portal)
-        {
-            dcomp_shared_lock_acquire();
-            list_remove(&target->portal_entry);
-            dcomp_shared_lock_release();
-            CloseHandle(target->portal);
-        }
+        if (target->share) dcomp_portal_target_unlink(target);
+        dcomp_target_release_shown(target);
 
         AcquireSRWLockExclusive(&target_registration_lock);
         if (GetPropW(target->hwnd, target->topmost ? WINE_DCOMP_UNDERLAY_TOP_PROP
@@ -4000,14 +4009,13 @@ static void dcomp_visual_apply_commit(struct dcomp_visual *visual, LONGLONG now_
     }
 }
 
-/* active: the committed state and children of the visual (a portal's tree, or a redraw of committed scenes), else the pending ones */
+/* active: the committed state and children of the visual (a redraw of committed scenes), else the pending ones */
 static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int *contents,
         unsigned int *visuals, struct dcomp_visual **seen, IUnknown **content_device, enum DCOMPOSITION_OPACITY_MODE parent_mode,
         const D2D_MATRIX_3X2_F *parent_mat, unsigned int depth, LONGLONG now_100ns, BOOL active)
 {
     const struct dcomp_visual_state *state;
     struct dcomp_visual *child;
-    struct dcomp_target *portal;
     IWineDCompSwapChain *binding;
     D2D_MATRIX_3X2_F loc_mat, cur_mat;
     HRESULT hr;
@@ -4093,17 +4101,8 @@ static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int 
         }
     }
 
-    /* the committed tree of a portal into this shared visual, under the lock of the portal's device */
-    if ((portal = dcomp_shared_get_portal(visual)))
-    {
-        EnterCriticalSection(&portal->device->cs);
-        hr = dcomp_validate_pending(portal->active_root, contents, visuals, seen, content_device, mode, &cur_mat, depth + 1,
-                now_100ns, TRUE);
-        LeaveCriticalSection(&portal->device->cs);
-        IDCompositionTarget_Release(&portal->IDCompositionTarget_iface);
-        if (FAILED(hr)) return hr;
-    }
-
+    /* A portal shown in a shared visual is a published snapshot: it is not validated here (it fits the scene or is left out
+     * when the scene is collected, dcomp_collect_share). */
     for (child = active ? visual->active_children : visual->pending_children; child;
             child = active ? child->active_next_sibling : child->pending_next_sibling)
         if (FAILED(hr = dcomp_validate_pending(child, contents, visuals, seen, content_device, mode, &cur_mat, depth + 1,
@@ -4117,9 +4116,17 @@ struct dcomp_collect_context
 {
     struct dcomp_target *target;
     struct wine_dcomp_target_scene scene;
-    BOOL active;     /* collect the committed state and children (a portal's tree, a redraw) */
-    BOOL overflow;   /* more layers than a scene holds (a portal's tree changed after validation) */
+    BOOL active;     /* collect the committed state and children (a redraw, a portal snapshot) */
+    BOOL overflow;   /* more layers than a scene holds */
+    BOOL building;   /* a portal snapshot: a nested snapshot is cut at the layer limit instead of left out */
+    BOOL from_portal[WINE_DCOMP_MAX_LAYERS];   /* the layer was copied from a portal snapshot */
+    /* the portal snapshots the scene shows (references) */
+    struct dcomp_portal_snapshot *snapshots[WINE_DCOMP_MAX_LAYERS];
+    unsigned int snapshot_count;
 };
+
+static void dcomp_collect_share(struct dcomp_visual *visual, const D2D_MATRIX_3X2_F *matrix,
+        struct dcomp_collect_context *ctx);
 
 static void dcomp_collect_children(struct dcomp_visual *child,
         const D2D_MATRIX_3X2_F *parent, float opacity, enum DCOMPOSITION_OPACITY_MODE mode,
@@ -4138,7 +4145,6 @@ static void dcomp_collect_pending(struct dcomp_visual *visual,
     struct dcomp_visual_state state = ctx->active ? visual->active : visual->pending;
     D2D_MATRIX_3X2_F local = {1,0,0,1,0,0}, matrix;
     struct wine_dcomp_layer_desc *layer;
-    struct dcomp_target *portal;
     IDXGISwapChain1 *sc;
     DXGI_SWAP_CHAIN_DESC1 desc;
 
@@ -4229,21 +4235,8 @@ static void dcomp_collect_pending(struct dcomp_visual *visual,
         layer->interpolation_mode = interpolation;
         layer->soft_border = border == DCOMPOSITION_BORDER_MODE_SOFT;
     }
-    /* A shared visual shows the committed tree of its portal, in front of its own content and behind its children. */
-    if ((portal = dcomp_shared_get_portal(visual)))
-    {
-        BOOL active = ctx->active;
-
-        EnterCriticalSection(&portal->device->cs);
-        if (portal->active_root)
-        {
-            ctx->active = TRUE;
-            dcomp_collect_pending(portal->active_root, &matrix, opacity, mode, interpolation, border, now_100ns, ctx);
-            ctx->active = active;
-        }
-        LeaveCriticalSection(&portal->device->cs);
-        IDCompositionTarget_Release(&portal->IDCompositionTarget_iface);
-    }
+    /* A shared visual shows the snapshot its portal published, in front of its own content and behind its children. */
+    if (visual->share) dcomp_collect_share(visual, &matrix, ctx);
     dcomp_collect_children(ctx->active ? visual->active_children : visual->pending_children, &matrix, opacity, mode,
             interpolation, border, now_100ns, ctx);
     layer->subtree_end = ctx->scene.layer_count;
@@ -4278,10 +4271,18 @@ static HRESULT dcomp_retain_active_tree(struct dcomp_visual *visual, struct dcom
     return S_OK;
 }
 
+#define DCOMP_MAX_VIEWERS WINE_DCOMP_MAX_CONTENTS
+
+static void dcomp_portal_publish(struct dcomp_target *target, LONGLONG now_100ns,
+        struct dcomp_device **viewers, unsigned int *viewer_count);
+static void dcomp_snapshot_release(struct dcomp_portal_snapshot *snapshot);
+
 /* Commits the pending changes of the device and presents the scenes of its window targets. With redraw, nothing is committed:
- * the scenes are made again from the committed trees, because a portal shown in them has changed (another device committed).
- * *portals tells whether the commit changed the committed trees of portal targets of the device. */
-static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev, BOOL redraw, BOOL *portals)
+ * the scenes are made again from the committed trees, because a portal shown in them has published a new snapshot. Both publish
+ * the snapshots of the device's portal targets (a redraw from the committed trees, before its scenes) and return the devices that
+ * show them in viewers (with a reference each), to be redrawn once no lock is held. */
+static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev, BOOL redraw, struct dcomp_device **viewers,
+        unsigned int *viewer_count)
 {
     struct dcomp_target *target;
     D2D_MATRIX_3X2_F ident = {1,0,0,1,0,0};
@@ -4305,8 +4306,13 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev, BOOL redra
     GetSystemTimeAsFileTime(&commit_time);
     now_100ns = ((LONGLONG)commit_time.dwHighDateTime << 32) | commit_time.dwLowDateTime;
 
-    if (portals) *portals = FALSE;
+    if (viewer_count) *viewer_count = 0;
     EnterCriticalSection(&dev->cs);
+    /* A redraw publishes the snapshots of the device's portals again first: a portal tree may show a portal that changed, and
+     * the device's own window may show one of these portals. */
+    if (redraw && viewers)
+        LIST_FOR_EACH_ENTRY(target, &dev->portal_targets, struct dcomp_target, entry)
+            dcomp_portal_publish(target, now_100ns, viewers, viewer_count);
     LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
     {
         if ((redraw ? target->active_root : target->pending_root) && ++targets > WINE_DCOMP_MAX_CONTENTS)
@@ -4363,9 +4369,9 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev, BOOL redra
      * only of them is presented through the target's auxiliary producer. */
     for (c = 0; c < targets; ++c)
     {
-        const struct wine_dcomp_target_scene *scene = &contexts[c].scene;
+        struct wine_dcomp_target_scene *scene = &contexts[c].scene;
         struct dcomp_target *target = contexts[c].target;
-        struct dcomp_surface *first_surface = NULL;
+        struct dcomp_surface *first_surface = NULL, *first_portal_surface = NULL;
         BOOL has_surface = FALSE, has_swapchain = FALSE;
 
         for (i = 0; i < scene->layer_count; ++i)
@@ -4379,7 +4385,12 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev, BOOL redra
                 struct dcomp_surface *impl = impl_from_IDCompositionSurface(surface);
                 IDCompositionSurface_Release(surface);
                 has_surface = TRUE;
-                if (!first_surface)
+                /* the producer is made for the device's own surfaces first, portal surfaces have to match it */
+                if (contexts[c].from_portal[i])
+                {
+                    if (!first_portal_surface) first_portal_surface = impl;
+                }
+                else if (!first_surface)
                     first_surface = impl;
                 continue;
             }
@@ -4403,6 +4414,7 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev, BOOL redra
         if (has_surface && !has_swapchain)
         {
             ID3D11Device *layer_device;
+            if (!first_surface) first_surface = first_portal_surface;
             if (FAILED(hr = dcomp_target_ensure_aux_producer(target,
                     first_surface->rendering_device, &first_surface->rendering_device_iid)))
                 goto done;
@@ -4424,6 +4436,15 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev, BOOL redra
                     if (layer_device != target->aux_device)
                     {
                         ID3D11Device_Release(layer_device);
+                        /* another device's portal does not fail this device's commit: its surface is left out */
+                        if (contexts[c].from_portal[i])
+                        {
+                            static LONG once;
+                            if (!InterlockedExchange(&once, 1))
+                                WARN("Leaving out a portal surface of another D3D device than target %p's producer.\n", target);
+                            scene->layers[i].content = NULL;
+                            continue;
+                        }
                         hr = E_NOTIMPL;
                         goto done;
                     }
@@ -4516,23 +4537,50 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev, BOOL redra
                 }
                 target->active_root = target->pending_root;
             }
-            if (target->active_root)
-            {
-                dcomp_visual_apply_commit(target->active_root, now_100ns);
-                if (portals) *portals = TRUE;
-            }
+            if (target->active_root) dcomp_visual_apply_commit(target->active_root, now_100ns);
         }
-        /* The commit succeeded: now revoke the auxiliary producers this commit
-         * does not present through (a real producer, no content, or no scene).
-         * A failed commit keeps them, with the previous scene. */
+        /* after the switch, the portal targets publish snapshots of their committed trees */
+        LIST_FOR_EACH_ENTRY(target, &dev->portal_targets, struct dcomp_target, entry)
+            dcomp_portal_publish(target, now_100ns, viewers, viewer_count);
+    }
+    if (SUCCEEDED(hr))
+    {
+        /* The commit (or redraw) succeeded: now revoke the auxiliary producers it
+         * does not present through (a real producer, no content, or no scene;
+         * after a redraw, a portal that is gone). A failed commit keeps them,
+         * with the previous scene. */
         LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
         {
             if (!target->aux_binding) continue;
+            if (redraw && !target->active_root) continue;
             for (j = 0; j < count && bindings[j] != target->aux_binding; ++j) {}
             if (j == count) dcomp_target_release_aux_producer(target);
         }
+        /* the window targets keep the snapshots of the scenes they show now; a target without a scene shows none */
+        LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
+        {
+            struct dcomp_collect_context *ctx = NULL;
+
+            for (c = 0; c < targets; ++c) if (contexts[c].target == target) ctx = &contexts[c];
+            if (!ctx && redraw) continue;
+            for (i = 0; i < target->shown_count; ++i) dcomp_snapshot_release(target->shown[i]);
+            free(target->shown);
+            target->shown = NULL;
+            target->shown_count = 0;
+            if (!ctx || !ctx->snapshot_count) continue;
+            if ((target->shown = malloc(ctx->snapshot_count * sizeof(*target->shown))))
+            {
+                memcpy(target->shown, ctx->snapshots, ctx->snapshot_count * sizeof(*target->shown));
+                target->shown_count = ctx->snapshot_count;
+            }
+            else for (i = 0; i < ctx->snapshot_count; ++i) dcomp_snapshot_release(ctx->snapshots[i]);
+            ctx->snapshot_count = 0;
+        }
     }
 done:
+    /* snapshots of scenes that were not presented (snapshots are freed later, never under a lock: dcomp_snapshot_release) */
+    for (c = 0; contexts && c < targets; ++c)
+        for (i = 0; i < contexts[c].snapshot_count; ++i) dcomp_snapshot_release(contexts[c].snapshots[i]);
     for (i = 0; i < old_count; ++i) IDCompositionVisual2_Release(&old_nodes[i]->IDCompositionVisual2_iface);
     for (i = 0; i < count; ++i)
     {
@@ -4572,55 +4620,47 @@ static ULONG STDMETHODCALLTYPE dcomp_##prefix##_Release(type *iface) \
     return IDCompositionDevice_Release(&dev->IDCompositionDevice_iface); \
 }
 
-/* After a commit that changed what portal targets of the device show, the devices whose shared visuals show those portals present
- * their committed scenes again. This runs without the lock of the device: a redraw takes the viewer's lock and then the portal
- * device's (in dcomp_collect_pending), the same order as a commit of the viewer. (Two devices that each show a portal of the other
- * in window targets of their own would take the locks in both orders; Notepad's do not.) */
-static void dcomp_device_redraw_viewers(struct dcomp_device *dev)
+/* The devices that show a portal which has published a new snapshot present their committed scenes again. A redraw also
+ * publishes the snapshots of the device's own portals again (from its committed trees), because a portal tree may hold the
+ * visual of the portal that changed (Notepad's does: the window shows the UI thread's portal, whose tree holds the shared visual
+ * of the compositor's portal); their viewers are redrawn in turn. Each device is redrawn once per call, so a cycle of portals
+ * ends. Called with no lock held: a redraw takes only the device's own lock (and the shared lock, as a leaf). Releases the
+ * references of devices. */
+static void dcomp_redraw_viewers(struct dcomp_device **viewers, unsigned int count)
 {
-    struct dcomp_target *targets[WINE_DCOMP_MAX_CONTENTS], *target;
-    struct dcomp_device *viewers[WINE_DCOMP_MAX_CONTENTS], *done[WINE_DCOMP_MAX_CONTENTS];
-    unsigned int target_count = 0, viewer_count, done_count = 0, i, j, k;
+    struct dcomp_device *queue[DCOMP_MAX_VIEWERS], *more[DCOMP_MAX_VIEWERS];
+    unsigned int head, total = 0, more_count, i, j;
     HRESULT hr;
 
-    EnterCriticalSection(&dev->cs);
-    LIST_FOR_EACH_ENTRY(target, &dev->portal_targets, struct dcomp_target, entry)
+    for (i = 0; i < count; ++i) queue[total++] = viewers[i];
+    for (head = 0; head < total; ++head)
     {
-        if (!target->active_root || target_count == ARRAY_SIZE(targets)) continue;
-        IDCompositionTarget_AddRef(&target->IDCompositionTarget_iface);
-        targets[target_count++] = target;
-    }
-    LeaveCriticalSection(&dev->cs);
-
-    for (i = 0; i < target_count; ++i)
-    {
-        viewer_count = dcomp_shared_get_viewers(targets[i], viewers, ARRAY_SIZE(viewers));
-        for (j = 0; j < viewer_count; ++j)
+        TRACE("Redrawing device %p.\n", queue[head]);
+        more_count = 0;
+        if (FAILED(hr = dcomp_device_internal_commit(queue[head], TRUE, more, &more_count)))
+            WARN("Redrawing device %p failed, hr %#lx.\n", queue[head], hr);
+        for (i = 0; i < more_count; ++i)
         {
-            for (k = 0; k < done_count && done[k] != viewers[j]; ++k) {}
-            if (k == done_count && done_count < ARRAY_SIZE(done))
-            {
-                TRACE("Portal %p of device %p changed: redrawing device %p.\n", targets[i], dev, viewers[j]);
-                if (FAILED(hr = dcomp_device_internal_commit(viewers[j], TRUE, NULL)))
-                    WARN("Redrawing device %p failed, hr %#lx.\n", viewers[j], hr);
-                IDCompositionDevice_AddRef(&viewers[j]->IDCompositionDevice_iface);
-                done[done_count++] = viewers[j];
-            }
-            IDCompositionDevice_Release(&viewers[j]->IDCompositionDevice_iface);
+            for (j = 0; j < total && queue[j] != more[i]; ++j) {}
+            if (j < total || total == ARRAY_SIZE(queue))
+                IDCompositionDevice_Release(&more[i]->IDCompositionDevice_iface);
+            else
+                queue[total++] = more[i];
         }
-        IDCompositionTarget_Release(&targets[i]->IDCompositionTarget_iface);
     }
-    for (k = 0; k < done_count; ++k) IDCompositionDevice_Release(&done[k]->IDCompositionDevice_iface);
+    for (i = 0; i < total; ++i) IDCompositionDevice_Release(&queue[i]->IDCompositionDevice_iface);
 }
 
 /* A commit has completed when dcomp_device_internal_commit returns, with success or not: the event of SetCommitCompletionEvent is signaled then.
- * Only a commit that succeeded submitted a batch (methods 45 and 46 count those). */
+ * Only a commit that succeeded submitted a batch (methods 45 and 46 count those). The viewers of the device's portals are redrawn
+ * before that, so a completed commit is shown wherever it is shown. */
 static HRESULT dcomp_device_commit(struct dcomp_device *dev)
 {
-    BOOL portals;
-    HRESULT hr = dcomp_device_internal_commit(dev, FALSE, &portals);
+    struct dcomp_device *viewers[DCOMP_MAX_VIEWERS];
+    unsigned int viewer_count = 0;
+    HRESULT hr = dcomp_device_internal_commit(dev, FALSE, viewers, &viewer_count);
 
-    if (SUCCEEDED(hr) && portals) dcomp_device_redraw_viewers(dev);
+    dcomp_redraw_viewers(viewers, viewer_count);
     EnterCriticalSection(&dev->cs);
     if (SUCCEEDED(hr)) ++dev->batch;
     if (dev->commit_event) SetEvent(dev->commit_event);
@@ -5507,24 +5547,39 @@ static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateSurfaceFromHwnd(IDCo
  * there. A handle is found by its kernel object (a duplicate is the same visual), not by its value.
  * ===================================================================== */
 
-struct dcomp_shared
+/* A published snapshot of the committed tree of a portal target: the layers that tree is collected to, relative to its root,
+ * with a reference to each surface and to nothing else (docs/uwp/PORTAL_SNAPSHOT_DESIGN.md in WineExplorer). It never changes
+ * once published. It is freed where its last reference goes, never under the shared lock; the last Release of a surface takes
+ * no lock, so that may be under any device's lock. */
+struct dcomp_portal_snapshot
 {
-    struct list entry;
-    HANDLE object;                 /* a duplicate of the handle the visual was opened from: its kernel object names the visual */
-    struct dcomp_device *device;   /* the device the visual was made for; no reference */
-    struct dcomp_visual *visual;   /* no reference: the entry goes when the last holder releases the visual */
+    LONG refcount;
+    unsigned int layer_count;
+    struct wine_dcomp_layer_desc layers[];
 };
 
-static struct list dcomp_shared_list = LIST_INIT(dcomp_shared_list);
-static struct list dcomp_portal_list = LIST_INIT(dcomp_portal_list);   /* targets opened from shared handles */
-static SRWLOCK dcomp_shared_lock = SRWLOCK_INIT;
-
-static BOOL dcomp_is_shared_handle(HANDLE handle);
-
-static BOOL dcomp_same_object(HANDLE a, HANDLE b)
+/* A kernel object made by DCompositionCreateSharedVisualHandle. It is in the registry of the process while a handle of the
+ * caller's to it is open (the registry holds a reference then); its visuals and its portal target hold references too. */
+struct dcomp_share
 {
-    return a == b || !NtCompareObjects(a, b);
-}
+    LONG refcount;
+    struct list entry;      /* in dcomp_share_registry while listed */
+    HANDLE object;          /* a private duplicate of the handle: its kernel object names the share */
+    struct list visuals;    /* struct dcomp_visual share_entry (one at a time); no references */
+    LONG visual_device;     /* the serial of the device that opened it as a visual first: the only one that may, 0 before */
+    BOOL target_opened;     /* an object opens as a target once (Windows 11: E_ACCESSDENIED after that, also after release) */
+    BOOL target_alive;      /* the portal target has references */
+    /* published by the portal target's device, or NULL; it stays after the target is released (Windows 11 shows it still), and
+     * goes when neither a visual nor the target is left */
+    struct dcomp_portal_snapshot *snapshot;
+};
+
+static LONG dcomp_device_serial;
+static struct list dcomp_share_registry = LIST_INIT(dcomp_share_registry);
+/* A leaf lock, taken after a device's lock and never before one. Under it pointers are followed, references counted (a last
+ * reference is never released under it) and lists changed; only opening a handle and making one also query the server under it
+ * (the registry's lookup and sweep). */
+static SRWLOCK dcomp_shared_lock = SRWLOCK_INIT;
 
 static void dcomp_shared_lock_acquire(void)
 {
@@ -5536,146 +5591,348 @@ static void dcomp_shared_lock_release(void)
     ReleaseSRWLockExclusive(&dcomp_shared_lock);
 }
 
-/* with the lock held */
-static void dcomp_shared_remove_visual(struct dcomp_visual *visual)
+static BOOL dcomp_same_object(HANDLE a, HANDLE b)
 {
-    struct dcomp_shared *shared, *next;
+    return a == b || !NtCompareObjects(a, b);
+}
 
-    LIST_FOR_EACH_ENTRY_SAFE(shared, next, &dcomp_shared_list, struct dcomp_shared, entry)
+/* not under the shared lock */
+static void dcomp_snapshot_release(struct dcomp_portal_snapshot *snapshot)
+{
+    unsigned int i;
+
+    if (!snapshot || InterlockedDecrement(&snapshot->refcount)) return;
+    for (i = 0; i < snapshot->layer_count; ++i)
+        if (snapshot->layers[i].content) IUnknown_Release(snapshot->layers[i].content);
+    free(snapshot);
+}
+
+/* With the shared lock held, when a visual of the share or its target is gone: with neither left, nothing shows the snapshot any
+ * more; it is returned, to be released after the lock is left. */
+static struct dcomp_portal_snapshot *dcomp_share_unused_snapshot_locked(struct dcomp_share *share)
+{
+    struct dcomp_portal_snapshot *snapshot = NULL;
+
+    if (list_empty(&share->visuals) && !share->target_alive)
     {
-        if (shared->visual != visual) continue;
-        list_remove(&shared->entry);
-        CloseHandle(shared->object);
-        free(shared);
+        snapshot = share->snapshot;
+        share->snapshot = NULL;
+    }
+    return snapshot;
+}
+
+/* the last reference of a visual opened from a share is gone: with the shared lock held */
+static struct dcomp_portal_snapshot *dcomp_share_remove_visual_locked(struct dcomp_visual *visual)
+{
+    list_remove(&visual->share_entry);
+    return dcomp_share_unused_snapshot_locked(visual->share);
+}
+
+/* with no shared lock held */
+static void dcomp_share_release(struct dcomp_share *share)
+{
+    if (InterlockedDecrement(&share->refcount)) return;
+    dcomp_snapshot_release(share->snapshot);
+    CloseHandle(share->object);
+    free(share);
+}
+
+/* With the shared lock held: the shares whose handles the caller has all closed (the share's duplicate is the only handle left)
+ * leave the registry; their registry references are moved to dropped, to be released after the lock is left. A share still
+ * linked to visuals or a target lives on, but nothing can open it any more. */
+static void dcomp_share_sweep_locked(struct list *dropped)
+{
+    struct dcomp_share *share, *next;
+    OBJECT_BASIC_INFORMATION info;
+
+    LIST_FOR_EACH_ENTRY_SAFE(share, next, &dcomp_share_registry, struct dcomp_share, entry)
+    {
+        if (NtQueryObject(share->object, ObjectBasicInformation, &info, sizeof(info), NULL) || info.HandleCount > 1) continue;
+        TRACE("share %p: no handle of the caller's is left.\n", share);
+        list_remove(&share->entry);
+        list_add_tail(dropped, &share->entry);
     }
 }
 
-/* The portal shown inside a shared visual: the target opened from a handle of the same kernel object, with a reference, or NULL.
- * The visual is one of a committing device (its lock is held), so its entry cannot go away meanwhile. */
-static struct dcomp_target *dcomp_shared_get_portal(struct dcomp_visual *visual)
+static void dcomp_share_release_dropped(struct list *dropped)
 {
-    struct dcomp_target *target, *found = NULL;
-    struct dcomp_shared *shared;
+    struct dcomp_share *share, *next;
 
-    if (!visual->shared) return NULL;
-    AcquireSRWLockExclusive(&dcomp_shared_lock);
-    LIST_FOR_EACH_ENTRY(shared, &dcomp_shared_list, struct dcomp_shared, entry)
+    LIST_FOR_EACH_ENTRY_SAFE(share, next, dropped, struct dcomp_share, entry)
     {
-        if (shared->visual != visual) continue;
-        LIST_FOR_EACH_ENTRY(target, &dcomp_portal_list, struct dcomp_target, portal_entry)
+        list_remove(&share->entry);
+        dcomp_share_release(share);
+    }
+}
+
+/* With the shared lock held: the share of a handle of DCompositionCreateSharedVisualHandle, found by its kernel object (a
+ * duplicate is the same share), or NULL for any other handle (Windows 11 refuses those with E_HANDLE). The only place that
+ * compares objects: opening a handle links visuals and targets to their share, later lookups follow the pointers. */
+static struct dcomp_share *dcomp_share_find_locked(HANDLE handle)
+{
+    struct dcomp_share *share;
+
+    if (!handle || handle == INVALID_HANDLE_VALUE) return NULL;
+    LIST_FOR_EACH_ENTRY(share, &dcomp_share_registry, struct dcomp_share, entry)
+        if (dcomp_same_object(share->object, handle)) return share;
+    return NULL;
+}
+
+static BOOL dcomp_share_known(HANDLE handle)
+{
+    BOOL known;
+
+    AcquireSRWLockExclusive(&dcomp_shared_lock);
+    known = !!dcomp_share_find_locked(handle);
+    ReleaseSRWLockExclusive(&dcomp_shared_lock);
+    return known;
+}
+
+/* With the shared lock held: the devices of the share's visuals, with a reference each, added to viewers once. A visual in the
+ * list has references (its last Release unlinks it under this lock), and a visual holds its device. */
+static void dcomp_share_get_viewers_locked(struct dcomp_share *share, struct dcomp_device **viewers, unsigned int *count)
+{
+    struct dcomp_visual *visual;
+    unsigned int i;
+
+    LIST_FOR_EACH_ENTRY(visual, &share->visuals, struct dcomp_visual, share_entry)
+    {
+        for (i = 0; i < *count && viewers[i] != visual->device; ++i) {}
+        if (i < *count) continue;
+        if (*count == DCOMP_MAX_VIEWERS)
         {
-            if (!dcomp_same_object(target->portal, shared->object)) continue;
-            /* a target whose last reference is gone is being released (it leaves the list under this lock): skipped */
-            if (InterlockedIncrement(&target->refcount) == 1)
-            {
-                InterlockedDecrement(&target->refcount);
-                continue;
-            }
-            found = target;
+            WARN("More than %u devices show portals of one commit; some are not redrawn.\n", DCOMP_MAX_VIEWERS);
             break;
         }
-        break;
+        IDCompositionDevice_AddRef(&visual->device->IDCompositionDevice_iface);
+        viewers[(*count)++] = visual->device;
     }
-    ReleaseSRWLockExclusive(&dcomp_shared_lock);
-    if (found) TRACE("visual %p shows portal %p of device %p, root %p.\n", visual, found, found->device, found->active_root);
-    return found;
 }
 
-/* The devices whose shared visuals show the portal target, with a reference each; returns their number (at most max). */
-static unsigned int dcomp_shared_get_viewers(struct dcomp_target *target, struct dcomp_device **devices, unsigned int max)
+/* A viewer's collection: the snapshot published for the shared visual is appended after the visual's content layer and before its
+ * children (inside the visual's subtree), under the visual's world matrix. A clip is tested per pixel in its layer's own space,
+ * so clips stay exact under any transform. The scene keeps a reference to the snapshot. A snapshot that does not fit is left out;
+ * while a snapshot is built, a nested one is cut at the layer limit instead. Another device's lock is never taken. */
+static void dcomp_collect_share(struct dcomp_visual *visual, const D2D_MATRIX_3X2_F *matrix,
+        struct dcomp_collect_context *ctx)
 {
-    struct dcomp_shared *shared;
-    unsigned int count = 0, i;
+    unsigned int base = ctx->scene.layer_count, count, i;
+    struct dcomp_portal_snapshot *snapshot;
 
     AcquireSRWLockExclusive(&dcomp_shared_lock);
-    LIST_FOR_EACH_ENTRY(shared, &dcomp_shared_list, struct dcomp_shared, entry)
-    {
-        if (!dcomp_same_object(target->portal, shared->object)) continue;
-        for (i = 0; i < count && devices[i] != shared->device; ++i) {}
-        if (i < count || count == max) continue;
-        /* the entry lives as long as its visual, and the visual holds its device */
-        IDCompositionDevice_AddRef(&shared->device->IDCompositionDevice_iface);
-        devices[count++] = shared->device;
-    }
+    if ((snapshot = visual->share->snapshot)) InterlockedIncrement(&snapshot->refcount);
     ReleaseSRWLockExclusive(&dcomp_shared_lock);
-    return count;
+    if (!snapshot) return;
+
+    count = snapshot->layer_count;
+    if (count > WINE_DCOMP_MAX_LAYERS - base)
+    {
+        static LONG once;
+
+        if (!ctx->building)
+        {
+            if (!InterlockedExchange(&once, 1))
+                WARN("Leaving out the portal of visual %p: its %u layers do not fit the scene.\n", visual, count);
+            dcomp_snapshot_release(snapshot);
+            return;
+        }
+        if (!InterlockedExchange(&once, 1))
+            WARN("Cutting the nested portal of visual %p to %u of %u layers.\n", visual, WINE_DCOMP_MAX_LAYERS - base, count);
+        count = WINE_DCOMP_MAX_LAYERS - base;
+    }
+    for (i = 0; i < count; ++i)
+    {
+        const struct wine_dcomp_layer_desc *src = &snapshot->layers[i];
+        struct wine_dcomp_layer_desc *dst = &ctx->scene.layers[base + i];
+
+        *dst = *src;
+        dst->m11 = src->m11 * matrix->_11 + src->m12 * matrix->_21;
+        dst->m12 = src->m11 * matrix->_12 + src->m12 * matrix->_22;
+        dst->m21 = src->m21 * matrix->_11 + src->m22 * matrix->_21;
+        dst->m22 = src->m21 * matrix->_12 + src->m22 * matrix->_22;
+        dst->m31 = src->m31 * matrix->_11 + src->m32 * matrix->_21 + matrix->_31;
+        dst->m32 = src->m31 * matrix->_12 + src->m32 * matrix->_22 + matrix->_32;
+        dst->subtree_end = base + min(src->subtree_end, count);
+        ctx->from_portal[base + i] = TRUE;
+    }
+    ctx->scene.layer_count = base + count;
+    /* every snapshot kept adds a layer at least, so there is room */
+    if (count) ctx->snapshots[ctx->snapshot_count++] = snapshot;
+    else dcomp_snapshot_release(snapshot);
 }
 
-/* One visual per handle and device: a second device opening the handle makes its own visual, because a visual of another device
- * cannot be put into a target of this one. A visual nobody holds any more is gone, and the handle then makes a new one. */
+/* In the Commit of the portal target's device, under its lock, after the tree switch succeeded: the target's committed tree is
+ * collected to a snapshot and published in its share (a root of NULL publishes NULL), and the devices of the share's visuals are
+ * added to viewers. A nested shared visual's snapshot is copied in (flattened), so a snapshot refers to surfaces only. Every
+ * Commit publishes: a surface drawn since the last one is only shown after a Commit of its device. */
+static void dcomp_portal_publish(struct dcomp_target *target, LONGLONG now_100ns,
+        struct dcomp_device **viewers, unsigned int *viewer_count)
+{
+    D2D_MATRIX_3X2_F ident = {1,0,0,1,0,0};
+    struct dcomp_portal_snapshot *snapshot = NULL, *old;
+    struct dcomp_share *share = target->share;
+    struct dcomp_collect_context *ctx;
+    unsigned int i;
+
+    if (target->active_root)
+    {
+        if (!(ctx = calloc(1, sizeof(*ctx))))
+        {
+            ERR("Out of memory, portal %p keeps its previous snapshot.\n", target);
+            return;
+        }
+        ctx->active = TRUE;
+        ctx->building = TRUE;
+        dcomp_collect_pending(target->active_root, &ident, 1, DCOMPOSITION_OPACITY_MODE_LAYER,
+                DCOMPOSITION_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, DCOMPOSITION_BORDER_MODE_HARD, now_100ns, ctx);
+        if ((snapshot = malloc(offsetof(struct dcomp_portal_snapshot, layers[ctx->scene.layer_count]))))
+        {
+            snapshot->refcount = 1;
+            snapshot->layer_count = ctx->scene.layer_count;
+            memcpy(snapshot->layers, ctx->scene.layers, snapshot->layer_count * sizeof(*snapshot->layers));
+            for (i = 0; i < snapshot->layer_count; ++i)
+            {
+                IUnknown *content = snapshot->layers[i].content;
+                IDCompositionSurface *surface;
+
+                if (!content) continue;
+                if (SUCCEEDED(IUnknown_QueryInterface(content, &IID_IDCompositionSurface, (void **)&surface)))
+                {
+                    IDCompositionSurface_Release(surface);
+                    IUnknown_AddRef(content);
+                }
+                else
+                {
+                    /* a viewer would bind the portal device's producer to its window, where that device could revoke it */
+                    static LONG once;
+                    if (!InterlockedExchange(&once, 1)) FIXME("A swap chain in a portal is not shown.\n");
+                    snapshot->layers[i].content = NULL;
+                }
+            }
+        }
+        for (i = 0; i < ctx->snapshot_count; ++i) dcomp_snapshot_release(ctx->snapshots[i]);
+        free(ctx);
+        if (!snapshot)
+        {
+            ERR("Out of memory, portal %p keeps its previous snapshot.\n", target);
+            return;
+        }
+    }
+    else if (!share->snapshot) return;   /* nothing was shown, nothing is: no redraw (only this device writes the snapshot) */
+
+    TRACE("portal %p publishes snapshot %p, %u layers.\n", target, snapshot, snapshot ? snapshot->layer_count : 0);
+    AcquireSRWLockExclusive(&dcomp_shared_lock);
+    old = share->snapshot;
+    share->snapshot = snapshot;
+    if (viewers) dcomp_share_get_viewers_locked(share, viewers, viewer_count);
+    ReleaseSRWLockExclusive(&dcomp_shared_lock);
+    dcomp_snapshot_release(old);
+}
+
+/* A released portal target: its last published snapshot stays in the share and is still shown (measured on Windows 11: what a
+ * released portal target committed last stays visible in the shared visual, also after the viewer commits, takes the visual out
+ * and puts it back; only a root of NULL committed before takes it away). With no lock held. */
+static void dcomp_portal_target_unlink(struct dcomp_target *target)
+{
+    struct dcomp_share *share = target->share;
+    struct dcomp_portal_snapshot *unused;
+
+    AcquireSRWLockExclusive(&dcomp_shared_lock);
+    share->target_alive = FALSE;
+    unused = dcomp_share_unused_snapshot_locked(share);
+    ReleaseSRWLockExclusive(&dcomp_shared_lock);
+    dcomp_snapshot_release(unused);
+    target->share = NULL;
+    dcomp_share_release(share);
+}
+
+/* the snapshots a window target's scene showed, released with the target (with no lock held) */
+static void dcomp_target_release_shown(struct dcomp_target *target)
+{
+    unsigned int i;
+
+    for (i = 0; i < target->shown_count; ++i) dcomp_snapshot_release(target->shown[i]);
+    free(target->shown);
+    target->shown = NULL;
+    target->shown_count = 0;
+}
+
+/* One visual per object at a time, on the device that opened it first: while a visual opened from the object lives, another open is
+ * refused, and another device is refused also after that (Windows 11: E_ACCESSDENIED, tests/uwp/alpc/dcomp-sharedopen-probe.c).
+ * Once the visual is released, the first device opens the object as a visual again. */
 static HRESULT dcomp_shared_open_visual(struct dcomp_device *dev, HANDLE handle, REFIID iid, void **out)
 {
-    struct dcomp_shared *shared, *found = NULL;
     struct dcomp_visual *visual = NULL;
+    struct dcomp_share *share;
+    struct list dropped;
+    BOOL created = FALSE;
     HRESULT hr;
 
-    /* the lookup and the insert are one step under the lock, so two opens of a handle at the same time find the same visual */
+    list_init(&dropped);
+    /* the check and the insert are one step under the lock, so of two opens at the same time one is refused */
     AcquireSRWLockExclusive(&dcomp_shared_lock);
-    LIST_FOR_EACH_ENTRY(shared, &dcomp_shared_list, struct dcomp_shared, entry)
-        if (shared->device == dev && dcomp_same_object(shared->object, handle)) { found = shared; break; }
-    if (found)
+    dcomp_share_sweep_locked(&dropped);
+    if (!(share = dcomp_share_find_locked(handle))) hr = E_HANDLE;
+    else if (!list_empty(&share->visuals) || (share->visual_device && share->visual_device != dev->serial)) hr = E_ACCESSDENIED;
+    else
     {
-        hr = IDCompositionVisual2_QueryInterface(&found->visual->IDCompositionVisual2_iface, iid, out);
-        ReleaseSRWLockExclusive(&dcomp_shared_lock);
-        return hr;
+        if (SUCCEEDED(hr = dcomp_visual_create(dev, &visual)))
+        {
+            share->visual_device = dev->serial;
+            created = TRUE;
+            InterlockedIncrement(&share->refcount);
+            visual->share = share;
+            list_add_tail(&share->visuals, &visual->share_entry);
+            hr = IDCompositionVisual2_QueryInterface(&visual->IDCompositionVisual2_iface, iid, out);
+        }
     }
-
-    if (!(found = calloc(1, sizeof(*found))))
-    {
-        ReleaseSRWLockExclusive(&dcomp_shared_lock);
-        return E_OUTOFMEMORY;
-    }
-    if (!DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &found->object, 0, FALSE, DUPLICATE_SAME_ACCESS))
-    {
-        hr = HRESULT_FROM_WIN32(GetLastError());
-        ReleaseSRWLockExclusive(&dcomp_shared_lock);
-        free(found);
-        return hr;
-    }
-    if (FAILED(hr = dcomp_visual_create(dev, &visual)))
-    {
-        ReleaseSRWLockExclusive(&dcomp_shared_lock);
-        CloseHandle(found->object);
-        free(found);
-        return hr;
-    }
-    visual->shared = TRUE;
-    found->device = dev;
-    found->visual = visual;
-    list_add_tail(&dcomp_shared_list, &found->entry);
-    hr = IDCompositionVisual2_QueryInterface(&visual->IDCompositionVisual2_iface, iid, out);
     ReleaseSRWLockExclusive(&dcomp_shared_lock);
 
-    /* the reference of dcomp_visual_create belongs to the caller of this function now; releasing it takes the lock, so it is done outside
-     * (the visual cannot die before: the caller's reference from the query is still held, or the release below ends it when the query failed) */
-    IDCompositionVisual2_Release(&visual->IDCompositionVisual2_iface);
+    /* the reference of dcomp_visual_create belongs to the caller now; releasing it takes the lock, so it is done outside (the
+     * caller's reference from the query is still held, or this release ends the visual when the query failed) */
+    if (created) IDCompositionVisual2_Release(&visual->IDCompositionVisual2_iface);
+    dcomp_share_release_dropped(&dropped);
     return hr;
 }
 
-/* A target that no window backs, a portal: what its device commits as its root is shown inside the shared visual of the same
- * kernel object (dcomp_collect_pending). */
+/* A target that no window backs, a portal: its device publishes snapshots of what it commits as its root, and the visuals opened
+ * from the same object show them (dcomp_portal_publish, dcomp_collect_share). */
 static HRESULT dcomp_shared_open_target(struct dcomp_device *dev, HANDLE handle, REFIID iid, void **out)
 {
     struct dcomp_target *target;
-    HRESULT hr;
+    struct dcomp_share *share;
+    struct list dropped;
+    HRESULT hr = S_OK;
 
     if (!(target = calloc(1, sizeof(*target)))) return E_OUTOFMEMORY;
-    if (!DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &target->portal, 0, FALSE, DUPLICATE_SAME_ACCESS))
-    {
-        hr = HRESULT_FROM_WIN32(GetLastError());
-        free(target);
-        return hr;
-    }
     target->IDCompositionTarget_iface.lpVtbl = &dcomp_target_vtbl;
     target->refcount = 1;
     target->device = dev;
+
+    list_init(&dropped);
+    AcquireSRWLockExclusive(&dcomp_shared_lock);
+    dcomp_share_sweep_locked(&dropped);
+    if (!(share = dcomp_share_find_locked(handle))) hr = E_HANDLE;
+    else if (share->target_opened) hr = E_ACCESSDENIED;
+    else
+    {
+        share->target_opened = TRUE;
+        share->target_alive = TRUE;
+        InterlockedIncrement(&share->refcount);
+        target->share = share;
+    }
+    ReleaseSRWLockExclusive(&dcomp_shared_lock);
+    dcomp_share_release_dropped(&dropped);
+    if (FAILED(hr))
+    {
+        free(target);
+        return hr;
+    }
+
     IDCompositionDevice_AddRef(&dev->IDCompositionDevice_iface);
     EnterCriticalSection(&dev->cs);
     list_add_tail(&dev->portal_targets, &target->entry);
     LeaveCriticalSection(&dev->cs);
-    dcomp_shared_lock_acquire();
-    list_add_tail(&dcomp_portal_list, &target->portal_entry);
-    dcomp_shared_lock_release();
     hr = IDCompositionTarget_QueryInterface(&target->IDCompositionTarget_iface, iid, out);
     IDCompositionTarget_Release(&target->IDCompositionTarget_iface);
     return hr;
@@ -5763,13 +6020,13 @@ static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_OpenSharedObject(IDComposi
     if (!out) return E_POINTER;
     *out = NULL;
     if (!iid) return E_INVALIDARG;
-    /* only a handle of DCompositionCreateSharedVisualHandle (Windows 11: anything else, a closed handle too, is E_HANDLE) */
-    if (!dcomp_is_shared_handle(handle)) return E_HANDLE;
 
+    /* only a handle of DCompositionCreateSharedVisualHandle opens (Windows 11: anything else, a closed handle too, is E_HANDLE) */
     if (IsEqualGUID(iid, &IID_IDCompositionTarget)) return dcomp_shared_open_target(dev, handle, iid, out);
     if (IsEqualGUID(iid, &IID_IUnknown) || IsEqualGUID(iid, &IID_IDCompositionVisual)
             || IsEqualGUID(iid, &IID_IDCompositionVisual2))
         return dcomp_shared_open_visual(dev, handle, iid, out);
+    if (!dcomp_share_known(handle)) return E_HANDLE;
 
     /* Windows 11 answers E_INVALIDARG for another interface (IDispatch) */
     WARN("Unsupported interface %s.\n", debugstr_guid(iid));
@@ -5843,6 +6100,7 @@ static HRESULT dcomp_device_create(int version, IUnknown *rendering_device, REFI
     dev->commit_iface = dcomp_commit_vtbl;
     dev->version = version;
     dev->refcount = 1;
+    dev->serial = InterlockedIncrement(&dcomp_device_serial);
     list_init(&dev->targets);
     list_init(&dev->portal_targets);
     InitializeCriticalSection(&dev->cs);
@@ -5905,55 +6163,52 @@ HRESULT WINAPI DCompositionCreateDevice3(IUnknown *rendering_device, REFIID iid,
  * DCompositionCreateSharedVisualHandle resolves to the same address); dcompi.dll of the Windows App Runtime asks for it (the Wine
  * loader's message for the missing import names ordinal 1040). The signature is HRESULT (HANDLE *out), measured on Windows 11 with
  * tests/uwp/alpc/dcomp-visualhandle-probe.c: a NULL out is E_INVALIDARG, otherwise the handle is an object of type "Composition".
- * The compositor passes the handle on in a property of a visual; here the handle is an
- * event, which is what a caller can do with it (duplicate it, close it) until there is a system compositor to share
- * the visual with. (Windows returns an object of the type "Composition", here it is an event: NtQueryObject tells them apart.)
- * The device opens only these handles: on Windows 11 a handle of another object (an event, a handle of
- * DCompositionCreateSurfaceHandle, the process) or a closed handle is E_HANDLE (tests/uwp/alpc/dcomp-sharedopen-probe.c). So the
- * event has a name of its own, which dcomp_is_shared_handle checks.
+ * The compositor passes the handle on in a property of a visual; here the handle is an unnamed event, which is what a caller can
+ * do with it (duplicate it, close it) until there is a system compositor to share the visual with. (Windows returns an object of
+ * the type "Composition", here it is an event: NtQueryObject tells them apart.) The device opens only these handles: on Windows 11
+ * a handle of another object (an event, a handle of DCompositionCreateSurfaceHandle, the process) or a closed handle is E_HANDLE
+ * (tests/uwp/alpc/dcomp-sharedopen-probe.c). So each event made here has a share in the process's registry, which keeps a duplicate
+ * of it; opening a handle finds the share by its kernel object. No name is put into \BaseNamedObjects.
  */
-static const WCHAR dcomp_shared_prefix[] = L"WineDCompositionSharedVisual-";
-
-static BOOL dcomp_is_shared_handle(HANDLE handle)
-{
-    union { OBJECT_NAME_INFORMATION info; BYTE buffer[sizeof(OBJECT_NAME_INFORMATION) + 512 * sizeof(WCHAR)]; } name;
-    const WCHAR *component, *end;
-    size_t prefix_len = ARRAY_SIZE(dcomp_shared_prefix) - 1;
-    ULONG size;
-
-    if (!handle || handle == INVALID_HANDLE_VALUE) return FALSE;
-    if (NtQueryObject(handle, ObjectNameInformation, &name, sizeof(name), &size)) return FALSE;
-    if (!name.info.Name.Buffer || !name.info.Name.Length) return FALSE;
-    end = name.info.Name.Buffer + name.info.Name.Length / sizeof(WCHAR);
-    for (component = end; component > name.info.Name.Buffer && component[-1] != '\\'; --component) {}
-    return end - component > prefix_len && !wcsncmp(component, dcomp_shared_prefix, prefix_len);
-}
-
 HRESULT WINAPI DCompositionCreateSharedVisualHandle(HANDLE *out)
 {
-    static LONG counter;
-    WCHAR name[64];
+    struct dcomp_share *share;
+    struct list dropped;
     HANDLE handle;
-    unsigned int i;
+    HRESULT hr;
 
     TRACE("(%p)\n", out);
 
     if (!out) return E_INVALIDARG;
     *out = NULL;
-    /* a name another process made first is not taken: the next one is tried */
-    for (i = 0; i < 16; ++i)
+    if (!(share = calloc(1, sizeof(*share)))) return E_OUTOFMEMORY;
+    if (!(handle = CreateEventW(NULL, TRUE, FALSE, NULL)))
     {
-        swprintf(name, ARRAY_SIZE(name), L"%s%lx-%lx", dcomp_shared_prefix, GetCurrentProcessId(),
-                (unsigned long)InterlockedIncrement(&counter));
-        if (!(handle = CreateEventW(NULL, TRUE, FALSE, name))) return HRESULT_FROM_WIN32(GetLastError());
-        if (GetLastError() != ERROR_ALREADY_EXISTS)
-        {
-            *out = handle;
-            return S_OK;
-        }
-        CloseHandle(handle);
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        free(share);
+        return hr;
     }
-    return E_FAIL;
+    if (!DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &share->object, 0, FALSE, DUPLICATE_SAME_ACCESS))
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        CloseHandle(handle);
+        free(share);
+        return hr;
+    }
+    share->refcount = 1;   /* the registry's */
+    list_init(&share->visuals);
+
+    /* the shares whose handles were all closed leave the registry first */
+    list_init(&dropped);
+    AcquireSRWLockExclusive(&dcomp_shared_lock);
+    dcomp_share_sweep_locked(&dropped);
+    list_add_tail(&dcomp_share_registry, &share->entry);
+    ReleaseSRWLockExclusive(&dcomp_shared_lock);
+    dcomp_share_release_dropped(&dropped);
+
+    TRACE("share %p, handle %p.\n", share, handle);
+    *out = handle;
+    return S_OK;
 }
 
 /* The compositor clock (documented in the Windows SDK, dcomp.h). Wine has no system compositor, so the clock is a fixed 60 Hz clock
