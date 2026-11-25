@@ -6701,6 +6701,30 @@ static void ignore_server_ioctl_struct_holes( ULONG code, const void *in_buffer,
 }
 
 
+/* FSCTL_SET_ZERO_DATA: deallocate the range where the file system can, else write zeros */
+static NTSTATUS zero_file_range( int fd, LONGLONG start, LONGLONG end )
+{
+    static const char zeros[65536];
+    ssize_t ret;
+
+    if (start >= end) return STATUS_SUCCESS;
+#ifdef FALLOC_FL_PUNCH_HOLE
+    if (!fallocate( fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, start, end - start )) return STATUS_SUCCESS;
+    if (errno != EOPNOTSUPP && errno != ENOSYS) return errno_to_status( errno );
+#endif
+    while (start < end)
+    {
+        if ((ret = pwrite( fd, zeros, min( end - start, (LONGLONG)sizeof(zeros) ), start )) == -1)
+        {
+            if (errno == EINTR) continue;
+            return errno_to_status( errno );
+        }
+        start += ret;
+    }
+    return STATUS_SUCCESS;
+}
+
+
 /******************************************************************************
  *              NtFsControlFile   (NTDLL.@)
  */
@@ -6788,6 +6812,27 @@ NTSTATUS WINAPI NtFsControlFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE ap
         TRACE("FSCTL_SET_SPARSE: Ignoring request\n");
         status = STATUS_SUCCESS;
         break;
+
+    case FSCTL_SET_ZERO_DATA:
+    {
+        const FILE_ZERO_DATA_INFORMATION *info = in_buffer;
+        struct stat st;
+
+        if (!info || in_size < sizeof(*info) || info->FileOffset.QuadPart < 0 ||
+            info->BeyondFinalZero.QuadPart < info->FileOffset.QuadPart)
+        {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+        if ((status = server_get_unix_fd( handle, FILE_WRITE_DATA, &fd, &needs_close, NULL, NULL ))) break;
+        if (fstat( fd, &st ) == -1) status = errno_to_status( errno );
+        /* zeroing past the end does not extend the file */
+        else status = zero_file_range( fd, info->FileOffset.QuadPart,
+                                       min( info->BeyondFinalZero.QuadPart, (LONGLONG)st.st_size ) );
+        if (needs_close) close( fd );
+        break;
+    }
+
     default:
         return server_ioctl_file( handle, event, apc, apc_context, io, code,
                                   in_buffer, in_size, out_buffer, out_size );
