@@ -4467,13 +4467,14 @@ static ULONG STDMETHODCALLTYPE dcomp_##prefix##_Release(type *iface) \
     return IDCompositionDevice_Release(&dev->IDCompositionDevice_iface); \
 }
 
-/* A commit has completed when dcomp_device_internal_commit returns, with success or not: the event of SetCommitCompletionEvent is signaled then. */
+/* A commit has completed when dcomp_device_internal_commit returns, with success or not: the event of SetCommitCompletionEvent is signaled then.
+ * Only a commit that succeeded submitted a batch (methods 45 and 46 count those). */
 static HRESULT dcomp_device_commit(struct dcomp_device *dev)
 {
     HRESULT hr = dcomp_device_internal_commit(dev);
 
     EnterCriticalSection(&dev->cs);
-    ++dev->batch;
+    if (SUCCEEDED(hr)) ++dev->batch;
     if (dev->commit_event) SetEvent(dev->commit_event);
     LeaveCriticalSection(&dev->cs);
     return hr;
@@ -5557,8 +5558,9 @@ static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_OpenSharedObject(IDComposi
             || IsEqualGUID(iid, &IID_IDCompositionVisual2))
         return dcomp_shared_open_visual(dev, handle, iid, out);
 
+    /* Windows 11 answers E_INVALIDARG for another interface (IDispatch) */
     WARN("Unsupported interface %s.\n", debugstr_guid(iid));
-    return E_NOINTERFACE;
+    return E_INVALIDARG;
 }
 
 /* the interface of IDCompositionDesktopDevice and its private methods, in the order of the vtable */

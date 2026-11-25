@@ -449,7 +449,34 @@ static void test_shared_visual(void)
             block = 0xdeadbeef00000000ull;
             hr = method46(desktop, &block);
             ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-            ok(block == 0xdeadbeef00000000ull, "Got block %#I64x.\n", block);
+            /* Windows 11 may read 1 already (Notepad's trace shows 1 before its first Commit; the system compositor's own
+             * count, not this device's) */
+            ok(block == 0xdeadbeef00000000ull || broken(block == 0xdeadbeef00000001ull), "Got block %#I64x.\n", block);
+
+#ifdef __x86_64__
+            /* method 45 (the newest submitted batch; its stack size on i386 is not measured): 0 on a fresh device too; after a
+             * Commit that completed, the completed batch is at least 1 and the submitted one is not behind it */
+            {
+                method46_t method45 = (*(method46_t **)desktop)[45];
+                DWORD submitted = 0xdeadbeef, completed = 0xdeadbeef;
+
+                hr = method45(desktop, &submitted);
+                ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                ok(!submitted || broken(submitted == 1), "Got submitted %lu.\n", submitted);
+
+                hr = IDCompositionDesktopDevice_Commit(desktop);
+                ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                hr = IDCompositionDesktopDevice_WaitForCommitCompletion(desktop);
+                ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                hr = method46(desktop, &completed);
+                ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                hr = method45(desktop, &submitted);
+                ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                /* Windows 11 sometimes still reads 0 (two runs out of three) */
+                ok(completed >= 1 || broken(!completed), "Got completed %lu.\n", completed);
+                ok(submitted >= completed, "Got submitted %lu, completed %lu.\n", submitted, completed);
+            }
+#endif
 
             if (is_wine)
             {
@@ -587,7 +614,7 @@ static void test_shared_visual(void)
 
     out = (void *)0xdeadbeef;
     hr = open(desktop, handle2, &IID_IDispatch, &out);
-    ok(hr == E_NOINTERFACE, "Got unexpected hr %#lx.\n", hr);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
     ok(!out, "Got %p.\n", out);
 
     hr = IDCompositionDesktopDevice_QueryInterface(desktop, &IID_IDCompositionDevice, (void **)&device);
