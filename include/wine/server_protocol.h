@@ -5763,6 +5763,7 @@ struct create_service_token_request
 {
     struct request_header __header;
     unsigned int   account;
+    /* VARARG(sid,sid); */
 };
 struct create_service_token_reply
 {

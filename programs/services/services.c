@@ -56,6 +56,7 @@ static const BOOL is_win64 = (sizeof(void *) > sizeof(int));
 /* Set when the server gave this services.exe the system role (SYSTEM token, ELEVATION_SYSTEM_ROLE_WORKORDER.md C3).
  * Only then are services started with the token of their account; otherwise they run with the caller's token. */
 static BOOL system_role;
+static BOOL in_session0;   /* WineExplorer: this service manager is session 0's own (session 0, with the system role) */
 
 static BOOL has_system_role(void)
 {
@@ -93,10 +94,18 @@ static void set_default_dacl(void)
 }
 
 /* The token of the account that ObjectName names. An empty name or LocalSystem is the SYSTEM token. Other accounts
- * (a user name needs a logon) are refused for now. *sddl is the security descriptor of the control pipe. */
-static DWORD get_service_token(const WCHAR *account, HANDLE *token, const WCHAR **sddl)
+ * (a user name needs a logon) are refused for now. *sddl is the security descriptor of the control pipe. A service
+ * whose SID type is not NONE gets its SID, NT SERVICE\name, as a group (B114). */
+static DWORD get_service_token(const WCHAR *account, const WCHAR *name, DWORD sid_type, HANDLE *token,
+                               const WCHAR **sddl)
 {
-    HANDLE handle;
+    struct
+    {
+        HANDLE handle;
+        BYTE sid[SECURITY_MAX_SID_SIZE];
+    } params;
+    UNICODE_STRING name_str;
+    DWORD sid_size = 0;
     NTSTATUS status;
     int type;
 
@@ -121,10 +130,18 @@ static DWORD get_service_token(const WCHAR *account, HANDLE *token, const WCHAR 
     }
     else return ERROR_SERVICE_LOGON_FAILED;
 
-    handle = (HANDLE)(ULONG_PTR)type;
-    if ((status = NtSetInformationProcess(GetCurrentProcess(), ProcessWineCreateServiceToken, &handle, sizeof(handle))))
+    params.handle = (HANDLE)(ULONG_PTR)type;
+    if (sid_type != SERVICE_SID_TYPE_NONE)
+    {
+        RtlInitUnicodeString(&name_str, name);
+        sid_size = sizeof(params.sid);
+        if ((status = RtlCreateServiceSid(&name_str, params.sid, &sid_size)))
+            return RtlNtStatusToDosError(status);
+    }
+    if ((status = NtSetInformationProcess(GetCurrentProcess(), ProcessWineCreateServiceToken, &params,
+                                          sizeof(params.handle) + sid_size)))
         return RtlNtStatusToDosError(status);
-    *token = handle;
+    *token = params.handle;
     return ERROR_SUCCESS;
 }
 
@@ -310,6 +327,19 @@ static void load_session_service(HKEY hKey, struct service_entry *entry)
         WINE_WARN("%s: WexSessionService is not 0 or 1, ignored\n", wine_dbgstr_w(entry->name));
 }
 
+/* WineExplorer: a service that means something only in session 0 (Local Accounts: its pipes are the bridge's and its helper
+ * is the machine's) has WexStartInSession0Only (REG_DWORD) 1: it is auto-started there and nowhere else, so a plain prefix
+ * and a session without session 0 do not run a copy of their own. It can still be started on demand. */
+static void load_session0_start_only(HKEY hKey, struct service_entry *entry)
+{
+    DWORD type, value, size = sizeof(value);
+
+    entry->session0_start_only = FALSE;
+    if (!RegQueryValueExW(hKey, L"WexStartInSession0Only", NULL, &type, (BYTE *)&value, &size) &&
+        type == REG_DWORD && size == sizeof(value))
+        entry->session0_start_only = value != 0;
+}
+
 static DWORD load_service_config(HKEY hKey, struct service_entry *entry)
 {
     DWORD err, value = 0;
@@ -334,7 +364,11 @@ static DWORD load_service_config(HKEY hKey, struct service_entry *entry)
         entry->is_wow64 = TRUE;
     if (load_reg_dword(hKey, L"DelayedAutoStart", &value) == 0 && value == 1)
         entry->delayed_autostart = TRUE;
+    if (load_reg_dword(hKey, L"ServiceSidType", &value) == 0 &&
+        (value == SERVICE_SID_TYPE_UNRESTRICTED || value == SERVICE_SID_TYPE_RESTRICTED))
+        entry->sid_type = value;
     load_session_service(hKey, entry);
+    load_session0_start_only(hKey, entry);
 
     WINE_TRACE("Image path           = %s\n", wine_dbgstr_w(entry->config.lpBinaryPathName) );
     WINE_TRACE("Group                = %s\n", wine_dbgstr_w(entry->config.lpLoadOrderGroup) );
@@ -418,6 +452,13 @@ DWORD save_service_config(struct service_entry *entry)
         err = reg_set_dword_value(hKey, L"DelayedAutoStart", entry->delayed_autostart);
     else
         err = RegDeleteValueW(hKey, L"DelayedAutoStart");
+    if (err != 0 && err != ERROR_FILE_NOT_FOUND)
+        goto cleanup;
+
+    if (entry->sid_type)
+        err = reg_set_dword_value(hKey, L"ServiceSidType", entry->sid_type);
+    else
+        err = RegDeleteValueW(hKey, L"ServiceSidType");
     if (err != 0 && err != ERROR_FILE_NOT_FOUND)
         goto cleanup;
 
@@ -691,6 +732,12 @@ static void scmdatabase_autostart_services(struct scmdatabase *db)
         if (!safeboot_allows(service))
         {
             TRACE("not starting %s in Safe Mode\n", wine_dbgstr_w(service->name));
+            release_service(service);
+            continue;
+        }
+        if (service->session0_start_only && !in_session0)
+        {
+            TRACE("%s is started in session 0 only\n", wine_dbgstr_w(service->name));
             release_service(service);
             continue;
         }
@@ -1297,7 +1344,8 @@ found:
         return ERROR_SUCCESS;
     }
 
-    if ((err = get_service_token(service_entry->config.lpServiceStartName, &service_token, &sddl)))
+    if ((err = get_service_token(service_entry->config.lpServiceStartName, service_entry->name,
+                                 service_entry->sid_type, &service_token, &sddl)))
     {
         WINE_ERR("cannot start %s as %s, error = %lu\n", wine_dbgstr_w(service_entry->name),
                  wine_dbgstr_w(service_entry->config.lpServiceStartName), err);
@@ -1789,7 +1837,9 @@ static void init_forward_mode(void)
 {
     DWORD session = 0;
 
-    if (!ProcessIdToSessionId(GetCurrentProcessId(), &session) || !session) return;
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &session)) session = 0;
+    in_session0 = !session && system_role;
+    if (!session) return;
     if ((forward_mode = forward_available()))
         WINE_TRACE("services that are not the session's are session 0's\n");
 }

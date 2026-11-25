@@ -183,6 +183,7 @@ AddService=NDIS,0x800,NDISService
 AddService=nsiproxy,0x800,NsiProxyService
 AddService=wexelevate,0,WexElevateService
 AddService=gpsvc,0,WexPolicyService
+AddService=wexaccounts,0,WexAccountsService
 
 [DefaultInstall.ntx86.Services]
 AddService=BITS,0,BITSService
@@ -206,6 +207,7 @@ AddService=NDIS,0x800,NDISService
 AddService=nsiproxy,0x800,NsiProxyService
 AddService=wexelevate,0,WexElevateService
 AddService=gpsvc,0,WexPolicyService
+AddService=wexaccounts,0,WexAccountsService
 
 [DefaultInstall.ntamd64.Services]
 AddService=BITS,0,BITSService
@@ -229,6 +231,7 @@ AddService=NDIS,0x800,NDISService
 AddService=nsiproxy,0x800,NsiProxyService
 AddService=wexelevate,0,WexElevateService
 AddService=gpsvc,0,WexPolicyService
+AddService=wexaccounts,0,WexAccountsService
 
 [DefaultInstall.ntarm64.Services]
 AddService=BITS,0,BITSService
@@ -252,6 +255,7 @@ AddService=NDIS,0x800,NDISService
 AddService=nsiproxy,0x800,NsiProxyService
 AddService=wexelevate,0,WexElevateService
 AddService=gpsvc,0,WexPolicyService
+AddService=wexaccounts,0,WexAccountsService
 
 [Strings]
 MciExtStr="Software\Microsoft\Windows NT\CurrentVersion\MCI Extensions"
@@ -1226,6 +1230,19 @@ ServiceBinary="%11%\wexelevate.exe"
 ServiceType=16
 StartType=3
 ErrorControl=1
+
+[WexAccountsService]
+AddReg=WexAccountsServiceKeys
+Description="The Windows side of Local Users and Groups: accounts through the accounts helper of the host"
+DisplayName="Local Accounts"
+ServiceBinary="%11%\wexaccounts.exe"
+ServiceType=16
+StartType=2
+ErrorControl=1
+
+[WexAccountsServiceKeys]
+HKLM,"System\CurrentControlSet\Services\wexaccounts","WexStartInSession0Only",0x10001,1
+HKLM,"System\CurrentControlSet\Services\wexaccounts","ServiceSidType",0x10001,1
 
 [WexPolicyService]
 Description="Writes the registry policy of the computer and of the users who log on"
