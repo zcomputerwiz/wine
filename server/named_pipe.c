@@ -504,6 +504,10 @@ static void pipe_end_disconnect( struct pipe_end *pipe_end, unsigned int status 
     if (pipe_end->client_process) release_object( pipe_end->client_process );
     pipe_end->client_primary = NULL;
     pipe_end->client_process = NULL;
+    /* nothing of the last client is reported once it is gone (a server end keeps them until the next connect else) */
+    pipe_end->client_pid = 0;
+    pipe_end->client_lease = 0;
+    pipe_end->client_session = PIPE_SESSION_UNKNOWN;
 
     pipe_end->state = status == STATUS_PIPE_DISCONNECTED
         ? FILE_PIPE_DISCONNECTED_STATE : FILE_PIPE_CLOSING_STATE;

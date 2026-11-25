@@ -3005,6 +3005,9 @@ void init_registry(void)
 
     /* go back to the server dir */
     if (fchdir( server_dir_fd ) == -1) fatal_error( "chdir to server dir: %s\n", strerror( errno ));
+
+    /* WineExplorer: the machine hive is loaded, the system role's switch can be read now and for good */
+    sysrun_latch_role();
 }
 
 /* save a registry branch to a file */

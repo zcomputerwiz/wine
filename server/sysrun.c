@@ -198,17 +198,26 @@ int sysrun_raise_for_current(void)
 
 /* ---- the system role (C3) ---------------------------------------------------------------------------------- */
 
-/* Latched at the first call, after the registry is loaded and before any client: the bits a process gets under one
- * value of the role must never be read under the other (a live value let a system-group process's child keep raised
- * file access, or a flip turn the role on for processes created without it). As with hive saving, the live value is
- * not used; a change takes effect when the server starts again. */
+/* Latched once, by init_registry when the machine hive is loaded and before any client: the bits a process gets under
+ * one value of the role must never be read under the other (a live value let a system-group process's child keep
+ * raised file access, or a flip turn the role on for processes created without it). As with hive saving, the live
+ * value is not used; a change takes effect when the server starts again. Not latched earlier, where the hive is not
+ * there yet and the helper would read as unset (off) for the server's whole life.
+ *
+ * With the role off a launcher-started server keeps the creator's system group for a child that has neither a
+ * service token nor an elevated one (sysrun_process_created returns first). That mode is only for test images
+ * (WEX_ELEVATION=0): every installed machine has the role on since 2026-11-23 (setup-machine-root.sh). */
+static int role_latched = -1;
+
+void sysrun_latch_role(void)
+{
+    if (role_latched < 0) role_latched = sysrun_active && elevation_enforced() ? 1 : 0;
+}
+
 static int system_role_enabled(void)
 {
-    static int enabled = -1;
-
     if (!sysrun_active) return 0;
-    if (enabled < 0) enabled = elevation_enforced() ? 1 : 0;
-    return enabled;
+    return role_latched >= 0 ? role_latched : elevation_enforced();
 }
 
 /* Safe Mode (docs/SAFE_MODE.md): /run/wineexplorer/bootmode, a regular file that root owns and others cannot write,
