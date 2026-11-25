@@ -100,6 +100,8 @@ extern unsigned int token_get_session_id( struct token *token );
 extern data_size_t token_describe( struct token *token, void *data, data_size_t size );
 extern struct token *token_create_described( const void *data, data_size_t size );
 extern int token_can_act( const struct token *token );
+extern void token_set_link_bound( struct token *token, unsigned int session );
+extern unsigned int token_caller_class( struct token *token );  /* WEX_CALLER_* (wine/wex_caller.h) */
 extern void token_get_ids( const struct token *token, struct luid *token_id, struct luid *modified_id );
 extern int token_sid_present( struct token *token, const struct sid *sid, int deny );
 

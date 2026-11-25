@@ -1111,6 +1111,7 @@ struct token *link_bound_token( uid_t uid, unsigned int session, const void *des
         *status = STATUS_ACCESS_DENIED;
         return NULL;
     }
+    token_set_link_bound( token, session );  /* H3: never this server's own system, whatever it says */
     *status = STATUS_SUCCESS;
     return token;
 }

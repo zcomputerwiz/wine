@@ -47,6 +47,8 @@
 #include "e1s_token.h"
 #include "wine/wex_token.h"
 #include "wine/wex_profile.h"
+#define WEX_CALLER_CONSTANTS_ONLY
+#include "wine/wex_caller.h"
 
 #define MAX_SUBAUTH_COUNT 1
 
@@ -151,6 +153,8 @@ struct token
     struct uwp_context *package;    /* package context (UWP compatibility) */
     int            package_pending; /* no process image has been checked against the context yet */
     int            windows_sd;      /* R7: Windows' descriptor was given (token_protect_system, token_protect_elevated) */
+    int            link_bound;      /* WineExplorer H3: made by link_bound_token from another server's description */
+    unsigned int   link_session;    /* ... for that link's session */
 };
 
 struct privilege
@@ -793,6 +797,8 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
     token->lineage_id = src_token->lineage_id;
     token->auth_id = src_token->auth_id;
     token->e1s_account = src_token->e1s_account;
+    token->link_bound = src_token->link_bound;  /* a copy of a session's token stays a session's (H3) */
+    token->link_session = src_token->link_session;
 
     /* copy groups */
     LIST_FOR_EACH_ENTRY( group, &src_token->groups, struct group, entry )
@@ -3059,6 +3065,51 @@ static int desc_get_groups( const char *buf, data_size_t size, data_size_t *pos,
         list_add_tail( list, &group->entry );
     }
     return 1;
+}
+
+/* WineExplorer H3 (docs/EVENTLOG_DESIGN.md, the caller class): a token made from another server's description over
+ * a link (link_bound_token) records it; its copies keep it */
+void token_set_link_bound( struct token *token, unsigned int session )
+{
+    token->link_bound = 1;
+    token->link_session = session;
+}
+
+static int token_has_service_group( struct token *token )
+{
+    struct group *group;
+
+    LIST_FOR_EACH_ENTRY( group, &token->groups, struct group, entry )
+    {
+        if (group->sid.revision != SID_REVISION || memcmp( group->sid.id_auth, service_sid.id_auth, 6 ) ||
+            !group->sid.sub_count)
+            continue;
+        if (group->sid.sub_auth[0] == SECURITY_SERVICE_RID || group->sid.sub_auth[0] == 80) return 1;
+    }
+    return 0;
+}
+
+/* The one decision of who a service's caller is (E1 and U1), for every service of session 0:
+ * - system-local: SYSTEM, LocalService or NetworkService of this server, which is session 0 or a plain prefix's own;
+ *   never a token from another server's link, nor a system role in a user's server (it counts as the user, E1);
+ * - elevated administrator: a real user (not one of those accounts, no SERVICE group or service SID) with
+ *   Administrators enabled, High integrity or more and a token that is not the limited one (T1 believes it);
+ * - user: anyone else authenticated (the service accounts and service groups of a link-bound token included);
+ * - none: no token, or anonymous. */
+unsigned int token_caller_class( struct token *token )
+{
+    static const struct sid anonymous_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_ANONYMOUS_LOGON_RID } };
+    int service_account;
+
+    if (!token || equal_sid( token->user, &anonymous_sid )) return WEX_CALLER_NONE;
+    service_account = token_service_account( token ) != -1;
+    if (service_account)
+        return !token->link_bound && (session0_server || !session0_client) ? WEX_CALLER_SYSTEM_LOCAL : WEX_CALLER_USER;
+    if (token_has_service_group( token )) return WEX_CALLER_USER;
+    if (token_sid_present( token, &builtin_admins_sid, FALSE ) && token->integrity_rid >= SECURITY_MANDATORY_HIGH_RID &&
+        token->elevation != TokenElevationTypeLimited)
+        return WEX_CALLER_ELEVATED_ADMIN;
+    return WEX_CALLER_USER;
 }
 
 /* WineExplorer X0: can the token act (a primary token, or an impersonation token at impersonation or delegation

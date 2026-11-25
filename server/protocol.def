@@ -2305,6 +2305,16 @@ struct process_info
 @END
 
 
+/* WineExplorer (H3): the class of a service's caller, decided by the server (token_caller_class, WEX_CALLER_* of
+   wine/wex_caller.h): the client of the connection of a pipe server end, or a token */
+@REQ(get_caller_class)
+    obj_handle_t handle;       /* a pipe server end, or a token (TOKEN_QUERY) */
+    int          is_pipe;      /* 1: handle is a pipe server end */
+@REPLY
+    unsigned int caller_class; /* WEX_CALLER_* */
+@END
+
+
 /* WineExplorer system tier: the read end of a registry channel's wait pipe, where session 0 reports changes */
 @REQ(set_registry_relay)
     int          fd;           /* the pipe, in flight */

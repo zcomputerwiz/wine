@@ -42,6 +42,7 @@
 #include "wine/debug.h"
 
 #include "wevtsvc_private.h"
+#include "wine/wex_caller.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(eventlog);
 
@@ -124,6 +125,7 @@ struct connection
     HANDLE             token;            /* the caller's, at identification level at least */
     struct account    *account;
     BOOL               service_account;  /* SYSTEM, LocalService or NetworkService */
+    unsigned int       caller_class;     /* WEX_CALLER_*, from the server (H3) */
     BOOL               security_priv;    /* SeSecurityPrivilege enabled */
     DWORD              client_pid;       /* tracing only, never for decisions */
     struct log_handle  handles[MAX_CONN_HANDLES];
@@ -290,9 +292,9 @@ static DWORD log_rights( struct connection *conn, struct evt_log *log )
             rights |= desired;
     }
     LocalFree( sd );
-    /* E1, L1's form: a session's system role (a service account's token from a session, over the bridge) counts as
-     * the session's user: read and write, read only on System, never clear. Session 0's own processes are the system */
-    if (!conn->listener->local && conn->service_account)
+    /* E1, L1's form: a service account that the server does not call this server's own system (a session's system role,
+     * over the bridge) counts as its user: read and write, read only on System, never clear (H3: get_caller_class) */
+    if (conn->caller_class != WEX_CALLER_SYSTEM_LOCAL && conn->service_account)
         rights &= system ? RIGHT_READ : RIGHT_READ | RIGHT_WRITE;
     return rights;
 }
@@ -366,6 +368,7 @@ static BOOL identify( struct connection *conn )
                             IsWellKnownSid( user->User.Sid, WinLocalServiceSid ) ||
                             IsWellKnownSid( user->User.Sid, WinNetworkServiceSid );
     if (!conn->listener->local && !restrict_service_groups( conn )) return FALSE;
+    conn->caller_class = wex_caller_class_of_pipe( conn->pipe );  /* the server decides (H3) */
     LookupPrivilegeValueW( NULL, L"SeSecurityPrivilege", &privs.Privilege[0].Luid );
     conn->security_priv = PrivilegeCheck( conn->token, &privs, &held ) && held;
     /* a local connection in session 0 must be a session 0 process (a session reaches only the bridged name; a local
@@ -651,6 +654,11 @@ static DWORD dispatch( struct connection *conn, const struct wex_evtlog_header *
 {
     struct log_handle *h = NULL;
 
+    if (req->op == WEX_EVTLOG_CALLER)
+    {
+        reply->hdr.arg[0] = conn->caller_class;  /* who the server says this caller is (tests of H3) */
+        return ERROR_SUCCESS;
+    }
     if (req->op != WEX_EVTLOG_OPEN && !(h = get_handle( conn, req->handle ))) return ERROR_INVALID_HANDLE;
     switch (req->op)
     {
