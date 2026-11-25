@@ -872,6 +872,11 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->peer_pid        = -1;
     process->peer_uid        = -1;
     process->peer_gid        = -1;
+    /* sysrun_process_created sets these only for the system role's processes: left alone they kept a freed process's
+     * bits, and a user's threads got a service's descriptor (B108) */
+    process->sysrun_protected = 0;
+    process->sysrun_account  = 0;
+    process->sysrun_pending  = 0;
     if (sysrun_active)  /* the connection's credentials, never the unix_pid the client sends */
     {
         struct ucred cred;
