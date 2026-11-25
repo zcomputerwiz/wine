@@ -1393,8 +1393,10 @@ static void session0_link_event( struct fd *fd, int event )
     }
     else if (hdr->type == WEX_SESSION0_PIPE)
     {
-        /* T5.2: join the channel (a stream socket) to the named pipe, as a client with the described token */
-        struct token *token = create_bound_token( hdr + 1, hdr->desc_size, link->peer_uid, &reply.status );
+        /* T5.2: join the channel (a stream socket) to the named pipe, as a client with the described token; L1 (E6):
+         * bound to the link, its account and its session (a description naming another session is refused) */
+        struct token *token = link_bound_token( link->peer_uid, peer_session( link ), hdr + 1, hdr->desc_size,
+                                                &reply.status );
         WCHAR *name = malloc( hdr->name_size ? hdr->name_size : 1 );
 
         if (!token || !name)
