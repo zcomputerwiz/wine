@@ -412,8 +412,11 @@ void sysrun_main_image( struct process *process, struct fd *fd )
 #ifdef WEX_E1S6_TRANSPORT_TEST
     e1lab_sysrun_main_image( process, fd, system_role_enabled() );  /* R5: wex_e1lab_sysrun.c */
 #endif
-    if (!process->sysrun_pending)
+    /* only sysrun_process_created sets sysrun_pending, and only with the system role; checking the role here too
+     * keeps a stale bit (B112) from ever giving a process SYSTEM's token */
+    if (!process->sysrun_pending || !system_role_enabled())
     {
+        process->sysrun_pending = 0;
         if (broker) pin_broker( process );
         return;
     }

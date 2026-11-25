@@ -843,6 +843,8 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->e1s6_image_seen = 0;
     process->e1s6_broker_generation = 0;
     process->e1s6_primary = NULL;
+    memset( &process->e1s6_token_id, 0, sizeof(process->e1s6_token_id) );
+    memset( &process->e1s6_modified_id, 0, sizeof(process->e1s6_modified_id) );
 #ifdef WEX_E1S6_TRANSPORT_TEST
     process->e1s6_control_fd = -1;
 #endif

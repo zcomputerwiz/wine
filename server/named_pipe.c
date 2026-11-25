@@ -1568,6 +1568,9 @@ static void init_pipe_end( struct pipe_end *pipe_end, struct named_pipe *pipe,
     pipe_end->client_impersonated = 0;
     pipe_end->client_session = 0;
     pipe_end->client_lease = 0;
+    /* also on the bridge's user side, which sets neither: FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE reads them */
+    pipe_end->client_pid = 0;
+    pipe_end->server_pid = 0;
     memset( &pipe_end->consumed_writer, 0, sizeof(pipe_end->consumed_writer) );
     pipe_end->binding_reads = 0;
     pipe_end->consumed_valid = 0;
