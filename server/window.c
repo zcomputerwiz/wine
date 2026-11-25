@@ -622,13 +622,30 @@ void post_desktop_message( struct desktop *desktop, unsigned int message,
     if (win && win->thread) post_message( win->handle, message, wparam, lparam );
 }
 
+/* A new desktop window takes over a desktop whose window lost its thread (the process that managed the desktop, usually
+ * explorer, died while the desktop lives on). The windows of the other processes stay: they become children of the new
+ * desktop window, in the same order, and the ownerless desktop window goes away. */
+static void take_over_desktop_window( struct window *win, struct window *old )
+{
+    struct window *child, *next;
+
+    LIST_FOR_EACH_ENTRY_SAFE_REV( child, next, &old->children, struct window, entry )
+        if (child->handle) set_parent_window( child, win );
+    LIST_FOR_EACH_ENTRY_SAFE( child, next, &old->unlinked, struct window, entry )
+        if (child->handle) set_parent_window( child, win );
+
+    old->style &= ~WS_VISIBLE;   /* nothing to expose: the new desktop window is the one that paints */
+    if (!set_parent_window( old, win )) return;
+    free_window_handle( old );
+}
+
 /* create a new window structure (note: the window is not linked in the window tree) */
 static struct window *create_window( struct window *parent, struct window *owner, atom_t atom,
                                      mod_handle_t class_instance, bool ansi, unsigned int dpi_context,
                                      struct ratio dpi, struct ratio raw_dpi )
 {
     data_size_t extra_size, private_size;
-    struct window *win = NULL;
+    struct window *win = NULL, *old_top = NULL;
     struct desktop *desktop;
     struct window_class *class;
     struct obj_locator class_locator;
@@ -646,7 +663,15 @@ static struct window *create_window( struct window *parent, struct window *owner
     if (!parent)  /* null parent is only allowed for desktop or HWND_MESSAGE top window */
     {
         if (is_desktop_class( class ))
-            parent = desktop->top_window;  /* use existing desktop if any */
+        {
+            if (desktop->top_window && !desktop->top_window->thread)
+            {
+                /* the desktop window's owner is gone: this one replaces it */
+                old_top = desktop->top_window;
+                desktop->top_window = NULL;
+            }
+            else parent = desktop->top_window;  /* use existing desktop if any */
+        }
         else if (is_message_class( class ))
             /* use desktop window if message window is already created */
             parent = desktop->msg_window ? desktop->top_window : NULL;
@@ -726,6 +751,7 @@ static struct window *create_window( struct window *parent, struct window *owner
             assert( !desktop->top_window );
             desktop->top_window = win;
             set_process_default_desktop( current->process, desktop, current->desktop );
+            if (old_top) take_over_desktop_window( win, old_top );
         }
         else
         {
@@ -738,6 +764,7 @@ static struct window *create_window( struct window *parent, struct window *owner
     return win;
 
 failed:
+    if (old_top && !desktop->top_window) desktop->top_window = old_top;
     if (win)
     {
         if (win->handle)
