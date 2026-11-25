@@ -706,10 +706,21 @@ static unsigned int relink_delay;  /* seconds, doubled after each failed try up 
 static int request_session_id( unsigned int wanted );
 static void schedule_relink( unsigned int delay );
 
+#ifdef WEX_X0_LAB_TEST
+static int lab_relink_held;  /* the lab keeps the link down (past the owner's bound for a lost peer) */
+#endif
+
 static void relink( void *private )
 {
     relink_timeout = NULL;
     if (session_link) return;
+#ifdef WEX_X0_LAB_TEST
+    if (lab_relink_held)
+    {
+        schedule_relink( 1 );
+        return;
+    }
+#endif
     if (request_session_id( default_session_id ))
     {
         unsigned int i, block;
@@ -984,6 +995,12 @@ void session0_init( int server_mode )
 void session0_lab_drop_link(void)
 {
     if (session_link) shutdown( get_unix_fd( session_link->fd ), SHUT_RDWR );
+}
+
+/* the lab: no relink while held (tries go on each second); released, the next try links */
+void session0_lab_hold_relink( int held )
+{
+    lab_relink_held = held;
 }
 #endif
 

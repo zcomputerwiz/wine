@@ -599,8 +599,21 @@ static void lab_command( struct lab_client *client, char *line )
     else if (!strcmp( verb, "droplink" ) && !session0_server)
     {
         /* forge: the HELLO on the next link names another pid (the peer must refuse it) */
+        /* hold: no relink until "relink" (to stay down past the owner's bound for a lost peer) */
         if (args.words == 2 && !strcmp( args.word[1], "forge" )) x_lab_forge_hello = 1;
+        if (args.words == 2 && !strcmp( args.word[1], "hold" )) session0_lab_hold_relink( 1 );
         session0_lab_drop_link();
+        strcpy( text, "status=0\n" );
+    }
+    else if (!strcmp( verb, "relink" ) && !session0_server)
+    {
+        session0_lab_hold_relink( 0 );
+        strcpy( text, "status=0\n" );
+    }
+    else if (!strcmp( verb, "lostbound" ) && args.words == 2)
+    {
+        /* seconds an owner keeps a peer whose link is lost (WEX_X_LOST_SECONDS by default) */
+        x_lost_seconds = strtoul( args.word[1], NULL, 0 );
         strcpy( text, "status=0\n" );
     }
     else if (!strcmp( verb, "frame" ) && args.words >= 2)

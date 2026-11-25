@@ -174,6 +174,7 @@ static const struct x_kind_ops *kinds[X_MAX_KINDS];
 static unsigned int conn_numbers;
 static int defer_pings;
 int x_lab_forge_hello;
+unsigned int x_lost_seconds = WEX_X_LOST_SECONDS;  /* the lab may shorten it */
 struct list x_all_held = LIST_INIT( x_all_held );
 
 static void x_serve( struct x_conn *conn, const struct wex_x_header *hdr, const char *body, size_t size );
@@ -678,7 +679,7 @@ static void x_lost_tick( void *private )
         x_peer_end( peer, "its server is gone" );
         return;
     }
-    if (monotonic_time - peer->lost_since >= (timeout_t)WEX_X_LOST_SECONDS * TICKS_PER_SEC)
+    if (monotonic_time - peer->lost_since >= (timeout_t)x_lost_seconds * TICKS_PER_SEC)
     {
         x_peer_end( peer, "its link did not come back" );
         return;
@@ -705,6 +706,13 @@ static void x_hello( struct x_conn *conn, const char *body, size_t size )
     {
         if (peer->uid == conn->uid && !memcmp( &peer->epoch, &hello.epoch, sizeof(hello.epoch) ))
         {
+            /* the same epoch, but it no longer keeps us (it dropped its peer, e.g. after WEX_X_LOST_SECONDS): our
+             * references into it are gone there, so ours are dead too and our calls fail; a fresh peer follows */
+            if (hello.peer_nonce != own_epoch.nonce)
+            {
+                x_peer_end( peer, "it started fresh" );
+                continue;
+            }
             found = peer;
             continue;
         }
@@ -784,6 +792,12 @@ struct x_conn *x_conn_create( struct fd *fd, uid_t uid, pid_t pid, unsigned int 
 
     memset( &hello, 0, sizeof(hello) );
     hello.epoch = own_epoch;
+    /* the epoch this side still keeps for the server at the other end (its process: SO_PEERCRED), if any */
+    {
+        struct x_peer *peer;
+        LIST_FOR_EACH_ENTRY( peer, &peers, struct x_peer, entry )
+            if (peer->uid == uid && peer->epoch.pid == (unsigned int)pid) hello.peer_nonce = peer->epoch.nonce;
+    }
     if (x_lab_forge_hello)  /* the lab: one HELLO that names another pid, which the peer must refuse */
     {
         x_lab_forge_hello = 0;

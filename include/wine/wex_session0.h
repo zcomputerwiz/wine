@@ -158,6 +158,9 @@ struct wex_x_hello
     struct wex_x_epoch epoch;
     unsigned int       connection; /* session 0: its number for this connection; a user's server: 0 */
     unsigned int       session;    /* session 0: the link's session; a user's server: its own */
+    unsigned long long peer_nonce; /* the nonce of the epoch the sender still keeps for the connecting server, or 0:
+                                    * when it is not the receiver's own, the sender started fresh (it dropped the
+                                    * peer), and the receiver ends its side of that peer too */
 };
 
 struct wex_x_open

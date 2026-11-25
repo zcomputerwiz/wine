@@ -68,6 +68,7 @@ extern int e1lab_sysrun_e1s6_endorse( const void *data, unsigned int size );
  * server's session link */
 extern void x0lab_init(void);
 extern void session0_lab_drop_link(void);
+extern void session0_lab_hold_relink( int held );
 #endif /* WEX_X0_LAB_TEST */
 
 #endif /* __WINE_SERVER_WEX_E1LAB_H */
