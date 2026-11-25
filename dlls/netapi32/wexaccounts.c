@@ -636,16 +636,17 @@ NET_API_STATUS wexa_user_getinfo( const WCHAR *username, DWORD level, BYTE **buf
     return build_users( level, &u, 1, bufptr );
 }
 
-/* A blank password is refused for now: crypt("") would give the unix account a real empty password, and the PAM rules of
- * a Debian system then let any local user su into it. (Whether the XP behaviour, a blank password that works at the
- * greeter only, is wanted is the owner's decision.) */
+/* What goes on the wire for a password: a crypt(3) SHA-512 hash made here, or the empty string for a blank password (a NULL
+ * or empty password, as on Windows). A blank is never crypt(""), which would be a real password that every PAM stack takes:
+ * the accounts helper makes an empty shadow field that only the logon screen accepts (docs/BLANK_PASSWORDS.md). */
 static NET_API_STATUS hash_of( const WCHAR *password, char *hash )
 {
     char utf8[3 * (PWLEN + 1) + 1];
     NET_API_STATUS ret = NERR_Success;
 
     hash[0] = 0;
-    if (!password || !*password || lstrlenW( password ) > PWLEN) return NERR_PasswordTooShort;
+    if (!password || !*password) return NERR_Success;
+    if (lstrlenW( password ) > PWLEN) return NERR_PasswordTooShort;
     if (!WideCharToMultiByte( CP_UTF8, 0, password, -1, utf8, sizeof(utf8), NULL, NULL )) ret = NERR_PasswordTooShort;
     else if (!wexa_hash_password( utf8, hash )) ret = ERROR_NOT_ENOUGH_MEMORY;
     SecureZeroMemory( utf8, sizeof(utf8) );
@@ -697,18 +698,18 @@ NET_API_STATUS wexa_user_add( DWORD level, BYTE *buf, DWORD *parm_err )
     else
     {
         put_u32( f, TYPE_STANDARD );
+        /* the trailing u32 asks for the account to be made disabled in the one operation: a disabled account is never
+         * enabled, even briefly, and the helper takes it away again if it cannot finish */
         if (!put_str( f, hash, strlen( hash ) )) ret = ERROR_INVALID_PARAMETER;
-        else ret = simple_call( WEXA_CREATE_USER, f, NERR_UserNotFound, NERR_BadUsername );
+        else
+        {
+            put_u32( f, (flags & UF_ACCOUNTDISABLE) ? 1 : 0 );
+            ret = simple_call( WEXA_CREATE_USER, f, NERR_UserNotFound, NERR_BadUsername );
+        }
     }
     SecureZeroMemory( f, sizeof(*f) );
     HeapFree( GetProcessHeap(), 0, f );
     SecureZeroMemory( hash, sizeof(hash) );
-    if (!ret && (flags & UF_ACCOUNTDISABLE))
-    {
-        /* the account is made enabled and locked at once afterwards; when the lock fails the account is removed again, so
-         * that a disabled account is never left enabled */
-        if ((ret = set_locked( info->usri2_name, TRUE ))) wexa_user_del( info->usri2_name );
-    }
     return ret;
 }
 
