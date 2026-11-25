@@ -1205,13 +1205,9 @@ static DWORD service_start_process(struct service_entry *service_entry, struct p
 
     service_lock(service_entry);
 
-    /* a deleted service never starts again, also from a restart after its failure */
-    if (is_marked_for_delete(service_entry))
-    {
-        service_unlock(service_entry);
-        return ERROR_SERVICE_MARKED_FOR_DELETE;
-    }
-
+    /* No marked-for-delete check here: a winedevice host's entry is marked for delete when it is made
+     * (add_winedevice_service) and then started. StartService refuses a deleted service (rpc.c), and so does a
+     * restart after a failure (failure_restart_callback). */
     if ((process = service_entry->process))
     {
         if (WaitForSingleObject(process->process, 0) == WAIT_TIMEOUT)
@@ -1564,7 +1560,7 @@ static void CALLBACK failure_restart_callback(TP_CALLBACK_INSTANCE *instance, vo
     start = !restarts_stopping;
     scmdatabase_unlock(db);
     service_lock(service);
-    /* not a service deleted or disabled meanwhile (service_start_process refuses a deleted one too) */
+    /* not a service deleted or disabled meanwhile */
     start = start && service->status.dwCurrentState == SERVICE_STOPPED && !is_marked_for_delete(service) &&
             service->config.dwStartType != SERVICE_DISABLED;
     service_unlock(service);
