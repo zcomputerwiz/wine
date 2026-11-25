@@ -717,7 +717,16 @@ static void conn_close( struct connection *conn )
     }
     CancelIoEx( conn->pipe, NULL );
     DisconnectNamedPipe( conn->pipe );
-    conn_free_if_done( conn );
+    /* freed by sweep_closed once no I/O of it is pending, never here: callers still use it */
+}
+
+/* the one place where closed connections are freed: after each completion has been handled */
+static void sweep_closed(void)
+{
+    struct connection *conn, *next;
+
+    LIST_FOR_EACH_ENTRY_SAFE( conn, next, &connections, struct connection, entry ) conn_free_if_done( conn );
+    LIST_FOR_EACH_ENTRY_SAFE( conn, next, &waiting, struct connection, entry ) conn_free_if_done( conn );
 }
 
 static void send_reply( struct connection *conn, const struct wex_evtlog_header *hdr, const BYTE *body, DWORD size )
@@ -969,8 +978,8 @@ static void serve(void)
             case IO_READ:    on_read( conn, error, bytes ); break;
             case IO_WRITE:   on_write( conn, error ); break;
             }
-            conn_free_if_done( conn );
         }
+        sweep_closed();
         if (WaitForSingleObject( changed, 0 ) == WAIT_OBJECT_0) reload_settings( key, changed );
         /* at most one flush a second (E5) */
         if (GetTickCount() - last_flush >= 1000)
