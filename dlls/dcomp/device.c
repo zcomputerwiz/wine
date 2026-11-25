@@ -5518,6 +5518,8 @@ static struct list dcomp_shared_list = LIST_INIT(dcomp_shared_list);
 static struct list dcomp_portal_list = LIST_INIT(dcomp_portal_list);   /* targets opened from shared handles */
 static SRWLOCK dcomp_shared_lock = SRWLOCK_INIT;
 
+static BOOL dcomp_is_shared_handle(HANDLE handle);
+
 static BOOL dcomp_same_object(HANDLE a, HANDLE b)
 {
     return a == b || !NtCompareObjects(a, b);
@@ -5754,23 +5756,23 @@ static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_OpenSharedObject(IDComposi
         REFIID iid, void **out)
 {
     struct dcomp_device *dev = impl_from_IDCompositionDesktopDevice(iface);
-    DWORD flags;
 
     TRACE("iface %p, handle %p, iid %s, out %p.\n", iface, handle, debugstr_guid(iid), out);
 
     if (!out) return E_POINTER;
     *out = NULL;
     if (!iid) return E_INVALIDARG;
-    if (!handle || handle == INVALID_HANDLE_VALUE || !GetHandleInformation(handle, &flags))
-        return HRESULT_FROM_WIN32(ERROR_INVALID_HANDLE);
+    /* only a handle of DCompositionCreateSharedVisualHandle (Windows 11: anything else, a closed handle too, is E_HANDLE) */
+    if (!dcomp_is_shared_handle(handle)) return E_HANDLE;
 
     if (IsEqualGUID(iid, &IID_IDCompositionTarget)) return dcomp_shared_open_target(dev, handle, iid, out);
     if (IsEqualGUID(iid, &IID_IUnknown) || IsEqualGUID(iid, &IID_IDCompositionVisual)
             || IsEqualGUID(iid, &IID_IDCompositionVisual2))
         return dcomp_shared_open_visual(dev, handle, iid, out);
 
+    /* Windows 11 answers E_INVALIDARG for another interface (IDispatch) */
     WARN("Unsupported interface %s.\n", debugstr_guid(iid));
-    return E_NOINTERFACE;
+    return E_INVALIDARG;
 }
 
 /* the interface of IDCompositionDesktopDevice and its private methods, in the order of the vtable */
@@ -5903,20 +5905,54 @@ HRESULT WINAPI DCompositionCreateDevice3(IUnknown *rendering_device, REFIID iid,
  * loader's message for the missing import names ordinal 1040). The signature is HRESULT (HANDLE *out), measured on Windows 11 with
  * tests/uwp/alpc/dcomp-visualhandle-probe.c: a NULL out is E_INVALIDARG, otherwise the handle is an object of type "Composition".
  * The compositor passes the handle on in a property of a visual; here the handle is an
- * anonymous event, which is what a caller can do with it (duplicate it, close it) until there is a system compositor to share
+ * event, which is what a caller can do with it (duplicate it, close it) until there is a system compositor to share
  * the visual with. (Windows returns an object of the type "Composition", here it is an event: NtQueryObject tells them apart.)
+ * The device opens only these handles: on Windows 11 a handle of another object (an event, a handle of
+ * DCompositionCreateSurfaceHandle, the process) or a closed handle is E_HANDLE (tests/uwp/alpc/dcomp-sharedopen-probe.c). So the
+ * event has a name of its own, which dcomp_is_shared_handle checks.
  */
+static const WCHAR dcomp_shared_prefix[] = L"WineDCompositionSharedVisual-";
+
+static BOOL dcomp_is_shared_handle(HANDLE handle)
+{
+    union { OBJECT_NAME_INFORMATION info; BYTE buffer[sizeof(OBJECT_NAME_INFORMATION) + 512 * sizeof(WCHAR)]; } name;
+    const WCHAR *component, *end;
+    size_t prefix_len = ARRAY_SIZE(dcomp_shared_prefix) - 1;
+    ULONG size;
+
+    if (!handle || handle == INVALID_HANDLE_VALUE) return FALSE;
+    if (NtQueryObject(handle, ObjectNameInformation, &name, sizeof(name), &size)) return FALSE;
+    if (!name.info.Name.Buffer || !name.info.Name.Length) return FALSE;
+    end = name.info.Name.Buffer + name.info.Name.Length / sizeof(WCHAR);
+    for (component = end; component > name.info.Name.Buffer && component[-1] != '\\'; --component) {}
+    return end - component > prefix_len && !wcsncmp(component, dcomp_shared_prefix, prefix_len);
+}
+
 HRESULT WINAPI DCompositionCreateSharedVisualHandle(HANDLE *out)
 {
+    static LONG counter;
+    WCHAR name[64];
     HANDLE handle;
+    unsigned int i;
 
     TRACE("(%p)\n", out);
 
     if (!out) return E_INVALIDARG;
     *out = NULL;
-    if (!(handle = CreateEventW(NULL, TRUE, FALSE, NULL))) return HRESULT_FROM_WIN32(GetLastError());
-    *out = handle;
-    return S_OK;
+    /* a name another process made first is not taken: the next one is tried */
+    for (i = 0; i < 16; ++i)
+    {
+        swprintf(name, ARRAY_SIZE(name), L"%s%lx-%lx", dcomp_shared_prefix, GetCurrentProcessId(),
+                (unsigned long)InterlockedIncrement(&counter));
+        if (!(handle = CreateEventW(NULL, TRUE, FALSE, name))) return HRESULT_FROM_WIN32(GetLastError());
+        if (GetLastError() != ERROR_ALREADY_EXISTS)
+        {
+            *out = handle;
+            return S_OK;
+        }
+        CloseHandle(handle);
+    }
+    return E_FAIL;
 }
 
 /* The compositor clock (documented in the Windows SDK, dcomp.h). Wine has no system compositor, so the clock is a fixed 60 Hz clock
