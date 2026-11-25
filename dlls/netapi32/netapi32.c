@@ -40,6 +40,7 @@
 #include "lmshare.h"
 #include "lmwksta.h"
 #include "netbios.h"
+#include "wexaccounts.h"
 #include "ifmib.h"
 #include "iphlpapi.h"
 #include "ntsecapi.h"
@@ -1131,6 +1132,9 @@ NET_API_STATUS WINAPI NetUserAdd(LPCWSTR servername,
     if((status = NETAPI_ValidateServername(servername)) != NERR_Success)
         return status;
 
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return wexa_user_add(level, bufptr, parm_err);
+
     switch(level)
     {
     /* Level 3 and 4 are identical for the purposes of NetUserAdd */
@@ -1204,6 +1208,9 @@ NET_API_STATUS WINAPI NetUserDel(LPCWSTR servername, LPCWSTR username)
     if((status = NETAPI_ValidateServername(servername))!= NERR_Success)
         return status;
 
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return wexa_user_del(username);
+
     if ((user = NETAPI_FindUser(username)) == NULL)
         return NERR_UserNotFound;
 
@@ -1237,6 +1244,9 @@ NetUserGetInfo(LPCWSTR servername, LPCWSTR username, DWORD level,
               "%s was requested.\n", debugstr_w(servername));
         return NERR_InvalidComputer;
     }
+
+    if (wexa_active())
+        return wexa_user_getinfo(username, level, bufptr);
 
     if(!NETAPI_FindUser(username) && !NETAPI_IsCurrentUser(username))
     {
@@ -1411,6 +1421,9 @@ NetUserGetLocalGroups(LPCWSTR servername, LPCWSTR username, DWORD level,
     if (status != NERR_Success)
         return status;
 
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return wexa_user_getlocalgroups(username, level, flags, bufptr, prefmaxlen, entriesread, totalentries);
+
     size = UNLEN + 1;
     NetApiBufferAllocate(size * sizeof(WCHAR), (LPVOID*)&currentuser);
     if (!GetUserNameW(currentuser, &size)) {
@@ -1474,6 +1487,9 @@ NetUserEnum(LPCWSTR servername, DWORD level, DWORD filter, LPBYTE* bufptr,
               "%s was requested.\n", debugstr_w(servername));
         return NERR_InvalidComputer;
     }
+
+    if (wexa_active())
+        return wexa_user_enum(level, filter, bufptr, prefmaxlen, entriesread, totalentries, resume_handle);
 
     if (!GetUserNameW(user, &len)) return GetLastError();
 
@@ -2128,6 +2144,11 @@ NET_API_STATUS WINAPI NetUserChangePassword(LPCWSTR domainname, LPCWSTR username
 
     TRACE("(%s, %s, ..., ...)\n", debugstr_w(domainname), debugstr_w(username));
 
+    /* with the machine's accounts in session 0 the old password cannot be checked here (docs/LOCAL_USERS_DESIGN.md):
+     * a change goes through NetUserSetInfo by an administrator */
+    if (!domainname && wexa_active())
+        return ERROR_NOT_SUPPORTED;
+
     if (samba_init() && !SAMBA_CALL( change_password, &params ))
         return NERR_Success;
 
@@ -2362,6 +2383,8 @@ NET_API_STATUS WINAPI NetLocalGroupAdd(
 {
     FIXME("(%s %ld %p %p) stub!\n", debugstr_w(servername), level, buf,
           parm_err);
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return ERROR_NOT_SUPPORTED;   /* other groups than Administrators and Users come later */
     return NERR_Success;
 }
 
@@ -2375,6 +2398,12 @@ NET_API_STATUS WINAPI NetLocalGroupAddMember(
 {
     FIXME("(%s %s %p) stub!\n", debugstr_w(servername),
           debugstr_w(groupname), membersid);
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+    {
+        LOCALGROUP_MEMBERS_INFO_0 member = { membersid };
+
+        return wexa_group_members(groupname, 0, (BYTE *)&member, 1, TRUE);
+    }
     return NERR_Success;
 }
 
@@ -2390,6 +2419,8 @@ NET_API_STATUS WINAPI NetLocalGroupAddMembers(
 {
     FIXME("(%s %s %ld %p %ld) stub!\n", debugstr_w(servername),
           debugstr_w(groupname), level, buf, totalentries);
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return wexa_group_members(groupname, level, buf, totalentries, TRUE);
     return NERR_Success;
 }
 
@@ -2401,6 +2432,8 @@ NET_API_STATUS WINAPI NetLocalGroupDel(
     LPCWSTR groupname)
 {
     FIXME("(%s %s) stub!\n", debugstr_w(servername), debugstr_w(groupname));
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return ERROR_NOT_SUPPORTED;   /* the two groups cannot be removed, and others do not exist yet */
     return NERR_Success;
 }
 
@@ -2414,6 +2447,12 @@ NET_API_STATUS WINAPI NetLocalGroupDelMember(
 {
     FIXME("(%s %s %p) stub!\n", debugstr_w(servername),
           debugstr_w(groupname), membersid);
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+    {
+        LOCALGROUP_MEMBERS_INFO_0 member = { membersid };
+
+        return wexa_group_members(groupname, 0, (BYTE *)&member, 1, FALSE);
+    }
     return NERR_Success;
 }
 
@@ -2429,6 +2468,8 @@ NET_API_STATUS WINAPI NetLocalGroupDelMembers(
 {
     FIXME("(%s %s %ld %p %ld) stub!\n", debugstr_w(servername),
           debugstr_w(groupname), level, buf, totalentries);
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return wexa_group_members(groupname, level, buf, totalentries, FALSE);
     return NERR_Success;
 }
 
@@ -2446,6 +2487,8 @@ NET_API_STATUS WINAPI NetLocalGroupEnum(
 {
     FIXME("(%s %ld %p %ld %p %p %p) stub!\n", debugstr_w(servername),
           level, bufptr, prefmaxlen, entriesread, totalentries, resumehandle);
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return wexa_group_enum(level, bufptr, prefmaxlen, entriesread, totalentries, resumehandle);
     *entriesread = 0;
     *totalentries = 0;
     return NERR_Success;
@@ -2466,6 +2509,9 @@ NET_API_STATUS WINAPI NetLocalGroupGetInfo(
 
     FIXME("(%s %s %ld %p) semi-stub!\n", debugstr_w(servername),
           debugstr_w(groupname), level, bufptr);
+
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return wexa_group_getinfo(groupname, level, bufptr);
 
     size = sizeof(*info) + sizeof(WCHAR) * (lstrlenW(groupname)+1) + sizeof(commentW);
     NetApiBufferAllocate(size, (LPVOID*)&info);
@@ -2497,6 +2543,9 @@ NET_API_STATUS WINAPI NetLocalGroupGetMembers(
     FIXME("(%s %s %ld %p %ld, %p %p %p) stub!\n", debugstr_w(servername),
           debugstr_w(localgroupname), level, bufptr, prefmaxlen, entriesread,
           totalentries, resumehandle);
+
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return wexa_group_getmembers(localgroupname, level, bufptr, prefmaxlen, entriesread, totalentries, resumehandle);
 
     if (level == 3)
     {
@@ -2547,6 +2596,8 @@ NET_API_STATUS WINAPI NetLocalGroupSetInfo(
 {
     FIXME("(%s %s %ld %p %p) stub!\n", debugstr_w(servername),
           debugstr_w(groupname), level, buf, parm_err);
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return ERROR_NOT_SUPPORTED;   /* a group's name and comment are not kept (the two groups are fixed) */
     return NERR_Success;
 }
 
@@ -2562,7 +2613,28 @@ NET_API_STATUS WINAPI NetLocalGroupSetMembers(
 {
     FIXME("(%s %s %ld %p %ld) stub!\n", debugstr_w(servername),
             debugstr_w(groupname), level, buf, totalentries);
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return ERROR_NOT_SUPPORTED;   /* the members are changed one at a time */
     return NERR_Success;
+}
+
+/************************************************************
+ *                NetUserSetInfo  (NETAPI32.@)
+ */
+NET_API_STATUS WINAPI NetUserSetInfo(LPCWSTR servername, LPCWSTR username, DWORD level, LPBYTE buf, LPDWORD parm_err)
+{
+    NET_API_STATUS status;
+
+    TRACE("(%s, %s, %ld, %p, %p)\n", debugstr_w(servername), debugstr_w(username), level, buf, parm_err);
+
+    if ((status = NETAPI_ValidateServername(servername)) != NERR_Success)
+        return status;
+
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return wexa_user_setinfo(username, level, buf, parm_err);
+
+    FIXME("(%s, %s, %ld, %p, %p) not supported here\n", debugstr_w(servername), debugstr_w(username), level, buf, parm_err);
+    return ERROR_NOT_SUPPORTED;
 }
 
 /************************************************************

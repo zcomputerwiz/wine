@@ -221,7 +221,7 @@
 @ stdcall NetUserModalsGet(wstr long ptr)
 @ stdcall NetUserModalsSet(wstr long ptr ptr)
 @ stub NetUserSetGroups
-@ stub NetUserSetInfo
+@ stdcall NetUserSetInfo(wstr wstr long ptr ptr)
 @ stdcall NetValidatePasswordPolicy(wstr ptr long ptr ptr)
 @ stdcall NetValidatePasswordPolicyFree(ptr)
 @ stdcall NetWkstaGetInfo(wstr long ptr)
