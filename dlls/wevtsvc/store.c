@@ -237,6 +237,28 @@ static DWORD rewrite_file( struct evt_log *log )
     return ERROR_SUCCESS;
 }
 
+/* a descriptor that grants everything to the service process's own user and nothing to others (LocalFree it) */
+static PSECURITY_DESCRIPTOR service_only_sd(void)
+{
+    BYTE buf[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    TOKEN_USER *user = (TOKEN_USER *)buf;
+    PSECURITY_DESCRIPTOR sd = NULL;
+    WCHAR *sid = NULL, sddl[128];
+    DWORD size = sizeof(buf);
+    HANDLE token;
+
+    if (!OpenProcessToken( GetCurrentProcess(), TOKEN_QUERY, &token )) return NULL;
+    if (GetTokenInformation( token, TokenUser, user, sizeof(buf), &size ) &&
+        ConvertSidToStringSidW( user->User.Sid, &sid ))
+    {
+        swprintf( sddl, ARRAY_SIZE(sddl), L"D:P(A;;FA;;;%s)", sid );
+        ConvertStringSecurityDescriptorToSecurityDescriptorW( sddl, SDDL_REVISION_1, &sd, NULL );
+        LocalFree( sid );
+    }
+    CloseHandle( token );
+    return sd;
+}
+
 /* the log of a name (Application, System, Security, or a log registered under the EventLog key); create: load it */
 struct evt_log *store_get_log( const WCHAR *name, BOOL create )
 {
@@ -261,9 +283,9 @@ struct evt_log *store_get_log( const WCHAR *name, BOOL create )
     list_init( &log->records );
     log->next = 1;
     file_name( log->name, log->path );
-    /* the service's account only: no session reads the file directly */
-    ConvertStringSecurityDescriptorToSecurityDescriptorW( L"D:P(A;;FA;;;SY)", SDDL_REVISION_1,
-                                                          &sa.lpSecurityDescriptor, NULL );
+    /* the service's own account only (SYSTEM in session 0, the prefix's user in a plain prefix): no session reads the
+     * file directly. Wine maps an entry for the owner to the Unix owner's bits; one for another SID would give none */
+    sa.lpSecurityDescriptor = service_only_sd();
     log->file = CreateFileW( log->path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, &sa, OPEN_ALWAYS,
                              FILE_ATTRIBUTE_NORMAL, NULL );
     LocalFree( sa.lpSecurityDescriptor );
