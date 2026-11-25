@@ -230,6 +230,7 @@ struct dcomp_device
     struct list targets;
     struct list portal_targets;   /* targets opened from shared handles (no window): activated at Commit, shown elsewhere */
     LONG serial;                  /* names the device for the shares whose visual it owns (a pointer could be reused) */
+    BOOL portal_swapchain_logged; /* the FIXME for a swap chain in a portal was printed (under the device's lock) */
     CRITICAL_SECTION cs;
     IUnknown *rendering_device;
     GUID rendering_device_iid;
@@ -4578,7 +4579,8 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev, BOOL redra
         }
     }
 done:
-    /* snapshots of scenes that were not presented (snapshots are freed later, never under a lock: dcomp_snapshot_release) */
+    /* the snapshots of scenes that were not presented; a snapshot may be released under a device's lock, never under the shared
+     * lock: a surface's last Release takes no lock (see dcomp_surface_Release) */
     for (c = 0; contexts && c < targets; ++c)
         for (i = 0; i < contexts[c].snapshot_count; ++i) dcomp_snapshot_release(contexts[c].snapshots[i]);
     for (i = 0; i < old_count; ++i) IDCompositionVisual2_Release(&old_nodes[i]->IDCompositionVisual2_iface);
@@ -5803,9 +5805,13 @@ static void dcomp_portal_publish(struct dcomp_target *target, LONGLONG now_100ns
                 }
                 else
                 {
-                    /* a viewer would bind the portal device's producer to its window, where that device could revoke it */
-                    static LONG once;
-                    if (!InterlockedExchange(&once, 1)) FIXME("A swap chain in a portal is not shown.\n");
+                    /* a viewer would bind the portal device's producer to its window, where that device could revoke it;
+                     * logged once per device */
+                    if (!target->device->portal_swapchain_logged)
+                    {
+                        target->device->portal_swapchain_logged = TRUE;
+                        FIXME("device %p: a swap chain in a portal is not shown.\n", target->device);
+                    }
                     snapshot->layers[i].content = NULL;
                 }
             }
