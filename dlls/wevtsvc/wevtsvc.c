@@ -280,8 +280,10 @@ static DWORD log_rights( struct connection *conn, struct evt_log *log )
     DWORD privs_size, granted, desired, rights = 0;
     BOOL ok, system = !wcsicmp( log->name, L"System" );
 
-    /* SeSecurityPrivilege reads and clears Security; nobody writes it until auditing exists */
-    if (log->is_security) return conn->security_priv ? RIGHT_READ | RIGHT_CLEAR : 0;
+    /* Security: the system (session 0's own, system-local) and a caller with SeSecurityPrivilege enabled read and clear
+     * it; nobody writes it until auditing exists */
+    if (log->is_security)
+        return conn->security_priv || conn->caller_class == WEX_CALLER_SYSTEM_LOCAL ? RIGHT_READ | RIGHT_CLEAR : 0;
     sddl = log->custom_sd ? log->custom_sd : system ? system_sd : application_sd;
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW( sddl, SDDL_REVISION_1, &sd, NULL ))
         return 0;  /* a CustomSD that does not parse gives nothing */
