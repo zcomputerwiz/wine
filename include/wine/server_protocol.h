@@ -7778,6 +7778,6 @@ union generic_reply
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 998
+#define SERVER_PROTOCOL_VERSION 999
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
