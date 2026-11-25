@@ -951,6 +951,9 @@ DWORD __cdecl svcctl_DeleteService(
 
     service_unlock(service->service_entry);
 
+    /* a restart pending after a failure would keep the deleted service in the database until its delay ends */
+    if (!err) service_cancel_restart(service->service_entry);
+
     return err;
 }
 
@@ -1245,11 +1248,64 @@ DWORD __cdecl svcctl_ChangeServiceConfig2W( SC_RPC_HANDLE hService, SC_RPC_CONFI
         }
         break;
     case SERVICE_CONFIG_FAILURE_ACTIONS:
-        WINE_FIXME( "SERVICE_CONFIG_FAILURE_ACTIONS not implemented: period %lu msg %s cmd %s\n",
-                    config.actions->dwResetPeriod,
-                    wine_dbgstr_w(config.actions->lpRebootMsg),
-                    wine_dbgstr_w(config.actions->lpCommand) );
-        break;
+        {
+            SERVICE_FAILURE_ACTIONSW *fa = config.actions;
+            WCHAR *msg = NULL, *cmd = NULL;
+            SC_ACTION *actions = NULL;
+            DWORD i;
+
+            if (!fa) return ERROR_INVALID_PARAMETER;
+            /* lpsaActions NULL: the actions and the reset period stay as they are */
+            if (fa->lpsaActions)
+            {
+                /* more would not fit in the value, and would be lost at the next start */
+                if (fa->cActions > MAX_FAILURE_ACTIONS) return ERROR_INVALID_PARAMETER;
+                for (i = 0; i < fa->cActions; i++)
+                {
+                    if (fa->lpsaActions[i].Type > SC_ACTION_RUN_COMMAND) return ERROR_INVALID_PARAMETER;
+                    /* a restart action needs a handle that may start the service, as on Windows */
+                    if (fa->lpsaActions[i].Type == SC_ACTION_RESTART && !(service->hdr.access & SERVICE_START))
+                        return ERROR_ACCESS_DENIED;
+                    if (fa->lpsaActions[i].Type == SC_ACTION_REBOOT)
+                        WINE_FIXME( "SC_ACTION_REBOOT: the caller's SeShutdownPrivilege is not checked\n" );
+                }
+                if (fa->cActions && !(actions = malloc( fa->cActions * sizeof(*actions) )))
+                    return ERROR_NOT_ENOUGH_MEMORY;
+                if (fa->cActions) memcpy( actions, fa->lpsaActions, fa->cActions * sizeof(*actions) );
+            }
+            /* a NULL string stays as it is, an empty one is removed */
+            if (fa->lpRebootMsg && fa->lpRebootMsg[0] && !(msg = wcsdup( fa->lpRebootMsg ))) goto failure_oom;
+            if (fa->lpCommand && fa->lpCommand[0] && !(cmd = wcsdup( fa->lpCommand ))) goto failure_oom;
+
+            service_lock( service->service_entry );
+            if (fa->lpRebootMsg)
+            {
+                free( service->service_entry->reboot_msg );
+                service->service_entry->reboot_msg = msg;
+            }
+            if (fa->lpCommand)
+            {
+                free( service->service_entry->failure_command );
+                service->service_entry->failure_command = cmd;
+            }
+            if (fa->lpsaActions)
+            {
+                free( service->service_entry->failure_actions );
+                service->service_entry->failure_actions = actions;
+                service->service_entry->failure_actions_count = fa->cActions;
+                service->service_entry->failure_reset_period = fa->cActions ? fa->dwResetPeriod : 0;
+                service->service_entry->failure_count = 0;
+            }
+            err = save_service_config( service->service_entry );
+            service_unlock( service->service_entry );
+            break;
+
+        failure_oom:
+            free( actions );
+            free( msg );
+            free( cmd );
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
     case SERVICE_CONFIG_PRESHUTDOWN_INFO:
         WINE_TRACE( "changing service %p preshutdown timeout to %ld\n",
                 service, config.preshutdown->dwPreshutdownTimeout );
@@ -1323,6 +1379,37 @@ DWORD __cdecl svcctl_QueryServiceConfig2W( SC_RPC_HANDLE hService, DWORD level,
         service_unlock(service->service_entry);
     }
     break;
+
+    case SERVICE_CONFIG_FAILURE_ACTIONS:
+    {
+        /* the wire layout of struct service_failure_actions (svcctl.idl); sechost makes the caller's structure */
+        struct service_failure_actions *fa = (struct service_failure_actions *)buffer;
+        struct service_entry *entry = service->service_entry;
+        DWORD msg_size, cmd_size, actions_size;
+        BYTE *p;
+
+        service_lock(entry);
+        msg_size = entry->reboot_msg ? (lstrlenW(entry->reboot_msg) + 1) * sizeof(WCHAR) : 0;
+        cmd_size = entry->failure_command ? (lstrlenW(entry->failure_command) + 1) * sizeof(WCHAR) : 0;
+        actions_size = entry->failure_actions_count * sizeof(SC_ACTION);
+        *needed = sizeof(*fa) + actions_size + msg_size + cmd_size;
+        if (size >= *needed)
+        {
+            fa->reset_period = entry->failure_reset_period;
+            fa->reboot_msg_size = msg_size;
+            fa->command_size = cmd_size;
+            fa->actions_count = entry->failure_actions_count;
+            p = (BYTE *)(fa + 1);
+            if (actions_size) memcpy(p, entry->failure_actions, actions_size);
+            p += actions_size;
+            if (msg_size) memcpy(p, entry->reboot_msg, msg_size);
+            p += msg_size;
+            if (cmd_size) memcpy(p, entry->failure_command, cmd_size);
+        }
+        else err = ERROR_INSUFFICIENT_BUFFER;
+        service_unlock(entry);
+        break;
+    }
 
     case SERVICE_CONFIG_PRESHUTDOWN_INFO:
         service_lock(service->service_entry);

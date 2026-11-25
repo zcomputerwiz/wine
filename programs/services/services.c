@@ -213,8 +213,70 @@ void free_service_entry(struct service_entry *entry)
     free(entry->dependOnServices);
     free(entry->dependOnGroups);
     free(entry->security);
+    free(entry->reboot_msg);
+    free(entry->failure_command);
+    free(entry->failure_actions);
     if (entry->process) release_process(entry->process);
     free(entry);
+}
+
+/* The "FailureActions" value, as Windows writes it: a SERVICE_FAILURE_ACTIONS header of five 32-bit fields (reset
+ * period, two unused pointer slots, the number of actions, the offset of the actions from the start of the value),
+ * then the SC_ACTIONs. A value that does not fit is ignored, and so are the actions of an unknown type. */
+#define FAILURE_ACTIONS_HEADER 20
+
+static void load_failure_actions(HKEY hKey, struct service_entry *entry)
+{
+    DWORD type, size = 0, count, offset, i;
+    BYTE *data;
+
+    if (load_reg_string(hKey, L"RebootMessage", TRUE, &entry->reboot_msg)) entry->reboot_msg = NULL;
+    if (load_reg_string(hKey, L"FailureCommand", TRUE, &entry->failure_command)) entry->failure_command = NULL;
+
+    if (RegQueryValueExW(hKey, L"FailureActions", NULL, &type, NULL, &size) || type != REG_BINARY ||
+        size < FAILURE_ACTIONS_HEADER || size > 0x10000) return;
+    if (!(data = malloc(size))) return;
+    if (!RegQueryValueExW(hKey, L"FailureActions", NULL, &type, data, &size) && size >= FAILURE_ACTIONS_HEADER)
+    {
+        memcpy(&count, data + 12, sizeof(count));
+        memcpy(&offset, data + 16, sizeof(offset));
+        if (count && offset >= FAILURE_ACTIONS_HEADER && offset <= size &&
+            count <= (size - offset) / sizeof(SC_ACTION) && (entry->failure_actions = malloc(count * sizeof(SC_ACTION))))
+        {
+            memcpy(entry->failure_actions, data + offset, count * sizeof(SC_ACTION));
+            entry->failure_actions_count = count;
+            for (i = 0; i < count; i++)
+                if (entry->failure_actions[i].Type > SC_ACTION_RUN_COMMAND)
+                    entry->failure_actions[i].Type = SC_ACTION_NONE;
+        }
+        if (entry->failure_actions_count || !count) memcpy(&entry->failure_reset_period, data, sizeof(DWORD));
+    }
+    free(data);
+}
+
+static DWORD save_failure_actions(HKEY hKey, const struct service_entry *entry)
+{
+    DWORD err, size, header[5];
+    BYTE *data;
+
+    if (!entry->failure_actions_count && !entry->failure_reset_period)
+    {
+        err = RegDeleteValueW(hKey, L"FailureActions");
+        return err == ERROR_FILE_NOT_FOUND ? ERROR_SUCCESS : err;
+    }
+    if (entry->failure_actions_count > MAX_FAILURE_ACTIONS) return ERROR_INVALID_PARAMETER;
+    size = FAILURE_ACTIONS_HEADER + entry->failure_actions_count * sizeof(SC_ACTION);
+    if (!(data = malloc(size))) return ERROR_NOT_ENOUGH_MEMORY;
+    header[0] = entry->failure_reset_period;
+    header[1] = header[2] = 0;
+    header[3] = entry->failure_actions_count;
+    header[4] = entry->failure_actions_count ? FAILURE_ACTIONS_HEADER : 0;
+    memcpy(data, header, sizeof(header));
+    if (entry->failure_actions_count)
+        memcpy(data + FAILURE_ACTIONS_HEADER, entry->failure_actions, entry->failure_actions_count * sizeof(SC_ACTION));
+    err = RegSetValueExW(hKey, L"FailureActions", 0, REG_BINARY, data, size);
+    free(data);
+    return err;
 }
 
 /* the per-service security descriptor of the "Security" value; an invalid one is ignored (the native default applies) */
@@ -267,6 +329,7 @@ static DWORD load_service_config(HKEY hKey, struct service_entry *entry)
     if ((err = load_reg_dword(hKey, L"PreshutdownTimeout", &entry->preshutdown_timeout))) return err;
 
     load_service_security(hKey, entry);
+    load_failure_actions(hKey, entry);
     if (load_reg_dword(hKey, L"WOW64", &value) == 0 && value == 1)
         entry->is_wow64 = TRUE;
     if (load_reg_dword(hKey, L"DelayedAutoStart", &value) == 0 && value == 1)
@@ -347,6 +410,9 @@ DWORD save_service_config(struct service_entry *entry)
     if ((err = reg_set_dword_value(hKey, L"ErrorControl", entry->config.dwErrorControl))) goto cleanup;
     if ((err = reg_set_dword_value(hKey, L"Type", entry->config.dwServiceType))) goto cleanup;
     if ((err = reg_set_dword_value(hKey, L"PreshutdownTimeout", entry->preshutdown_timeout))) goto cleanup;
+    if ((err = reg_set_string_value(hKey, L"RebootMessage", entry->reboot_msg, FALSE))) goto cleanup;
+    if ((err = reg_set_string_value(hKey, L"FailureCommand", entry->failure_command, FALSE))) goto cleanup;
+    if ((err = save_failure_actions(hKey, entry))) goto cleanup;
 
     if (entry->delayed_autostart)
         err = reg_set_dword_value(hKey, L"DelayedAutoStart", entry->delayed_autostart);
@@ -1139,6 +1205,13 @@ static DWORD service_start_process(struct service_entry *service_entry, struct p
 
     service_lock(service_entry);
 
+    /* a deleted service never starts again, also from a restart after its failure */
+    if (is_marked_for_delete(service_entry))
+    {
+        service_unlock(service_entry);
+        return ERROR_SERVICE_MARKED_FOR_DELETE;
+    }
+
     if ((process = service_entry->process))
     {
         if (WaitForSingleObject(process->process, 0) == WAIT_TIMEOUT)
@@ -1462,6 +1535,153 @@ static void load_registry_parameters(void)
     RegCloseKey( key );
 }
 
+/* SERVICE_CONFIG_FAILURE_ACTIONS: a restart, once its delay has passed. A service has at most one pending restart,
+ * its restart_timer, which holds a reference to it and is taken out of it under the database lock by whoever ends
+ * it: this callback, or service_cancel_restart (DeleteService, the end of services.exe), which then closes it. */
+/* Under the database lock: services.exe is ending (no restart starts any more), and the number of callbacks that took
+ * their timer and still run, which the end waits for before the database is torn down. */
+static BOOL restarts_stopping;
+static LONG restarts_running;
+
+static void CALLBACK failure_restart_callback(TP_CALLBACK_INSTANCE *instance, void *context, TP_TIMER *timer)
+{
+    struct service_entry *service = context;
+    struct scmdatabase *db = service->db;
+    BOOL mine, start;
+    DWORD err;
+
+    scmdatabase_lock(db);
+    if ((mine = service->restart_timer == timer))
+    {
+        service->restart_timer = NULL;
+        restarts_running++;
+    }
+    scmdatabase_unlock(db);
+    if (!mine) return;  /* cancelled: the canceller waits for this, then closes the timer and releases the service */
+
+    scmdatabase_lock_startup(db, INFINITE);
+    scmdatabase_lock(db);
+    start = !restarts_stopping;
+    scmdatabase_unlock(db);
+    service_lock(service);
+    /* not a service deleted or disabled meanwhile (service_start_process refuses a deleted one too) */
+    start = start && service->status.dwCurrentState == SERVICE_STOPPED && !is_marked_for_delete(service) &&
+            service->config.dwStartType != SERVICE_DISABLED;
+    service_unlock(service);
+    if (start)
+    {
+        WINE_TRACE("restarting %s after its failure\n", wine_dbgstr_w(service->name));
+        if ((err = service_start(service, 0, NULL)))
+            WINE_WARN("%s did not restart after its failure: %lu\n", wine_dbgstr_w(service->name), err);
+    }
+    scmdatabase_unlock_startup(db);
+    CloseThreadpoolTimer(timer);
+    release_service(service);
+    scmdatabase_lock(db);
+    restarts_running--;
+    scmdatabase_unlock(db);
+}
+
+void service_cancel_restart(struct service_entry *service)
+{
+    TP_TIMER *timer;
+
+    scmdatabase_lock(service->db);
+    timer = service->restart_timer;
+    service->restart_timer = NULL;
+    scmdatabase_unlock(service->db);
+    if (!timer) return;
+    SetThreadpoolTimer(timer, NULL, 0, 0);
+    WaitForThreadpoolTimerCallbacks(timer, TRUE);
+    CloseThreadpoolTimer(timer);
+    release_service(service);
+}
+
+/* the end of services.exe, before the database is torn down: no restart starts any more, the pending ones are
+ * cancelled, and the ones already running are waited for */
+static void scmdatabase_cancel_restarts(struct scmdatabase *db)
+{
+    struct service_entry *service, *found;
+    LONG running;
+
+    scmdatabase_lock(db);
+    restarts_stopping = TRUE;
+    scmdatabase_unlock(db);
+    for (;;)
+    {
+        found = NULL;
+        scmdatabase_lock(db);
+        LIST_FOR_EACH_ENTRY(service, &db->services, struct service_entry, entry)
+        {
+            if (!service->restart_timer) continue;
+            found = grab_service(service);
+            break;
+        }
+        scmdatabase_unlock(db);
+        if (!found) break;
+        service_cancel_restart(found);
+        release_service(found);
+    }
+    for (;;)
+    {
+        scmdatabase_lock(db);
+        running = restarts_running;
+        scmdatabase_unlock(db);
+        if (!running) break;
+        Sleep(10);
+    }
+}
+
+/* The service failed (its process ended while it ran): count the failure, restarting the count when the reset
+ * period has passed since the last one, and take the action for this failure (the last action repeats). Called with
+ * the database locked. */
+static void service_failed(struct service_entry *service)
+{
+    ULONGLONG now = GetTickCount64();
+    LARGE_INTEGER due;
+    SC_ACTION action;
+    TP_TIMER *timer;
+    FILETIME ft;
+    DWORD index;
+
+    if (!service->failure_actions_count || is_marked_for_delete(service) || restarts_stopping) return;
+    if (service->failure_count && service->failure_reset_period != INFINITE &&
+        now - service->last_failure > (ULONGLONG)service->failure_reset_period * 1000)
+        service->failure_count = 0;
+    service->failure_count++;
+    service->last_failure = now;
+    index = service->failure_count < service->failure_actions_count ? service->failure_count : service->failure_actions_count;
+    action = service->failure_actions[index - 1];
+
+    switch (action.Type)
+    {
+    case SC_ACTION_RESTART:
+        /* one pending restart per service, never set again: its timer may have expired with the callback waiting
+         * for the lock we hold, and a second expiry would run the callback once more after the first released it */
+        if (service->restart_timer) break;
+        if (!(timer = CreateThreadpoolTimer(failure_restart_callback, grab_service(service), NULL)))
+        {
+            release_service(service);
+            break;
+        }
+        service->restart_timer = timer;
+        due.QuadPart = -(LONGLONG)action.Delay * 10000;
+        ft.dwLowDateTime = due.u.LowPart;
+        ft.dwHighDateTime = due.u.HighPart;
+        SetThreadpoolTimer(timer, &ft, 0, 0);
+        break;
+    case SC_ACTION_RUN_COMMAND:
+        WINE_FIXME("%s failed: running %s is not implemented\n", wine_dbgstr_w(service->name),
+                   wine_dbgstr_w(service->failure_command));
+        break;
+    case SC_ACTION_REBOOT:
+        WINE_FIXME("%s failed: a reboot is not implemented\n", wine_dbgstr_w(service->name));
+        break;
+    default:
+        break;
+    }
+}
+
 static DWORD WINAPI process_monitor_thread_proc( void *arg )
 {
     struct scmdatabase *db = active_database;
@@ -1499,6 +1719,7 @@ static DWORD WINAPI process_monitor_thread_proc( void *arg )
             process->use_count--;
             release_process(process);
             notify_service_state(service);
+            service_failed(service);
         }
         scmdatabase_unlock(db);
     }
@@ -1638,6 +1859,7 @@ int __cdecl main(int argc, char *argv[])
         WaitForSingleObject(exit_event, INFINITE);
         PostQueuedCompletionStatus(job_completion_port, 0, 0, NULL);
         WaitForSingleObject(process_monitor_thread, INFINITE);
+        scmdatabase_cancel_restarts(active_database);  /* no new failure can arm one now */
         scmdatabase_wait_terminate(active_database);
         if (delayed_autostart_cleanup)
         {

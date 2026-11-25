@@ -235,6 +235,17 @@ struct service_description
     WCHAR  description[1];
 };
 
+/* QueryServiceConfig2W(SERVICE_CONFIG_FAILURE_ACTIONS) on the wire: this header, then actions_count SC_ACTIONs, then
+ * the reboot message and the command, each a terminated string present when its size (bytes, terminator included)
+ * is not 0. No pointers, so 32- and 64-bit callers read the same layout. */
+struct service_failure_actions
+{
+    DWORD reset_period;
+    DWORD reboot_msg_size;
+    DWORD command_size;
+    DWORD actions_count;
+};
+
 typedef struct _SERVICE_RPC_REQUIRED_PRIVILEGES_INFO {
     DWORD cbRequiredPrivileges;
     [size_is(cbRequiredPrivileges)] BYTE *pRequiredPrivileges;

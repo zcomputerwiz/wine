@@ -1266,6 +1266,9 @@ void __cdecl s_test_I_RpcBindingInqLocalClientPID(unsigned int protseq, RPC_BIND
     }
     else
     {
+        /* WineExplorer answers I_RpcBindingInqLocalClientPID for ncacn_np too, so that
+         * services.exe can identify a service's own process (see docs/STOCK_CHANGES.md). */
+        todo_wine_if(protseq == RPC_PROTSEQ_NMP)
         ok(status == RPC_S_INVALID_BINDING, "Got unexpected %ld.\n", status);
     }
 

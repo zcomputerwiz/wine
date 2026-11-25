@@ -504,7 +504,7 @@ static void check_token_information(const char *username, HANDLE token)
         {
             DWORD *access = (DWORD *)buffer;
 
-            service_todo_wine_ok(*access == 0, "Got unexpected access %#lx.\n", *access);
+            service_ok(*access == 0, "Got unexpected access %#lx.\n", *access);
             break;
         }
         default:
