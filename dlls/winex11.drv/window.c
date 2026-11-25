@@ -2145,28 +2145,50 @@ static int restack_error( Display *display, XErrorEvent *event, void *arg )
     return (event->error_code == BadMatch || event->error_code == BadWindow);
 }
 
+/* the visible window before this one in the Win32 z-order, 0 for the top one */
+static HWND visible_window_before( HWND hwnd )
+{
+    HWND prev = NtUserGetWindowRelative( hwnd, GW_HWNDPREV );
+    while (prev && !(NtUserGetWindowLongW( prev, GWL_STYLE ) & WS_VISIBLE))
+        prev = NtUserGetWindowRelative( prev, GW_HWNDPREV );
+    return prev;
+}
+
+/* WineExplorer: in a virtual desktop no window manager is involved, so the X window is stacked directly below the one
+ * of PREV, the visible window before it in the Win32 z-order (stock only ever raises); else a new window would stay
+ * mapped above topmost ones like the taskbar, and an X window created again for a window that keeps its Win32 place
+ * (a layered window gets one with another visual) would cover the windows above it, such as its owned popups */
+static void restack_below( struct x11drv_win_data *data, HWND prev )
+{
+    XWindowChanges changes = { .stack_mode = Below };
+
+    if (!prev || !is_virtual_desktop() || data->managed || data->embedded || !data->whole_window) return;
+    if (!(changes.sibling = X11DRV_get_whole_window( prev )) || changes.sibling == data->whole_window) return;
+
+    /* BadMatch when the other window is not a sibling (embedded or owned by another parent) */
+    TRACE( "window %p/%lx below %lx\n", data->hwnd, data->whole_window, changes.sibling );
+    X11DRV_expect_error( data->display, restack_error, NULL );
+    XConfigureWindow( data->display, data->whole_window, CWSibling | CWStackMode, &changes );
+    X11DRV_check_error();
+}
+
 static void sync_window_position( struct x11drv_win_data *data, UINT swp_flags, const struct window_rects *old_rects )
 {
     DWORD style = NtUserGetWindowLongW( data->hwnd, GWL_STYLE );
     DWORD ex_style = NtUserGetWindowLongW( data->hwnd, GWL_EXSTYLE );
     RECT new_rect, window_rect;
     BOOL above = FALSE;
-    Window below = 0;
+    HWND prev = 0;
 
     if (data->managed && ((style & WS_MINIMIZE) || data->desired_state.wm_state == IconicState)) return;
 
     if (!(swp_flags & SWP_NOZORDER) || (swp_flags & SWP_SHOWWINDOW))
     {
         /* find window that this one must be after */
-        HWND prev = NtUserGetWindowRelative( data->hwnd, GW_HWNDPREV );
-        while (prev && !(NtUserGetWindowLongW( prev, GWL_STYLE ) & WS_VISIBLE))
-            prev = NtUserGetWindowRelative( prev, GW_HWNDPREV );
-        if (!prev) above = TRUE;  /* top child */
+        if (!(prev = visible_window_before( data->hwnd ))) above = TRUE;  /* top child */
         /* should use stack_mode Below but most window managers don't get it right */
         /* and Above with a sibling doesn't work so well either, so we ignore it */
-        /* WineExplorer: in a virtual desktop no window manager is involved, and a new window would otherwise stay
-         * mapped above topmost ones like the taskbar */
-        else if (is_virtual_desktop() && !data->managed && !data->embedded) below = X11DRV_get_whole_window( prev );
+        /* WineExplorer: except in a virtual desktop (restack_below) */
     }
 
     set_size_hints( data, style );
@@ -2181,17 +2203,7 @@ static void sync_window_position( struct x11drv_win_data *data, UINT swp_flags, 
                                         window_rect.top - old_rects->window.top );
 
     window_set_config( data, new_rect, above );
-
-    if (below && data->whole_window && below != data->whole_window)
-    {
-        XWindowChanges changes = { .sibling = below, .stack_mode = Below };
-
-        /* BadMatch when the other window is not a sibling (embedded or owned by another parent) */
-        TRACE( "window %p/%lx below %lx\n", data->hwnd, data->whole_window, below );
-        X11DRV_expect_error( data->display, restack_error, NULL );
-        XConfigureWindow( data->display, data->whole_window, CWSibling | CWStackMode, &changes );
-        X11DRV_check_error();
-    }
+    restack_below( data, prev );
 }
 
 
@@ -2510,6 +2522,8 @@ static void create_whole_window( struct x11drv_win_data *data )
     data->pending_state.rect = data->current_state.rect;
     data->desired_state.rect = data->current_state.rect;
 
+    /* X puts a new window on top of its siblings */
+    restack_below( data, visible_window_before( data->hwnd ) );
     x11drv_xinput2_enable( data->display, data->whole_window );
     set_initial_wm_hints( data->display, data->whole_window );
     set_wm_hints( data );

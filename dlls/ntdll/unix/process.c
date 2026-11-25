@@ -1494,6 +1494,29 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
         SERVER_END_REQ;
         break;
 
+    case ProcessCommandLineInformation:
+        SERVER_START_REQ( get_process_command_line )
+        {
+            const unsigned int min_size = sizeof(UNICODE_STRING) + sizeof(WCHAR);
+            UNICODE_STRING *str = info;
+
+            req->handle = wine_server_obj_handle( handle );
+            wine_server_set_reply( req, str ? str + 1 : NULL, size > min_size ? size - min_size : 0 );
+            ret = wine_server_call( req );
+            if (ret == STATUS_BUFFER_TOO_SMALL) ret = STATUS_INFO_LENGTH_MISMATCH;
+            len = min_size + reply->len;
+            if (ret == STATUS_SUCCESS && size < len) ret = STATUS_INFO_LENGTH_MISMATCH;
+            if (ret == STATUS_SUCCESS)
+            {
+                str->Length = reply->len;
+                str->MaximumLength = str->Length + sizeof(WCHAR);
+                str->Buffer = (PWSTR)(str + 1);
+                str->Buffer[str->Length / sizeof(WCHAR)] = 0;
+            }
+        }
+        SERVER_END_REQ;
+        break;
+
     case ProcessExecuteFlags:
         len = sizeof(ULONG);
         if (size != len)

@@ -8439,6 +8439,85 @@ static void test_create_wait_completion_packet(void)
     pNtClose(handle);
 }
 
+static void test_set_zero_data(void)
+{
+    static const DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    FILE_ZERO_DATA_INFORMATION zero;
+    char path[MAX_PATH], name[MAX_PATH], buf[3 * 4096];
+    IO_STATUS_BLOCK io;
+    LARGE_INTEGER size;
+    NTSTATUS status;
+    HANDLE file, file2;
+    DWORD i, len;
+    BOOL ret;
+
+    GetTempPathA( MAX_PATH, path );
+    GetTempFileNameA( path, "zer", 0, name );
+    file = CreateFileA( name, GENERIC_READ | GENERIC_WRITE, share, NULL, CREATE_ALWAYS, FILE_FLAG_DELETE_ON_CLOSE, 0 );
+    ok( file != INVALID_HANDLE_VALUE, "CreateFile failed %lu\n", GetLastError() );
+    memset( buf, 'x', sizeof(buf) );
+    ret = WriteFile( file, buf, sizeof(buf), &len, NULL );
+    ok( ret && len == sizeof(buf), "WriteFile failed %lu\n", GetLastError() );
+
+    zero.FileOffset.QuadPart = 4096;
+    zero.BeyondFinalZero.QuadPart = 8192;
+    status = NtFsControlFile( file, NULL, NULL, NULL, &io, FSCTL_SET_ZERO_DATA, &zero, sizeof(zero) - 1, NULL, 0 );
+    ok( status == STATUS_INVALID_PARAMETER, "short buffer: got %#lx\n", status );
+
+    zero.FileOffset.QuadPart = 8192;
+    zero.BeyondFinalZero.QuadPart = 4096;
+    status = NtFsControlFile( file, NULL, NULL, NULL, &io, FSCTL_SET_ZERO_DATA, &zero, sizeof(zero), NULL, 0 );
+    ok( status == STATUS_INVALID_PARAMETER, "reversed range: got %#lx\n", status );
+
+    /* a file that is not sparse */
+    zero.FileOffset.QuadPart = 4096;
+    zero.BeyondFinalZero.QuadPart = 8192;
+    io.Status = 0xdeadbeef;
+    io.Information = 0xdeadbeef;
+    status = NtFsControlFile( file, NULL, NULL, NULL, &io, FSCTL_SET_ZERO_DATA, &zero, sizeof(zero), NULL, 0 );
+    ok( status == STATUS_SUCCESS, "got %#lx\n", status );
+    ok( io.Status == STATUS_SUCCESS, "got io.Status %#lx\n", io.Status );
+    ok( io.Information == 0, "got io.Information %Iu\n", io.Information );
+
+    /* a range past the end does not extend the file */
+    zero.FileOffset.QuadPart = 10000;
+    zero.BeyondFinalZero.QuadPart = 100000;
+    status = NtFsControlFile( file, NULL, NULL, NULL, &io, FSCTL_SET_ZERO_DATA, &zero, sizeof(zero), NULL, 0 );
+    ok( status == STATUS_SUCCESS, "past the end: got %#lx\n", status );
+    ret = GetFileSizeEx( file, &size );
+    ok( ret && size.QuadPart == sizeof(buf), "size %s\n", wine_dbgstr_longlong(size.QuadPart) );
+
+    SetFilePointer( file, 0, NULL, FILE_BEGIN );
+    memset( buf, 'y', sizeof(buf) );
+    ret = ReadFile( file, buf, sizeof(buf), &len, NULL );
+    ok( ret && len == sizeof(buf), "ReadFile failed %lu, len %lu\n", GetLastError(), len );
+    for (i = 0; i < sizeof(buf); i++)
+        if (buf[i] != ((i < 4096 || (i >= 8192 && i < 10000)) ? 'x' : 0)) break;
+    ok( i == sizeof(buf), "unexpected byte %#x at %lu\n", buf[i % sizeof(buf)], i );
+
+    /* the request needs write access */
+    file2 = CreateFileA( name, GENERIC_READ, share, NULL, OPEN_EXISTING, 0, 0 );
+    ok( file2 != INVALID_HANDLE_VALUE, "CreateFile failed %lu\n", GetLastError() );
+    zero.FileOffset.QuadPart = 0;
+    zero.BeyondFinalZero.QuadPart = 4096;
+    status = NtFsControlFile( file2, NULL, NULL, NULL, &io, FSCTL_SET_ZERO_DATA, &zero, sizeof(zero), NULL, 0 );
+    ok( status == STATUS_ACCESS_DENIED, "read-only handle: got %#lx\n", status );
+    CloseHandle( file2 );
+
+    /* a sparse file */
+    status = NtFsControlFile( file, NULL, NULL, NULL, &io, FSCTL_SET_SPARSE, NULL, 0, NULL, 0 );
+    ok( status == STATUS_SUCCESS, "FSCTL_SET_SPARSE: got %#lx\n", status );
+    status = NtFsControlFile( file, NULL, NULL, NULL, &io, FSCTL_SET_ZERO_DATA, &zero, sizeof(zero), NULL, 0 );
+    ok( status == STATUS_SUCCESS, "sparse: got %#lx\n", status );
+    SetFilePointer( file, 0, NULL, FILE_BEGIN );
+    ret = ReadFile( file, buf, 4096, &len, NULL );
+    ok( ret && len == 4096, "ReadFile failed %lu, len %lu\n", GetLastError(), len );
+    for (i = 0; i < 4096; i++) if (buf[i]) break;
+    ok( i == 4096, "unexpected byte %#x at %lu\n", buf[i % 4096], i );
+
+    CloseHandle( file );
+}
+
 
 START_TEST(file)
 {
@@ -8525,6 +8604,7 @@ START_TEST(file)
     test_ioctl();
     test_query_ea();
     test_flush_buffers_file();
+    test_set_zero_data();
     test_mailslot_name();
     test_reparse_points();
     test_file_map_large_size();
