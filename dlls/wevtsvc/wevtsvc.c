@@ -785,7 +785,8 @@ static void start_read( struct connection *conn )
 static BYTE *read_rest( struct connection *conn, DWORD got, DWORD *total )
 {
     OVERLAPPED ov;
-    DWORD left = 0, more = 0;
+    HANDLE event;
+    DWORD left = 0, more;
     BYTE *buf;
 
     if (!PeekNamedPipe( conn->pipe, NULL, 0, NULL, NULL, &left ) || (ULONGLONG)got + left > WEX_EVTLOG_MAX_MSG)
@@ -793,16 +794,19 @@ static BYTE *read_rest( struct connection *conn, DWORD got, DWORD *total )
     if (!(buf = budget_alloc( got + left ))) return NULL;
     memcpy( buf, conn->small, got );
     memset( &ov, 0, sizeof(ov) );
-    ov.hEvent = CreateEventW( NULL, TRUE, FALSE, NULL );
-    /* the data is in the pipe already: this completes at once */
-    if ((!ReadFile( conn->pipe, buf + got, left, NULL, &ov ) && GetLastError() != ERROR_IO_PENDING) ||
-        !GetOverlappedResult( conn->pipe, &ov, &more, TRUE ) || more != left)
+    event = CreateEventW( NULL, TRUE, FALSE, NULL );
+    /* the low bit of hEvent keeps this read off the completion port (the pipe is bound to it, and this OVERLAPPED is
+     * on the stack); the data is in the pipe already, so it completes at once */
+    ov.hEvent = (HANDLE)((ULONG_PTR)event | 1);
+    if (!ReadFile( conn->pipe, buf + got, left, NULL, &ov ) && GetLastError() != ERROR_IO_PENDING) ov.Internal = 1;
+    else WaitForSingleObject( event, INFINITE );
+    more = (DWORD)ov.InternalHigh;
+    CloseHandle( event );
+    if (ov.Internal || more != left)
     {
-        CloseHandle( ov.hEvent );
         budget_free( buf, got + left );
         return NULL;
     }
-    CloseHandle( ov.hEvent );
     *total = got + left;
     return buf;
 }
