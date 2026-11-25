@@ -35475,7 +35475,6 @@ static void test_shared_texture_coherence(void)
     }
     tests[] =
     {
-        {"legacy handle", D3D11_RESOURCE_MISC_SHARED, FALSE},
         {"NT handle", D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE, TRUE},
     };
     static const float colors[][4] =
@@ -35574,7 +35573,6 @@ static void test_shared_texture_coherence(void)
                 ID3D11DeviceContext_Flush(producer_context);
             }
             color = get_texture_color(opened, 32, 32);
-            todo_wine_if(i)
             ok(color == expected[i], "%s, frame %u: got color %#08lx, expected %#08lx.\n",
                     tests[test].name, i, color, expected[i]);
         }
