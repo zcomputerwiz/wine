@@ -50,11 +50,21 @@ WINE_DEFAULT_DEBUG_CHANNEL(eventlog);
 
 struct evt_file_header
 {
-    char  magic[8];
-    DWORD version;
-    DWORD next;        /* the number of the next record (kept across a clear) */
-    DWORD reserved[4];
-};
+    char      magic[8];
+    DWORD     version;
+    DWORD     next;        /* the number of the next record (kept across a clear) */
+    ULONGLONG created;     /* FILETIMEs: the log's creation, its last write (or clear), its last read */
+    ULONGLONG written;
+    ULONGLONG read;
+    ULONGLONG reserved;
+};  /* 48 bytes */
+
+static ULONGLONG now_filetime(void)
+{
+    FILETIME ft;
+    GetSystemTimeAsFileTime( &ft );
+    return ((ULONGLONG)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+}
 
 struct evt_trailer
 {
@@ -186,21 +196,33 @@ static void load_records( struct evt_log *log, const BYTE *buf, DWORD size )
     if (cut) WARN( "%s: %lu bytes after record %lu cut (torn or stale)\n", debugstr_w(log->name), cut, expect - 1 );
 }
 
-/* write the whole file again, in place */
-static DWORD rewrite_file( struct evt_log *log )
+/* the header at the start of the file */
+static DWORD write_header( struct evt_log *log )
 {
     struct evt_file_header hdr;
-    struct evt_record *rec;
-    DWORD written;
     LARGE_INTEGER zero = {{ 0 }};
+    DWORD written;
 
     memset( &hdr, 0, sizeof(hdr) );
     memcpy( hdr.magic, EVT_FILE_MAGIC, sizeof(hdr.magic) );
     hdr.version = EVT_FILE_VERSION;
     hdr.next = log->next;
+    hdr.created = log->created;
+    hdr.written = log->written;
+    hdr.read = log->read;
     if (!SetFilePointerEx( log->file, zero, NULL, FILE_BEGIN ) ||
         !WriteFile( log->file, &hdr, sizeof(hdr), &written, NULL ) || written != sizeof(hdr))
         return GetLastError();
+    return ERROR_SUCCESS;
+}
+
+/* write the whole file again, in place */
+static DWORD rewrite_file( struct evt_log *log )
+{
+    struct evt_record *rec;
+    DWORD written, status;
+
+    if ((status = write_header( log ))) return status;
     LIST_FOR_EACH_ENTRY( rec, &log->records, struct evt_record, entry )
     {
         struct evt_trailer trailer = { RtlComputeCrc32( 0, rec->data, rec->size ), rec->number };
@@ -262,12 +284,16 @@ struct evt_log *store_get_log( const WCHAR *name, BOOL create )
             if (!memcmp( hdr.magic, EVT_FILE_MAGIC, sizeof(hdr.magic) ) && hdr.version == EVT_FILE_VERSION)
             {
                 if (hdr.next) log->next = hdr.next;
+                log->created = hdr.created;
+                log->written = hdr.written;
+                log->read = hdr.read;
                 load_records( log, buf, len );
             }
             else WARN( "%s is not one of our log files: started empty\n", debugstr_w(log->path) );
         }
         free( buf );
     }
+    if (!log->created) log->created = log->written = now_filetime();
     store_refresh_settings( log );
     /* what was cut on load (or a new file) is gone from the file too */
     rewrite_file( log );
@@ -340,7 +366,7 @@ DWORD store_append( struct evt_log *log, const BYTE *data, DWORD size )
     list_add_tail( &log->records, &rec->entry );
     log->count++;
     log->bytes += size + sizeof(trailer);
-    log->generation++;
+    log->written = now_filetime();
     if (dropped) return rewrite_file( log );
     trailer.crc = RtlComputeCrc32( 0, rec->data, size );
     trailer.number = rec->number;
@@ -356,10 +382,11 @@ DWORD store_clear( struct evt_log *log )
 {
     free_records( log );
     log->full_reported = FALSE;
-    log->generation++;
+    log->written = now_filetime();
     return rewrite_file( log );
 }
 
+/* the header's times and the records written since the last flush go to disk (at most once a second) */
 void store_flush_all(void)
 {
     struct evt_log *log;
@@ -367,7 +394,44 @@ void store_flush_all(void)
     LIST_FOR_EACH_ENTRY( log, &logs, struct evt_log, entry )
     {
         if (!log->dirty) continue;
+        write_header( log );
         FlushFileBuffers( log->file );
         log->dirty = FALSE;
     }
+}
+
+void store_touch_read( struct evt_log *log )
+{
+    log->read = now_filetime();
+    log->dirty = TRUE;
+}
+
+/* section 9: what Event Viewer shows of a log */
+void store_information( struct evt_log *log, struct wex_evtlog_information *info )
+{
+    LARGE_INTEGER size;
+    DWORD room;
+
+    memset( info, 0, sizeof(*info) );
+    /* full: a record of the smallest size would not fit under the policy (or the log said so already) */
+    room = log->max_size - sizeof(struct evt_file_header);
+    info->full = log->full_reported ||
+                 (log->bytes + sizeof(EVENTLOGRECORD) + 8 > room && log->retention == EVT_RETENTION_NEVER);
+    info->count = log->count;
+    info->oldest = store_oldest( log );
+    info->next = log->next;
+    info->max_size = log->max_size;
+    info->retention = log->retention;
+    if (GetFileSizeEx( log->file, &size )) info->file_size = size.QuadPart;
+    info->created = log->created;
+    info->written = log->written;
+    info->read = log->read;
+}
+
+/* section 9: the EventLog key changed (Event Viewer set a MaxSize or Retention): every loaded log reads its settings */
+void store_refresh_all(void)
+{
+    struct evt_log *log;
+
+    LIST_FOR_EACH_ENTRY( log, &logs, struct evt_log, entry ) store_refresh_settings( log );
 }
