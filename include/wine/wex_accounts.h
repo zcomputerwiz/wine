@@ -42,6 +42,12 @@
 #define WEX_ACCOUNTS_VERDICT_USER     1
 #define WEX_ACCOUNTS_VERDICT_ELEVATED 2
 
+/* the service whose token may create the reserved pipe (B114), and its SID, NT SERVICE\wexaccounts:
+ * S-1-5-80-2861554723-205673086-2129874643-4023588997-3715158216, the SHA-1 of "WEXACCOUNTS" in UTF-16LE as five
+ * little-endian sub-authorities (RtlCreateServiceSid); the service needs SERVICE_SID_TYPE_UNRESTRICTED */
+#define WEX_ACCOUNTS_SERVICE    "wexaccounts"
+#define WEX_ACCOUNTS_SERVICE_RIDS 0xaa8fdc23, 0x0c42527e, 0x7ef34ed3, 0xefd31885, 0xdd70d0c8
+
 struct wex_accounts_request   /* struct wexa_request */
 {
     unsigned int   magic;

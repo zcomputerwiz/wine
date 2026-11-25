@@ -1271,8 +1271,18 @@ DWORD __cdecl svcctl_ChangeServiceConfig2W( SC_RPC_HANDLE hService, SC_RPC_CONFI
         service_unlock( service->service_entry );
         break;
     case SERVICE_CONFIG_SERVICE_SID_INFO:
-        WINE_FIXME( "SERVICE_CONFIG_SERVICE_SID_INFO not implemented: type %lu\n",
-                    config.sid->dwServiceSidType );
+        /* WineExplorer (B114): an own-process service of a system account whose type is not NONE gets
+         * NT SERVICE\name in its token; RESTRICTED is kept but its token is not write-restricted */
+        if (config.sid->dwServiceSidType != SERVICE_SID_TYPE_NONE &&
+            config.sid->dwServiceSidType != SERVICE_SID_TYPE_UNRESTRICTED &&
+            config.sid->dwServiceSidType != SERVICE_SID_TYPE_RESTRICTED)
+            return ERROR_INVALID_PARAMETER;
+        if (config.sid->dwServiceSidType == SERVICE_SID_TYPE_RESTRICTED)
+            WINE_FIXME( "SERVICE_SID_TYPE_RESTRICTED: the token is not write-restricted\n" );
+        service_lock( service->service_entry );
+        service->service_entry->sid_type = config.sid->dwServiceSidType;
+        save_service_config( service->service_entry );
+        service_unlock( service->service_entry );
         break;
     default:
         WINE_FIXME("level %lu not implemented\n", config.dwInfoLevel);
@@ -1343,6 +1353,17 @@ DWORD __cdecl svcctl_QueryServiceConfig2W( SC_RPC_HANDLE hService, DWORD level,
         if (size >= *needed)
             ((SERVICE_DELAYED_AUTO_START_INFO *)buffer)->fDelayedAutostart =
                 service->service_entry->delayed_autostart;
+        else err = ERROR_INSUFFICIENT_BUFFER;
+
+        service_unlock(service->service_entry);
+        break;
+
+    case SERVICE_CONFIG_SERVICE_SID_INFO:
+        service_lock(service->service_entry);
+
+        *needed = sizeof(SERVICE_SID_INFO);
+        if (size >= *needed)
+            ((SERVICE_SID_INFO *)buffer)->dwServiceSidType = service->service_entry->sid_type;
         else err = ERROR_INSUFFICIENT_BUFFER;
 
         service_unlock(service->service_entry);

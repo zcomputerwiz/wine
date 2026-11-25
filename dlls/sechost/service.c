@@ -799,6 +799,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH QueryServiceConfig2A( SC_HANDLE service, DWORD lev
             break;
         case SERVICE_CONFIG_PRESHUTDOWN_INFO:
         case SERVICE_CONFIG_DELAYED_AUTO_START_INFO:
+        case SERVICE_CONFIG_SERVICE_SID_INFO:
             if (buffer && bufferW && *ret_size <= size)
                 memcpy(buffer, bufferW, *ret_size);
             break;
@@ -841,6 +842,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH QueryServiceConfig2W( SC_HANDLE service, DWORD lev
 
     case SERVICE_CONFIG_PRESHUTDOWN_INFO:
     case SERVICE_CONFIG_DELAYED_AUTO_START_INFO:
+    case SERVICE_CONFIG_SERVICE_SID_INFO:
         bufptr = buffer;
         break;
 

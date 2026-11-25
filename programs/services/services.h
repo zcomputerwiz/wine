@@ -64,6 +64,7 @@ struct service_entry
     BOOL marked_for_delete;
     BOOL is_wow64;
     BOOL delayed_autostart;
+    DWORD sid_type;                    /* WineExplorer (B114): SERVICE_SID_TYPE_*, the ServiceSidType value */
     int session_service;               /* WineExplorer: the WexSessionService value, SESSION_SERVICE_* */
     BYTE *security;                    /* self-relative security descriptor of the "Security" value, NULL for the native default */
     DWORD security_size;

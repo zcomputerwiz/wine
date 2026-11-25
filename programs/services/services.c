@@ -93,10 +93,18 @@ static void set_default_dacl(void)
 }
 
 /* The token of the account that ObjectName names. An empty name or LocalSystem is the SYSTEM token. Other accounts
- * (a user name needs a logon) are refused for now. *sddl is the security descriptor of the control pipe. */
-static DWORD get_service_token(const WCHAR *account, HANDLE *token, const WCHAR **sddl)
+ * (a user name needs a logon) are refused for now. *sddl is the security descriptor of the control pipe. A service
+ * whose SID type is not NONE gets its SID, NT SERVICE\name, as a group (B114). */
+static DWORD get_service_token(const WCHAR *account, const WCHAR *name, DWORD sid_type, HANDLE *token,
+                               const WCHAR **sddl)
 {
-    HANDLE handle;
+    struct
+    {
+        HANDLE handle;
+        BYTE sid[SECURITY_MAX_SID_SIZE];
+    } params;
+    UNICODE_STRING name_str;
+    DWORD sid_size = 0;
     NTSTATUS status;
     int type;
 
@@ -121,10 +129,18 @@ static DWORD get_service_token(const WCHAR *account, HANDLE *token, const WCHAR 
     }
     else return ERROR_SERVICE_LOGON_FAILED;
 
-    handle = (HANDLE)(ULONG_PTR)type;
-    if ((status = NtSetInformationProcess(GetCurrentProcess(), ProcessWineCreateServiceToken, &handle, sizeof(handle))))
+    params.handle = (HANDLE)(ULONG_PTR)type;
+    if (sid_type != SERVICE_SID_TYPE_NONE)
+    {
+        RtlInitUnicodeString(&name_str, name);
+        sid_size = sizeof(params.sid);
+        if ((status = RtlCreateServiceSid(&name_str, params.sid, &sid_size)))
+            return RtlNtStatusToDosError(status);
+    }
+    if ((status = NtSetInformationProcess(GetCurrentProcess(), ProcessWineCreateServiceToken, &params,
+                                          sizeof(params.handle) + sid_size)))
         return RtlNtStatusToDosError(status);
-    *token = handle;
+    *token = params.handle;
     return ERROR_SUCCESS;
 }
 
@@ -271,6 +287,9 @@ static DWORD load_service_config(HKEY hKey, struct service_entry *entry)
         entry->is_wow64 = TRUE;
     if (load_reg_dword(hKey, L"DelayedAutoStart", &value) == 0 && value == 1)
         entry->delayed_autostart = TRUE;
+    if (load_reg_dword(hKey, L"ServiceSidType", &value) == 0 &&
+        (value == SERVICE_SID_TYPE_UNRESTRICTED || value == SERVICE_SID_TYPE_RESTRICTED))
+        entry->sid_type = value;
     load_session_service(hKey, entry);
 
     WINE_TRACE("Image path           = %s\n", wine_dbgstr_w(entry->config.lpBinaryPathName) );
@@ -352,6 +371,13 @@ DWORD save_service_config(struct service_entry *entry)
         err = reg_set_dword_value(hKey, L"DelayedAutoStart", entry->delayed_autostart);
     else
         err = RegDeleteValueW(hKey, L"DelayedAutoStart");
+    if (err != 0 && err != ERROR_FILE_NOT_FOUND)
+        goto cleanup;
+
+    if (entry->sid_type)
+        err = reg_set_dword_value(hKey, L"ServiceSidType", entry->sid_type);
+    else
+        err = RegDeleteValueW(hKey, L"ServiceSidType");
     if (err != 0 && err != ERROR_FILE_NOT_FOUND)
         goto cleanup;
 
@@ -1228,7 +1254,8 @@ found:
         return ERROR_SUCCESS;
     }
 
-    if ((err = get_service_token(service_entry->config.lpServiceStartName, &service_token, &sddl)))
+    if ((err = get_service_token(service_entry->config.lpServiceStartName, service_entry->name,
+                                 service_entry->sid_type, &service_token, &sddl)))
     {
         WINE_ERR("cannot start %s as %s, error = %lu\n", wine_dbgstr_w(service_entry->name),
                  wine_dbgstr_w(service_entry->config.lpServiceStartName), err);

@@ -4051,6 +4051,7 @@ struct handle_info
 /* Create the primary token of a service account (0 LocalSystem, 1 LocalService, 2 NetworkService); needs the system role */
 @REQ(create_service_token)
     unsigned int   account;       /* service account */
+    VARARG(sid,sid);              /* the service's SID (NT SERVICE\name), or nothing */
 @REPLY
     obj_handle_t   token;         /* handle to the new token */
 @END

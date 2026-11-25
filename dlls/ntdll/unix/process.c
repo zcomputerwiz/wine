@@ -1877,10 +1877,15 @@ NTSTATUS WINAPI NtSetInformationProcess( HANDLE handle, PROCESSINFOCLASS class, 
         return ret;
 
     case ProcessWineCreateServiceToken:  /* in: account (0 LocalSystem, 1 LocalService, 2 NetworkService), out: token handle */
-        if (size != sizeof(HANDLE *)) return STATUS_INFO_LENGTH_MISMATCH;
+        /* WineExplorer: the account may be followed by the service's SID (NT SERVICE\name, RtlCreateServiceSid),
+         * which the token gets as a group */
+        if (size < sizeof(HANDLE *) || size > sizeof(HANDLE *) + SECURITY_MAX_SID_SIZE)
+            return STATUS_INFO_LENGTH_MISMATCH;
         SERVER_START_REQ( create_service_token )
         {
             req->account = *(ULONG_PTR *)info;
+            if (size > sizeof(HANDLE *))
+                wine_server_add_data( req, (const char *)info + sizeof(HANDLE *), size - sizeof(HANDLE *) );
             if (!(ret = wine_server_call( req )))
                 *(HANDLE *)info = wine_server_ptr_handle( reply->token );
         }
