@@ -1181,6 +1181,9 @@ SOURCES = \
 	wine/unixlib.h \
 	wine/vulkan.h \
 	wine/vulkan_driver.h \
+	wine/wex_accounts.h \
+	wine/wex_caller.h \
+	wine/wex_eventlog.h \
 	wine/wex_session0.h \
 	wine/wex_sysrun_conf.h \
 	wine/wex_sysrun_peer.h \

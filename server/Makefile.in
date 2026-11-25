@@ -61,6 +61,7 @@ SOURCES = \
 	wex_e1lab_registry.h \
 	wex_e1lab_sysrun.c \
 	wex_e1lab_token.h \
+	wex_accounts.c \
 	wex_x0lab.c \
 	wex_profile_storage.c \
 	wex_profile_storage.h \

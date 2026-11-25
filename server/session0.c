@@ -1111,6 +1111,7 @@ struct token *link_bound_token( uid_t uid, unsigned int session, const void *des
         *status = STATUS_ACCESS_DENIED;
         return NULL;
     }
+    token_set_link_bound( token, session );  /* H3: never this server's own system, whatever it says */
     *status = STATUS_SUCCESS;
     return token;
 }
@@ -1393,13 +1394,23 @@ static void session0_link_event( struct fd *fd, int event )
     }
     else if (hdr->type == WEX_SESSION0_PIPE)
     {
-        /* T5.2: join the channel (a stream socket) to the named pipe, as a client with the described token */
-        struct token *token = create_bound_token( hdr + 1, hdr->desc_size, link->peer_uid, &reply.status );
+        /* T5.2: join the channel (a stream socket) to the named pipe, as a client with the described token; L1 (E6):
+         * bound to the link, its account and its session (a description naming another session is refused) */
+        /* N1: an opener whose server has no session link has no session to bind: refused before it is described */
+        int link_session = peer_session( link );
+        struct token *token = link_session < 0 ? NULL :
+                              link_bound_token( link->peer_uid, link_session, hdr + 1, hdr->desc_size, &reply.status );
         WCHAR *name = malloc( hdr->name_size ? hdr->name_size : 1 );
 
         if (!token || !name)
         {
             if (token) reply.status = STATUS_NO_MEMORY;
+            else if (link_session < 0)
+            {
+                reply.status = STATUS_ACCESS_DENIED;
+                fprintf( stderr, "session0: pipe open refused for uid %u: the server has no session link\n",
+                         (unsigned int)link->peer_uid );
+            }
             else fprintf( stderr, "session0: pipe open refused for uid %u: the described token (%x)\n",
                           (unsigned int)link->peer_uid, reply.status );
             close( channel );
