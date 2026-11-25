@@ -1396,13 +1396,21 @@ static void session0_link_event( struct fd *fd, int event )
     {
         /* T5.2: join the channel (a stream socket) to the named pipe, as a client with the described token; L1 (E6):
          * bound to the link, its account and its session (a description naming another session is refused) */
-        struct token *token = link_bound_token( link->peer_uid, peer_session( link ), hdr + 1, hdr->desc_size,
-                                                &reply.status );
+        /* N1: an opener whose server has no session link has no session to bind: refused before it is described */
+        int link_session = peer_session( link );
+        struct token *token = link_session < 0 ? NULL :
+                              link_bound_token( link->peer_uid, link_session, hdr + 1, hdr->desc_size, &reply.status );
         WCHAR *name = malloc( hdr->name_size ? hdr->name_size : 1 );
 
         if (!token || !name)
         {
             if (token) reply.status = STATUS_NO_MEMORY;
+            else if (link_session < 0)
+            {
+                reply.status = STATUS_ACCESS_DENIED;
+                fprintf( stderr, "session0: pipe open refused for uid %u: the server has no session link\n",
+                         (unsigned int)link->peer_uid );
+            }
             else fprintf( stderr, "session0: pipe open refused for uid %u: the described token (%x)\n",
                           (unsigned int)link->peer_uid, reply.status );
             close( channel );
