@@ -3240,6 +3240,15 @@ static int peek_message( MSG *msg, const struct peek_message_filter *filter )
             {
                 if (!(flags & PM_NOYIELD) && idle_event) NtSetEvent( idle_event, NULL );
             }
+            /* message 0x60 (measured on Windows 11): removing a posted one first calls the window procedure with the
+             * stored parameters, then returns the message with 0x80000000 set in wparam */
+            if (info.msg.message == 0x0060 && (flags & PM_REMOVE) && info.msg.hwnd)
+            {
+                MSG notify = info.msg;
+
+                NtUserDispatchMessage( &notify );
+                info.msg.wParam |= 0x80000000;
+            }
             *msg = info.msg;
             msg->pt = point_phys_to_win_dpi( info.msg.hwnd, info.msg.pt );
             thread_info->message_pos   = MAKELONG( msg->pt.x, msg->pt.y );
@@ -3417,7 +3426,9 @@ static inline LARGE_INTEGER *get_nt_timeout( LARGE_INTEGER *time, DWORD timeout 
  * passed on). No queue status bit is involved. */
 #define WM_CORE_MESSAGING_COMPLETION 0x0060
 
-static void dispatch_core_completion(void)
+/* returns whether a message wait should return as for input: only for a packet with a non-zero APC context (measured: a
+ * packet with a zero APC context is delivered as (3,0) but the wait goes on, and a packet someone else took is not an event) */
+static BOOL dispatch_core_completion(void)
 {
     struct user_thread_info *info = get_user_thread_info();
     LARGE_INTEGER zero = {0};
@@ -3426,16 +3437,17 @@ static void dispatch_core_completion(void)
     HWND *windows;
     UINT i, count;
 
-    if (!info->core_port) return;
+    if (!info->core_port) return FALSE;
     /* a packet that someone else took in the meantime is not an error */
-    if (NtRemoveIoCompletion( info->core_port, &key, &apc, &io, &zero )) return;
+    if (NtRemoveIoCompletion( info->core_port, &key, &apc, &io, &zero )) return FALSE;
 
     /* the window procedures may register or destroy windows: work on a copy */
-    if (!(count = info->core_window_count) || !(windows = malloc( count * sizeof(*windows) ))) return;
+    if (!(count = info->core_window_count) || !(windows = malloc( count * sizeof(*windows) ))) return apc != 0;
     memcpy( windows, info->core_windows, count * sizeof(*windows) );
     for (i = 0; i < count; i++)
         if (is_window( windows[i] )) send_message( windows[i], WM_CORE_MESSAGING_COMPLETION, apc ? 8 : 3, apc );
     free( windows );
+    return apc != 0;
 }
 
 void core_messaging_window_destroyed( HWND hwnd )
@@ -3589,8 +3601,23 @@ static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DW
 
     KeUserDispatchCallback( &params.dispatch, sizeof(params), &ret_ptr, &ret_len );
 
-    /* a CoreMessaging completion woke the queue: deliver it now that the user locks are back */
-    if (ret == count - 1 && check_internal_bits( QS_COMPLETION )) dispatch_core_completion();
+    /* a CoreMessaging completion woke the queue: deliver it now that the user locks are back; a completion that does not
+     * count as input (zero APC context) lets the wait go on for the rest of its time */
+    if (ret == count - 1 && check_internal_bits( QS_COMPLETION ) && !dispatch_core_completion())
+    {
+        DWORD rest = INFINITE;
+
+        if (abs)
+        {
+            LONGLONG left;
+
+            NtQuerySystemTime( &now );
+            left = (abs->QuadPart - now.QuadPart) / 10000;
+            rest = left > 0 ? left : 0;
+        }
+        if (timeout == INFINITE || rest) return wait_message( count, handles, rest, wake_mask, changed_mask, flags );
+        return WAIT_TIMEOUT;
+    }
 
     return ret;
 }
@@ -4870,20 +4897,6 @@ BOOL WINAPI NtUserPostMessage( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam
     if (!(info.dest_tid = get_window_thread( hwnd, NULL ))) return FALSE;
 
     if (is_exiting_thread( info.dest_tid )) return TRUE;
-
-    /* message 0x60 (measured on Windows 11, any window of any thread): posting it also sends a notification with the original
-     * parameters, queued behind the sent messages already waiting (a window of this thread sees it inside the next message
-     * retrieval, never inside the call), and the posted copy has the top bit set in wparam */
-    if (msg == WM_CORE_MESSAGING_COMPLETION)
-    {
-        struct send_message_info notify = info;
-        size_t reply_size = 0;
-
-        notify.type = MSG_NOTIFY;
-        notify.wm_char = WMCHAR_MAP_SENDMESSAGETIMEOUT;
-        if (!put_message_in_queue( &notify, &reply_size )) return FALSE;
-        info.wparam |= 0x80000000;
-    }
 
     return put_message_in_queue( &info, NULL );
 }

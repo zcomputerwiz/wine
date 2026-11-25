@@ -21976,23 +21976,20 @@ static void test_core_messaging_completions(void)
     ret_port = pInit(NULL, &existing);
     ok(!ret_port, "got %p.\n", ret_port);
 
-    ret_port = pInit(hwnd3, NULL);
+    existing = 0xdeadbeef;
+    ret_port = pInit(hwnd3, &existing);
     ok(ret_port == core_port, "got %p.\n", ret_port);
     ok(DestroyWindow(hwnd3), "DestroyWindow failed.\n");
 
-    /* a completion queued while the thread is outside a wait stays queued: nothing drains it, and no queue status
-     * bit changes */
+    /* a completion queued while the thread is outside a message wait stays queued: Sleep and alertable waits do not
+     * drain it (on Windows GetQueueStatus does, so it is not called here) */
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) DispatchMessageA(&msg);
     core_msgs.count = 0;
-    before = GetQueueStatus(QS_ALLINPUT | QS_ALLPOSTMESSAGE);
     status = pNtSetIoCompletion(core_port, 0x11, 0x21, 0, 0);
     ok(!status, "got %#lx.\n", status);
-    after = GetQueueStatus(QS_ALLINPUT | QS_ALLPOSTMESSAGE);
-    ok(after == before, "queue status changed: %#lx, %#lx.\n", before, after);
-    ret = PeekMessageA(&msg, NULL, 0, 0, PM_NOREMOVE);
-    ok(!ret, "got a message %#x.\n", msg.message);
     Sleep(50);
     SleepEx(50, TRUE);
+    WaitForSingleObjectEx(GetCurrentThread(), 50, TRUE);
     ok(!core_msgs.count, "got %d messages.\n", core_msgs.count);
 
     /* a message wait delivers it, whatever the wake mask: message 0x60, wparam 8, lparam the apc context, to every
@@ -22018,11 +22015,12 @@ static void test_core_messaging_completions(void)
     ok(status == WAIT_OBJECT_0, "got %#lx.\n", status);
     ok(core_msgs.count == 2 && core_msgs.lp[0] == 0x22, "got %d messages, lparam %#Ix.\n", core_msgs.count, core_msgs.lp[0]);
 
-    /* a zero apc context gives wparam 3 and lparam 0 whatever the key, the status and the information are */
+    /* a zero apc context gives wparam 3 and lparam 0 whatever the key, the status and the information are; the wait goes on
+     * (it does not return as for input) */
     core_msgs.count = 0;
     pNtSetIoCompletion(core_port, 0x7777, 0, 0, 0x6666);
-    status = MsgWaitForMultipleObjectsEx(0, NULL, 2000, QS_ALLINPUT, 0);
-    ok(status == WAIT_OBJECT_0, "got %#lx.\n", status);
+    status = MsgWaitForMultipleObjectsEx(0, NULL, 300, QS_ALLINPUT, 0);
+    ok(status == WAIT_TIMEOUT, "got %#lx.\n", status);
     ok(core_msgs.count == 2 && core_msgs.wp[0] == 3 && !core_msgs.lp[0], "got %d messages, wparam %#Ix, lparam %#Ix.\n",
        core_msgs.count, core_msgs.wp[0], core_msgs.lp[0]);
 
@@ -22049,7 +22047,9 @@ static void test_core_messaging_completions(void)
     status = pDrain(hwnd, NULL, NULL, NULL);
     ok(status == 1, "got %lu.\n", status);
     ok(core_msgs.count == 4 && core_msgs.lp[2] == 0x32, "got %d messages, lparam %#Ix.\n", core_msgs.count, core_msgs.lp[2]);
-    ok(!core_take_completion(&key, &apc), "the port is not empty.\n");
+    /* Windows leaves a packet with key 0 and apc context 0xffffffff80000001 in the port after a drain (not replicated) */
+    if (core_take_completion(&key, &apc))
+        ok(!key && apc == (ULONG_PTR)0xffffffff80000001ull, "got key %#Ix, apc %#Ix.\n", key, apc);
 
     /* a window that was destroyed gets nothing */
     core_msgs.count = 0;
@@ -22067,7 +22067,9 @@ static void test_core_messaging_completions(void)
     ret = PostMessageA(hwnd, 0x60, 5, 4);
     ok(ret, "PostMessage failed, error %lu.\n", GetLastError());
     ok(!core_msgs.count, "got %d messages inside PostMessage.\n", core_msgs.count);
-    ok(HIWORD(GetQueueStatus(QS_ALLINPUT)) & QS_SENDMESSAGE, "got no sent message.\n");
+    ok(!(HIWORD(GetQueueStatus(QS_ALLINPUT)) & QS_SENDMESSAGE), "got a sent message.\n");
+    ret = PeekMessageA(&msg, hwnd, 0x60, 0x60, PM_NOREMOVE);
+    ok(ret && msg.wParam == 5 && !core_msgs.count, "got ret %d, wparam %#Ix, %d messages.\n", ret, msg.wParam, core_msgs.count);
     ret = PeekMessageA(&msg, hwnd, 0x60, 0x60, PM_REMOVE);
     ok(ret && msg.wParam == 0x80000005 && msg.lParam == 4, "got ret %d, wparam %#Ix, lparam %#Ix.\n", ret, msg.wParam, msg.lParam);
     ok(core_msgs.count == 1 && core_msgs.wp[0] == 5 && core_msgs.lp[0] == 4 && core_msgs.tid[0] == core_main_tid,
