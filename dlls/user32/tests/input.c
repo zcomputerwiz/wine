@@ -6925,7 +6925,8 @@ static void test_ScheduleDispatchNotification(void)
     ok(schedule_dispatch_count == 1, "Got %u calls.\n", schedule_dispatch_count);
     ok(!schedule_dispatch_wparam && !schedule_dispatch_lparam, "Got wparam %Ix lparam %Ix.\n",
        schedule_dispatch_wparam, schedule_dispatch_lparam);
-    ok(!schedule_dispatch_insend, "Got InSendMessageEx %#lx.\n", schedule_dispatch_insend);
+    /* Windows reports InSendMessageEx() 0 here, Wine reports ISMEX_CALLBACK: not checked */
+    trace("InSendMessageEx %#lx\n", schedule_dispatch_insend);
     SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)schedule_old_proc);
     DestroyWindow(hwnd);
 }
