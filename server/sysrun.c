@@ -35,6 +35,7 @@
 #include <fcntl.h>
 #include <grp.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -74,6 +75,24 @@ static void set_not_dumpable(void)
 #if defined(__linux__) && defined(HAVE_SYS_PRCTL_H)
     prctl( PR_SET_DUMPABLE, 0, 0, 0, 0 );
 #endif
+}
+
+/* setegid, then not dumpable again, with every signal held in between (B106): the credential change sets the flag to
+ * fs.suid_dumpable, and with 1 the user, who may signal this server, could time a SIGQUIT into that window and get
+ * a core of it. A signal sent meanwhile is delivered once the flag is 0 again. Returns setegid's result. */
+static int set_egid( gid_t gid )
+{
+    sigset_t all, old;
+    int ret, err;
+
+    sigfillset( &all );
+    sigprocmask( SIG_BLOCK, &all, &old );
+    ret = setegid( gid );
+    err = errno;
+    set_not_dumpable();
+    sigprocmask( SIG_SETMASK, &old, NULL );
+    errno = err;
+    return ret;
 }
 
 enum sysrun_conf sysrun_conf_get( const char *key, char *value, size_t size )
@@ -119,8 +138,7 @@ void sysrun_init(void)
     if (!(gr = getgrnam( group )) || gr->gr_gid != sgid) return;
     system_gid = sgid;
     user_gid = rgid;
-    if (setegid( user_gid )) fatal_error( "cannot drop the system group: %s\n", strerror( errno ));
-    set_not_dumpable();
+    if (set_egid( user_gid )) fatal_error( "cannot drop the system group: %s\n", strerror( errno ));
     sysrun_active = 1;
 #endif
 }
@@ -140,8 +158,7 @@ int sysrun_raise(void)
     int err = errno;
 
     if (!sysrun_active || is_raised) return 0;
-    if (setegid( system_gid )) return 0;  /* the operation then fails with the user's rights */
-    set_not_dumpable();
+    if (set_egid( system_gid )) return 0;  /* the operation then fails with the user's rights */
     is_raised = 1;
     errno = err;
     return 1;
@@ -152,8 +169,7 @@ void sysrun_drop( int raised )
     int err = errno;
 
     if (!raised) return;
-    if (setegid( user_gid )) fatal_error( "cannot drop the system group: %s\n", strerror( errno ));
-    set_not_dumpable();
+    if (set_egid( user_gid )) fatal_error( "cannot drop the system group: %s\n", strerror( errno ));
     is_raised = 0;
     errno = err;
 }
