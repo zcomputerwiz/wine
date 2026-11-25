@@ -598,8 +598,17 @@ static void lab_command( struct lab_client *client, char *line )
     }
     else if (!strcmp( verb, "droplink" ) && !session0_server)
     {
+        /* forge: the HELLO on the next link names another pid (the peer must refuse it) */
+        if (args.words == 2 && !strcmp( args.word[1], "forge" )) x_lab_forge_hello = 1;
         session0_lab_drop_link();
         strcpy( text, "status=0\n" );
+    }
+    else if (!strcmp( verb, "frame" ) && args.words >= 2)
+    {
+        /* a header-only frame of the type given (hex), with call 1 and the reference given (hex) */
+        unsigned long long id = args.words == 3 ? strtoull( args.word[2], NULL, 16 ) : 0;
+        snprintf( text, sizeof(text), "sent=%d\n",
+                  x_send_raw_header( peer, strtoul( args.word[1], NULL, 16 ), 1, id ));
     }
     else if (!strcmp( verb, "notices" ) && args.words == 2)
     {

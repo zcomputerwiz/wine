@@ -78,11 +78,11 @@ struct x_qframe
 {
     struct list               entry;
     size_t                    size;
-    struct object            *give_back;   /* a TRY's success in this frame: given back if it is never sent */
-    const struct x_kind_ops  *ops;
     char                      data[1];
 };
 
+/* a request of this side waiting for its reply; it belongs to the peer, so it outlives a lost link and is sent again
+ * (with the same call number) when the same epoch links again */
 struct x_call
 {
     struct list         entry;
@@ -90,6 +90,23 @@ struct x_call
     unsigned int        type;
     x_done_fn           done;
     void               *ctx;
+    struct x_qframe    *frame;       /* the request as sent */
+};
+
+/* The owner's copy of a reply that must not be served twice (a TRY's or an OPEN's success): a request sent again
+ * after a relink gets it back instead. Kept until the holder's low-water mark (the lowest call it still waits for,
+ * in the status field of each request) passes it. A TRY's success still kept when the peer's epoch ends is given
+ * back: as far as the owner knows it never arrived. */
+#define X_MAX_CACHED 1024
+struct x_cached
+{
+    struct list               entry;
+    unsigned int              call;
+    unsigned int              type;
+    unsigned long long        ref;
+    struct wex_x_granted      granted;     /* OPEN's body */
+    struct object            *give_back;   /* TRY: the object taken */
+    const struct x_kind_ops  *ops;
 };
 
 struct x_conn
@@ -104,9 +121,6 @@ struct x_conn
     struct x_account   *account;
     struct list         queue;       /* struct x_qframe */
     size_t              queued;
-    struct list         calls;       /* struct x_call: this side's requests waiting for their reply */
-    unsigned int        call_count;
-    unsigned int        next_call;
     struct list         deferred;    /* the lab's held PING answers (struct x_qframe) */
     struct list         stalled;     /* the peer's requests waiting while the account's queue is over the cap */
     unsigned int        inflight_in; /* the peer's requests not answered yet (deferred and stalled) */
@@ -127,7 +141,12 @@ struct x_peer
     unsigned int          sub_count;
     struct timeout_user  *lost_timer;
     timeout_t             lost_since;
-    int                   paused;    /* the lab: carried to the next connection */
+    struct list           calls;     /* struct x_call: this side's requests to the peer, oldest first */
+    unsigned int          call_count;
+    unsigned int          next_call;
+    struct list           cached;    /* struct x_cached: replies the peer may ask for again */
+    unsigned int          cached_count;
+    unsigned int          stray;     /* replies to no call of ours, and other frames dropped */
 };
 
 struct x_ref
@@ -154,6 +173,7 @@ static struct list ref_hash[X_HASH_SIZE];
 static const struct x_kind_ops *kinds[X_MAX_KINDS];
 static unsigned int conn_numbers;
 static int defer_pings;
+int x_lab_forge_hello;
 struct list x_all_held = LIST_INIT( x_all_held );
 
 static void x_serve( struct x_conn *conn, const struct wex_x_header *hdr, const char *body, size_t size );
@@ -275,16 +295,6 @@ static void x_update_events( struct x_conn *conn )
     set_fd_events( conn->fd, x_conn_events( conn ));
 }
 
-static void x_qframe_free( struct x_qframe *q, int sent )
-{
-    if (q->give_back)
-    {
-        if (!sent) q->ops->give_back( q->give_back );
-        release_object( q->give_back );
-    }
-    free( q );
-}
-
 /* build a frame: the header, then up to three parts; NULL when it does not fit (raw: a little over the limit, for
  * the lab's test of the limit) */
 static struct x_qframe *x_build( unsigned int type, unsigned int call, unsigned int status, unsigned long long ref,
@@ -299,8 +309,6 @@ static struct x_qframe *x_build( unsigned int type, unsigned int call, unsigned 
     if (size > WEX_SESSION0_MAX_MSG + (raw ? 4096 : 0)) return NULL;
     if (!(q = malloc( offsetof( struct x_qframe, data[size] )))) return NULL;
     q->size = size;
-    q->give_back = NULL;
-    q->ops = NULL;
     hdr.magic = WEX_X_MAGIC;
     hdr.size = size;
     hdr.type = type;
@@ -325,7 +333,7 @@ static int x_transmit( struct x_conn *conn, struct x_qframe *q )
 {
     if (!conn)
     {
-        x_qframe_free( q, 0 );
+        free( q );
         return 0;
     }
     if (list_empty( &conn->queue ))
@@ -334,12 +342,12 @@ static int x_transmit( struct x_conn *conn, struct x_qframe *q )
 
         if (n == (ssize_t)q->size)
         {
-            x_qframe_free( q, 1 );
+            free( q );
             return 1;
         }
         if (n >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != ENOBUFS))
         {
-            x_qframe_free( q, 0 );  /* the link is ending: its end comes through poll */
+            free( q );  /* the link is ending: its end comes through poll */
             return 0;
         }
     }
@@ -370,7 +378,7 @@ void x_conn_writable( struct x_conn *conn )
         list_remove( &q->entry );
         conn->queued -= q->size;
         conn->account->queued -= q->size;
-        x_qframe_free( q, 1 );
+        free( q );
     }
     x_account_note( conn->account, CAP_QUEUED, conn->account->queued );
     x_update_events( conn );
@@ -378,21 +386,71 @@ void x_conn_writable( struct x_conn *conn )
 }
 
 static void x_reply( struct x_conn *conn, const struct wex_x_header *req, unsigned int status, unsigned long long ref,
-                     const void *body, size_t size, struct object *give_back, const struct x_kind_ops *ops )
+                     const void *body, size_t size )
 {
     struct x_qframe *q = x_build( req->type | WEX_X_REPLY, req->call, status, ref, body, size, NULL, 0, NULL, 0, 0 );
 
-    if (!q)
+    if (q) x_transmit( conn, q );
+}
+
+/* ---- the owner's cache of replies that must not be served twice ---- */
+
+static void x_cached_free( struct x_peer *peer, struct x_cached *c, int delivered )
+{
+    list_remove( &c->entry );
+    peer->cached_count--;
+    if (c->give_back)
     {
-        if (give_back) ops->give_back( give_back );
-        return;
+        if (!delivered) c->ops->give_back( c->give_back );
+        release_object( c->give_back );
     }
+    free( c );
+}
+
+/* the holder waits for no call below low: what it got is delivered */
+static void x_cache_ack( struct x_peer *peer, unsigned int low )
+{
+    struct x_cached *c, *next;
+
+    LIST_FOR_EACH_ENTRY_SAFE( c, next, &peer->cached, struct x_cached, entry )
+        if ((int)(c->call - low) < 0) x_cached_free( peer, c, 1 );
+}
+
+static void x_cache_add( struct x_peer *peer, const struct wex_x_header *req, unsigned long long ref,
+                         const struct wex_x_granted *granted, struct object *give_back, const struct x_kind_ops *ops )
+{
+    struct x_cached *c;
+
+    /* a holder that never moves its low-water mark: the oldest counts as delivered */
+    if (peer->cached_count >= X_MAX_CACHED)
+        x_cached_free( peer, LIST_ENTRY( list_head( &peer->cached ), struct x_cached, entry ), 1 );
+    if (!(c = calloc( 1, sizeof(*c) ))) return;  /* served once anyway; only a replay would miss it */
+    c->call = req->call;
+    c->type = req->type;
+    c->ref = ref;
+    if (granted) c->granted = *granted;
     if (give_back)
     {
-        q->give_back = grab_object( give_back );
-        q->ops = ops;
+        c->give_back = grab_object( give_back );
+        c->ops = ops;
     }
-    x_transmit( conn, q );
+    list_add_tail( &peer->cached, &c->entry );
+    peer->cached_count++;
+}
+
+/* a request sent again after a relink: its cached reply, if it had one; 1 when replayed */
+static int x_cache_replay( struct x_conn *conn, const struct wex_x_header *req )
+{
+    struct x_cached *c;
+
+    LIST_FOR_EACH_ENTRY( c, &conn->peer->cached, struct x_cached, entry )
+    {
+        if (c->call != req->call || c->type != req->type) continue;
+        x_reply( conn, req, STATUS_SUCCESS, c->ref, req->type == WEX_X_OPEN ? &c->granted : NULL,
+                 req->type == WEX_X_OPEN ? sizeof(c->granted) : 0 );
+        return 1;
+    }
+    return 0;
 }
 
 /* ---- the owner's references ---- */
@@ -543,18 +601,40 @@ void *x_describe_caller( struct thread *thread, data_size_t *size, unsigned int 
 
 /* ---- peers ---- */
 
-static void x_fail_calls( struct x_conn *conn )
+/* the peer's epoch ended: this side's calls to it fail (never while only its link is lost) */
+static void x_fail_calls( struct x_peer *peer )
 {
     struct x_call *call;
 
-    while (!list_empty( &conn->calls ))
+    while (!list_empty( &peer->calls ))
     {
-        call = LIST_ENTRY( list_head( &conn->calls ), struct x_call, entry );
+        call = LIST_ENTRY( list_head( &peer->calls ), struct x_call, entry );
         list_remove( &call->entry );
-        conn->call_count--;
+        peer->call_count--;
         call->done( call->ctx, STATUS_CONNECTION_DISCONNECTED, NULL, NULL, 0 );
+        free( call->frame );
         free( call );
     }
+}
+
+/* the lowest call this side still waits for from peer (its low-water mark, in each request's status field) */
+static unsigned int x_low_water( struct x_peer *peer )
+{
+    if (list_empty( &peer->calls )) return peer->next_call + 1;
+    return LIST_ENTRY( list_head( &peer->calls ), struct x_call, entry )->call;
+}
+
+/* send a call's request on the peer's connection (again, after a relink): a copy, with the current low-water mark */
+static int x_call_send( struct x_peer *peer, struct x_call *call )
+{
+    struct x_qframe *q = malloc( offsetof( struct x_qframe, data[call->frame->size] ));
+    unsigned int low = x_low_water( peer );
+
+    if (!q) return 0;
+    q->size = call->frame->size;
+    memcpy( q->data, call->frame->data, q->size );
+    memcpy( q->data + offsetof( struct wex_x_header, status ), &low, sizeof(low) );
+    return x_transmit( peer->conn, q );
 }
 
 /* the peer's epoch has ended: the owner drops what it issued to it; what this server holds into it is dead */
@@ -573,12 +653,13 @@ static void x_peer_end( struct x_peer *peer, const char *why )
         }
     if (peer->conn)
     {
-        struct x_conn *conn = peer->conn;
-
+        peer->conn->peer = NULL;
         peer->conn = NULL;
-        conn->peer = NULL;
-        x_fail_calls( conn );
     }
+    x_fail_calls( peer );
+    /* a TRY's success the holder never acknowledged: as far as the owner knows, it never arrived */
+    while (!list_empty( &peer->cached ))
+        x_cached_free( peer, LIST_ENTRY( list_head( &peer->cached ), struct x_cached, entry ), 0 );
     if (peer->lost_timer) remove_timeout_user( peer->lost_timer );
     list_remove( &peer->entry );
     fprintf( stderr, "x0: peer pid %u (uid %u, session %u) ended (%s): %u references dropped, %u held ones dead\n",
@@ -634,23 +715,21 @@ static void x_hello( struct x_conn *conn, const char *body, size_t size )
     }
     if (found)
     {
-        if (found->conn && found->conn != conn)
-        {
-            struct x_conn *old = found->conn;
+        struct x_call *call;
 
-            found->conn = NULL;
-            old->peer = NULL;
-            x_fail_calls( old );
-        }
+
+        if (found->conn && found->conn != conn) found->conn->peer = NULL;  /* a reply still coming there is dropped */
         if (found->lost_timer) remove_timeout_user( found->lost_timer );
         found->lost_timer = NULL;
         found->conn = conn;
         conn->peer = found;
-        conn->paused = found->paused;
-        x_update_events( conn );
-        fprintf( stderr, "x0: peer pid %u (uid %u, session %u) linked again: %u references kept\n",
-                 found->epoch.pid, (unsigned int)found->uid, found->session, found->ref_count );
-        /* notices queued on the lost link may be gone: every subscription is armed again */
+        fprintf( stderr, "x0: peer pid %u (uid %u, session %u) linked again: %u references kept, %u calls sent again\n",
+                 found->epoch.pid, (unsigned int)found->uid, found->session, found->ref_count, found->call_count );
+        /* Whatever was inside the lost socket is gone (SEQPACKET drops what the closing end had not read):
+         * - this side's calls are sent again with their call numbers: RELEASE, CANCEL, QUERY, SUBSCRIBE and PING are
+         *   idempotent, and the peer replays a TRY's or an OPEN's success from its cache instead of serving it twice;
+         * - every subscription is armed again, for notices that were lost. */
+        LIST_FOR_EACH_ENTRY( call, &found->calls, struct x_call, entry ) x_call_send( found, call );
         LIST_FOR_EACH_ENTRY( ref, &found->refs, struct x_ref, peer_entry ) x_arm( ref );
         return;
     }
@@ -661,6 +740,8 @@ static void x_hello( struct x_conn *conn, const char *body, size_t size )
     peer->conn = conn;
     peer->account = conn->account;
     list_init( &peer->refs );
+    list_init( &peer->calls );
+    list_init( &peer->cached );
     list_add_tail( &peers, &peer->entry );
     conn->peer = peer;
 }
@@ -697,26 +778,30 @@ struct x_conn *x_conn_create( struct fd *fd, uid_t uid, pid_t pid, unsigned int 
     conn->session = session;
     conn->number = ++conn_numbers;
     list_init( &conn->queue );
-    list_init( &conn->calls );
     list_init( &conn->deferred );
     list_init( &conn->stalled );
     list_add_tail( &conns, &conn->entry );
 
     memset( &hello, 0, sizeof(hello) );
     hello.epoch = own_epoch;
+    if (x_lab_forge_hello)  /* the lab: one HELLO that names another pid, which the peer must refuse */
+    {
+        x_lab_forge_hello = 0;
+        hello.epoch.pid ^= 1;
+    }
     hello.connection = session0_server ? conn->number : 0;
     hello.session = session0_server ? session : default_session_id;
     if ((q = x_build( WEX_X_HELLO, 0, 0, 0, &hello, sizeof(hello), NULL, 0, NULL, 0, 0 ))) x_transmit( conn, q );
     return conn;
 }
 
-static void x_drop_frames( struct x_conn *conn, struct list *list, int sent_state )
+static void x_drop_frames( struct list *list )
 {
     while (!list_empty( list ))
     {
         struct x_qframe *q = LIST_ENTRY( list_head( list ), struct x_qframe, entry );
         list_remove( &q->entry );
-        x_qframe_free( q, sent_state );
+        free( q );
     }
 }
 
@@ -724,15 +809,16 @@ void x_conn_closed( struct x_conn *conn )
 {
     struct x_peer *peer = conn->peer;
 
-    /* detached first: a completion that makes a new call finds no connection */
+    /* the calls stay with the peer while its epoch lives (sent again on the relink); replies that never went out are
+     * dropped: a TRY's or an OPEN's success stays in the owner's cache for the relink, or is given back when the
+     * peer's epoch ends */
     list_remove( &conn->entry );
     conn->peer = NULL;
     if (peer) peer->conn = NULL;
-    x_fail_calls( conn );
     conn->account->queued -= conn->queued;
-    x_drop_frames( conn, &conn->queue, 0 );     /* a TRY's success that never went out is given back */
-    x_drop_frames( conn, &conn->deferred, 1 );
-    x_drop_frames( conn, &conn->stalled, 1 );
+    x_drop_frames( &conn->queue );
+    x_drop_frames( &conn->deferred );
+    x_drop_frames( &conn->stalled );
     if (peer)
     {
         if (!x_epoch_alive( &peer->epoch )) x_peer_end( peer, "its server is gone" );
@@ -773,18 +859,21 @@ static void x_unstall( struct x_account *account )
 
 static void x_reply_received( struct x_conn *conn, const struct wex_x_header *hdr, const char *body, size_t size )
 {
+    struct x_peer *peer = conn->peer;
     struct x_call *call;
 
-    LIST_FOR_EACH_ENTRY( call, &conn->calls, struct x_call, entry )
+    if (!peer) return;  /* before HELLO, or a connection the peer has left: dropped */
+    LIST_FOR_EACH_ENTRY( call, &peer->calls, struct x_call, entry )
     {
         if (call->call != hdr->call || call->type != (hdr->type & ~WEX_X_REPLY)) continue;
         list_remove( &call->entry );
-        conn->call_count--;
+        peer->call_count--;
         call->done( call->ctx, hdr->status, hdr, body, size );
+        free( call->frame );
         free( call );
         return;
     }
-    /* a reply to no call of this connection: ignored */
+    peer->stray++;  /* a reply to no call of ours: never answered */
 }
 
 static void x_notice( struct x_conn *conn, const struct wex_x_header *hdr )
@@ -813,8 +902,11 @@ void x_conn_frame( struct x_conn *conn, const void *buf, size_t size, int bad )
     {
         fprintf( stderr, "x0: a cut or malformed frame (type %x, %lu bytes, %u said) from server pid %d\n", hdr.type,
                  (unsigned long)size, hdr.size, (int)conn->pid );
-        if (!(hdr.type & WEX_X_REPLY) && hdr.type != WEX_X_HELLO && hdr.type != WEX_X_NOTICE)
-            x_reply( conn, &hdr, STATUS_INVALID_PARAMETER, 0, NULL, 0, NULL, NULL );
+        /* a reply, a NOTICE or a HELLO is never answered (two servers would bounce it for ever); nor anything before
+         * the HELLO. Frames with descriptors arrive here as bad (session0.c): none carries one before X5. */
+        if (conn->peer && !(hdr.type & WEX_X_REPLY) && hdr.type != WEX_X_HELLO && hdr.type != WEX_X_NOTICE)
+            x_reply( conn, &hdr, STATUS_INVALID_PARAMETER, 0, NULL, 0 );
+        else if (conn->peer) conn->peer->stray++;
         return;
     }
     size -= sizeof(hdr);
@@ -832,14 +924,10 @@ void x_conn_frame( struct x_conn *conn, const void *buf, size_t size, int bad )
         x_notice( conn, &hdr );
         return;
     }
-    if (!conn->peer)
-    {
-        x_reply( conn, &hdr, STATUS_INVALID_DEVICE_STATE, 0, NULL, 0, NULL, NULL );  /* before its HELLO */
-        return;
-    }
+    if (!conn->peer) return;  /* before its HELLO: dropped */
     if (conn->inflight_in >= WEX_X_MAX_INFLIGHT)
     {
-        x_reply( conn, &hdr, STATUS_INSUFFICIENT_RESOURCES, 0, NULL, 0, NULL, NULL );
+        x_reply( conn, &hdr, STATUS_INSUFFICIENT_RESOURCES, 0, NULL, 0 );
         return;
     }
     /* over the queued cap: the request waits, counted in flight (the link is still read) */
@@ -849,12 +937,10 @@ void x_conn_frame( struct x_conn *conn, const void *buf, size_t size, int bad )
 
         if (!(q = malloc( offsetof( struct x_qframe, data[size + sizeof(hdr)] ))))
         {
-            x_reply( conn, &hdr, STATUS_NO_MEMORY, 0, NULL, 0, NULL, NULL );
+            x_reply( conn, &hdr, STATUS_NO_MEMORY, 0, NULL, 0 );
             return;
         }
         q->size = size + sizeof(hdr);
-        q->give_back = NULL;
-        q->ops = NULL;
         memcpy( q->data, buf, q->size );
         list_add_tail( &conn->stalled, &q->entry );
         conn->inflight_in++;
@@ -885,7 +971,7 @@ static void x_serve_open( struct x_conn *conn, const struct wex_x_header *hdr, c
     if (hdr->desc_size > size - sizeof(open) || open.name_size != size - sizeof(open) - hdr->desc_size) goto invalid;
     if (!(ops = x_find_kind( open.kind )))
     {
-        x_reply( conn, hdr, STATUS_NOT_SUPPORTED, 0, NULL, 0, NULL, NULL );
+        x_reply( conn, hdr, STATUS_NOT_SUPPORTED, 0, NULL, 0 );
         return;
     }
     /* condition 1: the only way a description in an X request becomes a token */
@@ -893,13 +979,13 @@ static void x_serve_open( struct x_conn *conn, const struct wex_x_header *hdr, c
     {
         fprintf( stderr, "x0: OPEN refused for uid %u, session %u: the described token (%x)\n",
                  (unsigned int)peer->uid, peer->session, status );
-        x_reply( conn, hdr, status, 0, NULL, 0, NULL, NULL );
+        x_reply( conn, hdr, status, 0, NULL, 0 );
         return;
     }
     if (peer->account->refs >= WEX_X_MAX_REFS)
     {
         release_object( token );
-        x_reply( conn, hdr, STATUS_INSUFFICIENT_RESOURCES, 0, NULL, 0, NULL, NULL );
+        x_reply( conn, hdr, STATUS_INSUFFICIENT_RESOURCES, 0, NULL, 0 );
         return;
     }
     status = ops->open( body + sizeof(open) + hdr->desc_size, open.name_size, open.access, token, &obj,
@@ -912,7 +998,7 @@ static void x_serve_open( struct x_conn *conn, const struct wex_x_header *hdr, c
     if (status)
     {
         release_object( token );
-        x_reply( conn, hdr, status, 0, NULL, 0, NULL, NULL );
+        x_reply( conn, hdr, status, 0, NULL, 0 );
         return;
     }
     do x_random( &ref->id, sizeof(ref->id) ); while (!ref->id || x_ref_find_any( ref->id ));
@@ -927,11 +1013,12 @@ static void x_serve_open( struct x_conn *conn, const struct wex_x_header *hdr, c
     peer->account->refs++;
     x_account_note( peer->account, CAP_REFS, peer->account->refs );
     granted.ready = ops->ready( obj );
-    x_reply( conn, hdr, STATUS_SUCCESS, ref->id, &granted, sizeof(granted), NULL, NULL );
+    x_cache_add( peer, hdr, ref->id, &granted, NULL, NULL );  /* sent again after a relink: the same reference */
+    x_reply( conn, hdr, STATUS_SUCCESS, ref->id, &granted, sizeof(granted) );
     return;
 
 invalid:
-    x_reply( conn, hdr, STATUS_INVALID_PARAMETER, 0, NULL, 0, NULL, NULL );
+    x_reply( conn, hdr, STATUS_INVALID_PARAMETER, 0, NULL, 0 );
 }
 
 static void x_serve( struct x_conn *conn, const struct wex_x_header *hdr, const char *body, size_t size )
@@ -941,11 +1028,11 @@ static void x_serve( struct x_conn *conn, const struct wex_x_header *hdr, const 
     struct x_qframe *q;
     unsigned int status;
 
-    if (!conn->peer)
-    {
-        x_reply( conn, hdr, STATUS_INVALID_DEVICE_STATE, 0, NULL, 0, NULL, NULL );
-        return;
-    }
+    if (!conn->peer) return;
+    /* the holder's low-water mark: replies to calls below it arrived */
+    x_cache_ack( conn->peer, hdr->status );
+    /* a TRY or an OPEN sent again after a relink: its success again, never a second acquisition or reference */
+    if ((hdr->type == WEX_X_TRY || hdr->type == WEX_X_OPEN) && x_cache_replay( conn, hdr )) return;
     switch (hdr->type)
     {
     case WEX_X_OPEN:
@@ -954,7 +1041,7 @@ static void x_serve( struct x_conn *conn, const struct wex_x_header *hdr, const 
     case WEX_X_PING:
         if (!(q = x_build( hdr->type | WEX_X_REPLY, hdr->call, 0, hdr->ref, body, size, NULL, 0, NULL, 0, 0 )))
         {
-            x_reply( conn, hdr, STATUS_INVALID_PARAMETER, 0, NULL, 0, NULL, NULL );
+            x_reply( conn, hdr, STATUS_INVALID_PARAMETER, 0, NULL, 0 );
             return;
         }
         if (defer_pings)  /* the lab: held as a request in flight */
@@ -973,12 +1060,12 @@ static void x_serve( struct x_conn *conn, const struct wex_x_header *hdr, const 
     case WEX_X_TRY:
         break;
     default:
-        x_reply( conn, hdr, STATUS_NOT_SUPPORTED, 0, NULL, 0, NULL, NULL );
+        x_reply( conn, hdr, STATUS_NOT_SUPPORTED, 0, NULL, 0 );
         return;
     }
     if (size)
     {
-        x_reply( conn, hdr, STATUS_INVALID_PARAMETER, hdr->ref, NULL, 0, NULL, NULL );
+        x_reply( conn, hdr, STATUS_INVALID_PARAMETER, hdr->ref, NULL, 0 );
         return;
     }
     ref = x_ref_lookup( conn->peer, hdr->ref );
@@ -986,16 +1073,16 @@ static void x_serve( struct x_conn *conn, const struct wex_x_header *hdr, const 
     {
     case WEX_X_RELEASE:  /* idempotent: a second release, or one of an id this peer does not hold, does nothing */
         if (ref) x_ref_free( ref );
-        x_reply( conn, hdr, STATUS_SUCCESS, hdr->ref, NULL, 0, NULL, NULL );
+        x_reply( conn, hdr, STATUS_SUCCESS, hdr->ref, NULL, 0 );
         return;
     case WEX_X_CANCEL:   /* idempotent */
         if (ref) x_unsubscribe( ref );
-        x_reply( conn, hdr, STATUS_SUCCESS, hdr->ref, NULL, 0, NULL, NULL );
+        x_reply( conn, hdr, STATUS_SUCCESS, hdr->ref, NULL, 0 );
         return;
     }
     if (!ref)
     {
-        x_reply( conn, hdr, STATUS_INVALID_HANDLE, hdr->ref, NULL, 0, NULL, NULL );
+        x_reply( conn, hdr, STATUS_INVALID_HANDLE, hdr->ref, NULL, 0 );
         return;
     }
     switch (hdr->type)
@@ -1003,19 +1090,19 @@ static void x_serve( struct x_conn *conn, const struct wex_x_header *hdr, const 
     case WEX_X_QUERY:
         granted.access = ref->access;
         granted.ready = ref->ops->ready( ref->obj );
-        x_reply( conn, hdr, STATUS_SUCCESS, ref->id, &granted, sizeof(granted), NULL, NULL );
+        x_reply( conn, hdr, STATUS_SUCCESS, ref->id, &granted, sizeof(granted) );
         return;
     case WEX_X_SUBSCRIBE:
         if (!(ref->access & SYNCHRONIZE))
         {
-            x_reply( conn, hdr, STATUS_ACCESS_DENIED, ref->id, NULL, 0, NULL, NULL );
+            x_reply( conn, hdr, STATUS_ACCESS_DENIED, ref->id, NULL, 0 );
             return;
         }
         if (!ref->subscribed)
         {
             if (conn->peer->account->subs >= WEX_X_MAX_SUBS)
             {
-                x_reply( conn, hdr, STATUS_INSUFFICIENT_RESOURCES, ref->id, NULL, 0, NULL, NULL );
+                x_reply( conn, hdr, STATUS_INSUFFICIENT_RESOURCES, ref->id, NULL, 0 );
                 return;
             }
             ref->subscribed = 1;
@@ -1023,19 +1110,21 @@ static void x_serve( struct x_conn *conn, const struct wex_x_header *hdr, const 
             conn->peer->account->subs++;
             x_account_note( conn->peer->account, CAP_SUBS, conn->peer->account->subs );
         }
-        x_reply( conn, hdr, STATUS_SUCCESS, ref->id, NULL, 0, NULL, NULL );
+        x_reply( conn, hdr, STATUS_SUCCESS, ref->id, NULL, 0 );
         x_arm( ref );
         return;
     case WEX_X_TRY:
         if (!(ref->access & SYNCHRONIZE))
         {
-            x_reply( conn, hdr, STATUS_ACCESS_DENIED, ref->id, NULL, 0, NULL, NULL );
+            x_reply( conn, hdr, STATUS_ACCESS_DENIED, ref->id, NULL, 0 );
             return;
         }
-        /* condition 2: the holder cannot cancel a try; a success that cannot be sent is given back (x_reply,
-         * x_transmit); a failed try re-arms in the same step, as does a successful one for the next wait */
+        /* condition 2: the holder cannot cancel a try. A success is kept in the cache until the holder's low-water
+         * mark passes it: replayed if the try comes again after a relink, given back if the peer's epoch ends first.
+         * A failed try re-arms in the same step, as does a successful one for the next wait. */
         status = ref->ops->try_acquire( ref->obj );
-        x_reply( conn, hdr, status, ref->id, NULL, 0, status ? NULL : ref->obj, ref->ops );
+        if (!status) x_cache_add( conn->peer, hdr, ref->id, NULL, ref->obj, ref->ops );
+        x_reply( conn, hdr, status, ref->id, NULL, 0 );
         x_arm( ref );
         return;
     }
@@ -1048,29 +1137,30 @@ unsigned int x_call( struct x_peer *peer, unsigned int type, unsigned long long 
                      const void *extra, size_t extra_size, int raw, x_done_fn done, void *ctx )
 {
     struct x_conn *conn = peer ? peer->conn : NULL;
-    struct x_qframe *q;
     struct x_call *call;
 
+    /* a new call while the link is lost fails at once; calls already made wait for the relink */
     if (!conn) return STATUS_CONNECTION_DISCONNECTED;
-    if (!raw && conn->call_count >= WEX_X_MAX_INFLIGHT) return STATUS_INSUFFICIENT_RESOURCES;
+    if (!raw && peer->call_count >= WEX_X_MAX_INFLIGHT) return STATUS_INSUFFICIENT_RESOURCES;
     if (!raw && conn->account->queued > WEX_X_MAX_QUEUED) return STATUS_INSUFFICIENT_RESOURCES;
     if (!(call = malloc( sizeof(*call) ))) return STATUS_NO_MEMORY;
-    if (!++conn->next_call) conn->next_call = 1;
-    call->call = conn->next_call;
+    if (!++peer->next_call) peer->next_call = 1;
+    call->call = peer->next_call;
     call->type = type;
     call->done = done;
     call->ctx = ctx;
-    if (!(q = x_build( type, call->call, 0, ref, body, body_size, desc, desc_size, extra, extra_size, raw )))
+    if (!(call->frame = x_build( type, call->call, 0, ref, body, body_size, desc, desc_size, extra, extra_size, raw )))
     {
         free( call );
         return STATUS_BUFFER_OVERFLOW;
     }
-    list_add_tail( &conn->calls, &call->entry );
-    conn->call_count++;
-    if (!x_transmit( conn, q ))
+    list_add_tail( &peer->calls, &call->entry );
+    peer->call_count++;
+    if (!x_call_send( peer, call ))
     {
         list_remove( &call->entry );
-        conn->call_count--;
+        peer->call_count--;
+        free( call->frame );
         free( call );
         return STATUS_CONNECTION_DISCONNECTED;
     }
@@ -1106,7 +1196,7 @@ void x_held_free( struct x_held *held )
 
 unsigned int x_peer_calls( struct x_peer *peer )
 {
-    return peer && peer->conn ? peer->conn->call_count : 0;
+    return peer ? peer->call_count : 0;
 }
 
 /* ---- the lab's views ---- */
@@ -1129,10 +1219,17 @@ void x_set_defer( int on )
     }
 }
 
+int x_send_raw_header( struct x_peer *peer, unsigned int type, unsigned int call, unsigned long long ref )
+{
+    struct x_qframe *q;
+
+    if (!peer || !peer->conn || !(q = x_build( type, call, 0, ref, NULL, 0, NULL, 0, NULL, 0, 0 ))) return 0;
+    return x_transmit( peer->conn, q );
+}
+
 void x_peer_pause( struct x_peer *peer, int paused )
 {
-    peer->paused = paused;
-    if (!peer->conn) return;
+    if (!peer->conn) return;  /* the connection's only: a relink reads again */
     peer->conn->paused = paused;
     x_update_events( peer->conn );
 }
@@ -1153,11 +1250,11 @@ size_t x_peers_report( char *buf, size_t size )
         if (conn) LIST_FOR_EACH( p, &conn->stalled ) stalled++;
         n = snprintf( buf + len, size - len,
                       "peer pid=%u uid=%u session=%u nonce=%llx link=%s conn=%u refs=%u subs=%u calls=%u "
-                      "inflight=%u stalled=%u queued=%lu\n",
+                      "inflight=%u stalled=%u queued=%lu cached=%u stray=%u\n",
                       peer->epoch.pid, (unsigned int)peer->uid, peer->session, peer->epoch.nonce,
                       conn ? "up" : "lost", conn ? conn->number : 0, peer->ref_count, peer->sub_count,
-                      conn ? conn->call_count : 0, conn ? conn->inflight_in : 0, stalled,
-                      conn ? (unsigned long)conn->queued : 0ul );
+                      peer->call_count, conn ? conn->inflight_in : 0, stalled,
+                      conn ? (unsigned long)conn->queued : 0ul, peer->cached_count, peer->stray );
         if (n < 0 || (size_t)n >= size - len) return len;
         len += n;
     }

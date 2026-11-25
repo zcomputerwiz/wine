@@ -112,6 +112,10 @@ extern void x_set_defer( int on );
 /* a holder stops (or starts again) reading its link to peer */
 extern void x_peer_pause( struct x_peer *peer, int paused );
 extern unsigned int x_peer_calls( struct x_peer *peer );
+/* the next HELLO this server sends names another pid (the lab's test of the peer's check) */
+extern int x_lab_forge_hello;
+/* a frame of only a header, as given (the lab: replies, notices and HELLOs that must not be answered) */
+extern int x_send_raw_header( struct x_peer *peer, unsigned int type, unsigned int call, unsigned long long ref );
 extern struct list x_all_held;
 
 #endif /* __WINE_SERVER_SESSION0_X_H */
