@@ -192,11 +192,16 @@ struct dcomp_target
     IDCompositionTarget IDCompositionTarget_iface;
     LONG refcount;
     struct dcomp_device *device;
-    struct list entry;
+    struct list entry;   /* in the device's targets, or in its portal_targets for a portal */
     HWND hwnd;
     BOOL topmost;
     struct dcomp_visual *pending_root;
     struct dcomp_visual *active_root;
+    /* A target opened from a shared visual handle is a portal: its committed root is shown inside the visual that the same
+     * kernel object stands for (opened as a visual, usually by another device). portal is this target's duplicate of the
+     * handle; portal_entry links it into dcomp_portal_list. */
+    HANDLE portal;
+    struct list portal_entry;
     /* Lazily created auxiliary producer for scenes whose content is only
      * IDCompositionSurface layers (which have no IWineDCompSwapChain binding
      * of their own). Created from the first surface layer's rendering device. */
@@ -217,6 +222,7 @@ struct dcomp_device
     int version;
     LONG refcount;
     struct list targets;
+    struct list portal_targets;   /* targets opened from shared handles (no window): activated at Commit, shown elsewhere */
     CRITICAL_SECTION cs;
     IUnknown *rendering_device;
     GUID rendering_device_iid;
@@ -2904,6 +2910,8 @@ static ULONG STDMETHODCALLTYPE dcomp_visual_AddRef(IDCompositionVisual2 *iface)
 static void dcomp_shared_lock_acquire(void);
 static void dcomp_shared_lock_release(void);
 static void dcomp_shared_remove_visual(struct dcomp_visual *visual);
+static struct dcomp_target *dcomp_shared_get_portal(struct dcomp_visual *visual);
+static unsigned int dcomp_shared_get_viewers(struct dcomp_target *target, struct dcomp_device **devices, unsigned int max);
 
 static ULONG STDMETHODCALLTYPE dcomp_visual_Release(IDCompositionVisual2 *iface)
 {
@@ -3749,6 +3757,14 @@ static ULONG STDMETHODCALLTYPE dcomp_target_Release(IDCompositionTarget *iface)
         list_remove(&target->entry);
         LeaveCriticalSection(&device->cs);
 
+        if (target->portal)
+        {
+            dcomp_shared_lock_acquire();
+            list_remove(&target->portal_entry);
+            dcomp_shared_lock_release();
+            CloseHandle(target->portal);
+        }
+
         AcquireSRWLockExclusive(&target_registration_lock);
         if (GetPropW(target->hwnd, target->topmost ? WINE_DCOMP_UNDERLAY_TOP_PROP
                 : WINE_DCOMP_UNDERLAY_BOTTOM_PROP) == (HANDLE)1)
@@ -3984,11 +4000,14 @@ static void dcomp_visual_apply_commit(struct dcomp_visual *visual, LONGLONG now_
     }
 }
 
+/* active: the committed state and children of the visual (a portal's tree, or a redraw of committed scenes), else the pending ones */
 static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int *contents,
         unsigned int *visuals, struct dcomp_visual **seen, IUnknown **content_device, enum DCOMPOSITION_OPACITY_MODE parent_mode,
-        const D2D_MATRIX_3X2_F *parent_mat, unsigned int depth, LONGLONG now_100ns)
+        const D2D_MATRIX_3X2_F *parent_mat, unsigned int depth, LONGLONG now_100ns, BOOL active)
 {
+    const struct dcomp_visual_state *state;
     struct dcomp_visual *child;
+    struct dcomp_target *portal;
     IWineDCompSwapChain *binding;
     D2D_MATRIX_3X2_F loc_mat, cur_mat;
     HRESULT hr;
@@ -3999,18 +4018,19 @@ static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int 
     if (depth > WINE_DCOMP_MAX_LAYERS || *visuals == WINE_DCOMP_MAX_LAYERS) return E_INVALIDARG;
     for (i = 0; i < *visuals; ++i) if (seen[i] == visual) return E_NOTIMPL;
     seen[(*visuals)++] = visual;
-    mode = visual->pending.opacity_mode == DCOMPOSITION_OPACITY_MODE_INHERIT
-            ? parent_mode : visual->pending.opacity_mode;
+    state = active ? &visual->active : &visual->pending;
+    mode = state->opacity_mode == DCOMPOSITION_OPACITY_MODE_INHERIT
+            ? parent_mode : state->opacity_mode;
 
-    if (visual->pending.transform_obj)
-        dcomp_transform_matrix(impl_from_IDCompositionTransform(visual->pending.transform_obj), now_100ns, &loc_mat);
-    else if (visual->pending.has_transform)
-        loc_mat = visual->pending.transform;
+    if (state->transform_obj)
+        dcomp_transform_matrix(impl_from_IDCompositionTransform(state->transform_obj), now_100ns, &loc_mat);
+    else if (state->has_transform)
+        loc_mat = state->transform;
     else
         loc_mat = (D2D_MATRIX_3X2_F){1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
 
-    loc_mat._31 += visual->pending.offset_x;
-    loc_mat._32 += visual->pending.offset_y;
+    loc_mat._31 += state->offset_x;
+    loc_mat._32 += state->offset_y;
 
     cur_mat._11 = loc_mat._11 * parent_mat->_11 + loc_mat._12 * parent_mat->_21;
     cur_mat._12 = loc_mat._11 * parent_mat->_12 + loc_mat._12 * parent_mat->_22;
@@ -4025,11 +4045,11 @@ static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int 
         return E_INVALIDARG;
 
 
-    if (visual->pending.content)
+    if (state->content)
     {
         IDCompositionSurface *surface;
         if (++*contents > WINE_DCOMP_MAX_CONTENTS) return E_NOTIMPL;
-        if (SUCCEEDED(IUnknown_QueryInterface(visual->pending.content,
+        if (SUCCEEDED(IUnknown_QueryInterface(state->content,
                 &IID_IDCompositionSurface, (void **)&surface)))
         {
             struct dcomp_surface *impl = impl_from_IDCompositionSurface(surface);
@@ -4045,10 +4065,10 @@ static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int 
             IDXGISwapChain1 *swapchain;
             IUnknown *device;
             DXGI_SWAP_CHAIN_DESC1 desc;
-            if (FAILED(hr = IUnknown_QueryInterface(visual->pending.content,
+            if (FAILED(hr = IUnknown_QueryInterface(state->content,
                     &IID_IWineDCompSwapChain, (void **)&binding))) return E_NOTIMPL;
             IWineDCompSwapChain_Release(binding);
-            if (FAILED(IUnknown_QueryInterface(visual->pending.content, &IID_IDXGISwapChain1,
+            if (FAILED(IUnknown_QueryInterface(state->content, &IID_IDXGISwapChain1,
                     (void **)&swapchain))) return E_NOTIMPL;
             hr = IDXGISwapChain1_GetDesc1(swapchain, &desc);
             if (SUCCEEDED(hr))
@@ -4073,9 +4093,21 @@ static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int 
         }
     }
 
-    for (child = visual->pending_children; child; child = child->pending_next_sibling)
+    /* the committed tree of a portal into this shared visual, under the lock of the portal's device */
+    if ((portal = dcomp_shared_get_portal(visual)))
+    {
+        EnterCriticalSection(&portal->device->cs);
+        hr = dcomp_validate_pending(portal->active_root, contents, visuals, seen, content_device, mode, &cur_mat, depth + 1,
+                now_100ns, TRUE);
+        LeaveCriticalSection(&portal->device->cs);
+        IDCompositionTarget_Release(&portal->IDCompositionTarget_iface);
+        if (FAILED(hr)) return hr;
+    }
+
+    for (child = active ? visual->active_children : visual->pending_children; child;
+            child = active ? child->active_next_sibling : child->pending_next_sibling)
         if (FAILED(hr = dcomp_validate_pending(child, contents, visuals, seen, content_device, mode, &cur_mat, depth + 1,
-                now_100ns)))
+                now_100ns, active)))
             return hr;
 
     return S_OK;
@@ -4085,6 +4117,8 @@ struct dcomp_collect_context
 {
     struct dcomp_target *target;
     struct wine_dcomp_target_scene scene;
+    BOOL active;     /* collect the committed state and children (a portal's tree, a redraw) */
+    BOOL overflow;   /* more layers than a scene holds (a portal's tree changed after validation) */
 };
 
 static void dcomp_collect_children(struct dcomp_visual *child,
@@ -4101,11 +4135,18 @@ static void dcomp_collect_pending(struct dcomp_visual *visual,
         LONGLONG now_100ns,
         struct dcomp_collect_context *ctx)
 {
-    struct dcomp_visual_state state = visual->pending;
+    struct dcomp_visual_state state = ctx->active ? visual->active : visual->pending;
     D2D_MATRIX_3X2_F local = {1,0,0,1,0,0}, matrix;
     struct wine_dcomp_layer_desc *layer;
+    struct dcomp_target *portal;
     IDXGISwapChain1 *sc;
     DXGI_SWAP_CHAIN_DESC1 desc;
+
+    if (ctx->scene.layer_count >= WINE_DCOMP_MAX_LAYERS)
+    {
+        ctx->overflow = TRUE;
+        return;
+    }
 
     if (state.clip_obj)
     {
@@ -4188,8 +4229,23 @@ static void dcomp_collect_pending(struct dcomp_visual *visual,
         layer->interpolation_mode = interpolation;
         layer->soft_border = border == DCOMPOSITION_BORDER_MODE_SOFT;
     }
-    dcomp_collect_children(visual->pending_children, &matrix, opacity, mode, interpolation, border,
-            now_100ns, ctx);
+    /* A shared visual shows the committed tree of its portal, in front of its own content and behind its children. */
+    if ((portal = dcomp_shared_get_portal(visual)))
+    {
+        BOOL active = ctx->active;
+
+        EnterCriticalSection(&portal->device->cs);
+        if (portal->active_root)
+        {
+            ctx->active = TRUE;
+            dcomp_collect_pending(portal->active_root, &matrix, opacity, mode, interpolation, border, now_100ns, ctx);
+            ctx->active = active;
+        }
+        LeaveCriticalSection(&portal->device->cs);
+        IDCompositionTarget_Release(&portal->IDCompositionTarget_iface);
+    }
+    dcomp_collect_children(ctx->active ? visual->active_children : visual->pending_children, &matrix, opacity, mode,
+            interpolation, border, now_100ns, ctx);
     layer->subtree_end = ctx->scene.layer_count;
 }
 
@@ -4201,8 +4257,8 @@ static void dcomp_collect_children(struct dcomp_visual *child,
         struct dcomp_collect_context *ctx)
 {
     if (!child) return;
-    dcomp_collect_children(child->pending_next_sibling, parent, opacity, mode, interpolation, border,
-            now_100ns, ctx);
+    dcomp_collect_children(ctx->active ? child->active_next_sibling : child->pending_next_sibling, parent, opacity, mode,
+            interpolation, border, now_100ns, ctx);
     dcomp_collect_pending(child, parent, opacity, mode, interpolation, border, now_100ns, ctx);
 }
 
@@ -4222,7 +4278,10 @@ static HRESULT dcomp_retain_active_tree(struct dcomp_visual *visual, struct dcom
     return S_OK;
 }
 
-static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
+/* Commits the pending changes of the device and presents the scenes of its window targets. With redraw, nothing is committed:
+ * the scenes are made again from the committed trees, because a portal shown in them has changed (another device committed).
+ * *portals tells whether the commit changed the committed trees of portal targets of the device. */
+static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev, BOOL redraw, BOOL *portals)
 {
     struct dcomp_target *target;
     D2D_MATRIX_3X2_F ident = {1,0,0,1,0,0};
@@ -4233,7 +4292,8 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
      * dedupe duplicate producers by the underlying object, not the interface. */
     IUnknown *binding_content[WINE_DCOMP_MAX_CONTENTS];
     struct dcomp_visual *pending_nodes[WINE_DCOMP_MAX_LAYERS], *old_nodes[WINE_DCOMP_MAX_LAYERS];
-    unsigned int old_count = 0;
+    struct dcomp_visual *portal_nodes[WINE_DCOMP_MAX_LAYERS];
+    unsigned int old_count = 0, portal_visuals = 0, portal_contents = 0;
     unsigned int contents = 0, visuals = 0, targets = 0, count = 0, i, j, c = 0;
     IUnknown *content_device = NULL;
     /* Commit reference time (100 ns units); attached animations are sampled
@@ -4245,10 +4305,11 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
     GetSystemTimeAsFileTime(&commit_time);
     now_100ns = ((LONGLONG)commit_time.dwHighDateTime << 32) | commit_time.dwLowDateTime;
 
+    if (portals) *portals = FALSE;
     EnterCriticalSection(&dev->cs);
     LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
     {
-        if (target->pending_root && ++targets > WINE_DCOMP_MAX_CONTENTS)
+        if ((redraw ? target->active_root : target->pending_root) && ++targets > WINE_DCOMP_MAX_CONTENTS)
         {
             hr = E_NOTIMPL;
             goto done;
@@ -4261,22 +4322,39 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
     }
     LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
     {
-        if (!target->pending_root) continue;
+        struct dcomp_visual *root = redraw ? target->active_root : target->pending_root;
+
+        if (!root) continue;
         if (!IsWindow(target->hwnd)) { hr = E_INVALIDARG; goto done; }
         for (j = 0; j < c; ++j)
             if (contexts[j].scene.target_hwnd == target->hwnd) { hr = E_NOTIMPL; goto done; }
         /* Distinct targets may use different D3D devices. A scene still cannot
          * mix devices until the backend provides a cross-device image route. */
-        if (FAILED(hr = dcomp_validate_pending(target->pending_root, &contents, &visuals, pending_nodes,
-                &content_device, DCOMPOSITION_OPACITY_MODE_LAYER, &ident, 0, now_100ns))) goto done;
+        if (FAILED(hr = dcomp_validate_pending(root, &contents, &visuals, pending_nodes,
+                &content_device, DCOMPOSITION_OPACITY_MODE_LAYER, &ident, 0, now_100ns, redraw))) goto done;
         if (content_device) IUnknown_Release(content_device);
         content_device = NULL;
         contexts[c].target = target;
         contexts[c].scene.target_hwnd = target->hwnd;
-        dcomp_collect_pending(target->pending_root, &ident, 1, DCOMPOSITION_OPACITY_MODE_LAYER,
+        contexts[c].active = redraw;
+        dcomp_collect_pending(root, &ident, 1, DCOMPOSITION_OPACITY_MODE_LAYER,
                 DCOMPOSITION_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, DCOMPOSITION_BORDER_MODE_HARD,
                 now_100ns, &contexts[c]);
+        if (contexts[c].overflow) { hr = E_NOTIMPL; goto done; }
+        TRACE("device %p%s: target %p (hwnd %p), %u layers.\n", dev, redraw ? " (redraw)" : "", target, target->hwnd,
+                contexts[c].scene.layer_count);
         ++c;
+    }
+    /* The pending trees of the portal targets are committed with the device; they are shown where their shared visuals are. */
+    if (!redraw)
+    {
+        LIST_FOR_EACH_ENTRY(target, &dev->portal_targets, struct dcomp_target, entry)
+        {
+            if (FAILED(hr = dcomp_validate_pending(target->pending_root, &portal_contents, &portal_visuals, portal_nodes,
+                    &content_device, DCOMPOSITION_OPACITY_MODE_LAYER, &ident, 0, now_100ns, FALSE))) goto done;
+            if (content_device) IUnknown_Release(content_device);
+            content_device = NULL;
+        }
     }
     /* Prepare ALL targets before changing active state. Keep one prepared scene
      * per producer, and reject ambiguous cross-target producer routing before
@@ -4366,9 +4444,14 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
     }
     /* Retain the old active tree before any activation so its nodes stay alive
      * while the new graph is built; a failed commit releases these extra refs
-     * and leaves the old tree untouched. */
-    LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
-        if (FAILED(hr = dcomp_retain_active_tree(target->active_root, old_nodes, &old_count))) goto done;
+     * and leaves the old tree untouched. A redraw changes no tree. */
+    if (!redraw)
+    {
+        LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
+            if (FAILED(hr = dcomp_retain_active_tree(target->active_root, old_nodes, &old_count))) goto done;
+        LIST_FOR_EACH_ENTRY(target, &dev->portal_targets, struct dcomp_target, entry)
+            if (FAILED(hr = dcomp_retain_active_tree(target->active_root, old_nodes, &old_count))) goto done;
+    }
     /* Activate every producer before switching the visual tree, so a failure
      * leaves the previous scene and tree intact. */
     for (i = 0; i < count; ++i)
@@ -4383,7 +4466,7 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
             break;
         }
     }
-    if (SUCCEEDED(hr))
+    if (SUCCEEDED(hr) && !redraw)
     {
         /* Reparenting must not reuse active sibling links while a different old
          * parent still traverses them. Remove ALL old edges, then build the new
@@ -4393,7 +4476,11 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
         {
             struct dcomp_visual *visual = old_nodes[i];
             for (j = 0; j < visuals && pending_nodes[j] != visual; ++j) {}
-            if (j == visuals) dcomp_unbind_content(visual->active.content);
+            if (j == visuals)
+            {
+                for (j = 0; j < portal_visuals && portal_nodes[j] != visual; ++j) {}
+                if (j == portal_visuals) dcomp_unbind_content(visual->active.content);
+            }
             while (visual->active_children)
             {
                 struct dcomp_visual *child = visual->active_children;
@@ -4416,6 +4503,24 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
                 target->active_root = target->pending_root;
             }
             if (target->active_root) dcomp_visual_apply_commit(target->active_root, now_100ns);
+        }
+        LIST_FOR_EACH_ENTRY(target, &dev->portal_targets, struct dcomp_target, entry)
+        {
+            if (target->active_root != target->pending_root)
+            {
+                if (target->pending_root) IDCompositionVisual2_AddRef(&target->pending_root->IDCompositionVisual2_iface);
+                if (target->active_root)
+                {
+                    dcomp_visual_unbind_tree(target->active_root);
+                    IDCompositionVisual2_Release(&target->active_root->IDCompositionVisual2_iface);
+                }
+                target->active_root = target->pending_root;
+            }
+            if (target->active_root)
+            {
+                dcomp_visual_apply_commit(target->active_root, now_100ns);
+                if (portals) *portals = TRUE;
+            }
         }
         /* The commit succeeded: now revoke the auxiliary producers this commit
          * does not present through (a real producer, no content, or no scene).
@@ -4467,12 +4572,55 @@ static ULONG STDMETHODCALLTYPE dcomp_##prefix##_Release(type *iface) \
     return IDCompositionDevice_Release(&dev->IDCompositionDevice_iface); \
 }
 
+/* After a commit that changed what portal targets of the device show, the devices whose shared visuals show those portals present
+ * their committed scenes again. This runs without the lock of the device: a redraw takes the viewer's lock and then the portal
+ * device's (in dcomp_collect_pending), the same order as a commit of the viewer. (Two devices that each show a portal of the other
+ * in window targets of their own would take the locks in both orders; Notepad's do not.) */
+static void dcomp_device_redraw_viewers(struct dcomp_device *dev)
+{
+    struct dcomp_target *targets[WINE_DCOMP_MAX_CONTENTS], *target;
+    struct dcomp_device *viewers[WINE_DCOMP_MAX_CONTENTS], *done[WINE_DCOMP_MAX_CONTENTS];
+    unsigned int target_count = 0, viewer_count, done_count = 0, i, j, k;
+    HRESULT hr;
+
+    EnterCriticalSection(&dev->cs);
+    LIST_FOR_EACH_ENTRY(target, &dev->portal_targets, struct dcomp_target, entry)
+    {
+        if (!target->active_root || target_count == ARRAY_SIZE(targets)) continue;
+        IDCompositionTarget_AddRef(&target->IDCompositionTarget_iface);
+        targets[target_count++] = target;
+    }
+    LeaveCriticalSection(&dev->cs);
+
+    for (i = 0; i < target_count; ++i)
+    {
+        viewer_count = dcomp_shared_get_viewers(targets[i], viewers, ARRAY_SIZE(viewers));
+        for (j = 0; j < viewer_count; ++j)
+        {
+            for (k = 0; k < done_count && done[k] != viewers[j]; ++k) {}
+            if (k == done_count && done_count < ARRAY_SIZE(done))
+            {
+                TRACE("Portal %p of device %p changed: redrawing device %p.\n", targets[i], dev, viewers[j]);
+                if (FAILED(hr = dcomp_device_internal_commit(viewers[j], TRUE, NULL)))
+                    WARN("Redrawing device %p failed, hr %#lx.\n", viewers[j], hr);
+                IDCompositionDevice_AddRef(&viewers[j]->IDCompositionDevice_iface);
+                done[done_count++] = viewers[j];
+            }
+            IDCompositionDevice_Release(&viewers[j]->IDCompositionDevice_iface);
+        }
+        IDCompositionTarget_Release(&targets[i]->IDCompositionTarget_iface);
+    }
+    for (k = 0; k < done_count; ++k) IDCompositionDevice_Release(&done[k]->IDCompositionDevice_iface);
+}
+
 /* A commit has completed when dcomp_device_internal_commit returns, with success or not: the event of SetCommitCompletionEvent is signaled then.
  * Only a commit that succeeded submitted a batch (methods 45 and 46 count those). */
 static HRESULT dcomp_device_commit(struct dcomp_device *dev)
 {
-    HRESULT hr = dcomp_device_internal_commit(dev);
+    BOOL portals;
+    HRESULT hr = dcomp_device_internal_commit(dev, FALSE, &portals);
 
+    if (SUCCEEDED(hr) && portals) dcomp_device_redraw_viewers(dev);
     EnterCriticalSection(&dev->cs);
     if (SUCCEEDED(hr)) ++dev->batch;
     if (dev->commit_event) SetEvent(dev->commit_event);
@@ -5352,20 +5500,31 @@ static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateSurfaceFromHwnd(IDCo
  * IDCompositionDesktopDevice (after the three methods the public interface ends with), opens that handle as an IDCompositionVisual or
  * as an IDCompositionTarget. Observed on Windows 11 (tests/uwp/alpc/wintrace.c): the handle is a kernel object, the device is the one
  * DCompositionCreateDevice3 returns, the same handle opened twice gives a visual and then a target. There is no system compositor to
- * share with here: a handle stands for one visual of this process (made on the first open and kept until the handle value is made
- * again), and a target opened from a handle has no window (SetRoot only keeps the root).
+ * share with here: a handle stands for one visual of this process and device (made on the first open), and a target opened from a
+ * handle is a portal into that visual: what is committed as the target's root is shown inside the visual. In Notepad the UI thread
+ * makes the handle, opens it as a visual and puts the visual into the tree of its window's target; the compositor of the Windows
+ * App SDK opens a duplicate of the handle as a target on its own device and sets the root of its scene (title, tabs, status bar)
+ * there. A handle is found by its kernel object (a duplicate is the same visual), not by its value.
  * ===================================================================== */
 
 struct dcomp_shared
 {
     struct list entry;
-    HANDLE handle;
+    HANDLE object;                 /* a duplicate of the handle the visual was opened from: its kernel object names the visual */
     struct dcomp_device *device;   /* the device the visual was made for; no reference */
     struct dcomp_visual *visual;   /* no reference: the entry goes when the last holder releases the visual */
 };
 
 static struct list dcomp_shared_list = LIST_INIT(dcomp_shared_list);
+static struct list dcomp_portal_list = LIST_INIT(dcomp_portal_list);   /* targets opened from shared handles */
 static SRWLOCK dcomp_shared_lock = SRWLOCK_INIT;
+
+static BOOL dcomp_is_shared_handle(HANDLE handle);
+
+static BOOL dcomp_same_object(HANDLE a, HANDLE b)
+{
+    return a == b || !NtCompareObjects(a, b);
+}
 
 static void dcomp_shared_lock_acquire(void)
 {
@@ -5386,24 +5545,60 @@ static void dcomp_shared_remove_visual(struct dcomp_visual *visual)
     {
         if (shared->visual != visual) continue;
         list_remove(&shared->entry);
+        CloseHandle(shared->object);
         free(shared);
     }
 }
 
-/* a new handle value is a new shared visual: forget what an older handle of the same value stood for (the visual lives on
- * for whoever holds it, it is only no longer found by the handle) */
-static void dcomp_shared_forget(HANDLE handle)
+/* The portal shown inside a shared visual: the target opened from a handle of the same kernel object, with a reference, or NULL.
+ * The visual is one of a committing device (its lock is held), so its entry cannot go away meanwhile. */
+static struct dcomp_target *dcomp_shared_get_portal(struct dcomp_visual *visual)
 {
-    struct dcomp_shared *shared, *next;
+    struct dcomp_target *target, *found = NULL;
+    struct dcomp_shared *shared;
 
+    if (!visual->shared) return NULL;
     AcquireSRWLockExclusive(&dcomp_shared_lock);
-    LIST_FOR_EACH_ENTRY_SAFE(shared, next, &dcomp_shared_list, struct dcomp_shared, entry)
+    LIST_FOR_EACH_ENTRY(shared, &dcomp_shared_list, struct dcomp_shared, entry)
     {
-        if (shared->handle != handle) continue;
-        list_remove(&shared->entry);
-        free(shared);
+        if (shared->visual != visual) continue;
+        LIST_FOR_EACH_ENTRY(target, &dcomp_portal_list, struct dcomp_target, portal_entry)
+        {
+            if (!dcomp_same_object(target->portal, shared->object)) continue;
+            /* a target whose last reference is gone is being released (it leaves the list under this lock): skipped */
+            if (InterlockedIncrement(&target->refcount) == 1)
+            {
+                InterlockedDecrement(&target->refcount);
+                continue;
+            }
+            found = target;
+            break;
+        }
+        break;
     }
     ReleaseSRWLockExclusive(&dcomp_shared_lock);
+    if (found) TRACE("visual %p shows portal %p of device %p, root %p.\n", visual, found, found->device, found->active_root);
+    return found;
+}
+
+/* The devices whose shared visuals show the portal target, with a reference each; returns their number (at most max). */
+static unsigned int dcomp_shared_get_viewers(struct dcomp_target *target, struct dcomp_device **devices, unsigned int max)
+{
+    struct dcomp_shared *shared;
+    unsigned int count = 0, i;
+
+    AcquireSRWLockExclusive(&dcomp_shared_lock);
+    LIST_FOR_EACH_ENTRY(shared, &dcomp_shared_list, struct dcomp_shared, entry)
+    {
+        if (!dcomp_same_object(target->portal, shared->object)) continue;
+        for (i = 0; i < count && devices[i] != shared->device; ++i) {}
+        if (i < count || count == max) continue;
+        /* the entry lives as long as its visual, and the visual holds its device */
+        IDCompositionDevice_AddRef(&shared->device->IDCompositionDevice_iface);
+        devices[count++] = shared->device;
+    }
+    ReleaseSRWLockExclusive(&dcomp_shared_lock);
+    return count;
 }
 
 /* One visual per handle and device: a second device opening the handle makes its own visual, because a visual of another device
@@ -5417,7 +5612,7 @@ static HRESULT dcomp_shared_open_visual(struct dcomp_device *dev, HANDLE handle,
     /* the lookup and the insert are one step under the lock, so two opens of a handle at the same time find the same visual */
     AcquireSRWLockExclusive(&dcomp_shared_lock);
     LIST_FOR_EACH_ENTRY(shared, &dcomp_shared_list, struct dcomp_shared, entry)
-        if (shared->handle == handle && shared->device == dev) { found = shared; break; }
+        if (shared->device == dev && dcomp_same_object(shared->object, handle)) { found = shared; break; }
     if (found)
     {
         hr = IDCompositionVisual2_QueryInterface(&found->visual->IDCompositionVisual2_iface, iid, out);
@@ -5430,14 +5625,21 @@ static HRESULT dcomp_shared_open_visual(struct dcomp_device *dev, HANDLE handle,
         ReleaseSRWLockExclusive(&dcomp_shared_lock);
         return E_OUTOFMEMORY;
     }
-    if (FAILED(hr = dcomp_visual_create(dev, &visual)))
+    if (!DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &found->object, 0, FALSE, DUPLICATE_SAME_ACCESS))
     {
+        hr = HRESULT_FROM_WIN32(GetLastError());
         ReleaseSRWLockExclusive(&dcomp_shared_lock);
         free(found);
         return hr;
     }
+    if (FAILED(hr = dcomp_visual_create(dev, &visual)))
+    {
+        ReleaseSRWLockExclusive(&dcomp_shared_lock);
+        CloseHandle(found->object);
+        free(found);
+        return hr;
+    }
     visual->shared = TRUE;
-    found->handle = handle;
     found->device = dev;
     found->visual = visual;
     list_add_tail(&dcomp_shared_list, &found->entry);
@@ -5450,18 +5652,30 @@ static HRESULT dcomp_shared_open_visual(struct dcomp_device *dev, HANDLE handle,
     return hr;
 }
 
-/* a target that no window backs: SetRoot keeps the root, nothing is shown */
-static HRESULT dcomp_shared_open_target(struct dcomp_device *dev, REFIID iid, void **out)
+/* A target that no window backs, a portal: what its device commits as its root is shown inside the shared visual of the same
+ * kernel object (dcomp_collect_pending). */
+static HRESULT dcomp_shared_open_target(struct dcomp_device *dev, HANDLE handle, REFIID iid, void **out)
 {
     struct dcomp_target *target;
     HRESULT hr;
 
     if (!(target = calloc(1, sizeof(*target)))) return E_OUTOFMEMORY;
+    if (!DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &target->portal, 0, FALSE, DUPLICATE_SAME_ACCESS))
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        free(target);
+        return hr;
+    }
     target->IDCompositionTarget_iface.lpVtbl = &dcomp_target_vtbl;
     target->refcount = 1;
     target->device = dev;
     IDCompositionDevice_AddRef(&dev->IDCompositionDevice_iface);
-    list_init(&target->entry);
+    EnterCriticalSection(&dev->cs);
+    list_add_tail(&dev->portal_targets, &target->entry);
+    LeaveCriticalSection(&dev->cs);
+    dcomp_shared_lock_acquire();
+    list_add_tail(&dcomp_portal_list, &target->portal_entry);
+    dcomp_shared_lock_release();
     hr = IDCompositionTarget_QueryInterface(&target->IDCompositionTarget_iface, iid, out);
     IDCompositionTarget_Release(&target->IDCompositionTarget_iface);
     return hr;
@@ -5543,17 +5757,16 @@ static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_OpenSharedObject(IDComposi
         REFIID iid, void **out)
 {
     struct dcomp_device *dev = impl_from_IDCompositionDesktopDevice(iface);
-    DWORD flags;
 
     TRACE("iface %p, handle %p, iid %s, out %p.\n", iface, handle, debugstr_guid(iid), out);
 
     if (!out) return E_POINTER;
     *out = NULL;
     if (!iid) return E_INVALIDARG;
-    if (!handle || handle == INVALID_HANDLE_VALUE || !GetHandleInformation(handle, &flags))
-        return HRESULT_FROM_WIN32(ERROR_INVALID_HANDLE);
+    /* only a handle of DCompositionCreateSharedVisualHandle (Windows 11: anything else, a closed handle too, is E_HANDLE) */
+    if (!dcomp_is_shared_handle(handle)) return E_HANDLE;
 
-    if (IsEqualGUID(iid, &IID_IDCompositionTarget)) return dcomp_shared_open_target(dev, iid, out);
+    if (IsEqualGUID(iid, &IID_IDCompositionTarget)) return dcomp_shared_open_target(dev, handle, iid, out);
     if (IsEqualGUID(iid, &IID_IUnknown) || IsEqualGUID(iid, &IID_IDCompositionVisual)
             || IsEqualGUID(iid, &IID_IDCompositionVisual2))
         return dcomp_shared_open_visual(dev, handle, iid, out);
@@ -5631,6 +5844,7 @@ static HRESULT dcomp_device_create(int version, IUnknown *rendering_device, REFI
     dev->version = version;
     dev->refcount = 1;
     list_init(&dev->targets);
+    list_init(&dev->portal_targets);
     InitializeCriticalSection(&dev->cs);
 
     if (rendering_device)
@@ -5692,21 +5906,54 @@ HRESULT WINAPI DCompositionCreateDevice3(IUnknown *rendering_device, REFIID iid,
  * loader's message for the missing import names ordinal 1040). The signature is HRESULT (HANDLE *out), measured on Windows 11 with
  * tests/uwp/alpc/dcomp-visualhandle-probe.c: a NULL out is E_INVALIDARG, otherwise the handle is an object of type "Composition".
  * The compositor passes the handle on in a property of a visual; here the handle is an
- * anonymous event, which is what a caller can do with it (duplicate it, close it) until there is a system compositor to share
+ * event, which is what a caller can do with it (duplicate it, close it) until there is a system compositor to share
  * the visual with. (Windows returns an object of the type "Composition", here it is an event: NtQueryObject tells them apart.)
+ * The device opens only these handles: on Windows 11 a handle of another object (an event, a handle of
+ * DCompositionCreateSurfaceHandle, the process) or a closed handle is E_HANDLE (tests/uwp/alpc/dcomp-sharedopen-probe.c). So the
+ * event has a name of its own, which dcomp_is_shared_handle checks.
  */
+static const WCHAR dcomp_shared_prefix[] = L"WineDCompositionSharedVisual-";
+
+static BOOL dcomp_is_shared_handle(HANDLE handle)
+{
+    union { OBJECT_NAME_INFORMATION info; BYTE buffer[sizeof(OBJECT_NAME_INFORMATION) + 512 * sizeof(WCHAR)]; } name;
+    const WCHAR *component, *end;
+    size_t prefix_len = ARRAY_SIZE(dcomp_shared_prefix) - 1;
+    ULONG size;
+
+    if (!handle || handle == INVALID_HANDLE_VALUE) return FALSE;
+    if (NtQueryObject(handle, ObjectNameInformation, &name, sizeof(name), &size)) return FALSE;
+    if (!name.info.Name.Buffer || !name.info.Name.Length) return FALSE;
+    end = name.info.Name.Buffer + name.info.Name.Length / sizeof(WCHAR);
+    for (component = end; component > name.info.Name.Buffer && component[-1] != '\\'; --component) {}
+    return end - component > prefix_len && !wcsncmp(component, dcomp_shared_prefix, prefix_len);
+}
+
 HRESULT WINAPI DCompositionCreateSharedVisualHandle(HANDLE *out)
 {
+    static LONG counter;
+    WCHAR name[64];
     HANDLE handle;
+    unsigned int i;
 
     TRACE("(%p)\n", out);
 
     if (!out) return E_INVALIDARG;
     *out = NULL;
-    if (!(handle = CreateEventW(NULL, TRUE, FALSE, NULL))) return HRESULT_FROM_WIN32(GetLastError());
-    dcomp_shared_forget(handle);
-    *out = handle;
-    return S_OK;
+    /* a name another process made first is not taken: the next one is tried */
+    for (i = 0; i < 16; ++i)
+    {
+        swprintf(name, ARRAY_SIZE(name), L"%s%lx-%lx", dcomp_shared_prefix, GetCurrentProcessId(),
+                (unsigned long)InterlockedIncrement(&counter));
+        if (!(handle = CreateEventW(NULL, TRUE, FALSE, name))) return HRESULT_FROM_WIN32(GetLastError());
+        if (GetLastError() != ERROR_ALREADY_EXISTS)
+        {
+            *out = handle;
+            return S_OK;
+        }
+        CloseHandle(handle);
+    }
+    return E_FAIL;
 }
 
 /* The compositor clock (documented in the Windows SDK, dcomp.h). Wine has no system compositor, so the clock is a fixed 60 Hz clock
