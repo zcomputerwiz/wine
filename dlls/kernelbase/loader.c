@@ -268,7 +268,16 @@ BOOL WINAPI DECLSPEC_HOTPATCH FreeLibrary( HINSTANCE module )
         return UnmapViewOfFile( ptr );
     }
 
-    return set_ntstatus( LdrUnloadDll( module ));
+    if (!set_ntstatus( LdrUnloadDll( module ))) return FALSE;
+    /* the last reference is gone when the image is unmapped: its satellite goes with it (another module mapped at the
+     * address later is told apart by get_mui_module's stamp check) */
+    {
+        MEMORY_BASIC_INFORMATION info;
+
+        if (!VirtualQuery( module, &info, sizeof(info) ) || info.Type != MEM_IMAGE || info.AllocationBase != module)
+            release_mui_module( module );
+    }
+    return TRUE;
 }
 
 
@@ -1132,11 +1141,26 @@ static BOOL get_module_path( HMODULE module, WCHAR *path )
         return FALSE;
     str = name.info.SectionFileName.Buffer;
     len = name.info.SectionFileName.Length / sizeof(WCHAR);
-    /* an NT path in the DOS name space (\??\C:\...) */
-    if (len <= 4 || len - 4 >= MAX_PATH || wcsncmp( str, L"\\??\\", 4 )) return FALSE;
-    memcpy( path, str + 4, (len - 4) * sizeof(WCHAR) );
-    path[len - 4] = 0;
-    return TRUE;
+    /* an NT path in the DOS name space: a drive path (\??\C:\...) or a UNC path (\??\UNC\server\share\... is
+     * \\server\share\...); anything else (\??\unix\... for files outside the drives) has no DOS path, and stripping the
+     * prefix would make it a path relative to the current directory */
+    if (len < 7 || wcsncmp( str, L"\\??\\", 4 )) return FALSE;
+    if (((str[4] >= 'A' && str[4] <= 'Z') || (str[4] >= 'a' && str[4] <= 'z')) && str[5] == ':' && str[6] == '\\')
+    {
+        if (len - 4 >= MAX_PATH) return FALSE;
+        memcpy( path, str + 4, (len - 4) * sizeof(WCHAR) );
+        path[len - 4] = 0;
+        return TRUE;
+    }
+    if (len > 8 && !wcsnicmp( str + 4, L"UNC\\", 4 ))
+    {
+        if (len - 6 >= MAX_PATH) return FALSE;
+        path[0] = path[1] = '\\';
+        memcpy( path + 2, str + 8, (len - 8) * sizeof(WCHAR) );
+        path[len - 6] = 0;
+        return TRUE;
+    }
+    return FALSE;
 }
 
 static HMODULE load_mui_satellite( HMODULE module )
@@ -1184,12 +1208,26 @@ static HMODULE load_mui_satellite( HMODULE module )
     return mui;
 }
 
+/* entries taken off the list, freed with their satellites outside mui_section */
+static void free_stale_mui_modules( struct list *stale )
+{
+    struct mui_module *mm, *next;
+
+    LIST_FOR_EACH_ENTRY_SAFE( mm, next, stale, struct mui_module, entry )
+    {
+        list_remove( &mm->entry );
+        if (mm->mui) FreeLibrary( mm->mui );
+        HeapFree( GetProcessHeap(), 0, mm );
+    }
+}
+
 /* the satellite of a module, NULL when it has none; the satellite is loaded outside the lock (the loader lock may be held
  * by a thread that waits for it) */
 static HMODULE get_mui_module( HMODULE module )
 {
     const IMAGE_NT_HEADERS *nt;
     struct mui_module *mm, *next, *found = NULL;
+    struct list stale = LIST_INIT( stale );
     HMODULE mui;
     DWORD err;
 
@@ -1218,14 +1256,16 @@ static HMODULE get_mui_module( HMODULE module )
         if (mm->stamp == nt->FileHeader.TimeDateStamp && mm->size == nt->OptionalHeader.SizeOfImage)
         {
             /* another thread was first */
+            HMODULE ret = mm->mui;
+
             RtlLeaveCriticalSection( &mui_section );
             if (mui) FreeLibrary( mui );
-            return mm->mui;
+            free_stale_mui_modules( &stale );
+            return ret;
         }
-        /* an earlier module at this address */
+        /* an earlier module at this address: freed after the lock is left (FreeLibrary enters it again) */
         list_remove( &mm->entry );
-        if (mm->mui) FreeLibrary( mm->mui );
-        HeapFree( GetProcessHeap(), 0, mm );
+        list_add_tail( &stale, &mm->entry );
     }
     if ((mm = HeapAlloc( GetProcessHeap(), 0, sizeof(*mm) )))
     {
@@ -1249,6 +1289,7 @@ static HMODULE get_mui_module( HMODULE module )
         mui = NULL;
     }
     RtlLeaveCriticalSection( &mui_section );
+    free_stale_mui_modules( &stale );
     return mui;
 }
 
