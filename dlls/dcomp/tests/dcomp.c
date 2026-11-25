@@ -3293,6 +3293,167 @@ done:
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+/* The viewer's thread uses the viewer's D3D11 device (immediate context: draws into its own surface, commits its device) while
+ * another thread commits the portal's device. A Commit of the portal redraws the viewer's window on the thread that committed,
+ * so it must not touch the D3D11 device the application uses on its own thread. Failures show as a removed device, a failed
+ * Commit, a wrong final color or a crash. */
+struct viewer_thread
+{
+    IDCompositionDesktopDevice *device;
+    ID3D11Device *d3d11_device;
+    IDCompositionSurface *surface;
+    unsigned int iterations;
+    LONG failures;
+};
+
+static DWORD WINAPI viewer_thread_proc(void *arg)
+{
+    struct viewer_thread *t = arg;
+    unsigned int i;
+
+    for (i = 0; i < t->iterations; ++i)
+    {
+        render_surface_color(t->d3d11_device, t->surface, (i & 1) ? 1.0f : 0.0f, 0.0f, (i & 1) ? 0.0f : 1.0f);
+        if (FAILED(IDCompositionDesktopDevice_Commit(t->device))) InterlockedIncrement(&t->failures);
+    }
+    return 0;
+}
+
+static void test_shared_visual_portal_viewer_thread(void)
+{
+    static const unsigned int window_size = 200, surface_size = 100, iterations = 300;
+    typedef HRESULT (WINAPI *create_handle_t)(HANDLE *);
+    IDCompositionVisual2 *shared, *portal_root, *own_root;
+    IDCompositionDesktopDevice *viewer, *portal_device;
+    IDCompositionTarget *window_target, *portal;
+    IDCompositionSurface *own_surface, *portal_surface;
+    create_handle_t create_handle;
+    D3D_FEATURE_LEVEL feature_level;
+    struct viewer_thread vt = {0};
+    ID3D11Device *d3d11_device;
+    HANDLE handle, thread;
+    unsigned int i;
+    ULONG refcount;
+    HRESULT hr;
+    HWND hwnd;
+
+    create_handle = (void *)GetProcAddress(GetModuleHandleW(L"dcomp.dll"), "DCompositionCreateSharedVisualHandle");
+    if (!create_handle || !pDCompositionCreateDevice3)
+    {
+        win_skip("DCompositionCreateSharedVisualHandle() or DCompositionCreateDevice3() is unavailable.\n");
+        return;
+    }
+    hwnd = CreateWindowExW(WS_EX_TOPMOST, L"static", L"dcomp_portal_viewer_thread",
+            WS_OVERLAPPED | WS_VISIBLE, 0, 0, window_size, window_size, NULL, NULL, NULL, NULL);
+    ok(hwnd != NULL, "Failed to create window.\n");
+    if (!hwnd) return;
+    MoveWindow(hwnd, 0, 0, window_size, window_size, TRUE);
+    hr = D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT, NULL, 0,
+            D3D11_SDK_VERSION, &d3d11_device, &feature_level, NULL);
+    if (FAILED(hr))
+        hr = D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_WARP, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT, NULL, 0,
+                D3D11_SDK_VERSION, &d3d11_device, &feature_level, NULL);
+    ok(hr == S_OK, "Failed to create D3D11 device, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        DestroyWindow(hwnd);
+        return;
+    }
+
+    /* the viewer: its window shows the shared visual, with a surface of its own as the visual's sibling content */
+    hr = pDCompositionCreateDevice3((IUnknown *)d3d11_device, &IID_IDCompositionDesktopDevice, (void **)&viewer);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = create_handle(&handle);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = open_shared(viewer, handle, &IID_IDCompositionVisual2, (void **)&shared);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_CreateVisual(viewer, &own_root);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    own_surface = create_color_surface(viewer, d3d11_device, surface_size, 0.0f, 0.0f, 1.0f);
+    ok(own_surface != NULL, "Failed to create the viewer's surface.\n");
+    hr = IDCompositionVisual2_SetContent(own_root, (IUnknown *)own_surface);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionVisual2_AddVisual(own_root, (IDCompositionVisual *)shared, TRUE, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionVisual2_SetOffsetX(shared, 100.0f);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_CreateTargetForHwnd(viewer, hwnd, TRUE, &window_target);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionTarget_SetRoot(window_target, (IDCompositionVisual *)own_root);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_Commit(viewer);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* the portal: another device, a surface that changes at each Commit */
+    hr = pDCompositionCreateDevice3((IUnknown *)d3d11_device, &IID_IDCompositionDesktopDevice, (void **)&portal_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = open_shared(portal_device, handle, &IID_IDCompositionTarget, (void **)&portal);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_CreateVisual(portal_device, &portal_root);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    portal_surface = create_color_surface(portal_device, d3d11_device, surface_size, 0.0f, 1.0f, 0.0f);
+    ok(portal_surface != NULL, "Failed to create the portal's surface.\n");
+    hr = IDCompositionVisual2_SetContent(portal_root, (IUnknown *)portal_surface);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionTarget_SetRoot(portal, (IDCompositionVisual *)portal_root);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_Commit(portal_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_WaitForCommitCompletion(portal_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    expect_rendered_color(hwnd, 150, 50, RGB(0, 0xff, 0));
+
+    /* the viewer's thread draws on the D3D11 device and commits; this thread commits the portal, with new pixels each time */
+    vt.device = viewer;
+    vt.d3d11_device = d3d11_device;
+    vt.surface = own_surface;
+    vt.iterations = iterations;
+    thread = CreateThread(NULL, 0, viewer_thread_proc, &vt, 0, NULL);
+    ok(thread != NULL, "Failed to create thread.\n");
+    for (i = 0; i < iterations; ++i)
+    {
+        /* nothing is drawn here: the D3D11 device belongs to the viewer's thread. Every Commit publishes a snapshot and redraws
+         * the viewers anyway (PORTAL_SNAPSHOT_DESIGN.md, section 1) */
+        hr = IDCompositionDesktopDevice_Commit(portal_device);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        if (FAILED(hr)) break;
+    }
+    ok(WaitForSingleObject(thread, 120000) == WAIT_OBJECT_0, "The viewer's thread did not end.\n");
+    CloseHandle(thread);
+    ok(!vt.failures, "%ld commits of the viewer failed.\n", vt.failures);
+    hr = ID3D11Device_GetDeviceRemovedReason(d3d11_device);
+    ok(hr == S_OK, "The D3D11 device was removed, hr %#lx.\n", hr);
+
+    /* both devices still work: a last Commit shows the viewer's own surface and the portal's */
+    render_surface_color(d3d11_device, own_surface, 1.0f, 1.0f, 0.0f);
+    hr = IDCompositionDesktopDevice_Commit(viewer);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_WaitForCommitCompletion(viewer);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    expect_rendered_color(hwnd, 50, 50, RGB(0xff, 0xff, 0));
+    expect_rendered_color(hwnd, 150, 50, RGB(0, 0xff, 0));
+
+    hr = IDCompositionTarget_SetRoot(portal, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_Commit(portal_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    IDCompositionSurface_Release(portal_surface);
+    IDCompositionVisual2_Release(portal_root);
+    IDCompositionTarget_Release(portal);
+    refcount = IDCompositionDesktopDevice_Release(portal_device);
+    ok(!refcount, "Portal device has %lu references left.\n", refcount);
+    IDCompositionTarget_Release(window_target);
+    IDCompositionSurface_Release(own_surface);
+    IDCompositionVisual2_Release(own_root);
+    IDCompositionVisual2_Release(shared);
+    CloseHandle(handle);
+    refcount = IDCompositionDesktopDevice_Release(viewer);
+    ok(!refcount, "Viewer has %lu references left.\n", refcount);
+    refcount = ID3D11Device_Release(d3d11_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+    DestroyWindow(hwnd);
+}
+
 START_TEST(dcomp)
 {
     HMODULE module;
@@ -3329,6 +3490,7 @@ START_TEST(dcomp)
     test_surface_composition();
     test_shared_visual_portal();
     test_shared_visual_portal_cases();
+    test_shared_visual_portal_viewer_thread();
     test_target_SetRoot();
     test_visual_SetContent();
     test_visual_SetBitmapInterpolationMode();
