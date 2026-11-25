@@ -32,6 +32,7 @@
 #include "request.h"
 #include "thread.h"
 #include "user.h"
+#include "session0.h"
 
 #ifdef HAVE_LINUX_NTSYNC_H
 # include <linux/ntsync.h>
@@ -47,6 +48,9 @@
 int get_inproc_device_fd(void)
 {
     static int fd = -2;
+    /* WineExplorer X0 (docs/SESSION0_CROSS_SERVER.md, M2): session 0's server never uses ntsync, so its main loop can
+     * hold and satisfy waits on global objects; checked at each call, not only when the device is first opened */
+    if (session0_server) return -1;
     if (fd == -2) fd = open( "/dev/ntsync", O_CLOEXEC | O_RDONLY );
     return fd;
 }

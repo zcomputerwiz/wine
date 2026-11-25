@@ -71,6 +71,10 @@ extern unsigned int pipe_bridge_query( const WCHAR *name, data_size_t len, uid_t
  * client_pid: the opener's process id, unique across servers (R6), or 0; lease: the serial of the lease of its block */
 extern unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_size_t len, int sock,
                                         uid_t uid, int session, unsigned int client_pid, unsigned int lease );
+/* X0: a token from a description received on the link of the peer of account uid and session; NULL with *status set
+ * (session0.c, docs/SESSION0_CROSS_SERVER.md, condition 1) */
+extern struct token *link_bound_token( uid_t uid, unsigned int session, const void *desc, data_size_t size,
+                                       unsigned int *status );
 /* R6, session 0: the lease an opener's id came from is still its block's */
 extern int session0_id_lease_current( unsigned int id, unsigned int serial );
 

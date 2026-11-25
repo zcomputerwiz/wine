@@ -62,4 +62,12 @@ extern int e1lab_sysrun_e1s6_endorse( const void *data, unsigned int size );
 
 #endif /* WEX_E1S6_TRANSPORT_TEST */
 
+#ifdef WEX_X0_LAB_TEST
+/* X0 (docs/SESSION0_CROSS_SERVER.md, its appendix): the lab's control socket and object kind (wex_x0lab.c), set up
+ * at the end of session0_init in session 0 and in each linked user's server; session0.c: the lab drops a user's
+ * server's session link */
+extern void x0lab_init(void);
+extern void session0_lab_drop_link(void);
+#endif /* WEX_X0_LAB_TEST */
+
 #endif /* __WINE_SERVER_WEX_E1LAB_H */

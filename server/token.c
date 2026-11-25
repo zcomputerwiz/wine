@@ -3061,6 +3061,14 @@ static int desc_get_groups( const char *buf, data_size_t size, data_size_t *pos,
     return 1;
 }
 
+/* WineExplorer X0: can the token act (a primary token, or an impersonation token at impersonation or delegation
+ * level)? An identification or anonymous impersonation token is never described to another server, since the
+ * description is always built into a primary token there (docs/SESSION0_CROSS_SERVER.md, "Trust and constraints") */
+int token_can_act( const struct token *token )
+{
+    return token->primary || token->impersonation_level >= SecurityImpersonation;
+}
+
 /* build a primary token from a description; NULL if it is malformed */
 struct token *token_create_described( const void *data, data_size_t size )
 {

@@ -71,6 +71,8 @@
 #include "e1s_token.h"
 #include "accounts.h"
 #include "session0.h"
+#include "session0_x.h"
+#include "wex_e1lab.h"
 #include "wine/wex_session0.h"
 #include "wine/wex_sysrun_peer.h"
 
@@ -114,6 +116,7 @@ struct session0_socket
     uid_t         peer_uid;
     pid_t         peer_pid;
     struct list   entry;                /* in session_links */
+    struct x_conn *x;                   /* X0: a session link carries X frames, both ways (session0_x.c) */
 };
 
 /* T6.2, session 0: the session link of each user's server, to send it orders. A user can start a few servers of
@@ -277,6 +280,7 @@ static void reserve_session_ids(void)
 #define ID_BLOCKS_PER_SERVER 64
 
 static int connect_session0( int nonblock );
+static ssize_t link_receive( int sock, void *buf, size_t size, int *fd, int *bad );
 static int link_request( int sock, unsigned int type, unsigned int last, const void *desc, data_size_t desc_size,
                          const void *extra, data_size_t extra_size, int fd, struct wex_session0_reply *answer );
 
@@ -479,6 +483,7 @@ static void init_link( struct session0_socket *link )
     link->peer_uid = (uid_t)-1;
     link->peer_pid = 0;
     list_init( &link->entry );
+    link->x = NULL;
 }
 
 /* Links that wait for their message are few and short-lived: a user's server sends it right after connecting.
@@ -514,6 +519,7 @@ static void session0_socket_destroy( struct object *obj )
     struct session0_socket *sock = (struct session0_socket *)obj;
     if (sock->timeout) remove_timeout_user( sock->timeout );
     if (sock->pending) pending_links--;
+    if (sock->x) x_conn_closed( sock->x );  /* before its fd goes */
     /* session 0: a hive never outlives its agent's link, however the link ended */
     if (sock->kind == LINK_HIVE && session0_server) session0_unload_user_hive( sock, 0 );
     if (sock->kind == LINK_SESSION && session0_server)
@@ -658,6 +664,7 @@ static void init_listener(void)
  * the server's own uid. */
 static uid_t session0_peer_uid = (uid_t)-1;
 static gid_t session0_peer_gid = (gid_t)-1;
+static pid_t session0_peer_pid;  /* session 0's Unix pid, from the last link's SO_PEERCRED */
 
 /* a link to session 0, after checking that the configured account serves the socket; -1 if not */
 static int connect_session0( int nonblock )
@@ -687,6 +694,7 @@ static int connect_session0( int nonblock )
         errno = EACCES;
         return -1;
     }
+    session0_peer_pid = cred.pid;  /* X0: the epoch session 0 claims in its HELLO must be this process's */
     return sock;
 }
 
@@ -800,17 +808,24 @@ static unsigned int session_order( const struct wex_session0_order *order, unsig
 
 static void session_link_event( struct fd *fd, int event )
 {
-    char buf[sizeof(struct wex_session0_order) + 1];  /* a longer message is not an order */
+    static char buf[WEX_SESSION0_MAX_MSG];  /* an order, or an X frame (X0) */
     const struct wex_session0_order *order = (const struct wex_session0_order *)buf;
     struct wex_session0_order_reply answer;
-    struct session0_socket *link;
+    struct session0_socket *link = session_link;
+    int desc_fd, bad;
     ssize_t n;
 
+    if ((event & POLLOUT) && link && link->x) x_conn_writable( link->x );
     if (event & POLLIN)
     {
-        n = recv( get_unix_fd( fd ), buf, sizeof(buf), MSG_DONTWAIT );
+        n = link_receive( get_unix_fd( fd ), buf, sizeof(buf), &desc_fd, &bad );
+        if (desc_fd != -1)
+        {
+            close( desc_fd );  /* nothing on this link carries a descriptor */
+            bad = 1;
+        }
         if (n < 0 && (errno == EAGAIN || errno == EINTR)) return;
-        if (n == sizeof(*order) && order->magic == WEX_SESSION0_MAGIC)
+        if (n == sizeof(*order) && !bad && order->magic == WEX_SESSION0_MAGIC)
         {
             answer.magic = WEX_SESSION0_MAGIC;
             answer.serial = order->serial;
@@ -819,7 +834,12 @@ static void session_link_event( struct fd *fd, int event )
             send( get_unix_fd( fd ), &answer, sizeof(answer), MSG_NOSIGNAL | MSG_DONTWAIT );
             return;
         }
-        if (n > 0) return;  /* not an order: ignored */
+        if (n >= (ssize_t)sizeof(unsigned int) && link && link->x && *(const unsigned int *)buf == WEX_X_MAGIC)
+        {
+            x_conn_frame( link->x, buf, n, bad );
+            return;
+        }
+        if (n > 0) return;  /* neither: ignored */
     }
     else if (!(event & (POLLHUP | POLLERR))) return;
     /* session 0 is gone (restarted): link again, under this server's own session id */
@@ -849,7 +869,9 @@ static int open_session_link( int sock )
         return 1;  /* the socket was closed with the fd object */
     }
     session_link = link;
-    set_fd_events( link->fd, POLLIN );
+    /* X0: the link carries X frames from now on; this server's HELLO goes out first */
+    link->x = x_conn_create( link->fd, session0_peer_uid, session0_peer_pid, default_session_id );
+    set_fd_events( link->fd, link->x ? x_conn_events( link->x ) : POLLIN );
     return 1;
 }
 
@@ -882,12 +904,16 @@ static int request_session_id( unsigned int wanted )
 
 void session0_init( int server_mode )
 {
+    x_init();  /* X0: this server's epoch, before any link */
     if (server_mode)
     {
         session0_server = 1;
         default_session_id = 0;  /* T5.3: session 0's own programs (its services) are in session 0, as on Windows */
         init_listener();
         if (!ptid_add_block( 0 )) fatal_error( "session 0: no table for its block of ids\n" );  /* R6: block 0 */
+#ifdef WEX_X0_LAB_TEST
+        x0lab_init();
+#endif
         return;
     }
     /* a launcher-started server uses the configuration only: the user controls the environment */
@@ -946,8 +972,20 @@ void session0_init( int server_mode )
                 fprintf( stderr, "wineserver: no block of ids from session 0: this server's ids may be another's\n" );
             }
         }
+#ifdef WEX_X0_LAB_TEST
+        x0lab_init();
+#endif
     }
 }
+
+#ifdef WEX_X0_LAB_TEST
+/* the lab (wex_x0lab.c): a user's server loses its session link as on a broken connection; the relink brings it
+ * back with the same epoch */
+void session0_lab_drop_link(void)
+{
+    if (session_link) shutdown( get_unix_fd( session_link->fd ), SHUT_RDWR );
+}
+#endif
 
 uid_t session0_hive_owner(void)
 {
@@ -1036,6 +1074,28 @@ static struct token *create_bound_token( const void *desc, data_size_t size, uid
     release_object( token );
     *status = STATUS_ACCESS_DENIED;
     return NULL;
+}
+
+/* X0 (docs/SESSION0_CROSS_SERVER.md, condition 1): the only way an X request turns a token description into a
+ * token. Session 0 binds a user's server to that server's own user or its session's system role
+ * (described_token_bound); a user's server believes session 0, its one peer (checked by connect_session0), for any
+ * account. Either way the description's session must be the link's: the session of the user's server for session
+ * 0, session 0 for a user's server (M3 serves callers in session 0 only, condition 4). NULL with *status set. */
+struct token *link_bound_token( uid_t uid, unsigned int session, const void *desc, data_size_t size,
+                                unsigned int *status )
+{
+    struct token *token = token_create_described( desc, size );
+
+    *status = STATUS_INVALID_PARAMETER;
+    if (!token) return NULL;
+    if ((session0_server && !described_token_bound( token, uid )) || token_get_session_id( token ) != session)
+    {
+        release_object( token );
+        *status = STATUS_ACCESS_DENIED;
+        return NULL;
+    }
+    *status = STATUS_SUCCESS;
+    return token;
 }
 
 /* serve a channel as a registry-only client with the described token */
@@ -1174,6 +1234,17 @@ static void session0_link_event( struct fd *fd, int event )
     int channel, bad;
     ssize_t n;
 
+    /* X0: a session link also waits for room to send its queued X frames */
+    if (link->kind == LINK_SESSION && link->x)
+    {
+        if (event & POLLOUT) x_conn_writable( link->x );
+        if (!(event & (POLLIN | POLLHUP | POLLERR))) return;
+        if (!(event & POLLIN))  /* the end, while not read (the lab's pause) */
+        {
+            release_object( link );
+            return;
+        }
+    }
     if (!(event & POLLIN) || !(buf = malloc( WEX_SESSION0_MAX_MSG )))
     {
         release_object( link );
@@ -1189,7 +1260,18 @@ static void session0_link_event( struct fd *fd, int event )
         /* a session link: answers to orders, or the session's server is gone (end of file) */
         struct wex_session0_order_reply *answer = buf;
 
-        if (channel != -1) close( channel );
+        if (channel != -1)
+        {
+            close( channel );
+            bad = 1;
+        }
+        /* X0: an X frame */
+        if (n >= (ssize_t)sizeof(unsigned int) && link->x && *(const unsigned int *)buf == WEX_X_MAGIC)
+        {
+            x_conn_frame( link->x, buf, n, bad );
+            free( buf );
+            return;
+        }
         /* exactly one answer per order sent; anything else is ignored */
         if (n == sizeof(*answer) && answer->magic == WEX_SESSION0_MAGIC && link->outstanding &&
             answer->serial == link->outstanding)
@@ -1270,6 +1352,9 @@ static void session0_link_event( struct fd *fd, int event )
                          (int)link->peer_pid, (unsigned int)link->peer_uid );
             send( get_unix_fd( fd ), &reply, sizeof(reply), MSG_NOSIGNAL | MSG_DONTWAIT );
             session0_send_order( link, WEX_SESSION0_ORDER_PING, 0 );
+            /* X0: the session link carries X frames from now on; session 0's HELLO */
+            if ((link->x = x_conn_create( link->fd, link->peer_uid, link->peer_pid, link->session_id )))
+                set_fd_events( link->fd, x_conn_events( link->x ));
             return;
         }
     }
