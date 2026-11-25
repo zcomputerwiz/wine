@@ -573,8 +573,11 @@ static void x_peer_end( struct x_peer *peer, const char *why )
         }
     if (peer->conn)
     {
-        x_fail_calls( peer->conn );
-        peer->conn->peer = NULL;
+        struct x_conn *conn = peer->conn;
+
+        peer->conn = NULL;
+        conn->peer = NULL;
+        x_fail_calls( conn );
     }
     if (peer->lost_timer) remove_timeout_user( peer->lost_timer );
     list_remove( &peer->entry );
@@ -633,8 +636,11 @@ static void x_hello( struct x_conn *conn, const char *body, size_t size )
     {
         if (found->conn && found->conn != conn)
         {
-            x_fail_calls( found->conn );
-            found->conn->peer = NULL;
+            struct x_conn *old = found->conn;
+
+            found->conn = NULL;
+            old->peer = NULL;
+            x_fail_calls( old );
         }
         if (found->lost_timer) remove_timeout_user( found->lost_timer );
         found->lost_timer = NULL;
@@ -718,15 +724,17 @@ void x_conn_closed( struct x_conn *conn )
 {
     struct x_peer *peer = conn->peer;
 
+    /* detached first: a completion that makes a new call finds no connection */
+    list_remove( &conn->entry );
+    conn->peer = NULL;
+    if (peer) peer->conn = NULL;
     x_fail_calls( conn );
     conn->account->queued -= conn->queued;
     x_drop_frames( conn, &conn->queue, 0 );     /* a TRY's success that never went out is given back */
     x_drop_frames( conn, &conn->deferred, 1 );
     x_drop_frames( conn, &conn->stalled, 1 );
-    list_remove( &conn->entry );
     if (peer)
     {
-        peer->conn = NULL;
         if (!x_epoch_alive( &peer->epoch )) x_peer_end( peer, "its server is gone" );
         else
         {

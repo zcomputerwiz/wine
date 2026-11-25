@@ -199,7 +199,7 @@ struct lab_batch
     unsigned int          number;
     enum lab_op           op;
     unsigned int          type;        /* OP_IDS: the request */
-    struct x_peer        *peer;
+    unsigned int          session;     /* the peer: looked up at each use (a peer can end meanwhile) */
     unsigned int          total, issued, done, ok;
     struct { unsigned int status, count; } st[8];
     unsigned long long    ids[8];      /* OPEN: the first ids */
@@ -272,11 +272,11 @@ static void batch_done( void *ctx, unsigned int status, const struct wex_x_heade
             struct wex_x_granted granted = { 0, 0 };
 
             if (size >= sizeof(granted)) memcpy( &granted, body, sizeof(granted) );
-            x_held_add( batch->peer, reply->ref, granted.access );
+            x_held_add( x_peer_of_session( batch->session ), reply->ref, granted.access );
             if (batch->id_count < ARRAY_SIZE(batch->ids)) batch->ids[batch->id_count++] = reply->ref;
         }
         else if (batch->op == OP_IDS && batch->type == WEX_X_RELEASE && (held = x_held_find( call->id )) &&
-                 held->peer == batch->peer)
+                 held->peer)
             x_held_free( held );
         else if (batch->op == OP_IDS && batch->type == WEX_X_QUERY && size >= sizeof(struct wex_x_granted) &&
                  batch->id_count < ARRAY_SIZE(batch->ids))
@@ -310,7 +310,7 @@ static void batch_pump( struct lab_batch *batch )
             case OP_OPEN:
             {
                 struct wex_x_open open = { WEX_X_KIND_LAB, batch->access, strlen( batch->name ), 0 };
-                status = x_call( batch->peer, WEX_X_OPEN, 0, &open, sizeof(open), batch->desc, batch->desc_size,
+                status = x_call( x_peer_of_session( batch->session ), WEX_X_OPEN, 0, &open, sizeof(open), batch->desc, batch->desc_size,
                                  batch->name, open.name_size, batch->raw, batch_done, call );
                 break;
             }
@@ -320,7 +320,7 @@ static void batch_pump( struct lab_batch *batch )
                               batch->ping_size - sizeof(struct wex_x_header) : 0;
                 char *data = calloc( 1, body + 1 );
 
-                status = data ? x_call( batch->peer, WEX_X_PING, 0, data, body, NULL, 0, NULL, 0, batch->raw,
+                status = data ? x_call( x_peer_of_session( batch->session ), WEX_X_PING, 0, data, body, NULL, 0, NULL, 0, batch->raw,
                                         batch_done, call ) : STATUS_NO_MEMORY;
                 free( data );
                 break;
@@ -328,7 +328,7 @@ static void batch_pump( struct lab_batch *batch )
             case OP_IDS:
             {
                 struct x_held *held = NULL;
-                struct x_peer *peer = batch->peer;
+                struct x_peer *peer = x_peer_of_session( batch->session );
 
                 call->id = batch->list[batch->issued - 1];
                 if (!batch->raw)
@@ -365,7 +365,7 @@ static void batch_pump( struct lab_batch *batch )
     }
 }
 
-static struct lab_batch *batch_new( struct lab_client *client, enum lab_op op, struct x_peer *peer, unsigned int n,
+static struct lab_batch *batch_new( struct lab_client *client, enum lab_op op, unsigned int session, unsigned int n,
                                     int nowait )
 {
     struct lab_batch *batch = calloc( 1, sizeof(*batch) );
@@ -373,7 +373,7 @@ static struct lab_batch *batch_new( struct lab_client *client, enum lab_op op, s
     if (!batch) return NULL;
     batch->number = ++batch_numbers;
     batch->op = op;
-    batch->peer = peer;
+    batch->session = session;
     batch->total = n;
     batch->client = nowait ? NULL : client;
     list_add_tail( &batches, &batch->entry );
@@ -447,12 +447,13 @@ static void lab_command( struct lab_client *client, char *line )
     struct lab_batch *batch;
     struct lab_counter *counter;
     struct x_held *held;
-    unsigned int n;
+    unsigned int n, session;
     const char *verb;
 
     parse_args( line, &args );
     verb = args.words ? args.word[0] : "";
-    peer = x_peer_of_session( args.opt_peer ? strtoul( args.opt_peer, NULL, 0 ) : 0 );
+    session = args.opt_peer ? strtoul( args.opt_peer, NULL, 0 ) : 0;
+    peer = x_peer_of_session( session );
     n = args.opt_n ? strtoul( args.opt_n, NULL, 0 ) : 1;
 
     if (!strcmp( verb, "epoch" ))
@@ -512,7 +513,7 @@ static void lab_command( struct lab_client *client, char *line )
             unsigned int session = strtoul( args.opt_session, NULL, 0 );
             memcpy( (char *)desc + 2 * sizeof(unsigned int), &session, sizeof(session) );
         }
-        if (!(batch = batch_new( client, OP_OPEN, peer, n, args.nowait )))
+        if (!(batch = batch_new( client, OP_OPEN, session, n, args.nowait )))
         {
             free( desc );
             lab_reply( client, "status=c0000017\n" );
@@ -528,7 +529,7 @@ static void lab_command( struct lab_client *client, char *line )
     }
     else if (!strcmp( verb, "ping" ))
     {
-        if (!(batch = batch_new( client, OP_PING, peer, n, args.nowait )))
+        if (!(batch = batch_new( client, OP_PING, session, n, args.nowait )))
         {
             lab_reply( client, "status=c0000017\n" );
             return;
@@ -551,7 +552,7 @@ static void lab_command( struct lab_client *client, char *line )
             LIST_FOR_EACH_ENTRY( held, &x_all_held, struct x_held, entry ) if (held->peer == peer) count++;
         }
         else count = n;
-        if (!(batch = batch_new( client, OP_IDS, peer, count, args.nowait )) ||
+        if (!(batch = batch_new( client, OP_IDS, session, count, args.nowait )) ||
             !(batch->list = calloc( count + 1, sizeof(*batch->list) )))
         {
             lab_reply( client, "status=c0000017\n" );
