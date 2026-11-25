@@ -3444,11 +3444,21 @@ static BOOL dispatch_core_completion(void)
     /* the window procedures may register or destroy windows: work on a copy */
     if (!(count = info->core_window_count) || !(windows = malloc( count * sizeof(*windows) ))) return apc != 0;
     memcpy( windows, info->core_windows, count * sizeof(*windows) );
-    /* measured: a packet with an APC context goes to every registered window, one without it only to the first */
-    for (i = 0; i < (apc ? count : min( count, 1 )); i++)
-        if (is_window( windows[i] )) send_message( windows[i], WM_CORE_MESSAGING_COMPLETION, apc ? 8 : 3, apc );
+    if (!apc)
+    {
+        /* a packet without an APC context: the first window gets a posted (0x60, 1, 0) (measured in Windows App SDK's
+         * threads: the message wait returns as for input, and the retrieval of the posted message calls the window
+         * procedure with (1, 0) and returns it with 0x80000001; no (3, 0) ever reaches them). Plain test windows got
+         * (3, 0) inside the wait on Windows, the difference is not understood. */
+        if (is_window( windows[0] )) NtUserPostMessage( windows[0], WM_CORE_MESSAGING_COMPLETION, 1, 0 );
+        free( windows );
+        return FALSE;
+    }
+    /* measured: a packet with an APC context goes to every registered window */
+    for (i = 0; i < count; i++)
+        if (is_window( windows[i] )) send_message( windows[i], WM_CORE_MESSAGING_COMPLETION, 8, apc );
     free( windows );
-    return apc != 0;
+    return TRUE;
 }
 
 void core_messaging_window_destroyed( HWND hwnd )

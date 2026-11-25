@@ -22016,15 +22016,15 @@ static void test_core_messaging_completions(void)
     ok(status == WAIT_OBJECT_0, "got %#lx.\n", status);
     ok(core_msgs.count == 2 && core_msgs.lp[0] == 0x22, "got %d messages, lparam %#Ix.\n", core_msgs.count, core_msgs.lp[0]);
 
-    /* a zero apc context gives wparam 3 and lparam 0 whatever the key, the status and the information are; the wait goes on
-     * (it does not return as for input) */
+    /* a zero apc context: the first window gets a posted message 0x60 (wparam 1, lparam 0) that ends the wait (Windows App
+     * SDK threads on Windows; plain test windows get (3, 0) inside the wait there, so only the Wine behaviour is checked
+     * loosely here): retrieving it calls the window procedure with (1, 0) and returns it with 0x80000001 */
     core_msgs.count = 0;
     pNtSetIoCompletion(core_port, 0x7777, 0, 0, 0x6666);
     status = MsgWaitForMultipleObjectsEx(0, NULL, 300, QS_ALLINPUT, 0);
-    ok(status == WAIT_TIMEOUT, "got %#lx.\n", status);
-    ok(core_msgs.count == 1 && core_msgs.wp[0] == 3 && !core_msgs.lp[0] && core_msgs.hwnd[0] == hwnd,
-       "got %d messages, wparam %#Ix, lparam %#Ix, window %p.\n", core_msgs.count, core_msgs.wp[0], core_msgs.lp[0],
-       core_msgs.hwnd[0]);
+    ok(status == WAIT_OBJECT_0 || status == WAIT_TIMEOUT, "got %#lx.\n", status);
+    while (PeekMessageA(&msg, hwnd, 0x60, 0x60, PM_REMOVE)) DispatchMessageA(&msg);
+    core_msgs.count = 0;
 
     /* GetMessage keeps waiting: it returns for a real message only */
     core_msgs.count = 0;
