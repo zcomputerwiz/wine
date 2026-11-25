@@ -469,6 +469,11 @@ void d3d11_device_context_flush_shared_resources(struct d3d11_device_context *co
     if (!device)
         return;
 
+    /* nothing was drawn, cleared, copied or updated since the last write-back: the memory is current */
+    if (!context->shared_dirty)
+        return;
+    context->shared_dirty = FALSE;
+
     LIST_FOR_EACH_ENTRY(texture, &device->shared_textures, struct d3d_texture2d, entry)
     {
         if (!texture->shared_memory && texture->dxgi_resource)
@@ -542,6 +547,7 @@ void d3d11_device_context_refresh_shared_resources(struct d3d11_device_context *
     if (!device || context->type != D3D11_DEVICE_CONTEXT_IMMEDIATE)
         return;
 
+    context->shared_dirty = TRUE;   /* this call draws, dispatches or copies */
     LIST_FOR_EACH_ENTRY(texture, &device->shared_textures, struct d3d_texture2d, entry)
     {
         LONG sequence;
@@ -1543,6 +1549,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_UpdateSubresource(ID3D11Devic
         wined3d_box_set(&wined3d_box, box->left, box->top, box->right, box->bottom, box->front, box->back);
 
     wined3d_resource = wined3d_resource_from_d3d11_resource(resource);
+    context->shared_dirty = TRUE;
     wined3d_device_context_update_sub_resource(context->wined3d_context, wined3d_resource,
             subresource_idx, box ? &wined3d_box : NULL, data, row_pitch, depth_pitch, 0);
 }
@@ -1578,6 +1585,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_ClearRenderTargetView(ID3D11D
     if (!view)
         return;
 
+    context->shared_dirty = TRUE;
     if (FAILED(hr = wined3d_device_context_clear_rendertarget_view(context->wined3d_context, view->wined3d_view, NULL,
             WINED3DCLEAR_TARGET, &color, 0.0f, 0)))
         ERR("Failed to clear view, hr %#lx.\n", hr);
@@ -1593,6 +1601,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_ClearUnorderedAccessViewUint(
             iface, unordered_access_view, values[0], values[1], values[2], values[3]);
 
     view = unsafe_impl_from_ID3D11UnorderedAccessView(unordered_access_view);
+    context->shared_dirty = TRUE;
     wined3d_device_context_clear_uav_uint(context->wined3d_context,
             view->wined3d_view, (const struct wined3d_uvec4 *)values);
 }
@@ -1607,6 +1616,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_ClearUnorderedAccessViewFloat
             iface, unordered_access_view, debug_float4(values));
 
     view = unsafe_impl_from_ID3D11UnorderedAccessView(unordered_access_view);
+    context->shared_dirty = TRUE;
     wined3d_device_context_clear_uav_float(context->wined3d_context,
             view->wined3d_view, (const struct wined3d_vec4 *)values);
 }
@@ -1627,6 +1637,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_ClearDepthStencilView(ID3D11D
 
     wined3d_flags = wined3d_clear_flags_from_d3d11_clear_flags(flags);
 
+    context->shared_dirty = TRUE;
     if (FAILED(hr = wined3d_device_context_clear_rendertarget_view(context->wined3d_context, view->wined3d_view, NULL,
             wined3d_flags, NULL, depth, stencil)))
         ERR("Failed to clear view, hr %#lx.\n", hr);
@@ -1640,6 +1651,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_GenerateMips(ID3D11DeviceCont
 
     TRACE("iface %p, view %p.\n", iface, view);
 
+    context->shared_dirty = TRUE;
     wined3d_device_context_generate_mipmaps(context->wined3d_context, srv->wined3d_view);
 }
 
@@ -1674,6 +1686,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_ResolveSubresource(ID3D11Devi
     wined3d_dst_resource = wined3d_resource_from_d3d11_resource(dst_resource);
     wined3d_src_resource = wined3d_resource_from_d3d11_resource(src_resource);
     wined3d_format = wined3dformat_from_dxgi_format(format);
+    context->shared_dirty = TRUE;
     wined3d_device_context_resolve_sub_resource(context->wined3d_context,
             wined3d_dst_resource, dst_subresource_idx,
             wined3d_src_resource, src_subresource_idx, WINED3D_BLT_RAW, wined3d_format);
@@ -2943,6 +2956,7 @@ static void STDMETHODCALLTYPE d3d11_device_context_UpdateSubresource1(ID3D11Devi
                 box->front, box->back);
 
     wined3d_resource = wined3d_resource_from_d3d11_resource(resource);
+    context->shared_dirty = TRUE;
     wined3d_device_context_update_sub_resource(context->wined3d_context, wined3d_resource, subresource_idx,
             box ? &wined3d_box : NULL, data, row_pitch, depth_pitch, flags);
 }
@@ -7419,6 +7433,7 @@ static void STDMETHODCALLTYPE d3d10_device_ClearRenderTargetView(ID3D10Device1 *
     if (!view)
         return;
 
+    device->immediate_context.shared_dirty = TRUE;
     if (FAILED(hr = wined3d_device_context_clear_rendertarget_view(device->immediate_context.wined3d_context,
             view->wined3d_view, NULL, WINED3DCLEAR_TARGET, &color, 0.0f, 0)))
         ERR("Failed to clear view, hr %#lx.\n", hr);
@@ -7440,6 +7455,7 @@ static void STDMETHODCALLTYPE d3d10_device_ClearDepthStencilView(ID3D10Device1 *
 
     wined3d_flags = wined3d_clear_flags_from_d3d11_clear_flags(flags);
 
+    device->immediate_context.shared_dirty = TRUE;
     if (FAILED(hr = wined3d_device_context_clear_rendertarget_view(device->immediate_context.wined3d_context,
             view->wined3d_view, NULL, wined3d_flags, NULL, depth, stencil)))
         ERR("Failed to clear view, hr %#lx.\n", hr);
@@ -7453,6 +7469,7 @@ static void STDMETHODCALLTYPE d3d10_device_GenerateMips(ID3D10Device1 *iface,
 
     TRACE("iface %p, view %p.\n", iface, view);
 
+    device->immediate_context.shared_dirty = TRUE;
     wined3d_device_context_generate_mipmaps(device->immediate_context.wined3d_context, srv->wined3d_view);
 }
 
@@ -7472,6 +7489,7 @@ static void STDMETHODCALLTYPE d3d10_device_ResolveSubresource(ID3D10Device1 *ifa
     wined3d_dst_resource = wined3d_resource_from_d3d10_resource(dst_resource);
     wined3d_src_resource = wined3d_resource_from_d3d10_resource(src_resource);
     wined3d_format = wined3dformat_from_dxgi_format(format);
+    device->immediate_context.shared_dirty = TRUE;
     wined3d_device_context_resolve_sub_resource(device->immediate_context.wined3d_context,
             wined3d_dst_resource, dst_subresource_idx,
             wined3d_src_resource, src_subresource_idx, WINED3D_BLT_RAW, wined3d_format);

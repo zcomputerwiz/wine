@@ -580,6 +580,7 @@ struct d3d11_device_context
     struct d3d_device *device;
 
     struct wined3d_private_store private_store;
+    BOOL shared_dirty;   /* work that may have changed a shared texture was recorded since the last write-back */
 };
 
 /* ID3D11Device, ID3D10Device1 */
