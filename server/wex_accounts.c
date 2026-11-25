@@ -29,7 +29,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
-#include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -174,12 +173,41 @@ static void call_poll_event( struct fd *fd, int event )
     call_end( call, STATUS_SUCCESS );
 }
 
-/* the uid of accountsd.conf's helper_user (root-owned configuration, read at each request); -1 when there is none */
+/* a local account's uid from /etc/passwd itself: never NSS, which on a domain member can wait for a directory server
+ * while the whole server waits (the reviewer's A1); the helper's account is a local system account. -1 if none. */
+static uid_t local_account_uid( const char *name )
+{
+    char line[1024], *uid_field, *end;
+    size_t len = strlen( name );
+    uid_t uid = (uid_t)-1;
+    unsigned long val;
+    int at_start = 1, start;
+    FILE *f;
+
+    if (!(f = fopen( "/etc/passwd", "re" ))) return uid;
+    while (fgets( line, sizeof(line), f ))
+    {
+        /* name:password:uid:... (the rest of a line longer than the buffer is skipped) */
+        start = at_start;
+        at_start = strchr( line, '\n' ) != NULL;
+        if (!start || strncmp( line, name, len ) || line[len] != ':') continue;
+        if (!(uid_field = strchr( line + len + 1, ':' ))) break;
+        uid_field++;
+        val = strtoul( uid_field, &end, 10 );
+        if (end != uid_field && *end == ':') uid = (uid_t)val;
+        break;
+    }
+    fclose( f );
+    return uid;
+}
+
+/* the uid of accountsd.conf's helper_user (root-owned configuration, read at each request: a name, looked up in
+ * /etc/passwd, or a number); -1 when there is none, or when it is root */
 static uid_t helper_uid(void)
 {
-    char line[256], *p;
-    struct passwd *pw;
+    char line[256], *p, *end;
     uid_t uid = (uid_t)-1;
+    unsigned long val;
     FILE *f;
 
     if (!(f = fopen( WEX_ACCOUNTS_CONFIG, "re" ))) return uid;
@@ -187,10 +215,12 @@ static uid_t helper_uid(void)
     {
         if (strncmp( line, "helper_user=", 12 )) continue;
         if ((p = strpbrk( line + 12, "\r\n" ))) *p = 0;
-        if (line[12] && (pw = getpwnam( line + 12 )) && pw->pw_uid) uid = pw->pw_uid;
+        if (!line[12]) continue;
+        val = strtoul( line + 12, &end, 10 );
+        uid = *end ? local_account_uid( line + 12 ) : (uid_t)val;
     }
     fclose( f );
-    return uid;
+    return uid ? uid : (uid_t)-1;
 }
 
 /* a connection to the helper, after checking that its account serves the socket; -1 if not */

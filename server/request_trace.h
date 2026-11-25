@@ -1315,7 +1315,8 @@ static void dump_accounts_forward_request( const struct accounts_forward_request
 {
     fprintf( stderr, " pipe=%04x", req->pipe );
     fprintf( stderr, ", op=%08x", req->op );
-    dump_varargs_bytes( ", body=", cur_size );
+    fprintf( stderr, ", offset=%u", req->offset );
+    fprintf( stderr, ", length=%u", req->length );
 }
 
 static void dump_accounts_forward_reply( const struct accounts_forward_reply *req )

@@ -36,6 +36,7 @@
 #define WEX_ACCOUNTS_MAGIC      0x41584557u                        /* "WEXA" */
 #define WEX_ACCOUNTS_VERSION    1
 #define WEX_ACCOUNTS_MAX_FRAME  65536
+#define WEX_ACCOUNTS_MAX_REPLY  (WEX_ACCOUNTS_MAX_FRAME - 16)       /* a reply body at most (the frame less its header) */
 #define WEX_ACCOUNTS_TIMEOUT    15                                  /* seconds */
 #define WEX_ACCOUNTS_VERDICT_NONE     0
 #define WEX_ACCOUNTS_VERDICT_USER     1
@@ -66,22 +67,29 @@ struct wex_accounts_reply     /* struct wexa_reply */
 
 #include "wine/server.h"
 
-/* Forward one request of the client connected to pipe (the service's server end): op and body to the helper; the
- * helper's reply body into out (*out_len: in, its size; out, the bytes, or the size needed with
- * STATUS_BUFFER_OVERFLOW) and its status. STATUS_ACCESS_DENIED: not the reserved pipe, or not a bridged client;
+/* Forward one request of the client connected to pipe (the service's server end) to the helper: op, and as the body
+ * len bytes at offset of the message the service last read from that client, whole, in message mode (the server keeps
+ * it; each message is forwarded once, the reviewer's A3). The helper's reply body goes into out, which must hold
+ * WEX_ACCOUNTS_MAX_REPLY bytes, so that no reply is ever lost (A4); *out_len: in, out's size; out, the bytes. *status is
+ * the helper's status.
+ * STATUS_INVALID_PARAMETER: out too small, or offset and len outside the message;
+ * STATUS_INVALID_DEVICE_STATE: no whole message read since the last forward;
+ * STATUS_ACCESS_DENIED: not the reserved pipe, or not a bridged client;
  * STATUS_PIPE_DISCONNECTED: no helper, or it went away; STATUS_IO_TIMEOUT: no reply within 15 s. */
-static inline NTSTATUS wex_accounts_forward( HANDLE pipe, const void *body, ULONG len, ULONG op, void *out,
+static inline NTSTATUS wex_accounts_forward( HANDLE pipe, ULONG offset, ULONG len, ULONG op, void *out,
                                              ULONG *out_len, USHORT *status )
 {
     LARGE_INTEGER timeout;
     HANDLE call = 0;
     NTSTATUS ret;
 
+    if (*out_len < WEX_ACCOUNTS_MAX_REPLY) return STATUS_INVALID_PARAMETER;
     SERVER_START_REQ( accounts_forward )
     {
         req->pipe = wine_server_obj_handle( pipe );
         req->op = op;
-        wine_server_add_data( req, body, len );
+        req->offset = offset;
+        req->length = len;
         if (!(ret = wine_server_call( req ))) call = wine_server_ptr_handle( reply->call );
     }
     SERVER_END_REQ;
@@ -94,7 +102,7 @@ static inline NTSTATUS wex_accounts_forward( HANDLE pipe, const void *body, ULON
         wine_server_set_reply( req, out, *out_len );  /* (inside the block, reply is the server's reply) */
         ret = wine_server_call( req );
         *status = reply->helper_status;
-        *out_len = ret == STATUS_BUFFER_OVERFLOW ? reply->total : wine_server_reply_size( reply );
+        *out_len = wine_server_reply_size( reply );
     }
     SERVER_END_REQ;
     NtClose( call );

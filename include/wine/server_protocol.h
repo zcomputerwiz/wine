@@ -2967,14 +2967,16 @@ struct get_caller_class_reply
 
 /* WineExplorer (H1): the accounts service forwards one request of a client of its reserved pipe to the root helper;
    the server decides the verdict and the uid, builds the header and waits for the reply without blocking
-   (wine/wex_accounts.h). The call is signaled when it has ended. */
+   (wine/wex_accounts.h). The body is a part of the client message the service last read whole, once per message
+   (A3). The call is signaled when it has ended. */
 struct accounts_forward_request
 {
     struct request_header __header;
     obj_handle_t pipe;
     unsigned int op;
-    /* VARARG(body,bytes); */
-    char __pad_20[4];
+    data_size_t  offset;
+    data_size_t  length;
+    char __pad_28[4];
 };
 struct accounts_forward_reply
 {
@@ -7742,6 +7744,6 @@ union generic_reply
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 995
+#define SERVER_PROTOCOL_VERSION 996
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
