@@ -2381,7 +2381,7 @@ static int pipe_bridge_allowed( const WCHAR *name, data_size_t len )
     static const WCHAR eventlog[] = {'e','v','e','n','t','l','o','g'};  /* the EventLog service (L1) */
 
     if (len == sizeof(svcctl) && !memicmp_strW( name, svcctl, len )) return 1;
-    if (len == sizeof(eventlog) && !memicmp_strW( name, eventlog, len )) return 1;
+    if (len == sizeof(eventlog) && !memicmp_strW( name, eventlog, len )) return 2;  /* link_bound_token needs the link */
     if (len == sizeof(broker) && !memicmp_strW( name, broker, len )) return 2;
     /* a service's ncalrpc endpoint: the pipe's descriptor decides, and the service checks its callers itself */
     if (is_lrpc_pipe_name( name, len )) return 1;

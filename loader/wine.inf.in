@@ -1251,6 +1251,7 @@ HKLM,%CurrentVersion%\RunServices,"winemenubuilder",2,"%11%\winemenubuilder.exe 
 HKLM,"System\CurrentControlSet\Services\Dnscache\Parameters",,16
 HKLM,"System\CurrentControlSet\Services\Eventlog\Application",,16
 HKLM,"System\CurrentControlSet\Services\Eventlog\System","Sources",0x10000,""
+HKLM,"System\CurrentControlSet\Services\Eventlog\Security",,16
 HKLM,"System\CurrentControlSet\Services\Tcpip\Parameters","DataBasePath",,"%12%\etc"
 HKLM,"System\CurrentControlSet\Services\Tcpip6\Parameters",,16
 HKLM,"System\CurrentControlSet\Services\VxD\MSTCP",,16
