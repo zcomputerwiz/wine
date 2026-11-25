@@ -65,6 +65,7 @@ extern void store_refresh_settings( struct evt_log *log );
 extern void store_refresh_all(void);
 extern DWORD store_append( struct evt_log *log, const BYTE *record, DWORD size );
 extern DWORD store_clear( struct evt_log *log );
+extern DWORD store_clear_through( struct evt_log *log, DWORD number );
 extern struct evt_record *store_find( struct evt_log *log, DWORD number );
 extern void store_flush_all(void);
 extern void store_init( const WCHAR *dir );

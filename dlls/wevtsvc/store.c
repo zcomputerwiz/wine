@@ -386,6 +386,24 @@ DWORD store_clear( struct evt_log *log )
     return rewrite_file( log );
 }
 
+/* the records up to number go, newer ones stay (a clear after a backup that a steady writer kept overtaking) */
+DWORD store_clear_through( struct evt_log *log, DWORD number )
+{
+    struct evt_record *rec, *next;
+
+    LIST_FOR_EACH_ENTRY_SAFE( rec, next, &log->records, struct evt_record, entry )
+    {
+        if (rec->number > number) break;
+        list_remove( &rec->entry );
+        log->count--;
+        log->bytes -= rec->size + sizeof(struct evt_trailer);
+        free( rec );
+    }
+    log->full_reported = FALSE;
+    log->written = now_filetime();
+    return rewrite_file( log );
+}
+
 /* the header's times and the records written since the last flush go to disk (at most once a second) */
 void store_flush_all(void)
 {

@@ -621,9 +621,14 @@ static DWORD do_clear( struct connection *conn, struct log_handle *h, const stru
     DWORD status;
 
     if (!(h->rights & RIGHT_CLEAR)) return ERROR_ACCESS_DENIED;
-    if (req->arg[0] && h->log->next - 1 > req->arg[1]) return ERROR_RETRY;
-    TRACE( "pid %04lx clears %s (backup to %u)\n", conn->client_pid, debugstr_w(h->log->name), req->arg[1] );
-    if (!(status = store_clear( h->log ))) notify_log( h->log );
+    TRACE( "pid %04lx clears %s (mode %u, backup to %u)\n", conn->client_pid, debugstr_w(h->log->name), req->arg[0],
+           req->arg[1] );
+    /* mode 2, after the client's bounded retries against a steady writer: clear through the backup's last record
+     * and keep the newer ones, so that nothing is lost and the clear always ends */
+    if (req->arg[0] == 2) status = store_clear_through( h->log, req->arg[1] );
+    else if (req->arg[0] && h->log->next - 1 > req->arg[1]) return ERROR_RETRY;
+    else status = store_clear( h->log );
+    if (!status) notify_log( h->log );
     return status;
 }
 
