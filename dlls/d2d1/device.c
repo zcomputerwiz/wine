@@ -116,6 +116,8 @@ static void d2d_clip_stack_pop(struct d2d_clip_stack *stack)
     --stack->count;
 }
 
+static void d2d_device_context_run_queued_draws(struct d2d_device_context *context);
+
 static void d2d_device_context_draw(struct d2d_device_context *render_target, enum d2d_shape_type shape_type,
         ID3D11Buffer *ib, unsigned int index_count, ID3D11Buffer *vb, unsigned int vb_stride,
         struct d2d_brush *brush, struct d2d_brush *opacity_brush)
@@ -128,6 +130,9 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
     D3D11_RECT scissor_rect;
     unsigned int offset;
     D3D11_VIEWPORT vp;
+
+    /* objects queued earlier draw first, as they come earlier in Windows' batch */
+    d2d_device_context_run_queued_draws(render_target);
 
     vp.TopLeftX = 0;
     vp.TopLeftY = 0;
@@ -205,6 +210,91 @@ static void d2d_device_context_set_error(struct d2d_device_context *context, HRE
     context->error.tag2 = context->drawing_state.tag2;
 }
 
+static void d2d_device_context_release_queued_draws(IUnknown **objects, size_t count)
+{
+    size_t i;
+
+    for (i = 0; i < count; ++i)
+        IUnknown_Release(objects[i]);
+    free(objects);
+}
+
+/* Calls back the objects that slot 15 of the private interface queued, in order: slot 3 of each, with no arguments, with the
+ * context's Direct3D state current, its target bound and viewport and scissor covering the target, as Windows does when it
+ * flushes its batch (measured, tests/uwp/alpc/d2d-ctx-slot15-probe.cpp). A failure becomes the context's error. */
+static void d2d_device_context_run_queued_draws(struct d2d_device_context *context)
+{
+    IUnknown **objects = context->queued_draws;
+    size_t count = context->queued_draws_count, i;
+    ID3DDeviceContextState *prev_state;
+    ID3D11DeviceContext1 *d3d_context;
+    D3D11_RECT scissor_rect;
+    D3D11_VIEWPORT vp;
+    HRESULT hr;
+
+    if (!count)
+        return;
+
+    /* detached first: an object may draw through this context again */
+    context->queued_draws = NULL;
+    context->queued_draws_size = context->queued_draws_count = 0;
+
+    if (context->target.type != D2D_TARGET_BITMAP || !context->target.bitmap->rtv || FAILED(context->error.code))
+    {
+        d2d_device_context_release_queued_draws(objects, count);
+        return;
+    }
+
+    vp.TopLeftX = 0.0f;
+    vp.TopLeftY = 0.0f;
+    vp.Width = context->pixel_size.width;
+    vp.Height = context->pixel_size.height;
+    vp.MinDepth = 0.0f;
+    vp.MaxDepth = 1.0f;
+    scissor_rect.left = 0;
+    scissor_rect.top = 0;
+    scissor_rect.right = context->pixel_size.width;
+    scissor_rect.bottom = context->pixel_size.height;
+
+    if (context->cs)
+        EnterCriticalSection(context->cs);
+
+    ID3D11Device1_GetImmediateContext1(context->d3d_device, &d3d_context);
+    ID3D11DeviceContext1_SwapDeviceContextState(d3d_context, context->d3d_state, &prev_state);
+    ID3D11DeviceContext1_RSSetViewports(d3d_context, 1, &vp);
+    ID3D11DeviceContext1_RSSetScissorRects(d3d_context, 1, &scissor_rect);
+    ID3D11DeviceContext1_OMSetRenderTargets(d3d_context, 1, &context->target.bitmap->rtv, NULL);
+
+    for (i = 0; i < count; ++i)
+    {
+        HRESULT (STDMETHODCALLTYPE *draw)(IUnknown *object) = ((void **)objects[i]->lpVtbl)[3];
+
+        TRACE("Calling back object %p.\n", objects[i]);
+        if (FAILED(hr = draw(objects[i])) && SUCCEEDED(context->error.code))
+            d2d_device_context_set_error(context, hr);
+    }
+
+    ID3D11DeviceContext1_SwapDeviceContextState(d3d_context, prev_state, NULL);
+    ID3D11DeviceContext1_Release(d3d_context);
+    ID3DDeviceContextState_Release(prev_state);
+
+    if (context->cs)
+        LeaveCriticalSection(context->cs);
+
+    d2d_device_context_release_queued_draws(objects, count);
+}
+
+/* Drops the queued objects without calling them (a new draw, or the context goes away). */
+static void d2d_device_context_discard_queued_draws(struct d2d_device_context *context)
+{
+    IUnknown **objects = context->queued_draws;
+    size_t count = context->queued_draws_count;
+
+    context->queued_draws = NULL;
+    context->queued_draws_size = context->queued_draws_count = 0;
+    d2d_device_context_release_queued_draws(objects, count);
+}
+
 static inline struct d2d_device_context *impl_from_IUnknown(IUnknown *iface)
 {
     return CONTAINING_RECORD(iface, struct d2d_device_context, IUnknown_iface);
@@ -226,8 +316,11 @@ static inline struct d2d_device_context *impl_from_ID2D1DeviceContext(ID2D1Devic
  * - Slot 7 (an ID2D1Bitmap1 or NULL, a pointer the compositor passes as NULL) sets the target, as SetTarget does: the compositor
  *   calls it after BeginDraw instead of SetTarget, many times per frame. It returns S_OK, also for a bitmap without
  *   D2D1_BITMAP_OPTIONS_TARGET, which does not become the target (tests/uwp/alpc/d2d-ctx-slot7-probe.cpp, test_device_private).
- * - Slot 15 (an object of the caller, 0) returns 0; the context holds a reference to the object for a while (its count rises by one
- *   and is back before the next call). Called in pairs per frame. Here it does nothing and holds no reference.
+ * - Slot 15 (an object of the caller, 0) returns 0 and queues the object (one reference) in the draw: at the next Flush or EndDraw
+ *   Windows calls slot 3 of each queued object, without arguments and in order, with the target it was queued for bound and viewport
+ *   and scissor covering it, then releases it; a failure of slot 3 is the EndDraw result. The lifted compositor draws its sprites
+ *   with Direct3D that way (tests/uwp/alpc/d2d-ctx-slot15-probe.cpp). Wine draws at once rather than in a batch, so the queue runs
+ *   before the next draw of the context, at a target change, Flush and EndDraw, which keeps the order of Windows' batch.
  * Notepad calls only slots 7, 9, 10, 12 and 15 (traced on 64-bit Windows 11 with all slots 3 to 15). The other slots are not known:
  * calling one raises the stub exception. 32-bit callers do not get the interface (argument sizes not measured). */
 #ifdef __x86_64__
@@ -277,10 +370,33 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_private_method7(void *iface,
 
 static HRESULT STDMETHODCALLTYPE d2d_device_context_private_method15(void *iface, IUnknown *object, UINT_PTR arg2)
 {
-    static LONG once;
+    struct d2d_device_context *context = impl_from_private(iface);
 
-    if (!InterlockedExchange(&once, 1)) FIXME("iface %p, object %p, %#Ix semi-stub.\n", iface, object, arg2);
-    else TRACE("iface %p, object %p, %#Ix.\n", iface, object, arg2);
+    TRACE("iface %p, object %p, %#Ix.\n", iface, object, arg2);
+
+    /* Windows draws a NULL object and crashes at the flush */
+    if (!object)
+    {
+        WARN("NULL object.\n");
+        return S_OK;
+    }
+    if (FAILED(context->error.code))
+        return S_OK;
+    if (context->target.type == D2D_TARGET_UNKNOWN)
+    {
+        d2d_device_context_set_error(context, D2DERR_WRONG_STATE);
+        return S_OK;
+    }
+    if (context->target.type == D2D_TARGET_COMMAND_LIST)
+    {
+        FIXME("Not implemented for a command list target.\n");
+        return S_OK;
+    }
+    if (!d2d_array_reserve((void **)&context->queued_draws, &context->queued_draws_size,
+            context->queued_draws_count + 1, sizeof(*context->queued_draws)))
+        return E_OUTOFMEMORY;
+    IUnknown_AddRef(object);
+    context->queued_draws[context->queued_draws_count++] = object;
     return S_OK;
 }
 
@@ -458,6 +574,7 @@ static ULONG STDMETHODCALLTYPE d2d_device_context_inner_Release(IUnknown *iface)
     {
         unsigned int i, j, k;
 
+        d2d_device_context_discard_queued_draws(context);
         d2d_clip_stack_cleanup(&context->clip_stack);
         IDWriteRenderingParams_Release(context->default_text_rendering_params);
         if (context->text_rendering_params)
@@ -2051,6 +2168,8 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_Flush(ID2D1DeviceContext6 *i
 
     FIXME("iface %p, tag1 %p, tag2 %p stub!\n", iface, tag1, tag2);
 
+    d2d_device_context_run_queued_draws(context);
+
     if (context->ops && context->ops->device_context_present)
         context->ops->device_context_present(context->outer_unknown);
 
@@ -2247,6 +2366,7 @@ static void STDMETHODCALLTYPE d2d_device_context_BeginDraw(ID2D1DeviceContext6 *
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_begin_draw(context->target.command_list, context);
 
+    d2d_device_context_discard_queued_draws(context);
     memset(&context->error, 0, sizeof(context->error));
 }
 
@@ -2263,6 +2383,8 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_EndDraw(ID2D1DeviceContext6 
         FIXME("Unimplemented for command list target.\n");
         return E_NOTIMPL;
     }
+
+    d2d_device_context_run_queued_draws(context);
 
     if (tag1)
         *tag1 = context->error.tag1;
@@ -2755,6 +2877,9 @@ static void STDMETHODCALLTYPE d2d_device_context_SetTarget(ID2D1DeviceContext6 *
     HRESULT hr;
 
     TRACE("iface %p, target %p.\n", iface, target);
+
+    /* queued objects draw on the target they were queued for (measured: Windows calls them at the flush with that target) */
+    d2d_device_context_run_queued_draws(context);
 
     if (!target)
     {
