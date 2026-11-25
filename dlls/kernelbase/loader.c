@@ -231,6 +231,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH DisableThreadLibraryCalls( HMODULE module )
  *	FreeLibrary   (kernelbase.@)
  */
 static void release_mui_module( HMODULE module );
+static void release_unloaded_mui_module( HMODULE module );
 
 BOOL WINAPI DECLSPEC_HOTPATCH FreeLibrary( HINSTANCE module )
 {
@@ -269,14 +270,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH FreeLibrary( HINSTANCE module )
     }
 
     if (!set_ntstatus( LdrUnloadDll( module ))) return FALSE;
-    /* the last reference is gone when the image is unmapped: its satellite goes with it (another module mapped at the
-     * address later is told apart by get_mui_module's stamp check) */
-    {
-        MEMORY_BASIC_INFORMATION info;
-
-        if (!VirtualQuery( module, &info, sizeof(info) ) || info.Type != MEM_IMAGE || info.AllocationBase != module)
-            release_mui_module( module );
-    }
+    release_unloaded_mui_module( module );
     return TRUE;
 }
 
@@ -1101,12 +1095,11 @@ static CRITICAL_SECTION mui_section = { &mui_critsect_debug, -1, 0, 0, 0, 0 };
 
 /* a module loaded as a data file is gone when it is freed: its satellite is freed with it (else the satellite's file
  * stays mapped, and e.g. BeginUpdateResource on it fails) */
-static void release_mui_module( HMODULE module )
+static HMODULE detach_mui_module( HMODULE module )
 {
     struct mui_module *mm;
     HMODULE mui = NULL;
 
-    if (list_empty( &mui_modules )) return;
     RtlEnterCriticalSection( &mui_section );
     LIST_FOR_EACH_ENTRY( mm, &mui_modules, struct mui_module, entry )
     {
@@ -1117,6 +1110,33 @@ static void release_mui_module( HMODULE module )
         break;
     }
     RtlLeaveCriticalSection( &mui_section );
+    return mui;
+}
+
+static void release_mui_module( HMODULE module )
+{
+    HMODULE mui;
+
+    if (list_empty( &mui_modules )) return;
+    if ((mui = detach_mui_module( module ))) FreeLibrary( mui );
+}
+
+/* after LdrUnloadDll of an image module: the last reference is gone when the image is unmapped, and its satellite goes
+ * with it. The check and the detach run under the loader lock, so another thread cannot load the module again at the
+ * same address in between and reuse the entry (its stamp would match) while the satellite is freed. The satellite is
+ * freed after the lock is left (lock order: the loader lock, then mui_section; nothing takes the loader lock while it
+ * holds mui_section). */
+static void release_unloaded_mui_module( HMODULE module )
+{
+    MEMORY_BASIC_INFORMATION info;
+    HMODULE mui = NULL;
+    ULONG_PTR magic;
+
+    if (list_empty( &mui_modules )) return;
+    LdrLockLoaderLock( 0, NULL, &magic );
+    if (!VirtualQuery( module, &info, sizeof(info) ) || info.Type != MEM_IMAGE || info.AllocationBase != module)
+        mui = detach_mui_module( module );
+    LdrUnlockLoaderLock( 0, magic );
     if (mui) FreeLibrary( mui );
 }
 
