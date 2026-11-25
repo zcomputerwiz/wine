@@ -243,6 +243,10 @@ extern struct reserve *get_completion_reserve_obj( struct process *process, obj_
 extern void add_completion( struct completion *completion, apc_param_t ckey, apc_param_t cvalue,
                             unsigned int status, apc_param_t information, struct completion_packet *packet );
 extern void cleanup_thread_completion( struct thread *thread );
+struct msg_queue;
+extern int link_completion_queue( struct completion *completion, struct msg_queue *queue );
+extern void unlink_completion_queue( struct completion *completion );
+extern void queue_completion_wake( struct msg_queue *queue, int signaled );
 
 /* serial port functions */
 

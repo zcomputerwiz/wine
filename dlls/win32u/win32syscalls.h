@@ -919,7 +919,7 @@
     SYSCALL_ENTRY( 0x1393, NtUserDragDetect, 12 ) \
     SYSCALL_ENTRY( 0x1394, NtUserDragObject, 20 ) \
     SYSCALL_ENTRY( 0x1395, NtUserDrainThreadCoreMessagingCompletions, 0 ) \
-    SYSCALL_ENTRY( 0x1396, NtUserDrainThreadCoreMessagingCompletions2, 0 ) \
+    SYSCALL_ENTRY( 0x1396, NtUserDrainThreadCoreMessagingCompletions2, 16 ) \
     SYSCALL_ENTRY( 0x1397, NtUserDrawAnimatedRects, 0 ) \
     SYSCALL_ENTRY( 0x1398, NtUserDrawCaption, 0 ) \
     SYSCALL_ENTRY( 0x1399, NtUserDrawCaptionTemp, 28 ) \
@@ -1145,7 +1145,7 @@
     SYSCALL_ENTRY( 0x1475, NtUserInitAnsiOem, 0 ) \
     SYSCALL_ENTRY( 0x1476, NtUserInitTask, 0 ) \
     SYSCALL_ENTRY( 0x1477, NtUserInitThreadCoreMessagingIocp, 0 ) \
-    SYSCALL_ENTRY( 0x1478, NtUserInitThreadCoreMessagingIocp2, 0 ) \
+    SYSCALL_ENTRY( 0x1478, NtUserInitThreadCoreMessagingIocp2, 8 ) \
     SYSCALL_ENTRY( 0x1479, NtUserInitialize, 0 ) \
     SYSCALL_ENTRY( 0x147a, NtUserInitializeClientPfnArrays, 16 ) \
     SYSCALL_ENTRY( 0x147b, NtUserInitializeGenericHidInjection, 0 ) \
@@ -2461,7 +2461,7 @@
     SYSCALL_ENTRY( 0x1393, NtUserDragDetect, 24 ) \
     SYSCALL_ENTRY( 0x1394, NtUserDragObject, 40 ) \
     SYSCALL_ENTRY( 0x1395, NtUserDrainThreadCoreMessagingCompletions, 0 ) \
-    SYSCALL_ENTRY( 0x1396, NtUserDrainThreadCoreMessagingCompletions2, 0 ) \
+    SYSCALL_ENTRY( 0x1396, NtUserDrainThreadCoreMessagingCompletions2, 32 ) \
     SYSCALL_ENTRY( 0x1397, NtUserDrawAnimatedRects, 0 ) \
     SYSCALL_ENTRY( 0x1398, NtUserDrawCaption, 0 ) \
     SYSCALL_ENTRY( 0x1399, NtUserDrawCaptionTemp, 56 ) \
@@ -2687,7 +2687,7 @@
     SYSCALL_ENTRY( 0x1475, NtUserInitAnsiOem, 0 ) \
     SYSCALL_ENTRY( 0x1476, NtUserInitTask, 0 ) \
     SYSCALL_ENTRY( 0x1477, NtUserInitThreadCoreMessagingIocp, 0 ) \
-    SYSCALL_ENTRY( 0x1478, NtUserInitThreadCoreMessagingIocp2, 0 ) \
+    SYSCALL_ENTRY( 0x1478, NtUserInitThreadCoreMessagingIocp2, 16 ) \
     SYSCALL_ENTRY( 0x1479, NtUserInitialize, 0 ) \
     SYSCALL_ENTRY( 0x147a, NtUserInitializeClientPfnArrays, 32 ) \
     SYSCALL_ENTRY( 0x147b, NtUserInitializeGenericHidInjection, 0 ) \
@@ -3742,7 +3742,6 @@
     SYSCALL_STUB( NtUserDoUninitMessagePumpHook ) \
     SYSCALL_STUB( NtUserDownlevelTouchpad ) \
     SYSCALL_STUB( NtUserDrainThreadCoreMessagingCompletions ) \
-    SYSCALL_STUB( NtUserDrainThreadCoreMessagingCompletions2 ) \
     SYSCALL_STUB( NtUserDrawAnimatedRects ) \
     SYSCALL_STUB( NtUserDrawCaption ) \
     SYSCALL_STUB( NtUserDwmGetRemoteSessionOcclusionEvent ) \
@@ -3875,7 +3874,6 @@
     SYSCALL_STUB( NtUserInitAnsiOem ) \
     SYSCALL_STUB( NtUserInitTask ) \
     SYSCALL_STUB( NtUserInitThreadCoreMessagingIocp ) \
-    SYSCALL_STUB( NtUserInitThreadCoreMessagingIocp2 ) \
     SYSCALL_STUB( NtUserInitialize ) \
     SYSCALL_STUB( NtUserInitializeGenericHidInjection ) \
     SYSCALL_STUB( NtUserInitializeInputDeviceInjection ) \

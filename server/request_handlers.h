@@ -134,6 +134,7 @@ DECL_HANDLER(get_msg_queue_handle);
 DECL_HANDLER(get_msg_queue);
 DECL_HANDLER(set_queue_fd);
 DECL_HANDLER(set_queue_mask);
+DECL_HANDLER(set_queue_completion);
 DECL_HANDLER(get_queue_status);
 DECL_HANDLER(get_process_idle_event);
 DECL_HANDLER(send_message);
@@ -470,6 +471,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_get_msg_queue,
     (req_handler)req_set_queue_fd,
     (req_handler)req_set_queue_mask,
+    (req_handler)req_set_queue_completion,
     (req_handler)req_get_queue_status,
     (req_handler)req_get_process_idle_event,
     (req_handler)req_send_message,
@@ -1434,6 +1436,8 @@ C_ASSERT( sizeof(struct set_queue_mask_request) == 24 );
 C_ASSERT( offsetof(struct set_queue_mask_reply, wake_bits) == 8 );
 C_ASSERT( offsetof(struct set_queue_mask_reply, changed_bits) == 12 );
 C_ASSERT( sizeof(struct set_queue_mask_reply) == 16 );
+C_ASSERT( offsetof(struct set_queue_completion_request, handle) == 12 );
+C_ASSERT( sizeof(struct set_queue_completion_request) == 16 );
 C_ASSERT( offsetof(struct get_queue_status_request, clear_bits) == 12 );
 C_ASSERT( sizeof(struct get_queue_status_request) == 16 );
 C_ASSERT( offsetof(struct get_queue_status_reply, wake_bits) == 8 );

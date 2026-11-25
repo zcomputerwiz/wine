@@ -917,7 +917,7 @@
 @ stdcall -syscall NtUserDragDetect(long long long)
 @ stdcall -syscall NtUserDragObject(long long long long long)
 @ stub -syscall NtUserDrainThreadCoreMessagingCompletions
-@ stub -syscall NtUserDrainThreadCoreMessagingCompletions2
+@ stdcall -syscall NtUserDrainThreadCoreMessagingCompletions2(long ptr ptr ptr)
 @ stub -syscall NtUserDrawAnimatedRects
 @ stub -syscall NtUserDrawCaption
 @ stdcall -syscall NtUserDrawCaptionTemp(long long ptr long long wstr long)
@@ -1143,7 +1143,7 @@
 @ stub -syscall NtUserInitAnsiOem
 @ stub -syscall NtUserInitTask
 @ stub -syscall NtUserInitThreadCoreMessagingIocp
-@ stub -syscall NtUserInitThreadCoreMessagingIocp2
+@ stdcall -syscall NtUserInitThreadCoreMessagingIocp2(long ptr)
 @ stub -syscall NtUserInitialize
 @ stdcall -syscall NtUserInitializeClientPfnArrays(ptr ptr ptr ptr)
 @ stub -syscall NtUserInitializeGenericHidInjection

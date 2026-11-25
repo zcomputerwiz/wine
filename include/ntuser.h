@@ -930,6 +930,8 @@ W32KAPI BOOL    WINAPI NtUserGetWindowPlacement( HWND hwnd, WINDOWPLACEMENT *pla
 W32KAPI int     WINAPI NtUserGetWindowRgnEx( HWND hwnd, HRGN hrgn, UINT unk );
 W32KAPI BOOL    WINAPI NtUserHideCaret( HWND hwnd );
 W32KAPI BOOL    WINAPI NtUserHiliteMenuItem( HWND hwnd, HMENU handle, UINT item, UINT hilite );
+W32KAPI ULONG   WINAPI NtUserDrainThreadCoreMessagingCompletions2( HWND hwnd, void *arg2, void *arg3, void *arg4 );
+W32KAPI HANDLE  WINAPI NtUserInitThreadCoreMessagingIocp2( HWND hwnd, ULONG *existing );
 W32KAPI NTSTATUS WINAPI NtUserInitializeClientPfnArrays( const ntuser_client_func_ptr *client_procsA,
                                                          const ntuser_client_func_ptr *client_procsW,
                                                          const ntuser_client_func_ptr *client_workers, HINSTANCE user_module );

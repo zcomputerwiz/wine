@@ -2143,6 +2143,24 @@ NTSTATUS WINAPI wow64_NtUserDragObject( UINT *args )
     return NtUserDragObject( parent, hwnd, fmt, data, hcursor );
 }
 
+NTSTATUS WINAPI wow64_NtUserDrainThreadCoreMessagingCompletions2( UINT *args )
+{
+    HWND hwnd = get_handle( &args );
+    void *arg2 = get_ptr( &args );
+    void *arg3 = get_ptr( &args );
+    void *arg4 = get_ptr( &args );
+
+    return NtUserDrainThreadCoreMessagingCompletions2( hwnd, arg2, arg3, arg4 );
+}
+
+NTSTATUS WINAPI wow64_NtUserInitThreadCoreMessagingIocp2( UINT *args )
+{
+    HWND hwnd = get_handle( &args );
+    ULONG *existing = get_ptr( &args );
+
+    return HandleToUlong( NtUserInitThreadCoreMessagingIocp2( hwnd, existing ));
+}
+
 NTSTATUS WINAPI wow64_NtUserDrawCaptionTemp( UINT *args )
 {
     HWND hwnd = get_handle( &args );

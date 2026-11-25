@@ -2481,6 +2481,12 @@ struct process_info
 @END
 
 
+/* Link a completion port to the current message queue: packets on it wake the owner of the queue */
+@REQ(set_queue_completion)
+    obj_handle_t handle;       /* completion port handle */
+@END
+
+
 /* Get the current message queue status */
 @REQ(get_queue_status)
     unsigned int clear_bits;   /* should we clear the change bits? */

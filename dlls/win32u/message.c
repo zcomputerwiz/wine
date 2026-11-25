@@ -43,7 +43,8 @@ WINE_DECLARE_DEBUG_CHANNEL(relay);
 
 #define QS_DRIVER       0x80000000
 #define QS_HARDWARE     0x40000000
-#define QS_INTERNAL     (QS_DRIVER | QS_HARDWARE)
+#define QS_COMPLETION   0x20000000
+#define QS_INTERNAL     (QS_DRIVER | QS_HARDWARE | QS_COMPLETION)
 
 static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
 
@@ -3409,6 +3410,142 @@ static inline LARGE_INTEGER *get_nt_timeout( LARGE_INTEGER *time, DWORD timeout 
     return time;
 }
 
+/* CoreMessaging completions (NtUserInitThreadCoreMessagingIocp2, measured on Windows 11):
+ * the thread's message queue owns a completion port; a packet on it wakes the message waits of the thread, and the wait
+ * takes one packet off the port and sends message 0x60 (wparam 8, lparam = the packet's APC context) to each window that
+ * registered with the port. No queue status bit is involved. */
+#define WM_CORE_MESSAGING_COMPLETION 0x0060
+
+static void dispatch_core_completion(void)
+{
+    struct user_thread_info *info = get_user_thread_info();
+    LARGE_INTEGER zero = {0};
+    ULONG_PTR key, apc;
+    IO_STATUS_BLOCK io;
+    HWND *windows;
+    UINT i, count;
+
+    if (!info->core_port) return;
+    /* a packet that someone else took in the meantime is not an error */
+    if (NtRemoveIoCompletion( info->core_port, &key, &apc, &io, &zero )) return;
+
+    /* the window procedures may register or destroy windows: work on a copy */
+    if (!(count = info->core_window_count) || !(windows = malloc( count * sizeof(*windows) ))) return;
+    memcpy( windows, info->core_windows, count * sizeof(*windows) );
+    for (i = 0; i < count; i++)
+        if (is_window( windows[i] )) send_message( windows[i], WM_CORE_MESSAGING_COMPLETION, 8, apc );
+    free( windows );
+}
+
+void core_messaging_window_destroyed( HWND hwnd )
+{
+    struct user_thread_info *info = get_user_thread_info();
+    UINT i;
+
+    for (i = 0; i < info->core_window_count; i++)
+    {
+        if (info->core_windows[i] != hwnd) continue;
+        memmove( &info->core_windows[i], &info->core_windows[i + 1],
+                 (info->core_window_count - i - 1) * sizeof(*info->core_windows) );
+        info->core_window_count--;
+        break;
+    }
+}
+
+void cleanup_core_messaging(void)
+{
+    struct user_thread_info *info = get_user_thread_info();
+    OBJECT_HANDLE_FLAG_INFORMATION flags = {0};
+
+    if (info->core_port)
+    {
+        NtSetInformationObject( info->core_port, ObjectHandleFlagInformation, &flags, sizeof(flags) );
+        NtClose( info->core_port );
+        info->core_port = 0;
+    }
+    free( info->core_windows );
+    info->core_windows = NULL;
+    info->core_window_count = 0;
+}
+
+/***********************************************************************
+ *           NtUserInitThreadCoreMessagingIocp2   (win32u.@)
+ *
+ * Registers a window of the calling thread with the thread's CoreMessaging completion port and returns the handle of
+ * the port (created by the first call). *existing is 0 for the call that created it and 1 for later calls; a window
+ * that is registered already is refused and *existing is left alone.
+ */
+HANDLE WINAPI NtUserInitThreadCoreMessagingIocp2( HWND hwnd, ULONG *existing )
+{
+    struct user_thread_info *info = get_user_thread_info();
+    OBJECT_HANDLE_FLAG_INFORMATION flags = {FALSE, TRUE};  /* protect from close */
+    BOOL created = FALSE;
+    HWND *windows;
+    NTSTATUS status;
+    HANDLE port;
+    UINT i;
+
+    TRACE( "hwnd %p, existing %p\n", hwnd, existing );
+
+    if (!hwnd || !is_current_thread_window( hwnd ))
+    {
+        RtlSetLastWin32Error( ERROR_INVALID_WINDOW_HANDLE );
+        return 0;
+    }
+    for (i = 0; i < info->core_window_count; i++)
+        if (info->core_windows[i] == hwnd) return 0;
+
+    if (!(windows = realloc( info->core_windows, (info->core_window_count + 1) * sizeof(*windows) )))
+    {
+        RtlSetLastWin32Error( ERROR_NOT_ENOUGH_MEMORY );
+        return 0;
+    }
+    info->core_windows = windows;
+
+    if (!info->core_port)
+    {
+        if ((status = NtCreateIoCompletion( &port, IO_COMPLETION_ALL_ACCESS, NULL, 0 )))
+        {
+            RtlSetLastWin32Error( RtlNtStatusToDosError( status ));
+            return 0;
+        }
+        SERVER_START_REQ( set_queue_completion )
+        {
+            req->handle = wine_server_obj_handle( port );
+            status = wine_server_call( req );
+        }
+        SERVER_END_REQ;
+        if (status)
+        {
+            NtClose( port );
+            RtlSetLastWin32Error( RtlNtStatusToDosError( status ));
+            return 0;
+        }
+        NtSetInformationObject( port, ObjectHandleFlagInformation, &flags, sizeof(flags) );
+        info->core_port = port;
+        created = TRUE;
+    }
+
+    info->core_windows[info->core_window_count++] = hwnd;
+    if (existing) *existing = !created;
+    return info->core_port;
+}
+
+/***********************************************************************
+ *           NtUserDrainThreadCoreMessagingCompletions2   (win32u.@)
+ *
+ * Delivers one queued completion (the same message as a message wait sends). The arguments after the window are not
+ * understood; Windows 11 callers pass pointers that the call does not write.
+ */
+ULONG WINAPI NtUserDrainThreadCoreMessagingCompletions2( HWND hwnd, void *arg2, void *arg3, void *arg4 )
+{
+    TRACE( "hwnd %p, %p, %p, %p\n", hwnd, arg2, arg3, arg4 );
+
+    if (!hwnd) return 0;
+    dispatch_core_completion();
+    return 1;
+}
+
 /* wait for message or signaled handle */
 static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DWORD wake_mask, DWORD changed_mask, DWORD flags )
 {
@@ -3437,7 +3574,8 @@ static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DW
     if (!(changed_mask & QS_SMRESULT) && (event = get_user_thread_info()->idle_event)) NtSetEvent( event, NULL );
 
     do ret = NtWaitForMultipleObjects( count, handles, type, !!(flags & MWMO_ALERTABLE), abs );
-    while (ret == count - 1 && !process_driver_events( QS_ALLINPUT, wake_mask, changed_mask ));
+    while (ret == count - 1 && !process_driver_events( QS_ALLINPUT, wake_mask, changed_mask ) &&
+           !check_internal_bits( QS_COMPLETION ));
 
     if (HIWORD(ret)) /* is it an error code? */
     {
@@ -3449,6 +3587,9 @@ static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DW
     if (ret == count - 1) get_user_thread_info()->last_driver_time = get_driver_check_time();
 
     KeUserDispatchCallback( &params.dispatch, sizeof(params), &ret_ptr, &ret_len );
+
+    /* a CoreMessaging completion woke the queue: deliver it now that the user locks are back */
+    if (ret == count - 1 && check_internal_bits( QS_COMPLETION )) dispatch_core_completion();
 
     return ret;
 }

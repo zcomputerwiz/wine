@@ -1417,6 +1417,11 @@ DWORD SYSCALL_API NtUserDragObject( HWND parent, HWND hwnd, UINT fmt, ULONG_PTR 
     SYSCALL_FUNC( NtUserDragObject );
 }
 
+ULONG SYSCALL_API NtUserDrainThreadCoreMessagingCompletions2( HWND hwnd, void *arg2, void *arg3, void *arg4 )
+{
+    SYSCALL_FUNC( NtUserDrainThreadCoreMessagingCompletions2 );
+}
+
 BOOL SYSCALL_API NtUserDrawCaptionTemp( HWND hwnd, HDC hdc, const RECT *rect, HFONT font,
                                         HICON icon, const WCHAR *str, UINT flags )
 {
@@ -1891,6 +1896,11 @@ BOOL SYSCALL_API NtUserHideCaret( HWND hwnd )
 BOOL SYSCALL_API NtUserHiliteMenuItem( HWND hwnd, HMENU handle, UINT item, UINT hilite )
 {
     SYSCALL_FUNC( NtUserHiliteMenuItem );
+}
+
+HANDLE SYSCALL_API NtUserInitThreadCoreMessagingIocp2( HWND hwnd, ULONG *existing )
+{
+    SYSCALL_FUNC( NtUserInitThreadCoreMessagingIocp2 );
 }
 
 NTSTATUS SYSCALL_API NtUserInitializeClientPfnArrays( const ntuser_client_func_ptr *client_procsA,

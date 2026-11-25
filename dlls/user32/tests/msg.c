@@ -21840,6 +21840,253 @@ static void test_PrintWindow(char **argv)
     DeleteObject(green_brush);
 }
 
+#ifdef _WIN64
+/* CoreMessaging's per-thread completion port (user32 ordinals 2669 and 2670, win32u NtUserInitThreadCoreMessagingIocp2 and
+ * NtUserDrainThreadCoreMessagingCompletions2), as measured on Windows 11. */
+static struct
+{
+    int count;
+    HWND hwnd[16];
+    WPARAM wp[16];
+    LPARAM lp[16];
+    DWORD tid[16];
+} core_msgs;
+static DWORD core_main_tid;
+
+static LRESULT WINAPI core_messaging_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == 0x60)
+    {
+        if (core_msgs.count < 16)
+        {
+            core_msgs.hwnd[core_msgs.count] = hwnd;
+            core_msgs.wp[core_msgs.count] = wp;
+            core_msgs.lp[core_msgs.count] = lp;
+            core_msgs.tid[core_msgs.count] = GetCurrentThreadId();
+        }
+        core_msgs.count++;
+        return 0;
+    }
+    if (msg == WM_USER + 1 && GetCurrentThreadId() != core_main_tid)
+    {
+        Sleep(300);
+        return 0;
+    }
+    return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+static HANDLE core_port;
+static LONG (WINAPI *pNtSetIoCompletion)(HANDLE, ULONG_PTR, ULONG_PTR, LONG, ULONG_PTR);
+static LONG (WINAPI *pNtRemoveIoCompletion)(HANDLE, ULONG_PTR *, ULONG_PTR *, void *, LARGE_INTEGER *);
+
+static DWORD CALLBACK core_late_completion(void *arg)
+{
+    Sleep(100);
+    pNtSetIoCompletion(core_port, 0xaa, (ULONG_PTR)arg, 0, 0);
+    return 0;
+}
+
+struct core_other_thread
+{
+    HANDLE ready;
+    HWND hwnd;
+};
+
+static DWORD CALLBACK core_other_thread_proc(void *arg)
+{
+    struct core_other_thread *data = arg;
+    MSG msg;
+
+    data->hwnd = CreateWindowExA(0, "CoreMessagingClass", NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, NULL, NULL);
+    SetEvent(data->ready);
+    while (GetMessageA(&msg, NULL, 0, 0) > 0) DispatchMessageA(&msg);
+    return 0;
+}
+
+static BOOL core_take_completion(ULONG_PTR *key, ULONG_PTR *apc)
+{
+    LARGE_INTEGER zero = {{0}};
+    ULONG_PTR io[2];
+
+    return !pNtRemoveIoCompletion(core_port, key, apc, io, &zero);
+}
+
+static void test_core_messaging_completions(void)
+{
+    HANDLE (WINAPI *pInit)(HWND, ULONG *);
+    ULONG (WINAPI *pDrain)(HWND, void *, void *, void *);
+    LONG (WINAPI *pNtQueryObject)(HANDLE, int, void *, ULONG, ULONG *);
+    HMODULE user32 = GetModuleHandleA("user32.dll"), ntdll = GetModuleHandleA("ntdll.dll");
+    struct { USHORT length, max; WCHAR *buffer; WCHAR text[64]; } type;
+    HWND hwnd, hwnd2, hwnd3;
+    ULONG existing;
+    HANDLE ret_port;
+    WNDCLASSA cls = {0};
+    ULONG_PTR key, apc;
+    DWORD status, before, after, flags;
+    MSG msg;
+    UINT_PTR timer;
+    BOOL ret;
+    int count;
+
+    pInit = (void *)GetProcAddress(user32, MAKEINTRESOURCEA(2669));
+    pDrain = (void *)GetProcAddress(user32, MAKEINTRESOURCEA(2670));
+    pNtSetIoCompletion = (void *)GetProcAddress(ntdll, "NtSetIoCompletion");
+    pNtRemoveIoCompletion = (void *)GetProcAddress(ntdll, "NtRemoveIoCompletion");
+    pNtQueryObject = (void *)GetProcAddress(ntdll, "NtQueryObject");
+    if (!pInit || !pDrain || !pNtSetIoCompletion || !pNtRemoveIoCompletion)
+    {
+        win_skip("The CoreMessaging completion functions are not available.\n");
+        return;
+    }
+
+    core_main_tid = GetCurrentThreadId();
+    cls.lpfnWndProc = core_messaging_wndproc;
+    cls.hInstance = GetModuleHandleA(NULL);
+    cls.lpszClassName = "CoreMessagingClass";
+    RegisterClassA(&cls);
+    hwnd = CreateWindowExA(0, "CoreMessagingClass", NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, NULL, NULL);
+    hwnd2 = CreateWindowExA(0, "CoreMessagingClass", NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, NULL, NULL);
+    hwnd3 = CreateWindowExA(0, "CoreMessagingClass", NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, NULL, NULL);
+    ok(hwnd && hwnd2 && hwnd3, "CreateWindowEx failed, error %lu.\n", GetLastError());
+
+    /* the first call creates the port, later calls return the same handle */
+    existing = 0xdeadbeef;
+    core_port = pInit(hwnd, &existing);
+    ok(core_port != NULL, "got no handle.\n");
+    ok(!existing, "got %lu.\n", existing);
+    if (!core_port) goto done;
+
+    memset(&type, 0, sizeof(type));
+    if (pNtQueryObject && !pNtQueryObject(core_port, 2, &type, sizeof(type), NULL))
+        ok(type.length == 12 * sizeof(WCHAR) && !wcsncmp(type.buffer, L"IoCompletion", 12), "got type %s.\n",
+           wine_dbgstr_wn(type.buffer, type.length / sizeof(WCHAR)));
+    ret = GetHandleInformation(core_port, &flags);
+    ok(ret && (flags & HANDLE_FLAG_PROTECT_FROM_CLOSE), "got ret %d, flags %#lx.\n", ret, flags);
+
+    existing = 0xdeadbeef;
+    ret_port = pInit(hwnd2, &existing);
+    ok(ret_port == core_port, "got %p, expected %p.\n", ret_port, core_port);
+    ok(existing == 1, "got %lu.\n", existing);
+
+    existing = 0xdeadbeef;
+    ret_port = pInit(hwnd, &existing);  /* registered already */
+    ok(!ret_port, "got %p.\n", ret_port);
+    ok(existing == 0xdeadbeef, "got %#lx.\n", existing);
+    ret_port = pInit(NULL, &existing);
+    ok(!ret_port, "got %p.\n", ret_port);
+
+    ret_port = pInit(hwnd3, NULL);
+    ok(ret_port == core_port, "got %p.\n", ret_port);
+    ok(DestroyWindow(hwnd3), "DestroyWindow failed.\n");
+
+    /* a completion queued while the thread is outside a wait stays queued: nothing drains it, and no queue status
+     * bit changes */
+    while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) DispatchMessageA(&msg);
+    core_msgs.count = 0;
+    before = GetQueueStatus(QS_ALLINPUT | QS_ALLPOSTMESSAGE);
+    status = pNtSetIoCompletion(core_port, 0x11, 0x21, 0, 0);
+    ok(!status, "got %#lx.\n", status);
+    after = GetQueueStatus(QS_ALLINPUT | QS_ALLPOSTMESSAGE);
+    ok(after == before, "queue status changed: %#lx, %#lx.\n", before, after);
+    ret = PeekMessageA(&msg, NULL, 0, 0, PM_NOREMOVE);
+    ok(!ret, "got a message %#x.\n", msg.message);
+    Sleep(50);
+    SleepEx(50, TRUE);
+    ok(!core_msgs.count, "got %d messages.\n", core_msgs.count);
+
+    /* a message wait delivers it, whatever the wake mask: message 0x60, wparam 8, lparam the apc context, to every
+     * registered window, and returns as if input was available */
+    status = MsgWaitForMultipleObjectsEx(0, NULL, 2000, QS_ALLINPUT, 0);
+    ok(status == WAIT_OBJECT_0, "got %#lx.\n", status);
+    ok(core_msgs.count == 2, "got %d messages.\n", core_msgs.count);
+    for (count = 0; count < min(core_msgs.count, 2); count++)
+    {
+        ok(core_msgs.hwnd[count] == (count ? hwnd2 : hwnd) || core_msgs.hwnd[count] == (count ? hwnd : hwnd2),
+           "got window %p.\n", core_msgs.hwnd[count]);
+        ok(core_msgs.wp[count] == 8, "got wparam %#Ix.\n", core_msgs.wp[count]);
+        ok(core_msgs.lp[count] == 0x21, "got lparam %#Ix.\n", core_msgs.lp[count]);
+        ok(core_msgs.tid[count] == core_main_tid, "got thread %lu.\n", core_msgs.tid[count]);
+    }
+    ok(!core_take_completion(&key, &apc), "the packet was not taken by the wait.\n");
+    after = GetQueueStatus(QS_ALLINPUT | QS_ALLPOSTMESSAGE);
+    ok(after == before, "queue status changed: %#lx, %#lx.\n", before, after);
+
+    core_msgs.count = 0;
+    pNtSetIoCompletion(core_port, 0x12, 0x22, 0, 0);
+    status = MsgWaitForMultipleObjectsEx(0, NULL, 2000, QS_POSTMESSAGE, 0);
+    ok(status == WAIT_OBJECT_0, "got %#lx.\n", status);
+    ok(core_msgs.count == 2 && core_msgs.lp[0] == 0x22, "got %d messages, lparam %#Ix.\n", core_msgs.count, core_msgs.lp[0]);
+
+    /* GetMessage keeps waiting: it returns for a real message only */
+    core_msgs.count = 0;
+    pNtSetIoCompletion(core_port, 0x13, 0x23, 0, 0);
+    timer = SetTimer(hwnd, 5, 300, NULL);
+    ok(timer, "SetTimer failed.\n");
+    ret = GetMessageA(&msg, NULL, 0, 0);
+    ok(ret == 1 && msg.message == WM_TIMER, "got ret %d, message %#x.\n", ret, msg.message);
+    ok(core_msgs.count == 2 && core_msgs.lp[0] == 0x23, "got %d messages, lparam %#Ix.\n", core_msgs.count, core_msgs.lp[0]);
+    KillTimer(hwnd, 5);
+
+    /* one completion per drain call, in order; no window gives 0 */
+    core_msgs.count = 0;
+    pNtSetIoCompletion(core_port, 0x14, 0x31, 0, 0);
+    pNtSetIoCompletion(core_port, 0x15, 0x32, 0, 0);
+    status = pDrain(hwnd, NULL, NULL, NULL);
+    ok(status == 1, "got %lu.\n", status);
+    ok(core_msgs.count == 2 && core_msgs.lp[0] == 0x31, "got %d messages, lparam %#Ix.\n", core_msgs.count, core_msgs.lp[0]);
+    status = pDrain(NULL, NULL, NULL, NULL);
+    ok(!status, "got %lu.\n", status);
+    ok(core_msgs.count == 2, "got %d messages.\n", core_msgs.count);
+    status = pDrain(hwnd, NULL, NULL, NULL);
+    ok(status == 1, "got %lu.\n", status);
+    ok(core_msgs.count == 4 && core_msgs.lp[2] == 0x32, "got %d messages, lparam %#Ix.\n", core_msgs.count, core_msgs.lp[2]);
+    ok(!core_take_completion(&key, &apc), "the port is not empty.\n");
+
+    /* a window that was destroyed gets nothing */
+    core_msgs.count = 0;
+    ok(DestroyWindow(hwnd2), "DestroyWindow failed.\n");
+    pNtSetIoCompletion(core_port, 0x16, 0x41, 0, 0);
+    status = MsgWaitForMultipleObjectsEx(0, NULL, 2000, QS_ALLINPUT, 0);
+    ok(status == WAIT_OBJECT_0, "got %#lx.\n", status);
+    ok(core_msgs.count == 1 && core_msgs.hwnd[0] == hwnd, "got %d messages, window %p.\n", core_msgs.count, core_msgs.hwnd[0]);
+
+    /* a packet that another thread took: the waiting thread is not stuck */
+    pNtSetIoCompletion(core_port, 0x17, 0x51, 0, 0);
+    ok(core_take_completion(&key, &apc) && key == 0x17 && apc == 0x51, "got key %#Ix, apc %#Ix.\n", key, apc);
+    core_msgs.count = 0;
+    status = MsgWaitForMultipleObjectsEx(0, NULL, 100, QS_ALLINPUT, 0);
+    ok(status == WAIT_TIMEOUT, "got %#lx.\n", status);
+    ok(!core_msgs.count, "got %d messages.\n", core_msgs.count);
+
+    /* the wait for the reply of a SendMessage to another thread delivers it too */
+    {
+        struct core_other_thread data = {CreateEventA(NULL, FALSE, FALSE, NULL)};
+        HANDLE thread = CreateThread(NULL, 0, core_other_thread_proc, &data, 0, NULL);
+        HANDLE late;
+
+        WaitForSingleObject(data.ready, 5000);
+        core_msgs.count = 0;
+        late = CreateThread(NULL, 0, core_late_completion, (void *)0x61, 0, NULL);
+        SendMessageA(data.hwnd, WM_USER + 1, 0, 0);
+        ok(core_msgs.count == 1 && core_msgs.lp[0] == 0x61 && core_msgs.tid[0] == core_main_tid,
+           "got %d messages, lparam %#Ix.\n", core_msgs.count, core_msgs.lp[0]);
+        ok(!core_take_completion(&key, &apc), "the packet is still queued.\n");
+        WaitForSingleObject(late, 5000);
+        CloseHandle(late);
+        PostMessageA(data.hwnd, WM_QUIT, 0, 0);
+        WaitForSingleObject(thread, 5000);
+        CloseHandle(thread);
+        CloseHandle(data.ready);
+    }
+
+done:
+    DestroyWindow(hwnd);
+    DestroyWindow(hwnd2);
+    UnregisterClassA("CoreMessagingClass", GetModuleHandleA(NULL));
+}
+#endif /* _WIN64 */
+
 START_TEST(msg)
 {
     char **test_argv;
@@ -21996,4 +22243,7 @@ START_TEST(msg)
            "unexpected error %ld\n", GetLastError());
     }
     DeleteCriticalSection( &sequence_cs );
+#ifdef _WIN64
+    test_core_messaging_completions();
+#endif
 }

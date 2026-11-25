@@ -5555,6 +5555,7 @@ LRESULT destroy_window( HWND hwnd )
     SERVER_END_REQ;
 
     send_message( hwnd, WM_NCDESTROY, 0, 0 );
+    core_messaging_window_destroyed( hwnd );
 
     if (hwnd == get_capture()) user_driver->pSetCapture( NULL, 0, toplevel );
 

@@ -77,6 +77,7 @@ struct completion
     struct list         wait_queue;
     unsigned int        depth;
     unsigned int        concurrent;
+    struct msg_queue   *owner;      /* message queue woken while the port has packets (set_queue_completion), or NULL */
 };
 
 struct completion_packet
@@ -96,6 +97,26 @@ struct completion_packet
 };
 
 static void remove_completion_packet_msg( struct comp_msg *msg );
+
+/* the queue that owns a completion port is woken as long as the port holds packets */
+static void completion_update_owner( struct completion *completion )
+{
+    if (completion->owner) queue_completion_wake( completion->owner, completion->depth != 0 );
+}
+
+/* link a completion port to a message queue; fails if the port already has an owner */
+int link_completion_queue( struct completion *completion, struct msg_queue *queue )
+{
+    if (completion->owner) return 0;
+    completion->owner = queue;
+    completion_update_owner( completion );
+    return 1;
+}
+
+void unlink_completion_queue( struct completion *completion )
+{
+    completion->owner = NULL;
+}
 
 static void completion_wait_dump( struct object*, int );
 static int completion_wait_signaled( struct object *obj, struct wait_queue_entry *entry );
@@ -155,6 +176,7 @@ static void completion_wait_satisfied( struct object *obj, struct wait_queue_ent
     msg = LIST_ENTRY( msg_entry, struct comp_msg, queue_entry );
     --wait->completion->depth;
     list_remove( &msg->queue_entry );
+    completion_update_owner( wait->completion );
     if (wait->msg) free( wait->msg );
     wait->msg = msg;
 }
@@ -209,6 +231,7 @@ static bool completion_init( struct object *obj, const void *init_data )
 
     completion->depth = 0;
     completion->concurrent = data->concurrent;
+    completion->owner = NULL;
     list_init( &completion->queue );
     list_init( &completion->wait_queue );
     return !!(completion->sync = create_internal_sync( 1, 0 ));
@@ -295,6 +318,7 @@ void add_completion( struct completion *completion, apc_param_t ckey, apc_param_
 
     list_add_tail( &completion->queue, &msg->queue_entry );
     completion->depth++;
+    completion_update_owner( completion );
     LIST_FOR_EACH_ENTRY( wait, &completion->wait_queue, struct completion_wait, wait_queue_entry )
     {
         wake_up( &wait->obj, 1 );
@@ -408,6 +432,7 @@ static void cancel_completion_packet( struct completion_packet *packet )
                 list_remove( &comp_msg->queue_entry );
                 free( comp_msg );
                 packet->completion->depth--;
+                completion_update_owner( packet->completion );
                 break;
             }
         }
@@ -543,6 +568,7 @@ DECL_HANDLER(remove_completion)
     {
         list_remove( entry );
         completion->depth--;
+        completion_update_owner( completion );
         msg = LIST_ENTRY( entry, struct comp_msg, queue_entry );
         reply->ckey = msg->ckey;
         reply->cvalue = msg->cvalue;

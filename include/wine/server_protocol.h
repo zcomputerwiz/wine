@@ -3250,6 +3250,18 @@ struct set_queue_mask_reply
 
 
 
+struct set_queue_completion_request
+{
+    struct request_header __header;
+    obj_handle_t handle;
+};
+struct set_queue_completion_reply
+{
+    struct reply_header __header;
+};
+
+
+
 struct get_queue_status_request
 {
     struct request_header __header;
@@ -6817,6 +6829,7 @@ enum request
     REQ_get_msg_queue,
     REQ_set_queue_fd,
     REQ_set_queue_mask,
+    REQ_set_queue_completion,
     REQ_get_queue_status,
     REQ_get_process_idle_event,
     REQ_send_message,
@@ -7156,6 +7169,7 @@ union generic_request
     struct get_msg_queue_request get_msg_queue_request;
     struct set_queue_fd_request set_queue_fd_request;
     struct set_queue_mask_request set_queue_mask_request;
+    struct set_queue_completion_request set_queue_completion_request;
     struct get_queue_status_request get_queue_status_request;
     struct get_process_idle_event_request get_process_idle_event_request;
     struct send_message_request send_message_request;
@@ -7493,6 +7507,7 @@ union generic_reply
     struct get_msg_queue_reply get_msg_queue_reply;
     struct set_queue_fd_reply set_queue_fd_reply;
     struct set_queue_mask_reply set_queue_mask_reply;
+    struct set_queue_completion_reply set_queue_completion_reply;
     struct get_queue_status_reply get_queue_status_reply;
     struct get_process_idle_event_reply get_process_idle_event_reply;
     struct send_message_reply send_message_reply;
@@ -7700,6 +7715,6 @@ union generic_reply
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 994
+#define SERVER_PROTOCOL_VERSION 995
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

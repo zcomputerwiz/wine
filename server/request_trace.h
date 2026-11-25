@@ -1510,6 +1510,11 @@ static void dump_set_queue_mask_reply( const struct set_queue_mask_reply *req )
     fprintf( stderr, ", changed_bits=%08x", req->changed_bits );
 }
 
+static void dump_set_queue_completion_request( const struct set_queue_completion_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+}
+
 static void dump_get_queue_status_request( const struct get_queue_status_request *req )
 {
     fprintf( stderr, " clear_bits=%08x", req->clear_bits );
@@ -3975,6 +3980,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_msg_queue_request,
     (dump_func)dump_set_queue_fd_request,
     (dump_func)dump_set_queue_mask_request,
+    (dump_func)dump_set_queue_completion_request,
     (dump_func)dump_get_queue_status_request,
     (dump_func)dump_get_process_idle_event_request,
     (dump_func)dump_send_message_request,
@@ -4311,6 +4317,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_msg_queue_reply,
     NULL,
     (dump_func)dump_set_queue_mask_reply,
+    NULL,
     (dump_func)dump_get_queue_status_reply,
     (dump_func)dump_get_process_idle_event_reply,
     NULL,
@@ -4647,6 +4654,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "get_msg_queue",
     "set_queue_fd",
     "set_queue_mask",
+    "set_queue_completion",
     "get_queue_status",
     "get_process_idle_event",
     "send_message",
@@ -4879,6 +4887,7 @@ static const struct
     { "CHILD_MUST_BE_VOLATILE",      STATUS_CHILD_MUST_BE_VOLATILE },
     { "CONNECTION_ABORTED",          STATUS_CONNECTION_ABORTED },
     { "CONNECTION_ACTIVE",           STATUS_CONNECTION_ACTIVE },
+    { "CONNECTION_DISCONNECTED",     STATUS_CONNECTION_DISCONNECTED },
     { "CONNECTION_REFUSED",          STATUS_CONNECTION_REFUSED },
     { "CONNECTION_RESET",            STATUS_CONNECTION_RESET },
     { "DEBUGGER_INACTIVE",           STATUS_DEBUGGER_INACTIVE },

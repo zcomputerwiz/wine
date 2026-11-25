@@ -168,8 +168,8 @@
 2666 stub RegisterForTooltipDismissNotification  # NtUserRegisterForTooltipDismissNotification
 2667 stub RegisterForCustomDockTargets  # NtUserRegisterForCustomDockTargets
 2668 stub GetClipboardMetadata  # NtUserGetClipboardMetadata
-2669 stub -noname InitThreadCoreMessagingIocp2  # NtUserInitThreadCoreMessagingIocp2
-2670 stub -noname DrainThreadCoreMessagingCompletions2  # NtUserDrainThreadCoreMessagingCompletions2
+2669 stdcall -noname InitThreadCoreMessagingIocp2(long ptr) NtUserInitThreadCoreMessagingIocp2
+2670 stdcall -noname DrainThreadCoreMessagingCompletions2(long ptr ptr ptr) NtUserDrainThreadCoreMessagingCompletions2
 2671 stub ShellRegisterHotKey  # NtUserShellRegisterHotKey
 2672 stub SetUserObjectCapability  # NtUserSetUserObjectCapability
 2673 stub SetWindowMessageCapability  # NtUserSetWindowMessageCapability

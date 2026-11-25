@@ -48,7 +48,8 @@
 
 #define QS_DRIVER       0x80000000
 #define QS_HARDWARE     0x40000000
-#define QS_INTERNAL     (QS_DRIVER | QS_HARDWARE)
+#define QS_COMPLETION   0x20000000  /* the linked completion port has packets (set_queue_completion) */
+#define QS_INTERNAL     (QS_DRIVER | QS_HARDWARE | QS_COMPLETION)
 
 #define WM_NCMOUSEFIRST WM_NCMOUSEMOVE
 #define WM_NCMOUSELAST  (WM_NCMOUSEFIRST+(WM_MOUSELAST-WM_MOUSEFIRST))
@@ -148,6 +149,7 @@ struct msg_queue
     struct hook_table     *hooks;           /* hook table */
     int                    keystate_lock;   /* owns an input keystate lock */
     queue_shm_t           *shared;          /* queue in session shared memory */
+    struct completion     *completion;      /* completion port linked to the queue, or NULL */
 };
 
 struct hotkey
@@ -287,6 +289,7 @@ static struct msg_queue *create_msg_queue( struct thread *thread, struct thread_
         queue->timeout         = NULL;
         queue->input           = (struct thread_input *)grab_object( input );
         queue->hooks           = NULL;
+        queue->completion      = NULL;
         queue->keystate_lock   = 0;
         list_init( &queue->send_result );
         list_init( &queue->callback_result );
@@ -800,6 +803,13 @@ static inline struct msg_queue *get_current_queue(void)
     struct msg_queue *queue = current->queue;
     if (!queue) queue = create_msg_queue( current, NULL );
     return queue;
+}
+
+/* wake the owner of the queue while its linked completion port has packets (no visible QS_* bit) */
+void queue_completion_wake( struct msg_queue *queue, int signaled )
+{
+    if (signaled) set_queue_bits( queue, QS_COMPLETION );
+    else clear_queue_bits( queue, QS_COMPLETION );
 }
 
 /* get a (pseudo-)unique id to tag hardware messages */
@@ -1336,6 +1346,11 @@ static void msg_queue_destroy( struct object *obj )
     }
     SHARED_WRITE_END;
     if (queue->keystate_lock) unlock_input_keystate( queue->input );
+    if (queue->completion)
+    {
+        unlink_completion_queue( queue->completion );
+        release_object( queue->completion );
+    }
     release_object( queue->input );
     if (queue->hooks) release_object( queue->hooks );
     if (queue->fd) release_object( queue->fd );
@@ -3113,6 +3128,29 @@ DECL_HANDLER(set_queue_mask)
 
     if (!get_queue_status( queue )) reset_sync( queue->sync );
     else signal_sync( queue->sync );
+}
+
+
+/* link a completion port to the current message queue */
+DECL_HANDLER(set_queue_completion)
+{
+    struct msg_queue *queue = get_current_queue();
+    struct completion *completion;
+
+    if (!queue) return;
+    if (queue->completion)  /* one port per queue */
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (!(completion = get_completion_obj( current->process, req->handle, IO_COMPLETION_MODIFY_STATE ))) return;
+    if (!link_completion_queue( completion, queue ))  /* the port belongs to another queue already */
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        release_object( completion );
+        return;
+    }
+    queue->completion = completion;  /* the queue keeps the reference */
 }
 
 
