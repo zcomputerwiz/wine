@@ -56,6 +56,7 @@ static const BOOL is_win64 = (sizeof(void *) > sizeof(int));
 /* Set when the server gave this services.exe the system role (SYSTEM token, ELEVATION_SYSTEM_ROLE_WORKORDER.md C3).
  * Only then are services started with the token of their account; otherwise they run with the caller's token. */
 static BOOL system_role;
+static BOOL in_session0;   /* WineExplorer: this service manager is session 0's own (session 0, with the system role) */
 
 static BOOL has_system_role(void)
 {
@@ -326,6 +327,19 @@ static void load_session_service(HKEY hKey, struct service_entry *entry)
         WINE_WARN("%s: WexSessionService is not 0 or 1, ignored\n", wine_dbgstr_w(entry->name));
 }
 
+/* WineExplorer: a service that means something only in session 0 (Local Accounts: its pipes are the bridge's and its helper
+ * is the machine's) has WexStartInSession0Only (REG_DWORD) 1: it is auto-started there and nowhere else, so a plain prefix
+ * and a session without session 0 do not run a copy of their own. It can still be started on demand. */
+static void load_session0_start_only(HKEY hKey, struct service_entry *entry)
+{
+    DWORD type, value, size = sizeof(value);
+
+    entry->session0_start_only = FALSE;
+    if (!RegQueryValueExW(hKey, L"WexStartInSession0Only", NULL, &type, (BYTE *)&value, &size) &&
+        type == REG_DWORD && size == sizeof(value))
+        entry->session0_start_only = value != 0;
+}
+
 static DWORD load_service_config(HKEY hKey, struct service_entry *entry)
 {
     DWORD err, value = 0;
@@ -354,6 +368,7 @@ static DWORD load_service_config(HKEY hKey, struct service_entry *entry)
         (value == SERVICE_SID_TYPE_UNRESTRICTED || value == SERVICE_SID_TYPE_RESTRICTED))
         entry->sid_type = value;
     load_session_service(hKey, entry);
+    load_session0_start_only(hKey, entry);
 
     WINE_TRACE("Image path           = %s\n", wine_dbgstr_w(entry->config.lpBinaryPathName) );
     WINE_TRACE("Group                = %s\n", wine_dbgstr_w(entry->config.lpLoadOrderGroup) );
@@ -717,6 +732,12 @@ static void scmdatabase_autostart_services(struct scmdatabase *db)
         if (!safeboot_allows(service))
         {
             TRACE("not starting %s in Safe Mode\n", wine_dbgstr_w(service->name));
+            release_service(service);
+            continue;
+        }
+        if (service->session0_start_only && !in_session0)
+        {
+            TRACE("%s is started in session 0 only\n", wine_dbgstr_w(service->name));
             release_service(service);
             continue;
         }
@@ -1816,7 +1837,9 @@ static void init_forward_mode(void)
 {
     DWORD session = 0;
 
-    if (!ProcessIdToSessionId(GetCurrentProcessId(), &session) || !session) return;
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &session)) session = 0;
+    in_session0 = !session && system_role;
+    if (!session) return;
     if ((forward_mode = forward_available()))
         WINE_TRACE("services that are not the session's are session 0's\n");
 }
