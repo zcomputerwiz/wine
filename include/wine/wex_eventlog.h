@@ -55,7 +55,7 @@
 #define WEX_EVTLOG_COUNT        5   /* reply arg[0] */
 #define WEX_EVTLOG_OLDEST       6   /* reply arg[0]: the oldest record number */
 #define WEX_EVTLOG_INFO         7   /* reply: wex_evtlog_information; arg[0]: the log is full */
-#define WEX_EVTLOG_CLEAR        8   /* arg[0]: 1 after a backup, arg[1]: the last record number the backup has; with
+#define WEX_EVTLOG_CLEAR        8   /* arg[0]: 1 after a backup (2: clear through arg[1] only, after the retries), arg[1]: the last record number the backup has; with
                                      * newer records ERROR_RETRY: the client streams the rest and clears again (N6) */
 #define WEX_EVTLOG_STREAM       9   /* arg[0]: the first record number (0: the oldest); reply: records, arg[0]: the
                                      * next number, ERROR_HANDLE_EOF after the last (E3: the client writes backups) */
