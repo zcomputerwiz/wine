@@ -3264,6 +3264,10 @@ static void test_failure_restart(void)
         ok(!WaitForSingleObject(sem, 10000), "the service did not start\n");
         ok(wait_stopped(svc), "the service did not stop\n");
         ok(DeleteService(svc), "DeleteService failed: %lu\n", GetLastError());
+        /* a service marked for delete is not started again, also by a handle opened before */
+        SetLastError(0xdeadbeef);
+        ok(!StartServiceA(svc, 0, NULL), "StartServiceA succeeded\n");
+        ok(GetLastError() == ERROR_SERVICE_MARKED_FOR_DELETE, "got %lu\n", GetLastError());
         CloseServiceHandle(svc);
         if ((svc = create_crash_service(scm, name, 0)))
         {
