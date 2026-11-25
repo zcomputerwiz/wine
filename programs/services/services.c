@@ -1538,21 +1538,34 @@ static void load_registry_parameters(void)
 /* SERVICE_CONFIG_FAILURE_ACTIONS: a restart, once its delay has passed. A service has at most one pending restart,
  * its restart_timer, which holds a reference to it and is taken out of it under the database lock by whoever ends
  * it: this callback, or service_cancel_restart (DeleteService, the end of services.exe), which then closes it. */
+/* Under the database lock: services.exe is ending (no restart starts any more), and the number of callbacks that took
+ * their timer and still run, which the end waits for before the database is torn down. */
+static BOOL restarts_stopping;
+static LONG restarts_running;
+
 static void CALLBACK failure_restart_callback(TP_CALLBACK_INSTANCE *instance, void *context, TP_TIMER *timer)
 {
     struct service_entry *service = context;
+    struct scmdatabase *db = service->db;
     BOOL mine, start;
     DWORD err;
 
-    scmdatabase_lock(service->db);
-    if ((mine = service->restart_timer == timer)) service->restart_timer = NULL;
-    scmdatabase_unlock(service->db);
-    if (!mine) return;  /* cancelled: the canceller closes the timer and releases the service */
+    scmdatabase_lock(db);
+    if ((mine = service->restart_timer == timer))
+    {
+        service->restart_timer = NULL;
+        restarts_running++;
+    }
+    scmdatabase_unlock(db);
+    if (!mine) return;  /* cancelled: the canceller waits for this, then closes the timer and releases the service */
 
-    scmdatabase_lock_startup(active_database, INFINITE);
+    scmdatabase_lock_startup(db, INFINITE);
+    scmdatabase_lock(db);
+    start = !restarts_stopping;
+    scmdatabase_unlock(db);
     service_lock(service);
     /* not a service deleted or disabled meanwhile (service_start_process refuses a deleted one too) */
-    start = service->status.dwCurrentState == SERVICE_STOPPED && !is_marked_for_delete(service) &&
+    start = start && service->status.dwCurrentState == SERVICE_STOPPED && !is_marked_for_delete(service) &&
             service->config.dwStartType != SERVICE_DISABLED;
     service_unlock(service);
     if (start)
@@ -1561,9 +1574,12 @@ static void CALLBACK failure_restart_callback(TP_CALLBACK_INSTANCE *instance, vo
         if ((err = service_start(service, 0, NULL)))
             WINE_WARN("%s did not restart after its failure: %lu\n", wine_dbgstr_w(service->name), err);
     }
-    scmdatabase_unlock_startup(active_database);
+    scmdatabase_unlock_startup(db);
     CloseThreadpoolTimer(timer);
     release_service(service);
+    scmdatabase_lock(db);
+    restarts_running--;
+    scmdatabase_unlock(db);
 }
 
 void service_cancel_restart(struct service_entry *service)
@@ -1581,28 +1597,39 @@ void service_cancel_restart(struct service_entry *service)
     release_service(service);
 }
 
-/* the end of services.exe: no restart may start once the database is being torn down */
+/* the end of services.exe, before the database is torn down: no restart starts any more, the pending ones are
+ * cancelled, and the ones already running are waited for */
 static void scmdatabase_cancel_restarts(struct scmdatabase *db)
 {
-    struct service_entry *service, **pending = NULL;
-    unsigned int count = 0, i;
+    struct service_entry *service, *found;
+    LONG running;
 
     scmdatabase_lock(db);
-    LIST_FOR_EACH_ENTRY(service, &db->services, struct service_entry, entry) if (service->restart_timer) count++;
-    if (count && (pending = malloc(count * sizeof(*pending))))
-    {
-        count = 0;
-        LIST_FOR_EACH_ENTRY(service, &db->services, struct service_entry, entry)
-            if (service->restart_timer) pending[count++] = grab_service(service);
-    }
-    else count = 0;
+    restarts_stopping = TRUE;
     scmdatabase_unlock(db);
-    for (i = 0; i < count; i++)
+    for (;;)
     {
-        service_cancel_restart(pending[i]);
-        release_service(pending[i]);
+        found = NULL;
+        scmdatabase_lock(db);
+        LIST_FOR_EACH_ENTRY(service, &db->services, struct service_entry, entry)
+        {
+            if (!service->restart_timer) continue;
+            found = grab_service(service);
+            break;
+        }
+        scmdatabase_unlock(db);
+        if (!found) break;
+        service_cancel_restart(found);
+        release_service(found);
     }
-    free(pending);
+    for (;;)
+    {
+        scmdatabase_lock(db);
+        running = restarts_running;
+        scmdatabase_unlock(db);
+        if (!running) break;
+        Sleep(10);
+    }
 }
 
 /* The service failed (its process ended while it ran): count the failure, restarting the count when the reset
@@ -1617,7 +1644,7 @@ static void service_failed(struct service_entry *service)
     FILETIME ft;
     DWORD index;
 
-    if (!service->failure_actions_count || is_marked_for_delete(service)) return;
+    if (!service->failure_actions_count || is_marked_for_delete(service) || restarts_stopping) return;
     if (service->failure_count && service->failure_reset_period != INFINITE &&
         now - service->last_failure > (ULONGLONG)service->failure_reset_period * 1000)
         service->failure_count = 0;
@@ -1629,16 +1656,15 @@ static void service_failed(struct service_entry *service)
     switch (action.Type)
     {
     case SC_ACTION_RESTART:
-        /* one pending restart per service: a new failure sets the pending one's delay again */
-        if (!(timer = service->restart_timer))
+        /* one pending restart per service, never set again: its timer may have expired with the callback waiting
+         * for the lock we hold, and a second expiry would run the callback once more after the first released it */
+        if (service->restart_timer) break;
+        if (!(timer = CreateThreadpoolTimer(failure_restart_callback, grab_service(service), NULL)))
         {
-            if (!(timer = CreateThreadpoolTimer(failure_restart_callback, grab_service(service), NULL)))
-            {
-                release_service(service);
-                break;
-            }
-            service->restart_timer = timer;
+            release_service(service);
+            break;
         }
+        service->restart_timer = timer;
         due.QuadPart = -(LONGLONG)action.Delay * 10000;
         ft.dwLowDateTime = due.u.LowPart;
         ft.dwHighDateTime = due.u.HighPart;
