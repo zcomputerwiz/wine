@@ -2796,23 +2796,6 @@ BOOL X11DRV_DestroyNotify( HWND hwnd, XEvent *event )
 }
 
 
-static int window_exists_error( Display *display, XErrorEvent *event, void *arg )
-{
-    return 1;
-}
-
-/* whether the X server still has the window (a desktop window of a dead process does not) */
-static BOOL x11drv_window_exists( Window win )
-{
-    XWindowAttributes attr;
-    BOOL ret;
-
-    X11DRV_expect_error( gdi_display, window_exists_error, NULL );
-    ret = XGetWindowAttributes( gdi_display, win, &attr ) != 0;
-    if (X11DRV_check_error()) ret = FALSE;
-    return ret;
-}
-
 /* initialize the desktop window id in the desktop manager process */
 static BOOL create_desktop_win_data( Window win, HWND hwnd )
 {
@@ -2874,22 +2857,18 @@ void X11DRV_SetDesktopWindow( HWND hwnd )
     else
     {
         Window win = (Window)NtUserGetProp( hwnd, whole_window_prop );
-        if (win && win != root_window)
+        if (is_virtual_desktop())
         {
-            /* The desktop window outlives the process that made it. When that process died (a crashed explorer) and
-             * this one made a new X desktop window of its own, the stored id is a window the X server has destroyed:
-             * adopting it makes every child window fail with BadWindow. Keep ours and store it. */
-            if (is_virtual_desktop() && !x11drv_window_exists( win ))
+            /* This process made its own X desktop window (it is the desktop's manager) and the server's desktop window
+             * is older: a manager that died and was replaced (B120). The stored X window id is the dead one's; use
+             * ours and store it. */
+            if (win != root_window && !create_desktop_win_data( root_window, hwnd ))
             {
-                WARN( "desktop window %lx is gone, using %lx\n", win, root_window );
-                if (!create_desktop_win_data( root_window, hwnd ))
-                {
-                    ERR( "Failed to create virtual desktop window data\n" );
-                    root_window = DefaultRootWindow( gdi_display );
-                }
+                ERR( "Failed to create virtual desktop window data\n" );
+                root_window = DefaultRootWindow( gdi_display );
             }
-            else X11DRV_init_desktop( win );
         }
+        else if (win && win != root_window) X11DRV_init_desktop( win );
     }
 }
 
