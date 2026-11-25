@@ -51,6 +51,10 @@
 #include "session0.h"
 #include "unicode.h"
 #include "wex_e1lab.h"
+#define WEX_CALLER_CONSTANTS_ONLY
+#include "wine/wex_caller.h"
+#define WEX_ACCOUNTS_CONSTANTS_ONLY
+#include "wine/wex_accounts.h"
 
 struct named_pipe;
 
@@ -112,6 +116,7 @@ struct pipe_server
     struct list          entry;      /* entry in named pipe listeners list */
     unsigned int         options;    /* pipe options */
     struct async_queue   listen_q;   /* listen queue */
+    int                  reserved;   /* WineExplorer H1: an instance of a reserved name, made by LocalSystem in session 0 */
 };
 
 struct named_pipe
@@ -1611,6 +1616,7 @@ static struct pipe_server *create_pipe_server( struct named_pipe *pipe, unsigned
         return NULL;
 
     server->options = options;
+    server->reserved = 0;
     init_pipe_end( &server->pipe_end, pipe, pipe_flags, pipe->insize );
     server->pipe_end.state = FILE_PIPE_LISTENING_STATE;
     server->pipe_end.server_pid = get_process_id( current->process );
@@ -1795,10 +1801,25 @@ static void named_pipe_dir_ioctl( struct fd *fd, ioctl_code_t code, struct async
 }
 
 
+/* WineExplorer H1: names that only LocalSystem may serve in session 0 (the accounts service's: plain and as the
+ * bridged name a session 0 process would use); 1 when the pipe has one */
+static int pipe_name_reserved( struct named_pipe *pipe )
+{
+    static const WCHAR accounts[] = {'a','c','c','o','u','n','t','s'};
+    static const WCHAR bridged[] = {'W','e','x','S','e','s','s','i','o','n','0','\\','a','c','c','o','u','n','t','s'};
+    data_size_t len;
+    const WCHAR *name;
+
+    if (!session0_server || !(name = get_object_name( &pipe->obj, &len ))) return 0;
+    return (len == sizeof(accounts) && !memicmp_strW( name, accounts, len )) ||
+           (len == sizeof(bridged) && !memicmp_strW( name, bridged, len ));
+}
+
 DECL_HANDLER(create_named_pipe)
 {
     struct named_pipe *pipe;
     struct pipe_server *server;
+    int reserved;
     struct named_pipe_init_data data = { .maxinstances = req->maxinstances, .outsize = req->outsize,
                                          .insize = req->insize, .sharing = req->sharing,
                                          .timeout = req->timeout, .flags = req->flags };
@@ -1858,6 +1879,16 @@ DECL_HANDLER(create_named_pipe)
         set_error( STATUS_ACCESS_DENIED );
         return;
     }
+    /* H1: in session 0 only LocalSystem (its primary token, not impersonating) makes instances of a reserved name;
+     * they are marked, and accounts_forward serves only marked instances */
+    if ((reserved = pipe_name_reserved( pipe )) &&
+        (current->token || !current->process->token ||
+         token_service_account( current->process->token ) != SERVICE_ACCOUNT_SYSTEM))
+    {
+        release_object( pipe );
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
 
     if (!reply->created)
     {
@@ -1879,6 +1910,7 @@ DECL_HANDLER(create_named_pipe)
     server = create_pipe_server( pipe, req->options, req->flags );
     if (server)
     {
+        server->reserved = reserved;
         reply->handle = alloc_handle( current->process, server, req->access, params.attr );
         pipe->instances++;
         release_object( server );
@@ -2379,9 +2411,11 @@ static int pipe_bridge_allowed( const WCHAR *name, data_size_t len )
     static const WCHAR svcctl[] = {'s','v','c','c','t','l'};
     static const WCHAR broker[] = {'w','e','x','e','l','e','v','a','t','e','.','r','9'};  /* E1 R9's B0 */
     static const WCHAR eventlog[] = {'e','v','e','n','t','l','o','g'};  /* the EventLog service (L1) */
+    static const WCHAR accounts[] = {'a','c','c','o','u','n','t','s'};  /* the accounts service (H1) */
 
     if (len == sizeof(svcctl) && !memicmp_strW( name, svcctl, len )) return 1;
     if (len == sizeof(eventlog) && !memicmp_strW( name, eventlog, len )) return 2;  /* link_bound_token needs the link */
+    if (len == sizeof(accounts) && !memicmp_strW( name, accounts, len )) return 2;
     if (len == sizeof(broker) && !memicmp_strW( name, broker, len )) return 2;
     /* a service's ncalrpc endpoint: the pipe's descriptor decides, and the service checks its callers itself */
     if (is_lrpc_pipe_name( name, len )) return 1;
@@ -2521,4 +2555,39 @@ DECL_HANDLER(get_caller_class)
         reply->caller_class = token_caller_class( token );
         release_object( token );
     }
+}
+
+/* WineExplorer (H1): the accounts service forwards one request of a client of its reserved pipe to the root helper.
+ * Only an instance made under the reservation, connected to a session's program through the bridge with a link-bound
+ * description; the verdict and the uid come from that connection, never from the service */
+DECL_HANDLER(accounts_forward)
+{
+    struct pipe_server *server = (struct pipe_server *)get_handle_obj( current->process, req->pipe, 0,
+                                                                       &pipe_server_ops );
+    struct pipe_end *client;
+    struct object *call;
+    unsigned int verdict;
+
+    if (!server) return;
+    client = server->pipe_end.connection;
+    if (!server->reserved || !client || client->obj.ops != &pipe_bridge_ops || !client->client_token ||
+        !token_is_link_bound( client->client_token ) || ((struct pipe_bridge *)client)->peer_uid == (uid_t)-1)
+    {
+        release_object( server );
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
+    switch (token_caller_class( client->client_token ))
+    {
+    case WEX_CALLER_ELEVATED_ADMIN: verdict = WEX_ACCOUNTS_VERDICT_ELEVATED; break;
+    case WEX_CALLER_USER:           verdict = WEX_ACCOUNTS_VERDICT_USER; break;
+    default:                        verdict = WEX_ACCOUNTS_VERDICT_NONE; break;
+    }
+    if ((call = accounts_call_start( req->op, verdict, ((struct pipe_bridge *)client)->peer_uid,
+                                     get_req_data(), get_req_data_size() )))
+    {
+        reply->call = alloc_handle( current->process, call, SYNCHRONIZE, 0 );
+        release_object( call );
+    }
+    release_object( server );
 }

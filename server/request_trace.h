@@ -1311,6 +1311,30 @@ static void dump_get_caller_class_reply( const struct get_caller_class_reply *re
     fprintf( stderr, " caller_class=%08x", req->caller_class );
 }
 
+static void dump_accounts_forward_request( const struct accounts_forward_request *req )
+{
+    fprintf( stderr, " pipe=%04x", req->pipe );
+    fprintf( stderr, ", op=%08x", req->op );
+    dump_varargs_bytes( ", body=", cur_size );
+}
+
+static void dump_accounts_forward_reply( const struct accounts_forward_reply *req )
+{
+    fprintf( stderr, " call=%04x", req->call );
+}
+
+static void dump_accounts_result_request( const struct accounts_result_request *req )
+{
+    fprintf( stderr, " call=%04x", req->call );
+}
+
+static void dump_accounts_result_reply( const struct accounts_result_reply *req )
+{
+    fprintf( stderr, " helper_status=%08x", req->helper_status );
+    fprintf( stderr, ", total=%u", req->total );
+    dump_varargs_bytes( ", body=", cur_size );
+}
+
 static void dump_set_registry_relay_request( const struct set_registry_relay_request *req )
 {
     fprintf( stderr, " fd=%d", req->fd );
@@ -3956,6 +3980,8 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_rename_key_request,
     (dump_func)dump_get_registry_channel_request,
     (dump_func)dump_get_caller_class_request,
+    (dump_func)dump_accounts_forward_request,
+    (dump_func)dump_accounts_result_request,
     (dump_func)dump_set_registry_relay_request,
     (dump_func)dump_relay_registry_notification_request,
     (dump_func)dump_create_timer_request,
@@ -4292,6 +4318,8 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     NULL,
     (dump_func)dump_get_registry_channel_reply,
     (dump_func)dump_get_caller_class_reply,
+    (dump_func)dump_accounts_forward_reply,
+    (dump_func)dump_accounts_result_reply,
     NULL,
     (dump_func)dump_relay_registry_notification_reply,
     (dump_func)dump_create_timer_reply,
@@ -4628,6 +4656,8 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "rename_key",
     "get_registry_channel",
     "get_caller_class",
+    "accounts_forward",
+    "accounts_result",
     "set_registry_relay",
     "relay_registry_notification",
     "create_timer",

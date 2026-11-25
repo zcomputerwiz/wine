@@ -3077,6 +3077,11 @@ void token_set_link_bound( struct token *token, unsigned int session )
     token->link_session = session;
 }
 
+int token_is_link_bound( struct token *token )
+{
+    return token->link_bound;
+}
+
 static int token_has_service_group( struct token *token )
 {
     struct group *group;

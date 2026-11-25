@@ -2315,6 +2315,28 @@ struct process_info
 @END
 
 
+/* WineExplorer (H1): the accounts service forwards one request of a client of its reserved pipe to the root helper;
+   the server decides the verdict and the uid, builds the header and waits for the reply without blocking
+   (wine/wex_accounts.h). The call is signaled when it has ended. */
+@REQ(accounts_forward)
+    obj_handle_t pipe;         /* the server end of the client's connection */
+    unsigned int op;           /* the helper's operation */
+    VARARG(body,bytes);        /* the request's body */
+@REPLY
+    obj_handle_t call;         /* waitable; accounts_result once signaled */
+@END
+
+
+/* WineExplorer (H1): the result of an accounts call that has ended */
+@REQ(accounts_result)
+    obj_handle_t call;
+@REPLY
+    unsigned int helper_status;/* the helper's status (wexa_status) */
+    data_size_t  total;        /* the reply body's size */
+    VARARG(body,bytes);        /* the reply body */
+@END
+
+
 /* WineExplorer system tier: the read end of a registry channel's wait pipe, where session 0 reports changes */
 @REQ(set_registry_relay)
     int          fd;           /* the pipe, in flight */

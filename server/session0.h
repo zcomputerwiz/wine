@@ -77,5 +77,8 @@ extern struct token *link_bound_token( uid_t uid, unsigned int session, const vo
                                        unsigned int *status );
 /* R6, session 0: the lease an opener's id came from is still its block's */
 extern int session0_id_lease_current( unsigned int id, unsigned int serial );
+/* WineExplorer H1: wex_accounts.c */
+extern struct object *accounts_call_start( unsigned int op, unsigned int verdict, unsigned int caller_uid,
+                                           const void *body, data_size_t size );
 
 #endif /* __WINE_SERVER_SESSION0_H */
