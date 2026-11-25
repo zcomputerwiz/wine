@@ -1739,7 +1739,7 @@ static BOOL default_session_service(const WCHAR *name)
 {
     static const WCHAR * const session_services[] =
     {
-        L"BITS", L"EventLog", L"FontCache", L"FontCache3.0.0.0", L"LanmanServer", L"MSIServer", L"PlugPlay",
+        L"BITS", L"FontCache", L"FontCache3.0.0.0", L"LanmanServer", L"MSIServer", L"PlugPlay",
         L"RpcSs", L"SamSs", L"scardsvr", L"Schedule", L"Spooler", L"StiSvc", L"TermService", L"Winmgmt",
         L"wexelevate",
     };

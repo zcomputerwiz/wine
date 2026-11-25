@@ -5897,7 +5897,8 @@ static WCHAR desk_wallpaper_path[MAX_PATH];
 static PATH_ENTRY( DESKPATTERN, DESKTOP_KEY, "Pattern", desk_pattern_path );
 static PATH_ENTRY( DESKWALLPAPER, DESKTOP_KEY, "Wallpaper", desk_wallpaper_path );
 
-static BYTE user_prefs[8] = { 0x10, 0x00, 0x00, 0x80, 0x12, 0x00, 0x00, 0x00 };
+/* byte 2 bit 0x04 is SPI_GETDROPSHADOW (menus and tooltips cast a shadow), on in Windows XP; WineExplorer turns it on */
+static BYTE user_prefs[8] = { 0x10, 0x00, 0x04, 0x80, 0x12, 0x00, 0x00, 0x00 };
 static BINARY_ENTRY( USERPREFERENCESMASK, user_prefs, DESKTOP_KEY, "UserPreferencesMask" );
 
 static FONT_ENTRY( CAPTIONLOGFONT, FW_BOLD, METRICS_KEY, "CaptionFont" );

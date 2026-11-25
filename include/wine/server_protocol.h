@@ -2963,6 +2963,59 @@ struct get_registry_channel_reply
 };
 
 
+/* WineExplorer (H3): the class of a service's caller, decided by the server (token_caller_class, WEX_CALLER_* of
+   wine/wex_caller.h): the client of the connection of a pipe server end, or a token */
+struct get_caller_class_request
+{
+    struct request_header __header;
+    obj_handle_t handle;
+    int          is_pipe;
+    char __pad_20[4];
+};
+struct get_caller_class_reply
+{
+    struct reply_header __header;
+    unsigned int caller_class;
+    char __pad_12[4];
+};
+
+
+/* WineExplorer (H1): the accounts service forwards one request of a client of its reserved pipe to the root helper;
+   the server decides the verdict and the uid, builds the header and waits for the reply without blocking
+   (wine/wex_accounts.h). The body is a part of the client message the service last read whole, once per message
+   (A3). The call is signaled when it has ended. */
+struct accounts_forward_request
+{
+    struct request_header __header;
+    obj_handle_t pipe;
+    unsigned int op;
+    data_size_t  offset;
+    data_size_t  length;
+    char __pad_28[4];
+};
+struct accounts_forward_reply
+{
+    struct reply_header __header;
+    obj_handle_t call;
+    char __pad_12[4];
+};
+
+
+
+struct accounts_result_request
+{
+    struct request_header __header;
+    obj_handle_t call;
+};
+struct accounts_result_reply
+{
+    struct reply_header __header;
+    unsigned int helper_status;
+    data_size_t  total;
+    /* VARARG(body,bytes); */
+};
+
+
 
 struct set_registry_relay_request
 {
@@ -6810,6 +6863,9 @@ enum request
     REQ_set_registry_notification,
     REQ_rename_key,
     REQ_get_registry_channel,
+    REQ_get_caller_class,
+    REQ_accounts_forward,
+    REQ_accounts_result,
     REQ_set_registry_relay,
     REQ_relay_registry_notification,
     REQ_create_timer,
@@ -7150,6 +7206,9 @@ union generic_request
     struct set_registry_notification_request set_registry_notification_request;
     struct rename_key_request rename_key_request;
     struct get_registry_channel_request get_registry_channel_request;
+    struct get_caller_class_request get_caller_class_request;
+    struct accounts_forward_request accounts_forward_request;
+    struct accounts_result_request accounts_result_request;
     struct set_registry_relay_request set_registry_relay_request;
     struct relay_registry_notification_request relay_registry_notification_request;
     struct create_timer_request create_timer_request;
@@ -7488,6 +7547,9 @@ union generic_reply
     struct set_registry_notification_reply set_registry_notification_reply;
     struct rename_key_reply rename_key_reply;
     struct get_registry_channel_reply get_registry_channel_reply;
+    struct get_caller_class_reply get_caller_class_reply;
+    struct accounts_forward_reply accounts_forward_reply;
+    struct accounts_result_reply accounts_result_reply;
     struct set_registry_relay_reply set_registry_relay_reply;
     struct relay_registry_notification_reply relay_registry_notification_reply;
     struct create_timer_reply create_timer_reply;
@@ -7715,6 +7777,6 @@ union generic_reply
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 995
+#define SERVER_PROTOCOL_VERSION 998
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

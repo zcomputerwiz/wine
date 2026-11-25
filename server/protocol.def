@@ -2314,6 +2314,40 @@ struct process_info
 @END
 
 
+/* WineExplorer (H3): the class of a service's caller, decided by the server (token_caller_class, WEX_CALLER_* of
+   wine/wex_caller.h): the client of the connection of a pipe server end, or a token */
+@REQ(get_caller_class)
+    obj_handle_t handle;       /* a pipe server end, or a token (TOKEN_QUERY) */
+    int          is_pipe;      /* 1: handle is a pipe server end */
+@REPLY
+    unsigned int caller_class; /* WEX_CALLER_* */
+@END
+
+
+/* WineExplorer (H1): the accounts service forwards one request of a client of its reserved pipe to the root helper;
+   the server decides the verdict and the uid, builds the header and waits for the reply without blocking
+   (wine/wex_accounts.h). The body is a part of the client message the service last read whole, once per message
+   (A3). The call is signaled when it has ended. */
+@REQ(accounts_forward)
+    obj_handle_t pipe;         /* the server end of the client's connection */
+    unsigned int op;           /* the helper's operation */
+    data_size_t  offset;       /* the body: these bytes of the client's last message */
+    data_size_t  length;
+@REPLY
+    obj_handle_t call;         /* waitable; accounts_result once signaled */
+@END
+
+
+/* WineExplorer (H1): the result of an accounts call that has ended */
+@REQ(accounts_result)
+    obj_handle_t call;
+@REPLY
+    unsigned int helper_status;/* the helper's status (wexa_status) */
+    data_size_t  total;        /* the reply body's size */
+    VARARG(body,bytes);        /* the reply body */
+@END
+
+
 /* WineExplorer system tier: the read end of a registry channel's wait pipe, where session 0 reports changes */
 @REQ(set_registry_relay)
     int          fd;           /* the pipe, in flight */
