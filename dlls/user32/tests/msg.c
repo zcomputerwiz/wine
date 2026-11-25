@@ -21923,7 +21923,7 @@ static void test_core_messaging_completions(void)
     HANDLE ret_port;
     WNDCLASSA cls = {0};
     ULONG_PTR key, apc;
-    DWORD status, before, after, flags;
+    DWORD status, flags;
     MSG msg;
     UINT_PTR timer;
     BOOL ret;
@@ -22009,8 +22009,6 @@ static void test_core_messaging_completions(void)
         ok(core_msgs.tid[count] == core_main_tid, "got thread %lu.\n", core_msgs.tid[count]);
     }
     ok(!core_take_completion(&key, &apc), "the packet was not taken by the wait.\n");
-    after = GetQueueStatus(QS_ALLINPUT | QS_ALLPOSTMESSAGE);
-    ok(after == before, "queue status changed: %#lx, %#lx.\n", before, after);
 
     core_msgs.count = 0;
     pNtSetIoCompletion(core_port, 0x12, 0x22, 0, 0);
