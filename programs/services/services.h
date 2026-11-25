@@ -65,6 +65,7 @@ struct service_entry
     BOOL is_wow64;
     BOOL delayed_autostart;
     int session_service;               /* WineExplorer: the WexSessionService value, SESSION_SERVICE_* */
+    BOOL session0_start_only;          /* WineExplorer: the WexStartInSession0Only value: auto-started only in session 0 */
     BYTE *security;                    /* self-relative security descriptor of the "Security" value, NULL for the native default */
     DWORD security_size;
     struct list handles;

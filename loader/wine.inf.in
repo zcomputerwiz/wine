@@ -1232,12 +1232,16 @@ StartType=3
 ErrorControl=1
 
 [WexAccountsService]
+AddReg=WexAccountsServiceKeys
 Description="The Windows side of Local Users and Groups: accounts through the accounts helper of the host"
 DisplayName="Local Accounts"
 ServiceBinary="%11%\wexaccounts.exe"
 ServiceType=16
 StartType=2
 ErrorControl=1
+
+[WexAccountsServiceKeys]
+HKLM,"System\CurrentControlSet\Services\wexaccounts","WexStartInSession0Only",0x10001,1
 
 [WexPolicyService]
 Description="Writes the registry policy of the computer and of the users who log on"
