@@ -35462,6 +35462,132 @@ test_done:
     ok(!ref, "got %ld.\n", ref);
 }
 
+/* A shared texture that two devices use with no fence and no keyed mutex: the producer draws and flushes, the consumer
+ * (a compositor, for instance) reads it back or copies it. Each new frame has to be seen, not the frame the consumer
+ * had when it opened the texture. */
+static void test_shared_texture_coherence(void)
+{
+    static const struct
+    {
+        const char *name;
+        UINT misc_flags;
+        BOOL nt_handle;
+    }
+    tests[] =
+    {
+        {"NT handle", D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE, TRUE},
+    };
+    static const float colors[][4] =
+    {
+        {1.0f, 0.0f, 0.0f, 1.0f},
+        {0.0f, 1.0f, 0.0f, 1.0f},
+        {0.0f, 0.0f, 1.0f, 1.0f},
+    };
+    static const DWORD expected[] = {0xff0000ff, 0xff00ff00, 0xffff0000};   /* DXGI_FORMAT_R8G8B8A8_UNORM, little endian */
+    ID3D11DeviceContext *producer_context;
+    ID3D11RenderTargetView *rtv;
+    ID3D11Device *producer, *consumer;
+    ID3D11Texture2D *texture, *opened;
+    D3D11_TEXTURE2D_DESC desc;
+    ID3D11Device1 *producer1;
+    IDXGIResource1 *res1;
+    IDXGIResource *res;
+    unsigned int test, i;
+    HANDLE handle;
+    DWORD color;
+    HRESULT hr;
+
+    if (!(producer = create_device(NULL)) || !(consumer = create_device(NULL)))
+    {
+        skip("Failed to create devices.\n");
+        if (producer) ID3D11Device_Release(producer);
+        return;
+    }
+    hr = ID3D11Device_QueryInterface(producer, &IID_ID3D11Device1, (void **)&producer1);
+    if (hr != S_OK)
+    {
+        win_skip("ID3D11Device1 is not supported.\n");
+        ID3D11Device_Release(consumer);
+        ID3D11Device_Release(producer);
+        return;
+    }
+    ID3D11Device1_Release(producer1);
+    ID3D11Device_GetImmediateContext(producer, &producer_context);
+
+    for (test = 0; test < ARRAY_SIZE(tests); ++test)
+    {
+        memset(&desc, 0, sizeof(desc));
+        desc.Width = 64;
+        desc.Height = 64;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        desc.MiscFlags = tests[test].misc_flags;
+        hr = ID3D11Device_CreateTexture2D(producer, &desc, NULL, &texture);
+        ok(hr == S_OK, "%s: got %#lx.\n", tests[test].name, hr);
+        hr = ID3D11Device_CreateRenderTargetView(producer, (ID3D11Resource *)texture, NULL, &rtv);
+        ok(hr == S_OK, "%s: got %#lx.\n", tests[test].name, hr);
+
+        /* a first frame before the texture is shared */
+        ID3D11DeviceContext_ClearRenderTargetView(producer_context, rtv, colors[0]);
+        ID3D11DeviceContext_Flush(producer_context);
+
+        if (tests[test].nt_handle)
+        {
+            hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIResource1, (void **)&res1);
+            ok(hr == S_OK, "%s: got %#lx.\n", tests[test].name, hr);
+            hr = IDXGIResource1_CreateSharedHandle(res1, NULL, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+                    NULL, &handle);
+            ok(hr == S_OK, "%s: got %#lx.\n", tests[test].name, hr);
+            IDXGIResource1_Release(res1);
+            hr = ID3D11Device_QueryInterface(consumer, &IID_ID3D11Device1, (void **)&producer1);
+            ok(hr == S_OK, "%s: got %#lx.\n", tests[test].name, hr);
+            hr = ID3D11Device1_OpenSharedResource1(producer1, handle, &IID_ID3D11Texture2D, (void **)&opened);
+            ID3D11Device1_Release(producer1);
+        }
+        else
+        {
+            hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIResource, (void **)&res);
+            ok(hr == S_OK, "%s: got %#lx.\n", tests[test].name, hr);
+            hr = IDXGIResource_GetSharedHandle(res, &handle);
+            ok(hr == S_OK, "%s: got %#lx.\n", tests[test].name, hr);
+            IDXGIResource_Release(res);
+            hr = ID3D11Device_OpenSharedResource(consumer, handle, &IID_ID3D11Texture2D, (void **)&opened);
+        }
+        ok(hr == S_OK, "%s: got %#lx.\n", tests[test].name, hr);
+        if (hr != S_OK)
+        {
+            ID3D11RenderTargetView_Release(rtv);
+            ID3D11Texture2D_Release(texture);
+            continue;
+        }
+
+        for (i = 0; i < ARRAY_SIZE(colors); ++i)
+        {
+            if (i) /* the first frame was drawn before the texture was opened */
+            {
+                ID3D11DeviceContext_ClearRenderTargetView(producer_context, rtv, colors[i]);
+                ID3D11DeviceContext_Flush(producer_context);
+            }
+            color = get_texture_color(opened, 32, 32);
+            ok(color == expected[i], "%s, frame %u: got color %#08lx, expected %#08lx.\n",
+                    tests[test].name, i, color, expected[i]);
+        }
+
+        ID3D11Texture2D_Release(opened);
+        if (tests[test].nt_handle) CloseHandle(handle);
+        ID3D11RenderTargetView_Release(rtv);
+        ID3D11Texture2D_Release(texture);
+    }
+
+    ID3D11DeviceContext_Release(producer_context);
+    ID3D11Device_Release(consumer);
+    ID3D11Device_Release(producer);
+}
+
 static void test_keyed_mutex(void)
 {
     IDXGIKeyedMutex *keyed_mutex, *keyed_mutex2;
@@ -38010,6 +38136,7 @@ START_TEST(d3d11)
     queue_test(test_vertex_formats);
     queue_test(test_dxgi_resources);
     queue_for_each_feature_level(test_shared_resource);
+    queue_test(test_shared_texture_coherence);
     queue_test(test_keyed_mutex);
     queue_test(test_clear_during_render);
     queue_test(test_stencil_export);

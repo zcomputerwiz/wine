@@ -27,6 +27,26 @@
 DEFINE_GUID(IID_WineDXGISharedData,
     0x64b8bb26, 0x4b20, 0x4a99, 0xb1, 0xd5, 0xc9, 0xc0, 0xfb, 0x53, 0xc9, 0xf1);
 
+/* The named file mapping behind a shared texture starts with one page of header; the pixels follow. The sequence number
+ * is incremented each time the creating device writes its frame back (ID3D11DeviceContext::Flush, a fence Signal,
+ * a keyed mutex ReleaseSync); a device that opened the texture reloads its copy when it has changed. */
+#define WINE_DXGI_SHARED_HEADER_SIZE 4096
+
+struct wine_dxgi_shared_header
+{
+    volatile LONG sequence;
+};
+
+static inline void *wine_dxgi_shared_base(void *pixels)
+{
+    return pixels ? (char *)pixels - WINE_DXGI_SHARED_HEADER_SIZE : NULL;
+}
+
+static inline volatile LONG *wine_dxgi_shared_sequence(void *pixels)
+{
+    return pixels ? &((struct wine_dxgi_shared_header *)wine_dxgi_shared_base(pixels))->sequence : NULL;
+}
+
 struct wine_dxgi_shared_data
 {
     D3DKMT_HANDLE kmt_resource;
