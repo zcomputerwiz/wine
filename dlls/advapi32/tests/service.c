@@ -2305,6 +2305,7 @@ static void test_queryconfig2(void)
     LPSERVICE_DESCRIPTIONW pConfigW = (LPSERVICE_DESCRIPTIONW)buffer;
     SERVICE_PRESHUTDOWN_INFO preshutdown_info;
     SERVICE_DELAYED_AUTO_START_INFO auto_start_info;
+    SERVICE_SID_INFO sid_info;
     static const CHAR servicename [] = "winetest_query_config2";
     static const CHAR displayname [] = "Winetest dummy service";
     static const CHAR pathname    [] = "we_dont_care.exe";
@@ -2591,6 +2592,28 @@ static void test_queryconfig2(void)
     ok(ret, "expected QueryServiceConfig2W to succeed (%ld)\n", GetLastError());
     ok(needed == sizeof(auto_start_info), "needed = %ld\n", needed);
     ok(auto_start_info.fDelayedAutostart == 1, "fDelayedAutostart = %d\n", auto_start_info.fDelayedAutostart);
+
+    SetLastError(0xdeadbeef);
+    needed = 0;
+    sid_info.dwServiceSidType = 0xdeadbeef;
+    ret = pQueryServiceConfig2W(svc_handle, SERVICE_CONFIG_SERVICE_SID_INFO,
+            (LPBYTE)&sid_info, sizeof(sid_info), &needed);
+    ok(ret, "expected QueryServiceConfig2W to succeed (%ld)\n", GetLastError());
+    ok(needed == sizeof(sid_info), "needed = %ld\n", needed);
+    ok(sid_info.dwServiceSidType == SERVICE_SID_TYPE_NONE, "dwServiceSidType = %ld\n", sid_info.dwServiceSidType);
+
+    sid_info.dwServiceSidType = SERVICE_SID_TYPE_UNRESTRICTED;
+    ret = pChangeServiceConfig2A(svc_handle, SERVICE_CONFIG_SERVICE_SID_INFO, (LPBYTE)&sid_info);
+    ok(ret, "expected ChangeServiceConfig2A to succeed (%ld)\n", GetLastError());
+
+    needed = 0;
+    sid_info.dwServiceSidType = 0xdeadbeef;
+    ret = pQueryServiceConfig2W(svc_handle, SERVICE_CONFIG_SERVICE_SID_INFO,
+            (LPBYTE)&sid_info, sizeof(sid_info), &needed);
+    ok(ret, "expected QueryServiceConfig2W to succeed (%ld)\n", GetLastError());
+    ok(needed == sizeof(sid_info), "needed = %ld\n", needed);
+    ok(sid_info.dwServiceSidType == SERVICE_SID_TYPE_UNRESTRICTED, "dwServiceSidType = %ld\n",
+       sid_info.dwServiceSidType);
 
 cleanup:
     DeleteService(svc_handle);

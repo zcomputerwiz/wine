@@ -72,6 +72,7 @@ struct service_entry
     DWORD failure_count;               /* failures counted since the last reset */
     ULONGLONG last_failure;            /* GetTickCount64() of the last failure */
     TP_TIMER *restart_timer;           /* a restart waiting for its delay (holds a reference), under the database lock */
+    DWORD sid_type;                    /* WineExplorer (B114): SERVICE_SID_TYPE_*, the ServiceSidType value */
     int session_service;               /* WineExplorer: the WexSessionService value, SESSION_SERVICE_* */
     BYTE *security;                    /* self-relative security descriptor of the "Security" value, NULL for the native default */
     DWORD security_size;

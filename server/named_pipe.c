@@ -1849,6 +1849,10 @@ static void named_pipe_dir_ioctl( struct fd *fd, ioctl_code_t code, struct async
 
 /* WineExplorer H1: names that only LocalSystem may serve in session 0 (the accounts service's: plain and as the
  * bridged name a session 0 process would use); 1 when the pipe has one */
+static const struct sid accounts_service_sid =
+    { SID_REVISION, SECURITY_SERVICE_ID_RID_COUNT, SECURITY_NT_AUTHORITY,
+      { SECURITY_SERVICE_ID_BASE_RID, WEX_ACCOUNTS_SERVICE_RIDS } };
+
 static int pipe_name_reserved( struct named_pipe *pipe )
 {
     static const WCHAR accounts[] = {'a','c','c','o','u','n','t','s'};
@@ -1927,9 +1931,11 @@ DECL_HANDLER(create_named_pipe)
     }
     /* H1: in session 0 only LocalSystem (its primary token, not impersonating) makes instances of a reserved name;
      * they are marked, and accounts_forward serves only marked instances */
+    /* the accounts service only (B114): LocalSystem, not impersonating, with NT SERVICE\wexaccounts */
     if ((reserved = pipe_name_reserved( pipe )) &&
         (current->token || !current->process->token ||
-         token_service_account( current->process->token ) != SERVICE_ACCOUNT_SYSTEM))
+         token_service_account( current->process->token ) != SERVICE_ACCOUNT_SYSTEM ||
+         !token_sid_present( current->process->token, &accounts_service_sid, FALSE )))
     {
         release_object( pipe );
         set_error( STATUS_ACCESS_DENIED );
