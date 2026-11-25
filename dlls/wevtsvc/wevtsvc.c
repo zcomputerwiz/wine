@@ -453,6 +453,9 @@ static DWORD do_open( struct connection *conn, const BYTE *body, DWORD size, str
     if (!(log = store_get_log( log_name, TRUE )) && !(log = store_get_log( L"Application", TRUE )))
         return ERROR_FILE_NOT_FOUND;
     rights = log_rights( conn, log );
+    TRACE( "pid %04lx opens %s of %s: class %u, service account %d, local %d, rights %#lx\n", conn->client_pid,
+           debugstr_w(name), debugstr_w(log->name), conn->caller_class, conn->service_account,
+           conn->listener->local, rights );
     if (open.flags == WEX_EVTLOG_OPEN_SOURCE ? !(rights & RIGHT_WRITE) : !(rights & RIGHT_READ))
         return ERROR_ACCESS_DENIED;
     if (conn->account->handles >= WEX_EVTLOG_MAX_HANDLES) return ERROR_NOT_ENOUGH_QUOTA;
