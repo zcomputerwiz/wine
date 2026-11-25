@@ -3168,6 +3168,130 @@ static void run_service(void)
     StartServiceCtrlDispatcherA(table);
 }
 
+static DWORD WINAPI crash_ctrl_handler(DWORD ctl, DWORD type, void *data, void *context)
+{
+    return NO_ERROR;
+}
+
+/* the service of the failure action tests: it counts its starts on a semaphore, runs, and ends its process without
+ * reporting SERVICE_STOPPED, which is a failure */
+static void WINAPI crash_service_main(DWORD argc, char **argv)
+{
+    SERVICE_STATUS_HANDLE st_handle = RegisterServiceCtrlHandlerExA("", crash_ctrl_handler, NULL);
+    SERVICE_STATUS st = { SERVICE_WIN32_OWN_PROCESS, SERVICE_RUNNING, SERVICE_ACCEPT_STOP };
+    HANDLE sem = OpenSemaphoreA(SEMAPHORE_MODIFY_STATE, FALSE, "Global\\winetest_failure_starts");
+
+    SetServiceStatus(st_handle, &st);
+    if (sem) ReleaseSemaphore(sem, 1, NULL);
+    Sleep(500);
+    ExitProcess(1);
+}
+
+static void run_crash_service(void)
+{
+    char empty[] = {0};
+    SERVICE_TABLE_ENTRYA table[] = {{ empty, crash_service_main }, { 0, 0 }};
+
+    StartServiceCtrlDispatcherA(table);
+}
+
+static BOOL wait_stopped(SC_HANDLE svc)
+{
+    SERVICE_STATUS status;
+    int i;
+
+    for (i = 0; i < 100; i++)
+    {
+        if (QueryServiceStatus(svc, &status) && status.dwCurrentState == SERVICE_STOPPED) return TRUE;
+        Sleep(100);
+    }
+    return FALSE;
+}
+
+static SC_HANDLE create_crash_service(SC_HANDLE scm, const char *name, DWORD delay)
+{
+    SC_ACTION actions[2] = {{ SC_ACTION_RESTART, delay }, { SC_ACTION_NONE, 0 }};
+    SERVICE_FAILURE_ACTIONSA fa = { 3600, NULL, NULL, ARRAY_SIZE(actions), actions };
+    char cmd[MAX_PATH + 32];
+    SC_HANDLE svc;
+
+    sprintf(cmd, "\"%s\" service crash", selfname);
+    svc = CreateServiceA(scm, name, name, GENERIC_ALL, SERVICE_WIN32_OWN_PROCESS, SERVICE_DEMAND_START,
+                         SERVICE_ERROR_IGNORE, cmd, NULL, NULL, NULL, NULL, NULL);
+    ok(svc != NULL, "CreateServiceA failed: %lu\n", GetLastError());
+    if (svc) ok(ChangeServiceConfig2A(svc, SERVICE_CONFIG_FAILURE_ACTIONS, &fa), "ChangeServiceConfig2A failed: %lu\n",
+                GetLastError());
+    return svc;
+}
+
+/* the actions themselves: a restart, none after a deletion or a disabling during the delay */
+static void test_failure_restart(void)
+{
+    static const char name[] = "winetest_failure_restart";
+    SC_HANDLE scm, svc;
+    HANDLE sem;
+    DWORD ret;
+
+    if (!(scm = OpenSCManagerA(NULL, NULL, GENERIC_ALL)))
+    {
+        skip("Not enough rights to get a handle to the manager\n");
+        return;
+    }
+    if (!(sem = CreateSemaphoreA(NULL, 0, 16, "Global\\winetest_failure_starts")))
+    {
+        skip("no semaphore: %lu\n", GetLastError());
+        CloseServiceHandle(scm);
+        return;
+    }
+
+    /* restarted at once after the first failure; the second one's action is none */
+    if ((svc = create_crash_service(scm, name, 0)))
+    {
+        ok(StartServiceA(svc, 0, NULL), "StartServiceA failed: %lu\n", GetLastError());
+        ok(!WaitForSingleObject(sem, 10000), "the service did not start\n");
+        ok(!WaitForSingleObject(sem, 10000), "the service was not restarted after its failure\n");
+        ret = WaitForSingleObject(sem, 3000);
+        ok(ret == WAIT_TIMEOUT, "the service was restarted after its second failure\n");
+        wait_stopped(svc);
+        DeleteService(svc);
+        CloseServiceHandle(svc);
+    }
+
+    /* deleted during the delay: no restart, and the name can be used again at once */
+    if ((svc = create_crash_service(scm, name, 3000)))
+    {
+        ok(StartServiceA(svc, 0, NULL), "StartServiceA failed: %lu\n", GetLastError());
+        ok(!WaitForSingleObject(sem, 10000), "the service did not start\n");
+        ok(wait_stopped(svc), "the service did not stop\n");
+        ok(DeleteService(svc), "DeleteService failed: %lu\n", GetLastError());
+        CloseServiceHandle(svc);
+        if ((svc = create_crash_service(scm, name, 0)))
+        {
+            DeleteService(svc);
+            CloseServiceHandle(svc);
+        }
+        ret = WaitForSingleObject(sem, 4000);
+        ok(ret == WAIT_TIMEOUT, "a deleted service was restarted\n");
+    }
+
+    /* disabled during the delay: no restart */
+    if ((svc = create_crash_service(scm, name, 3000)))
+    {
+        ok(StartServiceA(svc, 0, NULL), "StartServiceA failed: %lu\n", GetLastError());
+        ok(!WaitForSingleObject(sem, 10000), "the service did not start\n");
+        ok(wait_stopped(svc), "the service did not stop\n");
+        ok(ChangeServiceConfigA(svc, SERVICE_NO_CHANGE, SERVICE_DISABLED, SERVICE_NO_CHANGE, NULL, NULL, NULL, NULL,
+                                NULL, NULL, NULL), "ChangeServiceConfigA failed: %lu\n", GetLastError());
+        ret = WaitForSingleObject(sem, 4000);
+        ok(ret == WAIT_TIMEOUT, "a disabled service was restarted\n");
+        DeleteService(svc);
+        CloseServiceHandle(svc);
+    }
+
+    CloseHandle(sem);
+    CloseServiceHandle(scm);
+}
+
 static void test_failure_actions(void)
 {
     static const WCHAR servicename[] = L"winetest_failure_actions";
@@ -3301,6 +3425,8 @@ START_TEST(service)
     {
         if (strcmp(myARGV[2], "serve") == 0)
             run_service();
+        else if (strcmp(myARGV[2], "crash") == 0)
+            run_crash_service();
         return;
     }
 
@@ -3326,6 +3452,7 @@ START_TEST(service)
     test_query_svc();
     test_LockServiceDatabase();
     test_failure_actions();
+    test_failure_restart();
 
     /* Services may start or stop between enumeration calls, leading to
      * inconsistencies and failures. So we may need a couple attempts.

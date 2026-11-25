@@ -71,6 +71,7 @@ struct service_entry
     SC_ACTION *failure_actions;        /* the actions of the "FailureActions" value, or NULL */
     DWORD failure_count;               /* failures counted since the last reset */
     ULONGLONG last_failure;            /* GetTickCount64() of the last failure */
+    TP_TIMER *restart_timer;           /* a restart waiting for its delay (holds a reference), under the database lock */
     int session_service;               /* WineExplorer: the WexSessionService value, SESSION_SERVICE_* */
     BYTE *security;                    /* self-relative security descriptor of the "Security" value, NULL for the native default */
     DWORD security_size;
@@ -100,6 +101,10 @@ DWORD save_service_config(struct service_entry *entry);
 void free_service_entry(struct service_entry *entry);
 struct service_entry *grab_service(struct service_entry *service);
 void release_service(struct service_entry *service);
+/* SERVICE_CONFIG_FAILURE_ACTIONS: at most this many actions, so that the "FailureActions" value stays under 64 KiB */
+#define MAX_FAILURE_ACTIONS ((0x10000 - 20) / sizeof(SC_ACTION))
+/* cancel a pending restart after a failure; called without the database and service locks */
+void service_cancel_restart(struct service_entry *service);
 void service_lock(struct service_entry *service);
 void service_unlock(struct service_entry *service);
 DWORD service_start(struct service_entry *service, DWORD service_argc, LPCWSTR *service_argv);

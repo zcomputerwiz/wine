@@ -951,6 +951,9 @@ DWORD __cdecl svcctl_DeleteService(
 
     service_unlock(service->service_entry);
 
+    /* a restart pending after a failure would keep the deleted service in the database until its delay ends */
+    if (!err) service_cancel_restart(service->service_entry);
+
     return err;
 }
 
@@ -1255,6 +1258,8 @@ DWORD __cdecl svcctl_ChangeServiceConfig2W( SC_RPC_HANDLE hService, SC_RPC_CONFI
             /* lpsaActions NULL: the actions and the reset period stay as they are */
             if (fa->lpsaActions)
             {
+                /* more would not fit in the value, and would be lost at the next start */
+                if (fa->cActions > MAX_FAILURE_ACTIONS) return ERROR_INVALID_PARAMETER;
                 for (i = 0; i < fa->cActions; i++)
                 {
                     if (fa->lpsaActions[i].Type > SC_ACTION_RUN_COMMAND) return ERROR_INVALID_PARAMETER;

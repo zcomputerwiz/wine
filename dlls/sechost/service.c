@@ -935,8 +935,25 @@ BOOL WINAPI DECLSPEC_HOTPATCH QueryServiceConfig2W( SC_HANDLE service, DWORD lev
             SetLastError( ERROR_INSUFFICIENT_BUFFER );
             return FALSE;
         }
+        /* the reply may come forwarded from session 0: its sizes must add up before anything is copied */
+        if (w->actions_count > 0x10000 / sizeof(SC_ACTION) || w->reboot_msg_size > 0x10000 ||
+            w->command_size > 0x10000 || (w->reboot_msg_size % sizeof(WCHAR)) || (w->command_size % sizeof(WCHAR)) ||
+            sizeof(*w) + w->actions_count * sizeof(SC_ACTION) + w->reboot_msg_size + w->command_size !=
+            *ret_size - sizeof(*fa) + sizeof(*w))
+        {
+            free( bufptr );
+            SetLastError( ERROR_INVALID_DATA );
+            return FALSE;
+        }
         actions_size = w->actions_count * sizeof(SC_ACTION);
         src = (BYTE *)(w + 1);
+        if ((w->reboot_msg_size && ((WCHAR *)(src + actions_size))[w->reboot_msg_size / sizeof(WCHAR) - 1]) ||
+            (w->command_size && ((WCHAR *)(src + actions_size + w->reboot_msg_size))[w->command_size / sizeof(WCHAR) - 1]))
+        {
+            free( bufptr );
+            SetLastError( ERROR_INVALID_DATA );
+            return FALSE;
+        }
         dst = (BYTE *)(fa + 1);
         fa->dwResetPeriod = w->reset_period;
         fa->cActions = w->actions_count;
