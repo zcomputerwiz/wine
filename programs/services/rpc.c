@@ -1643,6 +1643,10 @@ DWORD __cdecl svcctl_StartServiceW(
     if (service->service_entry->config.dwStartType == SERVICE_DISABLED)
         return ERROR_SERVICE_DISABLED;
 
+    /* as on Windows; services.exe's own winedevice hosts are marked for delete from the start and not started here */
+    if (is_marked_for_delete(service->service_entry))
+        return ERROR_SERVICE_MARKED_FOR_DELETE;
+
     /* WineExplorer Safe Mode (services.c, safeboot_allows) */
     if (!safeboot_allows(service->service_entry))
     {
