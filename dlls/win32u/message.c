@@ -3444,7 +3444,8 @@ static BOOL dispatch_core_completion(void)
     /* the window procedures may register or destroy windows: work on a copy */
     if (!(count = info->core_window_count) || !(windows = malloc( count * sizeof(*windows) ))) return apc != 0;
     memcpy( windows, info->core_windows, count * sizeof(*windows) );
-    for (i = 0; i < count; i++)
+    /* measured: a packet with an APC context goes to every registered window, one without it only to the first */
+    for (i = 0; i < (apc ? count : min( count, 1 )); i++)
         if (is_window( windows[i] )) send_message( windows[i], WM_CORE_MESSAGING_COMPLETION, apc ? 8 : 3, apc );
     free( windows );
     return apc != 0;
@@ -3507,6 +3508,11 @@ HANDLE WINAPI NtUserInitThreadCoreMessagingIocp2( HWND hwnd, ULONG *existing )
     }
     for (i = 0; i < info->core_window_count; i++)
         if (info->core_windows[i] == hwnd) return 0;
+    if (info->core_window_count >= 2)  /* measured: a thread registers at most two windows */
+    {
+        RtlSetLastWin32Error( ERROR_ALREADY_INITIALIZED );
+        return 0;
+    }
 
     if (!(windows = realloc( info->core_windows, (info->core_window_count + 1) * sizeof(*windows) )))
     {

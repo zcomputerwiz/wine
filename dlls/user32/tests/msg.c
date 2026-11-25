@@ -21976,9 +21976,12 @@ static void test_core_messaging_completions(void)
     ret_port = pInit(NULL, &existing);
     ok(!ret_port, "got %p.\n", ret_port);
 
+    /* a thread registers at most two windows */
     existing = 0xdeadbeef;
+    SetLastError(0xdeadbeef);
     ret_port = pInit(hwnd3, &existing);
-    ok(ret_port == core_port, "got %p.\n", ret_port);
+    ok(!ret_port && GetLastError() == ERROR_ALREADY_INITIALIZED, "got %p, error %lu.\n", ret_port, GetLastError());
+    ok(existing == 0xdeadbeef, "got %#lx.\n", existing);
     ok(DestroyWindow(hwnd3), "DestroyWindow failed.\n");
 
     /* a completion queued while the thread is outside a message wait stays queued: Sleep and alertable waits do not
@@ -22021,8 +22024,9 @@ static void test_core_messaging_completions(void)
     pNtSetIoCompletion(core_port, 0x7777, 0, 0, 0x6666);
     status = MsgWaitForMultipleObjectsEx(0, NULL, 300, QS_ALLINPUT, 0);
     ok(status == WAIT_TIMEOUT, "got %#lx.\n", status);
-    ok(core_msgs.count == 2 && core_msgs.wp[0] == 3 && !core_msgs.lp[0], "got %d messages, wparam %#Ix, lparam %#Ix.\n",
-       core_msgs.count, core_msgs.wp[0], core_msgs.lp[0]);
+    ok(core_msgs.count == 1 && core_msgs.wp[0] == 3 && !core_msgs.lp[0] && core_msgs.hwnd[0] == hwnd,
+       "got %d messages, wparam %#Ix, lparam %#Ix, window %p.\n", core_msgs.count, core_msgs.wp[0], core_msgs.lp[0],
+       core_msgs.hwnd[0]);
 
     /* GetMessage keeps waiting: it returns for a real message only */
     core_msgs.count = 0;
