@@ -3412,8 +3412,9 @@ static inline LARGE_INTEGER *get_nt_timeout( LARGE_INTEGER *time, DWORD timeout 
 
 /* CoreMessaging completions (NtUserInitThreadCoreMessagingIocp2, measured on Windows 11):
  * the thread's message queue owns a completion port; a packet on it wakes the message waits of the thread, and the wait
- * takes one packet off the port and sends message 0x60 (wparam 8, lparam = the packet's APC context) to each window that
- * registered with the port. No queue status bit is involved. */
+ * takes one packet off the port and sends message 0x60 to each window that registered with the port: wparam 8 and lparam = the
+ * packet's APC context when that is not zero, wparam 3 and lparam 0 when it is (the key, status and information are not
+ * passed on). No queue status bit is involved. */
 #define WM_CORE_MESSAGING_COMPLETION 0x0060
 
 static void dispatch_core_completion(void)
@@ -3433,7 +3434,7 @@ static void dispatch_core_completion(void)
     if (!(count = info->core_window_count) || !(windows = malloc( count * sizeof(*windows) ))) return;
     memcpy( windows, info->core_windows, count * sizeof(*windows) );
     for (i = 0; i < count; i++)
-        if (is_window( windows[i] )) send_message( windows[i], WM_CORE_MESSAGING_COMPLETION, 8, apc );
+        if (is_window( windows[i] )) send_message( windows[i], WM_CORE_MESSAGING_COMPLETION, apc ? 8 : 3, apc );
     free( windows );
 }
 
@@ -4859,6 +4860,15 @@ BOOL WINAPI NtUserPostMessage( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam
     if (!(info.dest_tid = get_window_thread( hwnd, NULL ))) return FALSE;
 
     if (is_exiting_thread( info.dest_tid )) return TRUE;
+
+    /* message 0x60 (measured on Windows 11, any window of any thread): posting it also notifies the window at once, with the
+     * original parameters (inside the call for a window of this thread, in the sent message processing of the owner
+     * otherwise), and the posted copy has the top bit set in wparam */
+    if (msg == WM_CORE_MESSAGING_COMPLETION)
+    {
+        if (!send_notify_message( hwnd, msg, wparam, lparam, FALSE )) return FALSE;
+        info.wparam |= 0x80000000;
+    }
 
     return put_message_in_queue( &info, NULL );
 }

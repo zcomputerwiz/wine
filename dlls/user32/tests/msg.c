@@ -22018,6 +22018,14 @@ static void test_core_messaging_completions(void)
     ok(status == WAIT_OBJECT_0, "got %#lx.\n", status);
     ok(core_msgs.count == 2 && core_msgs.lp[0] == 0x22, "got %d messages, lparam %#Ix.\n", core_msgs.count, core_msgs.lp[0]);
 
+    /* a zero apc context gives wparam 3 and lparam 0 whatever the key, the status and the information are */
+    core_msgs.count = 0;
+    pNtSetIoCompletion(core_port, 0x7777, 0, 0, 0x6666);
+    status = MsgWaitForMultipleObjectsEx(0, NULL, 2000, QS_ALLINPUT, 0);
+    ok(status == WAIT_OBJECT_0, "got %#lx.\n", status);
+    ok(core_msgs.count == 2 && core_msgs.wp[0] == 3 && !core_msgs.lp[0], "got %d messages, wparam %#Ix, lparam %#Ix.\n",
+       core_msgs.count, core_msgs.wp[0], core_msgs.lp[0]);
+
     /* GetMessage keeps waiting: it returns for a real message only */
     core_msgs.count = 0;
     pNtSetIoCompletion(core_port, 0x13, 0x23, 0, 0);
@@ -22051,6 +22059,36 @@ static void test_core_messaging_completions(void)
     ok(status == WAIT_OBJECT_0, "got %#lx.\n", status);
     ok(core_msgs.count == 1 && core_msgs.hwnd[0] == hwnd, "got %d messages, window %p.\n", core_msgs.count, core_msgs.hwnd[0]);
 
+    /* posting message 0x60: the window is notified at once with the original parameters and the posted copy has the top bit set
+     * in wparam; sending it, or sending it as a notification, delivers it once, and other messages are not changed */
+    while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) DispatchMessageA(&msg);
+    core_msgs.count = 0;
+    ret = PostMessageA(hwnd, 0x60, 5, 4);
+    ok(ret, "PostMessage failed, error %lu.\n", GetLastError());
+    ok(core_msgs.count == 1 && core_msgs.wp[0] == 5 && core_msgs.lp[0] == 4 && core_msgs.tid[0] == core_main_tid,
+       "got %d messages, wparam %#Ix, lparam %#Ix.\n", core_msgs.count, core_msgs.wp[0], core_msgs.lp[0]);
+    ret = PeekMessageA(&msg, hwnd, 0x60, 0x60, PM_REMOVE);
+    ok(ret && msg.wParam == 0x80000005 && msg.lParam == 4, "got ret %d, wparam %#Ix, lparam %#Ix.\n", ret, msg.wParam, msg.lParam);
+    DispatchMessageA(&msg);
+    ok(core_msgs.count == 2 && core_msgs.wp[1] == 0x80000005, "got %d messages, wparam %#Ix.\n", core_msgs.count, core_msgs.wp[1]);
+    core_msgs.count = 0;
+    ret = PostMessageA(hwnd, 0x60, 0x80000001, 0);
+    ok(ret, "PostMessage failed.\n");
+    ok(core_msgs.count == 1 && core_msgs.wp[0] == 0x80000001, "got %d messages, wparam %#Ix.\n", core_msgs.count, core_msgs.wp[0]);
+    ret = PeekMessageA(&msg, hwnd, 0x60, 0x60, PM_REMOVE);
+    ok(ret && msg.wParam == 0x80000001, "got ret %d, wparam %#Ix.\n", ret, msg.wParam);
+    core_msgs.count = 0;
+    SendMessageA(hwnd, 0x60, 5, 4);
+    ok(core_msgs.count == 1 && core_msgs.wp[0] == 5, "got %d messages, wparam %#Ix.\n", core_msgs.count, core_msgs.wp[0]);
+    SendNotifyMessageA(hwnd, 0x60, 6, 4);
+    ok(core_msgs.count == 2 && core_msgs.wp[1] == 6, "got %d messages, wparam %#Ix.\n", core_msgs.count, core_msgs.wp[1]);
+    ok(!PeekMessageA(&msg, hwnd, 0x60, 0x60, PM_REMOVE), "got a message.\n");
+    core_msgs.count = 0;
+    PostMessageA(hwnd, 0x61, 5, 4);
+    ok(!core_msgs.count, "got %d messages.\n", core_msgs.count);
+    ret = PeekMessageA(&msg, hwnd, 0x61, 0x61, PM_REMOVE);
+    ok(ret && msg.wParam == 5, "got ret %d, wparam %#Ix.\n", ret, msg.wParam);
+
     /* a packet that another thread took: the waiting thread is not stuck */
     pNtSetIoCompletion(core_port, 0x17, 0x51, 0, 0);
     ok(core_take_completion(&key, &apc) && key == 0x17 && apc == 0x51, "got key %#Ix, apc %#Ix.\n", key, apc);
@@ -22074,6 +22112,20 @@ static void test_core_messaging_completions(void)
         ok(!core_take_completion(&key, &apc), "the packet is still queued.\n");
         WaitForSingleObject(late, 5000);
         CloseHandle(late);
+
+        /* message 0x60 posted to a window of another thread: the notification comes first, then the posted copy */
+        core_msgs.count = 0;
+        ret = PostMessageA(data.hwnd, 0x60, 5, 4);
+        ok(ret, "PostMessage failed.\n");
+        for (count = 0; count < 100 && core_msgs.count < 2; count++) Sleep(10);
+        ok(core_msgs.count == 2, "got %d messages.\n", core_msgs.count);
+        if (core_msgs.count == 2)
+        {
+            ok(core_msgs.wp[0] == 5 && core_msgs.wp[1] == 0x80000005, "got wparams %#Ix, %#Ix.\n", core_msgs.wp[0], core_msgs.wp[1]);
+            ok(core_msgs.tid[0] != core_main_tid && core_msgs.tid[1] == core_msgs.tid[0], "got threads %lu, %lu.\n",
+               core_msgs.tid[0], core_msgs.tid[1]);
+        }
+
         PostMessageA(data.hwnd, WM_QUIT, 0, 0);
         WaitForSingleObject(thread, 5000);
         CloseHandle(thread);
