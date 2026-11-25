@@ -60,6 +60,7 @@
 #define WEX_EVTLOG_STREAM       9   /* arg[0]: the first record number (0: the oldest); reply: records, arg[0]: the
                                      * next number, ERROR_HANDLE_EOF after the last (E3: the client writes backups) */
 #define WEX_EVTLOG_NOTIFY       10  /* completes when a record is written to the handle's log (a connection of its own) */
+#define WEX_EVTLOG_CALLER       11  /* no handle; reply arg[0]: this connection's caller class (WEX_CALLER_*, wine/wex_caller.h) */
 
 /* OPEN flags */
 #define WEX_EVTLOG_OPEN_LOG     0   /* name: a log (OpenEventLog) */

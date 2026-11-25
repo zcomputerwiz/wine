@@ -2497,3 +2497,28 @@ unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_si
     pipe_bridge_update_events( &bridge->pipe_end );
     return STATUS_SUCCESS;
 }
+
+/* WineExplorer (H3): the class of a service's caller: the client of a pipe connection (the server end's), or a token */
+DECL_HANDLER(get_caller_class)
+{
+    if (req->is_pipe)
+    {
+        struct pipe_server *server = (struct pipe_server *)get_handle_obj( current->process, req->handle, 0,
+                                                                           &pipe_server_ops );
+        struct pipe_end *client;
+
+        if (!server) return;
+        if (!(client = server->pipe_end.connection)) set_error( STATUS_PIPE_DISCONNECTED );
+        /* the token the client opened with (a bridge's: the link-bound description) */
+        else reply->caller_class = token_caller_class( client->client_token ? client->client_token : client->client_primary );
+        release_object( server );
+    }
+    else
+    {
+        struct token *token = get_token_obj( current->process, req->handle, TOKEN_QUERY );
+
+        if (!token) return;
+        reply->caller_class = token_caller_class( token );
+        release_object( token );
+    }
+}

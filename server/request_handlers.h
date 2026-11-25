@@ -114,6 +114,7 @@ DECL_HANDLER(save_registry);
 DECL_HANDLER(set_registry_notification);
 DECL_HANDLER(rename_key);
 DECL_HANDLER(get_registry_channel);
+DECL_HANDLER(get_caller_class);
 DECL_HANDLER(set_registry_relay);
 DECL_HANDLER(relay_registry_notification);
 DECL_HANDLER(create_timer);
@@ -449,6 +450,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_set_registry_notification,
     (req_handler)req_rename_key,
     (req_handler)req_get_registry_channel,
+    (req_handler)req_get_caller_class,
     (req_handler)req_set_registry_relay,
     (req_handler)req_relay_registry_notification,
     (req_handler)req_create_timer,
@@ -1343,6 +1345,11 @@ C_ASSERT( sizeof(struct get_registry_channel_request) == 16 );
 C_ASSERT( offsetof(struct get_registry_channel_reply, cookie) == 8 );
 C_ASSERT( offsetof(struct get_registry_channel_reply, user_hive) == 12 );
 C_ASSERT( sizeof(struct get_registry_channel_reply) == 16 );
+C_ASSERT( offsetof(struct get_caller_class_request, handle) == 12 );
+C_ASSERT( offsetof(struct get_caller_class_request, is_pipe) == 16 );
+C_ASSERT( sizeof(struct get_caller_class_request) == 24 );
+C_ASSERT( offsetof(struct get_caller_class_reply, caller_class) == 8 );
+C_ASSERT( sizeof(struct get_caller_class_reply) == 16 );
 C_ASSERT( offsetof(struct set_registry_relay_request, fd) == 12 );
 C_ASSERT( sizeof(struct set_registry_relay_request) == 16 );
 C_ASSERT( offsetof(struct relay_registry_notification_request, event) == 12 );
