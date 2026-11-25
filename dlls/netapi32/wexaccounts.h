@@ -33,7 +33,7 @@
 BOOL wexa_sha512_crypt( const char *key, const char *salt_in, char out[WEXA_HASH_MAX] );
 BOOL wexa_hash_password( const char *password, char out[WEXA_HASH_MAX] );
 
-/* TRUE when this process asks the accounts service (a session 0 exists, and WEX_NETAPI_STOCK is not set) */
+/* TRUE when this process asks the accounts service (a session 0 exists, and the test hook HKLM\Software\WineExplorer\AccountsTest\Stock is not set) */
 BOOL wexa_active(void);
 
 NET_API_STATUS wexa_user_enum( DWORD level, DWORD filter, BYTE **bufptr, DWORD prefmaxlen, DWORD *entriesread,

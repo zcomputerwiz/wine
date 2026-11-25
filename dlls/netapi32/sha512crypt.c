@@ -69,8 +69,9 @@ BOOL wexa_sha512_crypt( const char *key, const char *salt_in, char out[WEXA_HASH
 {
     BYTE *buf, A[SHA512_LEN], B[SHA512_LEN], C[SHA512_LEN], DP[SHA512_LEN], DS[SHA512_LEN], P[MAX_KEY], S[SALT_LEN];
     char salt[SALT_LEN + 1];
-    size_t key_len = strlen( key ), salt_len = 0, n, i, pos;
+    size_t key_len = strlen( key ), salt_len = 0, n, i, pos, bufsize;
     char *p;
+    BOOL ok = FALSE;
 
     while (salt_in[salt_len] && salt_in[salt_len] != '$' && salt_len < SALT_LEN)
     {
@@ -82,7 +83,11 @@ BOOL wexa_sha512_crypt( const char *key, const char *salt_in, char out[WEXA_HASH
     /* the longest message is H(the key, key_len times) for P; the others are shorter */
     n = key_len * key_len;
     if (n < 16384) n = 16384;
-    if (!(buf = malloc( n + 4096 ))) return FALSE;
+    bufsize = n + 4096;
+    if (!(buf = malloc( bufsize ))) return FALSE;
+    /* the digests are on the stack: clear them before the first early exit too */
+    memset( A, 0, sizeof(A) ); memset( B, 0, sizeof(B) ); memset( C, 0, sizeof(C) );
+    memset( DP, 0, sizeof(DP) ); memset( DS, 0, sizeof(DS) ); memset( P, 0, sizeof(P) ); memset( S, 0, sizeof(S) );
 
     /* B = H(key salt key) */
     pos = 0;
@@ -155,12 +160,20 @@ BOOL wexa_sha512_crypt( const char *key, const char *salt_in, char out[WEXA_HASH
     p = put64( p, C[62], C[20], C[41], 4 );
     p = put64( p, 0, 0, C[63], 2 );
     *p = 0;
-    free( buf );
-    return TRUE;
+    ok = TRUE;
 
 fail:
+    /* everything that held the key, or a digest of it */
+    SecureZeroMemory( buf, bufsize );
+    SecureZeroMemory( A, sizeof(A) );
+    SecureZeroMemory( B, sizeof(B) );
+    SecureZeroMemory( C, sizeof(C) );
+    SecureZeroMemory( DP, sizeof(DP) );
+    SecureZeroMemory( DS, sizeof(DS) );
+    SecureZeroMemory( P, sizeof(P) );
+    SecureZeroMemory( S, sizeof(S) );
     free( buf );
-    return FALSE;
+    return ok;
 }
 
 /* A new hash of a password with a random 16 character salt */

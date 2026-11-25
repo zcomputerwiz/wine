@@ -35,6 +35,7 @@
 #include "winerror.h"
 #include "winnls.h"
 #include "winnt.h"
+#include "winreg.h"
 #include "lm.h"
 #include "lmerr.h"
 #include "wine/debug.h"
@@ -104,21 +105,42 @@ static const WCHAR comment_users[] = L"Users are prevented from making accidenta
 
 static INIT_ONCE active_once = INIT_ONCE_STATIC_INIT;
 static BOOL active;
+static WCHAR test_pipe[MAX_PATH];   /* the pipe of a test (see test_hooks), else empty */
+
+/* The suites' hooks: another pipe than the accounts service's, or Wine's own behaviour. They are values of the machine
+ * hive, which only an administrator writes (the environment of a process is not a safe place: the elevated half of a
+ * program has the environment of the limited half, and a pipe of the limited half's would receive the new hash). */
+static void test_hooks( BOOL *stock )
+{
+    DWORD size = sizeof(test_pipe), type, value = 0, vsize = sizeof(value);
+    HKEY key;
+
+    *stock = FALSE;
+    test_pipe[0] = 0;
+    if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"Software\\WineExplorer\\AccountsTest", 0, KEY_QUERY_VALUE, &key )) return;
+    if (!RegQueryValueExW( key, L"Stock", NULL, &type, (BYTE *)&value, &vsize ) && type == REG_DWORD && value) *stock = TRUE;
+    if (RegQueryValueExW( key, L"Pipe", NULL, &type, (BYTE *)test_pipe, &size ) || type != REG_SZ || size < 2 * sizeof(WCHAR))
+        test_pipe[0] = 0;
+    else test_pipe[ARRAY_SIZE(test_pipe) - 1] = 0;
+    RegCloseKey( key );
+}
 
 static BOOL WINAPI detect_active( INIT_ONCE *once, void *param, void **context )
 {
-    WCHAR tmp[8];
     HANDLE pipe;
     DWORD err;
+    BOOL stock;
 
     active = FALSE;
-    if (GetEnvironmentVariableW( L"WEX_NETAPI_STOCK", tmp, ARRAY_SIZE(tmp) )) return TRUE;   /* tests of the stock code */
-    if (GetEnvironmentVariableW( L"WEX_ACCOUNTS_PIPE", tmp, 1 )) { active = TRUE; return TRUE; }
+    test_hooks( &stock );
+    if (stock) return TRUE;                                   /* tests of the stock code */
+    if (test_pipe[0]) { active = TRUE; return TRUE; }
 
     /* like the service manager (services' forward_available): a machine has session 0 when its pipe name is found there,
      * and then the accounts are session 0's, reachable or not (U5): an unreachable service is an error, never the
      * list of this process */
-    pipe = CreateFileW( session0_svcctl, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL );
+    pipe = CreateFileW( session0_svcctl, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+                        SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL );
     if (pipe != INVALID_HANDLE_VALUE)
     {
         CloseHandle( pipe );
@@ -227,14 +249,14 @@ static DWORD wexa_call( WORD op, const struct frame *body, BYTE *reply, DWORD *r
     struct wexa_reply rep;
     WCHAR pipe_name[MAX_PATH];
     BYTE *in = NULL;
-    DWORD mode = PIPE_READMODE_MESSAGE, wrote, got = 0, err = 0, i, blen = body ? body->len : 0;
+    DWORD mode = PIPE_READMODE_MESSAGE, wrote, got = 0, err = 0, open_err = 0, i, blen = body ? body->len : 0;
     HANDLE pipe = INVALID_HANDLE_VALUE;
     BYTE *frame;
 
     *status = WEXA_UNAVAILABLE;
     *reply_len = 0;
-    if (!GetEnvironmentVariableW( L"WEX_ACCOUNTS_PIPE", pipe_name, ARRAY_SIZE(pipe_name) ))
-        lstrcpyW( pipe_name, default_pipe );
+    wexa_active();   /* reads the test hooks */
+    lstrcpyW( pipe_name, test_pipe[0] ? test_pipe : default_pipe );
 
     if (blen > WEXA_MAX_FRAME - sizeof(req)) return ERROR_INVALID_PARAMETER;
     if (!(frame = HeapAlloc( GetProcessHeap(), 0, sizeof(req) + blen ))) return ERROR_NOT_ENOUGH_MEMORY;
@@ -244,16 +266,21 @@ static DWORD wexa_call( WORD op, const struct frame *body, BYTE *reply, DWORD *r
 
     for (i = 0; i < 10; i++)
     {
-        pipe = CreateFileW( pipe_name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL );
+        /* identification only: whoever serves the pipe learns who calls, and cannot act as the caller */
+        pipe = CreateFileW( pipe_name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+                            SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL );
         if (pipe != INVALID_HANDLE_VALUE) break;
-        if (GetLastError() == ERROR_PIPE_BUSY) WaitNamedPipeW( pipe_name, 1000 );
+        open_err = GetLastError();
+        if (open_err == ERROR_ACCESS_DENIED) break;   /* retrying does not change the answer */
+        if (open_err == ERROR_PIPE_BUSY) WaitNamedPipeW( pipe_name, 1000 );
         else Sleep( 300 );
     }
     if (pipe == INVALID_HANDLE_VALUE)
     {
-        TRACE( "the accounts service is not reachable (%lu)\n", GetLastError() );
+        TRACE( "the accounts service is not reachable (%lu)\n", open_err );
+        SecureZeroMemory( frame, sizeof(req) + blen );
         HeapFree( GetProcessHeap(), 0, frame );
-        return RPC_S_SERVER_UNAVAILABLE;
+        return open_err == ERROR_ACCESS_DENIED ? ERROR_ACCESS_DENIED : RPC_S_SERVER_UNAVAILABLE;
     }
 
     SetNamedPipeHandleState( pipe, &mode, NULL, NULL );
@@ -264,6 +291,7 @@ static DWORD wexa_call( WORD op, const struct frame *body, BYTE *reply, DWORD *r
     else if (!ReadFile( pipe, in, sizeof(rep) + WEXA_MAX_FRAME, &got, NULL ) || got < sizeof(rep))
         err = RPC_S_SERVER_UNAVAILABLE;
     CloseHandle( pipe );
+    SecureZeroMemory( frame, sizeof(req) + blen );   /* a new password's hash is in it */
     HeapFree( GetProcessHeap(), 0, frame );
 
     if (!err)
@@ -279,6 +307,7 @@ static DWORD wexa_call( WORD op, const struct frame *body, BYTE *reply, DWORD *r
             *reply_len = rep.body_len;
         }
     }
+    if (in) SecureZeroMemory( in, sizeof(rep) + WEXA_MAX_FRAME );
     HeapFree( GetProcessHeap(), 0, in );
     return err;
 }
@@ -396,6 +425,9 @@ static NET_API_STATUS fetch_list( WORD op, struct user_list *l )
         first = reader_u32( &r );
         count = reader_u32( &r );
         if (r.bad || first != start || count > total) { ret = ERROR_INVALID_DATA; break; }
+        /* the list changed between two pages (an account made or removed): the buffer was sized for the first page's
+         * total, so the pages cannot be put together */
+        if (start && total != l->total) { ret = ERROR_INVALID_DATA; break; }
         if (!l->u && total)
         {
             if (total > 100000 || !(l->u = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, total * sizeof(*l->u) )))
@@ -404,7 +436,7 @@ static NET_API_STATUS fetch_list( WORD op, struct user_list *l )
                 break;
             }
         }
-        l->total = total;
+        if (!start) l->total = total;
         for (i = 0; i < count && start + i < total; i++)
         {
             struct user *u = &l->u[start + i];
@@ -428,7 +460,8 @@ static NET_API_STATUS fetch_list( WORD op, struct user_list *l )
     return ret;
 }
 
-/* the RID of an account, from the account map; the unix uid when there is none */
+/* the RID of an account, from the account map; 0 when there is none (a unix uid is not a RID: it could be the number of a
+ * well-known one, and an account that is not in the map has no SID anyway) */
 static DWORD user_rid( const struct user *u )
 {
     BYTE sid_buf[SECURITY_MAX_SID_SIZE];
@@ -439,7 +472,7 @@ static DWORD user_rid( const struct user *u )
 
     if (LookupAccountNameW( NULL, u->name, sid, &sid_len, domain, &dom_len, &use ) && sid->SubAuthorityCount)
         return sid->SubAuthority[sid->SubAuthorityCount - 1];
-    return u->uid;
+    return 0;
 }
 
 #define EMPTY_STR  L""
@@ -596,17 +629,23 @@ NET_API_STATUS wexa_user_getinfo( const WCHAR *username, DWORD level, BYTE **buf
     return build_users( level, &u, 1, bufptr );
 }
 
+/* A blank password is refused for now: crypt("") would give the unix account a real empty password, and the PAM rules of
+ * a Debian system then let any local user su into it. (Whether the XP behaviour, a blank password that works at the
+ * greeter only, is wanted is the owner's decision.) */
 static NET_API_STATUS hash_of( const WCHAR *password, char *hash )
 {
     char utf8[3 * (PWLEN + 1) + 1];
+    NET_API_STATUS ret = NERR_Success;
 
-    if (!password || lstrlenW( password ) > PWLEN) return NERR_PasswordTooShort;
-    if (!*password) utf8[0] = 0;
-    else if (!WideCharToMultiByte( CP_UTF8, 0, password, -1, utf8, sizeof(utf8), NULL, NULL )) return NERR_PasswordTooShort;
-    if (!wexa_hash_password( utf8, hash )) return ERROR_NOT_ENOUGH_MEMORY;
+    hash[0] = 0;
+    if (!password || !*password || lstrlenW( password ) > PWLEN) return NERR_PasswordTooShort;
+    if (!WideCharToMultiByte( CP_UTF8, 0, password, -1, utf8, sizeof(utf8), NULL, NULL )) ret = NERR_PasswordTooShort;
+    else if (!wexa_hash_password( utf8, hash )) ret = ERROR_NOT_ENOUGH_MEMORY;
     SecureZeroMemory( utf8, sizeof(utf8) );
-    return NERR_Success;
+    return ret;
 }
+
+static NET_API_STATUS set_locked( const WCHAR *name, BOOL locked );
 
 NET_API_STATUS wexa_user_add( DWORD level, BYTE *buf, DWORD *parm_err )
 {
@@ -633,13 +672,18 @@ NET_API_STATUS wexa_user_add( DWORD level, BYTE *buf, DWORD *parm_err )
         if (parm_err) *parm_err = USER_PRIV_PARMNUM;
         return ERROR_INVALID_PARAMETER;
     }
-    if ((ret = hash_of( info->usri2_password ? info->usri2_password : EMPTY_STR, hash )))
+    if ((ret = hash_of( info->usri2_password, hash )))
     {
         if (parm_err) *parm_err = USER_PASSWORD_PARMNUM;
+        SecureZeroMemory( hash, sizeof(hash) );
         return ret;
     }
 
-    if (!(f = HeapAlloc( GetProcessHeap(), 0, sizeof(*f) ))) return ERROR_NOT_ENOUGH_MEMORY;
+    if (!(f = HeapAlloc( GetProcessHeap(), 0, sizeof(*f) )))
+    {
+        SecureZeroMemory( hash, sizeof(hash) );
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
     f->len = 0;
     if (!put_wstr( f, info->usri2_name ) || !put_wstr( f, full ))
         ret = NERR_BadUsername;
@@ -651,14 +695,12 @@ NET_API_STATUS wexa_user_add( DWORD level, BYTE *buf, DWORD *parm_err )
     }
     SecureZeroMemory( f, sizeof(*f) );
     HeapFree( GetProcessHeap(), 0, f );
+    SecureZeroMemory( hash, sizeof(hash) );
     if (!ret && (flags & UF_ACCOUNTDISABLE))
     {
-        if (!(f = HeapAlloc( GetProcessHeap(), 0, sizeof(*f) ))) return ERROR_NOT_ENOUGH_MEMORY;
-        f->len = 0;
-        put_wstr( f, info->usri2_name );
-        put_u32( f, 1 );
-        ret = simple_call( WEXA_SET_LOCKED, f, NERR_UserNotFound, ERROR_INVALID_PARAMETER );
-        HeapFree( GetProcessHeap(), 0, f );
+        /* the account is made enabled and locked at once afterwards; when the lock fails the account is removed again, so
+         * that a disabled account is never left enabled */
+        if ((ret = set_locked( info->usri2_name, TRUE ))) wexa_user_del( info->usri2_name );
     }
     return ret;
 }
@@ -698,13 +740,22 @@ static NET_API_STATUS set_password( const WCHAR *name, const WCHAR *password )
     NET_API_STATUS ret;
 
     if (!name || !*name) return NERR_UserNotFound;
-    if ((ret = hash_of( password, hash ))) return ret;
-    if (!(f = HeapAlloc( GetProcessHeap(), 0, sizeof(*f) ))) return ERROR_NOT_ENOUGH_MEMORY;
+    if ((ret = hash_of( password, hash )))
+    {
+        SecureZeroMemory( hash, sizeof(hash) );
+        return ret;
+    }
+    if (!(f = HeapAlloc( GetProcessHeap(), 0, sizeof(*f) )))
+    {
+        SecureZeroMemory( hash, sizeof(hash) );
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
     f->len = 0;
     if (!put_wstr( f, name ) || !put_str( f, hash, strlen( hash ) )) ret = ERROR_INVALID_PARAMETER;
     else ret = simple_call( WEXA_SET_PASSWORD, f, NERR_UserNotFound, ERROR_INVALID_PARAMETER );
     SecureZeroMemory( f, sizeof(*f) );
     HeapFree( GetProcessHeap(), 0, f );
+    SecureZeroMemory( hash, sizeof(hash) );
     return ret;
 }
 
@@ -745,7 +796,12 @@ NET_API_STATUS wexa_user_setinfo( const WCHAR *username, DWORD level, BYTE *buf,
         return ret;
     }
     case 1003:  /* the password */
-        return set_password( username, ((USER_INFO_1003 *)buf)->usri1003_password );
+    {
+        NET_API_STATUS ret = set_password( username, ((USER_INFO_1003 *)buf)->usri1003_password );
+
+        if (ret == NERR_PasswordTooShort && parm_err) *parm_err = USER_PASSWORD_PARMNUM;
+        return ret;
+    }
     case 1008:  /* the flags: the account is disabled or not (the other flags have no place in a unix account) */
         return set_locked( username, (((USER_INFO_1008 *)buf)->usri1008_flags & UF_ACCOUNTDISABLE) != 0 );
     case 1011:  /* the full name */
