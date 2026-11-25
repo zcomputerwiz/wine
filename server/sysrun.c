@@ -198,9 +198,17 @@ int sysrun_raise_for_current(void)
 
 /* ---- the system role (C3) ---------------------------------------------------------------------------------- */
 
+/* Latched at the first call, after the registry is loaded and before any client: the bits a process gets under one
+ * value of the role must never be read under the other (a live value let a system-group process's child keep raised
+ * file access, or a flip turn the role on for processes created without it). As with hive saving, the live value is
+ * not used; a change takes effect when the server starts again. */
 static int system_role_enabled(void)
 {
-    return sysrun_active && elevation_enforced();
+    static int enabled = -1;
+
+    if (!sysrun_active) return 0;
+    if (enabled < 0) enabled = elevation_enforced() ? 1 : 0;
+    return enabled;
 }
 
 /* Safe Mode (docs/SAFE_MODE.md): /run/wineexplorer/bootmode, a regular file that root owns and others cannot write,

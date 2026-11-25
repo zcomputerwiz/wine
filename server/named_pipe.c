@@ -86,7 +86,8 @@ struct pipe_end
     struct pipe_end     *connection; /* the other end of the pipe */
     process_id_t         client_pid; /* process that created the client */
     unsigned int         client_lease; /* a bridge: the lease of client_pid's block (R6), 0 for a local client */
-    unsigned int         client_session; /* its session (a bridge: the session of the server that opened it) */
+    unsigned int         client_session; /* its session (a bridge: the session of the server that opened it), or: */
+#define PIPE_SESSION_UNKNOWN (~0u)         /* not known (no client yet, no token, a bridge without a session link) */
     process_id_t         server_pid; /* process that created the server */
     struct token        *client_token; /* token of the thread that opened the client end (elevation enforced) */
     struct process      *client_process; /* retained opener, not a later PID lookup */
@@ -1408,6 +1409,12 @@ static void pipe_end_get_connection_attribute( struct pipe_end *pipe_end )
     }
     else if (attr_size == sizeof("ClientSessionId") && !memcmp( attr, "ClientSessionId", attr_size ))
     {
+        /* an unknown session fails: 0 would be session 0's, the answer a service trusts most */
+        if (pipe_end->client_session == PIPE_SESSION_UNKNOWN)
+        {
+            set_error( STATUS_NOT_FOUND );
+            return;
+        }
         value = &pipe_end->client_session;
         value_size = sizeof(pipe_end->client_session);
     }
@@ -1566,7 +1573,7 @@ static void init_pipe_end( struct pipe_end *pipe_end, struct named_pipe *pipe,
     memset( &pipe_end->client_token_id, 0, sizeof(pipe_end->client_token_id) );
     memset( &pipe_end->client_modified_id, 0, sizeof(pipe_end->client_modified_id) );
     pipe_end->client_impersonated = 0;
-    pipe_end->client_session = 0;
+    pipe_end->client_session = PIPE_SESSION_UNKNOWN;
     pipe_end->client_lease = 0;
     /* also on the bridge's user side, which sets neither: FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE reads them */
     pipe_end->client_pid = 0;
@@ -1642,7 +1649,7 @@ static struct pipe_end *create_pipe_client( struct named_pipe *pipe, data_size_t
     init_pipe_end( client, pipe, 0, buffer_size );
     client->state = FILE_PIPE_CONNECTED_STATE;
     client->client_pid = get_process_id( current->process );
-    client->client_session = current->process->token ? token_get_session_id( current->process->token ) : 0;
+    client->client_session = current->process->token ? token_get_session_id( current->process->token ) : PIPE_SESSION_UNKNOWN;
     client->client_process = (struct process *)grab_object( current->process );
     client->client_impersonated = (current->token != NULL);
     if (current->process->token)
@@ -2491,7 +2498,7 @@ unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_si
     server->pipe_end.client_pid = client_pid;
     bridge->pipe_end.client_lease = client_pid ? lease : 0;
     server->pipe_end.client_lease = bridge->pipe_end.client_lease;
-    bridge->pipe_end.client_session = session > 0 ? session : 0;
+    bridge->pipe_end.client_session = session > 0 ? session : PIPE_SESSION_UNKNOWN;
     server->pipe_end.client_session = bridge->pipe_end.client_session;  /* R9: the session of the opener's server */
     list_remove( &server->entry );
     release_object( pipe );
