@@ -10430,6 +10430,7 @@ struct queued_draw
     UINT expected_width, expected_height;
     float colour[4];
     HRESULT result;
+    IUnknown *requeue;   /* when set, the call queues the object once more through this private interface */
 };
 
 static HRESULT STDMETHODCALLTYPE queued_draw_QueryInterface(void *iface, REFIID iid, void **out)
@@ -10473,6 +10474,15 @@ static HRESULT STDMETHODCALLTYPE queued_draw_draw(void *iface)
     ok(count == 1, "Got %u viewports.\n", count);
     ok(vp.Width == draw->expected_width && vp.Height == draw->expected_height, "Got viewport %.8ex%.8e.\n", vp.Width, vp.Height);
     ID3D11DeviceContext_Release(d3d_context);
+    if (draw->requeue)
+    {
+        IUnknown *priv = draw->requeue;
+        HRESULT hr;
+
+        draw->requeue = NULL;
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, IUnknown *, UINT_PTR))(*(void ***)priv)[15])(priv, iface, 0);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    }
     return draw->result;
 }
 
@@ -10584,6 +10594,20 @@ static void test_context_private_queued_draw(ID2D1DeviceContext *context, IUnkno
     ok(draw.refcount == 1, "Got refcount %lu.\n", draw.refcount);
     ID2D1DeviceContext_SetTarget(context, (ID2D1Image *)bitmap);
 
+    /* an object queued while EndDraw calls the queue is released without being called */
+    draw.calls = 0;
+    draw.requeue = priv;
+    ID2D1DeviceContext_BeginDraw(context);
+    method15(priv, (IUnknown *)&draw, 0);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(draw.calls == 1, "Called %u times.\n", draw.calls);
+    ok(draw.refcount == 1, "Got refcount %lu.\n", draw.refcount);
+    ok(!draw.requeue, "Not requeued.\n");
+    ID2D1DeviceContext_BeginDraw(context);
+    ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(draw.calls == 1, "Called %u times.\n", draw.calls);
+
     /* a failure of the object is the result of EndDraw */
     draw.calls = 0;
     draw.result = E_FAIL;
@@ -10593,6 +10617,19 @@ static void test_context_private_queued_draw(ID2D1DeviceContext *context, IUnkno
     ok(hr == E_FAIL, "Got unexpected hr %#lx.\n", hr);
     ok(draw.calls == 1, "Called %u times.\n", draw.calls);
     ok(draw.refcount == 1, "Got refcount %lu.\n", draw.refcount);
+
+    /* a second BeginDraw keeps the queue (last: Windows fails the EndDraw calls after it) */
+    draw.calls = 0;
+    draw.result = S_OK;
+    ID2D1DeviceContext_BeginDraw(context);
+    method15(priv, (IUnknown *)&draw, 0);
+    ID2D1DeviceContext_BeginDraw(context);
+    ok(draw.refcount == 2, "Got refcount %lu.\n", draw.refcount);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    todo_wine ok(hr == D2DERR_WRONG_STATE, "Got unexpected hr %#lx.\n", hr);
+    ok(draw.calls == 1, "Called %u times.\n", draw.calls);
+    ok(draw.refcount == 1, "Got refcount %lu.\n", draw.refcount);
+    ID2D1DeviceContext_EndDraw(context, NULL, NULL);
 
     ID2D1DeviceContext_SetTarget(context, NULL);
     ID3D11Resource_Release(draw.expected_target);

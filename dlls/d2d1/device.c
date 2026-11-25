@@ -274,6 +274,9 @@ static void d2d_device_context_run_queued_draws(struct d2d_device_context *conte
             d2d_device_context_set_error(context, hr);
     }
 
+    /* the objects may leave any state bound (shaders of other stages, depth-stencil, stream-out, predication); the context's
+     * draws set only what they use and expect the rest cleared */
+    ID3D11DeviceContext1_ClearState(d3d_context);
     ID3D11DeviceContext1_SwapDeviceContextState(d3d_context, prev_state, NULL);
     ID3D11DeviceContext1_Release(d3d_context);
     ID3DDeviceContextState_Release(prev_state);
@@ -284,7 +287,8 @@ static void d2d_device_context_run_queued_draws(struct d2d_device_context *conte
     d2d_device_context_release_queued_draws(objects, count);
 }
 
-/* Drops the queued objects without calling them (a new draw, or the context goes away). */
+/* Drops the queued objects without calling them, as Windows does with objects queued while EndDraw calls the queue and with
+ * those left when the context goes away (measured). */
 static void d2d_device_context_discard_queued_draws(struct d2d_device_context *context)
 {
     IUnknown **objects = context->queued_draws;
@@ -320,7 +324,10 @@ static inline struct d2d_device_context *impl_from_ID2D1DeviceContext(ID2D1Devic
  *   Windows calls slot 3 of each queued object, without arguments and in order, with the target it was queued for bound and viewport
  *   and scissor covering it, then releases it; a failure of slot 3 is the EndDraw result. The lifted compositor draws its sprites
  *   with Direct3D that way (tests/uwp/alpc/d2d-ctx-slot15-probe.cpp). Wine draws at once rather than in a batch, so the queue runs
- *   before the next draw of the context, at a target change, Flush and EndDraw, which keeps the order of Windows' batch.
+ *   before the next draw of the context, at a target change, Flush and EndDraw, which keeps the order of Windows' batch. Measured
+ *   too: a second BeginDraw keeps the queue, objects queued while EndDraw calls the queue are released uncalled, and so are those
+ *   left when the context is released. The context's lock is held while an object runs. FIXME: CopyFromRenderTarget, a
+ *   CopyFromBitmap from the target and GetDC read the target without running the queue first (Windows flushes for them).
  * Notepad calls only slots 7, 9, 10, 12 and 15 (traced on 64-bit Windows 11 with all slots 3 to 15). The other slots are not known:
  * calling one raises the stub exception. 32-bit callers do not get the interface (argument sizes not measured). */
 #ifdef __x86_64__
@@ -2366,7 +2373,7 @@ static void STDMETHODCALLTYPE d2d_device_context_BeginDraw(ID2D1DeviceContext6 *
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_begin_draw(context->target.command_list, context);
 
-    d2d_device_context_discard_queued_draws(context);
+    /* objects still queued stay queued (measured: the next EndDraw calls them) */
     memset(&context->error, 0, sizeof(context->error));
 }
 
@@ -2385,6 +2392,8 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_EndDraw(ID2D1DeviceContext6 
     }
 
     d2d_device_context_run_queued_draws(context);
+    /* objects that the queued ones queued in turn are released uncalled (measured) */
+    d2d_device_context_discard_queued_draws(context);
 
     if (tag1)
         *tag1 = context->error.tag1;
