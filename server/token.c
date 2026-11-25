@@ -669,6 +669,8 @@ static struct token *create_token( unsigned int primary, unsigned int session_id
         token->package = NULL;
         token->package_pending = 0;
         token->windows_sd = 0;
+        token->link_bound = 0;    /* H3: a token of this server's own (link_bound_token sets it) */
+        token->link_session = 0;
 
         /* copy user */
         token->user = memdup( user, sid_len( user ));
