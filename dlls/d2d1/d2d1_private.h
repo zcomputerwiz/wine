@@ -222,6 +222,11 @@ struct d2d_device_context
     struct d2d_clip_stack clip_stack;
 
     struct d2d_indexed_objects vertex_buffers;
+
+    /* objects queued by slot 15 of the private interface, called back before the next draw and at Flush and EndDraw */
+    IUnknown **queued_draws;
+    size_t queued_draws_size;
+    size_t queued_draws_count;
 };
 
 HRESULT d2d_d3d_create_render_target(struct d2d_device *device, IDXGISurface *surface, IUnknown *outer_unknown,

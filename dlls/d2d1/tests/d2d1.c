@@ -10418,6 +10418,226 @@ static void test_subresource_surface(BOOL d3d11)
     release_test_context(&ctx);
 }
 
+#ifdef __x86_64__
+/* an object for slot 15 of the context's private interface: Direct2D calls its slot 3 when it flushes */
+struct queued_draw
+{
+    const void **vtbl;
+    LONG refcount;
+    unsigned int calls;
+    ID3D11Device *d3d_device;
+    ID3D11Resource *expected_target;
+    UINT expected_width, expected_height;
+    float colour[4];
+    HRESULT result;
+    IUnknown *requeue;   /* when set, the call queues the object once more through this private interface */
+};
+
+static HRESULT STDMETHODCALLTYPE queued_draw_QueryInterface(void *iface, REFIID iid, void **out)
+{
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG STDMETHODCALLTYPE queued_draw_AddRef(void *iface)
+{
+    return InterlockedIncrement(&((struct queued_draw *)iface)->refcount);
+}
+
+static ULONG STDMETHODCALLTYPE queued_draw_Release(void *iface)
+{
+    return InterlockedDecrement(&((struct queued_draw *)iface)->refcount);
+}
+
+static HRESULT STDMETHODCALLTYPE queued_draw_draw(void *iface)
+{
+    struct queued_draw *draw = iface;
+    ID3D11RenderTargetView *rtv = NULL;
+    ID3D11DeviceContext *d3d_context;
+    ID3D11Resource *resource = NULL;
+    D3D11_VIEWPORT vp;
+    UINT count = 1;
+
+    ++draw->calls;
+    ID3D11Device_GetImmediateContext(draw->d3d_device, &d3d_context);
+    ID3D11DeviceContext_OMGetRenderTargets(d3d_context, 1, &rtv, NULL);
+    ok(!!rtv, "No render target is bound.\n");
+    if (rtv)
+    {
+        ID3D11RenderTargetView_GetResource(rtv, &resource);
+        ok(resource == draw->expected_target, "Got target %p, expected %p.\n", resource, draw->expected_target);
+        ID3D11DeviceContext_ClearRenderTargetView(d3d_context, rtv, draw->colour);
+        ID3D11Resource_Release(resource);
+        ID3D11RenderTargetView_Release(rtv);
+    }
+    ID3D11DeviceContext_RSGetViewports(d3d_context, &count, &vp);
+    ok(count == 1, "Got %u viewports.\n", count);
+    ok(vp.Width == draw->expected_width && vp.Height == draw->expected_height, "Got viewport %.8ex%.8e.\n", vp.Width, vp.Height);
+    ID3D11DeviceContext_Release(d3d_context);
+    if (draw->requeue)
+    {
+        IUnknown *priv = draw->requeue;
+        HRESULT hr;
+
+        draw->requeue = NULL;
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, IUnknown *, UINT_PTR))(*(void ***)priv)[15])(priv, iface, 0);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    }
+    return draw->result;
+}
+
+static const void *queued_draw_vtbl[] =
+{
+    queued_draw_QueryInterface,
+    queued_draw_AddRef,
+    queued_draw_Release,
+    queued_draw_draw,
+};
+
+/* the first pixel of a bitmap */
+static DWORD get_bitmap_pixel(ID2D1DeviceContext *context, ID2D1Bitmap1 *bitmap)
+{
+    D2D1_BITMAP_PROPERTIES1 desc = {{DXGI_FORMAT_R8G8B8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED}, 96.0f, 96.0f};
+    D2D1_SIZE_U size = {16, 16};
+    D2D1_POINT_2U origin = {0, 0};
+    D2D1_MAPPED_RECT mapped;
+    ID2D1Bitmap1 *readback;
+    DWORD pixel = 0xdeadbeef;
+    HRESULT hr;
+
+    desc.bitmapOptions = D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
+    hr = ID2D1DeviceContext_CreateBitmap(context, size, NULL, 0, &desc, &readback);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1Bitmap1_CopyFromBitmap(readback, &origin, (ID2D1Bitmap *)bitmap, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1Bitmap1_Map(readback, D2D1_MAP_OPTIONS_READ, &mapped);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        pixel = *(DWORD *)mapped.bits;
+        ID2D1Bitmap1_Unmap(readback);
+    }
+    ID2D1Bitmap1_Release(readback);
+    return pixel;
+}
+
+/* slot 15 of the private interface {2ea67ed7-...}: (object, 0) queues the object; at the next Flush or EndDraw Direct2D calls its
+ * slot 3, in order with its own drawing, with the target it was queued for bound, and releases it (measured:
+ * tests/uwp/alpc/d2d-ctx-slot15-probe.cpp of WineExplorer) */
+static void test_context_private_queued_draw(ID2D1DeviceContext *context, IUnknown *priv, ID3D11Device *d3d_device)
+{
+    typedef HRESULT (STDMETHODCALLTYPE *method15_t)(void *, IUnknown *, UINT_PTR);
+    D2D1_BITMAP_PROPERTIES1 desc = {{DXGI_FORMAT_R8G8B8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED}, 96.0f, 96.0f};
+    D2D1_COLOR_F red = {1.0f, 0.0f, 0.0f, 1.0f}, blue = {0.0f, 0.0f, 1.0f, 1.0f};
+    struct queued_draw draw = {queued_draw_vtbl, 1};
+    method15_t method15 = (method15_t)(*(void ***)priv)[15];
+    D2D1_SIZE_U size = {16, 16}, other_size = {8, 4};
+    ID2D1Bitmap1 *bitmap, *other;
+    IDXGISurface *surface;
+    DWORD pixel;
+    HRESULT hr;
+
+    desc.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
+    hr = ID2D1DeviceContext_CreateBitmap(context, size, NULL, 0, &desc, &bitmap);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1DeviceContext_CreateBitmap(context, other_size, NULL, 0, &desc, &other);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1Bitmap1_GetSurface(bitmap, &surface);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    IDXGISurface_QueryInterface(surface, &IID_ID3D11Resource, (void **)&draw.expected_target);
+    IDXGISurface_Release(surface);
+    draw.d3d_device = d3d_device;
+    draw.expected_width = 16;
+    draw.expected_height = 16;
+    draw.colour[1] = draw.colour[3] = 1.0f; /* green */
+    ID2D1DeviceContext_SetTarget(context, (ID2D1Image *)bitmap);
+
+    /* after Direct2D's clear: green; the object holds a reference until it is called */
+    ID2D1DeviceContext_BeginDraw(context);
+    ID2D1DeviceContext_Clear(context, &red);
+    hr = method15(priv, (IUnknown *)&draw, 0);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(draw.refcount == 2, "Got refcount %lu.\n", draw.refcount);
+    ok(!draw.calls, "Called %u times.\n", draw.calls);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(draw.calls == 1, "Called %u times.\n", draw.calls);
+    ok(draw.refcount == 1, "Got refcount %lu.\n", draw.refcount);
+    pixel = get_bitmap_pixel(context, bitmap);
+    ok(pixel == 0xff00ff00, "Got unexpected pixel %08lx.\n", pixel);
+
+    /* before a later clear: blue; twice: called twice; Flush calls it too */
+    draw.calls = 0;
+    ID2D1DeviceContext_BeginDraw(context);
+    method15(priv, (IUnknown *)&draw, 0);
+    method15(priv, (IUnknown *)&draw, 0);
+    ok(draw.refcount == 3, "Got refcount %lu.\n", draw.refcount);
+    ID2D1DeviceContext_Clear(context, &blue);
+    hr = ID2D1DeviceContext_Flush(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(draw.calls == 2, "Called %u times.\n", draw.calls);
+    ok(draw.refcount == 1, "Got refcount %lu.\n", draw.refcount);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(draw.calls == 2, "Called %u times.\n", draw.calls);
+    pixel = get_bitmap_pixel(context, bitmap);
+    ok(pixel == 0xffff0000, "Got unexpected pixel %08lx.\n", pixel);
+
+    /* a target change before the flush: it draws on the target it was queued for */
+    draw.calls = 0;
+    ID2D1DeviceContext_BeginDraw(context);
+    method15(priv, (IUnknown *)&draw, 0);
+    ID2D1DeviceContext_SetTarget(context, (ID2D1Image *)other);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(draw.calls == 1, "Called %u times.\n", draw.calls);
+    ok(draw.refcount == 1, "Got refcount %lu.\n", draw.refcount);
+    ID2D1DeviceContext_SetTarget(context, (ID2D1Image *)bitmap);
+
+    /* an object queued while EndDraw calls the queue is released without being called */
+    draw.calls = 0;
+    draw.requeue = priv;
+    ID2D1DeviceContext_BeginDraw(context);
+    method15(priv, (IUnknown *)&draw, 0);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(draw.calls == 1, "Called %u times.\n", draw.calls);
+    ok(draw.refcount == 1, "Got refcount %lu.\n", draw.refcount);
+    ok(!draw.requeue, "Not requeued.\n");
+    ID2D1DeviceContext_BeginDraw(context);
+    ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(draw.calls == 1, "Called %u times.\n", draw.calls);
+
+    /* a failure of the object is the result of EndDraw */
+    draw.calls = 0;
+    draw.result = E_FAIL;
+    ID2D1DeviceContext_BeginDraw(context);
+    method15(priv, (IUnknown *)&draw, 0);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == E_FAIL, "Got unexpected hr %#lx.\n", hr);
+    ok(draw.calls == 1, "Called %u times.\n", draw.calls);
+    ok(draw.refcount == 1, "Got refcount %lu.\n", draw.refcount);
+
+    /* a second BeginDraw keeps the queue (last: Windows fails the EndDraw calls after it) */
+    draw.calls = 0;
+    draw.result = S_OK;
+    ID2D1DeviceContext_BeginDraw(context);
+    method15(priv, (IUnknown *)&draw, 0);
+    ID2D1DeviceContext_BeginDraw(context);
+    ok(draw.refcount == 2, "Got refcount %lu.\n", draw.refcount);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    todo_wine ok(hr == D2DERR_WRONG_STATE, "Got unexpected hr %#lx.\n", hr);
+    ok(draw.calls == 1, "Called %u times.\n", draw.calls);
+    ok(draw.refcount == 1, "Got refcount %lu.\n", draw.refcount);
+    ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+
+    ID2D1DeviceContext_SetTarget(context, NULL);
+    ID3D11Resource_Release(draw.expected_target);
+    ID2D1Bitmap1_Release(other);
+    ID2D1Bitmap1_Release(bitmap);
+}
+#endif
+
 /* The private interface {46fdbfea-53f8-440c-b9e2-81dfec612a72} of the device, which the lifted compositor of the Windows App SDK asks
  * for; slot 5 as it calls it. Only x86_64 is measured, and Wine answers the interface there only. */
 static void test_device_private(BOOL d3d11)
@@ -10531,6 +10751,15 @@ static void test_device_private(BOOL d3d11)
         ID2D1DeviceContext_SetTarget(context, NULL);
         ID2D1Bitmap1_Release(plain);
         ID2D1Bitmap1_Release(bitmap);
+
+        if (d3d11)
+        {
+            ID3D11Device *d3d_device;
+
+            IDXGIDevice_QueryInterface(ctx.device, &IID_ID3D11Device, (void **)&d3d_device);
+            test_context_private_queued_draw(context, unk, d3d_device);
+            ID3D11Device_Release(d3d_device);
+        }
         IUnknown_Release(unk);
     }
     else
