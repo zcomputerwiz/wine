@@ -5751,6 +5751,7 @@ struct create_service_token_request
 {
     struct request_header __header;
     unsigned int   account;
+    /* VARARG(sid,sid); */
 };
 struct create_service_token_reply
 {
@@ -7762,6 +7763,6 @@ union generic_reply
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 997
+#define SERVER_PROTOCOL_VERSION 998
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

@@ -3223,6 +3223,7 @@ static void dump_grant_process_admin_token_request( const struct grant_process_a
 static void dump_create_service_token_request( const struct create_service_token_request *req )
 {
     fprintf( stderr, " account=%08x", req->account );
+    dump_varargs_sid( ", sid=", cur_size );
 }
 
 static void dump_create_service_token_reply( const struct create_service_token_reply *req )
@@ -4989,6 +4990,7 @@ static const struct
     { "INVALID_PORT_HANDLE",         STATUS_INVALID_PORT_HANDLE },
     { "INVALID_READ_MODE",           STATUS_INVALID_READ_MODE },
     { "INVALID_SECURITY_DESCR",      STATUS_INVALID_SECURITY_DESCR },
+    { "INVALID_SID",                 STATUS_INVALID_SID },
     { "INVALID_STATE_TRANSITION",    STATUS_INVALID_STATE_TRANSITION },
     { "INVALID_USER_BUFFER",         STATUS_INVALID_USER_BUFFER },
     { "IO_REPARSE_DATA_INVALID",     STATUS_IO_REPARSE_DATA_INVALID },

@@ -1149,8 +1149,26 @@ void token_copy_auth_id( struct token *dst, const struct token *src )
 /* Tokens of the system role (docs/ELEVATION_SYSTEM_ROLE_WORKORDER.md, C3): LocalSystem, LocalService and
  * NetworkService, all primary, Default elevation, no linked token, System integrity.
  * Privileges and groups follow the native tokens measured in docs/ELEVATION_LOCAL_VALIDATION_WORKORDER.md
- * (Task Scheduler tokens). Left out on purpose: the per-task/per-service SIDs and the unknown S-1-5-32-* SIDs. */
+ * (Task Scheduler tokens). Left out on purpose: the per-task SIDs and the unknown S-1-5-32-* SIDs. A service's own SID
+ * (NT SERVICE\name) is added by token_create_service_sid when services.exe passes it (B114). */
 struct token *token_create_service( unsigned int account, unsigned int session_id )
+{
+    return token_create_service_sid( account, session_id, NULL );
+}
+
+/* a service SID, S-1-5-80-x-x-x-x-x (SECURITY_SERVICE_ID_BASE_RID and the SHA-1 of the upper case name) */
+static int is_service_id_sid( const struct sid *sid )
+{
+    static const unsigned char nt_authority[6] = SECURITY_NT_AUTHORITY;
+
+    return sid->revision == SID_REVISION && sid->sub_count == SECURITY_SERVICE_ID_RID_COUNT &&
+           !memcmp( sid->id_auth, nt_authority, sizeof(nt_authority) ) &&
+           sid->sub_auth[0] == SECURITY_SERVICE_ID_BASE_RID;
+}
+
+/* the token of a service account; own_sid, when not NULL, is the service's own SID, added as an enabled group
+ * that may own objects, as in Windows' tokens of services whose SID type is unrestricted */
+struct token *token_create_service_sid( unsigned int account, unsigned int session_id, const struct sid *own_sid )
 {
     const unsigned int on = SE_PRIVILEGE_ENABLED;
     const unsigned int grp = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY;
@@ -1223,12 +1241,24 @@ struct token *token_create_service( unsigned int account, unsigned int session_i
     default:
         return NULL;
     }
+    if (own_sid && !is_service_id_sid( own_sid )) return NULL;
 
     /* the default DACL of the account: SYSTEM and Administrators for LocalSystem, SYSTEM and the account for the others */
     if (!(default_dacl = create_default_dacl( account == SERVICE_ACCOUNT_SYSTEM ? &builtin_admins_sid : user )))
         return NULL;
-    token = create_token( 1, session_id, user, owner, primary_group, groups, group_count, privs, priv_count,
-                          default_dacl, NULL, -1, TokenElevationTypeDefault );
+    if (own_sid)
+    {
+        struct sid_attrs with_sid[ARRAY_SIZE( service_groups ) + 1];
+
+        memcpy( with_sid, groups, group_count * sizeof(*groups) );
+        with_sid[group_count].sid = own_sid;
+        with_sid[group_count].attrs = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_OWNER;
+        token = create_token( 1, session_id, user, owner, primary_group, with_sid, group_count + 1, privs, priv_count,
+                              default_dacl, NULL, -1, TokenElevationTypeDefault );
+    }
+    else
+        token = create_token( 1, session_id, user, owner, primary_group, groups, group_count, privs, priv_count,
+                              default_dacl, NULL, -1, TokenElevationTypeDefault );
     free( default_dacl );
     if (!token) return NULL;
     /* service (SYSTEM) logons use a fixed authentication id */
@@ -1376,7 +1406,15 @@ DECL_HANDLER(create_service_token)
         set_error( STATUS_INVALID_PARAMETER );
         return;
     }
-    if ((token = token_create_service( req->account, caller->session_id )))
+    /* B114: the service's own SID, computed by services.exe (trusted: the caller is the system role) */
+    if (get_req_data_size() && (!sid_valid_size( get_req_data(), get_req_data_size() ) ||
+                                !is_service_id_sid( get_req_data() )))
+    {
+        set_error( STATUS_INVALID_SID );
+        return;
+    }
+    if ((token = token_create_service_sid( req->account, caller->session_id,
+                                           get_req_data_size() ? get_req_data() : NULL )))
     {
         if (token_protect_system( token, 1 ))
             reply->token = alloc_handle_no_access_check( current->process, token, TOKEN_ALL_ACCESS, 0 );
