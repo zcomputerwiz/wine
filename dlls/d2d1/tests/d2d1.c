@@ -10424,8 +10424,11 @@ static void test_device_private(BOOL d3d11)
 {
 #ifdef __x86_64__
     static const GUID iid_private = {0x46fdbfea, 0x53f8, 0x440c, {0xb9, 0xe2, 0x81, 0xdf, 0xec, 0x61, 0x2a, 0x72}};
+    static const GUID iid_context_private = {0x2ea67ed7, 0xd42e, 0x4c07, {0x9d, 0xd5, 0xa9, 0x1e, 0xa2, 0x3e, 0x01, 0xd2}};
     typedef HRESULT (STDMETHODCALLTYPE *method5_t)(void *, UINT_PTR, UINT_PTR, DWORD *);
+    typedef HRESULT (STDMETHODCALLTYPE *method7_t)(void *, ID2D1Bitmap1 *, void *);
     static const UINT_PTR args[][2] = {{2000, 0x1e0000}, {0, 0}, {0xffffffff, 0}, {2000, 0xffffffff}};
+    static const D2D1_SIZE_U size = {16, 16};
     ID2D1DeviceContext *context;
     struct d2d1_test_context ctx;
     IUnknown *priv, *priv2, *unk;
@@ -10480,6 +10483,60 @@ static void test_device_private(BOOL d3d11)
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
     hr = ID2D1DeviceContext_QueryInterface(context, &iid_private, (void **)&unk);
     ok(hr == E_NOINTERFACE, "Got unexpected hr %#lx.\n", hr);
+
+    /* slot 7 of the context's private interface {2ea67ed7-...} sets the target, as the compositor calls it (bitmap, NULL) after
+     * BeginDraw without calling SetTarget (measured: tests/uwp/alpc/d2d-ctx-slot7-probe.cpp of WineExplorer) */
+    hr = ID2D1DeviceContext_QueryInterface(context, &iid_context_private, (void **)&unk);
+    if (hr == S_OK)
+    {
+        D2D1_BITMAP_PROPERTIES1 bitmap_desc = {{DXGI_FORMAT_R8G8B8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED}, 96.0f, 96.0f};
+        ID2D1Bitmap1 *bitmap, *plain;
+        ID2D1Image *target;
+        D2D1_COLOR_F colour = {1.0f, 0.0f, 0.0f, 1.0f};
+
+        bitmap_desc.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
+        hr = ID2D1DeviceContext_CreateBitmap(context, size, NULL, 0, &bitmap_desc, &bitmap);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        bitmap_desc.bitmapOptions = D2D1_BITMAP_OPTIONS_NONE;
+        hr = ID2D1DeviceContext_CreateBitmap(context, size, NULL, 0, &bitmap_desc, &plain);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+        /* without a target, drawing fails */
+        ID2D1DeviceContext_BeginDraw(context);
+        ID2D1DeviceContext_Clear(context, &colour);
+        hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+        ok(hr == D2DERR_WRONG_STATE, "Got unexpected hr %#lx.\n", hr);
+
+        ID2D1DeviceContext_BeginDraw(context);
+        hr = ((method7_t)(*(void ***)unk)[7])(unk, bitmap, NULL);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ID2D1DeviceContext_GetTarget(context, &target);
+        ok(target == (ID2D1Image *)bitmap, "Got unexpected target %p.\n", target);
+        if (target) ID2D1Image_Release(target);
+        ID2D1DeviceContext_Clear(context, &colour);
+        hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+        /* NULL clears it; a bitmap without the target option is not taken, and the call still succeeds */
+        hr = ((method7_t)(*(void ***)unk)[7])(unk, NULL, NULL);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ID2D1DeviceContext_GetTarget(context, &target);
+        ok(!target, "Got unexpected target %p.\n", target);
+        hr = ((method7_t)(*(void ***)unk)[7])(unk, plain, NULL);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ID2D1DeviceContext_GetTarget(context, &target);
+        ok(target != (ID2D1Image *)plain, "Got the bitmap without the target option.\n");
+        if (target) ID2D1Image_Release(target);
+
+        ID2D1DeviceContext_SetTarget(context, NULL);
+        ID2D1Bitmap1_Release(plain);
+        ID2D1Bitmap1_Release(bitmap);
+        IUnknown_Release(unk);
+    }
+    else
+    {
+        win_skip("The private context interface is not supported.\n");
+    }
     ID2D1DeviceContext_Release(context);
 
     IUnknown_Release(priv);

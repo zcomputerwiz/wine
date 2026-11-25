@@ -95,6 +95,8 @@ static ULONG STDMETHODCALLTYPE dxgi_device_Release(IWineDXGIDevice *iface)
         if (device->child_layer)
             IUnknown_Release(device->child_layer);
         wined3d_mutex_lock();
+        if (device->pending_query)
+            wined3d_query_decref(device->pending_query);
         wined3d_swapchain_decref(device->implicit_swapchain);
         wined3d_device_decref(device->wined3d_device);
         wined3d_mutex_unlock();
@@ -334,14 +336,22 @@ static HRESULT STDMETHODCALLTYPE dxgi_device_EnqueueSetEvent(IWineDXGIDevice *if
         return E_INVALIDARG;
     if (!dxgi_event_handle_valid(event))
         return E_ACCESSDENIED;
-    /* after a query that never completed, waiting again would cost the full bound on every call */
-    if (device->queries_lost)
-    {
-        SetEvent(event);
-        return DXGI_ERROR_DEVICE_REMOVED;
-    }
-
+    /* While a query that timed out is still pending, waiting again would cost the full bound on every call. It is
+     * polled once per call instead: a long stall that ends is not a device loss, and the device works again. */
     wined3d_mutex_lock();
+    if ((query = device->pending_query))
+    {
+        hr = wined3d_query_get_data(query, &done, sizeof(done), WINED3DGETDATA_FLUSH);
+        if (hr == S_FALSE)
+        {
+            wined3d_mutex_unlock();
+            SetEvent(event);
+            return DXGI_ERROR_DEVICE_REMOVED;
+        }
+        TRACE("The pending query completed, hr %#lx.\n", hr);
+        device->pending_query = NULL;
+        wined3d_query_decref(query);
+    }
     hr = wined3d_query_create(device->wined3d_device, WINED3D_QUERY_TYPE_EVENT, NULL,
             &dxgi_null_wined3d_parent_ops, &query);
     if (SUCCEEDED(hr))
@@ -360,24 +370,30 @@ static HRESULT STDMETHODCALLTYPE dxgi_device_EnqueueSetEvent(IWineDXGIDevice *if
     {
         wined3d_mutex_lock();
         hr = wined3d_query_get_data(query, &done, sizeof(done), WINED3DGETDATA_FLUSH);
+        if (hr == S_FALSE && GetTickCount() - start > 2000)
+        {
+            WARN("The query did not complete in 2 s; setting the event, the device counts as lost while it is pending.\n");
+            if (!device->pending_query)
+            {
+                device->pending_query = query;
+                query = NULL;
+            }
+            hr = DXGI_ERROR_DEVICE_REMOVED;
+        }
         wined3d_mutex_unlock();
         if (hr != S_FALSE) break;
-        if (GetTickCount() - start > 2000)
-        {
-            WARN("The query did not complete in 2 s; setting the event, the device counts as lost.\n");
-            device->queries_lost = TRUE;
-            hr = DXGI_ERROR_DEVICE_REMOVED;
-            break;
-        }
         Sleep(++spins < 64 ? 0 : 1);
     }
-    wined3d_mutex_lock();
-    wined3d_query_decref(query);
-    wined3d_mutex_unlock();
+    if (query)
+    {
+        wined3d_mutex_lock();
+        wined3d_query_decref(query);
+        wined3d_mutex_unlock();
+    }
     if (FAILED(hr)) WARN("Failed to wait for the query, hr %#lx.\n", hr);
 
     if (!SetEvent(event)) return HRESULT_FROM_WIN32(GetLastError());
-    return device->queries_lost ? DXGI_ERROR_DEVICE_REMOVED : S_OK;
+    return hr == DXGI_ERROR_DEVICE_REMOVED ? hr : S_OK;
 }
 
 static void STDMETHODCALLTYPE dxgi_device_Trim(IWineDXGIDevice *iface)

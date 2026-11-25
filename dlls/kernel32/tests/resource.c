@@ -822,12 +822,17 @@ static void test_mui_satellite(void)
     static const WCHAR en_dll[] = L"en-US\\test_mui2.dll.mui";
     /* the string table block 1 (ids 0 to 15) with "satellite" as string 1 */
     static const WORD table[] = {0, 9, 's','a','t','e','l','l','i','t','e', 0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+    static const DWORD flags[] =
+    {
+        LOAD_LIBRARY_AS_DATAFILE, LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE, LOAD_LIBRARY_AS_IMAGE_RESOURCE,
+        LOAD_LIBRARY_AS_IMAGE_RESOURCE | LOAD_LIBRARY_AS_DATAFILE, 0
+    };
     WCHAR path[MAX_PATH], buf[32];
     HMODULE module;
     HANDLE res;
     HRSRC rsrc;
     BOOL r;
-    int len;
+    int len, i;
 
     create_test_dll( ln_dll );
     CreateDirectoryW( L"en-US", NULL );
@@ -856,17 +861,34 @@ static void test_mui_satellite(void)
     ok( r, "EndUpdateResourceW failed: %ld\n", GetLastError() );
 
     GetFullPathNameW( ln_dll, ARRAY_SIZE(path), path, NULL );
-    module = LoadLibraryW( path );
-    /* Windows 11 does not load this minimal image; the test then only runs on Wine */
-    ok( module != NULL || broken( GetLastError() == ERROR_BAD_EXE_FORMAT ), "LoadLibrary failed: %ld\n", GetLastError() );
-    if (module)
+    /* as the kinds of data file (the satellite is found on Windows 11 too), then as an image (Windows 11 does not load this
+     * minimal image after EndUpdateResource, nor map it with LOAD_LIBRARY_AS_IMAGE_RESOURCE alone; those parts then only
+     * run on Wine) */
+    for (i = 0; i < ARRAY_SIZE(flags); ++i)
     {
-        rsrc = FindResourceW( module, MAKEINTRESOURCEW(1), (const WCHAR *)RT_STRING );
-        ok( rsrc != NULL, "FindResource failed: %ld\n", GetLastError() );
-        if (rsrc) ok( SizeofResource( module, rsrc ) == sizeof(table), "unexpected size %lu\n", SizeofResource( module, rsrc ) );
-        len = LoadStringW( module, 1, buf, ARRAY_SIZE(buf) );
-        ok( len == 9 && !wcscmp( buf, L"satellite" ), "LoadString returned %d %s\n", len, wine_dbgstr_w(buf) );
-        FreeLibrary( module );
+        winetest_push_context( "flags %#lx", flags[i] );
+        SetLastError( 0xdeadbeef );
+        module = LoadLibraryExW( path, NULL, flags[i] );
+        ok( module != NULL || broken( (!flags[i] || flags[i] == LOAD_LIBRARY_AS_IMAGE_RESOURCE)
+                                      && GetLastError() == ERROR_BAD_EXE_FORMAT ),
+            "LoadLibraryEx failed: %ld\n", GetLastError() );
+        if (module)
+        {
+            rsrc = FindResourceW( module, MAKEINTRESOURCEW(1), (const WCHAR *)RT_STRING );
+            ok( rsrc != NULL, "FindResource failed: %ld\n", GetLastError() );
+            if (rsrc)
+                ok( SizeofResource( module, rsrc ) == sizeof(table), "unexpected size %lu\n", SizeofResource( module, rsrc ) );
+            buf[0] = 0;
+            len = LoadStringW( module, 1, buf, ARRAY_SIZE(buf) );
+            ok( len == 9 && !wcscmp( buf, L"satellite" ), "LoadString returned %d %s\n", len, wine_dbgstr_w(buf) );
+            FreeLibrary( module );
+
+            /* freeing the module releases its satellite: the satellite's file can be updated again */
+            res = BeginUpdateResourceW( en_dll, FALSE );
+            ok( res != NULL, "BeginUpdateResourceW failed: %ld\n", GetLastError() );
+            if (res) EndUpdateResourceW( res, TRUE );
+        }
+        winetest_pop_context();
     }
 
     DeleteFileW( ln_dll );

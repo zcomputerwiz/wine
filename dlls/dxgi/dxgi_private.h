@@ -161,7 +161,8 @@ struct dxgi_device
     struct wined3d_device *wined3d_device;
     struct wined3d_swapchain *implicit_swapchain;
     IWineDXGIAdapter *adapter;
-    BOOL queries_lost;   /* an EnqueueSetEvent query never completed (device loss): later calls do not wait */
+    /* an EnqueueSetEvent query that did not complete in time: later calls do not wait while it is pending */
+    struct wined3d_query *pending_query;
 };
 
 HRESULT dxgi_device_init(struct dxgi_device *device, struct dxgi_device_layer *layer,
