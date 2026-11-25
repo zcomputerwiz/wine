@@ -1242,6 +1242,7 @@ ErrorControl=1
 
 [WexAccountsServiceKeys]
 HKLM,"System\CurrentControlSet\Services\wexaccounts","WexStartInSession0Only",0x10001,1
+HKLM,"System\CurrentControlSet\Services\wexaccounts","ServiceSidType",0x10001,1
 
 [WexPolicyService]
 Description="Writes the registry policy of the computer and of the users who log on"
