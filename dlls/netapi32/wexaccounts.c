@@ -107,9 +107,10 @@ static INIT_ONCE active_once = INIT_ONCE_STATIC_INIT;
 static BOOL active;
 static WCHAR test_pipe[MAX_PATH];   /* the pipe of a test (see test_hooks), else empty */
 
-/* The suites' hooks: another pipe than the accounts service's, or Wine's own behaviour. They are values of the machine
- * hive, which only an administrator writes (the environment of a process is not a safe place: the elevated half of a
- * program has the environment of the limited half, and a pipe of the limited half's would receive the new hash). */
+/* The suites' hooks: Wine's own behaviour (Stock), and, in the lab build only, another pipe than the accounts service's (Pipe).
+ * They are values of the machine hive, which only an administrator writes (the environment of a process is not a safe place:
+ * the elevated half of a program has the environment of the limited half, and a pipe of the limited half's would receive the
+ * new hash). */
 static void test_hooks( BOOL *stock )
 {
     DWORD size = sizeof(test_pipe), type, value = 0, vsize = sizeof(value);
@@ -117,11 +118,17 @@ static void test_hooks( BOOL *stock )
 
     *stock = FALSE;
     test_pipe[0] = 0;
-    if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"Software\\WineExplorer\\AccountsTest", 0, KEY_QUERY_VALUE, &key )) return;
+    /* the 64-bit view, whatever the caller: a 32-bit program would read Wow6432Node */
+    if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"Software\\WineExplorer\\AccountsTest", 0, KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key ))
+        return;
     if (!RegQueryValueExW( key, L"Stock", NULL, &type, (BYTE *)&value, &vsize ) && type == REG_DWORD && value) *stock = TRUE;
+#ifdef WEX_NETAPI_LAB_TEST
+    /* the lab build only (scripts/lab/r8-lab-build.sh): a pipe of a test. A shipped build never reads it: a leftover value would
+     * name a pipe that any user might serve, which would receive every new password's hash */
     if (RegQueryValueExW( key, L"Pipe", NULL, &type, (BYTE *)test_pipe, &size ) || type != REG_SZ || size < 2 * sizeof(WCHAR))
         test_pipe[0] = 0;
     else test_pipe[ARRAY_SIZE(test_pipe) - 1] = 0;
+#endif
     RegCloseKey( key );
 }
 
