@@ -3164,10 +3164,15 @@ BOOL WINAPI NtUserRegisterTouchPadCapable( BOOL capable )
  */
 INT WINAPI NtUserScheduleDispatchNotification( HWND hwnd )
 {
-    FIXME("hwnd %p stub!\n", hwnd);
+    TRACE( "hwnd %p\n", hwnd );
 
-    if (is_window(hwnd))
+    /* measured on Windows 11: a sent message 0x60 (the CoreMessaging notification) with wparam 0 and lparam 0 is queued for
+     * the window (QS_SENDMESSAGE); the window procedure runs inside the thread's next message retrieval */
+    if (is_window( hwnd ))
+    {
+        send_deferred_message( hwnd, 0x0060, 0, 0 );
         return 2;
+    }
 
     return 0;
 }

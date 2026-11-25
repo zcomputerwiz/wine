@@ -6868,10 +6868,30 @@ static void test_SetFocus_process(void)
     DestroyWindow( hwnd );
 }
 
+static unsigned int schedule_dispatch_count;
+static WPARAM schedule_dispatch_wparam;
+static LPARAM schedule_dispatch_lparam;
+static DWORD schedule_dispatch_insend;
+static WNDPROC schedule_old_proc;
+
+static LRESULT CALLBACK schedule_dispatch_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    if (msg == 0x60)
+    {
+        schedule_dispatch_count++;
+        schedule_dispatch_wparam = wparam;
+        schedule_dispatch_lparam = lparam;
+        schedule_dispatch_insend = InSendMessageEx(NULL);
+    }
+    return CallWindowProcW(schedule_old_proc, hwnd, msg, wparam, lparam);
+}
+
 static void test_ScheduleDispatchNotification(void)
 {
     HWND hwnd;
     INT ret;
+    DWORD status;
+    MSG msg;
 
     if (!pScheduleDispatchNotification)
     {
@@ -6888,6 +6908,25 @@ static void test_ScheduleDispatchNotification(void)
     ret = pScheduleDispatchNotification(hwnd);
     ok(ret == 2, "Got unexpected %d.\n", ret);
 
+    DestroyWindow(hwnd);
+
+    /* the notification is a sent message 0x60 (wparam 0, lparam 0) that reaches the window procedure inside the
+     * next message retrieval of the thread */
+    hwnd = CreateWindowW(L"static", NULL, WS_POPUP, 100, 100, 200, 200, NULL, NULL, NULL, NULL);
+    schedule_old_proc = (WNDPROC)SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)schedule_dispatch_proc);
+    schedule_dispatch_count = 0;
+    ret = pScheduleDispatchNotification(hwnd);
+    ok(ret == 2, "Got unexpected %d.\n", ret);
+    ok(!schedule_dispatch_count, "Got %u calls inside the function.\n", schedule_dispatch_count);
+    status = GetQueueStatus(QS_ALLINPUT);
+    ok(HIWORD(status) & QS_SENDMESSAGE, "Got queue status %#lx.\n", status);
+    ret = PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE);
+    ok(!ret, "Got a message %#x.\n", msg.message);
+    ok(schedule_dispatch_count == 1, "Got %u calls.\n", schedule_dispatch_count);
+    ok(!schedule_dispatch_wparam && !schedule_dispatch_lparam, "Got wparam %Ix lparam %Ix.\n",
+       schedule_dispatch_wparam, schedule_dispatch_lparam);
+    ok(!schedule_dispatch_insend, "Got InSendMessageEx %#lx.\n", schedule_dispatch_insend);
+    SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)schedule_old_proc);
     DestroyWindow(hwnd);
 }
 

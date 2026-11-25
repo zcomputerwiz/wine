@@ -4829,6 +4829,16 @@ static BOOL send_message_callback( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
     return process_message( &info, NULL, ansi );
 }
 
+/* a message sent to a window with no result wanted: for a window of the current thread it is queued as a sent message
+ * (QS_SENDMESSAGE) and reaches the window procedure inside the next message retrieval, like SendMessageCallback with
+ * a NULL callback and data 1 */
+BOOL send_deferred_message( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
+{
+    struct send_message_callback_params params = { .callback = NULL, .data = 1 };
+
+    return send_message_callback( hwnd, msg, wparam, lparam, &params, FALSE );
+}
+
 /***********************************************************************
  *           NtUserPostMessage  (win32u.@)
  */
