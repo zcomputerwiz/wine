@@ -1950,23 +1950,13 @@ done:
  * a crash from a Log Off. */
 static void mark_session_ending( BOOL on )
 {
-    WCHAR path[MAX_PATH];
+    /* the root of the prefix's C: drive, which the account can write (the Windows directory of a prefix can be shared
+     * and read-only, and the profile's name is not known to the supervisor). One name for the prefix: its sessions
+     * share one wineserver and --end-session ends them all, and the caller of ExitWindowsEx (an elevated broker, a
+     * logoff script) need not have the login session's environment */
+    const WCHAR *path = L"C:\\wex-session-ending";
     HANDLE file;
 
-    WCHAR session[32];
-    DWORD len;
-
-    /* one file per login session (XDG_SESSION_ID, set by the display manager), when an account can have two sessions on
-     * one prefix; the supervisor names it the same way */
-    /* the root of the prefix's C: drive, which the account can write (the Windows directory of a prefix can be shared
-     * and read-only, and the profile's name is not known to the supervisor) */
-    lstrcpyW( path, L"C:\\wex-session-ending" );
-    len = GetEnvironmentVariableW( L"XDG_SESSION_ID", session, ARRAY_SIZE( session ));
-    if (len && len < ARRAY_SIZE( session ))
-    {
-        lstrcatW( path, L"-" );
-        lstrcatW( path, session );
-    }
     if (!on)
     {
         DeleteFileW( path );
