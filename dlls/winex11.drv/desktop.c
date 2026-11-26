@@ -156,11 +156,51 @@ static void destroy_dead_children( Display *display, Window desktop )
     if (children) XFree( children );
 }
 
+/* whether the X window still exists */
+static BOOL x_window_exists( Display *display, Window win, XWindowAttributes *attrs )
+{
+    int ok;
+
+    X11DRV_expect_error( display, ignore_x_error, NULL );
+    ok = XGetWindowAttributes( display, win, attrs );
+    XSync( display, False );
+    return !X11DRV_check_error() && ok;
+}
+
+/* The old desktop window is left behind and not taken over. It must not stay: it is a full-screen window of the dead
+ * manager, covering the new desktop (a blank screen) and listed by the window manager as a second "Wine Desktop". It goes
+ * with the dead manager's taskbar and the windows of the programs inside it, as before B121, when the manager's
+ * connection closing took them. */
+static void destroy_retained_desktop( Display *display, Window old )
+{
+    XWindowAttributes attrs;
+
+    if (!x_window_exists( display, old, &attrs )) return;
+    WARN( "destroying the retained desktop window %lx\n", old );
+    X11DRV_expect_error( display, ignore_x_error, NULL );
+    XDestroyWindow( display, old );
+    XSync( display, False );
+    X11DRV_check_error();
+}
+
+/* Wine tests only (a test of the failed takeover): WINE_X11_RETAIN_TEST_REFUSE set refuses the takeover as if another
+ * client held the window's events */
+static BOOL test_refuse_takeover(void)
+{
+    const char *env = getenv( "WINE_X11_RETAIN_TEST_REFUSE" );
+    return env && *env && *env != '0';
+}
+
+/* The old connection can still be closing when the replacement starts (the manager was killed): the window is not there
+ * yet or still held. A short wait, 20 tries of 50 ms. */
+#define ADOPT_TRIES 20
+
 /***********************************************************************
  *           X11DRV_adopt_desktop
  *
  * The desktop manager that replaces a dead one takes over the X window the dead one left (the stored id): returns FALSE
- * when there is none (not retained, or gone), and the window this process made is used.
+ * when there is none (not retained, or gone), and the window this process made is used. When the window is there and
+ * cannot be taken over, it is destroyed (see destroy_retained_desktop), so that the window made here is the only one.
  */
 BOOL X11DRV_adopt_desktop( Window old )
 {
@@ -168,14 +208,27 @@ BOOL X11DRV_adopt_desktop( Window old )
     XWindowAttributes attrs;
     XSetWindowAttributes win_attr;
     Window ours = root_window;
-    int ok;
+    unsigned int tries;
+    BOOL taken = FALSE;
 
-    if (!retain_desktop( NULL ) || !old || old == ours || !is_virtual_desktop()) return FALSE;
+    if (!old || old == ours || !is_virtual_desktop() || old == DefaultRootWindow( display )) return FALSE;
 
-    X11DRV_expect_error( display, ignore_x_error, NULL );
-    ok = XGetWindowAttributes( display, old, &attrs );
-    XSync( display, False );
-    if (X11DRV_check_error() || !ok) return FALSE;
+    if (!retain_desktop( NULL ))
+    {
+        WARN( "the desktop window %lx is not taken over: WINE_X11_RETAIN_DESKTOP is not set\n", old );
+        destroy_retained_desktop( display, old );
+        return FALSE;
+    }
+
+    for (tries = 0; !x_window_exists( display, old, &attrs ); tries++)
+    {
+        if (tries >= ADOPT_TRIES)
+        {
+            WARN( "the desktop window %lx is gone\n", old );
+            return FALSE;
+        }
+        usleep( 50000 );
+    }
 
     TRACE( "taking over the desktop window %lx from %lx\n", old, ours );
     /* the dead manager's ButtonPress selection is still held by the X server (one client only), and the shell's own windows cover the desktop */
@@ -183,12 +236,19 @@ BOOL X11DRV_adopt_desktop( Window old )
                           PointerMotionMask | ButtonReleaseMask | FocusChangeMask |
                           StructureNotifyMask | PropertyChangeMask;
     win_attr.cursor = XCreateFontCursor( display, XC_top_left_arrow );
-    X11DRV_expect_error( display, ignore_x_error, NULL );
-    XChangeWindowAttributes( display, old, CWEventMask | CWCursor, &win_attr );
-    XSync( display, False );
-    if (X11DRV_check_error())  /* another client refuses part of the mask: the window made here stays the desktop */
+    for (tries = 0; tries < ADOPT_TRIES && !taken; tries++)
+    {
+        if (tries) usleep( 50000 );
+        if (test_refuse_takeover()) break;
+        X11DRV_expect_error( display, ignore_x_error, NULL );
+        XChangeWindowAttributes( display, old, CWEventMask | CWCursor, &win_attr );
+        XSync( display, False );
+        taken = !X11DRV_check_error();
+    }
+    if (!taken)  /* another client refuses part of the mask: the window made here is the desktop, and the old one goes */
     {
         WARN( "cannot take over the desktop window %lx\n", old );
+        destroy_retained_desktop( display, old );
         return FALSE;
     }
     if (XGetWindowAttributes( display, ours, &attrs ))
