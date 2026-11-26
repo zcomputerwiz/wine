@@ -1,0 +1,111 @@
+/*
+ * The input-site classes of inputhost.dll
+ *
+ * Copyright 2026 WineExplorer contributors
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+/* No metadata describes these classes. The class names and interface ids are the ones Windows 10 answers; the interface
+ * and method names are ours. The shapes were measured at the interface boundary only (see main.c). */
+
+#pragma makedep header
+#pragma makedep register
+
+#ifdef __WIDL__
+#pragma winrt ns_prefix
+#endif
+
+import "inspectable.idl";
+import "windowscontracts.idl";
+import "windows.foundation.idl";
+
+namespace Windows.UI.Internal.Input {
+    interface IInputSite;
+    interface IInputSiteStatics;
+    interface IActivationConfigurationInputObject;
+    interface IActivationConfigurationInputObjectStatics;
+    runtimeclass InputSite;
+    runtimeclass ActivationConfigurationInputObject;
+
+    /* the default interface of a site; its methods, if it has any, are not known */
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.Internal.Input.InputSite),
+        uuid(f77d91d0-46ca-4464-99c1-8902aed17680)
+    ]
+    interface IInputSite : IInspectable
+    {
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.Internal.Input.InputSite),
+        uuid(8ca0442d-ae80-47b0-af23-813fc1da9cd0)
+    ]
+    interface IInputSiteStatics : IInspectable
+    {
+        HRESULT CreateForHost([in] IInspectable *host, [out, retval] Windows.UI.Internal.Input.InputSite **site);
+    }
+
+    /* two 32-bit settings, each read and written; what they mean is not known */
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.Internal.Input.ActivationConfigurationInputObject),
+        uuid(773ebb88-99de-4a39-b9fa-02adaec25d4d)
+    ]
+    interface IActivationConfigurationInputObject : IInspectable
+    {
+        [propget] HRESULT Setting1([out, retval] INT32 *value);
+        [propput] HRESULT Setting1([in] INT32 value);
+        [propget] HRESULT Setting2([out, retval] INT32 *value);
+        [propput] HRESULT Setting2([in] INT32 value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.Internal.Input.ActivationConfigurationInputObject),
+        uuid(4c8421ca-3863-5236-b09a-757cf68c5fa5)
+    ]
+    interface IActivationConfigurationInputObjectStatics : IInspectable
+    {
+        HRESULT CreateForInputSite([in] Windows.UI.Internal.Input.InputSite *site,
+                                   [out, retval] Windows.UI.Internal.Input.ActivationConfigurationInputObject **object);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.UI.Internal.Input.IInputSiteStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        threading(both)
+    ]
+    runtimeclass InputSite
+    {
+        [default] interface Windows.UI.Internal.Input.IInputSite;
+        interface Windows.Foundation.IClosable;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.UI.Internal.Input.IActivationConfigurationInputObjectStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        threading(both)
+    ]
+    runtimeclass ActivationConfigurationInputObject
+    {
+        [default] interface Windows.UI.Internal.Input.IActivationConfigurationInputObject;
+        interface Windows.Foundation.IClosable;
+    }
+}

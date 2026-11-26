@@ -1234,6 +1234,7 @@ enable_inetmib1
 enable_infosoft
 enable_initpki
 enable_inkobj
+enable_inputhost
 enable_inseng
 enable_iphlpapi
 enable_iprop
@@ -22332,6 +22333,8 @@ wine_fn_config_makefile dlls/infosoft enable_infosoft
 wine_fn_config_makefile dlls/infosoft/tests enable_tests
 wine_fn_config_makefile dlls/initpki enable_initpki
 wine_fn_config_makefile dlls/inkobj enable_inkobj
+wine_fn_config_makefile dlls/inputhost enable_inputhost
+wine_fn_config_makefile dlls/inputhost/tests enable_tests
 wine_fn_config_makefile dlls/inseng enable_inseng
 wine_fn_config_makefile dlls/iphlpapi enable_iphlpapi
 wine_fn_config_makefile dlls/iphlpapi/tests enable_tests

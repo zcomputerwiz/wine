@@ -1,0 +1,5 @@
+TESTDLL = inputhost.dll
+IMPORTS = combase
+
+SOURCES = \
+	inputhost.c
