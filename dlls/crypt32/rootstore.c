@@ -771,16 +771,18 @@ void CRYPT_ImportSystemRootCertsToReg(void)
     if (root_certs_imported)
         return;
 
-    hsem = wine_create_internal_semaphore( 0, 1, L"crypt32_root_semaphore" );
+    /* WineExplorer: a mutex, not a semaphore created at 0: if the importing process dies, the waiters get it
+     * abandoned instead of waiting forever. One of Wine's internal locks (wine/internal_lock.h). */
+    hsem = wine_create_internal_mutex( TRUE, L"crypt32_root_mutex" );
     if (!hsem)
     {
-        ERR("Failed to create semaphore\n");
+        ERR("Failed to create mutex\n");
         return;
     }
 
     if(GetLastError() == ERROR_ALREADY_EXISTS)
     {
-        WaitForSingleObject(hsem, INFINITE);
+        WaitForSingleObject(hsem, INFINITE);  /* WAIT_OBJECT_0 or WAIT_ABANDONED: owned either way */
         goto done;
     }
 
@@ -803,6 +805,6 @@ done:
     RegCloseKey(key);
     CertCloseStore(cached, 0);
     root_certs_imported = TRUE;
-    ReleaseSemaphore(hsem, 1, NULL);
+    ReleaseMutex(hsem);
     CloseHandle(hsem);
 }
