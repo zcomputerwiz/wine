@@ -277,7 +277,7 @@ static void test_input_site(void)
     ok( host.sink_calls == 1, "The sink was asked for %d times.\n", host.sink_calls );
     ok( host.object_calls == is_win11, "The object was asked for %d times.\n", host.object_calls );
     ok( !host.unexpected_calls, "%d calls of other methods of the host.\n", host.unexpected_calls );
-    ok( host.ref > 1, "Got %ld references on the host.\n", host.ref );
+    ok( host.ref == 1, "Got %ld references on the host.\n", host.ref );
     IInspectable_Release( statics );
     if (!site) goto done;
 
@@ -385,12 +385,8 @@ static void test_input_site(void)
         IClosable_Release( closable );
     }
     refs = IInspectable_Release( site );
-    trace( "site: %ld references left after the last Release, host: %ld references.\n", refs, host.ref );
-    if (!strcmp( winetest_platform, "wine" ))
-    {
-        ok( !refs, "Got %ld references on the site.\n", refs );
-        ok( host.ref == 1, "Got %ld references on the host.\n", host.ref );
-    }
+    ok( !refs, "Got %ld references on the site.\n", refs );
+    ok( host.ref == 1, "Got %ld references on the host.\n", host.ref );
 
 done:
     CloseHandle( host.sink );

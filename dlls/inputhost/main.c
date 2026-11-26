@@ -28,13 +28,14 @@
  *   - Its one method takes the caller's host object and returns a site. The host is asked for the interface
  *     {92179cc0-...}, and slot 9 of that interface for a handle: the composition input sink of the caller's input window
  *     (NtCreateCompositionInputSink). Windows does not check the handle (an event, or NULL, gives a site as well); a host
- *     that refuses the interface or fails the call ends the process there, here the creation fails.
+ *     that refuses the interface or fails the call ends the process there, here the creation fails. No reference to
+ *     the host is kept.
  *   - The configuration object is created from a site and has two 32-bit settings that start as 0 and read back what
  *     was written.
  *   - A site lists four more interfaces on Windows ({e6414e4b-...}, {2cc67fbf-...}, {46cae093-...} and IClosable), the
  *     configuration object more still. Their methods are not known; only IClosable is answered.
  * The site does not deliver input yet.
- * 32-bit: the calls were measured with 64-bit callers; the argument counts are the same ones here.
+ * The test passes on both Windows versions in 32 and 64 bit, so the argument counts hold for 32-bit callers too.
  */
 
 #include <stdarg.h>
@@ -120,26 +121,12 @@ struct input_site
     IInputSite IInputSite_iface;
     IClosable IClosable_iface;
     LONG ref;
-    CRITICAL_SECTION cs;
-    IUnknown *host;   /* the host's {92179cc0} interface; NULL once closed */
-    HANDLE sink;      /* the caller's handle, not owned */
+    HANDLE sink;      /* the caller's handle, not owned; NULL once closed */
 };
 
 static inline struct input_site *impl_from_IInputSite( IInputSite *iface )
 {
     return CONTAINING_RECORD( iface, struct input_site, IInputSite_iface );
-}
-
-static void input_site_drop_host( struct input_site *impl )
-{
-    IUnknown *host;
-
-    EnterCriticalSection( &impl->cs );
-    host = impl->host;
-    impl->host = NULL;
-    impl->sink = NULL;
-    LeaveCriticalSection( &impl->cs );
-    if (host) IUnknown_Release( host );
 }
 
 static HRESULT WINAPI input_site_QueryInterface( IInputSite *iface, REFIID iid, void **out )
@@ -185,12 +172,7 @@ static ULONG WINAPI input_site_Release( IInputSite *iface )
 
     TRACE( "iface %p decreasing ref to %lu.\n", iface, ref );
 
-    if (!ref)
-    {
-        input_site_drop_host( impl );
-        DeleteCriticalSection( &impl->cs );
-        free( impl );
-    }
+    if (!ref) free( impl );
     return ref;
 }
 
@@ -240,7 +222,7 @@ static HRESULT WINAPI input_site_closable_Close( IClosable *iface )
 
     TRACE( "iface %p.\n", iface );
 
-    input_site_drop_host( impl );
+    InterlockedExchangePointer( &impl->sink, NULL );
     return S_OK;
 }
 
@@ -610,21 +592,16 @@ static HRESULT WINAPI input_site_statics_CreateForHost( IInputSiteStatics *iface
         IUnknown_Release( host_iface );
         return hr;
     }
+    /* no reference to the host is kept, as on Windows */
+    IUnknown_Release( host_iface );
     /* Windows then hands such a host a handle of its own (slot 10) and asks again; an application's host has a sink */
     if (!sink) FIXME( "The host has no input sink.\n" );
 
-    if (!(impl = calloc( 1, sizeof(*impl) )))
-    {
-        IUnknown_Release( host_iface );
-        return E_OUTOFMEMORY;
-    }
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IInputSite_iface.lpVtbl = &input_site_vtbl;
     impl->IClosable_iface.lpVtbl = &input_site_closable_vtbl;
     impl->ref = 1;
-    impl->host = host_iface;
     impl->sink = sink;
-    InitializeCriticalSectionEx( &impl->cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO );
-    impl->cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": input_site.cs");
 
     FIXME( "site %p for the input sink %p: input is not delivered through it yet.\n", impl, sink );
 
