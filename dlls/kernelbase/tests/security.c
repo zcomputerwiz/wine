@@ -818,7 +818,7 @@ done:
  * release it must observe the complete value (not a half-published or missing one). */
 static void test_AppContainerBlockedReader( void )
 {
-    static const WCHAR lock_name[] = L"\\KernelObjects\\WineAppContainerRegistrationLock";
+    WCHAR lock_name[96];
     WCHAR name[64], args[200], ename[96];
     PSID sid;
     PROCESS_INFORMATION pi;
@@ -848,6 +848,9 @@ static void test_AppContainerBlockedReader( void )
     hr = pAppContainerRegisterSid( sid, L"PubMoniker", L"PubDisp" );
     ok( hr == S_OK, "setup register for blocked-reader returned %#lx.\n", (unsigned long)hr );
 
+    /* Wine's internal lock directory (wine/internal_lock.h) */
+    swprintf( lock_name, ARRAY_SIZE(lock_name), L"\\Sessions\\%lu\\WineObjects\\WineAppContainerRegistrationLock",
+              NtCurrentTeb()->Peb->SessionId );
     RtlInitUnicodeString( &us, lock_name );
     InitializeObjectAttributes( &attr, &us, OBJ_CASE_INSENSITIVE | OBJ_OPENIF, NULL, NULL );
     status = NtCreateMutant( &lock, SYNCHRONIZE, &attr, FALSE );
@@ -921,7 +924,7 @@ done:
  * existing registration. Run last so it leaves no stray object for other tests. */
 static void test_AppContainerLockFailure( void )
 {
-    static const WCHAR lock_name[] = L"\\KernelObjects\\WineAppContainerRegistrationLock";
+    WCHAR lock_name[96];
     WCHAR name[64];
     PSID sid;
     OBJECT_ATTRIBUTES attr;
@@ -945,6 +948,8 @@ static void test_AppContainerLockFailure( void )
     }
     pAppContainerUnregisterSid( sid );
 
+    swprintf( lock_name, ARRAY_SIZE(lock_name), L"\\Sessions\\%lu\\WineObjects\\WineAppContainerRegistrationLock",
+              NtCurrentTeb()->Peb->SessionId );
     RtlInitUnicodeString( &us, lock_name );
     InitializeObjectAttributes( &attr, &us, OBJ_CASE_INSENSITIVE, NULL, NULL );
     status = NtCreateEvent( &evh, EVENT_MODIFY_STATE | SYNCHRONIZE, &attr, 0, FALSE );

@@ -43,6 +43,7 @@
 #include "wine/unixlib.h"
 #include "wine/rbtree.h"
 #include "wine/debug.h"
+#include "wine/internal_lock.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(font);
 
@@ -6734,10 +6735,8 @@ UINT font_init(void)
     DWORD disposition;
     UINT dpi = 0;
 
-    /* WineExplorer: in \KernelObjects, not \BaseNamedObjects (wine/internal_lock.h) */
-    static WCHAR wine_font_mutexW[] =
-        {'\\','K','e','r','n','e','l','O','b','j','e','c','t','s',
-         '\\','_','_','W','I','N','E','_','F','O','N','T','_','M','U','T','E','X','_','_'};
+    WCHAR wine_font_mutexW[64];
+    char font_mutex[64];
     static const WCHAR wine_fonts_keyW[] =
         {'S','o','f','t','w','a','r','e','\\','W','i','n','e','\\','F','o','n','t','s'};
     static const WCHAR cacheW[] = {'C','a','c','h','e'};
@@ -6755,10 +6754,14 @@ UINT font_init(void)
     load_file_system_fonts();
     font_funcs->load_fonts();
 
+    /* WineExplorer: one of Wine's internal locks (wine/internal_lock.h), out of \BaseNamedObjects */
+    snprintf( font_mutex, sizeof(font_mutex), WINE_INTERNAL_LOCK_DIR_FMT "__WINE_FONT_MUTEX__",
+              RtlGetCurrentPeb()->SessionId );
     attr.Attributes = OBJ_OPENIF;
     attr.ObjectName = &name;
     name.Buffer = wine_font_mutexW;
-    name.Length = name.MaximumLength = sizeof(wine_font_mutexW);
+    name.MaximumLength = asciiz_to_unicode( wine_font_mutexW, font_mutex );
+    name.Length = name.MaximumLength - sizeof(WCHAR);
 
     if (NtCreateMutant( &mutex, MUTEX_ALL_ACCESS, &attr, FALSE ) < 0) return dpi;
     NtWaitForSingleObject( mutex, FALSE, NULL );

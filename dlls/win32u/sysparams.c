@@ -35,6 +35,7 @@
 #include "d3dkmdt.h"
 #include "wine/wingdi16.h"
 #include "wine/server.h"
+#include "wine/internal_lock.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(system);
 
@@ -360,9 +361,10 @@ static HANDLE get_display_device_init_mutex( void )
     char buffer[256];
     HANDLE mutex;
 
-    /* WineExplorer: in \KernelObjects, so that no other server sharing \BaseNamedObjects (session 0's) reaches it
-     * (wine/internal_lock.h); one server holds one session */
-    snprintf( buffer, ARRAY_SIZE(buffer), "\\KernelObjects\\display_device_init" );
+    /* WineExplorer: one of Wine's internal locks (wine/internal_lock.h), per session as before, out of the session's
+     * \BaseNamedObjects (session 0's is shared with the sessions) */
+    snprintf( buffer, ARRAY_SIZE(buffer), WINE_INTERNAL_LOCK_DIR_FMT "display_device_init",
+              RtlGetCurrentPeb()->SessionId );
     name.MaximumLength = asciiz_to_unicode( bufferW, buffer );
     name.Length = name.MaximumLength - sizeof(WCHAR);
 
