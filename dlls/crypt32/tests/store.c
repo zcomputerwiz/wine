@@ -29,6 +29,7 @@
 #include <winreg.h>
 #include <winerror.h>
 #include <wincrypt.h>
+#include <winternl.h>
 
 #include "wine/test.h"
 
@@ -3893,8 +3894,91 @@ static void test_CryptQueryObject(void)
     ok( ctx == NULL, "got %p\n", ctx );
 }
 
+/* WineExplorer: the root import lock is a mutex in Wine's internal lock directory (dlls/crypt32/rootstore.c) */
+static DWORD WINAPI abandon_root_import_lock( void *arg )
+{
+    WCHAR path[96];
+    UNICODE_STRING name;
+    OBJECT_ATTRIBUTES attr;
+    HANDLE *mutex = arg;
+    NTSTATUS status;
+
+    swprintf( path, ARRAY_SIZE(path), L"\\Sessions\\%lu\\WineObjects\\crypt32_root_mutex",
+              NtCurrentTeb()->Peb->SessionId );
+    RtlInitUnicodeString( &name, path );
+    InitializeObjectAttributes( &attr, &name, OBJ_OPENIF, NULL, NULL );
+    status = NtCreateMutant( mutex, MUTANT_ALL_ACCESS, &attr, TRUE );
+    ok( !status, "creating the lock returned %#lx\n", status );
+    return 0;  /* ends owning it: the mutex is abandoned, its handle stays open */
+}
+
+/* the child: the root import lock was abandoned by a thread that died mid-import; opening Root must not hang, and
+ * the store is filled (this process imports) */
+static void root_import_abandoned_child(void)
+{
+    HANDLE thread, mutex = NULL, store;
+    PCCERT_CONTEXT cert = NULL;
+    DWORD count = 0;
+
+    thread = CreateThread( NULL, 0, abandon_root_import_lock, &mutex, 0, NULL );
+    WaitForSingleObject( thread, INFINITE );
+    CloseHandle( thread );
+    store = CertOpenStore( CERT_STORE_PROV_SYSTEM_W, 0, 0, CERT_SYSTEM_STORE_LOCAL_MACHINE, L"Root" );
+    ok( store != NULL, "CertOpenStore failed: %lu\n", GetLastError() );
+    if (!store) return;
+    while ((cert = CertEnumCertificatesInStore( store, cert ))) count++;
+    ok( count > 0, "the Root store is empty\n" );
+    CertCloseStore( store, 0 );
+    if (mutex) CloseHandle( mutex );
+}
+
+static void test_root_import_lock(void)
+{
+    PROCESS_INFORMATION pi;
+    STARTUPINFOA si = { sizeof(si) };
+    char cmd[MAX_PATH + 32], **argv;
+    PCCERT_CONTEXT cert = NULL;
+    HANDLE store;
+    DWORD count = 0, ret;
+
+    if (strcmp( winetest_platform, "wine" ))
+    {
+        skip( "Wine's root import lock\n" );
+        return;
+    }
+    /* a second process finds the store filled */
+    store = CertOpenStore( CERT_STORE_PROV_SYSTEM_W, 0, 0, CERT_SYSTEM_STORE_LOCAL_MACHINE, L"Root" );
+    ok( store != NULL, "CertOpenStore failed: %lu\n", GetLastError() );
+    if (store)
+    {
+        while ((cert = CertEnumCertificatesInStore( store, cert ))) count++;
+        ok( count > 0, "the Root store is empty\n" );
+        CertCloseStore( store, 0 );
+    }
+
+    winetest_get_mainargs( &argv );
+    sprintf( cmd, "\"%s\" store root_import_abandoned", argv[0] );
+    ret = CreateProcessA( NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi );
+    ok( ret, "CreateProcess failed: %lu\n", GetLastError() );
+    if (!ret) return;
+    ret = WaitForSingleObject( pi.hProcess, 60000 );
+    ok( ret == WAIT_OBJECT_0, "the child hung on an abandoned import lock\n" );
+    if (ret != WAIT_OBJECT_0) TerminateProcess( pi.hProcess, 1 );
+    wait_child_process( pi.hProcess );
+    CloseHandle( pi.hProcess );
+    CloseHandle( pi.hThread );
+}
+
 START_TEST(store)
 {
+    char **argv;
+
+    if (winetest_get_mainargs( &argv ) >= 3 && !strcmp( argv[2], "root_import_abandoned" ))
+    {
+        root_import_abandoned_child();
+        return;
+    }
+
     /* various combinations of CertOpenStore */
     testMemStore();
     testCollectionStore();
@@ -3930,4 +4014,5 @@ START_TEST(store)
     test_PFXImportCertStore_trailing_zeros();
     test_PFXExportCertStoreEx();
     test_CryptQueryObject();
+    test_root_import_lock();
 }
