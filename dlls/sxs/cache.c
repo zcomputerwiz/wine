@@ -25,12 +25,14 @@
 
 #include "windef.h"
 #include "winbase.h"
+#include "winternl.h"
 #include "ole2.h"
 #include "winsxs.h"
 #include "msxml2.h"
 
 #include "wine/debug.h"
 #include "wine/list.h"
+#include "wine/internal_lock.h"
 #include "sxs_private.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(sxs);
@@ -778,7 +780,7 @@ HRESULT WINAPI CreateAssemblyCache( IAssemblyCache **obj, DWORD reserved )
 
     cache->IAssemblyCache_iface.lpVtbl = &cache_vtbl;
     cache->refs = 1;
-    cache->lock = CreateMutexW( NULL, FALSE, cache_mutex_nameW );
+    cache->lock = wine_create_internal_mutex( FALSE, cache_mutex_nameW );
     if (!cache->lock)
     {
         free( cache );
