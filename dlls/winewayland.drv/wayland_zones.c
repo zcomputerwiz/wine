@@ -118,7 +118,7 @@ void wayland_zones_init(void)
     snprintf(buffer, sizeof(buffer), "Zone_%08x", hash);
     for (i = 0; (value_name[i] = buffer[i]); ++i) {}
     RtlInitUnicodeString(&value, value_name);
-    RtlInitUnicodeString(&name, u"\\BaseNamedObjects\\WineWaylandZones");
+    RtlInitUnicodeString(&name, u"\\KernelObjects\\WineWaylandZones");  /* not \BaseNamedObjects: wine/internal_lock.h */
     InitializeObjectAttributes(&attr, &name, OBJ_OPENIF | OBJ_CASE_INSENSITIVE, NULL, NULL);
     if (NtCreateMutant(&mutex, MUTANT_ALL_ACCESS, &attr, FALSE) < 0) return;
     if (NtWaitForSingleObject(mutex, FALSE, NULL) < 0) { NtClose(mutex); return; }
