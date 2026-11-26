@@ -1583,8 +1583,10 @@ done:
 #define AC_MONIKER_VALUE  L"Moniker"
 #define AC_DISPLAY_VALUE  L"DisplayName"
 /* A fully qualified NT object path is required: a bare relative name with no
- * RootDirectory is not a valid object path (STATUS_OBJECT_PATH_SYNTAX_BAD). */
-#define AC_LOCK_NAME      L"\\BaseNamedObjects\\WineAppContainerRegistrationLock"
+ * RootDirectory is not a valid object path (STATUS_OBJECT_PATH_SYNTAX_BAD). In \KernelObjects, not
+ * \BaseNamedObjects: the lock guards the user's own mappings, and no program (nor another server sharing
+ * \BaseNamedObjects, WineExplorer's session 0) can reach it there (wine/internal_lock.h). */
+#define AC_LOCK_NAME      L"\\KernelObjects\\WineAppContainerRegistrationLock"
 /* Sanity cap for a stored moniker; anything larger is treated as corrupt. */
 #define AC_MAX_MONIKER_BYTES 0x10000
 

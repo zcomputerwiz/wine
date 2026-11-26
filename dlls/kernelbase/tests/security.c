@@ -818,7 +818,7 @@ done:
  * release it must observe the complete value (not a half-published or missing one). */
 static void test_AppContainerBlockedReader( void )
 {
-    static const WCHAR lock_name[] = L"\\BaseNamedObjects\\WineAppContainerRegistrationLock";
+    static const WCHAR lock_name[] = L"\\KernelObjects\\WineAppContainerRegistrationLock";
     WCHAR name[64], args[200], ename[96];
     PSID sid;
     PROCESS_INFORMATION pi;
@@ -921,7 +921,7 @@ done:
  * existing registration. Run last so it leaves no stray object for other tests. */
 static void test_AppContainerLockFailure( void )
 {
-    static const WCHAR lock_name[] = L"\\BaseNamedObjects\\WineAppContainerRegistrationLock";
+    static const WCHAR lock_name[] = L"\\KernelObjects\\WineAppContainerRegistrationLock";
     WCHAR name[64];
     PSID sid;
     OBJECT_ATTRIBUTES attr;
