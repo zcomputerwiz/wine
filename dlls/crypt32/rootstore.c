@@ -782,8 +782,10 @@ void CRYPT_ImportSystemRootCertsToReg(void)
 
     if(GetLastError() == ERROR_ALREADY_EXISTS)
     {
-        WaitForSingleObject(hsem, INFINITE);  /* WAIT_OBJECT_0 or WAIT_ABANDONED: owned either way */
-        goto done;
+        /* owned after either wait; WAIT_ABANDONED: the importing process died mid-import, so this one imports
+         * (create, import and release all happen on this thread) */
+        if (WaitForSingleObject(hsem, INFINITE) != WAIT_ABANDONED)
+            goto done;
     }
 
     /* the shared (64-bit) view, which 32-bit and 64-bit programs both read (store.c, CRYPT_SysRegOpenStoreW) */
