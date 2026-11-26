@@ -44,6 +44,7 @@
 #include "wine/debug.h"
 #include "wine/list.h"
 #include "wine/rbtree.h"
+#include "wine/internal_lock.h"
 #include <wine/unixlib.h>
 
 #include "ddk/compstui.h"
@@ -1091,7 +1092,7 @@ void WINSPOOL_LoadSystemPrinters(void)
     WCHAR               PrinterName[256];
 
     /* FIXME: The init code should be moved to spoolsv.exe */
-    init_mutex = CreateMutexW( NULL, TRUE, L"__WINE_WINSPOOL_MUTEX__" );
+    init_mutex = wine_create_internal_mutex( TRUE, L"__WINE_WINSPOOL_MUTEX__" );
     if (!init_mutex)
     {
         ERR( "Failed to create mutex\n" );
