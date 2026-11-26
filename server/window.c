@@ -634,15 +634,20 @@ static void set_desktop_manager( struct desktop *desktop, struct process *proces
     desktop->manager_died = 0;
 }
 
-/* whether the current process may take over the top window of a desktop whose manager died (B120): the desktop is a
- * Wine virtual or root desktop (the shell's, not a service's), and the caller is the manager's user in its session
+/* whether the current process may take over the top window of a desktop whose manager died (B120): the desktop is on
+ * the interactive window station (the shell's, not a service's; the Wayland session's desktop has no virtual or root
+ * flag, so the window station is what tells), and the caller is the manager's user in its session
  * with at least its integrity level, not an AppContainer or restricted token; the secure desktop only for the
  * system role */
 static int may_take_over_desktop( struct desktop *desktop )
 {
     if (!desktop->manager_died || !desktop->manager_user) return 0;
-    if (!(desktop->shared->flags & (DF_WINE_VIRTUAL_DESKTOP | DF_WINE_ROOT_DESKTOP))) return 0;
+    if (!(desktop->winstation->flags & WSF_VISIBLE)) return 0;   /* the interactive window station's, not a service's */
     if (desktop->secure && !sysrun_process_is_system( current->process )) return 0;
+    /* the process's token, and the thread's too when it impersonates: both must pass */
+    if (current->token && !token_may_take_desktop( current->token, desktop->manager_user, desktop->manager_session,
+                                                   desktop->manager_il ))
+        return 0;
     return token_may_take_desktop( current->process->token, desktop->manager_user, desktop->manager_session,
                                    desktop->manager_il );
 }
@@ -676,6 +681,9 @@ static struct window *reattach_desktop_window( struct window *win, struct deskto
     }
     SHARED_WRITE_END;
     current->desktop_users++;
+    /* what detach_window_thread took off the old thread's queue */
+    if (win->update_region) inc_queue_paint_count( current, 1 );
+    if (win->paint_flags & PAINT_INTERNAL) inc_queue_paint_count( current, 1 );
     set_user_handle_owner( win->handle, current );
     set_desktop_manager( desktop, current->process );
     set_process_default_desktop( current->process, desktop, current->desktop );

@@ -1944,7 +1944,7 @@ done:
     return ret;
 }
 
-/* WineExplorer: a session that ends on purpose (Log Off, shut down) leaves the file C:\windows\temp\wex-session-ending
+/* WineExplorer: a session that ends on purpose (Log Off, shut down) leaves the file C:\wex-session-ending
  * before it starts ending, and removes it when the end is refused. The session's supervisor (wex_run_shell) restarts
  * the shell when it ended without it, as Winlogon does (AutoRestartShell); the exit status of the launcher cannot tell
  * a crash from a Log Off. */
@@ -1953,10 +1953,20 @@ static void mark_session_ending( BOOL on )
     WCHAR path[MAX_PATH];
     HANDLE file;
 
-    GetWindowsDirectoryW( path, MAX_PATH - ARRAY_SIZE( L"\\temp\\wex-session-ending" ));
-    lstrcatW( path, L"\\temp" );
-    CreateDirectoryW( path, NULL );
-    lstrcatW( path, L"\\wex-session-ending" );
+    WCHAR session[32];
+    DWORD len;
+
+    /* one file per login session (XDG_SESSION_ID, set by the display manager), when an account can have two sessions on
+     * one prefix; the supervisor names it the same way */
+    /* the root of the prefix's C: drive, which the account can write (the Windows directory of a prefix can be shared
+     * and read-only, and the profile's name is not known to the supervisor) */
+    lstrcpyW( path, L"C:\\wex-session-ending" );
+    len = GetEnvironmentVariableW( L"XDG_SESSION_ID", session, ARRAY_SIZE( session ));
+    if (len && len < ARRAY_SIZE( session ))
+    {
+        lstrcatW( path, L"-" );
+        lstrcatW( path, session );
+    }
     if (!on)
     {
         DeleteFileW( path );
