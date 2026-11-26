@@ -7819,6 +7819,18 @@ ULONG_PTR WINAPI NtUserCallOneParam( ULONG_PTR arg, ULONG code )
     case NtUserCallOneParam_GetAsyncKeyboardState:
         return get_async_keyboard_state( (void *)arg );
 
+    case NtUserCallOneParam_IsGUIThread:
+    {
+        /* on Windows a thread becomes a GUI thread with its first win32k call; here: once it has used the session's
+         * shared queue, desktop or input data, or waited for messages, or after a conversion (IsGUIThread(TRUE), or
+         * loading user32) */
+        struct user_thread_info *info = get_user_thread_info();
+
+        if (info->session_data || info->server_queue || info->gui_thread) return TRUE;
+        if (arg) info->gui_thread = TRUE;
+        return arg != 0;
+    }
+
     /* temporary exports */
     case NtUserGetDeskPattern:
         return get_entry( &entry_DESKPATTERN, 256, (WCHAR *)arg );

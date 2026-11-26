@@ -134,6 +134,7 @@ struct user_thread_info
     struct mouse_tracking_info   *mouse_tracking_info;    /* NtUserTrackMouseEvent handling */
     struct opengl_thread_data    *opengl_data;            /* OpenGL private thread data */
     struct list                   known_pointers;         /* list of known pointers */
+    BOOL                          gui_thread;             /* made a GUI thread by IsGUIThread(TRUE) */
 };
 
 extern struct user_thread_info *get_user_thread_info(void);

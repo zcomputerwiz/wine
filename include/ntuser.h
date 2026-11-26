@@ -1143,6 +1143,7 @@ enum
     NtUserCallOneParam_SetThreadDpiAwarenessContext,
     NtUserCallOneParam_D3DKMTOpenAdapterFromGdiDisplayName,
     NtUserCallOneParam_GetAsyncKeyboardState,
+    NtUserCallOneParam_IsGUIThread,
     /* temporary exports */
     NtUserGetDeskPattern,
 };
