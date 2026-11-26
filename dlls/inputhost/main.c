@@ -26,10 +26,11 @@
  *   - Windows 10 serves the site factory as {8ca0442d-...} and refuses {73f80911-...}; Windows 11 the reverse. The
  *     application's own copy of the component asks for the former, so that is the one served here.
  *   - Its one method takes the caller's host object and returns a site. The host is asked for the interface
- *     {92179cc0-...}, and slot 9 of that interface for a handle: the composition input sink of the caller's input window
- *     (NtCreateCompositionInputSink). Windows does not check the handle (an event, or NULL, gives a site as well); a host
- *     that refuses the interface or fails the call ends the process there, here the creation fails. No reference to
- *     the host is kept.
+ *     {92179cc0-...}, and slot 9 of that interface for a handle. Windows does not check the handle (an event, or NULL,
+ *     gives a site as well); a host that refuses the interface or fails the call ends the process there, here the
+ *     creation fails. No reference to the host is kept. The handle is taken to be the composition input sink of the
+ *     caller's input window (NtCreateCompositionInputSink) and is named so here; these measurements do not establish
+ *     that, and nothing here depends on it yet.
  *   - The configuration object is created from a site and has two 32-bit settings that start as 0 and read back what
  *     was written.
  *   - A site lists four more interfaces on Windows ({e6414e4b-...}, {2cc67fbf-...}, {46cae093-...} and IClosable), the
