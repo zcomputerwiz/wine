@@ -45,6 +45,7 @@
 
 #include "wine/debug.h"
 #include "wine/hid.h"
+#include "wine/internal_lock.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dinput);
 
@@ -1880,7 +1881,7 @@ HRESULT hid_joystick_refresh_devices(void)
 
     EnterCriticalSection( &joystick_cache_cs );
 
-    mutex = CreateMutexW( NULL, FALSE, L"__wine_dinput_reg_mutex" );
+    mutex = wine_create_internal_mutex( FALSE, L"__wine_dinput_reg_mutex" );
     WaitForSingleObject( mutex, INFINITE );
 
     hid_joystick_cleanup_devices();
