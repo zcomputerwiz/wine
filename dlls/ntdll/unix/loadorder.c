@@ -476,6 +476,92 @@ static enum loadorder version_heuristics( const UNICODE_STRING *nt_name,
 
 
 /***************************************************************************
+ *	is_package_full_name
+ *
+ * Check that a path component has the form of a package full name:
+ * name_version_architecture_resourceid_publisherid, the resource id may be empty and
+ * the publisher id is 13 characters of the package manager's base32 alphabet.
+ */
+static BOOL is_package_full_name( const WCHAR *str, unsigned int len )
+{
+    static const char base32[] = "0123456789abcdefghjkmnpqrstvwxyz";
+    unsigned int i, field = 0, start = 0, flen;
+
+    for (i = 0; i <= len; i++)
+    {
+        if (i < len && str[i] != '_') continue;
+        flen = i - start;
+        switch (field)
+        {
+        case 0:  /* name: letters, digits, '.' and '-' */
+        case 1:  /* version: digits and dots */
+        case 2:  /* architecture */
+        case 3:  /* resource id, may be empty */
+            if (!flen && field != 3) return FALSE;
+            break;
+        case 4:  /* publisher id */
+            if (flen != 13) return FALSE;
+            break;
+        default:
+            return FALSE;
+        }
+        for (; start < i; start++)
+        {
+            WCHAR c = str[start];
+            if (field == 4)
+            {
+                if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+                if (c >= 128 || !strchr( base32, c )) return FALSE;
+            }
+            else if (field == 1)
+            {
+                if ((c < '0' || c > '9') && c != '.') return FALSE;
+            }
+            else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                       c == '.' || c == '-'))
+                return FALSE;
+        }
+        start = i + 1;
+        field++;
+    }
+    return field == 5;
+}
+
+
+/***************************************************************************
+ *	is_package_file
+ *
+ * Check whether a file is inside a package installation directory: the file's directory has
+ * a component that is a package full name directly below a component named WindowsApps.
+ */
+static BOOL is_package_file( const WCHAR *path, unsigned int len )
+{
+    static const WCHAR windowsappsW[] = {'W','i','n','d','o','w','s','A','p','p','s'};
+    unsigned int pos = 0, start, prev_start = 0, prev_len = 0;
+    BOOL have_prev = FALSE;
+
+    while (pos < len)
+    {
+        start = pos;
+        while (pos < len && path[pos] != '\\' && path[pos] != '/') pos++;
+        if (pos >= len) break;  /* the last component is the file name */
+        if (have_prev && prev_len == ARRAY_SIZE(windowsappsW) &&
+            !wcsnicmp( path + prev_start, windowsappsW, prev_len ) &&
+            is_package_full_name( path + start, pos - start ))
+            return TRUE;
+        if (pos > start)
+        {
+            prev_start = start;
+            prev_len = pos - start;
+            have_prev = TRUE;
+        }
+        pos++;
+    }
+    return FALSE;
+}
+
+
+/***************************************************************************
  *	set_load_order_app_name
  */
 void set_load_order_app_name( const WCHAR *app_name )
@@ -548,6 +634,16 @@ enum loadorder get_load_order( const UNICODE_STRING *nt_name, BOOL is_system_dir
         {
             ret = LO_NATIVE_BUILTIN;
             TRACE( "preferring native for the program %s\n", debugstr_us(nt_name) );
+            goto done;
+        }
+        /* a DLL a package ships for its own use: the package copy is what the program was built
+         * against and what Windows loads (it is not a known DLL), even when it is a Microsoft file
+         * and Wine has a builtin of the same name */
+        if (pe_mapping && !pe_mapping->image.wine_builtin && !pe_mapping->image.wine_fakedll &&
+            is_package_file( nt_name->Buffer, nt_name->Length / sizeof(WCHAR) ))
+        {
+            ret = LO_NATIVE_BUILTIN;
+            TRACE( "preferring native for the package file %s\n", debugstr_us(nt_name) );
             goto done;
         }
         ret = version_heuristics( nt_name, pe_mapping );
