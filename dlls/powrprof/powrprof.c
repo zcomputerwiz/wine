@@ -29,6 +29,7 @@
 #include "powersetting.h"
 #include "powrprof.h"
 #include "wine/debug.h"
+#include "wine/internal_lock.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(powrprof);
 
@@ -398,7 +399,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
             RegCloseKey(hKey);
          }
 
-         PPRegSemaphore = CreateSemaphoreW(NULL, 1, 1, L"PowerProfileRegistrySemaphore");
+         PPRegSemaphore = wine_create_internal_semaphore(1, 1, L"PowerProfileRegistrySemaphore");
          if (PPRegSemaphore == NULL) {
             ERR("Couldn't create Semaphore: %ld\n", GetLastError());
             return FALSE;
