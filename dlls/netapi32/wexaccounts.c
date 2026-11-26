@@ -58,7 +58,8 @@ enum
 enum
 {
     WEXA_OK = 0, WEXA_DENIED, WEXA_NOT_FOUND, WEXA_EXISTS, WEXA_BAD_ARGUMENT, WEXA_LOGGED_IN, WEXA_BUSY,
-    WEXA_UNAVAILABLE, WEXA_LAST_ADMIN, WEXA_BAD_REQUEST, WEXA_SYNC_PENDING
+    WEXA_UNAVAILABLE, WEXA_LAST_ADMIN, WEXA_BAD_REQUEST, WEXA_SYNC_PENDING,
+    WEXA_BLANK_REFUSED
 };
 
 #pragma pack(push,1)
@@ -335,6 +336,7 @@ static NET_API_STATUS map_status( DWORD err, DWORD status, NET_API_STATUS notfou
     case WEXA_BUSY:         return ERROR_BUSY;
     case WEXA_UNAVAILABLE:  return RPC_S_SERVER_UNAVAILABLE;
     case WEXA_LAST_ADMIN:   return NERR_LastAdmin;
+    case WEXA_BLANK_REFUSED: return NERR_PasswordTooShort;   /* this machine's PAM would take a blank password everywhere */
     default:                return ERROR_INVALID_DATA;
     }
 }
@@ -636,16 +638,29 @@ NET_API_STATUS wexa_user_getinfo( const WCHAR *username, DWORD level, BYTE **buf
     return build_users( level, &u, 1, bufptr );
 }
 
-/* A blank password is refused for now: crypt("") would give the unix account a real empty password, and the PAM rules of
- * a Debian system then let any local user su into it. (Whether the XP behaviour, a blank password that works at the
- * greeter only, is wanted is the owner's decision.) */
+/* What goes on the wire for a password: a crypt(3) SHA-512 hash made here, or the empty string for a blank password (a NULL
+ * or empty password, as on Windows). A blank is never crypt(""), which would be a real password that every PAM stack takes:
+ * the accounts helper makes an empty shadow field that only the logon screen accepts (docs/BLANK_PASSWORDS.md). */
 static NET_API_STATUS hash_of( const WCHAR *password, char *hash )
 {
     char utf8[3 * (PWLEN + 1) + 1];
     NET_API_STATUS ret = NERR_Success;
 
+    DWORD min_len = 0, size = sizeof(min_len);
+    HKEY key;
+
     hash[0] = 0;
-    if (!password || !*password || lstrlenW( password ) > PWLEN) return NERR_PasswordTooShort;
+    /* the machine's minimum password length (the policy kept in the registry, NetUserModalsGet level 0): a blank password and a
+     * short one are refused when it is set, as on Windows */
+    if (!RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"Software\\WineExplorer\\Elevation", 0, KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key ))
+    {
+        if (RegGetValueW( key, NULL, L"MinPasswordLength", RRF_RT_REG_DWORD, NULL, &min_len, &size )) min_len = 0;
+        RegCloseKey( key );
+    }
+    if (min_len > PWLEN) min_len = PWLEN;
+    if (min_len && (!password || (DWORD)lstrlenW( password ) < min_len)) return NERR_PasswordTooShort;
+    if (!password || !*password) return NERR_Success;
+    if (lstrlenW( password ) > PWLEN) return NERR_PasswordTooShort;
     if (!WideCharToMultiByte( CP_UTF8, 0, password, -1, utf8, sizeof(utf8), NULL, NULL )) ret = NERR_PasswordTooShort;
     else if (!wexa_hash_password( utf8, hash )) ret = ERROR_NOT_ENOUGH_MEMORY;
     SecureZeroMemory( utf8, sizeof(utf8) );
@@ -697,18 +712,18 @@ NET_API_STATUS wexa_user_add( DWORD level, BYTE *buf, DWORD *parm_err )
     else
     {
         put_u32( f, TYPE_STANDARD );
+        /* the trailing u32 asks for the account to be made disabled in the one operation: a disabled account is never
+         * enabled, even briefly, and the helper takes it away again if it cannot finish */
         if (!put_str( f, hash, strlen( hash ) )) ret = ERROR_INVALID_PARAMETER;
-        else ret = simple_call( WEXA_CREATE_USER, f, NERR_UserNotFound, NERR_BadUsername );
+        else
+        {
+            if (flags & UF_ACCOUNTDISABLE) put_u32( f, 1 );   /* only when asked for: an enabled create also works with an older helper */
+            ret = simple_call( WEXA_CREATE_USER, f, NERR_UserNotFound, NERR_BadUsername );
+        }
     }
     SecureZeroMemory( f, sizeof(*f) );
     HeapFree( GetProcessHeap(), 0, f );
     SecureZeroMemory( hash, sizeof(hash) );
-    if (!ret && (flags & UF_ACCOUNTDISABLE))
-    {
-        /* the account is made enabled and locked at once afterwards; when the lock fails the account is removed again, so
-         * that a disabled account is never left enabled */
-        if ((ret = set_locked( info->usri2_name, TRUE ))) wexa_user_del( info->usri2_name );
-    }
     return ret;
 }
 
