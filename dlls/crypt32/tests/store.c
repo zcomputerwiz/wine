@@ -3908,7 +3908,9 @@ static DWORD WINAPI abandon_root_import_lock( void *arg )
     RtlInitUnicodeString( &name, path );
     InitializeObjectAttributes( &attr, &name, OBJ_OPENIF, NULL, NULL );
     status = NtCreateMutant( mutex, MUTANT_ALL_ACCESS, &attr, TRUE );
-    ok( !status, "creating the lock returned %#lx\n", status );
+    ok( !status || status == 0x40000000 /* STATUS_OBJECT_NAME_EXISTS */, "creating the lock returned %#lx\n", status );
+    /* another process (the other architecture's run) may hold it: an existing mutex is opened, not owned */
+    if (status == 0x40000000) WaitForSingleObject( *mutex, INFINITE );
     return 0;  /* ends owning it: the mutex is abandoned, its handle stays open */
 }
 
