@@ -21840,6 +21840,47 @@ static void test_PrintWindow(char **argv)
     DeleteObject(green_brush);
 }
 
+static DWORD CALLBACK is_gui_thread_proc(void *arg)
+{
+    MSG msg;
+    BOOL ret;
+
+    /* a new thread is not a GUI thread until it calls into win32k */
+    ret = IsGUIThread(FALSE);
+    ok(!ret, "got %d.\n", ret);
+    ret = IsGUIThread(FALSE);
+    ok(!ret, "got %d.\n", ret);
+
+    if (arg)
+    {
+        SetLastError(0xdeadbeef);
+        ret = IsGUIThread(TRUE);
+        ok(ret == TRUE, "got %d.\n", ret);
+        ok(GetLastError() == 0xdeadbeef, "got error %lu.\n", GetLastError());
+    }
+    else PeekMessageA(&msg, NULL, 0, 0, PM_NOREMOVE);
+
+    ret = IsGUIThread(FALSE);
+    ok(ret == TRUE, "got %d.\n", ret);
+    return 0;
+}
+
+static void test_IsGUIThread(void)
+{
+    HANDLE thread;
+    BOOL ret;
+
+    ret = IsGUIThread(FALSE);
+    ok(ret == TRUE, "got %d.\n", ret);
+
+    thread = CreateThread(NULL, 0, is_gui_thread_proc, NULL, 0, NULL);
+    WaitForSingleObject(thread, INFINITE);
+    CloseHandle(thread);
+    thread = CreateThread(NULL, 0, is_gui_thread_proc, (void *)1, 0, NULL);
+    WaitForSingleObject(thread, INFINITE);
+    CloseHandle(thread);
+}
+
 START_TEST(msg)
 {
     char **test_argv;
@@ -21904,6 +21945,7 @@ START_TEST(msg)
     test_PostMessage();
     test_broadcast();
     test_ShowWindow();
+    test_IsGUIThread();
     test_PeekMessage();
     test_PeekMessage2();
     test_PeekMessage3();

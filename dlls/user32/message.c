@@ -1186,8 +1186,7 @@ UINT_PTR WINAPI SetSystemTimer( HWND hwnd, UINT_PTR id, UINT timeout, void *unkn
  */
 BOOL WINAPI IsGUIThread( BOOL convert )
 {
-    FIXME( "%u: stub\n", convert );
-    return TRUE;
+    return NtUserCallOneParam( convert, NtUserCallOneParam_IsGUIThread );
 }
 
 

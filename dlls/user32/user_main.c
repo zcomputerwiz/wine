@@ -215,6 +215,8 @@ static BOOL process_attach(void)
 
     winproc_init();
     SYSPARAMS_Init();
+    /* loading user32 makes the loading thread a GUI thread */
+    NtUserCallOneParam( TRUE, NtUserCallOneParam_IsGUIThread );
     return TRUE;
 }
 
