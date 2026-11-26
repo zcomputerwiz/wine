@@ -360,8 +360,9 @@ static HANDLE get_display_device_init_mutex( void )
     char buffer[256];
     HANDLE mutex;
 
-    snprintf( buffer, ARRAY_SIZE(buffer), "\\Sessions\\%u\\BaseNamedObjects\\display_device_init",
-              RtlGetCurrentPeb()->SessionId );
+    /* WineExplorer: in \KernelObjects, so that no other server sharing \BaseNamedObjects (session 0's) reaches it
+     * (wine/internal_lock.h); one server holds one session */
+    snprintf( buffer, ARRAY_SIZE(buffer), "\\KernelObjects\\display_device_init" );
     name.MaximumLength = asciiz_to_unicode( bufferW, buffer );
     name.Length = name.MaximumLength - sizeof(WCHAR);
 

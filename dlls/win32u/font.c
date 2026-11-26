@@ -6734,8 +6734,9 @@ UINT font_init(void)
     DWORD disposition;
     UINT dpi = 0;
 
+    /* WineExplorer: in \KernelObjects, not \BaseNamedObjects (wine/internal_lock.h) */
     static WCHAR wine_font_mutexW[] =
-        {'\\','B','a','s','e','N','a','m','e','d','O','b','j','e','c','t','s',
+        {'\\','K','e','r','n','e','l','O','b','j','e','c','t','s',
          '\\','_','_','W','I','N','E','_','F','O','N','T','_','M','U','T','E','X','_','_'};
     static const WCHAR wine_fonts_keyW[] =
         {'S','o','f','t','w','a','r','e','\\','W','i','n','e','\\','F','o','n','t','s'};
