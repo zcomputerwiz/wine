@@ -2862,7 +2862,7 @@ void X11DRV_SetDesktopWindow( HWND hwnd )
             /* This process made its own X desktop window (it is the desktop's manager) and the server's desktop window
              * is older: a manager that died and was replaced (B120). The stored X window id is the dead one's; use
              * ours and store it. */
-            if (win != root_window && !create_desktop_win_data( root_window, hwnd ))
+            if ((X11DRV_adopt_desktop( win ) || win != root_window) && !create_desktop_win_data( root_window, hwnd ))
             {
                 ERR( "Failed to create virtual desktop window data\n" );
                 root_window = DefaultRootWindow( gdi_display );

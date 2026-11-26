@@ -865,6 +865,7 @@ struct x11drv_settings_handler
 extern void X11DRV_Settings_SetHandler(const struct x11drv_settings_handler *handler);
 
 extern void X11DRV_init_desktop( Window win );
+extern BOOL X11DRV_adopt_desktop( Window old );
 extern BOOL is_virtual_desktop(void);
 extern BOOL is_desktop_fullscreen(void);
 extern BOOL is_detached_mode(const DEVMODEW *);

@@ -24,6 +24,10 @@
 #endif
 
 #include "config.h"
+#include <errno.h>
+#include <signal.h>
+#include <unistd.h>
+#include <X11/Xatom.h>
 #include <X11/cursorfont.h>
 #include <X11/Xlib.h>
 
@@ -36,6 +40,7 @@
 WINE_DEFAULT_DEBUG_CHANNEL(x11drv);
 
 static RECT host_primary_rect;
+static BOOL retain_desktop(void);
 
 #define _NET_WM_STATE_REMOVE 0
 #define _NET_WM_STATE_ADD 1
@@ -89,9 +94,99 @@ BOOL X11DRV_CreateDesktop( const WCHAR *name, UINT width, UINT height )
     if (!win) return FALSE;
 
     x11drv_xinput2_enable( display, win );
+    if (retain_desktop()) XSetCloseDownMode( display, RetainTemporary );
     XFlush( display );
 
     X11DRV_init_desktop( win );
+    return TRUE;
+}
+
+/* B121: the session shell's X desktop window outlives the shell. The programs that run across a shell restart (B120) have
+ * windows inside it, and a destroyed desktop window takes them with it. With WINE_X11_RETAIN_DESKTOP set (the session
+ * scripts do), the X server keeps the dead desktop manager's resources, and the new manager takes the window over. */
+static BOOL retain_desktop(void)
+{
+    const char *env = getenv( "WINE_X11_RETAIN_DESKTOP" );
+    return env && *env && *env != '0';
+}
+
+static int ignore_x_error( Display *display, XErrorEvent *event, void *arg )
+{
+    return 1;
+}
+
+/* the dead manager's own windows (the taskbar and the like) stay in the retained desktop: their process is gone */
+static void destroy_dead_children( Display *display, Window desktop )
+{
+    Window root, parent, *children;
+    unsigned int i, count;
+
+    if (!XQueryTree( display, desktop, &root, &parent, &children, &count )) return;
+    for (i = 0; i < count; i++)
+    {
+        Atom type;
+        int format;
+        unsigned long nitems, left;
+        unsigned char *data;
+        long pid;
+
+        X11DRV_expect_error( display, ignore_x_error, NULL );
+        if (!XGetWindowProperty( display, children[i], x11drv_atom(_NET_WM_PID), 0, 1, False, XA_CARDINAL,
+                                 &type, &format, &nitems, &left, &data ) && data)
+        {
+            pid = (nitems == 1 && format == 32) ? *(long *)data : 0;
+            XFree( data );
+            if (pid > 0 && pid != getpid() && kill( pid, 0 ) == -1 && errno == ESRCH)
+            {
+                TRACE( "destroying %lx of the dead process %ld\n", children[i], pid );
+                XDestroyWindow( display, children[i] );
+            }
+        }
+        XSync( display, False );
+        X11DRV_check_error();
+    }
+    if (children) XFree( children );
+}
+
+/***********************************************************************
+ *           X11DRV_adopt_desktop
+ *
+ * The desktop manager that replaces a dead one takes over the X window the dead one left (the stored id): returns FALSE
+ * when there is none (not retained, or gone), and the window this process made is used.
+ */
+BOOL X11DRV_adopt_desktop( Window old )
+{
+    Display *display = thread_init_display();
+    XWindowAttributes attrs;
+    XSetWindowAttributes win_attr;
+    Window ours = root_window;
+    int ok;
+
+    if (!retain_desktop() || !old || old == ours || !is_virtual_desktop()) return FALSE;
+
+    X11DRV_expect_error( display, ignore_x_error, NULL );
+    ok = XGetWindowAttributes( display, old, &attrs );
+    XSync( display, False );
+    if (X11DRV_check_error() || !ok) return FALSE;
+
+    TRACE( "taking over the desktop window %lx from %lx\n", old, ours );
+    XSetCloseDownMode( display, RetainTemporary );
+    /* the dead manager's ButtonPress selection is still held by the X server (one client only), and the shell's own windows cover the desktop */
+    win_attr.event_mask = ExposureMask | KeyPressMask | KeyReleaseMask | EnterWindowMask |
+                          PointerMotionMask | ButtonReleaseMask | FocusChangeMask |
+                          StructureNotifyMask | PropertyChangeMask;
+    win_attr.cursor = XCreateFontCursor( display, XC_top_left_arrow );
+    XChangeWindowAttributes( display, old, CWEventMask | CWCursor, &win_attr );
+    if (XGetWindowAttributes( display, ours, &attrs ))
+        XResizeWindow( display, old, attrs.width, attrs.height );
+    X11DRV_expect_error( display, ignore_x_error, NULL );  /* a button selection of the dead manager may remain */
+    x11drv_xinput2_enable( display, old );
+    XSync( display, False );
+    X11DRV_check_error();
+    X11DRV_init_desktop( old );
+    XDestroyWindow( display, ours );
+    destroy_dead_children( display, old );
+    XFlush( display );
     return TRUE;
 }
 
