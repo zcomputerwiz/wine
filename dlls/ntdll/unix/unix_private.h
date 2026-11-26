@@ -219,6 +219,7 @@ extern USHORT *lctable;
 extern SIZE_T startup_info_size;
 extern BOOL is_prefix_bootstrap;
 extern ULONG session_id;
+extern ULONG64 mitigation_options[2];
 extern int main_argc;
 extern char **main_argv;
 extern WCHAR **main_wargv;
@@ -258,22 +259,47 @@ extern BOOL sysrun_server_ok( int fd );
 extern BOOL sysrun_must_drop_group( HANDLE token );
 extern BOOL sysrun_prepare_child( BOOL drop_group );
 extern void sysrun_early_init(void);
+extern void sysrun_safe_shell_gate(void);
 #define SYSRUN_REFUSED 77  /* exit status of wex-sysrun when it refuses */
 
 extern unsigned int server_call_unlocked( void *req_ptr );
-/* WineExplorer system tier: machine registry calls to session 0 (server.c) */
-extern BOOL regsrv_is_handle( HANDLE handle );
-extern BOOL regsrv_route_path( const WCHAR *path, USHORT len );
-extern NTSTATUS regsrv_full_path( HANDLE parent, const UNICODE_STRING *name, UNICODE_STRING *path );
-extern unsigned int regsrv_call( void *req_ptr, HANDLE handle, obj_handle_t *field, unsigned int *generation );
-extern HANDLE regsrv_add_key( obj_handle_t remote, unsigned int generation, const UNICODE_STRING *path,
-                              ACCESS_MASK access, ULONG attributes );
-extern NTSTATUS regsrv_close( HANDLE handle );
-extern NTSTATUS regsrv_duplicate( HANDLE source, HANDLE *dest, ACCESS_MASK access, ULONG attributes, ULONG options );
-/* T2b: virtualized keys (registry.c) */
-extern BOOL regvirt_is_handle( HANDLE handle );
-extern HANDLE regvirt_underlying( HANDLE handle );
-extern NTSTATUS regvirt_close( HANDLE handle );
+extern int get_unix_tid(void);
+/* WineExplorer system tier: key handles of session 0 and of the virtual store (wex_regkey.c) */
+struct wexkey_target
+{
+    UNICODE_STRING    path;     /* absolute path of a machine key */
+    BOOL              owned;    /* path.Buffer to be freed */
+    BOOL              remote;   /* session 0 */
+    BOOL              use_abs;  /* open here by the absolute path */
+    OBJECT_ATTRIBUTES abs;
+};
+extern BOOL wexkey_is_handle( HANDLE handle );
+extern BOOL wexkey_is_virtual( HANDLE handle );
+extern HANDLE wexkey_underlying( HANDLE handle );
+extern unsigned int wexkey_server_call( void *req_ptr, HANDLE handle, obj_handle_t *field );
+extern NTSTATUS wexkey_close( HANDLE handle );
+extern NTSTATUS wexkey_duplicate( HANDLE source_process, HANDLE source, HANDLE dest_process, HANDLE *dest,
+                                  ACCESS_MASK access, ULONG attributes, ULONG options );
+extern NTSTATUS wexkey_receive( HANDLE section, unsigned int size, HANDLE *handle );
+extern NTSTATUS wexkey_user_key_path( HANDLE token, char *buffer, size_t size, unsigned int *len );
+extern NTSTATUS wexkey_target_init( const OBJECT_ATTRIBUTES *attr, struct wexkey_target *t );
+extern void wexkey_target_free( struct wexkey_target *t );
+extern ACCESS_MASK wexkey_view( ACCESS_MASK access );
+extern unsigned int wexkey_session0_call( void *req_ptr, HANDLE handle, obj_handle_t *field,
+                                          unsigned int *generation );
+extern HANDLE wexkey_add_session0( obj_handle_t remote, unsigned int generation, const UNICODE_STRING *path,
+                                   ACCESS_MASK access, ULONG attributes );
+extern NTSTATUS wexkey_virtualize( NTSTATUS status, HANDLE *key, const UNICODE_STRING *path, ACCESS_MASK access,
+                                   BOOL create, ULONG *dispos );
+extern NTSTATUS wexkey_virtual_relative( HANDLE *key, ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr,
+                                         const UNICODE_STRING *class, ULONG options, ULONG *dispos, BOOL create );
+extern NTSTATUS wexkey_virtual_store( HANDLE handle, HANDLE *store );
+extern NTSTATUS wexkey_virtual_query_value( HANDLE handle, const UNICODE_STRING *name,
+                                            KEY_VALUE_INFORMATION_CLASS info_class, void *info, DWORD length,
+                                            DWORD *result_len );
+extern NTSTATUS wexkey_virtual_enumerate( HANDLE handle, ULONG index, BOOL subkey, int info_class, void *info,
+                                          DWORD length, DWORD *result_len );
+extern void wexkey_virtual_query_key( HANDLE handle, KEY_INFORMATION_CLASS info_class, void *info );
 extern void server_enter_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigset );
 extern void server_leave_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigset );
 extern unsigned int server_select( const union select_op *select_op, data_size_t size, UINT flags,
@@ -416,6 +442,7 @@ extern NTSTATUS open_unix_file( HANDLE *handle, const char *unix_name, ACCESS_MA
                                 OBJECT_ATTRIBUTES *attr, ULONG attributes, ULONG sharing, ULONG disposition,
                                 ULONG options, void *ea_buffer, ULONG ea_length );
 extern NTSTATUS get_device_info( int fd, struct _FILE_FS_DEVICE_INFORMATION *info );
+extern void get_random( void *buf, ULONG len );
 extern void init_files(void);
 extern void init_cpu_info(void);
 extern void init_shared_data_cpuinfo( struct _KUSER_SHARED_DATA *data );

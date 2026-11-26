@@ -67,6 +67,7 @@
 #include "e1s_token.h"
 #include "sysrun.h"
 #include "session0.h"
+#include "wine/wex_session0.h"
 
 /* process object */
 
@@ -139,10 +140,6 @@ fail:
     clear_error();
     return 0;
 }
-
-#ifndef SO_PASSPIDFD
-#define SO_PASSPIDFD 76
-#endif
 
 /* R8 step 3b: the kernel attaches the sender's credentials and a pidfd to every fd transfer on the
  * server end of the dialog's process socket, so receive_fd can pin the dialog's own loader. Set and
@@ -318,7 +315,7 @@ static struct job *get_job_obj( struct process *process, obj_handle_t handle, un
 static void add_job_completion( struct job *job, apc_param_t msg, apc_param_t pid )
 {
     if (job->completion_port)
-        add_completion( job->completion_port, job->completion_key, pid, STATUS_SUCCESS, msg );
+        add_completion( job->completion_port, job->completion_key, pid, STATUS_SUCCESS, msg, NULL );
 }
 
 static void add_job_completion_existing_processes( struct job *job, struct job *completion_job )
@@ -533,70 +530,142 @@ struct ptid_entry
     unsigned int next;  /* next free entry */
 };
 
-static struct ptid_entry *ptid_entries;     /* array of ptid entries */
-static unsigned int used_ptid_entries;      /* number of entries in use */
-static unsigned int alloc_ptid_entries;     /* number of allocated entries */
-static unsigned int next_free_ptid;         /* next free entry */
-static unsigned int last_free_ptid;         /* last free entry */
+static struct ptid_entry *ptid_entries;     /* array of ptid entries, by slot */
+static unsigned int used_ptid_entries;      /* number of slots in use */
+static unsigned int alloc_ptid_entries;     /* number of allocated slots */
+static unsigned int next_free_ptid;         /* next free slot + 1, 0 for none */
+static unsigned int last_free_ptid;         /* last free slot + 1, 0 for none */
 static unsigned int num_free_ptids;         /* number of free ptids */
 
 static void kill_all_processes(void);
 
 #define PTID_OFFSET 8  /* offset for first ptid value */
 
+/* WineExplorer R6 (docs/SESSION0_PROCESS_IDS.md): with session 0 the ids come from blocks that session 0 leases to
+ * each server (block 0 is session 0's own), so the ids of different servers never meet. Slot s is then index
+ * blocks[s / WEX_ID_BLOCK_SIZE] * WEX_ID_BLOCK_SIZE + s % WEX_ID_BLOCK_SIZE; without blocks it is s + PTID_OFFSET,
+ * as in stock Wine. */
+#define PTID_MAX_BLOCKS 64
+static unsigned int ptid_blocks[PTID_MAX_BLOCKS];
+static unsigned int ptid_block_count;
+
 static unsigned int index_from_ptid(unsigned int id) { return id / 4; }
 static unsigned int ptid_from_index(unsigned int index) { return index * 4; }
+
+static unsigned int index_of_slot( unsigned int slot )
+{
+    if (!ptid_block_count) return slot + PTID_OFFSET;
+    return ptid_blocks[slot / WEX_ID_BLOCK_SIZE] * WEX_ID_BLOCK_SIZE + slot % WEX_ID_BLOCK_SIZE;
+}
+
+/* the slot in use of an index; 0 when the index is not one of this server's */
+static int slot_of_index( unsigned int index, unsigned int *slot )
+{
+    unsigned int i;
+
+    if (!ptid_block_count)
+    {
+        if (index < PTID_OFFSET) return 0;
+        *slot = index - PTID_OFFSET;
+        return *slot < used_ptid_entries;
+    }
+    for (i = 0; i < ptid_block_count; i++)
+    {
+        if (ptid_blocks[i] != index / WEX_ID_BLOCK_SIZE) continue;
+        *slot = i * WEX_ID_BLOCK_SIZE + index % WEX_ID_BLOCK_SIZE;
+        return *slot < used_ptid_entries;
+    }
+    return 0;
+}
+
+/* R6: one more block of ids (block 0: session 0's own, whose first PTID_OFFSET indices stay unused as in stock
+ * Wine). The first one only before any id was given out. 1 when it was added. */
+int ptid_add_block( unsigned int block )
+{
+    unsigned int count = (ptid_block_count + 1) * WEX_ID_BLOCK_SIZE;
+    struct ptid_entry *entries;
+
+    if (ptid_block_count >= PTID_MAX_BLOCKS || block >= WEX_ID_BLOCK_COUNT) return 0;
+    if (!ptid_block_count && used_ptid_entries) return 0;  /* the stock numbering is in use */
+    if (ptid_block_count && !block) return 0;
+    if (!(entries = realloc( ptid_entries, count * sizeof(*entries) ))) return 0;
+    memset( entries + ptid_block_count * WEX_ID_BLOCK_SIZE, 0, WEX_ID_BLOCK_SIZE * sizeof(*entries) );
+    ptid_entries = entries;
+    alloc_ptid_entries = count;
+    if (!ptid_block_count && !block) used_ptid_entries = PTID_OFFSET;
+    ptid_blocks[ptid_block_count++] = block;
+    return 1;
+}
+
+/* the i-th block of ids this server holds; 0 after the last (and for session 0's block 0) */
+unsigned int ptid_block( unsigned int i )
+{
+    return i < ptid_block_count ? ptid_blocks[i] : 0;
+}
 
 /* allocate a new process or thread id */
 unsigned int alloc_ptid( void *ptr )
 {
-    struct ptid_entry *entry;
-    unsigned int index;
+    unsigned int slot;
 
     if (used_ptid_entries < alloc_ptid_entries)
-    {
-        index = used_ptid_entries + PTID_OFFSET;
-        entry = &ptid_entries[used_ptid_entries++];
-    }
+        slot = used_ptid_entries++;
     else if (next_free_ptid && num_free_ptids >= 256)
     {
-        index = next_free_ptid;
-        entry = &ptid_entries[index - PTID_OFFSET];
-        if (!(next_free_ptid = entry->next)) last_free_ptid = 0;
+        slot = next_free_ptid - 1;
+        if (!(next_free_ptid = ptid_entries[slot].next)) last_free_ptid = 0;
         num_free_ptids--;
     }
-    else  /* need to grow the array */
+    else if (ptid_block_count)  /* R6: another block of ids from session 0 */
     {
-        unsigned int count = alloc_ptid_entries + (alloc_ptid_entries / 2);
-        if (!count) count = 512;
-        if (!(entry = realloc( ptid_entries, count * sizeof(*entry) )))
+        unsigned int block = ptid_block_count < PTID_MAX_BLOCKS ? session0_new_id_block( 0 ) : 0;
+
+        if (block && ptid_add_block( block )) slot = used_ptid_entries++;
+        else if (next_free_ptid)  /* no more blocks: a freed id sooner than usual */
+        {
+            slot = next_free_ptid - 1;
+            if (!(next_free_ptid = ptid_entries[slot].next)) last_free_ptid = 0;
+            num_free_ptids--;
+        }
+        else
         {
             set_error( STATUS_NO_MEMORY );
             return 0;
         }
-        ptid_entries = entry;
+    }
+    else  /* need to grow the array */
+    {
+        unsigned int count = alloc_ptid_entries + (alloc_ptid_entries / 2);
+        struct ptid_entry *entries;
+
+        if (!count) count = 512;
+        if (!(entries = realloc( ptid_entries, count * sizeof(*entries) )))
+        {
+            set_error( STATUS_NO_MEMORY );
+            return 0;
+        }
+        ptid_entries = entries;
         alloc_ptid_entries = count;
-        index = used_ptid_entries + PTID_OFFSET;
-        entry = &ptid_entries[used_ptid_entries++];
+        slot = used_ptid_entries++;
     }
 
-    entry->ptr = ptr;
-    return ptid_from_index( index );
+    ptid_entries[slot].ptr = ptr;
+    return ptid_from_index( index_of_slot( slot ));
 }
 
 /* free a process or thread id */
 void free_ptid( unsigned int id )
 {
-    unsigned int index = index_from_ptid( id );
-    struct ptid_entry *entry = &ptid_entries[index - PTID_OFFSET];
+    unsigned int slot;
 
-    entry->ptr  = NULL;
-    entry->next = 0;
+    if (!slot_of_index( index_from_ptid( id ), &slot )) return;
+    ptid_entries[slot].ptr  = NULL;
+    ptid_entries[slot].next = 0;
 
     /* append to end of free list so that we don't reuse it too early */
-    if (last_free_ptid) ptid_entries[last_free_ptid - PTID_OFFSET].next = index;
-    else next_free_ptid = index;
-    last_free_ptid = index;
+    if (last_free_ptid) ptid_entries[last_free_ptid - 1].next = slot + 1;
+    else next_free_ptid = slot + 1;
+    last_free_ptid = slot + 1;
     num_free_ptids++;
 }
 
@@ -617,10 +686,10 @@ int any_process( int (*cb)(struct process *, void *), void *user )
 /* retrieve the pointer corresponding to a process or thread id */
 void *get_ptid_entry( unsigned int id )
 {
-    unsigned int index = index_from_ptid( id );
-    if (index < PTID_OFFSET) return NULL;
-    if (index - PTID_OFFSET >= used_ptid_entries) return NULL;
-    return ptid_entries[index - PTID_OFFSET].ptr;
+    unsigned int slot;
+
+    if (!slot_of_index( index_from_ptid( id ), &slot )) return NULL;
+    return ptid_entries[slot].ptr;
 }
 
 /* return the main thread of the process */
@@ -774,6 +843,8 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->e1s6_image_seen = 0;
     process->e1s6_broker_generation = 0;
     process->e1s6_primary = NULL;
+    memset( &process->e1s6_token_id, 0, sizeof(process->e1s6_token_id) );
+    memset( &process->e1s6_modified_id, 0, sizeof(process->e1s6_modified_id) );
 #ifdef WEX_E1S6_TRANSPORT_TEST
     process->e1s6_control_fd = -1;
 #endif
@@ -788,6 +859,8 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->debug_children  = 1;
     process->is_terminating  = 0;
     process->imagelen        = 0;
+    process->cmdline         = NULL;
+    process->cmdlinelen      = 0;
     process->image           = NULL;
     process->job             = NULL;
     process->console         = NULL;
@@ -803,6 +876,11 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->peer_pid        = -1;
     process->peer_uid        = -1;
     process->peer_gid        = -1;
+    /* sysrun_process_created sets these only for the system role's processes: left alone they kept a freed process's
+     * bits, and a user's threads got a service's descriptor (B108) */
+    process->sysrun_protected = 0;
+    process->sysrun_account  = 0;
+    process->sysrun_pending  = 0;
     if (sysrun_active)  /* the connection's credentials, never the unix_pid the client sends */
     {
         struct ucred cred;
@@ -858,6 +936,11 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
          * run as LocalSystem. Only session 0's account starts programs here */
         process->handles = alloc_handle_table( process, 0 );
         process->token = token_create_service( SERVICE_ACCOUNT_SYSTEM, default_session_id );
+        if (process->token && !token_protect_system( process->token, 0 ))  /* R7: as a system process's */
+        {
+            release_object( process->token );
+            process->token = NULL;
+        }
         process->affinity = ~0;
     }
     else if (!parent)
@@ -867,8 +950,14 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
         /* the registry is loaded before the first client connects, so the helper setting is known here */
         if (process->token && elevation_enforced())
         {
-            token_make_filtered( process->token );
-            if (!user_is_administrator()) token_make_standard( process->token );
+            /* Safe Mode, as Windows: User Account Control does not run, an administrator's token is not split and
+             * is the full one (docs/SAFE_MODE_ELEVATED_DESKTOP.md); a standard user's is the standard token */
+            if (user_is_administrator() && sysrun_safe_boot()) token_make_full( process->token );
+            else
+            {
+                token_make_filtered( process->token );
+                if (!user_is_administrator()) token_make_standard( process->token );
+            }
         }
         process->affinity = ~0;
     }
@@ -888,6 +977,13 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
         /* Note: for security reasons, starting a new process does not attempt
          * to use the current impersonation token for the new process */
         process->token = token_duplicate( token ? token : parent->token, TRUE, 0, NULL, NULL, 0, NULL, 0, FALSE );
+        /* R7: the new primary token keeps the descriptor of the token it was made from (a service's, from
+         * create_service_token; a system process's, from its parent) */
+        if (process->token && !token_keep_descriptor( process->token, token ? token : parent->token ))
+        {
+            release_object( process->token );
+            process->token = NULL;
+        }
         if (token && token_e1s_account( token )) process->e1s_profile_issued = (struct token *)grab_object( token );
         process->affinity = parent->affinity;
     }
@@ -955,6 +1051,7 @@ static void process_destroy( struct object *obj )
     free( process->rawinput_devices );
     free( process->dir_cache );
     free( process->image );
+    free( process->cmdline );
 }
 
 /* dump a process on stdout for debugging purposes */
@@ -1139,7 +1236,6 @@ static void process_killed( struct process *process )
     process->end_time = current_time;
     wex_dialog_unprotect( process );
     winstation_process_killed( process );
-    dwm_cleanup_process( process );
     close_process_desktop( process );
     process->winstation = 0;
     process->desktop = 0;
@@ -1590,6 +1686,16 @@ DECL_HANDLER(new_process)
     process->machine = req->machine;
     process->startup_info = (struct startup_info *)grab_object( info );
 
+    /* keep the command line for ProcessCommandLineInformation: the startup data is freed once the process runs,
+     * and reading it from the process's memory needs more access than a limited query has */
+    if (info->data->cmdline_len)
+    {
+        const char *str = (const char *)(info->data + 1) + info->data->imagepath_len + info->data->curdir_len +
+                          info->data->dllpath_len;
+        if ((process->cmdline = memdup( str, info->data->cmdline_len )))
+            process->cmdlinelen = info->data->cmdline_len;
+    }
+
     job = isolate ? NULL : parent->job;
     while (job)
     {
@@ -1848,6 +1954,43 @@ DECL_HANDLER(get_process_debug_info)
     release_object( process );
 }
 
+/* the command line a process was given (ProcessCommandLineInformation), with the limited query right as on Windows;
+ * for a process started without startup data (from Unix) it is read from its PEB */
+DECL_HANDLER(get_process_command_line)
+{
+    struct process *process;
+    WCHAR *buffer = NULL;
+    data_size_t len = 0;
+
+    if (!(process = get_process_from_handle( req->handle, PROCESS_QUERY_LIMITED_INFORMATION ))) return;
+
+    if (process->cmdline) len = process->cmdlinelen;
+    else if (process->peb && process->running_threads)
+    {
+        ULONG64 params;
+        UNICODE_STRING64 str;
+
+        if (read_process_memory( process, process->peb + offsetof( PEB64, ProcessParameters ), sizeof(params),
+                                 (char *)&params ) &&
+            read_process_memory( process, params + offsetof( RTL_USER_PROCESS_PARAMETERS64, CommandLine ),
+                                 sizeof(str), (char *)&str ) &&
+            (!str.Length || ((buffer = mem_alloc( str.Length )) &&
+                             read_process_memory( process, str.Buffer, str.Length, (char *)buffer ))))
+            len = str.Length;
+        else
+        {
+            free( buffer );
+            release_object( process );
+            return;  /* the read set the error */
+        }
+    }
+    reply->len = len;
+    if (len > get_reply_max_size()) set_error( STATUS_BUFFER_TOO_SMALL );
+    else if (len) set_reply_data( buffer ? buffer : process->cmdline, len );
+    free( buffer );
+    release_object( process );
+}
+
 /* fetch the name of the process image */
 DECL_HANDLER(get_process_image_name)
 {
@@ -1938,6 +2081,37 @@ DECL_HANDLER(get_process_vm_counters)
 #endif
     }
     else set_error( STATUS_ACCESS_DENIED );
+    release_object( process );
+}
+
+/* Retrieve a process's I/O counters; zero where the host does not say (as before this request existed) */
+DECL_HANDLER(get_process_io_counters)
+{
+    struct process *process = get_process_from_handle( req->handle, PROCESS_QUERY_LIMITED_INFORMATION );
+
+    if (!process) return;
+#ifdef linux
+    if (process->unix_pid != -1)
+    {
+        FILE *f;
+        char proc_path[32], line[256];
+        unsigned long long value;
+
+        snprintf( proc_path, sizeof(proc_path), "/proc/%u/io", process->unix_pid );
+        if ((f = fopen( proc_path, "r" )))
+        {
+            /* rchar/wchar count the bytes of every read and write call, syscr/syscw the calls */
+            while (fgets( line, sizeof(line), f ))
+            {
+                if (sscanf( line, "rchar: %llu", &value )) reply->read_bytes = value;
+                else if (sscanf( line, "wchar: %llu", &value )) reply->write_bytes = value;
+                else if (sscanf( line, "syscr: %llu", &value )) reply->read_operations = value;
+                else if (sscanf( line, "syscw: %llu", &value )) reply->write_operations = value;
+            }
+            fclose( f );
+        }
+    }
+#endif
     release_object( process );
 }
 

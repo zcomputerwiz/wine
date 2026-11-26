@@ -36,6 +36,7 @@
 #include "ip2string.h"
 #include "sddl.h"
 #include "ddk/ntifs.h"
+#include "delayloadhandler.h"
 #include "wine/test.h"
 #include "wine/asm.h"
 #include "wine/rbtree.h"
@@ -117,6 +118,17 @@ static BOOL      (WINAPI *pRtlIsCriticalSectionLocked)(CRITICAL_SECTION *);
 static BOOL      (WINAPI *pRtlIsCriticalSectionLockedByThread)(CRITICAL_SECTION *);
 static BOOLEAN   (WINAPI *pRtlIsGenericTableEmpty)(PRTL_GENERIC_TABLE);
 static NTSTATUS  (WINAPI *pRtlInitializeCriticalSectionEx)(CRITICAL_SECTION *, ULONG, ULONG);
+static void *    (WINAPI *pRtlInsertElementGenericTableAvl)(RTL_AVL_TABLE *, void *, CLONG, BOOLEAN *);
+static void      (WINAPI *pRtlInitializeGenericTableAvl)(RTL_AVL_TABLE *, PRTL_AVL_COMPARE_ROUTINE, PRTL_AVL_ALLOCATE_ROUTINE,
+                                                         PRTL_AVL_FREE_ROUTINE, void *);
+static void *    (WINAPI *pRtlLookupElementGenericTableAvl)(RTL_AVL_TABLE *, void *);
+static BOOLEAN   (WINAPI *pRtlDeleteElementGenericTableAvl)(RTL_AVL_TABLE *, void *);
+static void *    (WINAPI *pRtlEnumerateGenericTableAvl)(RTL_AVL_TABLE *, BOOLEAN);
+static void *    (WINAPI *pRtlEnumerateGenericTableWithoutSplayingAvl)(RTL_AVL_TABLE *, void **);
+static void *    (WINAPI *pRtlGetElementGenericTableAvl)(RTL_AVL_TABLE *, ULONG);
+static ULONG     (WINAPI *pRtlNumberGenericTableElementsAvl)(RTL_AVL_TABLE *);
+static BOOLEAN   (WINAPI *pRtlIsGenericTableEmptyAvl)(RTL_AVL_TABLE *);
+static BOOLEAN   (WINAPI *pRtlIsNameInExpression)(const UNICODE_STRING *, const UNICODE_STRING *, BOOLEAN, const WCHAR *);
 static void      (WINAPI *pRtlInitializeGenericTable)(RTL_GENERIC_TABLE *, PRTL_GENERIC_COMPARE_ROUTINE,
                                                       PRTL_GENERIC_ALLOCATE_ROUTINE, PRTL_GENERIC_FREE_ROUTINE,
                                                       void *);
@@ -193,6 +205,16 @@ static void InitFunctionPtrs(void)
         pRtlIsCriticalSectionLockedByThread = (void *)GetProcAddress(hntdll, "RtlIsCriticalSectionLockedByThread");
         pRtlIsGenericTableEmpty = (void *)GetProcAddress(hntdll, "RtlIsGenericTableEmpty");
         pRtlInitializeCriticalSectionEx = (void *)GetProcAddress(hntdll, "RtlInitializeCriticalSectionEx");
+        pRtlInsertElementGenericTableAvl = (void *)GetProcAddress(hntdll, "RtlInsertElementGenericTableAvl");
+        pRtlInitializeGenericTableAvl = (void *)GetProcAddress(hntdll, "RtlInitializeGenericTableAvl");
+        pRtlLookupElementGenericTableAvl = (void *)GetProcAddress(hntdll, "RtlLookupElementGenericTableAvl");
+        pRtlDeleteElementGenericTableAvl = (void *)GetProcAddress(hntdll, "RtlDeleteElementGenericTableAvl");
+        pRtlEnumerateGenericTableAvl = (void *)GetProcAddress(hntdll, "RtlEnumerateGenericTableAvl");
+        pRtlEnumerateGenericTableWithoutSplayingAvl = (void *)GetProcAddress(hntdll, "RtlEnumerateGenericTableWithoutSplayingAvl");
+        pRtlGetElementGenericTableAvl = (void *)GetProcAddress(hntdll, "RtlGetElementGenericTableAvl");
+        pRtlNumberGenericTableElementsAvl = (void *)GetProcAddress(hntdll, "RtlNumberGenericTableElementsAvl");
+        pRtlIsGenericTableEmptyAvl = (void *)GetProcAddress(hntdll, "RtlIsGenericTableEmptyAvl");
+        pRtlIsNameInExpression = (void *)GetProcAddress(hntdll, "RtlIsNameInExpression");
         pRtlInitializeGenericTable = (void *)GetProcAddress(hntdll, "RtlInitializeGenericTable");
         pRtlFindExportedRoutineByName = (void *)GetProcAddress(hntdll, "RtlFindExportedRoutineByName");
         pRtlLookupElementGenericTable = (void *)GetProcAddress(hntdll, "RtlLookupElementGenericTable");
@@ -4945,6 +4967,189 @@ static void WINAPI generic_free_proc(RTL_GENERIC_TABLE *table, void *ptr)
     free(ptr);
 }
 
+static RTL_GENERIC_COMPARE_RESULTS WINAPI avl_compare_proc(RTL_AVL_TABLE *table, void *p1, void *p2)
+{
+    int *value1 = p1, *value2 = p2;
+
+    if (*value1 < *value2) return GenericLessThan;
+    if (*value1 > *value2) return GenericGreaterThan;
+    return GenericEqual;
+}
+
+static void * WINAPI avl_allocate_proc(RTL_AVL_TABLE *table, LONG size)
+{
+    return malloc(size);
+}
+
+static void WINAPI avl_free_proc(RTL_AVL_TABLE *table, void *ptr)
+{
+    free(ptr);
+}
+
+static void expect_avl_order(RTL_AVL_TABLE *table, const int *expected, unsigned int count)
+{
+    void *previous = NULL, *data;
+    unsigned int i;
+    int *value;
+
+    ok(pRtlNumberGenericTableElementsAvl(table) == count, "Got %lu elements, expected %u.\n",
+            pRtlNumberGenericTableElementsAvl(table), count);
+    ok(pRtlIsGenericTableEmptyAvl(table) == !count, "Got unexpected emptiness for %u elements.\n", count);
+
+    for (i = 0; i < count; i++)
+    {
+        value = pRtlEnumerateGenericTableAvl(table, !i);
+        ok(value && *value == expected[i], "Index %u: got %d, expected %d.\n", i, value ? *value : -1, expected[i]);
+        data = pRtlEnumerateGenericTableWithoutSplayingAvl(table, &previous);
+        ok(data == value, "Index %u: got %p, expected %p.\n", i, data, value);
+        data = pRtlGetElementGenericTableAvl(table, i);
+        ok(data == value, "Index %u: got %p, expected %p.\n", i, data, value);
+    }
+    ok(!pRtlEnumerateGenericTableAvl(table, FALSE), "Expected the end of the enumeration.\n");
+    ok(!pRtlEnumerateGenericTableWithoutSplayingAvl(table, &previous), "Expected the end of the enumeration.\n");
+    ok(!pRtlGetElementGenericTableAvl(table, count), "Expected no element at index %u.\n", count);
+}
+
+static void test_avl_table(void)
+{
+    static const int insert_order[] = { 50, 30, 80, 10, 40, 70, 90, 35, 45, 60 };
+    static const int sorted[] = { 10, 30, 35, 40, 45, 50, 60, 70, 80, 90 };
+    RTL_AVL_TABLE table;
+    BOOLEAN is_new;
+    unsigned int i;
+    int value, *ptr, *ptr2;
+
+    if (!pRtlInitializeGenericTableAvl || !pRtlInsertElementGenericTableAvl || !pRtlLookupElementGenericTableAvl
+            || !pRtlDeleteElementGenericTableAvl || !pRtlEnumerateGenericTableAvl || !pRtlIsGenericTableEmptyAvl
+            || !pRtlEnumerateGenericTableWithoutSplayingAvl || !pRtlGetElementGenericTableAvl
+            || !pRtlNumberGenericTableElementsAvl)
+    {
+        win_skip("AVL generic table functions are unavailable.\n");
+        return;
+    }
+
+    memset(&table, 0xcc, sizeof(table));
+    pRtlInitializeGenericTableAvl(&table, avl_compare_proc, avl_allocate_proc, avl_free_proc, (void *)0x1234);
+    ok(table.CompareRoutine == avl_compare_proc, "Got unexpected compare routine.\n");
+    ok(table.TableContext == (void *)0x1234, "Got unexpected context.\n");
+    expect_avl_order(&table, NULL, 0);
+    value = 5;
+    ok(!pRtlLookupElementGenericTableAvl(&table, &value), "Found an element in an empty table.\n");
+    ok(!pRtlDeleteElementGenericTableAvl(&table, &value), "Deleted an element from an empty table.\n");
+
+    for (i = 0; i < ARRAY_SIZE(insert_order); i++)
+    {
+        value = insert_order[i];
+        is_new = FALSE;
+        ptr = pRtlInsertElementGenericTableAvl(&table, &value, sizeof(value), &is_new);
+        ok(ptr && *ptr == value, "Got unexpected element %p.\n", ptr);
+        ok(is_new == TRUE, "Expected a new element.\n");
+        ok(!((ULONG_PTR)ptr & 7), "Element %p is not aligned.\n", ptr);
+
+        is_new = TRUE;
+        ptr2 = pRtlInsertElementGenericTableAvl(&table, &value, sizeof(value), &is_new);
+        ok(ptr2 == ptr, "Got %p, expected %p.\n", ptr2, ptr);
+        ok(is_new == FALSE, "Expected an existing element.\n");
+
+        ptr2 = pRtlLookupElementGenericTableAvl(&table, &value);
+        ok(ptr2 == ptr, "Got %p, expected %p.\n", ptr2, ptr);
+    }
+    expect_avl_order(&table, sorted, ARRAY_SIZE(sorted));
+    value = 55;
+    ok(!pRtlLookupElementGenericTableAvl(&table, &value), "Found a missing element.\n");
+    ok(!pRtlDeleteElementGenericTableAvl(&table, &value), "Deleted a missing element.\n");
+
+    /* a leaf, an element with one child, an element with two children, then the root */
+    {
+        static const int after_leaf[] = { 10, 30, 35, 40, 50, 60, 70, 80, 90 };
+        static const int after_one_child[] = { 10, 30, 35, 40, 50, 60, 70, 80 };
+        static const int after_two_children[] = { 10, 35, 40, 50, 60, 70, 80 };
+        static const int after_root[] = { 10, 35, 40, 60, 70, 80 };
+
+        value = 45;
+        ok(pRtlDeleteElementGenericTableAvl(&table, &value), "Failed to delete %d.\n", value);
+        expect_avl_order(&table, after_leaf, ARRAY_SIZE(after_leaf));
+        value = 90;
+        ok(pRtlDeleteElementGenericTableAvl(&table, &value), "Failed to delete %d.\n", value);
+        expect_avl_order(&table, after_one_child, ARRAY_SIZE(after_one_child));
+        value = 30;
+        ok(pRtlDeleteElementGenericTableAvl(&table, &value), "Failed to delete %d.\n", value);
+        expect_avl_order(&table, after_two_children, ARRAY_SIZE(after_two_children));
+        value = 50;
+        ok(pRtlDeleteElementGenericTableAvl(&table, &value), "Failed to delete %d.\n", value);
+        expect_avl_order(&table, after_root, ARRAY_SIZE(after_root));
+        value = 50;
+        ok(!pRtlLookupElementGenericTableAvl(&table, &value), "Found a deleted element.\n");
+    }
+
+    for (i = 0; i < ARRAY_SIZE(insert_order); i++)
+    {
+        value = insert_order[i];
+        pRtlDeleteElementGenericTableAvl(&table, &value);
+    }
+    expect_avl_order(&table, NULL, 0);
+
+    value = 7;
+    ptr = pRtlInsertElementGenericTableAvl(&table, &value, sizeof(value), &is_new);
+    ok(ptr && is_new, "Failed to insert into the emptied table.\n");
+    expect_avl_order(&table, &value, 1);
+    pRtlDeleteElementGenericTableAvl(&table, &value);
+}
+
+static void test_RtlIsNameInExpression(void)
+{
+    static const struct
+    {
+        const WCHAR *expression, *name;
+        BOOLEAN ignore_case, expected;
+    }
+    tests[] =
+    {
+        { L"*",        L"ABC",     TRUE,  TRUE  },
+        { L"*",        L"",        TRUE,  TRUE  },
+        { L"A*",       L"ABC",     TRUE,  TRUE  },
+        { L"A*",       L"BC",      TRUE,  FALSE },
+        { L"A?C",      L"ABC",     TRUE,  TRUE  },
+        { L"A?C",      L"AC",      TRUE,  FALSE },
+        { L"*.TXT",    L"FOO.TXT", TRUE,  TRUE  },
+        { L"*.TXT",    L"FOO.DOC", TRUE,  FALSE },
+        { L"*.TXT",    L"foo.txt", TRUE,  TRUE  },
+        { L"*.TXT",    L"foo.txt", FALSE, FALSE },
+        { L"foo.txt",  L"foo.txt", FALSE, TRUE  },
+        { L"foo.txt",  L"foo.txt", TRUE,  FALSE },
+        { L"A*B*C",    L"AXXBYYC", TRUE,  TRUE  },
+        { L"A*B*C",    L"AXXBYY",  TRUE,  FALSE },
+        { L"ABC",      L"ABCD",    TRUE,  FALSE },
+        /* The DOS wildcard cases (<, > and ") follow the documented FsRtlIsNameInExpression rules; not checked on Windows. */
+        { L">>>",      L"AB",      TRUE,  TRUE  },
+        { L">>>",      L"ABCD",    TRUE,  FALSE },
+        { L"\"",       L"",        TRUE,  TRUE  },
+        { L"\"",       L".",       TRUE,  TRUE  },
+        { L"\"",       L"A",       TRUE,  FALSE },
+        { L"<",        L"ABC",     TRUE,  TRUE  },
+        { L"<",        L"A.B",     TRUE,  FALSE },
+        { L"<\"B",     L"A.B",     TRUE,  TRUE  },
+    };
+    UNICODE_STRING expression, name;
+    BOOLEAN ret;
+    unsigned int i;
+
+    if (!pRtlIsNameInExpression)
+    {
+        win_skip("RtlIsNameInExpression is unavailable.\n");
+        return;
+    }
+
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        RtlInitUnicodeString(&expression, tests[i].expression);
+        RtlInitUnicodeString(&name, tests[i].name);
+        ret = pRtlIsNameInExpression(&expression, &name, tests[i].ignore_case, NULL);
+        ok(ret == tests[i].expected, "Test %u (%s, %s, %d): got %d, expected %d.\n", i, debugstr_w(tests[i].expression),
+                debugstr_w(tests[i].name), tests[i].ignore_case, ret, tests[i].expected);
+    }
+}
+
 static void test_RtlInitializeGenericTable(void)
 {
     RTL_GENERIC_TABLE table;
@@ -5562,6 +5767,107 @@ static void test_pointer_encoding(void)
     ok( v == expected, "got %p, expected %p.\n", v, expected );
 }
 
+/* A delay-load descriptor for a missing DLL, inside this module's image so that its RVAs are valid. */
+struct delay_image_layout
+{
+    IMAGE_DELAYLOAD_DESCRIPTOR desc;
+    HMODULE module;
+    IMAGE_THUNK_DATA iat[2];
+    IMAGE_THUNK_DATA names[2];
+    char dll[32];
+    WORD hint;
+    char function[32];
+};
+static struct delay_image_layout delay_image;
+
+static int delay_dll_hook_calls, delay_system_hook_calls;
+static void *delay_dll_hook_result;
+static char delay_hook_name[64];
+static DWORD delay_hook_ordinal, delay_hook_error, delay_hook_by_name;
+
+static void * WINAPI delay_dll_hook( ULONG reason, DELAYLOAD_INFO *info )
+{
+    delay_dll_hook_calls++;
+    ok( reason == 4, "got reason %lu.\n", reason );
+    ok( !strcmp( info->TargetDllName, "wine_missing_delay.dll" ), "got dll %s.\n", info->TargetDllName );
+    delay_hook_by_name = info->TargetApiDescriptor.ImportDescribedByName;
+    if (delay_hook_by_name) strcpy( delay_hook_name, info->TargetApiDescriptor.Description.Name );
+    else delay_hook_ordinal = info->TargetApiDescriptor.Description.Ordinal;
+    delay_hook_error = info->LastError;
+    return delay_dll_hook_result;
+}
+
+static void * WINAPI delay_system_hook( const char *dll, const char *function )
+{
+    delay_system_hook_calls++;
+    ok( !strcmp( dll, "wine_missing_delay.dll" ), "got dll %s.\n", dll );
+    return (void *)0x5151;
+}
+
+static void test_LdrResolveDelayLoadedAPI(void)
+{
+    void * (WINAPI *pLdrResolveDelayLoadedAPI)( void *, const IMAGE_DELAYLOAD_DESCRIPTOR *,
+                                                PDELAYLOAD_FAILURE_DLL_CALLBACK, PDELAYLOAD_FAILURE_SYSTEM_ROUTINE,
+                                                IMAGE_THUNK_DATA *, ULONG );
+    BYTE *base = (BYTE *)GetModuleHandleA( NULL );
+    DWORD rva = (BYTE *)&delay_image - base;
+    unsigned int i;
+    void *ret;
+
+    pLdrResolveDelayLoadedAPI = (void *)GetProcAddress( hntdll, "LdrResolveDelayLoadedAPI" );
+    if (!pLdrResolveDelayLoadedAPI)
+    {
+        win_skip( "LdrResolveDelayLoadedAPI is not available.\n" );
+        return;
+    }
+
+    for (i = 0; i < 3; i++)
+    {
+        BOOL by_name = i != 1;
+
+        memset( &delay_image, 0, sizeof(delay_image) );
+        strcpy( delay_image.dll, "wine_missing_delay.dll" );
+        strcpy( delay_image.function, "WineMissingFunction" );
+        delay_image.desc.Attributes.RvaBased = 1;
+        delay_image.desc.DllNameRVA = rva + offsetof( struct delay_image_layout, dll );
+        delay_image.desc.ModuleHandleRVA = rva + offsetof( struct delay_image_layout, module );
+        delay_image.desc.ImportAddressTableRVA = rva + offsetof( struct delay_image_layout, iat );
+        delay_image.desc.ImportNameTableRVA = rva + offsetof( struct delay_image_layout, names );
+        delay_image.names[0].u1.AddressOfData = by_name ? rva + offsetof( struct delay_image_layout, hint )
+                                                        : IMAGE_ORDINAL_FLAG | 42;
+        /* not yet resolved: the entry points into the image */
+        delay_image.iat[0].u1.Function = (ULONG_PTR)test_LdrResolveDelayLoadedAPI;
+        delay_dll_hook_calls = delay_system_hook_calls = 0;
+        delay_dll_hook_result = (i == 2) ? (void *)0x1234 : NULL;
+        delay_hook_name[0] = 0;
+        delay_hook_ordinal = delay_hook_error = 0;
+
+        ret = pLdrResolveDelayLoadedAPI( base, &delay_image.desc, delay_dll_hook, delay_system_hook,
+                                         &delay_image.iat[0], 0 );
+        ok( delay_dll_hook_calls == 1, "%u: dll hook called %d times.\n", i, delay_dll_hook_calls );
+        ok( delay_hook_by_name == by_name, "%u: got by name %lu.\n", i, delay_hook_by_name );
+        if (by_name)
+            ok( !strcmp( delay_hook_name, "WineMissingFunction" ), "%u: got name %s.\n", i, delay_hook_name );
+        else
+            ok( delay_hook_ordinal == 42, "%u: got ordinal %lu.\n", i, delay_hook_ordinal );
+        ok( delay_hook_error == ERROR_MOD_NOT_FOUND, "%u: got error %lu.\n", i, delay_hook_error );
+        if (i == 2)
+        {
+            /* the module's hook resolved it: no system routine */
+            ok( ret == (void *)0x1234, "%u: got %p.\n", i, ret );
+            ok( !delay_system_hook_calls, "%u: system hook called %d times.\n", i, delay_system_hook_calls );
+        }
+        else
+        {
+            /* the module's hook gave up: the system routine runs */
+            ok( ret == (void *)0x5151, "%u: got %p.\n", i, ret );
+            ok( delay_system_hook_calls == 1, "%u: system hook called %d times.\n", i, delay_system_hook_calls );
+        }
+        ok( delay_image.iat[0].u1.Function == (ULONG_PTR)test_LdrResolveDelayLoadedAPI,
+            "%u: IAT entry changed to %#Ix.\n", i, (ULONG_PTR)delay_image.iat[0].u1.Function );
+    }
+}
+
 START_TEST(rtl)
 {
     InitFunctionPtrs();
@@ -5603,6 +5909,7 @@ START_TEST(rtl)
     test_LdrEnumerateLoadedModules();
     test_RtlMakeSelfRelativeSD();
     test_LdrRegisterDllNotification();
+    test_LdrResolveDelayLoadedAPI();
     test_DbgPrint();
     test_RtlDestroyHeap();
     test_RtlCreateHeap();
@@ -5623,6 +5930,8 @@ START_TEST(rtl)
     test_RtlDeleteNoSplay();
     test_RtlDelete();
     test_RtlInitializeGenericTable();
+    test_avl_table();
+    test_RtlIsNameInExpression();
     test_RtlNumberGenericTableElements();
     test_RtlIsGenericTableEmpty();
     test_RtlInsertElementGenericTable();

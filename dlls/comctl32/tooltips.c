@@ -2329,7 +2329,7 @@ TOOLTIPS_Register (void)
     WNDCLASSW wndClass;
 
     ZeroMemory (&wndClass, sizeof(WNDCLASSW));
-    wndClass.style         = CS_GLOBALCLASS | CS_DBLCLKS | CS_SAVEBITS;
+    wndClass.style         = CS_GLOBALCLASS | CS_DBLCLKS | CS_SAVEBITS | CS_DROPSHADOW;
     wndClass.lpfnWndProc   = TOOLTIPS_WindowProc;
     wndClass.cbClsExtra    = 0;
     wndClass.cbWndExtra    = sizeof(TOOLTIPS_INFO *);

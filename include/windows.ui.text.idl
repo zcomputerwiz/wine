@@ -30,7 +30,44 @@ import "windows.globalization.idl";
 
 namespace Windows.UI.Text
 {
+    typedef enum FontStretch FontStretch;
+    typedef enum FontStyle FontStyle;
     typedef enum UnderlineType UnderlineType;
+    typedef struct FontWeight FontWeight;
+
+    interface IFontWeights;
+    interface IFontWeightsStatics;
+
+    runtimeclass FontWeights;
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0)]
+    enum FontStretch
+    {
+        Undefined      = 0,
+        UltraCondensed = 1,
+        ExtraCondensed = 2,
+        Condensed      = 3,
+        SemiCondensed  = 4,
+        Normal         = 5,
+        SemiExpanded   = 6,
+        Expanded       = 7,
+        ExtraExpanded  = 8,
+        UltraExpanded  = 9
+    };
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0)]
+    enum FontStyle
+    {
+        Normal  = 0,
+        Oblique = 1,
+        Italic  = 2
+    };
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0)]
+    struct FontWeight
+    {
+        UINT16 Weight;
+    };
 
     declare
     {
@@ -61,4 +98,43 @@ namespace Windows.UI.Text
         ThickDotted     = 18,
         ThickLongDash   = 19
     };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.Text.FontWeights),
+        uuid(7880a444-01ab-4997-8517-df822a0c45f1)
+    ]
+    interface IFontWeights : IInspectable
+    {
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.Text.FontWeights),
+        uuid(b3b579d5-1ba9-48eb-9dad-c095e8c23ba3)
+    ]
+    interface IFontWeightsStatics : IInspectable
+    {
+        [propget] HRESULT Black([out, retval] Windows.UI.Text.FontWeight *value);
+        [propget] HRESULT Bold([out, retval] Windows.UI.Text.FontWeight *value);
+        [propget] HRESULT ExtraBlack([out, retval] Windows.UI.Text.FontWeight *value);
+        [propget] HRESULT ExtraBold([out, retval] Windows.UI.Text.FontWeight *value);
+        [propget] HRESULT ExtraLight([out, retval] Windows.UI.Text.FontWeight *value);
+        [propget] HRESULT Light([out, retval] Windows.UI.Text.FontWeight *value);
+        [propget] HRESULT Medium([out, retval] Windows.UI.Text.FontWeight *value);
+        [propget] HRESULT Normal([out, retval] Windows.UI.Text.FontWeight *value);
+        [propget] HRESULT SemiBold([out, retval] Windows.UI.Text.FontWeight *value);
+        [propget] HRESULT SemiLight([out, retval] Windows.UI.Text.FontWeight *value);
+        [propget] HRESULT Thin([out, retval] Windows.UI.Text.FontWeight *value);
+    }
+
+    [
+        static(Windows.UI.Text.IFontWeightsStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    runtimeclass FontWeights
+    {
+        [default] interface Windows.UI.Text.IFontWeights;
+    }
 }

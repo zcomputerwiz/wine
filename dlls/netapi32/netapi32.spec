@@ -100,6 +100,10 @@
 @ stdcall NetGetDCName(wstr wstr ptr)
 @ stub NetGetDisplayInformationIndex
 @ stdcall NetGetJoinInformation(wstr ptr ptr) wkscli.NetGetJoinInformation
+@ stdcall NetJoinDomain(wstr wstr wstr wstr wstr long) wkscli.NetJoinDomain
+@ stdcall NetRenameMachineInDomain(wstr wstr wstr wstr long) wkscli.NetRenameMachineInDomain
+@ stdcall NetUnjoinDomain(wstr wstr wstr long) wkscli.NetUnjoinDomain
+@ stdcall NetValidateName(wstr wstr wstr wstr long) wkscli.NetValidateName
 @ stub NetGroupAdd
 @ stdcall NetGroupAddUser(wstr wstr wstr)
 @ stub NetGroupDel
@@ -217,7 +221,7 @@
 @ stdcall NetUserModalsGet(wstr long ptr)
 @ stdcall NetUserModalsSet(wstr long ptr ptr)
 @ stub NetUserSetGroups
-@ stub NetUserSetInfo
+@ stdcall NetUserSetInfo(wstr wstr long ptr ptr)
 @ stdcall NetValidatePasswordPolicy(wstr ptr long ptr ptr)
 @ stdcall NetValidatePasswordPolicyFree(ptr)
 @ stdcall NetWkstaGetInfo(wstr long ptr)

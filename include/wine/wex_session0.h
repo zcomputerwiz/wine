@@ -30,7 +30,7 @@
 /* the link message from a user's server to session 0: header, then the token description; SCM_RIGHTS carries
  * the channel. Session 0 answers with a reply. One message per connection. */
 #define WEX_SESSION0_MAGIC    0x30535857  /* "WXS0" */
-#define WEX_SESSION0_VERSION  5
+#define WEX_SESSION0_VERSION  8
 #define WEX_SESSION0_MAX_MSG  65536
 
 struct wex_session0_request
@@ -39,7 +39,15 @@ struct wex_session0_request
     unsigned int version;
     unsigned int desc_size;   /* size of the token description that follows */
     unsigned int type;        /* WEX_SESSION0_* below */
-    unsigned int machine;     /* CHANNEL: the program's machine (IMAGE_FILE_MACHINE_*): its registry view */
+    union                     /* the last field, by type (one word on the wire whatever its name) */
+    {
+        unsigned int machine;     /* CHANNEL: the program's machine (IMAGE_FILE_MACHINE_*): its registry view */
+        unsigned int saved;       /* HIVE_SAVED: 1 written, 0 not */
+        unsigned int name_size;   /* PIPE, PIPE_WAIT: the size in bytes of the pipe name after the description */
+        unsigned int session_id;  /* SESSION_ID: the id the server asks for (0: any) */
+        unsigned int block;       /* BLOCK: the block of ids the server asks for again (0: a new one) */
+        unsigned int unused;      /* USER_HIVE, HIVE_UNLOAD: 0 */
+    };
 };
 
 /* Message types. CHANNEL: the program's registry channel in SCM_RIGHTS; one message, then the link closes.
@@ -61,10 +69,21 @@ struct wex_session0_request
 #define WEX_SESSION0_SESSION_ID   4
 #define WEX_SESSION0_HIVE_SAVED   5
 /* PIPE (T5.2): a program of the session opens a pipe of session 0 (\pipe\WexSession0\<name> in the session). The
- * token description is followed by the pipe's name (machine: its size in bytes, UTF-16); SCM_RIGHTS: one end of
+ * token description is followed by the pipe's name (machine: its size in bytes, UTF-16) and, since version 7, the
+ * opener's process id (4 bytes; 0: none, as PIPE_WAIT has none); SCM_RIGHTS: one end of
  * a stream socket, on which session 0 joins the pipe (each message: a 4-byte length, then the data). One
  * message, then the link closes. */
 #define WEX_SESSION0_PIPE         6
+/* PIPE_WAIT: a program of the session waits for a pipe of session 0 (FSCTL_PIPE_WAIT); the same message as PIPE,
+ * without a socket. The status says whether session 0 has the pipe; no instance is taken. */
+#define WEX_SESSION0_PIPE_WAIT    7
+/* BLOCK (R6, docs/SESSION0_PROCESS_IDS.md): a linked server asks for a block of process and thread ids, a new one
+ * (block 0) or one it held before session 0 restarted; the reply's value is the block (WEX_ID_BLOCK_SIZE indices
+ * from block * WEX_ID_BLOCK_SIZE; ids are indices * 4). Session 0 gives a block to one live server at a time, so
+ * the ids of different servers never meet. No token description, no descriptor. */
+#define WEX_SESSION0_BLOCK        8
+#define WEX_ID_BLOCK_SIZE         4096
+#define WEX_ID_BLOCK_COUNT        4096  /* indices below 2^24: ids below 2^26, as on Windows */
 
 /* orders */
 #define WEX_SESSION0_ORDER_PING   1   /* answered with the server's session id */
@@ -83,6 +102,79 @@ struct wex_session0_order_reply
     unsigned int serial;
     unsigned int status;      /* NTSTATUS; STATUS_NOT_SUPPORTED for an order the server does not know */
     unsigned int value;
+};
+
+/* X frames (version 8, docs/SESSION0_CROSS_SERVER.md, M0 and its X0 appendix): the cross-server protocol on the
+ * session link, in both directions, beside the orders. A frame is a header, a body by type and, for OPEN, the
+ * caller's token description and the name; size counts all of it and is at most WEX_SESSION0_MAX_MSG. A request
+ * carries the sender's call number, its reply the same number and the type with WEX_X_REPLY. Replies come in any
+ * order. */
+#define WEX_X_MAGIC           0x58305857  /* "WX0X" */
+
+#define WEX_X_HELLO           1   /* each side once: struct wex_x_hello; no reply */
+#define WEX_X_OPEN            2   /* holder to owner: struct wex_x_open, description, name; reply: ref, wex_x_granted */
+#define WEX_X_QUERY           3   /* reply: wex_x_granted */
+#define WEX_X_RELEASE         4   /* idempotent: always success */
+#define WEX_X_SUBSCRIBE       5   /* arms the subscription of ref */
+#define WEX_X_CANCEL          6   /* idempotent: ends the subscription */
+#define WEX_X_TRY             7   /* success (acquired) or STATUS_TIMEOUT; re-arms the subscription; never cancelled */
+#define WEX_X_NOTICE          8   /* owner to holder: ref is ready (one per arming); no reply */
+#define WEX_X_PING            9   /* the body comes back */
+#define WEX_X_REPLY           0x80000000
+
+/* OPEN kinds: none in production yet (X1: global names, X3: process ids); the lab build has its counter */
+#define WEX_X_KIND_LAB        0x7f000001
+
+/* caps on what is in flight (per account of the holder; requests per link) */
+#define WEX_X_MAX_REFS        16384
+#define WEX_X_MAX_SUBS        4096
+#define WEX_X_MAX_INFLIGHT    256
+#define WEX_X_MAX_QUEUED      (4 * 1024 * 1024)
+/* how long an owner keeps the references of a peer whose link is lost while its process lives, in seconds */
+#define WEX_X_LOST_SECONDS    120
+
+struct wex_x_header
+{
+    unsigned int       magic;      /* WEX_X_MAGIC */
+    unsigned int       size;       /* the whole frame, header included */
+    unsigned int       type;       /* WEX_X_*, with WEX_X_REPLY in a reply */
+    unsigned int       call;       /* the sender's call number, repeated in the reply; 0 in HELLO and NOTICE */
+    unsigned int       status;     /* replies: NTSTATUS; requests: 0 */
+    unsigned int       desc_size;  /* OPEN: the size of the token description after the body */
+    unsigned long long ref;        /* the reference the frame is about, or 0 */
+};
+
+/* a server's identity: it changes when the server restarts, never when a link does */
+struct wex_x_epoch
+{
+    unsigned long long nonce;      /* random, from the server's start */
+    unsigned long long start;      /* the process's start time (/proc/<pid>/stat, clock ticks since boot) */
+    unsigned int       pid;
+    unsigned int       reserved;
+};
+
+struct wex_x_hello
+{
+    struct wex_x_epoch epoch;
+    unsigned int       connection; /* session 0: its number for this connection; a user's server: 0 */
+    unsigned int       session;    /* session 0: the link's session; a user's server: its own */
+    unsigned long long peer_nonce; /* the nonce of the epoch the sender still keeps for the connecting server, or 0:
+                                    * when it is not the receiver's own, the sender started fresh (it dropped the
+                                    * peer), and the receiver ends its side of that peer too */
+};
+
+struct wex_x_open
+{
+    unsigned int       kind;       /* WEX_X_KIND_* */
+    unsigned int       access;     /* desired access */
+    unsigned int       name_size;  /* bytes of the name after the description */
+    unsigned int       reserved;
+};
+
+struct wex_x_granted
+{
+    unsigned int       access;     /* the rights the owner granted (information: the owner decides) */
+    unsigned int       ready;      /* QUERY: the object is ready (signaled) now */
 };
 
 struct wex_session0_reply
@@ -104,7 +196,12 @@ struct wex_session0_hive_save
  * display, drive and port mappings, computer name state, the service manager's instance counter, Safe Mode's
  * SafeBoot\Option, which each session's wineboot writes from the boot mode, the volatile hardware tree).
  * Paths relative to \Registry\Machine and \Registry\User\.Default; a key matches
- * when its path equals an entry or continues it with a backslash. Compared without regard to case. */
+ * when its path equals an entry or continues it with a backslash (wex_session_key_match). Compared without regard
+ * to case.
+ *
+ * ntdll opens these keys in the program's own server instead of session 0 (routing). The server's copy of the
+ * machine hives keeps them and is never written: only session 0 writes the machine hives (R4 of
+ * docs/SESSION0_SPLIT_REVIEW.md retired the merge of a shared hive file, which used this list too). */
 #define WEX_SESSION_MACHINE_KEYS \
     "Hardware", \
     "System\\ControlSet001\\Enum", \
@@ -135,5 +232,23 @@ struct wex_session0_hive_save
 #define WEX_SESSION_DEFAULT_USER_KEYS \
     "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders", \
     "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders"
+
+/* the number of characters of path (count characters) that an ASCII prefix matches, when the match ends with the
+ * path or at a backslash; 0 when it does not match. Without regard to case (ASCII letters). */
+static inline unsigned int wex_session_key_match( const WCHAR *path, unsigned int count, const char *prefix )
+{
+    unsigned int i;
+
+    for (i = 0; prefix[i]; i++)
+    {
+        WCHAR ch = path[i];
+        unsigned char p = prefix[i];
+        if (i >= count) return 0;
+        if (ch >= 'A' && ch <= 'Z') ch += 'a' - 'A';
+        if (p >= 'A' && p <= 'Z') p += 'a' - 'A';
+        if (ch != p) return 0;
+    }
+    return (count == i || path[i] == '\\') ? i : 0;
+}
 
 #endif /* __WINE_WINE_WEX_SESSION0_H */

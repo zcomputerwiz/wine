@@ -32,10 +32,10 @@
 @ stub SLInstallSAMLicense
 @ stdcall SLOpen(ptr) sppc.SLOpen
 @ stub SLReArmWindows
-@ stub SLRegisterEvent
+@ stdcall SLRegisterEvent(ptr wstr ptr ptr) sppc.SLRegisterEvent
 @ stub SLRegisterWindowsEvent
 @ stub SLUninstallLicense
 @ stub SLUninstallProofOfPurchase
 @ stub SLUninstallSAMLicense
-@ stub SLUnregisterEvent
+@ stdcall SLUnregisterEvent(ptr wstr ptr ptr) sppc.SLUnregisterEvent
 @ stub SLUnregisterWindowsEvent

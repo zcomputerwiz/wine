@@ -42,6 +42,19 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
         IActivationFactory_QueryInterface( package_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_DesignMode ))
         IActivationFactory_QueryInterface( design_mode_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_LimitedAccessFeatures ))
+        IActivationFactory_QueryInterface( limited_access_features_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_AppService_AppServiceConnection ))
+        IActivationFactory_QueryInterface( app_service_connection_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Internal_StateRepository_Package ))
+        IActivationFactory_QueryInterface( state_repository_package_factory, &IID_IActivationFactory, (void **)factory );
+
+    else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_Resources_ResourceLoader ))
+        IActivationFactory_QueryInterface( resource_loader_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_Resources_Core_ResourceManager ))
+        IActivationFactory_QueryInterface( resource_manager_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_Resources_Core_ResourceContext ))
+        IActivationFactory_QueryInterface( resource_context_factory, &IID_IActivationFactory, (void **)factory );
 
     if (*factory) return S_OK;
     return CLASS_E_CLASSNOTAVAILABLE;

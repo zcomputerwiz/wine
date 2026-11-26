@@ -1,11 +1,13 @@
 MODULE    = wintypes.dll
 IMPORTLIB = wintypes
-IMPORTS   = combase kernelbase
+IMPORTS   = combase kernelbase bcrypt
 
 SOURCES = \
 	buffer.c \
 	classes.idl \
 	datareader.c \
+	diagnostics.c \
+	guidhelper.c \
 	main.c \
 	map.c \
 	propertyset.c \

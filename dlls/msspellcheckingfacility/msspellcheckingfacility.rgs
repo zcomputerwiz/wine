@@ -1,0 +1,13 @@
+HKCR
+{
+    NoRemove CLSID
+    {
+        ForceRemove '{7ab36653-1796-484b-bdfa-e74f1db7c1dc}' = s 'SpellCheckerFactory'
+        {
+            InprocServer32 = s '%MODULE%'
+            {
+                val ThreadingModel = s 'Both'
+            }
+        }
+    }
+}

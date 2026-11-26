@@ -21,10 +21,18 @@
 #endif
 
 import "inspectable.idl";
+import "eventtoken.idl";
+import "windowscontracts.idl";
 import "windows.foundation.idl";
 
 namespace Windows.System.Power {
     typedef enum BatteryStatus BatteryStatus;
+    typedef enum EnergySaverStatus EnergySaverStatus;
+    typedef enum PowerSupplyStatus PowerSupplyStatus;
+
+    interface IPowerManagerStatics;
+
+    runtimeclass PowerManager;
 
     [contract(Windows.Foundation.UniversalApiContract, 1.0)]
     enum BatteryStatus
@@ -34,4 +42,54 @@ namespace Windows.System.Power {
         Idle = 2,
         Charging = 3,
     };
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0)]
+    enum EnergySaverStatus
+    {
+        Disabled = 0,
+        Off = 1,
+        On = 2,
+    };
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0)]
+    enum PowerSupplyStatus
+    {
+        NotPresent = 0,
+        Inadequate = 1,
+        Adequate = 2,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.System.Power.PowerManager),
+        uuid(1394825d-62ce-4364-98d5-aa28c7fbd15b)
+    ]
+    interface IPowerManagerStatics : IInspectable
+    {
+        [propget] HRESULT EnergySaverStatus([out, retval] Windows.System.Power.EnergySaverStatus *value);
+        [eventadd] HRESULT EnergySaverStatusChanged([in] Windows.Foundation.EventHandler<IInspectable *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT EnergySaverStatusChanged([in] EventRegistrationToken token);
+        [propget] HRESULT BatteryStatus([out, retval] Windows.System.Power.BatteryStatus *value);
+        [eventadd] HRESULT BatteryStatusChanged([in] Windows.Foundation.EventHandler<IInspectable *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT BatteryStatusChanged([in] EventRegistrationToken token);
+        [propget] HRESULT PowerSupplyStatus([out, retval] Windows.System.Power.PowerSupplyStatus *value);
+        [eventadd] HRESULT PowerSupplyStatusChanged([in] Windows.Foundation.EventHandler<IInspectable *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT PowerSupplyStatusChanged([in] EventRegistrationToken token);
+        [propget] HRESULT RemainingChargePercent([out, retval] INT32 *value);
+        [eventadd] HRESULT RemainingChargePercentChanged([in] Windows.Foundation.EventHandler<IInspectable *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT RemainingChargePercentChanged([in] EventRegistrationToken token);
+        [propget] HRESULT RemainingDischargeTime([out, retval] Windows.Foundation.TimeSpan *value);
+        [eventadd] HRESULT RemainingDischargeTimeChanged([in] Windows.Foundation.EventHandler<IInspectable *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT RemainingDischargeTimeChanged([in] EventRegistrationToken token);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.System.Power.IPowerManagerStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        threading(both)
+    ]
+    runtimeclass PowerManager
+    {
+    }
 }

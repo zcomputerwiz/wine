@@ -1,0 +1,5 @@
+@ stdcall MappingDoAction(ptr long wstr)
+@ stdcall MappingFreePropertyBag(ptr)
+@ stdcall MappingFreeServices(ptr)
+@ stdcall MappingGetServices(ptr ptr ptr)
+@ stdcall MappingRecognizeText(ptr wstr long long ptr ptr)

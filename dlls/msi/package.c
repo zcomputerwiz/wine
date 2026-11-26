@@ -670,7 +670,10 @@ static VOID set_installer_properties(MSIPACKAGE *package)
     lstrcatW(pth, L"\\");
     msi_set_property( package->db, L"TemplateFolder", pth, -1 );
 
-    SHGetFolderPathW(NULL, CSIDL_DESKTOP, NULL, 0, pth);
+    if (msi_get_property_int( package->db, L"ALLUSERS", 0 ) == 1)
+        SHGetFolderPathW(NULL, CSIDL_COMMON_DESKTOPDIRECTORY, NULL, 0, pth);
+    else
+        SHGetFolderPathW(NULL, CSIDL_DESKTOP, NULL, 0, pth);
     lstrcatW(pth, L"\\");
     msi_set_property( package->db, L"DesktopFolder", pth, -1 );
 
@@ -1251,11 +1254,6 @@ static WCHAR *get_product_code( MSIDATABASE *db )
     return get_property( db, L"ProductCode" );
 }
 
-static WCHAR *get_product_version( MSIDATABASE *db )
-{
-    return get_property( db, L"ProductVersion" );
-}
-
 /* Is installing this package file going to be a per-machine install (what msi_set_context decides later, from the
  * package file alone, because a limited token cannot open the package for the install: opening copies it into the
  * machine's Installer directory)? The product is installed per machine already, or ALLUSERS is 1 or 2 on the command
@@ -1367,6 +1365,121 @@ UINT msi_set_original_database_property( MSIDATABASE *db, const WCHAR *package )
     return r;
 }
 
+/* The package could not be copied to the local cache (for example a per-machine package run without the right to
+ * write the Windows directory): say so in the log and, unless the UI level is none, in a message box, instead of
+ * failing without a word. No package exists yet, so neither its log nor its error dialog can be used. */
+static void report_local_copy_failure( const WCHAR *file, UINT error )
+{
+    WCHAR dir[MAX_PATH], text[1024];
+    char afile[3 * MAX_PATH], adir[3 * MAX_PATH], line[6 * MAX_PATH + 128];
+    DWORD written, len;
+    HANDLE log;
+
+    WARN( "unable to make a local copy of package %s (%u)\n", debugstr_w(file), error );
+    GetWindowsDirectoryW( dir, MAX_PATH );
+    lstrcatW( dir, L"\\Installer" );
+    if (gszLogFile && (log = CreateFileW( gszLogFile, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                          OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL )) != INVALID_HANDLE_VALUE)
+    {
+        if (!WideCharToMultiByte( CP_ACP, 0, file, -1, afile, sizeof(afile), NULL, NULL )) afile[0] = 0;
+        if (!WideCharToMultiByte( CP_ACP, 0, dir, -1, adir, sizeof(adir), NULL, NULL )) adir[0] = 0;
+        len = snprintf( line, sizeof(line), "MSI (c): cannot copy the package %s to %s (error %u)\n",
+                        afile, adir, error );
+        WriteFile( log, line, min( len, sizeof(line) - 1 ), &written, NULL );
+        CloseHandle( log );
+    }
+    if ((gUILevel & INSTALLUILEVEL_MASK) == INSTALLUILEVEL_NONE) return;
+    if (!FormatMessageW( FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL,
+                         ERROR_INSTALL_PACKAGE_OPEN_FAILED, 0, text, ARRAY_SIZE(text), NULL ))
+        lstrcpyW( text, L"This installation package could not be opened." );
+    MessageBoxW( gUIhwnd, text, L"Windows Installer", MB_OK | MB_ICONERROR );
+}
+
+/* Is this msiexec the one the elevation broker started for a frozen package (WEXELEVATE_DOC_PATH and
+ * WEXELEVATE_DOC_SHA256 set)? Then the user consented to that one file only. */
+BOOL msi_broker_froze_a_file(void)
+{
+    WCHAR want[MAX_PATH], expected[65];
+
+    return GetEnvironmentVariableW( L"WEXELEVATE_DOC_PATH", want, ARRAY_SIZE(want) ) &&
+           GetEnvironmentVariableW( L"WEXELEVATE_DOC_SHA256", expected, ARRAY_SIZE(expected) ) == 64;
+}
+
+/* Is FILE, as this process resolves it, the file the broker froze? */
+BOOL msi_is_frozen_file_path( const WCHAR *file )
+{
+    WCHAR want[MAX_PATH], full_src[MAX_PATH], full_want[MAX_PATH];
+    DWORD len;
+
+    len = GetEnvironmentVariableW( L"WEXELEVATE_DOC_PATH", want, ARRAY_SIZE(want) );
+    if (!len || len >= ARRAY_SIZE(want)) return FALSE;
+    len = GetFullPathNameW( file, ARRAY_SIZE(full_src), full_src, NULL );
+    if (!len || len >= ARRAY_SIZE(full_src)) return FALSE;
+    len = GetFullPathNameW( want, ARRAY_SIZE(full_want), full_want, NULL );
+    if (!len || len >= ARRAY_SIZE(full_want)) return FALSE;
+    return !wcsicmp( full_src, full_want );
+}
+
+/* a package in the Installer cache (%windir%\Installer), which only administrators can write: the cached package of an
+ * installed product, which /i {product-code} PATCH=... opens */
+static BOOL is_cached_package( const WCHAR *file )
+{
+    WCHAR dir[MAX_PATH], full[MAX_PATH];
+    DWORD len, n;
+
+    if (!(len = GetWindowsDirectoryW( dir, ARRAY_SIZE(dir) - 12 ))) return FALSE;
+    lstrcpyW( dir + len, L"\\Installer\\" );
+    len += 11;
+    n = GetFullPathNameW( file, ARRAY_SIZE(full), full, NULL );
+    return n && n < ARRAY_SIZE(full) && n > len && !wcsnicmp( full, dir, len ) && !wcschr( full + len, '\\' );
+}
+
+/* The elevation broker freezes the package of a per-machine install and gives the elevated msiexec the path and the
+ * SHA-256 of what it froze (WEXELEVATE_DOC_PATH and WEXELEVATE_DOC_SHA256): the copy made here has to be that file,
+ * even if the path was made to lead elsewhere after the freeze. Another file is refused: the consent window showed the
+ * frozen one, and msiexec's command line may name more than the broker read (a second /i). TRUE when the broker froze
+ * nothing, or for the Installer cache's copy of an installed product. */
+BOOL msi_copy_is_frozen_file( const WCHAR *src, const WCHAR *copy )
+{
+    WCHAR expected[65], hex[65];
+    BYTE buf[65536], digest[32];
+    HCRYPTPROV prov;
+    HCRYPTHASH hash;
+    HANDLE file;
+    DWORD got, len = sizeof(digest), i;
+    BOOL ok = FALSE;
+
+    if (!msi_broker_froze_a_file()) return TRUE;
+    if (!msi_is_frozen_file_path( src ))
+    {
+        if (is_cached_package( src )) return TRUE;
+        WARN( "%s is not the file the broker froze\n", debugstr_w(src) );
+        return FALSE;
+    }
+    GetEnvironmentVariableW( L"WEXELEVATE_DOC_SHA256", expected, ARRAY_SIZE(expected) );
+
+    file = CreateFileW( copy, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, 0 );
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    if (CryptAcquireContextW( &prov, NULL, MS_ENH_RSA_AES_PROV_W, PROV_RSA_AES, CRYPT_VERIFYCONTEXT ))
+    {
+        if (CryptCreateHash( prov, CALG_SHA_256, 0, 0, &hash ))
+        {
+            while (ReadFile( file, buf, sizeof(buf), &got, NULL ) && got)
+                if (!CryptHashData( hash, buf, got, 0 )) break;
+            if (!got && CryptGetHashParam( hash, HP_HASHVAL, digest, &len, 0 ) && len == sizeof(digest))
+            {
+                for (i = 0; i < len; i++) swprintf( hex + 2 * i, 3, L"%02x", digest[i] );
+                ok = !wcsicmp( hex, expected );
+            }
+            CryptDestroyHash( hash );
+        }
+        CryptReleaseContext( prov, 0 );
+    }
+    CloseHandle( file );
+    if (!ok) WARN( "the copy of %s is not the file the broker froze\n", debugstr_w(src) );
+    return ok;
+}
+
 UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
 {
     MSIDATABASE *db;
@@ -1395,7 +1508,7 @@ UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
     }
     else
     {
-        WCHAR *product_version = NULL;
+        WCHAR *package_code = NULL;
 
         if ( UrlIsW( szPackage, URLIS_URL ) )
         {
@@ -1420,6 +1533,7 @@ UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
             r = msi_create_empty_local_file( localfile, L".msi" );
             if (r != ERROR_SUCCESS)
             {
+                report_local_copy_failure( file, GetLastError() );
                 msiobj_release( &db->hdr );
                 return r;
             }
@@ -1433,6 +1547,12 @@ UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
                 return r;
             }
             delete_on_close = TRUE;
+            if (!msi_copy_is_frozen_file( file, localfile ))
+            {
+                DeleteFileW( localfile );
+                msiobj_release( &db->hdr );
+                return ERROR_FILE_CORRUPT;
+            }
 
             /* Remove read-only bit, we are opening it with write access in MSI_OpenDatabaseW below. */
             localfile_attr = GetFileAttributesW( localfile );
@@ -1448,31 +1568,35 @@ UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
                 msiobj_release( &db->hdr );
                 return r;
             }
+            if (!msi_copy_is_frozen_file( file, localfile ))
+            {
+                msiobj_release( &db->hdr );
+                return ERROR_FILE_CORRUPT;
+            }
         }
         else
-            product_version = get_product_version( db );
+            package_code = msi_get_package_code( db );
         msiobj_release( &db->hdr );
         TRACE("opening package %s\n", debugstr_w( localfile ));
         r = MSI_OpenDatabaseW( localfile, MSIDBOPEN_TRANSACT, &db );
         if (r != ERROR_SUCCESS)
         {
-            free( product_version );
+            free( package_code );
             return r;
         }
 
-        if (product_version)
+        if (package_code)
         {
-            WCHAR *cache_version = get_product_version( db );
-            if (!product_version != !cache_version ||
-                    (product_version && wcscmp(product_version, cache_version)))
+            WCHAR *cache_code = msi_get_package_code( db );
+            if (!cache_code || wcsicmp( package_code, cache_code ))
             {
                 msiobj_release( &db->hdr );
-                free( product_version );
-                free( cache_version );
+                free( package_code );
+                free( cache_code );
                 return ERROR_PRODUCT_VERSION;
             }
-            free( product_version );
-            free( cache_version );
+            free( package_code );
+            free( cache_code );
         }
     }
     package = MSI_CreatePackage( db );

@@ -30,7 +30,11 @@ namespace Windows.System.Threading
     typedef enum WorkItemPriority WorkItemPriority;
     typedef enum WorkItemOptions WorkItemOptions;
 
+    interface IThreadPoolTimer;
+    interface IThreadPoolTimerStatics;
+
     runtimeclass ThreadPool;
+    runtimeclass ThreadPoolTimer;
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0)
@@ -92,5 +96,54 @@ namespace Windows.System.Threading
     ]
     runtimeclass ThreadPool
     {
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(faaea667-fbeb-49cb-adb2-71184c556e43)
+    ]
+    delegate HRESULT TimerElapsedHandler
+    ([in] Windows.System.Threading.ThreadPoolTimer * timer);
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(34ed19fa-8384-4eb9-8209-fb5094eeec35)
+    ]
+    delegate HRESULT TimerDestroyedHandler
+    ([in] Windows.System.Threading.ThreadPoolTimer * timer);
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.System.Threading.ThreadPoolTimer),
+        uuid(594ebe78-55ea-4a88-a50d-3402ae1f9cf2)
+    ]
+    interface IThreadPoolTimer : IInspectable
+    {
+        [propget] HRESULT Period([out, retval] Windows.Foundation.TimeSpan *value);
+        [propget] HRESULT Delay([out, retval] Windows.Foundation.TimeSpan *value);
+        HRESULT Cancel();
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.System.Threading.ThreadPoolTimer),
+        uuid(1a8a9d02-e482-461b-b8c7-8efad1cce590)
+    ]
+    interface IThreadPoolTimerStatics : IInspectable
+    {
+        [overload("CreatePeriodicTimer")] HRESULT CreatePeriodicTimer([in] Windows.System.Threading.TimerElapsedHandler * handler, [in] Windows.Foundation.TimeSpan period, [out, retval] Windows.System.Threading.ThreadPoolTimer * *result);
+        [overload("CreateTimer")] HRESULT CreateTimer([in] Windows.System.Threading.TimerElapsedHandler * handler, [in] Windows.Foundation.TimeSpan delay, [out, retval] Windows.System.Threading.ThreadPoolTimer * *result);
+        [overload("CreatePeriodicTimer")] HRESULT CreatePeriodicTimerWithCompletion([in] Windows.System.Threading.TimerElapsedHandler * handler, [in] Windows.Foundation.TimeSpan period, [in] Windows.System.Threading.TimerDestroyedHandler * destroyed, [out, retval] Windows.System.Threading.ThreadPoolTimer * *result);
+        [overload("CreateTimer")] HRESULT CreateTimerWithCompletion([in] Windows.System.Threading.TimerElapsedHandler * handler, [in] Windows.Foundation.TimeSpan delay, [in] Windows.System.Threading.TimerDestroyedHandler * destroyed, [out, retval] Windows.System.Threading.ThreadPoolTimer * *result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        static(Windows.System.Threading.IThreadPoolTimerStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass ThreadPoolTimer
+    {
+        [default] interface Windows.System.Threading.IThreadPoolTimer;
     }
 }

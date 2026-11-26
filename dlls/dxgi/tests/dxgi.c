@@ -5395,7 +5395,7 @@ static void test_swapchain_present(IUnknown *device, BOOL is_d3d12)
     IDXGIFactory *factory;
     IDXGIOutput *output;
     BOOL fullscreen;
-    unsigned int i;
+    unsigned int i, j;
     ULONG refcount;
     HRESULT hr;
 
@@ -5440,8 +5440,12 @@ static void test_swapchain_present(IUnknown *device, BOOL is_d3d12)
 
         /* Minimised window. */
         ShowWindow(swapchain_desc.OutputWindow, SW_MINIMIZE);
-        hr = IDXGISwapChain_Present(swapchain, 0, flags[i]);
-        ok(hr == (is_d3d12 ? S_OK : DXGI_STATUS_OCCLUDED), "Test %u: Got unexpected hr %#lx.\n", i, hr);
+        for (j = 0; j < 5; ++j)
+        {
+            hr = IDXGISwapChain_Present(swapchain, 0, flags[i]);
+            ok(hr == (is_d3d12 ? S_OK : DXGI_STATUS_OCCLUDED),
+                    "Test %u, present %u: Got unexpected hr %#lx.\n", i, j, hr);
+        }
         ShowWindow(swapchain_desc.OutputWindow, SW_NORMAL);
 
         /* Hidden window. */
@@ -7694,6 +7698,151 @@ static void test_cursor_clipping(IUnknown *device, BOOL is_d3d12)
     ok(refcount == !is_d3d12, "Got unexpected refcount %lu.\n", refcount);
 }
 
+/* RegisterOcclusionStatusEvent sets the event at once; cookies count from 1. EnqueueSetEvent sets the event once the commands
+ * submitted so far are complete. Both need an event they can set. */
+static void test_occlusion_status(void)
+{
+    HANDLE event, event2, limited;
+    DWORD cookie, cookie2;
+    IDXGIFactory2 *factory;
+    IDXGIDevice3 *device3;
+    IDXGIDevice *device;
+    HRESULT hr;
+
+    if (FAILED(hr = CreateDXGIFactory(&IID_IDXGIFactory2, (void **)&factory)))
+    {
+        win_skip("IDXGIFactory2 is not available.\n");
+        return;
+    }
+    event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    event2 = CreateEventW(NULL, FALSE, FALSE, NULL);
+
+    cookie = 0xdeadbeef;
+    hr = IDXGIFactory2_RegisterOcclusionStatusEvent(factory, event, &cookie);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(cookie == 1, "Got unexpected cookie %#lx.\n", cookie);
+    ok(!WaitForSingleObject(event, 0), "The event is not set.\n");
+    hr = IDXGIFactory2_RegisterOcclusionStatusEvent(factory, event2, &cookie2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(cookie2 == 2, "Got unexpected cookie %#lx.\n", cookie2);
+    IDXGIFactory2_UnregisterOcclusionStatus(factory, cookie);
+    IDXGIFactory2_UnregisterOcclusionStatus(factory, cookie2);
+
+    /* a handle that cannot set the event */
+    limited = NULL;
+    ok(DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(), &limited, SYNCHRONIZE, FALSE, 0),
+            "DuplicateHandle failed, error %lu.\n", GetLastError());
+    if (limited)
+    {
+        cookie = 0xdeadbeef;
+        hr = IDXGIFactory2_RegisterOcclusionStatusEvent(factory, limited, &cookie);
+        ok(hr == DXGI_ERROR_INVALID_CALL, "Got unexpected hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+            IDXGIFactory2_UnregisterOcclusionStatus(factory, cookie);
+    }
+
+    if ((device = create_device(0)))
+    {
+        if (SUCCEEDED(IDXGIDevice_QueryInterface(device, &IID_IDXGIDevice3, (void **)&device3)))
+        {
+            hr = IDXGIDevice3_EnqueueSetEvent(device3, event);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            ok(!WaitForSingleObject(event, 5000), "The event is not set.\n");
+            hr = IDXGIDevice3_EnqueueSetEvent(device3, NULL);
+            ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+            if (limited)
+            {
+                hr = IDXGIDevice3_EnqueueSetEvent(device3, limited);
+                ok(hr == E_ACCESSDENIED, "Got unexpected hr %#lx.\n", hr);
+            }
+            IDXGIDevice3_Release(device3);
+        }
+        else
+        {
+            win_skip("IDXGIDevice3 is not available.\n");
+        }
+        IDXGIDevice_Release(device);
+    }
+
+    if (limited)
+        CloseHandle(limited);
+    CloseHandle(event2);
+    CloseHandle(event);
+    IDXGIFactory2_Release(factory);
+}
+
+static void test_factory_adapters_changed_event(void)
+{
+    IDXGIFactory7 *factory, *factory2;
+    DWORD cookie, cookie2, cookie3;
+    HANDLE event, event_copy;
+    ULONG refcount;
+    HRESULT hr;
+
+    if (FAILED(hr = CreateDXGIFactory(&IID_IDXGIFactory7, (void **)&factory)))
+    {
+        win_skip("IDXGIFactory7 is not available.\n");
+        return;
+    }
+    hr = CreateDXGIFactory(&IID_IDXGIFactory7, (void **)&factory2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    ok(!!event, "Failed to create an event, error %lu.\n", GetLastError());
+
+    cookie = 0xdeadbeef;
+    hr = IDXGIFactory7_RegisterAdaptersChangedEvent(factory, NULL, &cookie);
+    ok(hr == DXGI_ERROR_INVALID_CALL, "Got unexpected hr %#lx.\n", hr);
+    ok(cookie == 0xdeadbeef, "Got unexpected cookie %#lx.\n", cookie);
+    hr = IDXGIFactory7_RegisterAdaptersChangedEvent(factory, event, NULL);
+    ok(hr == DXGI_ERROR_INVALID_CALL, "Got unexpected hr %#lx.\n", hr);
+    hr = IDXGIFactory7_RegisterAdaptersChangedEvent(factory, (HANDLE)0x1234, &cookie);
+    ok(hr == E_OUTOFMEMORY, "Got unexpected hr %#lx.\n", hr);
+    ok(cookie == 0xdeadbeef, "Got unexpected cookie %#lx.\n", cookie);
+
+    hr = IDXGIFactory7_RegisterAdaptersChangedEvent(factory, event, &cookie);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(cookie == 1, "Got unexpected cookie %#lx.\n", cookie);
+    ok(WaitForSingleObject(event, 0) == WAIT_TIMEOUT, "The event was signaled.\n");
+
+    cookie3 = 0xdeadbeef;
+    hr = IDXGIFactory7_RegisterAdaptersChangedEvent(factory, event, &cookie3);
+    ok(hr == DXGI_ERROR_INVALID_CALL, "Got unexpected hr %#lx.\n", hr);
+    ok(cookie3 == 0xdeadbeef, "Got unexpected cookie %#lx.\n", cookie3);
+    /* a second handle of the same event is the same event */
+    ok(DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(), &event_copy, 0, FALSE, DUPLICATE_SAME_ACCESS),
+            "Failed to duplicate the event.\n");
+    hr = IDXGIFactory7_RegisterAdaptersChangedEvent(factory, event_copy, &cookie3);
+    ok(hr == DXGI_ERROR_INVALID_CALL, "Got unexpected hr %#lx.\n", hr);
+    CloseHandle(event_copy);
+
+    /* cookies are per factory */
+    hr = IDXGIFactory7_RegisterAdaptersChangedEvent(factory2, event, &cookie2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(cookie2 == 1, "Got unexpected cookie %#lx.\n", cookie2);
+    hr = IDXGIFactory7_UnregisterAdaptersChangedEvent(factory2, cookie2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDXGIFactory7_UnregisterAdaptersChangedEvent(factory2, cookie2);
+    ok(hr == DXGI_ERROR_NOT_FOUND, "Got unexpected hr %#lx.\n", hr);
+
+    hr = IDXGIFactory7_UnregisterAdaptersChangedEvent(factory, 0xdeadbeef);
+    ok(hr == DXGI_ERROR_NOT_FOUND, "Got unexpected hr %#lx.\n", hr);
+    hr = IDXGIFactory7_UnregisterAdaptersChangedEvent(factory, cookie);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDXGIFactory7_UnregisterAdaptersChangedEvent(factory, cookie);
+    ok(hr == DXGI_ERROR_NOT_FOUND, "Got unexpected hr %#lx.\n", hr);
+
+    /* a registration that is left is released with the factory */
+    hr = IDXGIFactory7_RegisterAdaptersChangedEvent(factory, event, &cookie);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    CloseHandle(event);
+    refcount = IDXGIFactory7_Release(factory2);
+    ok(!refcount, "Factory has %lu references left.\n", refcount);
+    refcount = IDXGIFactory7_Release(factory);
+    ok(!refcount, "Factory has %lu references left.\n", refcount);
+}
+
 static void test_factory_check_feature_support(void)
 {
     IDXGIFactory5 *factory;
@@ -7928,6 +8077,31 @@ static void test_frame_latency_event(IUnknown *device, BOOL is_d3d12)
 
     wait_result = WaitForSingleObject(semaphore, 100);
     ok(wait_result == WAIT_TIMEOUT, "Got unexpected wait result %#lx.\n", wait_result);
+
+    /* occluded frames release the semaphore too */
+    ShowWindow(window, SW_MINIMIZE);
+
+    hr = IDXGISwapChain2_Present(swapchain2, 0, DXGI_PRESENT_TEST);
+    todo_wine_if(is_d3d12)
+    ok(hr == DXGI_STATUS_OCCLUDED || broken(hr == S_OK) /* <= Win10 22H2 */, "Got unexpected hr %#lx.\n", hr);
+    wait_result = WaitForSingleObject(semaphore, 100);
+    ok(wait_result == WAIT_TIMEOUT, "Got unexpected wait result %#lx.\n", wait_result);
+
+    for (i = 0; i < 5; i++)
+    {
+        hr = IDXGISwapChain2_Present(swapchain2, 0, 0);
+        todo_wine_if(is_d3d12)
+        ok(hr == DXGI_STATUS_OCCLUDED || broken(hr == S_OK) /* <= Win10 22H2 */,
+                "Present %u: got unexpected hr %#lx.\n", i, hr);
+
+        wait_result = WaitForSingleObject(semaphore, 100);
+        ok(!wait_result, "Present %u: got unexpected wait result %#lx.\n", i, wait_result);
+    }
+
+    wait_result = WaitForSingleObject(semaphore, 100);
+    ok(wait_result == WAIT_TIMEOUT, "Got unexpected wait result %#lx.\n", wait_result);
+
+    ShowWindow(window, SW_RESTORE);
 
     if (is_d3d12)
     {
@@ -9104,6 +9278,8 @@ START_TEST(dxgi)
     queue_test(test_output_desc);
     queue_test(test_object_wrapping);
     queue_test(test_factory_check_feature_support);
+    queue_test(test_factory_adapters_changed_event);
+    queue_test(test_occlusion_status);
     queue_test(test_video_memory_budget_notification);
 
     run_queued_tests();

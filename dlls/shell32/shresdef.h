@@ -129,6 +129,7 @@
 #define IDS_RUNDLG_BROWSE_FILTER_ALL 164
 
 #define IDS_SHLEXEC_NOASSOC         165
+#define IDS_SHLEXEC_NO_IMAGE_LEASE  248   /* the broker's refusal of an image on a file system without read leases */
 
 #define IDS_RECYCLEBIN_ERASEITEM         166
 #define IDS_RECYCLEBIN_ERASEMULTIPLE     167

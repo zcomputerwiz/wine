@@ -1,0 +1,49 @@
+/*
+ * Windows.Internal.StateRepository (the package state repository of Windows; internal and undocumented)
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+#ifdef __WIDL__
+#pragma winrt ns_prefix
+#endif
+
+import "inspectable.idl";
+import "windowscontracts.idl";
+
+namespace Windows.Internal.StateRepository {
+    interface IStateRepositoryPackageStatics;
+    runtimeclass Package;
+
+    /* The methods are not known: the interface is the one the Windows App Runtime asks the factory of the class for (found by
+     * logging the request). The implementation logs what is called. */
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Internal.StateRepository.Package),
+        uuid(4408fb32-c420-41c5-b6c1-edce489bb84d)
+    ]
+    interface IStateRepositoryPackageStatics : IInspectable
+    {
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        static(Windows.Internal.StateRepository.IStateRepositoryPackageStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        threading(both)
+    ]
+    runtimeclass Package
+    {
+    }
+}

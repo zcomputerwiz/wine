@@ -26,6 +26,10 @@
 
 interface RPCExplicitHandle
 {
+    /* a generic binding handle: generic_handle_t_bind() makes the binding for a call and generic_handle_t_unbind() frees it */
+    typedef [handle] int generic_handle_t;
+
+    int generic_add([in] generic_handle_t hGeneric, [in] int a, [in] int b);
     int add([in] handle_t hBinding, [in] int a, [in] int b);
     int getNum([in] int a, [in] handle_t hBinding);
     void Shutdown([in] handle_t hBinding);

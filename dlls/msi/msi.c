@@ -867,6 +867,23 @@ UINT WINAPI MsiConfigureProductExW(LPCWSTR szProduct, int iInstallLevel,
     if (r != ERROR_SUCCESS)
         return r;
 
+    /* a limited administrator changing a per-machine product (removal, patches): the elevated msiexec does it */
+    if (context == MSIINSTALLCONTEXT_MACHINE && !msi_elevation_helper_unset())
+    {
+        WCHAR *props = malloc( (lstrlenW( szCommandLine ? szCommandLine : L"" ) + 64) * sizeof(WCHAR) );
+
+        if (!props) return ERROR_OUTOFMEMORY;
+        lstrcpyW( props, szCommandLine ? szCommandLine : L"" );
+        if (eInstallState != INSTALLSTATE_DEFAULT) lstrcatW( props, L" INSTALLLEVEL=32767" );
+        if (eInstallState == INSTALLSTATE_ABSENT) lstrcatW( props, L" REMOVE=ALL" );
+        if (msi_install_through_broker( szProduct, props, gUILevel, &r ))
+        {
+            free( props );
+            return r;
+        }
+        free( props );
+    }
+
     r = open_package(szProduct, NULL, context, &package);
     if (r != ERROR_SUCCESS)
         return r;
@@ -4156,9 +4173,17 @@ UINT WINAPI MsiAdvertiseScriptA( const char *szScriptFile, DWORD dwFlags, HKEY *
  */
 UINT WINAPI MsiIsProductElevatedW( LPCWSTR szProduct, BOOL *pfElevated )
 {
-    FIXME("%s %p - stub\n",
-          debugstr_w( szProduct ), pfElevated );
-    *pfElevated = TRUE;
+    WCHAR squashed[SQUASHED_GUID_SIZE];
+    MSIINSTALLCONTEXT context;
+
+    TRACE( "%s, %p\n", debugstr_w( szProduct ), pfElevated );
+
+    if (!szProduct || !pfElevated || !squash_guid( szProduct, squashed )) return ERROR_INVALID_PARAMETER;
+
+    /* a per-machine or managed product is elevated, a per-user unmanaged one is not */
+    *pfElevated = FALSE;
+    if (msi_locate_product( szProduct, &context )) return ERROR_UNKNOWN_PRODUCT;
+    *pfElevated = context == MSIINSTALLCONTEXT_MACHINE || context == MSIINSTALLCONTEXT_USERMANAGED;
     return ERROR_SUCCESS;
 }
 
@@ -4167,10 +4192,15 @@ UINT WINAPI MsiIsProductElevatedW( LPCWSTR szProduct, BOOL *pfElevated )
  */
 UINT WINAPI MsiIsProductElevatedA( LPCSTR szProduct, BOOL *pfElevated )
 {
-    FIXME("%s %p - stub\n",
-          debugstr_a( szProduct ), pfElevated );
-    *pfElevated = TRUE;
-    return ERROR_SUCCESS;
+    WCHAR *product = NULL;
+    UINT r;
+
+    TRACE( "%s, %p\n", debugstr_a( szProduct ), pfElevated );
+
+    if (szProduct && !(product = strdupAtoW( szProduct ))) return ERROR_OUTOFMEMORY;
+    r = MsiIsProductElevatedW( product, pfElevated );
+    free( product );
+    return r;
 }
 
 /***********************************************************************

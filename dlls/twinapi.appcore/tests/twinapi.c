@@ -19,6 +19,9 @@
 #include <stdarg.h>
 #include <stddef.h>
 
+/* IAppCapability2 is of contract version 15 (the default of the headers is 14) */
+#define WINDOWS_FOUNDATION_UNIVERSALAPICONTRACT_VERSION 0xf0000
+
 #include "windef.h"
 #include "winbase.h"
 
@@ -34,6 +37,10 @@
 #include "windows.foundation.h"
 #define WIDL_using_Windows_Security_ExchangeActiveSyncProvisioning
 #include "windows.security.exchangeactivesyncprovisioning.h"
+#define WIDL_using_Windows_System
+#include "windows.system.h"
+#define WIDL_using_Windows_Management_Policies
+#include "windows.management.policies.h"
 #define WIDL_using_Windows_System_Profile
 #include "windows.system.profile.h"
 #define WIDL_using_Windows_System_UserProfile
@@ -44,6 +51,22 @@
 #include "windows.applicationmodel.core.h"
 #define WIDL_using_Windows_ApplicationModel_DataTransfer
 #include "windows.applicationmodel.datatransfer.h"
+#define WIDL_using_Windows_ApplicationModel_UserActivities
+#include "windows.applicationmodel.useractivities.h"
+#define WIDL_using_Windows_UI_StartScreen
+#include "windows.ui.startscreen.h"
+#define WIDL_using_Windows_Devices_Input
+#include "windows.devices.input.h"
+#define WIDL_using_Windows_System_Display
+#include "windows.system.display.h"
+#define WIDL_using_Windows_Web_Http
+#include "windows.web.http.h"
+#define WIDL_using_Windows_System_Power
+#include "windows.system.power.h"
+#define WIDL_using_Windows_Management_Core
+#include "windows.management.core.h"
+#define WIDL_using_Windows_Security_Authorization_AppCapabilityAccess
+#include "windows.security.authorization.appcapabilityaccess.h"
 
 #include "wine/test.h"
 
@@ -339,6 +362,195 @@ static void test_DataTransferManager(void)
     IActivationFactory_Release( factory );
 }
 
+static void *get_statics( const WCHAR *class_name, REFIID iid )
+{
+    IActivationFactory *factory;
+    HSTRING str;
+    void *out = NULL;
+    HRESULT hr;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "%s: got hr %#lx.\n", debugstr_w( class_name ), hr );
+    if (hr != S_OK) return NULL;
+    hr = IActivationFactory_QueryInterface( factory, iid, &out );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    IActivationFactory_Release( factory );
+    return out;
+}
+
+/* Education/AllowGraphingCalculator, unmanaged: a user policy (Int32, 1), without a value when read without a user */
+static void check_graphing_policy( INamedPolicyData *data, IUser *expect_user )
+{
+    NamedPolicyKind kind = -1;
+    boolean flag = 2;
+    HSTRING str;
+    IUser *user = (void *)0xdeadbeef;
+    INT32 number = -1;
+    HRESULT hr;
+
+    hr = INamedPolicyData_get_Area( data, &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !wcscmp( WindowsGetStringRawBuffer( str, NULL ), L"Education" ), "got area %s.\n", debugstr_hstring( str ) );
+    WindowsDeleteString( str );
+    hr = INamedPolicyData_get_Name( data, &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !wcscmp( WindowsGetStringRawBuffer( str, NULL ), L"AllowGraphingCalculator" ), "got name %s.\n", debugstr_hstring( str ) );
+    WindowsDeleteString( str );
+    hr = INamedPolicyData_get_Kind( data, &kind );
+    ok( hr == S_OK && kind == NamedPolicyKind_Int32, "got hr %#lx, kind %d.\n", hr, kind );
+    /* without a value, IsManaged is false but fails */
+    hr = INamedPolicyData_get_IsManaged( data, &flag );
+    ok( hr == (expect_user ? S_OK : E_UNEXPECTED) && !flag, "got hr %#lx, managed %d.\n", hr, flag );
+    hr = INamedPolicyData_get_IsUserPolicy( data, &flag );
+    ok( hr == S_OK && flag == !!expect_user, "got hr %#lx, user policy %d.\n", hr, flag );
+    hr = INamedPolicyData_get_User( data, &user );
+    ok( hr == S_OK && user == expect_user, "got hr %#lx, user %p.\n", hr, user );
+    if (user) IUser_Release( user );
+    flag = 2;
+    hr = INamedPolicyData_GetBoolean( data, &flag );
+    if (expect_user) ok( hr == S_OK && flag == TRUE, "got hr %#lx, value %d.\n", hr, flag );
+    else ok( hr == E_UNEXPECTED, "got hr %#lx.\n", hr );
+    hr = INamedPolicyData_GetInt32( data, &number );
+    if (expect_user) ok( hr == S_OK && number == 1, "got hr %#lx, value %d.\n", hr, number );
+    else ok( hr == E_UNEXPECTED, "got hr %#lx.\n", hr );
+    INamedPolicyData_Release( data );
+}
+
+static void test_User(void)
+{
+    INamedPolicyStatics *policies;
+    IUserStatics2 *statics2;
+    IUserStatics *statics;
+    IUser *user = NULL, *found;
+    INamedPolicyData *data;
+    HSTRING id = NULL, str, area, name;
+    HRESULT hr;
+
+    if (!(statics = get_statics( L"Windows.System.User", &IID_IUserStatics ))) return;
+    statics2 = get_statics( L"Windows.System.User", &IID_IUserStatics2 );
+    ok( !!statics2, "no IUserStatics2.\n" );
+    if (!statics2) { IUserStatics_Release( statics ); return; }
+    hr = IUserStatics2_GetDefault( statics2, &user );
+    ok( hr == S_OK && user, "got hr %#lx, user %p.\n", hr, user );
+    IUserStatics2_Release( statics2 );
+    if (!user) { IUserStatics_Release( statics ); return; }
+
+    /* the user of an id is the same object; another or no id has none */
+    hr = IUser_get_NonRoamableId( user, &id );
+    ok( hr == S_OK && WindowsGetStringLen( id ), "got hr %#lx, id %s.\n", hr, debugstr_hstring( id ) );
+    found = (void *)0xdeadbeef;
+    hr = IUserStatics_GetFromId( statics, id, &found );
+    ok( hr == S_OK && found == user, "got hr %#lx, user %p, expected %p.\n", hr, found, user );
+    if (hr == S_OK && found) IUser_Release( found );
+    WindowsCreateString( L"bogus", 5, &str );
+    found = (void *)0xdeadbeef;
+    hr = IUserStatics_GetFromId( statics, str, &found );
+    ok( hr == S_OK && !found, "got hr %#lx, user %p.\n", hr, found );
+    WindowsDeleteString( str );
+    found = (void *)0xdeadbeef;
+    hr = IUserStatics_GetFromId( statics, NULL, &found );
+    ok( hr == S_OK && !found, "got hr %#lx, user %p.\n", hr, found );
+    IUserStatics_Release( statics );
+
+    if (!(policies = get_statics( L"Windows.Management.Policies.NamedPolicy", &IID_INamedPolicyStatics ))) goto done;
+    WindowsCreateString( L"Education", 9, &area );
+    WindowsCreateString( L"AllowGraphingCalculator", 23, &name );
+    data = NULL;
+    hr = INamedPolicyStatics_GetPolicyFromPath( policies, area, name, &data );
+    ok( hr == S_OK && data, "got hr %#lx, data %p.\n", hr, data );
+    if (data) check_graphing_policy( data, NULL );
+    data = NULL;
+    hr = INamedPolicyStatics_GetPolicyFromPathForUser( policies, user, area, name, &data );
+    ok( hr == S_OK && data, "got hr %#lx, data %p.\n", hr, data );
+    if (data) check_graphing_policy( data, user );
+    data = (void *)0xdeadbeef;
+    hr = INamedPolicyStatics_GetPolicyFromPathForUser( policies, NULL, area, name, &data );
+    ok( hr == E_INVALIDARG && data == (void *)0xdeadbeef, "got hr %#lx, data %p.\n", hr, data );
+    WindowsDeleteString( area );
+    WindowsDeleteString( name );
+    WindowsCreateString( L"Bogus", 5, &area );
+    WindowsCreateString( L"Nothing", 7, &name );
+    data = (void *)0xdeadbeef;
+    hr = INamedPolicyStatics_GetPolicyFromPath( policies, area, name, &data );
+    ok( hr == E_UNEXPECTED && !data, "got hr %#lx, data %p.\n", hr, data );
+    WindowsDeleteString( area );
+    WindowsDeleteString( name );
+    INamedPolicyStatics_Release( policies );
+done:
+    WindowsDeleteString( id );
+    IUser_Release( user );
+}
+
+static void test_MemoryManager(void)
+{
+    UINT64 usage = 0, limit = 0, expected = 0;
+    IMemoryManagerStatics2 *statics2;
+    IMemoryManagerStatics3 *statics3;
+    IMemoryManagerStatics4 *statics4;
+    IMemoryManagerStatics *statics;
+    IProcessMemoryReport *process;
+    IAppMemoryReport *app;
+    AppMemoryUsageLevel level = 0x55;
+    boolean done = 2;
+    HRESULT hr;
+
+    UINT64 private_usage = 0, peak = 0, total = 0, total_limit = 0, working = 0, private_working = 0;
+
+    /* a process without a resource policy: its commit charge against the system's commit limit */
+    if (!(statics = get_statics( L"Windows.System.MemoryManager", &IID_IMemoryManagerStatics ))) return;
+    hr = IMemoryManagerStatics_get_AppMemoryUsage( statics, &usage );
+    ok( hr == S_OK && usage, "got hr %#lx, usage %I64u.\n", hr, usage );
+    hr = IMemoryManagerStatics_get_AppMemoryUsageLimit( statics, &limit );
+    ok( hr == S_OK && limit > usage, "got hr %#lx, limit %I64u.\n", hr, limit );
+    /* a usage level only for a packaged process */
+    hr = IMemoryManagerStatics_get_AppMemoryUsageLevel( statics, &level );
+    ok( hr == HRESULT_FROM_NT( 0xc0000225 /* STATUS_NOT_FOUND */ ), "got hr %#lx, level %d.\n", hr, level );
+    IMemoryManagerStatics_Release( statics );
+
+    if (!(statics2 = get_statics( L"Windows.System.MemoryManager", &IID_IMemoryManagerStatics2 ))) return;
+    hr = IMemoryManagerStatics2_GetAppMemoryReport( statics2, &app );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED(hr))
+    {
+        IAppMemoryReport_get_PrivateCommitUsage( app, &private_usage );
+        IAppMemoryReport_get_PeakPrivateCommitUsage( app, &peak );
+        IAppMemoryReport_get_TotalCommitUsage( app, &total );
+        IAppMemoryReport_get_TotalCommitLimit( app, &total_limit );
+        ok( private_usage && private_usage <= peak && private_usage <= total, "got private %I64u, peak %I64u, total %I64u.\n",
+            private_usage, peak, total );
+        ok( total_limit == limit, "got limit %I64u, expected %I64u.\n", total_limit, limit );
+        IAppMemoryReport_Release( app );
+    }
+    hr = IMemoryManagerStatics2_GetProcessMemoryReport( statics2, &process );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED(hr))
+    {
+        IProcessMemoryReport_get_PrivateWorkingSetUsage( process, &private_working );
+        IProcessMemoryReport_get_TotalWorkingSetUsage( process, &working );
+        ok( private_working && private_working <= working, "got private %I64u, total %I64u.\n", private_working, working );
+        IProcessMemoryReport_Release( process );
+    }
+    IMemoryManagerStatics2_Release( statics2 );
+
+    /* the limit cannot be set, and none is expected */
+    if ((statics3 = get_statics( L"Windows.System.MemoryManager", &IID_IMemoryManagerStatics3 )))
+    {
+        hr = IMemoryManagerStatics3_TrySetAppMemoryUsageLimit( statics3, 1024 * 1024 * 1024, &done );
+        ok( hr == S_OK && !done, "got hr %#lx, result %d.\n", hr, done );
+        IMemoryManagerStatics3_Release( statics3 );
+    }
+    if ((statics4 = get_statics( L"Windows.System.MemoryManager", &IID_IMemoryManagerStatics4 )))
+    {
+        expected = 0xdeadbeef;
+        hr = IMemoryManagerStatics4_get_ExpectedAppMemoryUsageLimit( statics4, &expected );
+        ok( hr == S_OK && !expected, "got hr %#lx, limit %I64u.\n", hr, expected );
+        IMemoryManagerStatics4_Release( statics4 );
+    }
+}
+
 START_TEST(twinapi)
 {
     HRESULT hr;
@@ -352,6 +564,8 @@ START_TEST(twinapi)
     test_ApplicationView();
     test_CoreApplication();
     test_DataTransferManager();
+    test_User();
+    test_MemoryManager();
 
     RoUninitialize();
 }

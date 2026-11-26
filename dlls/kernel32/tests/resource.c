@@ -815,6 +815,87 @@ static void test_mui(void)
     RemoveDirectoryW( L"en-US" );
 }
 
+/* A resource that is only in the satellite of a language-neutral module is found through the module (LoadString, FindResource) */
+static void test_mui_satellite(void)
+{
+    static const WCHAR ln_dll[] = L"test_mui2.dll";
+    static const WCHAR en_dll[] = L"en-US\\test_mui2.dll.mui";
+    /* the string table block 1 (ids 0 to 15) with "satellite" as string 1 */
+    static const WORD table[] = {0, 9, 's','a','t','e','l','l','i','t','e', 0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+    static const DWORD flags[] =
+    {
+        LOAD_LIBRARY_AS_DATAFILE, LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE, LOAD_LIBRARY_AS_IMAGE_RESOURCE,
+        LOAD_LIBRARY_AS_IMAGE_RESOURCE | LOAD_LIBRARY_AS_DATAFILE, 0
+    };
+    WCHAR path[MAX_PATH], buf[32];
+    HMODULE module;
+    HANDLE res;
+    HRSRC rsrc;
+    BOOL r;
+    int len, i;
+
+    create_test_dll( ln_dll );
+    CreateDirectoryW( L"en-US", NULL );
+    create_test_dll( en_dll );
+
+    res = BeginUpdateResourceW( ln_dll, TRUE );
+    ok( res != NULL, "BeginUpdateResourceW failed: %ld\n", GetLastError() );
+    r = UpdateResourceW( res, L"MUI", MAKEINTRESOURCEW(1), 0, &ln_mui_res, sizeof(ln_mui_res) );
+    ok( r, "UpdateResource failed: %ld\n", GetLastError() );
+    r = EndUpdateResourceW( res, FALSE );
+    ok( r, "EndUpdateResourceW failed: %ld\n", GetLastError() );
+
+    /* the string table first, the MUI data in a second update (Windows refuses to add other resources to a MUI file) */
+    res = BeginUpdateResourceW( en_dll, TRUE );
+    ok( res != NULL, "BeginUpdateResourceW failed: %ld\n", GetLastError() );
+    r = UpdateResourceW( res, (const WCHAR *)RT_STRING, MAKEINTRESOURCEW(1), MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US),
+            (void *)table, sizeof(table) );
+    ok( r, "UpdateResource failed: %ld\n", GetLastError() );
+    r = EndUpdateResourceW( res, FALSE );
+    ok( r, "EndUpdateResourceW failed: %ld\n", GetLastError() );
+    res = BeginUpdateResourceW( en_dll, FALSE );
+    ok( res != NULL, "BeginUpdateResourceW failed: %ld\n", GetLastError() );
+    r = UpdateResourceW( res, L"MUI", MAKEINTRESOURCEW(1), 0, &en_mui_res, sizeof(en_mui_res) );
+    ok( r || broken( GetLastError() == ERROR_NOT_SUPPORTED ), "UpdateResource failed: %ld\n", GetLastError() );
+    r = EndUpdateResourceW( res, !r );
+    ok( r, "EndUpdateResourceW failed: %ld\n", GetLastError() );
+
+    GetFullPathNameW( ln_dll, ARRAY_SIZE(path), path, NULL );
+    /* as the kinds of data file (the satellite is found on Windows 11 too), then as an image (Windows 11 does not load this
+     * minimal image after EndUpdateResource, nor map it with LOAD_LIBRARY_AS_IMAGE_RESOURCE alone; those parts then only
+     * run on Wine) */
+    for (i = 0; i < ARRAY_SIZE(flags); ++i)
+    {
+        winetest_push_context( "flags %#lx", flags[i] );
+        SetLastError( 0xdeadbeef );
+        module = LoadLibraryExW( path, NULL, flags[i] );
+        ok( module != NULL || broken( (!flags[i] || flags[i] == LOAD_LIBRARY_AS_IMAGE_RESOURCE)
+                                      && GetLastError() == ERROR_BAD_EXE_FORMAT ),
+            "LoadLibraryEx failed: %ld\n", GetLastError() );
+        if (module)
+        {
+            rsrc = FindResourceW( module, MAKEINTRESOURCEW(1), (const WCHAR *)RT_STRING );
+            ok( rsrc != NULL, "FindResource failed: %ld\n", GetLastError() );
+            if (rsrc)
+                ok( SizeofResource( module, rsrc ) == sizeof(table), "unexpected size %lu\n", SizeofResource( module, rsrc ) );
+            buf[0] = 0;
+            len = LoadStringW( module, 1, buf, ARRAY_SIZE(buf) );
+            ok( len == 9 && !wcscmp( buf, L"satellite" ), "LoadString returned %d %s\n", len, wine_dbgstr_w(buf) );
+            FreeLibrary( module );
+
+            /* freeing the module releases its satellite: the satellite's file can be updated again */
+            res = BeginUpdateResourceW( en_dll, FALSE );
+            ok( res != NULL, "BeginUpdateResourceW failed: %ld\n", GetLastError() );
+            if (res) EndUpdateResourceW( res, TRUE );
+        }
+        winetest_pop_context();
+    }
+
+    DeleteFileW( ln_dll );
+    DeleteFileW( en_dll );
+    RemoveDirectoryW( L"en-US" );
+}
+
 START_TEST(resource)
 {
     DWORD i;
@@ -848,4 +929,5 @@ START_TEST(resource)
     }
     test_find_resource();
     test_mui();
+    test_mui_satellite();
 }

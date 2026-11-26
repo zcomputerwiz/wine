@@ -444,6 +444,30 @@ void client_surface_present( struct client_surface *surface )
     pthread_mutex_unlock( &surfaces_lock );
 }
 
+/* Copy the kept last frame of the window's offscreen client surfaces to the window again, without their renderer:
+ * the window's pixels were lost (uncovered, reshaped) and the application may not draw again. Any thread may call
+ * this; the surfaces lock keeps it apart from the renderer's own presents. Returns whether a surface was drawn. */
+static BOOL present_client_surfaces( HWND hwnd )
+{
+    struct client_surface *surface;
+    BOOL ret = FALSE;
+    HDC hdc;
+
+    pthread_mutex_lock( &surfaces_lock );
+    LIST_FOR_EACH_ENTRY( surface, &client_surfaces, struct client_surface, entry )
+    {
+        if (surface->hwnd != hwnd || !surface->offscreen) continue;
+        client_surface_update_locked( surface );
+        if (!(hdc = NtUserGetDCEx( hwnd, 0, DCX_CACHE | DCX_USESTYLE ))) continue;
+        surface->funcs->present( surface, hdc );
+        NtUserReleaseDC( hwnd, hdc );
+        ret = TRUE;
+    }
+    pthread_mutex_unlock( &surfaces_lock );
+    TRACE( "hwnd %p, presented %u\n", hwnd, ret );
+    return ret;
+}
+
 void client_surface_update( struct client_surface *surface )
 {
     pthread_mutex_lock( &surfaces_lock );
@@ -2513,7 +2537,14 @@ static BOOL apply_window_pos( HWND hwnd, HWND insert_after, UINT swp_flags, stru
 
         owner_hint = NtUserGetWindowRelative(hwnd, GW_OWNER);
         /* fallback to any window that is right below our top left corner */
-        if (!owner_hint) owner_hint = NtUserWindowFromPoint(new_rects->window.left - 1, new_rects->window.top - 1);
+        if (!owner_hint)
+        {
+            POINT pt = { new_rects->window.left - 1, new_rects->window.top - 1 };
+            INT hittest;
+
+            /* a hit test of the geometry only: WM_NCHITTEST is not sent to the application from inside SetWindowPos */
+            owner_hint = window_from_point( 0, pt, &hittest, FALSE );
+        }
         if (owner_hint) owner_hint = NtUserGetAncestor(owner_hint, GA_ROOT);
 
         user_driver->pWindowPosChanged( hwnd, insert_after, owner_hint, swp_flags, &monitor_rects,
@@ -6353,6 +6384,9 @@ ULONG_PTR WINAPI NtUserCallHwnd( HWND hwnd, DWORD code )
 
     case NtUserCallHwnd_IsWindowVisible:
         return is_window_visible( hwnd );
+
+    case NtUserCallHwnd_PresentClientSurfaces:
+        return present_client_surfaces( hwnd );
 
     /* temporary exports */
     case NtUserGetFullWindowHandle:

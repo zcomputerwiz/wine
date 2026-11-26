@@ -1,0 +1,51 @@
+/*
+ * Windows.UI.Popups, the command interface only (WineExplorer UWP)
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+#ifdef __WIDL__
+#pragma winrt ns_prefix
+#endif
+
+import "inspectable.idl";
+import "asyncinfo.idl";
+import "eventtoken.idl";
+import "windowscontracts.idl";
+import "windows.foundation.idl";
+
+namespace Windows.UI.Popups {
+    interface IUICommand;
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(daf77a4f-c27a-4298-9ac6-2922c45e7da6)
+    ]
+    delegate HRESULT UICommandInvokedHandler([in] Windows.UI.Popups.IUICommand *command);
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(4ff93a75-4145-47ff-ac7f-dff1c1fa5b0f)
+    ]
+    interface IUICommand : IInspectable
+    {
+        [propget] HRESULT Label([out, retval] HSTRING *value);
+        [propput] HRESULT Label([in] HSTRING value);
+        [propget] HRESULT Invoked([out, retval] Windows.UI.Popups.UICommandInvokedHandler **value);
+        [propput] HRESULT Invoked([in] Windows.UI.Popups.UICommandInvokedHandler *value);
+        [propget] HRESULT Id([out, retval] IInspectable **value);
+        [propput] HRESULT Id([in] IInspectable *value);
+    }
+}

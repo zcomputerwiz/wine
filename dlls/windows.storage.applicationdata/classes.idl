@@ -24,6 +24,7 @@
 import "windows.storage.idl";
 
 namespace Windows.Storage {
+    runtimeclass AppDataPaths;
     runtimeclass ApplicationData;
 }
 

@@ -762,7 +762,7 @@ static ULONGLONG get_cpu_features(void)
 
 void init_shared_data_cpuinfo( KUSER_SHARED_DATA *data )
 {
-    BOOLEAN *features = data->ProcessorFeatures;
+    BOOLEAN *features = data->ProcessorFeatures, have_x86 = FALSE;
 
     features[PF_FASTFAIL_AVAILABLE]      = TRUE;
     features[PF_COMPARE_EXCHANGE_DOUBLE] = TRUE;
@@ -807,20 +807,40 @@ void init_shared_data_cpuinfo( KUSER_SHARED_DATA *data )
         switch (supported_machines[i])
         {
         case IMAGE_FILE_MACHINE_I386:
-            features[PF_MMX_INSTRUCTIONS_AVAILABLE]    = TRUE;
-            features[PF_XMMI_INSTRUCTIONS_AVAILABLE]   = TRUE;
-            features[PF_RDTSC_INSTRUCTION_AVAILABLE]   = TRUE;
-            features[PF_XMMI64_INSTRUCTIONS_AVAILABLE] = TRUE;
-            features[PF_SSE3_INSTRUCTIONS_AVAILABLE]   = TRUE;
-            features[PF_COMPARE_EXCHANGE128]           = TRUE;
-            features[PF_RDTSCP_INSTRUCTION_AVAILABLE]  = TRUE;
-            features[PF_SSSE3_INSTRUCTIONS_AVAILABLE]  = TRUE;
-            features[PF_SSE4_1_INSTRUCTIONS_AVAILABLE] = TRUE;
-            features[PF_SSE4_2_INSTRUCTIONS_AVAILABLE] = TRUE;
+        case IMAGE_FILE_MACHINE_AMD64:
+            have_x86 = TRUE;
             break;
         }
     }
 #endif
+
+    if (have_x86)
+    {
+        XSTATE_CONFIGURATION *xstate_config = &data->XState;
+
+        features[PF_MMX_INSTRUCTIONS_AVAILABLE]    = TRUE;
+        features[PF_XMMI_INSTRUCTIONS_AVAILABLE]   = TRUE;
+        features[PF_RDTSC_INSTRUCTION_AVAILABLE]   = TRUE;
+        features[PF_XMMI64_INSTRUCTIONS_AVAILABLE] = TRUE;
+        features[PF_SSE3_INSTRUCTIONS_AVAILABLE]   = TRUE;
+        features[PF_COMPARE_EXCHANGE128]           = TRUE;
+        features[PF_XSAVE_ENABLED]                 = TRUE;
+        features[PF_RDTSCP_INSTRUCTION_AVAILABLE]  = TRUE;
+        features[PF_SSSE3_INSTRUCTIONS_AVAILABLE]  = TRUE;
+        features[PF_SSE4_1_INSTRUCTIONS_AVAILABLE] = TRUE;
+        features[PF_SSE4_2_INSTRUCTIONS_AVAILABLE] = TRUE;
+        features[PF_AVX_INSTRUCTIONS_AVAILABLE]    = TRUE;
+        features[PF_AVX2_INSTRUCTIONS_AVAILABLE]   = TRUE;
+
+        xstate_config->EnabledFeatures = xstate_config->EnabledVolatileFeatures = XSTATE_MASK_LEGACY | XSTATE_MASK_AVX;
+        xstate_config->Features[XSTATE_LEGACY_FLOATING_POINT].Offset = 0;
+        xstate_config->Features[XSTATE_LEGACY_FLOATING_POINT].Size   = 10 * sizeof(M128A);
+        xstate_config->Features[XSTATE_LEGACY_SSE].Offset = 10 * sizeof(M128A);
+        xstate_config->Features[XSTATE_LEGACY_SSE].Size   = 16 * sizeof(M128A);
+        xstate_config->Features[XSTATE_AVX].Offset = sizeof(XSAVE_AREA);
+        xstate_config->Features[XSTATE_AVX].Size   = sizeof(YMMCONTEXT);
+        xstate_config->Size = xstate_config->AllFeatureSize = sizeof(XSAVE_FORMAT) + sizeof(XSTATE);
+    }
 }
 
 #endif /* End architecture specific feature detection for CPUs */
@@ -1717,7 +1737,7 @@ static void read_dev_urandom( void *buf, ULONG len )
     else WARN( "can't open /dev/urandom\n" );
 }
 
-static void get_random( void *buf, ULONG len )
+void get_random( void *buf, ULONG len )
 {
 #ifdef HAVE_GETRANDOM
     int ret;
@@ -2554,6 +2574,7 @@ static NTSTATUS get_firmware_info( SYSTEM_FIRMWARE_TABLE_INFORMATION *sfti, ULON
 static void get_performance_info( SYSTEM_PERFORMANCE_INFORMATION *info )
 {
     unsigned long long totalram = 0, freeram = 0, totalswap = 0, freeswap = 0;
+    unsigned long long paged_pool = 0, nonpaged_pool = 0;
 
     memset( info, 0, sizeof(*info) );
 
@@ -2629,6 +2650,12 @@ static void get_performance_info( SYSTEM_PERFORMANCE_INFORMATION *info )
                     freeram += value * 1024;
                 else if (sscanf(line, "MemAvailable: %llu", &value))
                     mem_available = value * 1024;
+                /* the kernel's own memory, as Windows' pools: what it can give back is "paged" */
+                else if (sscanf(line, "SReclaimable: %llu", &value))
+                    paged_pool += value * 1024;
+                else if (sscanf(line, "SUnreclaim: %llu", &value) || sscanf(line, "KernelStack: %llu", &value) ||
+                         sscanf(line, "PageTables: %llu", &value))
+                    nonpaged_pool += value * 1024;
             }
             fclose(fp);
             if (mem_available) freeram = mem_available;
@@ -2718,6 +2745,15 @@ static void get_performance_info( SYSTEM_PERFORMANCE_INFORMATION *info )
     info->AvailablePages      = freeram / page_size;
     info->TotalCommittedPages = (totalram + totalswap - freeram - freeswap) / page_size;
     info->TotalCommitLimit    = (totalram + totalswap) / page_size;
+    info->PagedPoolUsage      = paged_pool / page_size;
+    info->NonPagedPoolUsage   = nonpaged_pool / page_size;
+
+    /* the highest commit charge this process has seen (the system's is not kept anywhere) */
+    {
+        static ULONG peak;
+        if (info->TotalCommittedPages > peak) peak = info->TotalCommittedPages;
+        info->PeakCommitment = peak;
+    }
 }
 
 #ifdef linux
@@ -3667,6 +3703,26 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
     case SystemFileCacheInformation:  /* 21 */
     {
         SYSTEM_CACHE_INFORMATION sci = { 0 };
+#ifdef linux
+        FILE *fp;
+
+        /* the file cache is the host's page cache */
+        if ((fp = fopen( "/proc/meminfo", "r" )))
+        {
+            unsigned long long value;
+            char line[64];
+
+            while (fgets( line, sizeof(line), fp ))
+                if (sscanf( line, "Cached: %llu kB", &value ) == 1)
+                {
+                    sci.CurrentSize = sci.PeakSize = value * 1024;
+                    break;
+                }
+            fclose( fp );
+        }
+#else
+        FIXME("info_class SYSTEM_CACHE_INFORMATION\n");
+#endif
 
         len = sizeof(sci);
         if (size >= len)
@@ -3675,7 +3731,6 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
             else memcpy( info, &sci, len);
         }
         else ret = STATUS_INFO_LENGTH_MISMATCH;
-        FIXME("info_class SYSTEM_CACHE_INFORMATION\n");
         break;
     }
 

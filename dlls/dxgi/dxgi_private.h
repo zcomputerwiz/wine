@@ -40,6 +40,7 @@
 #include "initguid.h"
 #endif
 #include "wine/d3dkmt_desc.h"
+#include "wine/list.h"
 #include "wine/wined3d.h"
 #include "wine/winedxgi.h"
 #include "wine/dcomp_layer.h"
@@ -48,6 +49,16 @@ enum dxgi_frame_latency
 {
     DXGI_FRAME_LATENCY_MAX     = 16,
 };
+
+/* whether a handle can be set with SetEvent (EVENT_MODIFY_STATE), checked without touching its state */
+static inline BOOL dxgi_event_handle_valid(HANDLE event)
+{
+    OBJECT_BASIC_INFORMATION info;
+
+    if (!event || NtQueryObject(event, ObjectBasicInformation, &info, sizeof(info), NULL))
+        return FALSE;
+    return !!(info.GrantedAccess & EVENT_MODIFY_STATE);
+}
 
 /* Layered device */
 enum dxgi_device_layer_id
@@ -123,6 +134,16 @@ struct dxgi_factory
     struct wined3d *wined3d;
     BOOL extended;
     HWND device_window;
+    struct list adapters_changed;   /* struct dxgi_adapters_changed, under the wined3d mutex */
+    DWORD next_adapters_changed_cookie;
+    struct list occlusion_events;   /* struct dxgi_adapters_changed (event and cookie), under the wined3d mutex */
+};
+
+struct dxgi_adapters_changed
+{
+    struct list entry;
+    DWORD cookie;
+    HANDLE event;   /* a duplicate of the application's handle */
 };
 
 HRESULT dxgi_factory_create(REFIID riid, void **factory, BOOL extended);
@@ -140,6 +161,8 @@ struct dxgi_device
     struct wined3d_device *wined3d_device;
     struct wined3d_swapchain *implicit_swapchain;
     IWineDXGIAdapter *adapter;
+    /* an EnqueueSetEvent query that did not complete in time: later calls do not wait while it is pending */
+    struct wined3d_query *pending_query;
 };
 
 HRESULT dxgi_device_init(struct dxgi_device *device, struct dxgi_device_layer *layer,
@@ -192,14 +215,10 @@ struct d3d11_swapchain
     LONG present_count;
     LONG in_set_fullscreen_state;
     HWND comp_wnd;
+    HWND sink_wnd;   /* receives WM_WINE_DCOMP_REPAINT for the target: on dxgi's own thread, or comp_wnd */
     DXGI_ALPHA_MODE composition_alpha_mode;
-    /* Layer placement published by dcomp. Written by the composition window's
-     * thread and read by Present, so every access holds the wined3d mutex. */
+    /* The composition target window whose scene shows this swapchain; Present reads it under the wined3d mutex. */
     HWND target_hwnd;
-    RECT dst_rect;      /* visible destination in target client coordinates */
-    RECT src_rect;      /* matching back buffer source rectangle */
-    BOOL has_dst_rect;
-    BOOL fully_clipped;
     /* Serializes Present/Present1 history with ResizeBuffers. The device is
      * borrowed from the retained IWineDXGIDevice. History copies use its CS. */
     SRWLOCK present_lock;
@@ -224,8 +243,11 @@ HRESULT d3d12_swapchain_create(IWineDXGIFactory *factory, ID3D12CommandQueue *qu
 
 BOOL dxgi_validate_swapchain_desc(const DXGI_SWAP_CHAIN_DESC1 *desc);
 BOOL dxgi_validate_swapchain_fullscreen_desc(const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *desc);
-void dcomp_swapchain_apply_target(struct d3d11_swapchain *swapchain, WPARAM mode, LPARAM lparam);
+void dcomp_swapchain_clear_target(struct d3d11_swapchain *swapchain);
 void dcomp_swapchain_repaint(HWND window);
+void dcomp_destroy_window(HWND window);
+BOOL dcomp_window_on_helper_thread(HWND window);
+HWND dcomp_create_repaint_sink(void);
 
 /* IDXGISurface/IDXGIResource */
 struct dxgi_resource

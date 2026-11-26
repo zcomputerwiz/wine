@@ -96,3 +96,33 @@ NTSTATUS WINAPI AlpcInitializeMessageAttribute(ULONG attribute_flags, ALPC_MESSA
     return STATUS_SUCCESS;
 
 }
+
+NTSTATUS WINAPI NtAlpcQueryInformation( HANDLE port, ALPC_PORT_INFORMATION_CLASS class, void *info, ULONG length,
+                                        ULONG *ret_length )
+{
+    FIXME( "%p, %d, %p, %lu, %p: semi-stub\n", port, class, info, length, ret_length );
+
+    if (class != AlpcBasicInformation) return STATUS_INVALID_INFO_CLASS;
+    if (length < sizeof(ALPC_BASIC_INFORMATION)) return STATUS_INFO_LENGTH_MISMATCH;
+    memset( info, 0, sizeof(ALPC_BASIC_INFORMATION) );
+    if (ret_length) *ret_length = sizeof(ALPC_BASIC_INFORMATION);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS WINAPI NtAlpcCreateSecurityContext( HANDLE port, ULONG flags, ALPC_SECURITY_ATTR *attr )
+{
+    static LONG counter;
+
+    FIXME( "%p, %#lx, %p: semi-stub\n", port, flags, attr );
+
+    if (!attr) return STATUS_INVALID_PARAMETER;
+    /* the context handle of a security attribute only has to be a value that the sender gives back */
+    attr->ContextHandle = (HANDLE)(ULONG_PTR)(InterlockedIncrement( &counter ) * 4);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS WINAPI NtAlpcDeleteSecurityContext( HANDLE port, ULONG flags, HANDLE context )
+{
+    FIXME( "%p, %#lx, %p: semi-stub\n", port, flags, context );
+    return STATUS_SUCCESS;
+}

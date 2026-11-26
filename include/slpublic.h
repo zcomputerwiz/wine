@@ -33,6 +33,10 @@ typedef GUID SLID;
 
 typedef PVOID HSLC;
 
+#define SL_EVENT_LICENSING_STATE_CHANGED L"msft:rm/event/licensingstatechanged"
+#define SL_EVENT_POLICY_CHANGED          L"msft:rm/event/policychanged"
+#define SL_EVENT_USER_NOTIFICATION       L"msft:rm/event/usernotification"
+
 typedef enum _tagSLDATATYPE
 {
     SL_DATA_NONE     = REG_NONE,
@@ -62,10 +66,13 @@ typedef struct _tagSL_LICENSING_STATUS
     UINT64 qwValidityExpiration;
 } SL_LICENSING_STATUS;
 
+SLCAPI HRESULT WINAPI SLClose(HSLC);
 SLCAPI HRESULT WINAPI SLGetLicensingStatusInformation(HSLC, const SLID*, const SLID*, LPCWSTR, UINT*, SL_LICENSING_STATUS**);
 SLCAPI HRESULT WINAPI SLGetWindowsInformation(LPCWSTR, SLDATATYPE*, UINT*, LPBYTE*);
 SLCAPI HRESULT WINAPI SLGetWindowsInformationDWORD(LPCWSTR, LPDWORD);
 SLCAPI HRESULT WINAPI SLOpen(HSLC*);
+SLCAPI HRESULT WINAPI SLRegisterEvent(HSLC, PCWSTR, const SLID*, HANDLE);
+SLCAPI HRESULT WINAPI SLUnregisterEvent(HSLC, PCWSTR, const SLID*, HANDLE);
 
 #ifdef __cplusplus
 }

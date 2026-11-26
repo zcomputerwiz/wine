@@ -199,20 +199,16 @@ static HRESULT WINAPI map_Lookup( IMap_HSTRING_IInspectable *iface, HSTRING key,
 {
     struct property_set *impl = impl_from_IMap_HSTRING_IInspectable( iface );
     struct entry *e;
-    HRESULT hr = E_BOUNDS;
 
     TRACE( "iface %p, key %s, value %p.\n", iface, debugstr_hstring( key ), value );
 
     if (!value) return E_POINTER;
     *value = NULL;
+    /* a key never set gives null, not E_BOUNDS, for settings and composite values alike (Windows 11) */
     EnterCriticalSection( &impl->cs );
-    if ((e = find_entry( impl, key )))
-    {
-        if ((*value = e->value)) IInspectable_AddRef( *value );
-        hr = S_OK;
-    }
+    if ((e = find_entry( impl, key )) && (*value = e->value)) IInspectable_AddRef( *value );
     LeaveCriticalSection( &impl->cs );
-    return hr;
+    return S_OK;
 }
 
 static HRESULT WINAPI map_get_Size( IMap_HSTRING_IInspectable *iface, UINT32 *size )

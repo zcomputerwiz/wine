@@ -752,9 +752,9 @@ static bool xpath_push_long_step(struct xpath_parser_context *ctxt, enum xpath_o
 static bool xpath_push_full_step(struct xpath_parser_context *ctxt, enum xpath_op op, int ch1, int ch2,
         int value, int value2, int value3, void *value4, void *value5)
 {
-    struct xpath_step_op *step = xpath_push_step(ctxt);
+    struct xpath_step_op *step;
 
-    if (!step)
+    if (!(step = xpath_push_step(ctxt)))
         return false;
 
     step->op = op;
@@ -771,7 +771,10 @@ static bool xpath_push_full_step(struct xpath_parser_context *ctxt, enum xpath_o
 
 static void xpath_push_leave_step(struct xpath_parser_context *ctxt, enum xpath_op op, int value, int value2)
 {
-    struct xpath_step_op *step = xpath_push_step(ctxt);
+    struct xpath_step_op *step;
+
+    if (!(step = xpath_push_step(ctxt)))
+        return;
 
     step->op = op;
     step->ch1 = -1;
@@ -782,7 +785,10 @@ static void xpath_push_leave_step(struct xpath_parser_context *ctxt, enum xpath_
 
 static void xpath_push_unary_step(struct xpath_parser_context *ctxt, enum xpath_op op, int ch, int value, int value2)
 {
-    struct xpath_step_op *step = xpath_push_step(ctxt);
+    struct xpath_step_op *step;
+
+    if (!(step = xpath_push_step(ctxt)))
+        return;
 
     step->op = op;
     step->ch1 = ch;
@@ -793,7 +799,10 @@ static void xpath_push_unary_step(struct xpath_parser_context *ctxt, enum xpath_
 static void xpath_push_binary_step(struct xpath_parser_context *ctxt, enum xpath_op op, int ch1, int ch2,
         int value, int value2)
 {
-    struct xpath_step_op *step = xpath_push_step(ctxt);
+    struct xpath_step_op *step;
+
+    if (!(step = xpath_push_step(ctxt)))
+        return;
 
     step->op = op;
     step->ch1 = ch1;
@@ -1821,6 +1830,13 @@ static void xpath_compile_path_expr(struct xpath_parser_context *ctxt)
         {
             int len = wcslen(name);
 
+            /* a prefixed name (prefix:local, as in ms:string-compare(...)) is one name; '::' is an axis */
+            if (ctxt->cur[len] == ':' && xml_is_ncname_startchar(ctxt->cur[len + 1]))
+            {
+                for (++len; xml_is_ncnamechar(ctxt->cur[len]); ++len)
+                    ;
+            }
+
             while (ctxt->cur[len])
             {
                 if (!xml_is_space(ctxt->cur[len]))
@@ -2085,7 +2101,8 @@ static void xpath_compile_expr(struct xpath_parser_context *ctxt, bool sort)
         xpath_parse_skipspaces(ctxt);
     }
 
-    if (sort && (ctxt->comp->steps.values[ctxt->comp->last].op != XPATH_OP_VALUE))
+    if (ctxt->error == XPATH_EXPRESSION_OK
+            && sort && (ctxt->comp->steps.values[ctxt->comp->last].op != XPATH_OP_VALUE))
     {
         /* more ops could be optimized too */
         /*
@@ -4981,8 +4998,10 @@ static xpath_function_ptr xpath_lookup_function(struct xpath_context *ctxt, cons
 {
     for (size_t i = 0; i < ctxt->functions.count; ++i)
     {
+        const WCHAR *entry_uri = ctxt->functions.entries[i].uri;
+
         if (wcscmp(ctxt->functions.entries[i].name, name)) continue;
-        if (uri && wcscmp(ctxt->functions.entries[i].uri, uri)) continue;
+        if (!uri != !entry_uri || (uri && wcscmp(entry_uri, uri))) continue;
         return ctxt->functions.entries[i].func;
     }
 
@@ -5517,7 +5536,9 @@ struct xpath_object * xpath_eval(const WCHAR *str, struct xpath_context *ctx)
         return NULL;
     xpath_eval_expr(ctxt);
 
-    if (ctxt->error == XPATH_EXPRESSION_OK)
+    if (ctxt->error != XPATH_EXPRESSION_OK)
+        TRACE("%s: error %d\n", debugstr_w(str), ctxt->error);
+    else
     {
         res = xpath_pop_value(ctxt);
         if (res == NULL)
@@ -7503,6 +7524,26 @@ static void xslpattern_compile_equality_expr(struct xpath_parser_context *ctxt)
     }
 }
 
+/* Lookahead for "not(" notation. */
+static bool xslpattern_is_not_func(struct xpath_parser_context *ctxt)
+{
+    const WCHAR *p = ctxt->cur;
+
+    if (p[0] == 'n' && p[1] == 'o' && p[2] == 't')
+    {
+        p += 3;
+        while (xml_is_space(*p))
+            ++p;
+        if (*p == '(')
+        {
+            ctxt->cur = ++p;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 /*
  *  NegationExpr ::= EqualityExpr
  *          | '$not$' NegationExpr
@@ -7518,11 +7559,9 @@ static void xslpattern_compile_negation_expr(struct xpath_parser_context *ctxt)
         xpath_parse_skipspaces(ctxt);
         neg = true;
     }
-    else if (xpath_parse_cmp(ctxt, L"not"))
+    else if (xslpattern_is_not_func(ctxt))
     {
         xpath_parse_skipspaces(ctxt);
-        if (!xpath_parse_cmp(ctxt, L"("))
-            return xpath_parser_context_set_error(ctxt, XPATH_EXPR_ERROR);
         neg = functional = true;
     }
 
@@ -7539,6 +7578,20 @@ static void xslpattern_compile_negation_expr(struct xpath_parser_context *ctxt)
         xpath_push_unary_step(ctxt, XPATH_OP_NOT, ctxt->comp->last, 0, 0);
 }
 
+static bool xslpattern_is_and_operator(struct xpath_parser_context *ctxt)
+{
+    if (xpath_parse_cmp(ctxt, L"$and$") || xpath_parse_cmp(ctxt, L"&&"))
+        return true;
+
+    if (ctxt->cur[0] == 'a' && ctxt->cur[1] == 'n' && ctxt->cur[2] == 'd' && xml_is_space(ctxt->cur[3]))
+    {
+        xpath_parse_skip(ctxt, 3);
+        return true;
+    }
+
+    return false;
+}
+
 /*
  *  AndExpr ::= NegationExpr
  *          | NegationExpr ('and' | '$and$' | '&&') AndExpr
@@ -7547,9 +7600,7 @@ static void xslpattern_compile_and_expr(struct xpath_parser_context *ctxt)
 {
     xslpattern_compile_negation_expr(ctxt);
     xpath_parse_skipspaces(ctxt);
-    while (xpath_parse_cmp(ctxt, L"and")
-            || xpath_parse_cmp(ctxt, L"$and$")
-            || xpath_parse_cmp(ctxt, L"&&"))
+    while (xslpattern_is_and_operator(ctxt))
     {
         int op1 = ctxt->comp->last;
 
@@ -7558,6 +7609,20 @@ static void xslpattern_compile_and_expr(struct xpath_parser_context *ctxt)
         xpath_push_binary_step(ctxt, XPATH_OP_AND, op1, ctxt->comp->last, 0, 0);
         xpath_parse_skipspaces(ctxt);
     }
+}
+
+static bool xslpattern_is_or_operator(struct xpath_parser_context *ctxt)
+{
+    if (xpath_parse_cmp(ctxt, L"$or$") || xpath_parse_cmp(ctxt, L"||"))
+        return true;
+
+    if (ctxt->cur[0] == 'o' && ctxt->cur[1] == 'r' && xml_is_space(ctxt->cur[2]))
+    {
+        xpath_parse_skip(ctxt, 2);
+        return true;
+    }
+
+    return false;
 }
 
 /*
@@ -7583,9 +7648,7 @@ static void xslpattern_compile_expr(struct xpath_parser_context *ctxt, bool sort
     xslpattern_compile_and_expr(ctxt);
 
     xpath_parse_skipspaces(ctxt);
-    while (xpath_parse_cmp(ctxt, L"or")
-            || xpath_parse_cmp(ctxt, L"$or$")
-            || xpath_parse_cmp(ctxt, L"||"))
+    while (xslpattern_is_or_operator(ctxt))
     {
         int op1 = ctxt->comp->last;
 
@@ -7595,7 +7658,8 @@ static void xslpattern_compile_expr(struct xpath_parser_context *ctxt, bool sort
         xpath_parse_skipspaces(ctxt);
     }
 
-    if (sort && (ctxt->comp->steps.values[ctxt->comp->last].op != XPATH_OP_VALUE))
+    if (ctxt->error == XPATH_EXPRESSION_OK
+            && sort && (ctxt->comp->steps.values[ctxt->comp->last].op != XPATH_OP_VALUE))
     {
         /* more ops could be optimized too */
         /*
@@ -7664,8 +7728,61 @@ static void xslpattern_builtin_node_name(struct xpath_parser_context *ctxt, int 
     }
 }
 
+/* ms:string-compare(string1, string2[, language[, options]]), an MSXML extension function: -1, 0 or 1 as string1
+ * sorts before, the same as or after string2 in the language (the user's locale when empty or absent); the options
+ * "i" compare without case, "u" sorts upper case first. */
+static void xpath_ms_string_compare(struct xpath_parser_context *ctxt, int nargs)
+{
+    WCHAR *str1 = NULL, *str2 = NULL, *lang = NULL, *options = NULL;
+    const WCHAR *locale = LOCALE_NAME_USER_DEFAULT, *p;
+    bool upper_first = false;
+    DWORD flags = 0;
+    int ret;
+
+    if (nargs < 2 || nargs > 4)
+        return xpath_parser_context_set_error(ctxt, XPATH_INVALID_ARITY);
+    if (ctxt->stack.count < nargs)
+        return xpath_parser_context_set_error(ctxt, XPATH_STACK_ERROR);
+
+    if (nargs == 4) options = xpath_pop_string(ctxt);
+    if (nargs >= 3) lang = xpath_pop_string(ctxt);
+    str2 = xpath_pop_string(ctxt);
+    str1 = xpath_pop_string(ctxt);
+
+    if (str1 && str2 && (nargs < 3 || lang) && (nargs < 4 || options))
+    {
+        for (p = options; p && *p; p++)
+        {
+            if (*p == 'i' || *p == 'I') flags |= NORM_IGNORECASE;
+            else if (*p == 'u' || *p == 'U') upper_first = true;
+        }
+        if (lang && *lang) locale = lang;
+
+        ret = CompareStringEx(locale, flags, str1, -1, str2, -1, NULL, NULL, 0);
+        if (!ret && locale != LOCALE_NAME_USER_DEFAULT)
+        {
+            locale = LOCALE_NAME_USER_DEFAULT;
+            ret = CompareStringEx(locale, flags, str1, -1, str2, -1, NULL, NULL, 0);
+        }
+        ret = ret ? ret - CSTR_EQUAL : 0;
+        /* the locale sorts lower case first; with "u", strings that differ only in case swap their order */
+        if (ret && upper_first && !(flags & NORM_IGNORECASE)
+                && CompareStringEx(locale, NORM_IGNORECASE, str1, -1, str2, -1, NULL, NULL, 0) == CSTR_EQUAL)
+            ret = -ret;
+        xpath_push_value(ctxt, xpath_new_number(ctxt, ret));
+    }
+
+    free(str1);
+    free(str2);
+    free(lang);
+    free(options);
+}
+
 static void xpath_register_xpath_functions(struct xpath_context *ctxt)
 {
+    /* MSXML 3.0 has no extension functions: its queries using them fail */
+    if (ctxt->properties && ctxt->properties->version >= MSXML4)
+        xpath_register_func_uri(ctxt, L"string-compare", L"urn:schemas-microsoft-com:xslt", xpath_ms_string_compare);
     xpath_register_func(ctxt, L"boolean", xpath_builtin_boolean);
     xpath_register_func(ctxt, L"ceiling", xpath_builtin_ceiling);
     xpath_register_func(ctxt, L"count", xpath_builtin_count);

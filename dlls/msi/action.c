@@ -4062,7 +4062,9 @@ static UINT publish_product_properties(MSIPACKAGE *package, HKEY hkey)
         free(buffer);
     }
 
-    msi_reg_set_val_dword(hkey, L"Assignment", 0);
+    /* 1 for a per-machine install, as on Windows: MsiGetProductInfo(AssignmentType) reports it, and callers such
+     * as Office's setup choose the context of the source list by it */
+    msi_reg_set_val_dword(hkey, L"Assignment", package->Context == MSIINSTALLCONTEXT_MACHINE);
     msi_reg_set_val_dword(hkey, L"AdvertiseFlags", 0x184);
     msi_reg_set_val_dword(hkey, INSTALLPROPERTY_INSTANCETYPEW, 0);
     msi_reg_set_val_multi_str(hkey, L"Clients", L":\0");
@@ -4194,6 +4196,13 @@ static UINT publish_patches( MSIPACKAGE *package )
         {
             res = GetLastError();
             ERR( "unable to copy patch package %lu\n", res );
+            goto done;
+        }
+        if (patch->filename && !msi_copy_is_frozen_file( patch->filename, patch->localfile ))
+        {
+            DeleteFileW( patch->localfile );
+            res = ERROR_FILE_CORRUPT;
+            ERR( "the copy of the patch package is not the file the broker froze\n" );
             goto done;
         }
         res = RegCreateKeyExW( product_patches_key, patch_squashed, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &patch_key, NULL );

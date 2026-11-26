@@ -212,7 +212,8 @@ FARPROC WINAPI DECLSPEC_HOTPATCH DelayLoadFailureHook( LPCSTR name, LPCSTR funct
         ERR( "failed to delay load %s.%u\n", name, LOWORD(function) );
     args[0] = (ULONG_PTR)name;
     args[1] = (ULONG_PTR)function;
-    RaiseException( EXCEPTION_WINE_STUB, EXCEPTION_NONCONTINUABLE, 2, args );
+    /* as on Windows: .NET Native's delay-load filters catch this code and take their own fallback */
+    RaiseException( ERROR_DELAY_LOAD_FAILED, EXCEPTION_NONCONTINUABLE, 2, args );
     return NULL;
 }
 
@@ -229,6 +230,9 @@ BOOL WINAPI DECLSPEC_HOTPATCH DisableThreadLibraryCalls( HMODULE module )
 /***********************************************************************
  *	FreeLibrary   (kernelbase.@)
  */
+static void release_mui_module( HMODULE module );
+static void release_unloaded_mui_module( HMODULE module );
+
 BOOL WINAPI DECLSPEC_HOTPATCH FreeLibrary( HINSTANCE module )
 {
     if (!module)
@@ -261,10 +265,13 @@ BOOL WINAPI DECLSPEC_HOTPATCH FreeLibrary( HINSTANCE module )
             }
             RtlLeaveCriticalSection( &exclusive_datafile_list_section );
         }
+        release_mui_module( module );
         return UnmapViewOfFile( ptr );
     }
 
-    return set_ntstatus( LdrUnloadDll( module ));
+    if (!set_ntstatus( LdrUnloadDll( module ))) return FALSE;
+    release_unloaded_mui_module( module );
+    return TRUE;
 }
 
 
@@ -1063,6 +1070,270 @@ BOOL WINAPI DECLSPEC_HOTPATCH EnumResourceTypesExW( HMODULE module, ENUMRESTYPEP
 }
 
 
+/* A language-neutral module keeps its localizable resources in a satellite, <directory>\<language>\<file>.mui, in the
+ * order of the preferred UI languages of the thread. A resource that the module itself does not have is looked up in
+ * the satellite, and LoadResource finds the satellite from the address of the resource. */
+struct mui_module
+{
+    struct list entry;
+    HMODULE     module;     /* the module */
+    DWORD       stamp;      /* time stamp and size of its image: another module loaded at the same address later is not it */
+    DWORD       size;
+    HMODULE     mui;        /* its satellite, as an image resource; NULL when there is none */
+    ULONG_PTR   base, end;  /* where the satellite is mapped */
+};
+static struct list mui_modules = LIST_INIT( mui_modules );
+
+static CRITICAL_SECTION mui_section;
+static CRITICAL_SECTION_DEBUG mui_critsect_debug =
+{
+    0, 0, &mui_section,
+    { &mui_critsect_debug.ProcessLocksList, &mui_critsect_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": mui_section") }
+};
+static CRITICAL_SECTION mui_section = { &mui_critsect_debug, -1, 0, 0, 0, 0 };
+
+/* a module loaded as a data file is gone when it is freed: its satellite is freed with it (else the satellite's file
+ * stays mapped, and e.g. BeginUpdateResource on it fails) */
+static HMODULE detach_mui_module( HMODULE module )
+{
+    struct mui_module *mm;
+    HMODULE mui = NULL;
+
+    RtlEnterCriticalSection( &mui_section );
+    LIST_FOR_EACH_ENTRY( mm, &mui_modules, struct mui_module, entry )
+    {
+        if (mm->module != module) continue;
+        mui = mm->mui;
+        list_remove( &mm->entry );
+        HeapFree( GetProcessHeap(), 0, mm );
+        break;
+    }
+    RtlLeaveCriticalSection( &mui_section );
+    return mui;
+}
+
+static void release_mui_module( HMODULE module )
+{
+    HMODULE mui;
+
+    if (list_empty( &mui_modules )) return;
+    if ((mui = detach_mui_module( module ))) FreeLibrary( mui );
+}
+
+/* after LdrUnloadDll of an image module: the last reference is gone when the image is unmapped, and its satellite goes
+ * with it. The check and the detach run under the loader lock, so another thread cannot load the module again at the
+ * same address in between and reuse the entry (its stamp would match) while the satellite is freed. The satellite is
+ * freed after the lock is left (lock order: the loader lock, then mui_section; nothing takes the loader lock while it
+ * holds mui_section). */
+static void release_unloaded_mui_module( HMODULE module )
+{
+    MEMORY_BASIC_INFORMATION info;
+    HMODULE mui = NULL;
+    ULONG_PTR magic;
+
+    if (list_empty( &mui_modules )) return;
+    LdrLockLoaderLock( 0, NULL, &magic );
+    if (!VirtualQuery( module, &info, sizeof(info) ) || info.Type != MEM_IMAGE || info.AllocationBase != module)
+        mui = detach_mui_module( module );
+    LdrUnlockLoaderLock( 0, magic );
+    if (mui) FreeLibrary( mui );
+}
+
+/* the file of a module; a module loaded as a data file is not known to the loader, its file is that of its mapping */
+static BOOL get_module_path( HMODULE module, WCHAR *path )
+{
+    union
+    {
+        MEMORY_SECTION_NAME info;
+        WCHAR buffer[sizeof(MEMORY_SECTION_NAME) / sizeof(WCHAR) + MAX_PATH + 4];
+    } name;
+    const WCHAR *str;
+    SIZE_T len;
+
+    if (!((ULONG_PTR)module & 3))
+    {
+        len = GetModuleFileNameW( module, path, MAX_PATH );
+        return len && len < MAX_PATH;
+    }
+    if (NtQueryVirtualMemory( GetCurrentProcess(), (void *)((ULONG_PTR)module & ~3), MemoryMappedFilenameInformation,
+                              &name, sizeof(name), NULL ))
+        return FALSE;
+    str = name.info.SectionFileName.Buffer;
+    len = name.info.SectionFileName.Length / sizeof(WCHAR);
+    /* an NT path in the DOS name space: a drive path (\??\C:\...) or a UNC path (\??\UNC\server\share\... is
+     * \\server\share\...); anything else (\??\unix\... for files outside the drives) has no DOS path, and stripping the
+     * prefix would make it a path relative to the current directory */
+    if (len < 7 || wcsncmp( str, L"\\??\\", 4 )) return FALSE;
+    if (((str[4] >= 'A' && str[4] <= 'Z') || (str[4] >= 'a' && str[4] <= 'z')) && str[5] == ':' && str[6] == '\\')
+    {
+        if (len - 4 >= MAX_PATH) return FALSE;
+        memcpy( path, str + 4, (len - 4) * sizeof(WCHAR) );
+        path[len - 4] = 0;
+        return TRUE;
+    }
+    if (len > 8 && !wcsnicmp( str + 4, L"UNC\\", 4 ))
+    {
+        if (len - 6 >= MAX_PATH) return FALSE;
+        path[0] = path[1] = '\\';
+        memcpy( path + 2, str + 8, (len - 8) * sizeof(WCHAR) );
+        path[len - 6] = 0;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static HMODULE load_mui_satellite( HMODULE module )
+{
+    static const WCHAR fallback[] = L"en-US\0";
+    WCHAR path[MAX_PATH], mui_path[MAX_PATH], *file, *langs = NULL;
+    const WCHAR *lang;
+    ULONG count, size = 0;
+    SIZE_T dir_len, file_len, lang_len;
+    HMODULE mui = NULL;
+    int pass;
+
+    if (!get_module_path( module, path ) || !(file = wcsrchr( path, '\\' ))) return NULL;
+    file++;
+    dir_len = file - path;
+    file_len = wcslen( file );
+
+    if (GetThreadPreferredUILanguages( MUI_LANGUAGE_NAME | MUI_UI_FALLBACK, &count, NULL, &size ) && size &&
+        (langs = HeapAlloc( GetProcessHeap(), 0, size * sizeof(WCHAR) )) &&
+        !GetThreadPreferredUILanguages( MUI_LANGUAGE_NAME | MUI_UI_FALLBACK, &count, langs, &size ))
+    {
+        HeapFree( GetProcessHeap(), 0, langs );
+        langs = NULL;
+    }
+
+    /* the preferred languages of the thread first, then English (United States) */
+    for (pass = 0; pass < 2 && !mui; pass++)
+    {
+        if (!(lang = pass ? fallback : langs)) continue;
+        for (; *lang && !mui; lang += lang_len + 1)
+        {
+            lang_len = wcslen( lang );
+            if (dir_len + lang_len + 1 + file_len + 4 >= MAX_PATH) continue;
+            memcpy( mui_path, path, dir_len * sizeof(WCHAR) );
+            memcpy( mui_path + dir_len, lang, lang_len * sizeof(WCHAR) );
+            mui_path[dir_len + lang_len] = '\\';
+            memcpy( mui_path + dir_len + lang_len + 1, file, file_len * sizeof(WCHAR) );
+            wcscpy( mui_path + dir_len + lang_len + 1 + file_len, L".mui" );
+            if (GetFileAttributesW( mui_path ) == INVALID_FILE_ATTRIBUTES) continue;
+            mui = LoadLibraryExW( mui_path, NULL, LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE );
+            TRACE( "%p: satellite %s -> %p\n", module, debugstr_w(mui_path), mui );
+        }
+    }
+    HeapFree( GetProcessHeap(), 0, langs );
+    return mui;
+}
+
+/* entries taken off the list, freed with their satellites outside mui_section */
+static void free_stale_mui_modules( struct list *stale )
+{
+    struct mui_module *mm, *next;
+
+    LIST_FOR_EACH_ENTRY_SAFE( mm, next, stale, struct mui_module, entry )
+    {
+        list_remove( &mm->entry );
+        if (mm->mui) FreeLibrary( mm->mui );
+        HeapFree( GetProcessHeap(), 0, mm );
+    }
+}
+
+/* the satellite of a module, NULL when it has none; the satellite is loaded outside the lock (the loader lock may be held
+ * by a thread that waits for it) */
+static HMODULE get_mui_module( HMODULE module )
+{
+    const IMAGE_NT_HEADERS *nt;
+    struct mui_module *mm, *next, *found = NULL;
+    struct list stale = LIST_INIT( stale );
+    HMODULE mui;
+    DWORD err;
+
+    /* modules loaded as data files too (measured: Windows 11 finds the satellite of LOAD_LIBRARY_AS_DATAFILE modules) */
+    if (!module || !(nt = RtlImageNtHeader( (HMODULE)((ULONG_PTR)module & ~3) ))) return NULL;
+
+    RtlEnterCriticalSection( &mui_section );
+    LIST_FOR_EACH_ENTRY( mm, &mui_modules, struct mui_module, entry )
+    {
+        if (mm->module != module) continue;
+        if (mm->stamp == nt->FileHeader.TimeDateStamp && mm->size == nt->OptionalHeader.SizeOfImage) found = mm;
+        break;
+    }
+    mui = found ? found->mui : NULL;
+    RtlLeaveCriticalSection( &mui_section );
+    if (found) return mui;
+
+    err = GetLastError();
+    mui = load_mui_satellite( module );
+    SetLastError( err );
+
+    RtlEnterCriticalSection( &mui_section );
+    LIST_FOR_EACH_ENTRY_SAFE( mm, next, &mui_modules, struct mui_module, entry )
+    {
+        if (mm->module != module) continue;
+        if (mm->stamp == nt->FileHeader.TimeDateStamp && mm->size == nt->OptionalHeader.SizeOfImage)
+        {
+            /* another thread was first */
+            HMODULE ret = mm->mui;
+
+            RtlLeaveCriticalSection( &mui_section );
+            if (mui) FreeLibrary( mui );
+            free_stale_mui_modules( &stale );
+            return ret;
+        }
+        /* an earlier module at this address: freed after the lock is left (FreeLibrary enters it again) */
+        list_remove( &mm->entry );
+        list_add_tail( &stale, &mm->entry );
+    }
+    if ((mm = HeapAlloc( GetProcessHeap(), 0, sizeof(*mm) )))
+    {
+        const IMAGE_NT_HEADERS *mui_nt;
+
+        mm->module = module;
+        mm->stamp = nt->FileHeader.TimeDateStamp;
+        mm->size = nt->OptionalHeader.SizeOfImage;
+        mm->mui = mui;
+        mm->base = mm->end = 0;
+        if (mui && (mui_nt = RtlImageNtHeader( (HMODULE)((ULONG_PTR)mui & ~3) )))
+        {
+            mm->base = (ULONG_PTR)mui & ~3;
+            mm->end = mm->base + mui_nt->OptionalHeader.SizeOfImage;
+        }
+        list_add_head( &mui_modules, &mm->entry );
+    }
+    else if (mui)
+    {
+        FreeLibrary( mui );
+        mui = NULL;
+    }
+    RtlLeaveCriticalSection( &mui_section );
+    free_stale_mui_modules( &stale );
+    return mui;
+}
+
+/* the module that holds a resource: the satellite of the module when the resource lies there */
+static HMODULE resource_module( HMODULE module, HRSRC rsrc )
+{
+    struct mui_module *mm;
+    HMODULE ret = module;
+
+    if (list_empty( &mui_modules )) return module;
+    RtlEnterCriticalSection( &mui_section );
+    LIST_FOR_EACH_ENTRY( mm, &mui_modules, struct mui_module, entry )
+    {
+        if (mm->mui && (ULONG_PTR)rsrc >= mm->base && (ULONG_PTR)rsrc < mm->end)
+        {
+            ret = mm->mui;
+            break;
+        }
+    }
+    RtlLeaveCriticalSection( &mui_section );
+    return ret;
+}
+
+
 /**********************************************************************
  *	    FindResourceExW  (kernelbase.@)
  */
@@ -1072,6 +1343,7 @@ HRSRC WINAPI DECLSPEC_HOTPATCH FindResourceExW( HMODULE module, LPCWSTR type, LP
     UNICODE_STRING nameW, typeW;
     LDR_RESOURCE_INFO info;
     const IMAGE_RESOURCE_DATA_ENTRY *entry = NULL;
+    HMODULE mui;
 
     TRACE( "%p %s %s %04x\n", module, debugstr_w(type), debugstr_w(name), lang );
 
@@ -1086,6 +1358,13 @@ HRSRC WINAPI DECLSPEC_HOTPATCH FindResourceExW( HMODULE module, LPCWSTR type, LP
         info.Name = (ULONG_PTR)nameW.Buffer;
         info.Language = lang;
         status = LdrFindResource_U( module, &info, 3, &entry );
+        if ((status == STATUS_RESOURCE_TYPE_NOT_FOUND || status == STATUS_RESOURCE_NAME_NOT_FOUND ||
+             status == STATUS_RESOURCE_LANG_NOT_FOUND || status == STATUS_RESOURCE_DATA_NOT_FOUND) &&
+            (mui = get_mui_module( module )))
+        {
+            entry = NULL;
+            status = LdrFindResource_U( mui, &info, 3, &entry );
+        }
     done:
         if (status != STATUS_SUCCESS) SetLastError( RtlNtStatusToDosError(status) );
     }
@@ -1130,7 +1409,7 @@ HGLOBAL WINAPI DECLSPEC_HOTPATCH LoadResource( HINSTANCE module, HRSRC rsrc )
 
     if (!rsrc) return 0;
     if (!module) module = GetModuleHandleW( 0 );
-    if (!set_ntstatus( LdrAccessResource( module, (IMAGE_RESOURCE_DATA_ENTRY *)rsrc, &ret, NULL )))
+    if (!set_ntstatus( LdrAccessResource( resource_module( module, rsrc ), (IMAGE_RESOURCE_DATA_ENTRY *)rsrc, &ret, NULL )))
         return 0;
     return ret;
 }

@@ -237,10 +237,130 @@ static HRESULT WINAPI connection_profile_GetNetworkNames( IConnectionProfile *if
     return E_NOTIMPL;
 }
 
+/* Windows.Networking.Connectivity.ConnectionCost: a connection without limits or charges, as every Wine connection is */
+struct connection_cost
+{
+    IConnectionCost IConnectionCost_iface;
+    LONG ref;
+};
+
+static inline struct connection_cost *impl_from_IConnectionCost( IConnectionCost *iface )
+{
+    return CONTAINING_RECORD( iface, struct connection_cost, IConnectionCost_iface );
+}
+
+static HRESULT WINAPI connection_cost_QueryInterface( IConnectionCost *iface, REFIID iid, void **out )
+{
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IConnectionCost ))
+    {
+        *out = iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI connection_cost_AddRef( IConnectionCost *iface )
+{
+    struct connection_cost *impl = impl_from_IConnectionCost( iface );
+    ULONG ref = InterlockedIncrement( &impl->ref );
+    TRACE( "iface %p increasing refcount to %lu.\n", iface, ref );
+    return ref;
+}
+
+static ULONG WINAPI connection_cost_Release( IConnectionCost *iface )
+{
+    struct connection_cost *impl = impl_from_IConnectionCost( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    TRACE( "iface %p decreasing refcount to %lu.\n", iface, ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI connection_cost_GetIids( IConnectionCost *iface, ULONG *iid_count, IID **iids )
+{
+    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI connection_cost_GetRuntimeClassName( IConnectionCost *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( L"Windows.Networking.Connectivity.ConnectionCost",
+                                ARRAY_SIZE(L"Windows.Networking.Connectivity.ConnectionCost") - 1, class_name );
+}
+
+static HRESULT WINAPI connection_cost_GetTrustLevel( IConnectionCost *iface, TrustLevel *trust_level )
+{
+    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI connection_cost_get_NetworkCostType( IConnectionCost *iface, NetworkCostType *value )
+{
+    TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = NetworkCostType_Unrestricted;
+    return S_OK;
+}
+
+static HRESULT WINAPI connection_cost_get_Roaming( IConnectionCost *iface, boolean *value )
+{
+    TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI connection_cost_get_OverDataLimit( IConnectionCost *iface, boolean *value )
+{
+    TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI connection_cost_get_ApproachingDataLimit( IConnectionCost *iface, boolean *value )
+{
+    TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+
+static const IConnectionCostVtbl connection_cost_vtbl =
+{
+    connection_cost_QueryInterface,
+    connection_cost_AddRef,
+    connection_cost_Release,
+    connection_cost_GetIids,
+    connection_cost_GetRuntimeClassName,
+    connection_cost_GetTrustLevel,
+    connection_cost_get_NetworkCostType,
+    connection_cost_get_Roaming,
+    connection_cost_get_OverDataLimit,
+    connection_cost_get_ApproachingDataLimit,
+};
+
 static HRESULT WINAPI connection_profile_GetConnectionCost( IConnectionProfile *iface, IConnectionCost **value )
 {
-    FIXME( "iface %p, value %p stub!\n", iface, value );
-    return E_NOTIMPL;
+    struct connection_cost *impl;
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IConnectionCost_iface.lpVtbl = &connection_cost_vtbl;
+    impl->ref = 1;
+    *value = &impl->IConnectionCost_iface;
+    return S_OK;
 }
 
 static HRESULT WINAPI connection_profile_GetDataPlanStatus( IConnectionProfile *iface, IDataPlanStatus **value )

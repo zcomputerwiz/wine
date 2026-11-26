@@ -292,6 +292,7 @@ extern BOOL shape_layered_windows;
 extern const struct gdi_dc_funcs *X11DRV_XRender_Init(void);
 
 extern BOOL visual_from_pixel_format( int format, XVisualInfo *visual );
+extern void *egl_argb_config_for_format( int format );
 
 extern UINT X11DRV_OpenGLInit( UINT, const struct opengl_funcs *, const struct opengl_driver_funcs ** );
 extern UINT X11DRV_VulkanInit( UINT, void *, const struct vulkan_driver_funcs ** );
@@ -374,11 +375,13 @@ struct x11drv_client_surface
 
     HDC hdc_src;
     HDC hdc_dst;
+    void *argb_config;   /* EGL config with the 32-bit visual, for a DirectComposition target in a glass window */
 };
 
 extern struct x11drv_client_surface *impl_from_client_surface( struct client_surface *client );
 
 extern void set_dc_drawable( HDC hdc, Drawable drawable, const RECT *rect, int mode );
+extern void get_x_window_visual( Window window, XVisualInfo *visual );
 extern Drawable get_dc_drawable( HDC hdc, RECT *rect );
 extern HRGN get_dc_monitor_region( HWND hwnd, HDC hdc );
 
@@ -435,6 +438,7 @@ struct x11drv_thread_data
     int      xinput2_pointer;      /* XInput2 master pointer device id */
 #endif /* HAVE_X11_EXTENSIONS_XINPUT2_H */
     int      root_window_users;    /* counter for root window XISelectEvents */
+    struct opengl_drawable *null_drawable; /* dummy drawable for OpenGL */
 
     struct display_state desired_state;       /* display state tracking the desired / win32 state */
     struct display_state pending_state;       /* display state tracking the pending / requested state */
@@ -484,7 +488,6 @@ extern BOOL keyboard_grabbed;
 extern unsigned int screen_bpp;
 extern BOOL usexrandr;
 extern BOOL usexvidmode;
-extern BOOL use_egl;
 extern BOOL use_take_focus;
 extern BOOL use_primary_selection;
 extern BOOL use_system_cursors;

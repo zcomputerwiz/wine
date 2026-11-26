@@ -823,6 +823,35 @@ LookupAccountSidLocalA(
  *   name_use    []
  */
 
+/* WineExplorer domain logon WO 2: when the joined domain's SID (HKLM\Software\WineExplorer\Domain, Sid, written by
+ * session 0 from Winbind) is the domain part of sid (S-1-5-21-a-b-c-RID), the domain's flat name; else FALSE */
+static BOOL wex_domain_of_sid( PSID sid, WCHAR *flat, DWORD chars )
+{
+    WCHAR text[64];
+    DWORD size = sizeof(text);
+    PSID domain;
+    BOOL ret = FALSE;
+    DWORD i;
+
+    if (!IsValidSid( sid ) || *GetSidSubAuthorityCount( sid ) != 5) return FALSE;
+    if (RegGetValueW( HKEY_LOCAL_MACHINE, L"Software\\WineExplorer\\Domain", L"Sid",
+                      RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, NULL, text, &size )) return FALSE;
+    if (!ConvertStringSidToSidW( text, &domain )) return FALSE;
+    if (*GetSidSubAuthorityCount( domain ) == 4 &&
+        !memcmp( GetSidIdentifierAuthority( domain ), GetSidIdentifierAuthority( sid ), sizeof(SID_IDENTIFIER_AUTHORITY) ))
+    {
+        for (i = 0; i < 4; i++) if (*GetSidSubAuthority( domain, i ) != *GetSidSubAuthority( sid, i )) break;
+        if (i == 4)
+        {
+            size = chars * sizeof(WCHAR);
+            ret = !RegGetValueW( HKEY_LOCAL_MACHINE, L"Software\\WineExplorer\\Domain", L"FlatName",
+                                 RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, NULL, flat, &size ) && flat[0];
+        }
+    }
+    LocalFree( domain );
+    return ret;
+}
+
 BOOL WINAPI
 LookupAccountSidW(
 	IN LPCWSTR system,
@@ -974,6 +1003,11 @@ LookupAccountSidW(
                         ac = account_name;
                         dm = computer_name;
                         use = SidTypeUser;
+                        /* a domain account (WineExplorer domain logon WO 2): its SID is the joined domain's
+                         * (HKLM\Software\WineExplorer\Domain, Sid and FlatName), so its domain is the domain's
+                         * flat name; WINEUSERNAME is already the name without the domain */
+                        if (wex_domain_of_sid( sid, computer_name, MAX_COMPUTERNAME_LENGTH + 1 ))
+                            dm = computer_name;
                     }
                 }
             }
@@ -3062,6 +3096,7 @@ DWORD WINAPI SetSecurityInfo(HANDLE handle, SE_OBJECT_TYPE ObjectType,
     SECURITY_DESCRIPTOR sd;
     PACL dacl = pDacl;
     NTSTATUS status;
+    DWORD service_err = 0;
 
     if (!handle)
         return ERROR_INVALID_HANDLE;
@@ -3180,6 +3215,15 @@ DWORD WINAPI SetSecurityInfo(HANDLE handle, SE_OBJECT_TYPE ObjectType,
         status = NtSetSecurityObject(handle, SecurityInfo, &sd);
         break;
 
+    case SE_SERVICE:
+        /* the service control manager keeps the DACL of a service (programs/services) */
+        if (SecurityInfo & ~DACL_SECURITY_INFORMATION)
+            FIXME("only the DACL of a service is set, ignoring 0x%lx\n", SecurityInfo & ~DACL_SECURITY_INFORMATION);
+        status = STATUS_SUCCESS;
+        if ((SecurityInfo & DACL_SECURITY_INFORMATION) && !SetServiceObjectSecurity( handle, DACL_SECURITY_INFORMATION, &sd ))
+            service_err = GetLastError();
+        break;
+
     default:
         FIXME("unimplemented type %u, returning success\n", ObjectType);
         status = STATUS_SUCCESS;
@@ -3188,7 +3232,7 @@ DWORD WINAPI SetSecurityInfo(HANDLE handle, SE_OBJECT_TYPE ObjectType,
     }
     if (dacl != pDacl)
         free(dacl);
-    return RtlNtStatusToDosError(status);
+    return service_err ? service_err : RtlNtStatusToDosError(status);
 }
 
 /******************************************************************************

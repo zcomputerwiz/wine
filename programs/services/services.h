@@ -64,6 +64,17 @@ struct service_entry
     BOOL marked_for_delete;
     BOOL is_wow64;
     BOOL delayed_autostart;
+    DWORD failure_reset_period;        /* SERVICE_CONFIG_FAILURE_ACTIONS: seconds after which the failure count restarts */
+    WCHAR *reboot_msg;                 /* the "RebootMessage" value, or NULL */
+    WCHAR *failure_command;            /* the "FailureCommand" value, or NULL */
+    DWORD failure_actions_count;
+    SC_ACTION *failure_actions;        /* the actions of the "FailureActions" value, or NULL */
+    DWORD failure_count;               /* failures counted since the last reset */
+    ULONGLONG last_failure;            /* GetTickCount64() of the last failure */
+    TP_TIMER *restart_timer;           /* a restart waiting for its delay (holds a reference), under the database lock */
+    DWORD sid_type;                    /* WineExplorer (B114): SERVICE_SID_TYPE_*, the ServiceSidType value */
+    int session_service;               /* WineExplorer: the WexSessionService value, SESSION_SERVICE_* */
+    BOOL session0_start_only;          /* WineExplorer: the WexStartInSession0Only value: auto-started only in session 0 */
     BYTE *security;                    /* self-relative security descriptor of the "Security" value, NULL for the native default */
     DWORD security_size;
     struct list handles;
@@ -92,13 +103,24 @@ DWORD save_service_config(struct service_entry *entry);
 void free_service_entry(struct service_entry *entry);
 struct service_entry *grab_service(struct service_entry *service);
 void release_service(struct service_entry *service);
+/* SERVICE_CONFIG_FAILURE_ACTIONS: at most this many actions, so that the "FailureActions" value stays under 64 KiB */
+#define MAX_FAILURE_ACTIONS ((0x10000 - 20) / sizeof(SC_ACTION))
+/* cancel a pending restart after a failure; called without the database and service locks */
+void service_cancel_restart(struct service_entry *service);
 void service_lock(struct service_entry *service);
 void service_unlock(struct service_entry *service);
 DWORD service_start(struct service_entry *service, DWORD service_argc, LPCWSTR *service_argv);
 BOOL safeboot_allows(const struct service_entry *service);
 /* WineExplorer system tier T5.4: services that every session (session 0 included) runs for itself; the others
- * are session 0's while a session forwards (forward_mode) */
-BOOL is_session_service(const WCHAR *name, DWORD type);
+ * are session 0's while a session forwards (forward_mode). A service's WexSessionService value overrides the
+ * default (services.c). */
+#define SESSION_SERVICE_DEFAULT        0   /* no value: by type and the built-in names */
+#define SESSION_SERVICE_SESSION0       1   /* 0: session 0's only */
+#define SESSION_SERVICE_EVERY_SESSION  2   /* 1: every session runs it */
+BOOL is_session_service(const WCHAR *name, DWORD type, int configured);
+BOOL service_is_session_service(const struct service_entry *entry);
+BOOL service_is_session0s(const struct service_entry *entry);
+BOOL is_session_service_name(struct scmdatabase *db, const WCHAR *name, DWORD type);
 extern BOOL forward_mode;
 void notify_service_state(struct service_entry *service);
 

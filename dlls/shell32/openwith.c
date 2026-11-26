@@ -333,6 +333,25 @@ static void app_execute(struct open_with_app *app, const WCHAR *file)
     RegCloseKey(key);
 }
 
+/* The Group Policy value NoFileAssociate of Policies\Explorer (REG_DWORD, not 0), in the user's hive or in the machine's.
+ * Read each time, not through SHRestricted: that one caches a value for the life of the process, and a policy refresh
+ * changes it while the shell runs. */
+BOOL SHELL_FileAssociationsRestricted(void)
+{
+    static const WCHAR key[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer";
+    HKEY roots[2] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(roots); i++)
+    {
+        DWORD value = 0, size = sizeof(value);
+
+        if (!RegGetValueW(roots[i], key, L"NoFileAssociate", RRF_RT_REG_DWORD | RRF_RT_REG_BINARY, NULL, &value, &size) &&
+            size == sizeof(value) && value) return TRUE;
+    }
+    return FALSE;
+}
+
 /* "Always use the selected program": the extension's ProgID ("ext_auto_file" if it had none) opens with it */
 static void set_default_handler(struct open_with_app *app, const WCHAR *file)
 {
@@ -428,6 +447,12 @@ static void dialog_init(struct open_with_dialog *dlg, HWND hwnd)
     /* no association for files without an extension or for programs */
     if (!ext[0] || !ext[1] || PathIsExeAW(dlg->info->pcszFile))
         dlg->flags &= ~(OAIF_ALLOW_REGISTRATION | OAIF_FORCE_REGISTRATION | OAIF_REGISTER_EXT);
+    /* Group Policy "Do not allow changing file associations": the dialog only opens the file, it registers nothing */
+    if (SHELL_FileAssociationsRestricted())
+    {
+        dlg->flags &= ~(OAIF_ALLOW_REGISTRATION | OAIF_FORCE_REGISTRATION | OAIF_REGISTER_EXT);
+        dlg->flags |= OAIF_HIDE_REGISTRATION;
+    }
     if (!(dlg->flags & OAIF_ALLOW_REGISTRATION)) EnableWindow(GetDlgItem(hwnd, IDC_OPENWITH_ALWAYS), FALSE);
     if (dlg->flags & OAIF_FORCE_REGISTRATION)
     {

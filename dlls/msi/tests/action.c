@@ -3189,7 +3189,7 @@ machprod:
     CHECK_DEL_REG_DWORD(hkey, "Version", 0x1010001);
     if (!old_installer)
         CHECK_DEL_REG_DWORD(hkey, "AuthorizedLUAApp", 0);
-    CHECK_DEL_REG_DWORD_TODO(hkey, "Assignment", 1);
+    CHECK_DEL_REG_DWORD(hkey, "Assignment", 1);
     CHECK_DEL_REG_DWORD(hkey, "AdvertiseFlags", 0x184);
     CHECK_DEL_REG_DWORD(hkey, "InstanceType", 0);
     CHECK_DEL_REG_MULTI(hkey, "Clients", ":\0");

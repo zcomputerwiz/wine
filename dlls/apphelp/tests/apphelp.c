@@ -90,6 +90,47 @@ static void test_ApphelpCheckShellObject(void)
     }
 }
 
+static void test_PermLayerKeys(void)
+{
+    BOOL (WINAPI *pSdbSetPermLayerKeys)(const WCHAR *, const WCHAR *, BOOL);
+    BOOL (WINAPI *pSdbGetPermLayerKeys)(const WCHAR *, WCHAR *, DWORD *, DWORD);
+    WCHAR path[MAX_PATH], layers[64];
+    DWORD size;
+    BOOL res;
+
+    pSdbSetPermLayerKeys = (void *)GetProcAddress(hdll, "SdbSetPermLayerKeys");
+    pSdbGetPermLayerKeys = (void *)GetProcAddress(hdll, "SdbGetPermLayerKeys");
+    if (!pSdbSetPermLayerKeys || !pSdbGetPermLayerKeys)
+    {
+        win_skip("SdbSetPermLayerKeys or SdbGetPermLayerKeys not available\n");
+        return;
+    }
+    /* a file that exists: the test itself */
+    GetModuleFileNameW(NULL, path, ARRAY_SIZE(path));
+
+    res = pSdbSetPermLayerKeys(path, L"WINXPSP3", FALSE);
+    ok(res, "SdbSetPermLayerKeys failed\n");
+
+    size = sizeof(layers);
+    memset(layers, 0, sizeof(layers));
+    res = pSdbGetPermLayerKeys(path, layers, &size, 1 /* GPLK_USER */);
+    ok(res, "SdbGetPermLayerKeys failed\n");
+    ok(!wcscmp(layers, L"WINXPSP3"), "got layers %s\n", wine_dbgstr_w(layers));
+    ok(size == sizeof(L"WINXPSP3"), "got size %lu\n", size);
+
+    /* too small a buffer */
+    size = sizeof(WCHAR);
+    res = pSdbGetPermLayerKeys(path, layers, &size, 1);
+    ok(!res, "SdbGetPermLayerKeys succeeded with a small buffer\n");
+
+    /* removing the layer: no value is left */
+    res = pSdbSetPermLayerKeys(path, NULL, FALSE);
+    ok(res, "SdbSetPermLayerKeys(NULL) failed\n");
+    size = sizeof(layers);
+    res = pSdbGetPermLayerKeys(path, layers, &size, 1);
+    ok(!res, "SdbGetPermLayerKeys still found a layer\n");
+}
+
 START_TEST(apphelp)
 {
 
@@ -101,4 +142,5 @@ START_TEST(apphelp)
     pApphelpCheckShellObject = (void *) GetProcAddress(hdll, "ApphelpCheckShellObject");
 
     test_ApphelpCheckShellObject();
+    test_PermLayerKeys();
 }

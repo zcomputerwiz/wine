@@ -14,6 +14,7 @@ SOURCES = \
 	blob.c \
 	bytecodewriter.c \
 	compiler.c \
+	library.c \
 	linker.c \
 	reflection.c \
 	utils.c

@@ -1374,6 +1374,20 @@ static int select_on( const union select_op *select_op, data_size_t op_size, cli
     return 0;
 }
 
+/* check if an object is signaled for wait completion packets */
+int is_obj_signaled( struct object *obj )
+{
+    struct object *sync;
+    int signaled;
+
+    sync = get_obj_sync( obj );
+    signaled = sync->ops->signaled( sync, NULL );
+    if (signaled)
+        sync->ops->satisfied( sync, NULL );
+    release_object( sync );
+    return signaled;
+}
+
 /* attempt to wake threads sleeping on the object wait queue */
 void wake_up( struct object *obj, int max )
 {
@@ -1388,6 +1402,8 @@ void wake_up( struct object *obj, int max )
         /* restart at the head of the list since a wake up can change the object wait queue */
         ptr = &obj->wait_queue;
     }
+
+    wake_up_completion_packets( obj );
 }
 
 /* return the apc queue to use for a given apc type */
@@ -1587,6 +1603,7 @@ int thread_get_inflight_fd( struct thread *thread, int client )
             {
                 ret = thread->inflight[i].server;
                 thread->inflight[i].server = thread->inflight[i].client = -1;
+                clear_error();
                 return ret;
             }
         }
@@ -1630,7 +1647,7 @@ static void copy_context( struct context_data *to, const struct context_data *fr
     if (flags & SERVER_CTX_FLOATING_POINT) to->fp = from->fp;
     if (flags & SERVER_CTX_DEBUG_REGISTERS) to->debug = from->debug;
     if (flags & SERVER_CTX_EXTENDED_REGISTERS) to->ext = from->ext;
-    if (flags & SERVER_CTX_YMM_REGISTERS) to->ymm = from->ymm;
+    if (flags & SERVER_CTX_VECTOR_REGISTERS) to->vector = from->vector;
     if (flags & SERVER_CTX_EXEC_SPACE) to->exec_space = from->exec_space;
     if (flags & SERVER_CTX_TLS) to->tls = from->tls;
 }
@@ -2190,6 +2207,21 @@ DECL_HANDLER(queue_apc)
             obj_handle_t handle = duplicate_handle( current->process, apc->call.dup_handle.dst_process,
                                                     process, 0, 0, DUPLICATE_SAME_ACCESS );
             if (handle) apc->call.dup_handle.dst_process = handle;
+            else
+            {
+                release_object( process );
+                process = NULL;
+            }
+        }
+        break;
+    case APC_WEX_REGKEY:  /* WineExplorer: a registry key duplicated into the process (ntdll's wex_regkey.c) */
+        process = get_process_from_handle( req->handle, PROCESS_DUP_HANDLE );
+        if (process && process != current->process)
+        {
+            /* duplicate the record's section into the target process */
+            obj_handle_t handle = duplicate_handle( current->process, apc->call.wex_regkey.section,
+                                                    process, 0, 0, DUPLICATE_SAME_ACCESS );
+            if (handle) apc->call.wex_regkey.section = handle;
             else
             {
                 release_object( process );

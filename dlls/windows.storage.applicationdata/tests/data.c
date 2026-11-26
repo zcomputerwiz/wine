@@ -24,6 +24,8 @@
 #include "winstring.h"
 
 #include "roapi.h"
+#include "shlobj.h"
+#include "appmodel.h"
 
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_Foundation_Collections
@@ -87,6 +89,114 @@ static void test_ApplicationDataStatics(void)
     ok( ref == 1, "got ref %ld.\n", ref );
 }
 
+/* a composite value (and a settings container, the same on Windows) gives null for a key never set, not E_BOUNDS */
+static void test_ApplicationDataCompositeValue(void)
+{
+    static const WCHAR *class_name = L"Windows.Storage.ApplicationDataCompositeValue";
+    IMap_HSTRING_IInspectable *map;
+    IInspectable *inspectable, *value;
+    boolean found;
+    HSTRING str;
+    HRESULT hr;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoActivateInstance( str, &inspectable );
+    WindowsDeleteString( str );
+    ok( hr == S_OK || broken( hr == REGDB_E_CLASSNOTREG ), "got hr %#lx.\n", hr );
+    if (hr != S_OK) return;
+    hr = IInspectable_QueryInterface( inspectable, &IID_IMap_HSTRING_IInspectable, (void **)&map );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    IInspectable_Release( inspectable );
+    if (hr != S_OK) return;
+
+    WindowsCreateString( L"never set", 9, &str );
+    found = TRUE;
+    hr = IMap_HSTRING_IInspectable_HasKey( map, str, &found );
+    ok( hr == S_OK && !found, "got hr %#lx, found %d.\n", hr, found );
+    value = (void *)0xdeadbeef;
+    hr = IMap_HSTRING_IInspectable_Lookup( map, str, &value );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !value, "got value %p.\n", value );
+    WindowsDeleteString( str );
+    IMap_HSTRING_IInspectable_Release( map );
+}
+
+static void check_known_folder( const char *name, HSTRING value, REFKNOWNFOLDERID id )
+{
+    WCHAR *path = NULL;
+    HRESULT hr;
+
+    hr = SHGetKnownFolderPath( id, KF_FLAG_DEFAULT, NULL, &path );
+    ok( hr == S_OK, "%s: got hr %#lx.\n", name, hr );
+    if (hr == S_OK)
+        ok( !wcsicmp( WindowsGetStringRawBuffer( value, NULL ), path ), "%s: got %s, expected %s.\n", name,
+            debugstr_w( WindowsGetStringRawBuffer( value, NULL ) ), debugstr_w( path ) );
+    CoTaskMemFree( path );
+}
+
+static void test_AppDataPaths(void)
+{
+    static const WCHAR *name = L"Windows.Storage.AppDataPaths";
+    IAppDataPathsStatics *statics;
+    IAppDataPaths *paths = NULL;
+    IActivationFactory *factory;
+    HSTRING str, value;
+    UINT32 length;
+    BOOL packaged;
+    HRESULT hr;
+    LONG ref;
+
+    WindowsCreateString( name, wcslen( name ), &str );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    ok( hr == S_OK || broken( hr == REGDB_E_CLASSNOTREG ), "got hr %#lx.\n", hr );
+    if (hr == S_OK)
+    {
+        hr = IActivationFactory_QueryInterface( factory, &IID_IAppDataPathsStatics, (void **)&statics );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        IActivationFactory_Release( factory );
+    }
+    if (hr != S_OK)
+    {
+        win_skip( "%s is not available.\n", debugstr_w( name ) );
+        WindowsDeleteString( str );
+        return;
+    }
+    WindowsDeleteString( str );
+
+    hr = IAppDataPathsStatics_GetDefault( statics, &paths );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    check_interface( paths, &IID_IUnknown );
+    check_interface( paths, &IID_IInspectable );
+    check_interface( paths, &IID_IAgileObject );
+
+    /* the paths need a package identity */
+    length = 0;
+    packaged = GetCurrentPackageFullName( &length, NULL ) != APPMODEL_ERROR_NO_PACKAGE;
+
+#define CHECK_PATH( prop, id ) \
+    hr = IAppDataPaths_get_##prop( paths, &value ); \
+    ok( hr == (packaged ? S_OK : HRESULT_FROM_WIN32( APPMODEL_ERROR_NO_PACKAGE )), #prop ": got hr %#lx.\n", hr ); \
+    if (hr == S_OK) { check_known_folder( #prop, value, &id ); WindowsDeleteString( value ); }
+    CHECK_PATH( Cookies, FOLDERID_Cookies )
+    CHECK_PATH( Desktop, FOLDERID_Desktop )
+    CHECK_PATH( Documents, FOLDERID_Documents )
+    CHECK_PATH( Favorites, FOLDERID_Favorites )
+    CHECK_PATH( History, FOLDERID_History )
+    CHECK_PATH( InternetCache, FOLDERID_InternetCache )
+    CHECK_PATH( LocalAppData, FOLDERID_LocalAppData )
+    CHECK_PATH( ProgramData, FOLDERID_ProgramData )
+    CHECK_PATH( RoamingAppData, FOLDERID_RoamingAppData )
+#undef CHECK_PATH
+
+    hr = IAppDataPaths_get_Cookies( paths, NULL );
+    ok( hr == (packaged ? E_POINTER : HRESULT_FROM_WIN32( APPMODEL_ERROR_NO_PACKAGE )), "got hr %#lx.\n", hr );
+
+    ref = IAppDataPaths_Release( paths );
+    ok( !ref, "got ref %ld.\n", ref );
+    IAppDataPathsStatics_Release( statics );
+}
+
 START_TEST(data)
 {
     HRESULT hr;
@@ -95,6 +205,8 @@ START_TEST(data)
     ok( hr == S_OK, "RoInitialize failed, hr %#lx\n", hr );
 
     test_ApplicationDataStatics();
+    test_AppDataPaths();
+    test_ApplicationDataCompositeValue();
 
     RoUninitialize();
 }

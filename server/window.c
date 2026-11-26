@@ -34,6 +34,8 @@
 #include "thread.h"
 #include "process.h"
 #include "user.h"
+#include "security.h"
+#include "sysrun.h"
 #include "unicode.h"
 
 static const struct ratio no_dpi;
@@ -169,14 +171,9 @@ static inline struct window *get_window( user_handle_t handle )
 }
 
 /* a window of another desktop may be changed only by the system role (docs/ELEVATION_SECURE_DESKTOP_WORKORDER.md) */
-int window_desktop_denied( struct window *win )
+static int window_desktop_denied( struct window *win )
 {
     return cross_desktop_denied( current, win->desktop );
-}
-
-struct desktop *get_window_desktop( struct window *win )
-{
-    return win->desktop;
 }
 
 /* check if window is the desktop */
@@ -627,6 +624,72 @@ void post_desktop_message( struct desktop *desktop, unsigned int message,
     if (win && win->thread) post_message( win->handle, message, wparam, lparam );
 }
 
+/* remember who manages a desktop: the process that creates its top window */
+static void set_desktop_manager( struct desktop *desktop, struct process *process )
+{
+    free( desktop->manager_user );
+    desktop->manager_user = token_desktop_manager_user( process->token );
+    desktop->manager_session = process->token ? token_get_session_id( process->token ) : 0;
+    desktop->manager_il = process->token ? token_desktop_manager_il( process->token ) : 0;
+    desktop->manager_died = 0;
+}
+
+/* whether the current process may take over the top window of a desktop whose manager died (B120): the desktop is on
+ * the interactive window station (the shell's, not a service's; the Wayland session's desktop has no virtual or root
+ * flag, so the window station is what tells), and the caller is the manager's user in its session
+ * with at least its integrity level, not an AppContainer or restricted token; the secure desktop only for the
+ * system role */
+static int may_take_over_desktop( struct desktop *desktop )
+{
+    if (!desktop->manager_died || !desktop->manager_user) return 0;
+    if (!(desktop->winstation->flags & WSF_VISIBLE)) return 0;   /* the interactive window station's, not a service's */
+    if (desktop->secure && !sysrun_process_is_system( current->process )) return 0;
+    /* the process's token, and the thread's too when it impersonates: both must pass */
+    if (current->token && !token_may_take_desktop( current->token, desktop->manager_user, desktop->manager_session,
+                                                   desktop->manager_il ))
+        return 0;
+    return token_may_take_desktop( current->process->token, desktop->manager_user, desktop->manager_session,
+                                   desktop->manager_il );
+}
+
+/* A desktop-class window created on a desktop whose top window lost its manager takes that window over, keeping its
+ * handle: the programs that run on the desktop keep the handle they cached (their parent for top-level windows, what
+ * FindWindow and EnumWindows start from), and its children, z-order and unlinked windows stay as they are. */
+static struct window *reattach_desktop_window( struct window *win, struct desktop *desktop, struct window_class *class,
+                                               const struct obj_locator *class_locator, unsigned int fnid,
+                                               data_size_t extra_size, data_size_t private_size )
+{
+    bool ansi;
+
+    if (win->shared->extra_size != extra_size)   /* not the class the window was made with */
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return NULL;
+    }
+    if (!current->queue && !init_thread_queue( current )) return NULL;
+
+    win->thread  = current;
+    win->desktop = desktop;   /* the reference create_window holds goes to the window, as for a new one */
+    win->class   = class;
+    SHARED_WRITE_BEGIN( win->shared, window_shm_t )
+    {
+        shared->class        = *class_locator;
+        shared->fnid         = fnid;
+        shared->private_size = private_size;
+        shared->info.wndproc = get_class_wndproc( class, &ansi );
+        shared->ansi         = ansi;
+    }
+    SHARED_WRITE_END;
+    current->desktop_users++;
+    /* what detach_window_thread took off the old thread's queue */
+    if (win->update_region) inc_queue_paint_count( current, 1 );
+    if (win->paint_flags & PAINT_INTERNAL) inc_queue_paint_count( current, 1 );
+    set_user_handle_owner( win->handle, current );
+    set_desktop_manager( desktop, current->process );
+    set_process_default_desktop( current->process, desktop, current->desktop );
+    return win;
+}
+
 /* create a new window structure (note: the window is not linked in the window tree) */
 static struct window *create_window( struct window *parent, struct window *owner, atom_t atom,
                                      mod_handle_t class_instance, bool ansi, unsigned int dpi_context,
@@ -651,7 +714,21 @@ static struct window *create_window( struct window *parent, struct window *owner
     if (!parent)  /* null parent is only allowed for desktop or HWND_MESSAGE top window */
     {
         if (is_desktop_class( class ))
-            parent = desktop->top_window;  /* use existing desktop if any */
+        {
+            struct window *top = desktop->top_window;
+
+            if (top && !top->thread && desktop->manager_died)
+            {
+                /* the manager of the desktop died: a process that may takes its window over, others are refused */
+                if (!may_take_over_desktop( desktop )) set_error( STATUS_ACCESS_DENIED );
+                else if ((win = reattach_desktop_window( top, desktop, class, &class_locator, fnid,
+                                                         extra_size, private_size )))
+                    return win;
+                win = NULL;
+                goto failed;
+            }
+            parent = top;  /* use existing desktop if any */
+        }
         else if (is_message_class( class ))
             /* use desktop window if message window is already created */
             parent = desktop->msg_window ? desktop->top_window : NULL;
@@ -730,6 +807,7 @@ static struct window *create_window( struct window *parent, struct window *owner
         {
             assert( !desktop->top_window );
             desktop->top_window = win;
+            set_desktop_manager( desktop, current->process );
             set_process_default_desktop( current->process, desktop, current->desktop );
         }
         else
@@ -766,7 +844,12 @@ void destroy_thread_windows( struct thread *thread )
     while ((win = next_user_handle( &handle, NTUSER_OBJ_WINDOW )))
     {
         if (win->thread != thread) continue;
-        if (is_desktop_window( win )) detach_window_thread( win );
+        if (is_desktop_window( win ))
+        {
+            /* the desktop window stays; if it was the top window, its manager is gone (B120) */
+            if (win == win->desktop->top_window) win->desktop->manager_died = 1;
+            detach_window_thread( win );
+        }
         else free_window_handle( win );
     }
 }

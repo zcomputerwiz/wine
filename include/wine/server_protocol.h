@@ -152,7 +152,7 @@ struct context_data
                  unsigned char regs[80]; } i386_regs;
         struct { struct { unsigned __int64 low, high; } fpregs[32]; } x86_64_regs;
         struct { unsigned __int64 d[32]; unsigned int fpscr; } arm_regs;
-        struct { struct { unsigned __int64 low, high; } q[32]; unsigned int fpcr, fpsr; } arm64_regs;
+        struct { struct { unsigned __int64 low, high; } q[16]; unsigned int fpcr, fpsr; } arm64_regs;
     } fp;
     union
     {
@@ -171,8 +171,9 @@ struct context_data
     } exec_space;
     union
     {
-        struct { struct { unsigned __int64 low, high; } ymm_high[16]; } regs;
-    } ymm;
+        struct { struct { unsigned __int64 low, high; } ymm_high[16]; } ymm_regs;
+        struct { struct { unsigned __int64 low, high; } q16[16]; } arm64_regs;
+    } vector;
     union
     {
         unsigned __int64 arm64_x18;
@@ -185,7 +186,7 @@ struct context_data
 #define SERVER_CTX_FLOATING_POINT     0x0008
 #define SERVER_CTX_DEBUG_REGISTERS    0x0010
 #define SERVER_CTX_EXTENDED_REGISTERS 0x0020
-#define SERVER_CTX_YMM_REGISTERS      0x0040
+#define SERVER_CTX_VECTOR_REGISTERS   0x0040
 #define SERVER_CTX_EXEC_SPACE         0x0080
 #define SERVER_CTX_TLS                0x0100
 
@@ -498,7 +499,8 @@ enum apc_type
     APC_MAP_VIEW_EX,
     APC_UNMAP_VIEW,
     APC_CREATE_THREAD,
-    APC_DUP_HANDLE
+    APC_DUP_HANDLE,
+    APC_WEX_REGKEY
 };
 
 struct user_apc
@@ -636,6 +638,12 @@ union apc_call
         unsigned int     attributes;
         unsigned int     options;
     } dup_handle;
+    struct
+    {
+        enum apc_type    type;
+        obj_handle_t     section;
+        unsigned int     size;
+    } wex_regkey;
 };
 
 union apc_result
@@ -747,6 +755,12 @@ union apc_result
     {
         enum apc_type    type;
         unsigned int     status;
+        obj_handle_t     handle;
+    } wex_regkey;
+    struct
+    {
+        enum apc_type    type;
+        unsigned int     status;
     } break_process;
 };
 
@@ -757,6 +771,7 @@ enum irp_type
     IRP_CALL_CLOSE,
     IRP_CALL_READ,
     IRP_CALL_WRITE,
+    IRP_CALL_SET_INFO,
     IRP_CALL_FLUSH,
     IRP_CALL_IOCTL,
     IRP_CALL_VOLUME,
@@ -798,6 +813,12 @@ union irp_params
         client_ptr_t     file;
         file_pos_t       pos;
     } write;
+    struct
+    {
+        enum irp_type    type;
+        int              class;
+        client_ptr_t     file;
+    } set_info;
     struct
     {
         enum irp_type    type;
@@ -1356,6 +1377,21 @@ struct get_process_image_name_reply
 
 
 
+struct get_process_command_line_request
+{
+    struct request_header __header;
+    obj_handle_t handle;
+};
+struct get_process_command_line_reply
+{
+    struct reply_header __header;
+    data_size_t  len;
+    /* VARARG(cmdline,unicode_str); */
+    char __pad_12[4];
+};
+
+
+
 struct get_process_vm_counters_request
 {
     struct request_header __header;
@@ -1370,6 +1406,24 @@ struct get_process_vm_counters_reply
     mem_size_t working_set_size;
     mem_size_t pagefile_usage;
     mem_size_t peak_pagefile_usage;
+};
+
+
+
+struct get_process_io_counters_request
+{
+    struct request_header __header;
+    obj_handle_t handle;
+};
+struct get_process_io_counters_reply
+{
+    struct reply_header __header;
+    file_pos_t read_operations;
+    file_pos_t write_operations;
+    file_pos_t other_operations;
+    file_pos_t read_bytes;
+    file_pos_t write_bytes;
+    file_pos_t other_bytes;
 };
 
 
@@ -2065,6 +2119,23 @@ struct get_file_info_reply
 {
     struct reply_header __header;
     /* VARARG(data,bytes); */
+};
+
+
+struct set_file_info_request
+{
+    struct request_header __header;
+    obj_handle_t handle;
+    struct async_data async;
+    unsigned int info_class;
+    /* VARARG(data,bytes); */
+    char __pad_60[4];
+};
+struct set_file_info_reply
+{
+    struct reply_header __header;
+    obj_handle_t wait;
+    char __pad_12[4];
 };
 
 
@@ -2892,6 +2963,59 @@ struct get_registry_channel_reply
 };
 
 
+/* WineExplorer (H3): the class of a service's caller, decided by the server (token_caller_class, WEX_CALLER_* of
+   wine/wex_caller.h): the client of the connection of a pipe server end, or a token */
+struct get_caller_class_request
+{
+    struct request_header __header;
+    obj_handle_t handle;
+    int          is_pipe;
+    char __pad_20[4];
+};
+struct get_caller_class_reply
+{
+    struct reply_header __header;
+    unsigned int caller_class;
+    char __pad_12[4];
+};
+
+
+/* WineExplorer (H1): the accounts service forwards one request of a client of its reserved pipe to the root helper;
+   the server decides the verdict and the uid, builds the header and waits for the reply without blocking
+   (wine/wex_accounts.h). The body is a part of the client message the service last read whole, once per message
+   (A3). The call is signaled when it has ended. */
+struct accounts_forward_request
+{
+    struct request_header __header;
+    obj_handle_t pipe;
+    unsigned int op;
+    data_size_t  offset;
+    data_size_t  length;
+    char __pad_28[4];
+};
+struct accounts_forward_reply
+{
+    struct reply_header __header;
+    obj_handle_t call;
+    char __pad_12[4];
+};
+
+
+
+struct accounts_result_request
+{
+    struct request_header __header;
+    obj_handle_t call;
+};
+struct accounts_result_reply
+{
+    struct reply_header __header;
+    unsigned int helper_status;
+    data_size_t  total;
+    /* VARARG(body,bytes); */
+};
+
+
 
 struct set_registry_relay_request
 {
@@ -3596,19 +3720,6 @@ struct create_named_pipe_reply
 #define NAMED_PIPE_MESSAGE_STREAM_READ  0x0002
 #define NAMED_PIPE_NONBLOCKING_MODE     0x0004
 #define NAMED_PIPE_SERVER_END           0x8000
-
-
-struct set_named_pipe_info_request
-{
-    struct request_header __header;
-    obj_handle_t   handle;
-    unsigned int   flags;
-    char __pad_20[4];
-};
-struct set_named_pipe_info_reply
-{
-    struct reply_header __header;
-};
 
 
 #define PIPE_CALLER_BINDING_VERSION 1
@@ -5296,25 +5407,6 @@ struct create_mailslot_reply
 
 
 
-struct set_mailslot_info_request
-{
-    struct request_header __header;
-    obj_handle_t   handle;
-    timeout_t      read_timeout;
-    unsigned int   flags;
-    char __pad_28[4];
-};
-struct set_mailslot_info_reply
-{
-    struct reply_header __header;
-    timeout_t      read_timeout;
-    unsigned int   max_msgsize;
-    char __pad_20[4];
-};
-#define MAILSLOT_SET_READ_TIMEOUT  1
-
-
-
 struct create_directory_request
 {
     struct request_header __header;
@@ -5659,6 +5751,7 @@ struct create_service_token_request
 {
     struct request_header __header;
     unsigned int   account;
+    /* VARARG(sid,sid); */
 };
 struct create_service_token_reply
 {
@@ -5858,6 +5951,56 @@ struct set_completion_info_reply
 
 
 
+struct create_completion_packet_request
+{
+    struct request_header __header;
+    unsigned int access;
+    /* VARARG(objattr,object_attributes); */
+};
+struct create_completion_packet_reply
+{
+    struct reply_header __header;
+    obj_handle_t handle;
+    char __pad_12[4];
+};
+
+
+
+struct associate_completion_packet_request
+{
+    struct request_header __header;
+    obj_handle_t  packet;
+    obj_handle_t  completion;
+    obj_handle_t  target;
+    apc_param_t   ckey;
+    apc_param_t   cvalue;
+    apc_param_t   information;
+    unsigned int  status;
+    char __pad_52[4];
+};
+struct associate_completion_packet_reply
+{
+    struct reply_header __header;
+    int           already_signaled;
+    char __pad_12[4];
+};
+
+
+
+struct cancel_completion_packet_request
+{
+    struct request_header __header;
+    obj_handle_t  packet;
+    int           remove_signaled;
+    char __pad_20[4];
+};
+struct cancel_completion_packet_reply
+{
+    struct reply_header __header;
+};
+
+
+
 struct add_fd_completion_request
 {
     struct request_header __header;
@@ -5868,20 +6011,6 @@ struct add_fd_completion_request
     int            async;
 };
 struct add_fd_completion_reply
-{
-    struct reply_header __header;
-};
-
-
-
-struct set_fd_completion_mode_request
-{
-    struct request_header __header;
-    obj_handle_t handle;
-    unsigned int flags;
-    char __pad_20[4];
-};
-struct set_fd_completion_mode_reply
 {
     struct reply_header __header;
 };
@@ -5914,19 +6043,6 @@ struct set_fd_name_info_request
     /* VARARG(filename,string); */
 };
 struct set_fd_name_info_reply
-{
-    struct reply_header __header;
-};
-
-
-
-struct set_fd_eof_info_request
-{
-    struct request_header __header;
-    obj_handle_t handle;
-    file_pos_t   eof;
-};
-struct set_fd_eof_info_reply
 {
     struct reply_header __header;
 };
@@ -6489,95 +6605,95 @@ struct alpc_create_port_reply
 
 
 
-struct dwm_connect_request
-{
-    struct request_header __header;
-    char __pad_12[4];
-};
-struct dwm_connect_reply
-{
-    struct reply_header __header;
-    obj_handle_t        handle;
-    unsigned int        version;
-    unsigned __int64    epoch;
-};
-
-
-
-struct dwm_get_broker_capability_request
-{
-    struct request_header __header;
-    char __pad_12[4];
-};
-struct dwm_get_broker_capability_reply
-{
-    struct reply_header __header;
-    unsigned __int64    capability;
-    unsigned __int64    epoch;
-};
-
-
-
-struct dwm_broker_register_request
+struct alpc_connect_request
 {
     struct request_header __header;
     unsigned int        flags;
-    unsigned __int64    capability;
+    unsigned int        port_flags;
+    int                 sec_level;
+    /* VARARG(obj_attr,object_attributes); */
+    /* VARARG(data,bytes); */
 };
-struct dwm_broker_register_reply
+struct alpc_connect_reply
 {
     struct reply_header __header;
     obj_handle_t        handle;
-    unsigned int        version;
-    unsigned __int64    epoch;
+    unsigned int        msg_id;
 };
 
 
 
-struct dwm_send_request
+struct alpc_accept_request
 {
     struct request_header __header;
     obj_handle_t        handle;
-    /* VARARG(msg,bytes); */
+    unsigned int        msg_id;
+    int                 accept;
+    mem_size_t          context;
+    /* VARARG(data,bytes); */
 };
-struct dwm_send_reply
+struct alpc_accept_reply
 {
     struct reply_header __header;
-    unsigned __int64    epoch;
-    unsigned int        request_id;
+    obj_handle_t        handle;
+    char __pad_12[4];
+};
+
+
+
+struct alpc_send_receive_request
+{
+    struct request_header __header;
+    obj_handle_t        handle;
+    unsigned int        flags;
+    int                 has_send;
+    int                 has_recv;
+    unsigned int        msg_id;
+    unsigned int        max_recv;
+    int                 sec_level;
+    /* VARARG(data,bytes); */
+};
+struct alpc_send_receive_reply
+{
+    struct reply_header __header;
+    int                 has_msg;
+    unsigned int        type;
+    unsigned int        msg_id;
+    unsigned int        callback_id;
+    unsigned int        pid;
+    unsigned int        tid;
+    unsigned int        status;
+    unsigned int        data_len;
+    unsigned int        sequence;
+    int                 has_context;
+    mem_size_t          port_context;
+    unsigned int        sent_id;
+    /* VARARG(data,bytes); */
+    char __pad_60[4];
+};
+
+
+
+struct alpc_disconnect_request
+{
+    struct request_header __header;
+    obj_handle_t        handle;
+};
+struct alpc_disconnect_reply
+{
+    struct reply_header __header;
+};
+
+
+
+struct alpc_impersonate_request
+{
+    struct request_header __header;
+    obj_handle_t        handle;
+    unsigned int        msg_id;
     char __pad_20[4];
 };
-
-
-
-struct dwm_recv_request
-{
-    struct request_header __header;
-    obj_handle_t        handle;
-};
-struct dwm_recv_reply
-{
-    struct reply_header __header;
-    unsigned int        request_id;
-    process_id_t        sender_pid;
-    thread_id_t         sender_tid;
-    unsigned int        desktop_id;
-    unsigned int        status;
-    /* VARARG(msg,bytes); */
-    char __pad_28[4];
-};
-
-
-
-struct dwm_reply_request
-{
-    struct request_header __header;
-    obj_handle_t        handle;
-    unsigned int        request_id;
-    unsigned int        status;
-    /* VARARG(msg,bytes); */
-};
-struct dwm_reply_reply
+struct alpc_impersonate_reply
 {
     struct reply_header __header;
 };
@@ -6641,7 +6757,9 @@ enum request
     REQ_get_process_debug_info,
     REQ_get_process_handle_table,
     REQ_get_process_image_name,
+    REQ_get_process_command_line,
     REQ_get_process_vm_counters,
+    REQ_get_process_io_counters,
     REQ_set_process_info,
     REQ_get_thread_info,
     REQ_get_thread_page_priority,
@@ -6683,6 +6801,7 @@ enum request
     REQ_get_directory_cache_entry,
     REQ_flush,
     REQ_get_file_info,
+    REQ_set_file_info,
     REQ_get_volume_info,
     REQ_lock_file,
     REQ_unlock_file,
@@ -6733,6 +6852,9 @@ enum request
     REQ_set_registry_notification,
     REQ_rename_key,
     REQ_get_registry_channel,
+    REQ_get_caller_class,
+    REQ_accounts_forward,
+    REQ_accounts_result,
     REQ_set_registry_relay,
     REQ_relay_registry_notification,
     REQ_create_timer,
@@ -6776,7 +6898,6 @@ enum request
     REQ_ioctl,
     REQ_set_irp_result,
     REQ_create_named_pipe,
-    REQ_set_named_pipe_info,
     REQ_get_pipe_caller_binding,
     REQ_create_window,
     REQ_destroy_window,
@@ -6877,7 +6998,6 @@ enum request
     REQ_get_tcp_connections,
     REQ_get_udp_endpoints,
     REQ_create_mailslot,
-    REQ_set_mailslot_info,
     REQ_create_directory,
     REQ_open_directory,
     REQ_get_directory_entries,
@@ -6912,11 +7032,12 @@ enum request
     REQ_get_thread_completion,
     REQ_query_completion,
     REQ_set_completion_info,
+    REQ_create_completion_packet,
+    REQ_associate_completion_packet,
+    REQ_cancel_completion_packet,
     REQ_add_fd_completion,
-    REQ_set_fd_completion_mode,
     REQ_set_fd_disp_info,
     REQ_set_fd_name_info,
-    REQ_set_fd_eof_info,
     REQ_get_window_layered_info,
     REQ_set_window_layered_info,
     REQ_alloc_user_handle,
@@ -6951,12 +7072,11 @@ enum request
     REQ_d3dkmt_sync_wait,
     REQ_d3dkmt_sync_signal,
     REQ_alpc_create_port,
-    REQ_dwm_connect,
-    REQ_dwm_get_broker_capability,
-    REQ_dwm_broker_register,
-    REQ_dwm_send,
-    REQ_dwm_recv,
-    REQ_dwm_reply,
+    REQ_alpc_connect,
+    REQ_alpc_accept,
+    REQ_alpc_send_receive,
+    REQ_alpc_disconnect,
+    REQ_alpc_impersonate,
     REQ_create_e1s_account_token,
     REQ_load_e1s_profile,
     REQ_NB_REQUESTS
@@ -6979,7 +7099,9 @@ union generic_request
     struct get_process_debug_info_request get_process_debug_info_request;
     struct get_process_handle_table_request get_process_handle_table_request;
     struct get_process_image_name_request get_process_image_name_request;
+    struct get_process_command_line_request get_process_command_line_request;
     struct get_process_vm_counters_request get_process_vm_counters_request;
+    struct get_process_io_counters_request get_process_io_counters_request;
     struct set_process_info_request set_process_info_request;
     struct get_thread_info_request get_thread_info_request;
     struct get_thread_page_priority_request get_thread_page_priority_request;
@@ -7021,6 +7143,7 @@ union generic_request
     struct get_directory_cache_entry_request get_directory_cache_entry_request;
     struct flush_request flush_request;
     struct get_file_info_request get_file_info_request;
+    struct set_file_info_request set_file_info_request;
     struct get_volume_info_request get_volume_info_request;
     struct lock_file_request lock_file_request;
     struct unlock_file_request unlock_file_request;
@@ -7071,6 +7194,9 @@ union generic_request
     struct set_registry_notification_request set_registry_notification_request;
     struct rename_key_request rename_key_request;
     struct get_registry_channel_request get_registry_channel_request;
+    struct get_caller_class_request get_caller_class_request;
+    struct accounts_forward_request accounts_forward_request;
+    struct accounts_result_request accounts_result_request;
     struct set_registry_relay_request set_registry_relay_request;
     struct relay_registry_notification_request relay_registry_notification_request;
     struct create_timer_request create_timer_request;
@@ -7114,7 +7240,6 @@ union generic_request
     struct ioctl_request ioctl_request;
     struct set_irp_result_request set_irp_result_request;
     struct create_named_pipe_request create_named_pipe_request;
-    struct set_named_pipe_info_request set_named_pipe_info_request;
     struct get_pipe_caller_binding_request get_pipe_caller_binding_request;
     struct create_window_request create_window_request;
     struct destroy_window_request destroy_window_request;
@@ -7215,7 +7340,6 @@ union generic_request
     struct get_tcp_connections_request get_tcp_connections_request;
     struct get_udp_endpoints_request get_udp_endpoints_request;
     struct create_mailslot_request create_mailslot_request;
-    struct set_mailslot_info_request set_mailslot_info_request;
     struct create_directory_request create_directory_request;
     struct open_directory_request open_directory_request;
     struct get_directory_entries_request get_directory_entries_request;
@@ -7250,11 +7374,12 @@ union generic_request
     struct get_thread_completion_request get_thread_completion_request;
     struct query_completion_request query_completion_request;
     struct set_completion_info_request set_completion_info_request;
+    struct create_completion_packet_request create_completion_packet_request;
+    struct associate_completion_packet_request associate_completion_packet_request;
+    struct cancel_completion_packet_request cancel_completion_packet_request;
     struct add_fd_completion_request add_fd_completion_request;
-    struct set_fd_completion_mode_request set_fd_completion_mode_request;
     struct set_fd_disp_info_request set_fd_disp_info_request;
     struct set_fd_name_info_request set_fd_name_info_request;
-    struct set_fd_eof_info_request set_fd_eof_info_request;
     struct get_window_layered_info_request get_window_layered_info_request;
     struct set_window_layered_info_request set_window_layered_info_request;
     struct alloc_user_handle_request alloc_user_handle_request;
@@ -7289,12 +7414,11 @@ union generic_request
     struct d3dkmt_sync_wait_request d3dkmt_sync_wait_request;
     struct d3dkmt_sync_signal_request d3dkmt_sync_signal_request;
     struct alpc_create_port_request alpc_create_port_request;
-    struct dwm_connect_request dwm_connect_request;
-    struct dwm_get_broker_capability_request dwm_get_broker_capability_request;
-    struct dwm_broker_register_request dwm_broker_register_request;
-    struct dwm_send_request dwm_send_request;
-    struct dwm_recv_request dwm_recv_request;
-    struct dwm_reply_request dwm_reply_request;
+    struct alpc_connect_request alpc_connect_request;
+    struct alpc_accept_request alpc_accept_request;
+    struct alpc_send_receive_request alpc_send_receive_request;
+    struct alpc_disconnect_request alpc_disconnect_request;
+    struct alpc_impersonate_request alpc_impersonate_request;
     struct create_e1s_account_token_request create_e1s_account_token_request;
     struct load_e1s_profile_request load_e1s_profile_request;
 };
@@ -7315,7 +7439,9 @@ union generic_reply
     struct get_process_debug_info_reply get_process_debug_info_reply;
     struct get_process_handle_table_reply get_process_handle_table_reply;
     struct get_process_image_name_reply get_process_image_name_reply;
+    struct get_process_command_line_reply get_process_command_line_reply;
     struct get_process_vm_counters_reply get_process_vm_counters_reply;
+    struct get_process_io_counters_reply get_process_io_counters_reply;
     struct set_process_info_reply set_process_info_reply;
     struct get_thread_info_reply get_thread_info_reply;
     struct get_thread_page_priority_reply get_thread_page_priority_reply;
@@ -7357,6 +7483,7 @@ union generic_reply
     struct get_directory_cache_entry_reply get_directory_cache_entry_reply;
     struct flush_reply flush_reply;
     struct get_file_info_reply get_file_info_reply;
+    struct set_file_info_reply set_file_info_reply;
     struct get_volume_info_reply get_volume_info_reply;
     struct lock_file_reply lock_file_reply;
     struct unlock_file_reply unlock_file_reply;
@@ -7407,6 +7534,9 @@ union generic_reply
     struct set_registry_notification_reply set_registry_notification_reply;
     struct rename_key_reply rename_key_reply;
     struct get_registry_channel_reply get_registry_channel_reply;
+    struct get_caller_class_reply get_caller_class_reply;
+    struct accounts_forward_reply accounts_forward_reply;
+    struct accounts_result_reply accounts_result_reply;
     struct set_registry_relay_reply set_registry_relay_reply;
     struct relay_registry_notification_reply relay_registry_notification_reply;
     struct create_timer_reply create_timer_reply;
@@ -7450,7 +7580,6 @@ union generic_reply
     struct ioctl_reply ioctl_reply;
     struct set_irp_result_reply set_irp_result_reply;
     struct create_named_pipe_reply create_named_pipe_reply;
-    struct set_named_pipe_info_reply set_named_pipe_info_reply;
     struct get_pipe_caller_binding_reply get_pipe_caller_binding_reply;
     struct create_window_reply create_window_reply;
     struct destroy_window_reply destroy_window_reply;
@@ -7551,7 +7680,6 @@ union generic_reply
     struct get_tcp_connections_reply get_tcp_connections_reply;
     struct get_udp_endpoints_reply get_udp_endpoints_reply;
     struct create_mailslot_reply create_mailslot_reply;
-    struct set_mailslot_info_reply set_mailslot_info_reply;
     struct create_directory_reply create_directory_reply;
     struct open_directory_reply open_directory_reply;
     struct get_directory_entries_reply get_directory_entries_reply;
@@ -7586,11 +7714,12 @@ union generic_reply
     struct get_thread_completion_reply get_thread_completion_reply;
     struct query_completion_reply query_completion_reply;
     struct set_completion_info_reply set_completion_info_reply;
+    struct create_completion_packet_reply create_completion_packet_reply;
+    struct associate_completion_packet_reply associate_completion_packet_reply;
+    struct cancel_completion_packet_reply cancel_completion_packet_reply;
     struct add_fd_completion_reply add_fd_completion_reply;
-    struct set_fd_completion_mode_reply set_fd_completion_mode_reply;
     struct set_fd_disp_info_reply set_fd_disp_info_reply;
     struct set_fd_name_info_reply set_fd_name_info_reply;
-    struct set_fd_eof_info_reply set_fd_eof_info_reply;
     struct get_window_layered_info_reply get_window_layered_info_reply;
     struct set_window_layered_info_reply set_window_layered_info_reply;
     struct alloc_user_handle_reply alloc_user_handle_reply;
@@ -7625,16 +7754,15 @@ union generic_reply
     struct d3dkmt_sync_wait_reply d3dkmt_sync_wait_reply;
     struct d3dkmt_sync_signal_reply d3dkmt_sync_signal_reply;
     struct alpc_create_port_reply alpc_create_port_reply;
-    struct dwm_connect_reply dwm_connect_reply;
-    struct dwm_get_broker_capability_reply dwm_get_broker_capability_reply;
-    struct dwm_broker_register_reply dwm_broker_register_reply;
-    struct dwm_send_reply dwm_send_reply;
-    struct dwm_recv_reply dwm_recv_reply;
-    struct dwm_reply_reply dwm_reply_reply;
+    struct alpc_connect_reply alpc_connect_reply;
+    struct alpc_accept_reply alpc_accept_reply;
+    struct alpc_send_receive_reply alpc_send_receive_reply;
+    struct alpc_disconnect_reply alpc_disconnect_reply;
+    struct alpc_impersonate_reply alpc_impersonate_reply;
     struct create_e1s_account_token_reply create_e1s_account_token_reply;
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 985
+#define SERVER_PROTOCOL_VERSION 998
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

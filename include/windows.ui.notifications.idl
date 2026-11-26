@@ -1748,3 +1748,38 @@ namespace Windows.UI.Notifications {
         [default] interface Windows.UI.Notifications.IUserNotificationChangedEventArgs;
     }
 }
+
+/* Windows.ApplicationModel.Activation.TileActivatedInfo and ILaunchActivatedEventArgs2, which returns it: defined here,
+ * where the notification types are (windows.applicationmodel.activation.idl, imported by this file through
+ * windows.applicationmodel.idl, declares them; it cannot import this file without an import cycle) */
+namespace Windows.ApplicationModel.Activation {
+    [
+        contract(Windows.Foundation.UniversalApiContract, 3.0),
+        exclusiveto(Windows.ApplicationModel.Activation.TileActivatedInfo),
+        uuid(80e4a3b1-3980-4f17-b738-89194e0b8f65)
+    ]
+    interface ITileActivatedInfo : IInspectable
+    {
+        [propget] HRESULT RecentlyShownNotifications([out, retval] Windows.Foundation.Collections.IVectorView<Windows.UI.Notifications.ShownTileNotification *> **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 3.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass TileActivatedInfo
+    {
+        [default] interface Windows.ApplicationModel.Activation.ITileActivatedInfo;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 3.0),
+        uuid(0fd37ebc-9dc9-46b5-9ace-bd95d4565345)
+    ]
+    interface ILaunchActivatedEventArgs2 : IInspectable
+        requires Windows.ApplicationModel.Activation.ILaunchActivatedEventArgs,
+                 Windows.ApplicationModel.Activation.IActivatedEventArgs
+    {
+        [propget] HRESULT TileActivatedInfo([out, retval] Windows.ApplicationModel.Activation.TileActivatedInfo **value);
+    }
+}

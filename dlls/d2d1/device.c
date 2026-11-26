@@ -116,6 +116,8 @@ static void d2d_clip_stack_pop(struct d2d_clip_stack *stack)
     --stack->count;
 }
 
+static void d2d_device_context_run_queued_draws(struct d2d_device_context *context);
+
 static void d2d_device_context_draw(struct d2d_device_context *render_target, enum d2d_shape_type shape_type,
         ID3D11Buffer *ib, unsigned int index_count, ID3D11Buffer *vb, unsigned int vb_stride,
         struct d2d_brush *brush, struct d2d_brush *opacity_brush)
@@ -128,6 +130,9 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
     D3D11_RECT scissor_rect;
     unsigned int offset;
     D3D11_VIEWPORT vp;
+
+    /* objects queued earlier draw first, as they come earlier in Windows' batch */
+    d2d_device_context_run_queued_draws(render_target);
 
     vp.TopLeftX = 0;
     vp.TopLeftY = 0;
@@ -205,6 +210,95 @@ static void d2d_device_context_set_error(struct d2d_device_context *context, HRE
     context->error.tag2 = context->drawing_state.tag2;
 }
 
+static void d2d_device_context_release_queued_draws(IUnknown **objects, size_t count)
+{
+    size_t i;
+
+    for (i = 0; i < count; ++i)
+        IUnknown_Release(objects[i]);
+    free(objects);
+}
+
+/* Calls back the objects that slot 15 of the private interface queued, in order: slot 3 of each, with no arguments, with the
+ * context's Direct3D state current, its target bound and viewport and scissor covering the target, as Windows does when it
+ * flushes its batch (measured, tests/uwp/alpc/d2d-ctx-slot15-probe.cpp). A failure becomes the context's error. */
+static void d2d_device_context_run_queued_draws(struct d2d_device_context *context)
+{
+    IUnknown **objects = context->queued_draws;
+    size_t count = context->queued_draws_count, i;
+    ID3DDeviceContextState *prev_state;
+    ID3D11DeviceContext1 *d3d_context;
+    D3D11_RECT scissor_rect;
+    D3D11_VIEWPORT vp;
+    HRESULT hr;
+
+    if (!count)
+        return;
+
+    /* detached first: an object may draw through this context again */
+    context->queued_draws = NULL;
+    context->queued_draws_size = context->queued_draws_count = 0;
+
+    if (context->target.type != D2D_TARGET_BITMAP || !context->target.bitmap->rtv || FAILED(context->error.code))
+    {
+        d2d_device_context_release_queued_draws(objects, count);
+        return;
+    }
+
+    vp.TopLeftX = 0.0f;
+    vp.TopLeftY = 0.0f;
+    vp.Width = context->pixel_size.width;
+    vp.Height = context->pixel_size.height;
+    vp.MinDepth = 0.0f;
+    vp.MaxDepth = 1.0f;
+    scissor_rect.left = 0;
+    scissor_rect.top = 0;
+    scissor_rect.right = context->pixel_size.width;
+    scissor_rect.bottom = context->pixel_size.height;
+
+    if (context->cs)
+        EnterCriticalSection(context->cs);
+
+    ID3D11Device1_GetImmediateContext1(context->d3d_device, &d3d_context);
+    ID3D11DeviceContext1_SwapDeviceContextState(d3d_context, context->d3d_state, &prev_state);
+    ID3D11DeviceContext1_RSSetViewports(d3d_context, 1, &vp);
+    ID3D11DeviceContext1_RSSetScissorRects(d3d_context, 1, &scissor_rect);
+    ID3D11DeviceContext1_OMSetRenderTargets(d3d_context, 1, &context->target.bitmap->rtv, NULL);
+
+    for (i = 0; i < count; ++i)
+    {
+        HRESULT (STDMETHODCALLTYPE *draw)(IUnknown *object) = ((void **)objects[i]->lpVtbl)[3];
+
+        TRACE("Calling back object %p.\n", objects[i]);
+        if (FAILED(hr = draw(objects[i])) && SUCCEEDED(context->error.code))
+            d2d_device_context_set_error(context, hr);
+    }
+
+    /* the objects may leave any state bound (shaders of other stages, depth-stencil, stream-out, predication); the context's
+     * draws set only what they use and expect the rest cleared */
+    ID3D11DeviceContext1_ClearState(d3d_context);
+    ID3D11DeviceContext1_SwapDeviceContextState(d3d_context, prev_state, NULL);
+    ID3D11DeviceContext1_Release(d3d_context);
+    ID3DDeviceContextState_Release(prev_state);
+
+    if (context->cs)
+        LeaveCriticalSection(context->cs);
+
+    d2d_device_context_release_queued_draws(objects, count);
+}
+
+/* Drops the queued objects without calling them, as Windows does with objects queued while EndDraw calls the queue and with
+ * those left when the context goes away (measured). */
+static void d2d_device_context_discard_queued_draws(struct d2d_device_context *context)
+{
+    IUnknown **objects = context->queued_draws;
+    size_t count = context->queued_draws_count;
+
+    context->queued_draws = NULL;
+    context->queued_draws_size = context->queued_draws_count = 0;
+    d2d_device_context_release_queued_draws(objects, count);
+}
+
 static inline struct d2d_device_context *impl_from_IUnknown(IUnknown *iface)
 {
     return CONTAINING_RECORD(iface, struct d2d_device_context, IUnknown_iface);
@@ -214,6 +308,215 @@ static inline struct d2d_device_context *impl_from_ID2D1DeviceContext(ID2D1Devic
 {
     return CONTAINING_RECORD(iface, struct d2d_device_context, ID2D1DeviceContext6_iface);
 }
+
+/* The private interface {2ea67ed7-d42e-4c07-9dd5-a91ea23e01d2} of the device context. The Windows App SDK (XAML and its compositor)
+ * asks the context for it and fails fast without it. Measured black box on 64-bit Windows 11 (tests/uwp/alpc/d2d-qi-probe.c and
+ * wintrace of WineExplorer): the context answers it with a separate object; Notepad calls slots 9, 10 and 12.
+ * - Slot 12 (bitmap, const D2D1_BITMAP_PROPERTIES1 *, ID2D1Bitmap1 **out) makes a new bitmap on the surface of the given bitmap:
+ *   a format that does not fit the surface is refused like CreateBitmapFromDxgiSurface refuses it, bitmap options other than those
+ *   of the source give E_INVALIDARG, and NULL properties, format DXGI_FORMAT_UNKNOWN or a dpi of 0 take those of the source.
+ * - Slots 9 (bitmap, pointer or NULL, pointer) and 10 (NULL, 1, 0, later a pointer and 0) return 0 and write nothing through their
+ *   arguments; what they change is state of the context and of the bitmap. Here they do nothing.
+ * - Slot 7 (an ID2D1Bitmap1 or NULL, a pointer the compositor passes as NULL) sets the target, as SetTarget does: the compositor
+ *   calls it after BeginDraw instead of SetTarget, many times per frame. It returns S_OK, also for a bitmap without
+ *   D2D1_BITMAP_OPTIONS_TARGET, which does not become the target (tests/uwp/alpc/d2d-ctx-slot7-probe.cpp, test_device_private).
+ * - Slot 15 (an object of the caller, 0) returns 0 and queues the object (one reference) in the draw: at the next Flush or EndDraw
+ *   Windows calls slot 3 of each queued object, without arguments and in order, with the target it was queued for bound and viewport
+ *   and scissor covering it, then releases it; a failure of slot 3 is the EndDraw result. The lifted compositor draws its sprites
+ *   with Direct3D that way (tests/uwp/alpc/d2d-ctx-slot15-probe.cpp). Wine draws at once rather than in a batch, so the queue runs
+ *   before the next draw of the context, at a target change, Flush and EndDraw, which keeps the order of Windows' batch. Measured
+ *   too: a second BeginDraw keeps the queue, objects queued while EndDraw calls the queue are released uncalled, and so are those
+ *   left when the context is released. The context's lock is held while an object runs. FIXME: CopyFromRenderTarget, a
+ *   CopyFromBitmap from the target and GetDC read the target without running the queue first (Windows flushes for them).
+ * Notepad calls only slots 7, 9, 10, 12 and 15 (traced on 64-bit Windows 11 with all slots 3 to 15). The other slots are not known:
+ * calling one raises the stub exception. 32-bit callers do not get the interface (argument sizes not measured). */
+#ifdef __x86_64__
+static const GUID d2d_device_context_private_iid = {0x2ea67ed7, 0xd42e, 0x4c07, {0x9d, 0xd5, 0xa9, 0x1e, 0xa2, 0x3e, 0x01, 0xd2}};
+
+static inline struct d2d_device_context *impl_from_private(void *iface)
+{
+    return CONTAINING_RECORD(iface, struct d2d_device_context, private_vtbl);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_device_context_private_QueryInterface(void *iface, REFIID iid, void **out)
+{
+    struct d2d_device_context *context = impl_from_private(iface);
+
+    TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
+
+    if (IsEqualGUID(iid, &d2d_device_context_private_iid))
+    {
+        ID2D1DeviceContext6_AddRef(&context->ID2D1DeviceContext6_iface);
+        *out = iface;
+        return S_OK;
+    }
+    return ID2D1DeviceContext6_QueryInterface(&context->ID2D1DeviceContext6_iface, iid, out);
+}
+
+static ULONG STDMETHODCALLTYPE d2d_device_context_private_AddRef(void *iface)
+{
+    return ID2D1DeviceContext6_AddRef(&impl_from_private(iface)->ID2D1DeviceContext6_iface);
+}
+
+static ULONG STDMETHODCALLTYPE d2d_device_context_private_Release(void *iface)
+{
+    return ID2D1DeviceContext6_Release(&impl_from_private(iface)->ID2D1DeviceContext6_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_device_context_private_method7(void *iface, ID2D1Bitmap1 *bitmap, void *arg2)
+{
+    struct d2d_device_context *context = impl_from_private(iface);
+
+    TRACE("iface %p, bitmap %p, arg2 %p.\n", iface, bitmap, arg2);
+
+    /* the second argument is dereferenced on Windows when it is not NULL; the compositor passes NULL */
+    if (arg2) FIXME("Ignoring %p.\n", arg2);
+    ID2D1DeviceContext6_SetTarget(&context->ID2D1DeviceContext6_iface, (ID2D1Image *)bitmap);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_device_context_private_method15(void *iface, IUnknown *object, UINT_PTR arg2)
+{
+    struct d2d_device_context *context = impl_from_private(iface);
+
+    TRACE("iface %p, object %p, %#Ix.\n", iface, object, arg2);
+
+    /* Windows draws a NULL object and crashes at the flush */
+    if (!object)
+    {
+        WARN("NULL object.\n");
+        return S_OK;
+    }
+    if (FAILED(context->error.code))
+        return S_OK;
+    if (context->target.type == D2D_TARGET_UNKNOWN)
+    {
+        d2d_device_context_set_error(context, D2DERR_WRONG_STATE);
+        return S_OK;
+    }
+    if (context->target.type == D2D_TARGET_COMMAND_LIST)
+    {
+        FIXME("Not implemented for a command list target.\n");
+        return S_OK;
+    }
+    if (!d2d_array_reserve((void **)&context->queued_draws, &context->queued_draws_size,
+            context->queued_draws_count + 1, sizeof(*context->queued_draws)))
+        return E_OUTOFMEMORY;
+    IUnknown_AddRef(object);
+    context->queued_draws[context->queued_draws_count++] = object;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_device_context_private_method9(void *iface, ID2D1Bitmap1 *bitmap, void *arg2, void *arg3)
+{
+    FIXME("iface %p, bitmap %p, %p, %p semi-stub.\n", iface, bitmap, arg2, arg3);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_device_context_private_method10(void *iface, void *arg1, UINT_PTR arg2, UINT_PTR arg3)
+{
+    FIXME("iface %p, %p, %#Ix, %#Ix semi-stub.\n", iface, arg1, arg2, arg3);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_device_context_private_method12(void *iface, ID2D1Bitmap1 *bitmap,
+        const D2D1_BITMAP_PROPERTIES1 *desc, ID2D1Bitmap1 **out)
+{
+    struct d2d_device_context *context = impl_from_private(iface);
+    D2D1_BITMAP_PROPERTIES1 props;
+    struct d2d_bitmap *src;
+    IDXGISurface *surface;
+    HRESULT hr;
+
+    TRACE("iface %p, bitmap %p, desc %p, out %p.\n", iface, bitmap, desc, out);
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!(src = d2d_bitmap_from_iface_checked((ID2D1Bitmap *)bitmap))) return E_INVALIDARG;
+
+    props.pixelFormat = src->format;
+    props.dpiX = src->dpi_x;
+    props.dpiY = src->dpi_y;
+    props.bitmapOptions = src->options;
+    props.colorContext = NULL;
+    if (desc)
+    {
+        if (desc->bitmapOptions != src->options) return E_INVALIDARG;
+        if (desc->pixelFormat.format != DXGI_FORMAT_UNKNOWN)
+        {
+            props.pixelFormat.format = desc->pixelFormat.format;
+            props.pixelFormat.alphaMode = desc->pixelFormat.alphaMode;
+        }
+        /* a dpi of 0 takes the source's, each axis on its own */
+        if (desc->dpiX != 0.0f)
+            props.dpiX = desc->dpiX;
+        if (desc->dpiY != 0.0f)
+            props.dpiY = desc->dpiY;
+        props.colorContext = desc->colorContext;
+    }
+
+    if (src->surface)
+    {
+        surface = src->surface;
+        IDXGISurface_AddRef(surface);
+    }
+    else if (!src->resource || FAILED(ID3D11Resource_QueryInterface(src->resource, &IID_IDXGISurface, (void **)&surface)))
+    {
+        return E_INVALIDARG;
+    }
+
+    hr = ID2D1DeviceContext6_CreateBitmapFromDxgiSurface(&context->ID2D1DeviceContext6_iface, surface, &props, out);
+    IDXGISurface_Release(surface);
+    return hr;
+}
+
+#define D2D_PRIVATE_STUB(n) \
+static void STDMETHODCALLTYPE d2d_device_context_private_unimplemented##n(void) \
+{ \
+    ULONG_PTR args[2] = {(ULONG_PTR)L"d2d1.dll", (ULONG_PTR)"device context private method " #n}; \
+    ERR("device context private method " #n " is not implemented.\n"); \
+    RaiseException(0x80000100 /* EXCEPTION_WINE_STUB */, EXCEPTION_NONCONTINUABLE, 2, args); \
+}
+D2D_PRIVATE_STUB(3)  D2D_PRIVATE_STUB(4)  D2D_PRIVATE_STUB(5)  D2D_PRIVATE_STUB(6)  D2D_PRIVATE_STUB(8)
+D2D_PRIVATE_STUB(11) D2D_PRIVATE_STUB(13) D2D_PRIVATE_STUB(14) D2D_PRIVATE_STUB(16) D2D_PRIVATE_STUB(17)
+D2D_PRIVATE_STUB(18) D2D_PRIVATE_STUB(19) D2D_PRIVATE_STUB(20) D2D_PRIVATE_STUB(21) D2D_PRIVATE_STUB(22) D2D_PRIVATE_STUB(23)
+D2D_PRIVATE_STUB(24) D2D_PRIVATE_STUB(25) D2D_PRIVATE_STUB(26) D2D_PRIVATE_STUB(27) D2D_PRIVATE_STUB(28) D2D_PRIVATE_STUB(29)
+
+/* the length of the vtable is not known: the slots after the last one measured raise the stub exception too */
+static const void * const d2d_device_context_private_vtbl[] =
+{
+    d2d_device_context_private_QueryInterface,
+    d2d_device_context_private_AddRef,
+    d2d_device_context_private_Release,
+    d2d_device_context_private_unimplemented3,
+    d2d_device_context_private_unimplemented4,
+    d2d_device_context_private_unimplemented5,
+    d2d_device_context_private_unimplemented6,
+    d2d_device_context_private_method7,
+    d2d_device_context_private_unimplemented8,
+    d2d_device_context_private_method9,
+    d2d_device_context_private_method10,
+    d2d_device_context_private_unimplemented11,
+    d2d_device_context_private_method12,
+    d2d_device_context_private_unimplemented13,
+    d2d_device_context_private_unimplemented14,
+    d2d_device_context_private_method15,
+    d2d_device_context_private_unimplemented16,
+    d2d_device_context_private_unimplemented17,
+    d2d_device_context_private_unimplemented18,
+    d2d_device_context_private_unimplemented19,
+    d2d_device_context_private_unimplemented20,
+    d2d_device_context_private_unimplemented21,
+    d2d_device_context_private_unimplemented22,
+    d2d_device_context_private_unimplemented23,
+    d2d_device_context_private_unimplemented24,
+    d2d_device_context_private_unimplemented25,
+    d2d_device_context_private_unimplemented26,
+    d2d_device_context_private_unimplemented27,
+    d2d_device_context_private_unimplemented28,
+    d2d_device_context_private_unimplemented29,
+};
+#endif
 
 static HRESULT STDMETHODCALLTYPE d2d_device_context_inner_QueryInterface(IUnknown *iface, REFIID iid, void **out)
 {
@@ -242,6 +545,14 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_inner_QueryInterface(IUnknow
         *out = &context->ID2D1GdiInteropRenderTarget_iface;
         return S_OK;
     }
+#ifdef __x86_64__
+    else if (IsEqualGUID(iid, &d2d_device_context_private_iid) && context->private_vtbl)
+    {
+        ID2D1DeviceContext6_AddRef(&context->ID2D1DeviceContext6_iface);
+        *out = &context->private_vtbl;
+        return S_OK;
+    }
+#endif
 
     WARN("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));
 
@@ -270,6 +581,7 @@ static ULONG STDMETHODCALLTYPE d2d_device_context_inner_Release(IUnknown *iface)
     {
         unsigned int i, j, k;
 
+        d2d_device_context_discard_queued_draws(context);
         d2d_clip_stack_cleanup(&context->clip_stack);
         IDWriteRenderingParams_Release(context->default_text_rendering_params);
         if (context->text_rendering_params)
@@ -1863,6 +2175,8 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_Flush(ID2D1DeviceContext6 *i
 
     FIXME("iface %p, tag1 %p, tag2 %p stub!\n", iface, tag1, tag2);
 
+    d2d_device_context_run_queued_draws(context);
+
     if (context->ops && context->ops->device_context_present)
         context->ops->device_context_present(context->outer_unknown);
 
@@ -2059,6 +2373,7 @@ static void STDMETHODCALLTYPE d2d_device_context_BeginDraw(ID2D1DeviceContext6 *
     if (context->target.type == D2D_TARGET_COMMAND_LIST)
         d2d_command_list_begin_draw(context->target.command_list, context);
 
+    /* objects still queued stay queued (measured: the next EndDraw calls them) */
     memset(&context->error, 0, sizeof(context->error));
 }
 
@@ -2075,6 +2390,10 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_EndDraw(ID2D1DeviceContext6 
         FIXME("Unimplemented for command list target.\n");
         return E_NOTIMPL;
     }
+
+    d2d_device_context_run_queued_draws(context);
+    /* objects that the queued ones queued in turn are released uncalled (measured) */
+    d2d_device_context_discard_queued_draws(context);
 
     if (tag1)
         *tag1 = context->error.tag1;
@@ -2567,6 +2886,9 @@ static void STDMETHODCALLTYPE d2d_device_context_SetTarget(ID2D1DeviceContext6 *
     HRESULT hr;
 
     TRACE("iface %p, target %p.\n", iface, target);
+
+    /* queued objects draw on the target they were queued for (measured: Windows calls them at the flush with that target) */
+    d2d_device_context_run_queued_draws(context);
 
     if (!target)
     {
@@ -4259,6 +4581,9 @@ static HRESULT d2d_device_context_init(struct d2d_device_context *render_target,
     render_target->ID2D1GdiInteropRenderTarget_iface.lpVtbl = &d2d_gdi_interop_render_target_vtbl;
     render_target->IDWriteTextRenderer_iface.lpVtbl = &d2d_text_renderer_vtbl;
     render_target->IUnknown_iface.lpVtbl = &d2d_device_context_inner_unknown_vtbl;
+#ifdef __x86_64__
+    render_target->private_vtbl = d2d_device_context_private_vtbl;
+#endif
     render_target->refcount = 1;
     ID2D1Device1_GetFactory((ID2D1Device1 *)&device->ID2D1Device6_iface, &render_target->factory);
     render_target->device = device;
@@ -4516,9 +4841,106 @@ HRESULT d2d_d3d_create_render_target(struct d2d_device *device, IDXGISurface *su
     return S_OK;
 }
 
+/* The private interface {46fdbfea-53f8-440c-b9e2-81dfec612a72} of the device. The lifted compositor of the Windows App SDK asks every
+ * new device for it, and without it drops the device and the Direct3D device under it and tries again on the next frame, so nothing
+ * it composes is drawn. Measured black box on 64-bit Windows 11 (tests/uwp/alpc/d2d-qi-probe.c and wintrace of WineExplorer): the
+ * device answers it with a separate object (a device context does not); Notepad calls only slot 5, every few seconds, as
+ * (2000, 0x1e0000, out). Slot 5 returns S_OK and writes the DWORD 1 to out for any arguments, before and after the device has drawn,
+ * and takes a NULL out. The other slots are not known: calling one raises the stub exception. 32-bit callers do not get the
+ * interface (argument sizes not measured). */
+#ifdef __x86_64__
+static const GUID d2d_device_private_iid = {0x46fdbfea, 0x53f8, 0x440c, {0xb9, 0xe2, 0x81, 0xdf, 0xec, 0x61, 0x2a, 0x72}};
+
+static inline struct d2d_device *impl_from_device_private(void *iface)
+{
+    return CONTAINING_RECORD(iface, struct d2d_device, private_vtbl);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_device_private_QueryInterface(void *iface, REFIID iid, void **out)
+{
+    struct d2d_device *device = impl_from_device_private(iface);
+
+    TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
+
+    if (IsEqualGUID(iid, &d2d_device_private_iid))
+    {
+        ID2D1Device6_AddRef(&device->ID2D1Device6_iface);
+        *out = iface;
+        return S_OK;
+    }
+    return ID2D1Device6_QueryInterface(&device->ID2D1Device6_iface, iid, out);
+}
+
+static ULONG STDMETHODCALLTYPE d2d_device_private_AddRef(void *iface)
+{
+    return ID2D1Device6_AddRef(&impl_from_device_private(iface)->ID2D1Device6_iface);
+}
+
+static ULONG STDMETHODCALLTYPE d2d_device_private_Release(void *iface)
+{
+    return ID2D1Device6_Release(&impl_from_device_private(iface)->ID2D1Device6_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_device_private_method5(void *iface, UINT_PTR arg1, UINT_PTR arg2, DWORD *out)
+{
+    TRACE("iface %p, %#Ix, %#Ix, out %p.\n", iface, arg1, arg2, out);
+
+    if (out) *out = 1;
+    return S_OK;
+}
+
+#define D2D_DEVICE_PRIVATE_STUB(n) \
+static void STDMETHODCALLTYPE d2d_device_private_unimplemented##n(void) \
+{ \
+    ULONG_PTR args[2] = {(ULONG_PTR)L"d2d1.dll", (ULONG_PTR)"device private method " #n}; \
+    ERR("device private method " #n " is not implemented.\n"); \
+    RaiseException(0x80000100 /* EXCEPTION_WINE_STUB */, EXCEPTION_NONCONTINUABLE, 2, args); \
+}
+D2D_DEVICE_PRIVATE_STUB(3)  D2D_DEVICE_PRIVATE_STUB(4)  D2D_DEVICE_PRIVATE_STUB(6)  D2D_DEVICE_PRIVATE_STUB(7)
+D2D_DEVICE_PRIVATE_STUB(8)  D2D_DEVICE_PRIVATE_STUB(9)  D2D_DEVICE_PRIVATE_STUB(10) D2D_DEVICE_PRIVATE_STUB(11)
+D2D_DEVICE_PRIVATE_STUB(12) D2D_DEVICE_PRIVATE_STUB(13) D2D_DEVICE_PRIVATE_STUB(14) D2D_DEVICE_PRIVATE_STUB(15)
+D2D_DEVICE_PRIVATE_STUB(16) D2D_DEVICE_PRIVATE_STUB(17) D2D_DEVICE_PRIVATE_STUB(18) D2D_DEVICE_PRIVATE_STUB(19)
+
+/* the length of the vtable is not known: the slots after the last one measured raise the stub exception too */
+static const void * const d2d_device_private_vtbl[] =
+{
+    d2d_device_private_QueryInterface,
+    d2d_device_private_AddRef,
+    d2d_device_private_Release,
+    d2d_device_private_unimplemented3,
+    d2d_device_private_unimplemented4,
+    d2d_device_private_method5,
+    d2d_device_private_unimplemented6,
+    d2d_device_private_unimplemented7,
+    d2d_device_private_unimplemented8,
+    d2d_device_private_unimplemented9,
+    d2d_device_private_unimplemented10,
+    d2d_device_private_unimplemented11,
+    d2d_device_private_unimplemented12,
+    d2d_device_private_unimplemented13,
+    d2d_device_private_unimplemented14,
+    d2d_device_private_unimplemented15,
+    d2d_device_private_unimplemented16,
+    d2d_device_private_unimplemented17,
+    d2d_device_private_unimplemented18,
+    d2d_device_private_unimplemented19,
+};
+#endif
+
 static HRESULT WINAPI d2d_device_QueryInterface(ID2D1Device6 *iface, REFIID iid, void **out)
 {
     TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
+
+#ifdef __x86_64__
+    if (IsEqualGUID(iid, &d2d_device_private_iid))
+    {
+        struct d2d_device *device = impl_from_ID2D1Device(iface);
+
+        ID2D1Device6_AddRef(iface);
+        *out = &device->private_vtbl;
+        return S_OK;
+    }
+#endif
 
     if (IsEqualGUID(iid, &IID_ID2D1Device6)
             || IsEqualGUID(iid, &IID_ID2D1Device5)
@@ -4811,6 +5233,9 @@ HRESULT d2d_device_init(struct d2d_device *device, ID2D1Factory1 *factory, IDXGI
     ID3D10Blob *compiled;
 
     device->ID2D1Device6_iface.lpVtbl = &d2d_device_vtbl;
+#ifdef __x86_64__
+    device->private_vtbl = d2d_device_private_vtbl;
+#endif
     device->refcount = 1;
     device->factory = factory;
     ID2D1Factory1_AddRef(device->factory);

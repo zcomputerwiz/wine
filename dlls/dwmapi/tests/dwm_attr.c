@@ -31,8 +31,10 @@
 #include "winbase.h"
 #include "wingdi.h"
 #include "winuser.h"
+#include "tlhelp32.h"
 #include "dwmapi.h"
 #include "wine/test.h"
+#include "dwm_test.h"
 
 #ifndef DWMWA_COLOR_DEFAULT
 #define DWMWA_COLOR_DEFAULT 0xFFFFFFFF
@@ -68,12 +70,78 @@ static DWORD run_child( const WCHAR *exe, HWND hwnd, DWORD expected, DWORD attr 
     ok( ret, "CreateProcessW failed, error %lu\n", GetLastError() );
     if (ret)
     {
-        WaitForSingleObject( pi.hProcess, 10000 );
-        GetExitCodeProcess( pi.hProcess, &exit_code );
+        /* a reader that hangs fails its phase and is ended, never left behind */
+        if (WaitForSingleObject( pi.hProcess, 10000 ))
+        {
+            ok( 0, "reader of attribute %#lx timed out\n", attr );
+            TerminateProcess( pi.hProcess, 1 );
+            WaitForSingleObject( pi.hProcess, 5000 );
+        }
+        else GetExitCodeProcess( pi.hProcess, &exit_code );
         CloseHandle( pi.hProcess );
         CloseHandle( pi.hThread );
     }
     return exit_code;
+}
+
+static DWORD parent_of( HANDLE snapshot, DWORD pid )
+{
+    PROCESSENTRY32W entry = { sizeof(entry) };
+
+    if (!Process32FirstW( snapshot, &entry )) return 0;
+    do if (entry.th32ProcessID == pid) return entry.th32ParentProcessID;
+    while (Process32NextW( snapshot, &entry ));
+    return 0;
+}
+
+/* Ends the broker of this test's desktop: the dwm.exe started by the desktop manager that started this test
+ * (explorer /desktop=NAME cmd /c test). FALSE when the test was started some other way. */
+static BOOL kill_own_broker(void)
+{
+    PROCESSENTRY32W entry = { sizeof(entry) };
+    HANDLE snapshot, process;
+    DWORD manager;
+    BOOL killed = FALSE;
+
+    snapshot = CreateToolhelp32Snapshot( TH32CS_SNAPPROCESS, 0 );
+    if (snapshot == INVALID_HANDLE_VALUE) return FALSE;
+    manager = parent_of( snapshot, parent_of( snapshot, GetCurrentProcessId() ) );
+    if (manager && Process32FirstW( snapshot, &entry ))
+    {
+        do
+        {
+            if (entry.th32ParentProcessID != manager || wcsicmp( entry.szExeFile, L"dwm.exe" )) continue;
+            if (!(process = OpenProcess( PROCESS_TERMINATE | SYNCHRONIZE, FALSE, entry.th32ProcessID ))) continue;
+            killed = TerminateProcess( process, 1 );
+            WaitForSingleObject( process, 5000 );
+            CloseHandle( process );
+        } while (Process32NextW( snapshot, &entry ));
+    }
+    CloseHandle( snapshot );
+    return killed;
+}
+
+/* The desktop manager starts a new broker, which holds nothing; the setter's first call that reaches it hands it
+ * the process's attributes (synchronously, in that call), so another process reads them again. One bounded phase
+ * waits for the new broker, its echo doing the replay; then one cross-process read. */
+static void test_broker_restart( const WCHAR *exe, HWND hwnd )
+{
+    DWORD exit_code, start;
+    ULONG len = 0;
+    HRESULT hr = E_FAIL;
+
+    if (!kill_own_broker())
+    {
+        skip( "not started by a desktop manager with a broker\n" );
+        return;
+    }
+    /* the desktop manager restarts it after 250 ms */
+    for (start = GetTickCount(); GetTickCount() - start < 5000; Sleep( 100 ))
+        if ((hr = pWexDwmpChannelEcho( NULL, 0, NULL, &len )) == S_OK) break;
+    ok( hr == S_OK, "the broker did not come back within 5 s: %#lx\n", hr );
+    if (hr != S_OK) return;
+    exit_code = run_child( exe, hwnd, 3, DWMWA_WINDOW_CORNER_PREFERENCE );
+    ok( exit_code == 0, "the restarted broker did not get the corner preference back\n" );
 }
 
 START_TEST(dwm_attr)
@@ -81,7 +149,6 @@ START_TEST(dwm_attr)
     char **argv;
     int argc;
     HMODULE dwmapi;
-    ULONG out_len = 0;
     HRESULT hr;
     WCHAR exe[MAX_PATH];
     HWND hwnd, hwnd2;
@@ -100,6 +167,8 @@ START_TEST(dwm_attr)
         attr = (argc > 5) ? strtoul( argv[5], NULL, 16 ) : DWMWA_CAPTION_COLOR;
         if (attr == 0x33) attr = DWMWA_WINDOW_CORNER_PREFERENCE;
 
+        /* the broker answers reads only for a process with a window on its desktop */
+        CreateWindowExW( 0, L"static", L"dwm_attr_child", WS_POPUP, 0, 0, 10, 10, 0, 0, 0, NULL );
         child_hr = DwmGetWindowAttribute( child_hwnd, attr, &v, 4 );
         ExitProcess( (child_hr == S_OK && v == expected) ? 0 : 1 );
     }
@@ -113,8 +182,7 @@ START_TEST(dwm_attr)
         return;
     }
 
-    hr = pWexDwmpChannelEcho( NULL, 0, NULL, &out_len );
-    if (hr != S_OK)
+    if (!dwm_broker_answers( pWexDwmpChannelEcho ))
     {
         skip( "needs a desktop with a DWM broker\n" );
         return;
@@ -147,6 +215,8 @@ START_TEST(dwm_attr)
 
     exit_code = run_child( exe, hwnd, DWMWA_COLOR_DEFAULT, DWMWA_CAPTION_COLOR );
     ok( exit_code == 0, "child failed to read reset caption color, exit_code %lu\n", exit_code );
+
+    test_broker_restart( exe, hwnd );
 
     DestroyWindow( hwnd );
 

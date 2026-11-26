@@ -852,15 +852,20 @@ static void create_safeboot_option_key(void)
     else if (!strcmp( buffer, "safecmd" )) option = alternate_shell = 1;
     safeboot_option = option;
 
-    if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, safeboot_keyW, 0, KEY_ALL_ACCESS, &key ))
+    /* SafeBoot itself is the machine's (session 0 holds it where there is one): only read access is asked for. Option
+     * is a key of each session (wine/wex_session0.h) and is created or deleted by its full path, so that it goes to
+     * this session's server; write access to SafeBoot is not needed for it. */
+    if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, safeboot_keyW, 0, KEY_READ, &key ))
     {
         /* a volatile parent would refuse the lists wine.inf adds under SafeBoot */
-        if (!option || RegCreateKeyExW( HKEY_LOCAL_MACHINE, safeboot_keyW, 0, NULL, 0, KEY_ALL_ACCESS, NULL, &key, NULL ))
+        if (!option || RegCreateKeyExW( HKEY_LOCAL_MACHINE, safeboot_keyW, 0, NULL, 0, KEY_READ, NULL, &key, NULL ))
             return;
     }
+    RegCloseKey( key );
     if (!option)
-        RegDeleteKeyW( key, L"Option" );
-    else if (!RegCreateKeyExW( key, L"Option", 0, NULL, REG_OPTION_VOLATILE, KEY_ALL_ACCESS, NULL, &option_key, NULL ))
+        RegDeleteKeyW( HKEY_LOCAL_MACHINE, L"System\\CurrentControlSet\\Control\\SafeBoot\\Option" );
+    else if (!RegCreateKeyExW( HKEY_LOCAL_MACHINE, L"System\\CurrentControlSet\\Control\\SafeBoot\\Option", 0, NULL,
+                               REG_OPTION_VOLATILE, KEY_SET_VALUE, NULL, &option_key, NULL ))
     {
         RegSetValueExW( option_key, L"OptionValue", 0, REG_DWORD, (const BYTE *)&option, sizeof(option) );
         if (alternate_shell)
@@ -868,7 +873,6 @@ static void create_safeboot_option_key(void)
                             sizeof(alternate_shell) );
         RegCloseKey( option_key );
     }
-    RegCloseKey( key );
 }
 
 /* create the ComputerName registry keys */
@@ -908,6 +912,30 @@ static void create_computer_name_keys(void)
         }
     }
     RegCloseKey( key );
+}
+
+/* WineExplorer: the domain of the process token's user (LookupAccountSidW), for an account of an account domain
+ * (S-1-5-21-...) only: SYSTEM, LocalService and NetworkService keep the computer name, never "NT AUTHORITY" */
+static BOOL get_user_domain( WCHAR *domain, DWORD len )
+{
+    static const SID_IDENTIFIER_AUTHORITY nt_authority = { SECURITY_NT_AUTHORITY };
+    BYTE buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    WCHAR name[256];
+    DWORD size, name_len = ARRAY_SIZE(name);
+    SID_NAME_USE use;
+    HANDLE token;
+    PSID sid;
+    BOOL ret;
+
+    if (!OpenProcessToken( GetCurrentProcess(), TOKEN_QUERY, &token )) return FALSE;
+    ret = GetTokenInformation( token, TokenUser, buffer, sizeof(buffer), &size );
+    CloseHandle( token );
+    if (!ret) return FALSE;
+    sid = ((TOKEN_USER *)buffer)->User.Sid;
+    if (memcmp( GetSidIdentifierAuthority( sid ), &nt_authority, sizeof(nt_authority) ) ||
+        !*GetSidSubAuthorityCount( sid ) || *GetSidSubAuthority( sid, 0 ) != SECURITY_NT_NON_UNIQUE)
+        return FALSE;
+    return LookupAccountSidW( NULL, sid, name, &name_len, domain, &len, &use ) && domain[0];
 }
 
 static void create_volatile_environment_registry_key(void)
@@ -950,7 +978,11 @@ static void create_volatile_environment_registry_key(void)
     size = ARRAY_SIZE(computername) - 2;
     if (GetComputerNameW(&computername[2], &size))
     {
-        set_reg_value( hkey, L"USERDOMAIN", &computername[2] );
+        /* WineExplorer: the user's domain as LookupAccountSidW names it, the joined domain's flat name for a domain
+         * account (docs/DOMAIN_LOGON.md), else this computer */
+        WCHAR domain[256];
+        if (get_user_domain( domain, ARRAY_SIZE(domain) )) set_reg_value( hkey, L"USERDOMAIN", domain );
+        else set_reg_value( hkey, L"USERDOMAIN", &computername[2] );
         computername[0] = computername[1] = '\\';
         set_reg_value( hkey, L"LOGONSERVER", computername );
     }
@@ -1912,6 +1944,29 @@ done:
     return ret;
 }
 
+/* WineExplorer: a session that ends on purpose (Log Off, shut down) leaves the file C:\wex-session-ending
+ * before it starts ending, and removes it when the end is refused. The session's supervisor (wex_run_shell) restarts
+ * the shell when it ended without it, as Winlogon does (AutoRestartShell); the exit status of the launcher cannot tell
+ * a crash from a Log Off. */
+static void mark_session_ending( BOOL on )
+{
+    /* the root of the prefix's C: drive, which the account can write (the Windows directory of a prefix can be shared
+     * and read-only, and the profile's name is not known to the supervisor). One name for the prefix: its sessions
+     * share one wineserver and --end-session ends them all, and the caller of ExitWindowsEx (an elevated broker, a
+     * logoff script) need not have the login session's environment */
+    const WCHAR *path = L"C:\\wex-session-ending";
+    HANDLE file;
+
+    if (!on)
+    {
+        DeleteFileW( path );
+        return;
+    }
+    file = CreateFileW( path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS,
+                        FILE_ATTRIBUTE_NORMAL, NULL );
+    if (file != INVALID_HANDLE_VALUE) CloseHandle( file );
+}
+
 static void usage( int status )
 {
     WINE_MESSAGE( "Usage: wineboot [options]\n" );
@@ -2001,13 +2056,14 @@ int __cdecl main( int argc, char *argv[] )
         }
     }
 
+    if (end_session || kill) mark_session_ending( TRUE );
     if (end_session)
     {
         if (kill)
         {
-            if (!shutdown_all_desktops( force )) return 1;
+            if (!shutdown_all_desktops( force )) { mark_session_ending( FALSE ); return 1; }
         }
-        else if (!shutdown_close_windows( force )) return 1;
+        else if (!shutdown_close_windows( force )) { mark_session_ending( FALSE ); return 1; }
     }
 
     if (kill) kill_processes( shutdown );

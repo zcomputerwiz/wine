@@ -122,6 +122,17 @@ user_handle_t alloc_user_handle( void *ptr, volatile void *shared, unsigned shor
     return entry_to_handle( entry );
 }
 
+/* the user object keeps its handle and moves to another thread (a desktop window whose manager was replaced, B120):
+ * the entry names the owner thread and process, which the clients check */
+void set_user_handle_owner( user_handle_t handle, struct thread *thread )
+{
+    user_entry_t *entry = handle_to_entry( handle );
+
+    if (!entry) return;
+    entry->tid = get_thread_id( thread );
+    entry->pid = get_process_id( thread->process );
+}
+
 /* return a pointer to a user object from its handle */
 void *get_user_object( user_handle_t handle, unsigned short type )
 {

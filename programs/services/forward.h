@@ -49,20 +49,16 @@ extern DWORD forward_ChangeServiceConfigW( SC_RPC_HANDLE service, DWORD type, DW
 extern DWORD forward_ChangeServiceConfig2W( SC_RPC_HANDLE service, SC_RPC_CONFIG_INFOW config );
 extern DWORD forward_QueryServiceConfig2W( SC_RPC_HANDLE service, DWORD level, BYTE *buffer, DWORD size,
                                            DWORD *needed );
-extern DWORD forward_QueryServiceConfigEx( SC_RPC_HANDLE service, DWORD level, SC_RPC_CONFIG_INFOW *info );
 extern DWORD forward_QueryServiceStatusEx( SC_RPC_HANDLE service, SC_STATUS_TYPE level, BYTE *buffer, DWORD size,
                                            DWORD *needed );
-extern DWORD forward_QueryServiceStatus( SC_RPC_HANDLE service, SERVICE_STATUS *status );
 extern DWORD forward_StartServiceW( SC_RPC_HANDLE service, DWORD argc, LPCWSTR *argv );
 extern DWORD forward_ControlService( SC_RPC_HANDLE service, DWORD control, SERVICE_STATUS *status );
-extern DWORD forward_ControlServiceExW( SC_RPC_HANDLE service, DWORD control, DWORD level,
-                                        SC_RPC_SERVICE_CONTROL_IN_PARAMSW *in,
-                                        SC_RPC_SERVICE_CONTROL_OUT_PARAMSW *out );
 extern DWORD forward_QueryServiceObjectSecurity( SC_RPC_HANDLE service, SECURITY_INFORMATION info,
                                                  BYTE *descriptor, DWORD size, DWORD *needed );
 extern DWORD forward_SetServiceObjectSecurity( SC_RPC_HANDLE service, SECURITY_INFORMATION info,
                                                BYTE *descriptor, DWORD size );
-extern DWORD forward_EnumDependentServicesW( SC_RPC_HANDLE service, DWORD state, BYTE *buffer, DWORD size,
-                                             DWORD *needed, DWORD *returned );
+/* not forwarded: QueryServiceConfigEx, QueryServiceStatus, ControlServiceExW and EnumDependentServicesW are not
+ * implemented by Wine's service manager (session 0's either), and sechost does not call them (QueryServiceStatus
+ * goes through QueryServiceStatusEx; EnumDependentServicesW is a stub there). Forward them once they exist. */
 
 #endif

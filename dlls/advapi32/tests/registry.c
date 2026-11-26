@@ -33,6 +33,7 @@
 #include "winsvc.h"
 #include "winerror.h"
 #include "aclapi.h"
+#include "sddl.h"
 
 #define IS_HKCR(hk) ((UINT_PTR)hk > 0 && ((UINT_PTR)hk & 3) == 2)
 
@@ -1584,6 +1585,7 @@ static void test_reg_load_key(void)
     OBJECT_ATTRIBUTES attr;
     NTSTATUS status;
     DWORD ret, size;
+    HANDLE event;
     HKEY key;
 
     if (!set_privileges(SE_RESTORE_NAME, TRUE) ||
@@ -1601,8 +1603,14 @@ static void test_reg_load_key(void)
     ret = RegSaveKeyA(hkey_main, saved_key, NULL);
     ok(ret == ERROR_SUCCESS, "expected ERROR_SUCCESS, got %ld\n", ret);
 
+    /* loading a hive is a change of the parent's subkey names */
+    event = CreateEventA(NULL, FALSE, FALSE, NULL);
+    ret = RegNotifyChangeKeyValue(HKEY_LOCAL_MACHINE, FALSE, REG_NOTIFY_CHANGE_NAME, event, TRUE);
+    ok(ret == ERROR_SUCCESS, "RegNotifyChangeKeyValue failed: %ld\n", ret);
+
     ret = RegLoadKeyA(HKEY_LOCAL_MACHINE, "Test", saved_key);
     ok(ret == ERROR_SUCCESS, "expected ERROR_SUCCESS, got %ld\n", ret);
+    ok(!WaitForSingleObject(event, 1000), "loading a hive did not signal the parent's watchers\n");
 
     ret = RegOpenKeyA(HKEY_LOCAL_MACHINE, "Test", &key);
     ok(ret == ERROR_SUCCESS, "expected ERROR_SUCCESS, got %ld\n", ret);
@@ -1618,8 +1626,13 @@ static void test_reg_load_key(void)
 
     RegCloseKey(key);
 
+    ret = RegNotifyChangeKeyValue(HKEY_LOCAL_MACHINE, FALSE, REG_NOTIFY_CHANGE_NAME, event, TRUE);
+    ok(ret == ERROR_SUCCESS, "RegNotifyChangeKeyValue failed: %ld\n", ret);
     ret = RegUnLoadKeyA(HKEY_LOCAL_MACHINE, "Test");
     ok(ret == ERROR_SUCCESS, "expected ERROR_SUCCESS, got %ld\n", ret);
+    /* but unloading one is not */
+    todo_wine ok(WaitForSingleObject(event, 1000) == WAIT_TIMEOUT, "unloading a hive signalled the parent's watchers\n");
+    CloseHandle(event);
 
     ret = RegLoadKeyA(HKEY_LOCAL_MACHINE, "Test", "");
     ok(ret == ERROR_INVALID_PARAMETER, "expected INVALID_PARAMETER, got %ld\n", ret);
@@ -5163,6 +5176,260 @@ static void test_control_set_symlink(void)
     RegCloseKey( key );
 }
 
+/* does the DACL hold an allowed ACE for sid with exactly these flags and this mask? */
+static BOOL dacl_has_ace( const ACL *dacl, PSID sid, BYTE flags, ACCESS_MASK mask )
+{
+    ACCESS_ALLOWED_ACE *ace;
+    DWORD i;
+
+    for (i = 0; i < dacl->AceCount; i++)
+    {
+        if (!GetAce( (ACL *)dacl, i, (void **)&ace )) return FALSE;
+        if (ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && ace->Header.AceFlags == flags &&
+            ace->Mask == mask && EqualSid( (PSID)&ace->SidStart, sid )) return TRUE;
+    }
+    return FALSE;
+}
+
+static void test_reg_create_key_security(void)
+{
+    SID_IDENTIFIER_AUTHORITY world_auth = { SECURITY_WORLD_SID_AUTHORITY };
+    SECURITY_ATTRIBUTES sa = { sizeof(sa) };
+    PSECURITY_DESCRIPTOR sd, got_sd;
+    SECURITY_DESCRIPTOR_CONTROL control;
+    DWORD revision;
+    HKEY parent, child, generic, generic_child;
+    PSID world;
+    ACL *dacl;
+    LONG ret;
+
+    AllocateAndInitializeSid( &world_auth, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &world );
+
+    /* the descriptor given at creation is the key's */
+    ret = ConvertStringSecurityDescriptorToSecurityDescriptorA( "D:P(A;CI;KA;;;WD)", SDDL_REVISION_1, &sd, NULL );
+    ok( ret, "ConvertStringSecurityDescriptorToSecurityDescriptorA failed %lu\n", GetLastError() );
+    sa.lpSecurityDescriptor = sd;
+    ret = RegCreateKeyExA( hkey_main, "sa_key", 0, NULL, 0, KEY_ALL_ACCESS, &sa, &parent, NULL );
+    ok( !ret, "RegCreateKeyExA failed %ld\n", ret );
+    LocalFree( sd );
+    ret = GetSecurityInfo( parent, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, &dacl, NULL, &got_sd );
+    ok( !ret, "GetSecurityInfo failed %ld\n", ret );
+    GetSecurityDescriptorControl( got_sd, &control, &revision );
+    ok( control & SE_DACL_PROTECTED, "DACL not protected, control %#x\n", control );
+    ok( dacl->AceCount == 1, "got %u ACEs\n", dacl->AceCount );
+    ok( dacl_has_ace( dacl, world, CONTAINER_INHERIT_ACE, KEY_ALL_ACCESS ), "the given ACE is missing\n" );
+    LocalFree( got_sd );
+
+    /* a new subkey inherits the container-inheritable ACE */
+    ret = RegCreateKeyExA( parent, "child", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &child, NULL );
+    ok( !ret, "RegCreateKeyExA failed %ld\n", ret );
+    ret = GetSecurityInfo( child, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, &dacl, NULL, &got_sd );
+    ok( !ret, "GetSecurityInfo failed %ld\n", ret );
+    ok( dacl_has_ace( dacl, world, CONTAINER_INHERIT_ACE | INHERITED_ACE, KEY_ALL_ACCESS ),
+        "the inherited ACE is missing\n" );
+    LocalFree( got_sd );
+
+    /* generic rights: an effective ACE with the rights mapped, and an inherit-only copy for the keys below */
+    ret = ConvertStringSecurityDescriptorToSecurityDescriptorA( "D:P(A;CI;GA;;;WD)", SDDL_REVISION_1, &sd, NULL );
+    ok( ret, "ConvertStringSecurityDescriptorToSecurityDescriptorA failed %lu\n", GetLastError() );
+    sa.lpSecurityDescriptor = sd;
+    ret = RegCreateKeyExA( hkey_main, "sa_generic", 0, NULL, 0, KEY_ALL_ACCESS, &sa, &generic, NULL );
+    ok( !ret, "RegCreateKeyExA failed %ld\n", ret );
+    LocalFree( sd );
+    ret = RegCreateKeyExA( generic, "child", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &generic_child, NULL );
+    ok( !ret, "RegCreateKeyExA failed %ld\n", ret );
+    ret = GetSecurityInfo( generic_child, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, &dacl, NULL,
+                           &got_sd );
+    ok( !ret, "GetSecurityInfo failed %ld\n", ret );
+    ok( dacl_has_ace( dacl, world, INHERITED_ACE, KEY_ALL_ACCESS ), "the effective inherited ACE is missing\n" );
+    ok( dacl_has_ace( dacl, world, CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE | INHERITED_ACE, GENERIC_ALL ),
+        "the inherit-only ACE is missing\n" );
+    LocalFree( got_sd );
+
+    /* an installer's "add an ACE" (Omaha's ClientStateMedium): the default DACL of a key under HKLM\Software read and
+     * set again with one ACE more; its creator may still create and open the keys below */
+    {
+        HKEY medium, medium_child = NULL, reopened;
+        PSID interactive;
+        SID_IDENTIFIER_AUTHORITY nt_auth = { SECURITY_NT_AUTHORITY };
+        EXPLICIT_ACCESSA ea = {0};
+        ACL *old_dacl, *new_dacl = NULL;
+        PSECURITY_DESCRIPTOR old_sd;
+
+        ret = RegCreateKeyExA( HKEY_LOCAL_MACHINE, "Software\\Wine\\WexAddAceTest", 0, NULL, 0, KEY_ALL_ACCESS, NULL,
+                               &medium, NULL );
+        if (ret == ERROR_ACCESS_DENIED) skip( "not an administrator\n" );
+        else
+        {
+            ok( !ret, "RegCreateKeyExA failed %ld\n", ret );
+            ret = GetSecurityInfo( medium, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, &old_dacl, NULL,
+                                   &old_sd );
+            ok( !ret, "GetSecurityInfo failed %ld\n", ret );
+            AllocateAndInitializeSid( &nt_auth, 1, SECURITY_INTERACTIVE_RID, 0, 0, 0, 0, 0, 0, 0, &interactive );
+            ea.grfAccessPermissions = KEY_READ | KEY_SET_VALUE | KEY_CREATE_SUB_KEY;
+            ea.grfAccessMode = GRANT_ACCESS;
+            ea.grfInheritance = CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE | OBJECT_INHERIT_ACE;
+            ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+            ea.Trustee.ptstrName = interactive;
+            ret = SetEntriesInAclA( 1, &ea, old_dacl, &new_dacl );
+            ok( !ret, "SetEntriesInAclA failed %ld\n", ret );
+            ret = SetSecurityInfo( medium, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, new_dacl, NULL );
+            ok( !ret, "SetSecurityInfo failed %ld\n", ret );
+            ret = RegCreateKeyExA( medium, "child", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &medium_child, NULL );
+            ok( !ret, "RegCreateKeyExA below the key with an added ACE failed %ld\n", ret );
+            ret = RegOpenKeyExA( HKEY_LOCAL_MACHINE, "Software\\Wine\\WexAddAceTest\\child", 0, KEY_ALL_ACCESS,
+                                 &reopened );
+            ok( !ret, "the creator cannot open the subkey of a key with an added ACE: %ld\n", ret );
+            if (!ret) RegCloseKey( reopened );
+            if (medium_child)
+            {
+                RegDeleteKeyA( medium_child, "" );
+                RegCloseKey( medium_child );
+            }
+            RegDeleteKeyA( medium, "" );
+            RegCloseKey( medium );
+            LocalFree( new_dacl );
+            LocalFree( old_sd );
+            FreeSid( interactive );
+        }
+    }
+
+    /* a parent with a descriptor of its own but nothing inheritable: a new subkey keeps the default, its creator
+     * may open it */
+    {
+        HKEY plain, plain_child, reopened;
+
+        ret = ConvertStringSecurityDescriptorToSecurityDescriptorA( "D:P(A;;KA;;;SY)(A;;KA;;;BA)(A;;KA;;;WD)",
+                                                                     SDDL_REVISION_1, &sd, NULL );
+        ok( ret, "ConvertStringSecurityDescriptorToSecurityDescriptorA failed %lu\n", GetLastError() );
+        sa.lpSecurityDescriptor = sd;
+        ret = RegCreateKeyExA( hkey_main, "sa_noinherit", 0, NULL, 0, KEY_ALL_ACCESS, &sa, &plain, NULL );
+        ok( !ret, "RegCreateKeyExA failed %ld\n", ret );
+        LocalFree( sd );
+        ret = RegCreateKeyExA( plain, "child", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &plain_child, NULL );
+        ok( !ret, "RegCreateKeyExA failed %ld\n", ret );
+        ret = RegOpenKeyExA( plain, "child", 0, KEY_ALL_ACCESS, &reopened );
+        ok( !ret, "the creator cannot open a subkey with nothing inherited: %ld\n", ret );
+        if (!ret) RegCloseKey( reopened );
+        RegDeleteKeyA( plain_child, "" );
+        RegCloseKey( plain_child );
+        RegDeleteKeyA( plain, "" );
+        RegCloseKey( plain );
+    }
+
+    /* CREATOR OWNER: the new key's owner (the token's default owner) gets the rights in the effective ACE, and the
+     * inherit-only copy keeps CREATOR OWNER for the keys below */
+    {
+        SID_IDENTIFIER_AUTHORITY creator_auth = { SECURITY_CREATOR_SID_AUTHORITY };
+        char owner_buf[sizeof(TOKEN_OWNER) + SECURITY_MAX_SID_SIZE];
+        TOKEN_OWNER *token_owner = (TOKEN_OWNER *)owner_buf;
+        HKEY creator, creator_child;
+        HANDLE token;
+        PSID creator_owner;
+        DWORD len;
+
+        AllocateAndInitializeSid( &creator_auth, 1, SECURITY_CREATOR_OWNER_RID, 0, 0, 0, 0, 0, 0, 0, &creator_owner );
+        OpenProcessToken( GetCurrentProcess(), TOKEN_QUERY, &token );
+        ret = GetTokenInformation( token, TokenOwner, owner_buf, sizeof(owner_buf), &len );
+        ok( ret, "GetTokenInformation failed %lu\n", GetLastError() );
+        CloseHandle( token );
+
+        ret = ConvertStringSecurityDescriptorToSecurityDescriptorA( "D:P(A;CI;KA;;;CO)(A;CI;KA;;;SY)(A;CI;KA;;;BA)",
+                                                                     SDDL_REVISION_1, &sd, NULL );
+        ok( ret, "ConvertStringSecurityDescriptorToSecurityDescriptorA failed %lu\n", GetLastError() );
+        sa.lpSecurityDescriptor = sd;
+        ret = RegCreateKeyExA( hkey_main, "sa_creator", 0, NULL, 0, KEY_ALL_ACCESS, &sa, &creator, NULL );
+        ok( !ret, "RegCreateKeyExA failed %ld\n", ret );
+        LocalFree( sd );
+
+        /* the explicit CREATOR OWNER ACE given at creation applies too: the key's owner gets the rights, and the
+         * inherit-only copy keeps CREATOR OWNER (an installer's own key must stay open to it, B46) */
+        ret = GetSecurityInfo( creator, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, &dacl, NULL, &got_sd );
+        ok( !ret, "GetSecurityInfo failed %ld\n", ret );
+        ok( dacl_has_ace( dacl, token_owner->Owner, 0, KEY_ALL_ACCESS ), "the owner's explicit ACE is missing\n" );
+        ok( dacl_has_ace( dacl, creator_owner, CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE, KEY_ALL_ACCESS ),
+            "the explicit inherit-only CREATOR OWNER ACE is missing\n" );
+        LocalFree( got_sd );
+        {
+            HKEY reopened;
+
+            ret = RegOpenKeyExA( hkey_main, "sa_creator", 0, KEY_ALL_ACCESS, &reopened );
+            ok( !ret, "the creator cannot open its own key: %ld\n", ret );
+            if (!ret) RegCloseKey( reopened );
+        }
+        ret = RegCreateKeyExA( creator, "child", 0, NULL, 0, KEY_ALL_ACCESS, NULL, &creator_child, NULL );
+        ok( !ret, "RegCreateKeyExA failed %ld\n", ret );
+        ret = GetSecurityInfo( creator_child, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, NULL, NULL, &dacl, NULL,
+                               &got_sd );
+        ok( !ret, "GetSecurityInfo failed %ld\n", ret );
+        ok( dacl_has_ace( dacl, token_owner->Owner, INHERITED_ACE, KEY_ALL_ACCESS ),
+            "the creator's effective ACE is missing\n" );
+        ok( dacl_has_ace( dacl, creator_owner, CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE | INHERITED_ACE, KEY_ALL_ACCESS ),
+            "the inherit-only CREATOR OWNER ACE is missing\n" );
+        ok( !dacl_has_ace( dacl, creator_owner, CONTAINER_INHERIT_ACE | INHERITED_ACE, KEY_ALL_ACCESS ),
+            "CREATOR OWNER is effective\n" );
+        LocalFree( got_sd );
+        RegDeleteKeyA( creator_child, "" );
+        RegCloseKey( creator_child );
+        RegDeleteKeyA( creator, "" );
+        RegCloseKey( creator );
+        FreeSid( creator_owner );
+    }
+
+    RegDeleteKeyA( generic_child, "" );
+    RegCloseKey( generic_child );
+    RegDeleteKeyA( generic, "" );
+    RegCloseKey( generic );
+    RegDeleteKeyA( child, "" );
+    RegCloseKey( child );
+    RegDeleteKeyA( parent, "" );
+    RegCloseKey( parent );
+    FreeSid( world );
+}
+
+/* RegFlushKey writes the key's branch to its file at once (Wine's server otherwise saves every 30 s and at exit) */
+static void test_flush_key_saves(void)
+{
+    static const char marker[] = "FlushKeyMarker";
+    char prefix[MAX_PATH], path[MAX_PATH + 16], value[64];
+    char *buf;
+    DWORD size, read;
+    HANDLE file;
+    BOOL found;
+    LONG res;
+
+    if (!winetest_platform_is_wine) { skip( "the registry file is Wine's\n" ); return; }
+    if (!GetEnvironmentVariableA( "WINEPREFIX", prefix, sizeof(prefix) ))
+    {
+        skip( "no WINEPREFIX\n" );
+        return;
+    }
+    sprintf( path, "%s/user.reg", prefix );
+    sprintf( value, "value%lu", GetTickCount() );
+    res = RegSetValueExA( hkey_main, marker, 0, REG_SZ, (const BYTE *)value, strlen( value ) + 1 );
+    ok( !res, "RegSetValueExA failed: %li\n", res );
+    res = RegFlushKey( hkey_main );
+    ok( !res, "RegFlushKey failed: %li\n", res );
+
+    {
+        /* the Unix path as a DOS one: Z:\ is the root */
+        char *p;
+        char dos[MAX_PATH + 16];
+        sprintf( dos, "Z:%s", path );
+        for (p = dos; *p; p++) if (*p == '/') *p = '\\';
+        file = CreateFileA( dos, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, 0 );
+    }
+    if (file == INVALID_HANDLE_VALUE) { skip( "cannot read the prefix's user.reg\n" ); return; }
+    size = GetFileSize( file, NULL );
+    buf = calloc( 1, size + 1 );
+    ReadFile( file, buf, size, &read, NULL );
+    CloseHandle( file );
+    found = strstr( buf, value ) != NULL;
+    free( buf );
+    ok( found, "the value written before RegFlushKey is not in user.reg\n" );
+    RegDeleteValueA( hkey_main, marker );
+}
+
 START_TEST(registry)
 {
     /* Load pointers for functions that are not available in all Windows versions */
@@ -5175,8 +5442,10 @@ START_TEST(registry)
     test_enum_value();
     test_query_value_ex();
     test_get_value();
+    test_flush_key_saves();
     test_reg_open_key();
     test_reg_create_key();
+    test_reg_create_key_security();
     test_reg_close_key();
     test_reg_delete_key();
     test_reg_query_value();

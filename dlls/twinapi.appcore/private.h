@@ -19,6 +19,9 @@
 #include <stdarg.h>
 #include <stddef.h>
 
+/* IAppCapability2 is of contract version 15 (the default of the headers is 14) */
+#define WINDOWS_FOUNDATION_UNIVERSALAPICONTRACT_VERSION 0xf0000
+
 #include "windef.h"
 #include "winbase.h"
 
@@ -30,9 +33,20 @@
 #include "wine/list.h"
 
 #define WIDL_using_Windows_Foundation
+#define WIDL_using_Windows_UI
+#define WIDL_using_Windows_Security_EnterpriseData
 #define WIDL_using_Windows_UI_Core
 #define WIDL_using_Windows_ApplicationModel_Activation
+#define WIDL_using_Windows_System
+#define WIDL_using_Windows_Storage_Streams
 #define WIDL_using_Windows_Foundation_Collections
+#define WIDL_using_Windows_Web_Http
+#define WIDL_using_Windows_System_Power
+#define WIDL_using_Windows_Management_Core
+#define WIDL_using_Windows_Storage
+#define WIDL_using_Windows_Security_Authorization_AppCapabilityAccess
+#define WIDL_using_Windows_System_Display
+#define WIDL_using_Windows_Devices_Input
 #include "windows.foundation.h"
 #define WIDL_using_Windows_Security_ExchangeActiveSyncProvisioning
 #include "windows.security.exchangeactivesyncprovisioning.h"
@@ -42,10 +56,26 @@
 #include "windows.system.userprofile.h"
 #define WIDL_using_Windows_UI_ViewManagement
 #include "windows.ui.viewmanagement.h"
+#define WIDL_using_Windows_ApplicationModel
 #define WIDL_using_Windows_ApplicationModel_Core
 #include "windows.applicationmodel.core.h"
 #define WIDL_using_Windows_ApplicationModel_DataTransfer
 #include "windows.applicationmodel.datatransfer.h"
+#include "windows.ui.notifications.h"   /* TileActivatedInfo, ILaunchActivatedEventArgs2 */
+#define WIDL_using_Windows_UI_Shell
+#define WIDL_using_Windows_Security_Credentials
+#define WIDL_using_Windows_ApplicationModel_UserActivities
+#include "windows.applicationmodel.useractivities.h"
+#define WIDL_using_Windows_UI_StartScreen
+#include "windows.system.display.h"
+#include "windows.web.http.h"
+#include "windows.system.power.h"
+#include "windows.management.core.h"
+#include "windows.security.authorization.appcapabilityaccess.h"
+#include "windows.devices.input.h"
+#include "windows.ui.startscreen.h"
+#define WIDL_using_Windows_Management_Policies
+#include "windows.management.policies.h"
 
 #include "wine/debug.h"
 
@@ -59,6 +89,14 @@ extern void handler_list_snapshot_free( IUnknown **handlers, unsigned int count 
 extern void handler_list_clear( struct list *list );
 extern HRESULT dispatch_callback( ICoreDispatcher *dispatcher, void (*callback)( void *context ), void *context );
 extern HRESULT core_view_create( ICoreWindow *window, boolean is_main, ICoreApplicationView **out );
+
+/* lifecycle.c: suspend, resume and the background state */
+enum lifecycle_event { LIFECYCLE_SUSPENDING, LIFECYCLE_RESUMING, LIFECYCLE_ENTERED_BACKGROUND, LIFECYCLE_LEAVING_BACKGROUND,
+                       LIFECYCLE_BACKGROUND_ACTIVATED, LIFECYCLE_EVENT_COUNT };
+extern HRESULT lifecycle_add( enum lifecycle_event event, IUnknown *handler, EventRegistrationToken *token );
+extern HRESULT lifecycle_remove( enum lifecycle_event event, EventRegistrationToken token );
+extern void lifecycle_watch_window( ICoreWindow *window );
+extern void lifecycle_stop(void);
 extern ICoreApplicationView *core_view_for_current_thread(void);
 extern ICoreApplicationView *core_view_main(void);
 extern void core_view_detach( ICoreApplicationView *view );
@@ -71,6 +109,179 @@ extern IActivationFactory *analytics_info_factory;
 extern IActivationFactory *advertising_manager_factory;
 extern IActivationFactory *core_application_factory;
 extern IActivationFactory *data_transfer_manager_statics_factory;
+extern IActivationFactory *user_activity_request_manager_factory;
+extern IActivationFactory *user_activity_factory;
+extern IActivationFactory *user_activity_attribution_factory;
+extern IActivationFactory *user_activity_channel_factory;
+extern IActivationFactory *user_activity_content_info_factory;
+extern IActivationFactory *jump_list_factory;
+extern IActivationFactory *jump_list_item_factory;
+extern IActivationFactory *display_request_factory;
+extern IActivationFactory *http_client_factory;
+extern IActivationFactory *power_manager_factory;
+extern IActivationFactory *app_capability_factory;
+extern IActivationFactory *application_data_manager_factory;
+extern IActivationFactory *education_settings_factory;
+extern IActivationFactory *platform_diagnostics_factory;
+extern IActivationFactory *assigned_access_settings_factory;
+extern IActivationFactory *diagnostics_settings_factory;
+extern IActivationFactory *pen_device_factory;
+extern IActivationFactory *keyboard_capabilities_factory;
+extern IActivationFactory *mouse_capabilities_factory;
+extern IActivationFactory *touch_capabilities_factory;
+/* jumplist_vector.c: an IVector<JumpListItem> (or its view) of the given items, which are referenced */
+HRESULT jump_list_item_vector_create( BOOL mutable, IJumpListItem *const *items, UINT32 count, void **out );
+
+HRESULT user_create( IUser **out );
+HSTRING user_get_id( IUser *user );
+extern IActivationFactory *user_factory;
+extern IActivationFactory *named_policy_factory;
+extern IActivationFactory *memory_manager_factory;
+extern IActivationFactory *launcher_factory;
+extern IActivationFactory *view_mode_preferences_factory;
+HRESULT async_bool_completed( boolean result, IAsyncOperation_boolean **out );
+
+/* static_factory.c: a factory and its statics interfaces. A statics vtable starts with the static_factory_ methods. */
+struct static_factory;
+struct static_iface { const void *lpVtbl; struct static_factory *factory; };
+struct static_factory
+{
+    IActivationFactory IActivationFactory_iface;
+    LONG ref;
+    const WCHAR *class_name;
+    HRESULT (*activate)( IInspectable **instance );   /* NULL: not activatable */
+    UINT32 count;
+    struct { const GUID *iid; struct static_iface iface; } statics[4];
+};
+extern const struct IActivationFactoryVtbl static_factory_vtbl;
+extern HRESULT WINAPI static_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out );
+extern ULONG WINAPI static_factory_AddRef( IActivationFactory *iface );
+extern ULONG WINAPI static_factory_Release( IActivationFactory *iface );
+extern HRESULT WINAPI static_factory_GetIids( IActivationFactory *iface, ULONG *count, IID **iids );
+extern HRESULT WINAPI static_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *name );
+extern HRESULT WINAPI static_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *level );
+/* the IUnknown and IInspectable methods of a statics interface TYPE, named PFX_...; a vtable starts with them */
+#define DEFINE_STATICS_IINSPECTABLE( pfx, type )                                                               \
+    static HRESULT WINAPI pfx##_QueryInterface( type *iface, REFIID iid, void **out )                          \
+    {                                                                                                          \
+        return static_factory_QueryInterface( (IActivationFactory *)iface, iid, out );                         \
+    }                                                                                                          \
+    static ULONG WINAPI pfx##_AddRef( type *iface )                                                            \
+    {                                                                                                          \
+        return static_factory_AddRef( (IActivationFactory *)iface );                                           \
+    }                                                                                                          \
+    static ULONG WINAPI pfx##_Release( type *iface )                                                           \
+    {                                                                                                          \
+        return static_factory_Release( (IActivationFactory *)iface );                                          \
+    }                                                                                                          \
+    static HRESULT WINAPI pfx##_GetIids( type *iface, ULONG *count, IID **iids )                               \
+    {                                                                                                          \
+        return static_factory_GetIids( (IActivationFactory *)iface, count, iids );                             \
+    }                                                                                                          \
+    static HRESULT WINAPI pfx##_GetRuntimeClassName( type *iface, HSTRING *name )                              \
+    {                                                                                                          \
+        return static_factory_GetRuntimeClassName( (IActivationFactory *)iface, name );                        \
+    }                                                                                                          \
+    static HRESULT WINAPI pfx##_GetTrustLevel( type *iface, TrustLevel *level )                                \
+    {                                                                                                          \
+        return static_factory_GetTrustLevel( (IActivationFactory *)iface, level );                             \
+    }
+
+/* static_factory.c: an object with one interface; the object is a struct that starts with a simple_object, and the
+ * interface pointer is the object pointer */
+struct simple_object
+{
+    const void *lpVtbl;
+    LONG ref;
+    const GUID *iid;
+    const WCHAR *class_name;
+    void (*destroy)( struct simple_object *object );
+};
+extern HRESULT simple_object_create( SIZE_T size, const void *vtbl, const GUID *iid, const WCHAR *class_name,
+                                     void (*destroy)( struct simple_object * ), struct simple_object **out );
+extern HRESULT WINAPI simple_object_QueryInterface( IInspectable *iface, REFIID iid, void **out );
+extern ULONG WINAPI simple_object_AddRef( IInspectable *iface );
+extern ULONG WINAPI simple_object_Release( IInspectable *iface );
+extern HRESULT WINAPI simple_object_GetIids( IInspectable *iface, ULONG *count, IID **iids );
+extern HRESULT WINAPI simple_object_GetRuntimeClassName( IInspectable *iface, HSTRING *name );
+extern HRESULT WINAPI simple_object_GetTrustLevel( IInspectable *iface, TrustLevel *level );
+/* the IUnknown and IInspectable methods of a one-interface object of interface TYPE, named PFX_... */
+#define DEFINE_SIMPLE_IINSPECTABLE( pfx, type )                                                                \
+    static HRESULT WINAPI pfx##_QueryInterface( type *iface, REFIID iid, void **out )                          \
+    {                                                                                                          \
+        return simple_object_QueryInterface( (IInspectable *)iface, iid, out );                                \
+    }                                                                                                          \
+    static ULONG WINAPI pfx##_AddRef( type *iface )                                                            \
+    {                                                                                                          \
+        return simple_object_AddRef( (IInspectable *)iface );                                                  \
+    }                                                                                                          \
+    static ULONG WINAPI pfx##_Release( type *iface )                                                           \
+    {                                                                                                          \
+        return simple_object_Release( (IInspectable *)iface );                                                 \
+    }                                                                                                          \
+    static HRESULT WINAPI pfx##_GetIids( type *iface, ULONG *count, IID **iids )                               \
+    {                                                                                                          \
+        return simple_object_GetIids( (IInspectable *)iface, count, iids );                                    \
+    }                                                                                                          \
+    static HRESULT WINAPI pfx##_GetRuntimeClassName( type *iface, HSTRING *name )                              \
+    {                                                                                                          \
+        return simple_object_GetRuntimeClassName( (IInspectable *)iface, name );                               \
+    }                                                                                                          \
+    static HRESULT WINAPI pfx##_GetTrustLevel( type *iface, TrustLevel *level )                                \
+    {                                                                                                          \
+        return simple_object_GetTrustLevel( (IInspectable *)iface, level );                                    \
+    }
+
+/* async_status.c: an IAsyncOperation<AppCapabilityAccessStatus> that is done when made */
+HRESULT async_access_status_completed( AppCapabilityAccessStatus value, IAsyncOperation_AppCapabilityAccessStatus **out );
+
+/* async_action.c: an IAsyncAction that is done when made */
+HRESULT async_action_completed( HRESULT hr, IAsyncAction **out );
+
+#define create_name( str, name ) WindowsCreateString( str, ARRAY_SIZE(str) - 1, name )
+
+/* Windows.ApplicationModel.DataTransfer */
+extern IActivationFactory *clipboard_factory;
+extern IActivationFactory *data_package_factory;
+extern IActivationFactory *html_format_helper_factory;
+extern IActivationFactory *standard_data_formats_factory;
+
+/* async_value.c: operations that are done when made. The value is copied; with a failed hr the operation is in
+ * the Error state and GetResults returns hr. */
+HRESULT async_hstring_completed( HSTRING value, HRESULT hr, IAsyncOperation_HSTRING **out );
+HRESULT async_inspectable_completed( IInspectable *value, HRESULT hr, IAsyncOperation_IInspectable **out );
+HRESULT async_uri_completed( IUriRuntimeClass *value, HRESULT hr, IAsyncOperation_Uri **out );
+HRESULT async_user_activity_completed( IUserActivity *value, HRESULT hr, IAsyncOperation_UserActivity **out );
+HRESULT async_jump_list_completed( IJumpList *value, HRESULT hr, IAsyncOperation_JumpList **out );
+
+/* hstring_vector.c: a vector of strings (IVector<HSTRING>) or a read-only view of one (IVectorView<HSTRING>) */
+HRESULT hstring_vector_create( BOOL mutable, const HSTRING *items, UINT32 count, void **out );
+
+/* boxed_string.c: an IReference<HSTRING> that is also an IPropertyValue */
+HRESULT boxed_string_create( HSTRING value, IInspectable **out );
+HRESULT inspectable_get_string( IInspectable *object, HSTRING *value );
+
+/* datapackage.c: the formats of a data package, shared by the package, its views and the clipboard */
+struct data_store;
+HRESULT data_store_create( struct data_store **out );
+void data_store_addref( struct data_store *store );
+void data_store_release( struct data_store *store );
+HRESULT data_store_set_string( struct data_store *store, const WCHAR *format, const WCHAR *value );
+HRESULT data_package_view_create( struct data_store *store, IDataPackageView **out );
+
+/* datapackage_props.c: DataPackagePropertySet and its view */
+HRESULT data_props_create( IDataPackagePropertySet **out );
+HRESULT data_props_view_create( IDataPackagePropertySet *props, IDataPackagePropertySetView **out );
+
+/* the well-known format names */
+#define DATA_FORMAT_TEXT      L"Text"
+#define DATA_FORMAT_HTML      L"HTML Format"
+#define DATA_FORMAT_RTF       L"Rich Text Format"
+#define DATA_FORMAT_URI       L"UniformResourceLocatorW"
+#define DATA_FORMAT_BITMAP    L"Bitmap"
+#define DATA_FORMAT_STORAGE   L"Shell IDList Array"
+HRESULT core_title_bar_create( ICoreApplicationViewTitleBar **out );
+HRESULT view_title_bar_create( IApplicationViewTitleBar **out );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \
@@ -107,5 +318,8 @@ extern IActivationFactory *data_transfer_manager_statics_factory;
         impl_type *impl = impl_from( iface );                                                      \
         return IInspectable_GetTrustLevel( (IInspectable *)(expr), trust_level );                  \
     }
+extern const GUID IID_IStaticLifetime_twinapi;
+extern void *get_static_lifetime(void);
+
 #define DEFINE_IINSPECTABLE( pfx, iface_type, impl_type, base_iface )                              \
     DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from_##iface_type, iface_type##_iface, &impl->base_iface )

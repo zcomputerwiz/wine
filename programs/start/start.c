@@ -599,12 +599,29 @@ int __cdecl wmain (int argc, WCHAR *argv[])
                                          opts.creation_flags, NULL, opts.sei.lpDirectory,
                                          &si.StartupInfo, &process_information ))
                     {
+                        if (GetLastError() == ERROR_ELEVATION_REQUIRED)
+                        {
+                            free(commandline);
+                            if (opts.machine)
+                            {
+                                DeleteProcThreadAttributeList(si.lpAttributeList);
+                                free(si.lpAttributeList);
+                            }
+                            goto shellexecute;
+                        }
 			fatal_string_error(STRING_EXECFAIL, GetLastError(), opts.sei.lpFile);
+                    }
+                    free(commandline);
+                    if (opts.machine)
+                    {
+                        DeleteProcThreadAttributeList(si.lpAttributeList);
+                        free(si.lpAttributeList);
                     }
                     opts.sei.hProcess = process_information.hProcess;
                     goto done;
         }
 
+shellexecute:
         if (!ShellExecuteExW(&opts.sei))
         {
             const WCHAR *filename = opts.sei.lpFile;

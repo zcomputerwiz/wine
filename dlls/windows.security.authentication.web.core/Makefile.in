@@ -1,0 +1,16 @@
+MODULE = windows.security.authentication.web.core.dll
+IMPORTS = combase advapi32
+
+SOURCES = \
+	account.c \
+	async.c \
+	async_private.idl \
+	broker.c \
+	classes.idl \
+	main.c \
+	manager.c \
+	map.c \
+	provider.c \
+	request.c \
+	response.c \
+	vector.c

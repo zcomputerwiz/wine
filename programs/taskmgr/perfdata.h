@@ -48,6 +48,7 @@ typedef struct _PERFDATA
 	TIME				UserTime;
 	TIME				KernelTime;
 	BOOL				Wow64Process;
+	ULONG				Order;	/* position in the list when it is not sorted */
 } PERFDATA, *PPERFDATA;
 
 /* SystemPageFileInformation (18) */

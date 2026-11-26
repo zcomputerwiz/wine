@@ -3,13 +3,18 @@ IMPORTS = combase advapi32 user32
 
 SOURCES = \
 	accessibilitysettings.c \
+	accountssettings.c \
 	classes.idl \
+	compositor_stub.c \
 	corewindow.c \
 	dispatcher.c \
+	fontweights.c \
 	inputpane.c \
 	main.c \
 	pointer.c \
+	systemnavigation.c \
 	uisettings.c \
 	uiviewsettings.c \
+	vector.c \
 	weakref.c \
 	window.c

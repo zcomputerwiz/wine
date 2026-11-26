@@ -38,6 +38,10 @@
 #include "windows.ui.h"
 
 extern IActivationFactory *color_helper_factory;
+extern IActivationFactory *colors_factory;
+
+/* component.c: the classes of an installed XAML component */
+HRESULT component_get_activation_factory( HSTRING classid, IActivationFactory **factory );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

@@ -76,6 +76,7 @@ static struct window_class *create_class( struct process *process, int local, in
     return class;
 
 failed:
+    release_object( class->process );
     free( class );
     return NULL;
 }
@@ -105,8 +106,8 @@ void destroy_process_classes( struct process *process )
 
 static struct window_class *find_class( struct process *process, atom_t atom, mod_handle_t instance )
 {
-    struct window_class *class;
-    int is_win16;
+    struct window_class *class, *only_local = NULL;
+    int is_win16, local_count = 0;
 
     LIST_FOR_EACH_ENTRY( class, &process->classes, struct window_class, entry )
     {
@@ -115,8 +116,10 @@ static struct window_class *find_class( struct process *process, atom_t atom, mo
         is_win16 = !(shared->info.instance >> 16);
         if (!instance || !shared->local || shared->info.instance == instance ||
             (!is_win16 && ((shared->info.instance & ~0xffff) == (instance & ~0xffff)))) return class;
+        if (is_win16 && !(instance >> 16)) only_local = class, local_count++;
     }
-    return NULL;
+    /* as find_class in win32u: a small instance that is not a module handle finds the one local class of that name */
+    return local_count == 1 ? only_local : NULL;
 }
 
 struct window_class *grab_class( struct process *process, atom_t atom, mod_handle_t instance, struct obj_locator *locator )
@@ -331,10 +334,12 @@ DECL_HANDLER(set_class_info)
             if (req->new_info > 4096)
             {
                 set_error( STATUS_INVALID_PARAMETER );
-                return;
             }
-            reply->old_info = shared->info.win_extra;
-            shared->info.win_extra = req->new_info;
+            else
+            {
+                reply->old_info = shared->info.win_extra;
+                shared->info.win_extra = req->new_info;
+            }
             break;
         case GCL_CBCLSEXTRA:
             set_win32_error( ERROR_INVALID_INDEX );
@@ -373,10 +378,12 @@ DECL_HANDLER(set_class_info)
                 req->offset > (int)(class->shared->info.cls_extra - req->size))
             {
                 set_win32_error( ERROR_INVALID_INDEX );
-                return;
             }
-            memcpy( &reply->old_info, (char *)shared->extra + req->offset, req->size );
-            memcpy( (char *)shared->extra + req->offset, &req->new_info, req->size );
+            else
+            {
+                memcpy( &reply->old_info, (char *)shared->extra + req->offset, req->size );
+                memcpy( (char *)shared->extra + req->offset, &req->new_info, req->size );
+            }
             break;
         }
     }

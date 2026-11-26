@@ -1082,7 +1082,8 @@ case $host_os in
         AS_VAR_APPEND([WINELOADER_LDFLAGS],[" -pie"])
         case $HOST_ARCH in
           i386|arm)
-            AS_VAR_APPEND([WINEPRELOADER_LDFLAGS],[" -static -Wl,-Ttext=0x7d400000"]) ;;
+            AS_VAR_APPEND([WINEPRELOADER_LDFLAGS],[" -static -Wl,-Ttext=0x7d400000"])
+            WINE_TRY_CFLAGS([-Wl,--no-rosegment],[AS_VAR_APPEND([WINEPRELOADER_LDFLAGS],[" -Wl,--no-rosegment"])]) ;;
           *)
             WINE_TRY_CFLAGS([-static-pie],
                             [AS_VAR_APPEND([WINEPRELOADER_LDFLAGS],[" -static-pie"])],
@@ -1095,8 +1096,7 @@ case $host_os in
                   *)
                     AS_VAR_APPEND([WINEPRELOADER_LDFLAGS],[" -static -Wl,-Ttext=0x7d7d00000000"]) ;;
                 esac
-            ])
-            ;;
+                WINE_TRY_CFLAGS([-Wl,--no-rosegment],[AS_VAR_APPEND([WINEPRELOADER_LDFLAGS],[" -Wl,--no-rosegment"])])]) ;;
         esac
         ;;
       *)
@@ -1613,7 +1613,7 @@ then
     WINE_PACKAGE_FLAGS(VA,[libva libva-drm],[-lva-drm -lva],,,
         [AC_CHECK_HEADER([va/va_drm.h],
             [WINE_CHECK_SONAME(va-drm, vaGetDisplayDRM,,[VA_CFLAGS=""])
-             WINE_CHECK_SONAME(va, vaInitialize,,[VA_CFLAGS=""])],
+             WINE_CHECK_SONAME(va, vaExportSurfaceHandle,,[VA_CFLAGS=""])],
             [VA_CFLAGS=""])])
 fi
 WINE_NOTICE_WITH(va,[test "x$ac_cv_lib_soname_va_drm" = x -o "x$ac_cv_lib_soname_va" = x],
@@ -2438,6 +2438,8 @@ WINE_CONFIG_MAKEFILE(dlls/avifile.dll16)
 WINE_CONFIG_MAKEFILE(dlls/avrt)
 WINE_CONFIG_MAKEFILE(dlls/bcp47langs)
 WINE_CONFIG_MAKEFILE(dlls/bcp47langs/tests)
+WINE_CONFIG_MAKEFILE(dlls/bcp47mrm)
+WINE_CONFIG_MAKEFILE(dlls/bcp47mrm/tests)
 WINE_CONFIG_MAKEFILE(dlls/bcrypt)
 WINE_CONFIG_MAKEFILE(dlls/bcrypt/tests)
 WINE_CONFIG_MAKEFILE(dlls/bcryptprimitives)
@@ -2448,6 +2450,8 @@ WINE_CONFIG_MAKEFILE(dlls/browseui/tests)
 WINE_CONFIG_MAKEFILE(dlls/bthprops.cpl)
 WINE_CONFIG_MAKEFILE(dlls/cabinet)
 WINE_CONFIG_MAKEFILE(dlls/cabinet/tests)
+WINE_CONFIG_MAKEFILE(dlls/capabilityaccessmanagerclient)
+WINE_CONFIG_MAKEFILE(dlls/capabilityaccessmanagerclient/tests)
 WINE_CONFIG_MAKEFILE(dlls/capi2032)
 WINE_CONFIG_MAKEFILE(dlls/cards)
 WINE_CONFIG_MAKEFILE(dlls/cdosys)
@@ -2684,6 +2688,7 @@ WINE_CONFIG_MAKEFILE(dlls/dxgi/tests)
 WINE_CONFIG_MAKEFILE(dlls/dxtrans)
 WINE_CONFIG_MAKEFILE(dlls/dxva2)
 WINE_CONFIG_MAKEFILE(dlls/dxva2/tests)
+WINE_CONFIG_MAKEFILE(dlls/elscore)
 WINE_CONFIG_MAKEFILE(dlls/esent)
 WINE_CONFIG_MAKEFILE(dlls/evr)
 WINE_CONFIG_MAKEFILE(dlls/evr/tests)
@@ -2899,6 +2904,7 @@ WINE_CONFIG_MAKEFILE(dlls/msrle32)
 WINE_CONFIG_MAKEFILE(dlls/msrle32/tests)
 WINE_CONFIG_MAKEFILE(dlls/msscript.ocx)
 WINE_CONFIG_MAKEFILE(dlls/msscript.ocx/tests)
+WINE_CONFIG_MAKEFILE(dlls/msspellcheckingfacility)
 WINE_CONFIG_MAKEFILE(dlls/mssign32)
 WINE_CONFIG_MAKEFILE(dlls/mssip32)
 WINE_CONFIG_MAKEFILE(dlls/mstask)
@@ -3301,6 +3307,8 @@ WINE_CONFIG_MAKEFILE(dlls/windows.perception.stub)
 WINE_CONFIG_MAKEFILE(dlls/windows.perception.stub/tests)
 WINE_CONFIG_MAKEFILE(dlls/windows.security.authentication.onlineid)
 WINE_CONFIG_MAKEFILE(dlls/windows.security.authentication.onlineid/tests)
+WINE_CONFIG_MAKEFILE(dlls/windows.security.authentication.web.core)
+WINE_CONFIG_MAKEFILE(dlls/windows.security.authentication.web.core/tests)
 WINE_CONFIG_MAKEFILE(dlls/windows.security.credentials.ui.userconsentverifier)
 WINE_CONFIG_MAKEFILE(dlls/windows.security.credentials.ui.userconsentverifier/tests)
 WINE_CONFIG_MAKEFILE(dlls/windows.security.enterprisedata)
@@ -3352,6 +3360,7 @@ WINE_CONFIG_MAKEFILE(dlls/winhttp)
 WINE_CONFIG_MAKEFILE(dlls/winhttp/tests)
 WINE_CONFIG_MAKEFILE(dlls/wininet)
 WINE_CONFIG_MAKEFILE(dlls/wininet/tests)
+WINE_CONFIG_MAKEFILE(dlls/winlangdb)
 WINE_CONFIG_MAKEFILE(dlls/winmm)
 WINE_CONFIG_MAKEFILE(dlls/winmm/tests)
 WINE_CONFIG_MAKEFILE(dlls/winnls.dll16)

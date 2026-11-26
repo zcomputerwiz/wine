@@ -39,6 +39,7 @@
 #include "ntsecapi.h"
 #include "winspool.h"
 #include "ntddstor.h"
+#include "lm.h"
 #include "setupapi.h"
 #include "devguid.h"
 
@@ -106,17 +107,24 @@ static const struct column col_cdromdrive[] =
 static const struct column col_compsys[] =
 {
     { L"Description",               CIM_STRING },
-    { L"Domain",                    CIM_STRING },
+    { L"DNSHostName",               CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"Domain",                    CIM_STRING|COL_FLAG_DYNAMIC },
     { L"DomainRole",                CIM_UINT16 },
     { L"HypervisorPresent",         CIM_BOOLEAN },
     { L"Manufacturer",              CIM_STRING },
     { L"Model",                     CIM_STRING },
-    { L"Name",                      CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"Name",                      CIM_STRING|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
     { L"NumberOfLogicalProcessors", CIM_UINT32 },
     { L"NumberOfProcessors",        CIM_UINT32 },
+    { L"PartOfDomain",              CIM_BOOLEAN },
     { L"SystemType",                CIM_STRING },
     { L"TotalPhysicalMemory",       CIM_UINT64 },
     { L"UserName",                  CIM_STRING|COL_FLAG_DYNAMIC },
+    { L"Workgroup",                 CIM_STRING|COL_FLAG_DYNAMIC },
+    /* methods */
+    { L"JoinDomainOrWorkgroup",     CIM_FLAG_ARRAY|COL_FLAG_METHOD },
+    { L"Rename",                    CIM_FLAG_ARRAY|COL_FLAG_METHOD },
+    { L"UnjoinDomainOrWorkgroup",   CIM_FLAG_ARRAY|COL_FLAG_METHOD },
 };
 static const struct column col_compsysproduct[] =
 {
@@ -412,6 +420,7 @@ static const struct column col_process[] =
     { L"Create",          CIM_FLAG_ARRAY|COL_FLAG_METHOD },
     { L"GetOwner",        CIM_FLAG_ARRAY|COL_FLAG_METHOD },
 };
+
 static const struct column col_processor[] =
 {
     { L"AddressWidth",              CIM_UINT16 },
@@ -419,9 +428,11 @@ static const struct column col_processor[] =
     { L"Caption",                   CIM_STRING|COL_FLAG_DYNAMIC },
     { L"CpuStatus",                 CIM_UINT16 },
     { L"CurrentClockSpeed",         CIM_UINT32 },
+    { L"CurrentVoltage",            CIM_UINT16 },
     { L"DataWidth",                 CIM_UINT16 },
     { L"Description",               CIM_STRING|COL_FLAG_DYNAMIC },
     { L"DeviceId",                  CIM_STRING|COL_FLAG_DYNAMIC|COL_FLAG_KEY },
+    { L"ExtClock",                  CIM_UINT32 },
     { L"Family",                    CIM_UINT16 },
     { L"Level",                     CIM_UINT16 },
     { L"Manufacturer",              CIM_STRING|COL_FLAG_DYNAMIC },
@@ -432,9 +443,11 @@ static const struct column col_processor[] =
     { L"ProcessorId",               CIM_STRING|COL_FLAG_DYNAMIC },
     { L"ProcessorType",             CIM_UINT16 },
     { L"Revision",                  CIM_UINT16 },
+    { L"Status",                    CIM_STRING },
     { L"UniqueId",                  CIM_STRING },
     { L"Version",                   CIM_STRING|COL_FLAG_DYNAMIC },
 };
+
 static const struct column col_qualifier[] =
 {
     { L"Class",        CIM_STRING },
@@ -692,6 +705,7 @@ struct record_cdromdrive
 struct record_computersystem
 {
     const WCHAR *description;
+    const WCHAR *dnshostname;
     const WCHAR *domain;
     UINT16       domainrole;
     int          hypervisorpresent;
@@ -700,9 +714,15 @@ struct record_computersystem
     const WCHAR *name;
     UINT32       num_logical_processors;
     UINT32       num_processors;
+    int          partofdomain;
     const WCHAR *systemtype;
     UINT64       total_physical_memory;
     const WCHAR *username;
+    const WCHAR *workgroup;
+    /* methods */
+    class_method *join_domain_or_workgroup;
+    class_method *rename;
+    class_method *unjoin_domain_or_workgroup;
 };
 struct record_computersystemproduct
 {
@@ -998,6 +1018,7 @@ struct record_process
     class_method *create;
     class_method *get_owner;
 };
+
 struct record_processor
 {
     UINT16       addresswidth;
@@ -1005,9 +1026,11 @@ struct record_processor
     const WCHAR *caption;
     UINT16       cpu_status;
     UINT32       currentclockspeed;
+    UINT16       currentvoltage;
     UINT16       datawidth;
     const WCHAR *description;
     const WCHAR *device_id;
+    UINT32       extclock;
     UINT16       family;
     UINT16       level;
     const WCHAR *manufacturer;
@@ -1018,9 +1041,11 @@ struct record_processor
     const WCHAR *processor_id;
     UINT16       processortype;
     UINT16       revision;
+    const WCHAR *status;
     const WCHAR *unique_id;
     const WCHAR *version;
 };
+
 struct record_qualifier
 {
     const WCHAR *class;
@@ -1275,6 +1300,20 @@ static const struct record_param data_param[] =
     { L"SystemRestore", L"Disable", -1, L"ReturnValue", CIM_UINT32 },
     { L"SystemRestore", L"Enable", 1, L"Drive", CIM_STRING },
     { L"SystemRestore", L"Enable", -1, L"ReturnValue", CIM_UINT32 },
+    { L"Win32_ComputerSystem", L"JoinDomainOrWorkgroup", 1, L"Name", CIM_STRING },
+    { L"Win32_ComputerSystem", L"JoinDomainOrWorkgroup", 1, L"Password", CIM_STRING },
+    { L"Win32_ComputerSystem", L"JoinDomainOrWorkgroup", 1, L"UserName", CIM_STRING },
+    { L"Win32_ComputerSystem", L"JoinDomainOrWorkgroup", 1, L"AccountOU", CIM_STRING },
+    { L"Win32_ComputerSystem", L"JoinDomainOrWorkgroup", 1, L"FJoinOptions", CIM_UINT32 },
+    { L"Win32_ComputerSystem", L"JoinDomainOrWorkgroup", -1, L"ReturnValue", CIM_UINT32 },
+    { L"Win32_ComputerSystem", L"Rename", 1, L"Name", CIM_STRING },
+    { L"Win32_ComputerSystem", L"Rename", 1, L"Password", CIM_STRING },
+    { L"Win32_ComputerSystem", L"Rename", 1, L"UserName", CIM_STRING },
+    { L"Win32_ComputerSystem", L"Rename", -1, L"ReturnValue", CIM_UINT32 },
+    { L"Win32_ComputerSystem", L"UnjoinDomainOrWorkgroup", 1, L"Password", CIM_STRING },
+    { L"Win32_ComputerSystem", L"UnjoinDomainOrWorkgroup", 1, L"UserName", CIM_STRING },
+    { L"Win32_ComputerSystem", L"UnjoinDomainOrWorkgroup", 1, L"FUnjoinOptions", CIM_UINT32 },
+    { L"Win32_ComputerSystem", L"UnjoinDomainOrWorkgroup", -1, L"ReturnValue", CIM_UINT32 },
     { L"Win32_Process", L"Create", 1, L"CommandLine", CIM_STRING },
     { L"Win32_Process", L"Create", 1, L"CurrentDirectory", CIM_STRING },
     { L"Win32_Process", L"Create", -1, L"ProcessId", CIM_UINT32 },
@@ -1837,7 +1876,7 @@ static enum fill_status fill_rawbiosdata( struct table *table, const struct expr
     if (!resize_table( table, 1, sizeof(*rec) )) return FILL_STATUS_FAILED;
 
     len = GetSystemFirmwareTable( RSMB, 0, NULL, 0 );
-    if (!(buf = malloc( len ))) return FILL_STATUS_FAILED;
+    if (len < sizeof(*buf) || !(buf = malloc( len ))) return FILL_STATUS_FAILED;
     GetSystemFirmwareTable( RSMB, 0, buf, len );
 
     rec = (struct record_rawsmbiostables *)table->data;
@@ -2009,6 +2048,36 @@ static WCHAR *get_compsysproduct_vendor( const char *buf, UINT len )
     return ret;
 }
 
+/* the domain or workgroup the computer is in (NetGetJoinInformation); WineExplorer's join engine answers it */
+static void get_compsys_membership( struct record_computersystem *rec )
+{
+    WCHAR *name = NULL;
+    NETSETUP_JOIN_STATUS type = NetSetupUnknownStatus;
+
+    rec->domain = NULL;
+    rec->workgroup = NULL;
+    if (NetGetJoinInformation( NULL, &name, &type ) == NERR_Success && name && type == NetSetupDomainName)
+    {
+        /* Windows gives the DNS name of the domain; the join state WineExplorer keeps for Windows programs has it */
+        WCHAR dns[256];
+        DWORD size = sizeof(dns);
+        if (!RegGetValueW( HKEY_LOCAL_MACHINE, L"Software\\WineExplorer\\Domain", L"Name", RRF_RT_REG_SZ, NULL, dns, &size ) && dns[0])
+            rec->domain = wcsdup( dns );
+        else
+            rec->domain = wcsdup( name );
+        rec->partofdomain = -1;
+        rec->domainrole = 1; /* member workstation */
+    }
+    else
+    {
+        WCHAR *wg = wcsdup( name && type == NetSetupWorkgroupName ? name : L"WORKGROUP" );
+        if (wg) CharUpperW( wg ); /* as Windows shows a workgroup */
+        rec->workgroup = wg;
+        rec->domain = wcsdup( wg );
+    }
+    if (name) NetApiBufferFree( name );
+}
+
 static enum fill_status fill_compsys( struct table *table, const struct expr *cond )
 {
     struct record_computersystem *rec;
@@ -2024,7 +2093,8 @@ static enum fill_status fill_compsys( struct table *table, const struct expr *co
 
     rec = (struct record_computersystem *)table->data;
     rec->description            = L"AT/AT COMPATIBLE";
-    rec->domain                 = L"WORKGROUP";
+    get_compsys_membership( rec );
+    rec->dnshostname            = get_computername();
     rec->manufacturer           = get_compsysproduct_vendor( buf, len );
     rec->model                  = get_compsysproduct_name( buf, len );
     rec->name                   = get_computername();
@@ -2032,6 +2102,10 @@ static enum fill_status fill_compsys( struct table *table, const struct expr *co
     rec->systemtype             = get_systemtype();
     rec->total_physical_memory  = get_total_physical_memory();
     rec->username               = get_username();
+    /* methods */
+    rec->join_domain_or_workgroup = compsys_join_domain_or_workgroup;
+    rec->rename                 = compsys_rename;
+    rec->unjoin_domain_or_workgroup = compsys_unjoin_domain_or_workgroup;
     if (!match_row( table, row, cond, &status )) free_row_values( table, row );
     else row++;
 
@@ -3741,14 +3815,14 @@ static enum fill_status fill_printer( struct table *table, const struct expr *co
         swprintf( id, ARRAY_SIZE( id ), L"Printer%u", i );
         rec->device_id            = wcsdup( id );
         rec->drivername           = wcsdup( info[i].pDriverName );
-        rec->horizontalresolution = info[i].pDevMode->dmPrintQuality;
+        rec->horizontalresolution = info[i].pDevMode ? info[i].pDevMode->dmPrintQuality : 0;
         rec->local                = -1;
-        rec->location             = wcsdup( info[i].pLocation );
+        rec->location             = info[i].pLocation ? wcsdup( info[i].pLocation ) : NULL;
         rec->name                 = wcsdup( info[i].pPrinterName );
         rec->portname             = wcsdup( info[i].pPortName );
-        if (!match_row( table, i, cond, &status ))
+        if (!match_row( table, num_rows, cond, &status ))
         {
-            free_row_values( table, i );
+            free_row_values( table, num_rows );
             continue;
         }
         offset += sizeof(*rec);
@@ -4015,10 +4089,12 @@ static enum fill_status fill_processor( struct table *table, const struct expr *
         rec->caption                = get_processor_caption( i );
         rec->cpu_status             = proc->status;
         rec->currentclockspeed      = get_processor_currentclockspeed( i );
+        rec->currentvoltage         = proc->voltage;
         rec->datawidth              = rec->addresswidth;
         rec->description            = get_processor_caption( i );
         swprintf( device_id, ARRAY_SIZE( device_id ), L"CPU%u", i );
         rec->device_id              = wcsdup( device_id );
+        rec->extclock               = proc->clock;
         rec->family                 = proc->family;
         rec->level                  = info.ProcessorLevel;
         rec->manufacturer           = get_processor_manufacturer( i, buf, len );
@@ -4030,6 +4106,7 @@ static enum fill_status fill_processor( struct table *table, const struct expr *
         rec->processor_id           = wcsdup( processor_id );
         rec->processortype          = proc->type;
         rec->revision               = info.ProcessorRevision;
+        rec->status                 = L"OK";
         rec->version                = wcsdup( version );
         if (!match_row( table, i, cond, &status ))
         {
@@ -4716,9 +4793,13 @@ static struct display_adapter *get_display_adapters( UINT *count )
 
     if (!(ret = malloc( nb_allocated * sizeof(*ret) ))) return NULL;
 
-    if ((devs = SetupDiGetClassDevsW( &GUID_DEVCLASS_DISPLAY, NULL, NULL, DIGCF_PRESENT )) == INVALID_HANDLE_VALUE) return NULL;
+    if ((devs = SetupDiGetClassDevsW( &GUID_DEVCLASS_DISPLAY, NULL, NULL, DIGCF_PRESENT )) == INVALID_HANDLE_VALUE)
+    {
+        free( ret );
+        return NULL;
+    }
 
-    while(SetupDiEnumDeviceInfo( devs, idx_devinfo++, &dev_info ))
+    while (SetupDiEnumDeviceInfo( devs, idx_devinfo++, &dev_info ))
     {
         WCHAR *driver, *instance_id;
         UINT key_len;
@@ -4979,7 +5060,7 @@ static struct table cimv2_builtin_classes[] =
     { L"__PARAMETERS", C(col_param), D(data_param) },
     { L"__QUALIFIERS", C(col_qualifier), D(data_qualifier) },
     { L"__SystemSecurity", C(col_systemsecurity), D(data_systemsecurity) },
-    { L"CIM_DataFile", C(col_datafile), 0, 0, NULL, fill_datafile },
+    { L"CIM_DataFile", C(col_datafile), 0, 0, NULL, fill_datafile, TABLE_FLAG_SLOW_FILL },
     { L"CIM_LogicalDisk", C(col_logicaldisk), 0, 0, NULL, fill_logicaldisk },
     { L"CIM_Processor", C(col_processor), 0, 0, NULL, fill_processor },
     { L"SoftwareLicensingProduct", C(col_softwarelicensingproduct), D(data_softwarelicensingproduct) },
@@ -4992,7 +5073,7 @@ static struct table cimv2_builtin_classes[] =
     { L"Win32_ComputerSystem", C(col_compsys), 0, 0, NULL, fill_compsys },
     { L"Win32_ComputerSystemProduct", C(col_compsysproduct), 0, 0, NULL, fill_compsysproduct },
     { L"Win32_DesktopMonitor", C(col_desktopmonitor), 0, 0, NULL, fill_desktopmonitor },
-    { L"Win32_Directory", C(col_directory), 0, 0, NULL, fill_directory },
+    { L"Win32_Directory", C(col_directory), 0, 0, NULL, fill_directory, TABLE_FLAG_SLOW_FILL },
     { L"Win32_DiskDrive", C(col_diskdrive), 0, 0, NULL, fill_diskdrive },
     { L"Win32_DiskDriveToDiskPartition", C(col_diskdrivetodiskpartition), 0, 0, NULL, fill_diskdrivetodiskpartition },
     { L"Win32_DiskPartition", C(col_diskpartition), 0, 0, NULL, fill_diskpartition },

@@ -387,13 +387,15 @@ static enum elevation_helper_status get_elevation_helper(WCHAR *helper, DWORD si
     return HELPER_CONFIGURED;
 }
 
-static BOOL is_full_token(void)
+/* Is the caller elevated already? A full token, and also a token of the default type that holds the Administrators
+ * group (LocalSystem, the built-in Administrator): Windows starts a "runas" of those directly, without a prompt. */
+static BOOL is_elevated_token(void)
 {
-    TOKEN_ELEVATION_TYPE type;
+    TOKEN_ELEVATION elevation;
     DWORD size;
 
-    return GetTokenInformation(GetCurrentThreadEffectiveToken(), TokenElevationType, &type, sizeof(type), &size)
-            && type == TokenElevationTypeFull;
+    return GetTokenInformation(GetCurrentThreadEffectiveToken(), TokenElevation, &elevation, sizeof(elevation), &size)
+            && elevation.TokenIsElevated;
 }
 
 /* The image CreateProcess would run for this command line: a quoted name, or the shortest prefix up to a blank
@@ -445,6 +447,11 @@ static BOOL get_command_image(const WCHAR *cmd, WCHAR *path, DWORD size)
  * Cancel (ERROR_CANCELLED) stays ERROR_CANCELLED with SE_ERR_ACCESSDENIED, as native ShellExecuteEx does. */
 typedef DWORD (WINAPI *WEXELEVATERUN)(const WCHAR *, const WCHAR *, const WCHAR *, const WCHAR *, DWORD, DWORD,
                                       DWORD, HANDLE *, DWORD *);
+
+/* The broker's refusal of an image on a file system that gives no read leases (UDF, as a loop-mounted ISO). It is
+ * defined in wexelevate.h in the WineExplorer tree; no other failure can produce this value, and it never crosses
+ * back to the program: it is mapped to ERROR_NOT_SUPPORTED before ShellExecuteEx returns. */
+#define WEXELEVATE_E_NO_IMAGE_LEASE 0x20150
 
 static UINT_PTR execute_with_broker(const WCHAR *cmd, const WCHAR *env, const SHELLEXECUTEINFOW *psei,
                                     SHELLEXECUTEINFOW *psei_out)
@@ -555,7 +562,7 @@ static UINT_PTR SHELL_ExecuteW(const WCHAR *lpCmd, WCHAR *env, BOOL shWait,
         {
             /* Elevation is enforced: the broker starts the program, never a linked token of ours. A process
              * that is elevated already runs it directly, as on Windows. */
-            if (!is_full_token())
+            if (!is_elevated_token())
             {
                 retval = execute_with_broker(lpCmd, env, psei, psei_out);
                 goto finish;
@@ -1859,6 +1866,16 @@ static void do_error_dialog( UINT_PTR retval, HWND hwnd )
     WCHAR msg[2048];
     int error_code=GetLastError();
 
+    if (error_code == WEXELEVATE_E_NO_IMAGE_LEASE)
+    {
+        /* The broker refused the image: its file system gives no read leases (UDF). Say what the user can do, in
+         * this process (the user's desktop), and leave the program-visible error as ERROR_NOT_SUPPORTED. */
+        LoadStringW(shell32_hInstance, IDS_SHLEXEC_NO_IMAGE_LEASE, msg, ARRAY_SIZE(msg));
+        MessageBoxW(hwnd, msg, NULL, MB_ICONERROR);
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return;
+    }
+
     if (retval == SE_ERR_NOASSOC)
         LoadStringW(shell32_hInstance, IDS_SHLEXEC_NOASSOC, msg, ARRAY_SIZE(msg));
     else
@@ -2048,6 +2065,8 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
                                       execfunc );
         if (retval <= 32 && !(sei_tmp.fMask & SEE_MASK_FLAG_NO_UI))
             do_error_dialog(retval, sei_tmp.hwnd);
+        if (retval <= 32 && GetLastError() == WEXELEVATE_E_NO_IMAGE_LEASE)
+            SetLastError(ERROR_NOT_SUPPORTED);   /* no dialog (SEE_MASK_FLAG_NO_UI): the program sees only the code */
         free(wszApplicationName);
         if (wszParameters != parametersBuffer)
             free(wszParameters);
@@ -2221,6 +2240,8 @@ end:
 
     if (retval <= 32 && !(sei_tmp.fMask & SEE_MASK_FLAG_NO_UI))
         do_error_dialog(retval, sei_tmp.hwnd);
+    if (retval <= 32 && GetLastError() == WEXELEVATE_E_NO_IMAGE_LEASE)
+        SetLastError(ERROR_NOT_SUPPORTED);   /* no dialog (SEE_MASK_FLAG_NO_UI): the program sees only the code */
     return retval > 32;
 }
 

@@ -24,12 +24,23 @@
 import "windows.foundation.idl";
 import "windows.foundation.metadata.idl";
 import "windows.storage.streams.idl";
+import "windows.foundation.diagnostics.idl";
 
 namespace Windows.Foundation {
+    runtimeclass GuidHelper;
     runtimeclass PropertyValue;
+}
+namespace Windows.Foundation.Diagnostics {
+    runtimeclass AsyncCausalityTracer;
+    runtimeclass LoggingActivity;
+    runtimeclass LoggingChannel;
+    runtimeclass LoggingChannelOptions;
+    runtimeclass LoggingFields;
+    runtimeclass LoggingOptions;
 }
 namespace Windows.Foundation.Collections {
     runtimeclass PropertySet;
+    runtimeclass ValueSet;
 }
 namespace Windows.Foundation.Metadata {
     runtimeclass ApiInformation;

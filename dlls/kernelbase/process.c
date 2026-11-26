@@ -526,6 +526,7 @@ static BOOL is_elevation_required( HANDLE token, const WCHAR *filename )
 {
     ACTIVATION_CONTEXT_RUN_LEVEL_INFORMATION run_level;
     TOKEN_ELEVATION_TYPE elev_type;
+    TOKEN_ELEVATION elevation;
     HANDLE token_to_check;
     ACTCTXW actctx_req;
     HANDLE actctx;
@@ -563,8 +564,12 @@ static BOOL is_elevation_required( HANDLE token, const WCHAR *filename )
     if (!GetTokenInformation( token_to_check, TokenElevationType, &elev_type, sizeof(elev_type), &size ))
         return FALSE;
 
-    /* An already elevated (Full) token satisfies all elevation requirements */
+    /* An already elevated token satisfies all elevation requirements: a Full one, and one of the default type
+     * that holds the Administrators group (LocalSystem, the built-in Administrator), as on Windows */
     if (elev_type == TokenElevationTypeFull)
+        return FALSE;
+    if (GetTokenInformation( token_to_check, TokenElevation, &elevation, sizeof(elevation), &size ) &&
+        elevation.TokenIsElevated)
         return FALSE;
 
     /* Check target image manifest for requested execution level */

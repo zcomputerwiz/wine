@@ -838,6 +838,20 @@ NTSTATUS WINAPI NtGdiDdDDIQueryAdapterInfo( D3DKMT_QUERYADAPTERINFO *desc )
         *value = KMT_DRIVERVERSION_WDDM_3_1;
         return STATUS_SUCCESS;
     }
+    case KMTQAITYPE_ADAPTERTYPE:
+    {
+        /* D3DKMT_ADAPTERTYPE: RenderSupported (0x1) and DisplaySupported (0x2). On Windows 11 every GPU sets both (with further
+         * bits such as hybrid or ACG support), the Basic Render Driver only RenderSupported with SoftwareDevice (0x4); a buffer
+         * smaller than 4 bytes gives STATUS_INVALID_PARAMETER (measured, WineExplorer tests/uwp/alpc/occlusion-kmt-probe.c).
+         * The compositor of the Windows App SDK asks for it before it renders. */
+        UINT *value = desc->pPrivateDriverData;
+
+        if (desc->PrivateDriverDataSize < sizeof(*value))
+            return STATUS_INVALID_PARAMETER;
+
+        *value = 0x1 | 0x2;
+        return STATUS_SUCCESS;
+    }
     default:
     {
         FIXME( "type %d not handled.\n", desc->Type );

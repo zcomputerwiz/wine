@@ -1,0 +1,63 @@
+/*
+ * Copyright 2026 WineExplorer contributors
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+#ifdef __WIDL__
+#pragma winrt ns_prefix
+#endif
+
+import "inspectable.idl";
+import "windowscontracts.idl";
+import "windows.foundation.idl";
+import "windows.storage.idl";
+
+namespace Windows.Management.Core {
+    interface IApplicationDataManager;
+    interface IApplicationDataManagerStatics;
+
+    runtimeclass ApplicationDataManager;
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Management.Core.ApplicationDataManager),
+        uuid(74d10432-2e99-4000-9a3a-64307e858129)
+    ]
+    interface IApplicationDataManager : IInspectable
+    {
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Management.Core.ApplicationDataManager),
+        uuid(1e1862e3-698e-49a1-9752-dee94925b9b3)
+    ]
+    interface IApplicationDataManagerStatics : IInspectable
+    {
+        HRESULT CreateForPackageFamily([in] HSTRING packageFamilyName, [out, retval] Windows.Storage.ApplicationData **applicationData);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.Management.Core.IApplicationDataManagerStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        threading(mta)
+    ]
+    runtimeclass ApplicationDataManager
+    {
+        [default] interface Windows.Management.Core.IApplicationDataManager;
+    }
+}

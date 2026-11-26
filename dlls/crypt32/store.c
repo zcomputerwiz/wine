@@ -519,8 +519,10 @@ static WINECRYPT_CERTSTORE *CRYPT_SysRegOpenStoreW(HCRYPTPROV hCryptProv,
     {
         LONG rc;
         HKEY key;
-        REGSAM sam = dwFlags & CERT_STORE_READONLY_FLAG ? KEY_READ :
-            KEY_ALL_ACCESS;
+        /* SystemCertificates is shared between the 32-bit and 64-bit views of the registry, as on Windows: a 32-bit
+         * program sees the same stores (and the same trusted roots) as a 64-bit one. */
+        REGSAM sam = (dwFlags & CERT_STORE_READONLY_FLAG ? KEY_READ :
+            KEY_ALL_ACCESS) | KEY_WOW64_64KEY;
 
         wsprintfW(storePath, L"%s\\%s", base, storeName);
         if (dwFlags & CERT_STORE_OPEN_EXISTING_FLAG)
@@ -633,13 +635,14 @@ static WINECRYPT_CERTSTORE *CRYPT_SysOpenStoreW(HCRYPTPROV hCryptProv,
             {
                 dwFlags &= ~CERT_SYSTEM_STORE_CURRENT_USER;
                 dwFlags |= CERT_SYSTEM_STORE_LOCAL_MACHINE;
+                /* The machine's part of a user's store is read-only, as on Windows: a user who cannot write the
+                 * machine registry still sees the machine's certificates, and what the user adds goes to the
+                 * user's own store. */
                 regStore = CertOpenStore(CERT_STORE_PROV_SYSTEM_REGISTRY_W, 0,
-                 0, dwFlags, pvPara);
+                 0, dwFlags | CERT_STORE_READONLY_FLAG, pvPara);
                 if (regStore)
                 {
-                    CertAddStoreToCollection(store, regStore,
-                     dwFlags & CERT_STORE_READONLY_FLAG ? 0 :
-                     CERT_PHYSICAL_STORE_ADD_ENABLE_FLAG, 0);
+                    CertAddStoreToCollection(store, regStore, 0, 0);
                     CertCloseStore(regStore, 0);
                 }
             }
@@ -1374,7 +1377,7 @@ static LONG CRYPT_OpenParentStore(DWORD dwFlags,
         return ERROR_FILE_NOT_FOUND;
     }
 
-    return RegOpenKeyExW(root, base, 0, KEY_READ, key);
+    return RegOpenKeyExW(root, base, 0, KEY_READ | KEY_WOW64_64KEY, key);
 }
 
 BOOL WINAPI CertEnumSystemStore(DWORD dwFlags, void *pvSystemStoreLocationPara,

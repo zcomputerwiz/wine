@@ -720,6 +720,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		{
 			FunctionUnregServer = TRUE;
 		}
+		/* restart options (before the "f" and "p" prefix tests): the installer reads REBOOT */
+		else if (msi_option_equal(argvW[i], "norestart"))
+		{
+			StringListAppend(&property_list, L"REBOOT=ReallySuppress");
+		}
+		else if (msi_option_equal(argvW[i], "forcerestart"))
+		{
+			StringListAppend(&property_list, L"REBOOT=Force");
+		}
+		else if (msi_option_equal(argvW[i], "promptrestart"))
+		{
+			/* prompting is the default */
+		}
 		else if(msi_option_prefix(argvW[i], "i") || msi_option_prefix(argvW[i], "package"))
 		{
 			LPWSTR argvWi = argvW[i];

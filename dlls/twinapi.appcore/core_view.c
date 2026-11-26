@@ -300,14 +300,22 @@ static HRESULT splash_create( ISplashScreen **out )
 
 /* ---- the arguments of a launch activation --------------------------------------------------------- */
 
+/* as on Windows 11 (tests/uwp/xaml/cx-probe, LaunchProbe.cpp): the user of the launch, no prelaunch, no tile
+ * information, no view switcher, CurrentlyShownApplicationViewId 0 */
 struct launch_args
 {
     IActivatedEventArgs IActivatedEventArgs_iface;
     ILaunchActivatedEventArgs ILaunchActivatedEventArgs_iface;
+    ILaunchActivatedEventArgs2 ILaunchActivatedEventArgs2_iface;
+    IActivatedEventArgsWithUser IActivatedEventArgsWithUser_iface;
+    IPrelaunchActivatedEventArgs IPrelaunchActivatedEventArgs_iface;
+    IApplicationViewActivatedEventArgs IApplicationViewActivatedEventArgs_iface;
+    IViewSwitcherProvider IViewSwitcherProvider_iface;
     LONG ref;
     HSTRING arguments;
     HSTRING tile_id;
     ISplashScreen *splash;
+    IUser *user;
 };
 
 static inline struct launch_args *impl_from_IActivatedEventArgs( IActivatedEventArgs *iface )
@@ -327,6 +335,16 @@ static HRESULT launch_args_query( struct launch_args *args, REFIID iid, void **o
         *out = &args->IActivatedEventArgs_iface;
     else if (IsEqualGUID( iid, &IID_ILaunchActivatedEventArgs ))
         *out = &args->ILaunchActivatedEventArgs_iface;
+    else if (IsEqualGUID( iid, &IID_ILaunchActivatedEventArgs2 ))
+        *out = &args->ILaunchActivatedEventArgs2_iface;
+    else if (IsEqualGUID( iid, &IID_IActivatedEventArgsWithUser ))
+        *out = &args->IActivatedEventArgsWithUser_iface;
+    else if (IsEqualGUID( iid, &IID_IPrelaunchActivatedEventArgs ))
+        *out = &args->IPrelaunchActivatedEventArgs_iface;
+    else if (IsEqualGUID( iid, &IID_IApplicationViewActivatedEventArgs ))
+        *out = &args->IApplicationViewActivatedEventArgs_iface;
+    else if (IsEqualGUID( iid, &IID_IViewSwitcherProvider ))
+        *out = &args->IViewSwitcherProvider_iface;
     else
     {
         *out = NULL;
@@ -345,6 +363,7 @@ static ULONG launch_args_release( struct launch_args *args )
         WindowsDeleteString( args->arguments );
         WindowsDeleteString( args->tile_id );
         if (args->splash) ISplashScreen_Release( args->splash );
+        if (args->user) IUser_Release( args->user );
         free( args );
     }
     return ref;
@@ -469,6 +488,104 @@ static const ILaunchActivatedEventArgsVtbl launch_args_vtbl =
     launch_args_get_TileId,
 };
 
+DEFINE_IINSPECTABLE( launch_args2, ILaunchActivatedEventArgs2, struct launch_args, IActivatedEventArgs_iface )
+
+static HRESULT WINAPI launch_args2_get_TileActivatedInfo( ILaunchActivatedEventArgs2 *iface, ITileActivatedInfo **value )
+{
+    *value = NULL;
+    return S_OK;
+}
+
+static const ILaunchActivatedEventArgs2Vtbl launch_args2_vtbl =
+{
+    launch_args2_QueryInterface,
+    launch_args2_AddRef,
+    launch_args2_Release,
+    launch_args2_GetIids,
+    launch_args2_GetRuntimeClassName,
+    launch_args2_GetTrustLevel,
+    launch_args2_get_TileActivatedInfo,
+};
+
+DEFINE_IINSPECTABLE( with_user, IActivatedEventArgsWithUser, struct launch_args, IActivatedEventArgs_iface )
+
+static HRESULT WINAPI with_user_get_User( IActivatedEventArgsWithUser *iface, IUser **value )
+{
+    struct launch_args *args = impl_from_IActivatedEventArgsWithUser( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+    if ((*value = args->user)) IUser_AddRef( args->user );
+    return S_OK;
+}
+
+static const IActivatedEventArgsWithUserVtbl with_user_vtbl =
+{
+    with_user_QueryInterface,
+    with_user_AddRef,
+    with_user_Release,
+    with_user_GetIids,
+    with_user_GetRuntimeClassName,
+    with_user_GetTrustLevel,
+    with_user_get_User,
+};
+
+DEFINE_IINSPECTABLE( prelaunch, IPrelaunchActivatedEventArgs, struct launch_args, IActivatedEventArgs_iface )
+
+static HRESULT WINAPI prelaunch_get_PrelaunchActivated( IPrelaunchActivatedEventArgs *iface, boolean *value )
+{
+    *value = FALSE;
+    return S_OK;
+}
+
+static const IPrelaunchActivatedEventArgsVtbl prelaunch_vtbl =
+{
+    prelaunch_QueryInterface,
+    prelaunch_AddRef,
+    prelaunch_Release,
+    prelaunch_GetIids,
+    prelaunch_GetRuntimeClassName,
+    prelaunch_GetTrustLevel,
+    prelaunch_get_PrelaunchActivated,
+};
+
+DEFINE_IINSPECTABLE( view_activated, IApplicationViewActivatedEventArgs, struct launch_args, IActivatedEventArgs_iface )
+
+static HRESULT WINAPI view_activated_get_CurrentlyShownApplicationViewId( IApplicationViewActivatedEventArgs *iface, INT32 *value )
+{
+    *value = 0;
+    return S_OK;
+}
+
+static const IApplicationViewActivatedEventArgsVtbl view_activated_vtbl =
+{
+    view_activated_QueryInterface,
+    view_activated_AddRef,
+    view_activated_Release,
+    view_activated_GetIids,
+    view_activated_GetRuntimeClassName,
+    view_activated_GetTrustLevel,
+    view_activated_get_CurrentlyShownApplicationViewId,
+};
+
+DEFINE_IINSPECTABLE( view_switcher, IViewSwitcherProvider, struct launch_args, IActivatedEventArgs_iface )
+
+static HRESULT WINAPI view_switcher_get_ViewSwitcher( IViewSwitcherProvider *iface, IActivationViewSwitcher **value )
+{
+    *value = NULL;
+    return S_OK;
+}
+
+static const IViewSwitcherProviderVtbl view_switcher_vtbl =
+{
+    view_switcher_QueryInterface,
+    view_switcher_AddRef,
+    view_switcher_Release,
+    view_switcher_GetIids,
+    view_switcher_GetRuntimeClassName,
+    view_switcher_GetTrustLevel,
+    view_switcher_get_ViewSwitcher,
+};
+
 static HRESULT launch_args_create( const WCHAR *arguments, const WCHAR *tile_id, IActivatedEventArgs **out )
 {
     struct launch_args *args;
@@ -477,10 +594,16 @@ static HRESULT launch_args_create( const WCHAR *arguments, const WCHAR *tile_id,
     if (!(args = calloc( 1, sizeof(*args) ))) return E_OUTOFMEMORY;
     args->IActivatedEventArgs_iface.lpVtbl = &activated_args_vtbl;
     args->ILaunchActivatedEventArgs_iface.lpVtbl = &launch_args_vtbl;
+    args->ILaunchActivatedEventArgs2_iface.lpVtbl = &launch_args2_vtbl;
+    args->IActivatedEventArgsWithUser_iface.lpVtbl = &with_user_vtbl;
+    args->IPrelaunchActivatedEventArgs_iface.lpVtbl = &prelaunch_vtbl;
+    args->IApplicationViewActivatedEventArgs_iface.lpVtbl = &view_activated_vtbl;
+    args->IViewSwitcherProvider_iface.lpVtbl = &view_switcher_vtbl;
     args->ref = 1;
     if (FAILED(hr = WindowsCreateString( arguments, wcslen( arguments ), &args->arguments )) ||
         FAILED(hr = WindowsCreateString( tile_id, wcslen( tile_id ), &args->tile_id )) ||
-        FAILED(hr = splash_create( &args->splash )))
+        FAILED(hr = splash_create( &args->splash )) ||
+        FAILED(hr = user_create( &args->user )))
     {
         launch_args_release( args );
         return hr;
@@ -495,6 +618,7 @@ struct core_view
 {
     ICoreApplicationView ICoreApplicationView_iface;
     ICoreApplicationView2 ICoreApplicationView2_iface;
+    ICoreApplicationView3 ICoreApplicationView3_iface;
     LONG ref;
 
     struct list entry;       /* the views of the process */
@@ -502,6 +626,8 @@ struct core_view
     boolean is_main;
     ICoreWindow *window;
     ICoreDispatcher *dispatcher;
+    ICoreApplicationViewTitleBar *title_bar;   /* made on first use, the same object after */
+    LONG token;
 
     CRITICAL_SECTION cs;
     struct list activated_handlers;
@@ -534,6 +660,8 @@ static HRESULT view_query( struct core_view *view, REFIID iid, void **out )
         *out = &view->ICoreApplicationView_iface;
     else if (IsEqualGUID( iid, &IID_ICoreApplicationView2 ))
         *out = &view->ICoreApplicationView2_iface;
+    else if (IsEqualGUID( iid, &IID_ICoreApplicationView3 ))
+        *out = &view->ICoreApplicationView3_iface;
     else
     {
         FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
@@ -554,6 +682,7 @@ static ULONG view_release( struct core_view *view )
         if (view->entry.next) list_remove( &view->entry );
         LeaveCriticalSection( &views_cs );
         handler_list_clear( &view->activated_handlers );
+        if (view->title_bar) ICoreApplicationViewTitleBar_Release( view->title_bar );
         ICoreDispatcher_Release( view->dispatcher );
         ICoreWindow_Release( view->window );
         DeleteCriticalSection( &view->cs );
@@ -698,6 +827,99 @@ static const ICoreApplicationView2Vtbl view2_vtbl =
     view2_get_Dispatcher,
 };
 
+static inline struct core_view *impl_from_ICoreApplicationView3( ICoreApplicationView3 *iface )
+{
+    return CONTAINING_RECORD( iface, struct core_view, ICoreApplicationView3_iface );
+}
+
+static HRESULT WINAPI view3_QueryInterface( ICoreApplicationView3 *iface, REFIID iid, void **out )
+{
+    return view_query( impl_from_ICoreApplicationView3( iface ), iid, out );
+}
+
+static ULONG WINAPI view3_AddRef( ICoreApplicationView3 *iface )
+{
+    return InterlockedIncrement( &impl_from_ICoreApplicationView3( iface )->ref );
+}
+
+static ULONG WINAPI view3_Release( ICoreApplicationView3 *iface )
+{
+    return view_release( impl_from_ICoreApplicationView3( iface ) );
+}
+
+static HRESULT WINAPI view3_GetIids( ICoreApplicationView3 *iface, ULONG *count, IID **iids )
+{
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI view3_GetRuntimeClassName( ICoreApplicationView3 *iface, HSTRING *name )
+{
+    return view_GetRuntimeClassName( &impl_from_ICoreApplicationView3( iface )->ICoreApplicationView_iface, name );
+}
+
+static HRESULT WINAPI view3_GetTrustLevel( ICoreApplicationView3 *iface, TrustLevel *level )
+{
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI view3_get_IsComponent( ICoreApplicationView3 *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+
+/* the view's title bar: one object for the view's lifetime */
+static HRESULT WINAPI view3_get_TitleBar( ICoreApplicationView3 *iface, ICoreApplicationViewTitleBar **value )
+{
+    struct core_view *view = impl_from_ICoreApplicationView3( iface );
+    ICoreApplicationViewTitleBar *bar = NULL;
+    HRESULT hr;
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    EnterCriticalSection( &view->cs );
+    if (!view->title_bar && FAILED(hr = core_title_bar_create( &bar )))
+    {
+        LeaveCriticalSection( &view->cs );
+        return hr;
+    }
+    if (!view->title_bar) view->title_bar = bar;
+    ICoreApplicationViewTitleBar_AddRef( (*value = view->title_bar) );
+    LeaveCriticalSection( &view->cs );
+    return S_OK;
+}
+
+static HRESULT WINAPI view3_add_HostedViewClosing( ICoreApplicationView3 *iface,
+        ITypedEventHandler_CoreApplicationView_HostedViewClosingEventArgs *handler, EventRegistrationToken *token )
+{
+    TRACE( "iface %p, handler %p, token %p: never raised (no hosted views).\n", iface, handler, token );
+    if (!handler || !token) return E_INVALIDARG;
+    token->value = InterlockedIncrement( &impl_from_ICoreApplicationView3( iface )->token );
+    return S_OK;
+}
+
+static HRESULT WINAPI view3_remove_HostedViewClosing( ICoreApplicationView3 *iface, EventRegistrationToken token )
+{
+    return S_OK;
+}
+
+static const ICoreApplicationView3Vtbl view3_vtbl =
+{
+    view3_QueryInterface,
+    view3_AddRef,
+    view3_Release,
+    view3_GetIids,
+    view3_GetRuntimeClassName,
+    view3_GetTrustLevel,
+    view3_get_IsComponent,
+    view3_get_TitleBar,
+    view3_add_HostedViewClosing,
+    view3_remove_HostedViewClosing,
+};
+
 /* The view of a window; the window's thread is the view's thread. */
 HRESULT core_view_create( ICoreWindow *window, boolean is_main, ICoreApplicationView **out )
 {
@@ -707,6 +929,7 @@ HRESULT core_view_create( ICoreWindow *window, boolean is_main, ICoreApplication
     if (!(view = calloc( 1, sizeof(*view) ))) return E_OUTOFMEMORY;
     view->ICoreApplicationView_iface.lpVtbl = &view_vtbl;
     view->ICoreApplicationView2_iface.lpVtbl = &view2_vtbl;
+    view->ICoreApplicationView3_iface.lpVtbl = &view3_vtbl;
     view->ref = 1;
     view->thread_id = GetCurrentThreadId();
     view->is_main = is_main;

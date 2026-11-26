@@ -40,6 +40,11 @@ namespace Windows.System.Profile {
     runtimeclass AnalyticsInfo;
     runtimeclass SystemIdentification;
     runtimeclass SystemIdentificationInfo;
+    typedef enum PlatformDataCollectionLevel PlatformDataCollectionLevel;
+    interface IEducationSettingsStatics;
+    interface IPlatformDiagnosticsAndUsageDataSettingsStatics;
+    runtimeclass EducationSettings;
+    runtimeclass PlatformDiagnosticsAndUsageDataSettings;
 
     [contract(Windows.Foundation.UniversalApiContract, 3.0)]
     enum SystemIdentificationSource
@@ -135,5 +140,57 @@ namespace Windows.System.Profile {
     runtimeclass SystemIdentificationInfo
     {
         [default] interface Windows.System.Profile.ISystemIdentificationInfo;
+    }
+
+    [contract(Windows.Foundation.UniversalApiContract, 2.0)]
+    enum PlatformDataCollectionLevel
+    {
+        Security = 0,
+        Basic    = 1,
+        Enhanced = 2,
+        Full     = 3,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 4.0),
+        exclusiveto(Windows.System.Profile.EducationSettings),
+        uuid(fc53f0ef-4d3e-4e13-9b23-505f4d091e92)
+    ]
+    interface IEducationSettingsStatics : IInspectable
+    {
+        [propget] HRESULT IsEducationEnvironment([out, retval] boolean *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 2.0),
+        exclusiveto(Windows.System.Profile.PlatformDiagnosticsAndUsageDataSettings),
+        uuid(b6e24c1b-7b1c-4b32-8c62-a66597ce723a)
+    ]
+    interface IPlatformDiagnosticsAndUsageDataSettingsStatics : IInspectable
+    {
+        [propget] HRESULT CollectionLevel([out, retval] Windows.System.Profile.PlatformDataCollectionLevel *value);
+        [eventadd] HRESULT CollectionLevelChanged([in] Windows.Foundation.EventHandler<IInspectable *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT CollectionLevelChanged([in] EventRegistrationToken token);
+        HRESULT CanCollectDiagnostics([in] Windows.System.Profile.PlatformDataCollectionLevel level, [out, retval] boolean *result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 4.0),
+        marshaling_behavior(agile),
+        static(Windows.System.Profile.IEducationSettingsStatics, Windows.Foundation.UniversalApiContract, 4.0),
+        threading(both)
+    ]
+    runtimeclass EducationSettings
+    {
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 2.0),
+        marshaling_behavior(agile),
+        static(Windows.System.Profile.IPlatformDiagnosticsAndUsageDataSettingsStatics, Windows.Foundation.UniversalApiContract, 2.0),
+        threading(both)
+    ]
+    runtimeclass PlatformDiagnosticsAndUsageDataSettings
+    {
     }
 }

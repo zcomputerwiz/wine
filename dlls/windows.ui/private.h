@@ -46,12 +46,45 @@
 #define WIDL_using_Windows_UI_ViewManagement
 #include "windows.ui.viewmanagement.h"
 #include "windows.ui.core.corewindow.interop.h"
+#define WIDL_using_Windows_UI_Text
+#include "windows.ui.text.h"
+#define WIDL_using_Windows_UI_Text
+#include "windows.ui.text.h"
 
+#define WIDL_using_Windows_Security_Credentials
+#include "windows.security.credentials.h"
+#define WIDL_using_Windows_UI_Popups
+#include "windows.ui.popups.h"
+#define WIDL_using_Windows_UI_ApplicationSettings
+#include "windows.ui.applicationsettings.h"
+#include "accountssettingspaneinterop.h"
+
+extern IActivationFactory *compositor_stub_factory;
+extern IActivationFactory *apiinfo_stub_factory;
+
+struct vector_iids
+{
+    const GUID *iterable;
+    const GUID *iterator;
+    const GUID *vector;
+    const GUID *view;
+};
+HRESULT vector_inspectable_create( const struct vector_iids *iids, IVector_IInspectable **out );
+
+extern IActivationFactory *accountssettingspane_factory;
+extern IActivationFactory *credentialcommand_factory;
+extern IActivationFactory *settingscommand_factory;
+extern IActivationFactory *webaccountcommand_factory;
+extern IActivationFactory *webaccountprovidercommand_factory;
 extern IActivationFactory *accessibilitysettings_factory;
 extern IActivationFactory *uisettings_factory;
 extern IActivationFactory *uiviewsettings_factory;
 extern IActivationFactory *inputpane_factory;
 extern IActivationFactory *corewindow_factory;
+extern IActivationFactory *systemnavigation_factory;
+extern IActivationFactory *fontweights_factory;
+extern IActivationFactory *systemnavigation_factory;
+extern IActivationFactory *fontweights_factory;
 
 /* event handler lists (dispatcher.c); the caller's critical section protects the list */
 extern HRESULT ui_handler_add( struct list *list, CRITICAL_SECTION *cs, IUnknown *handler, EventRegistrationToken *token );

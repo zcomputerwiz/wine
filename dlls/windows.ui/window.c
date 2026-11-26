@@ -648,6 +648,11 @@ static BOOL window_ensure_native( struct core_window *window )
     name = wcsrchr( title, '\\' );
     name = name ? name + 1 : title;
 
+    /* The thread of a view is per-monitor DPI aware, as a packaged application's is on Windows, and its window has
+     * the thread's context. Another window of the same process can then be made its child (SetParent needs windows
+     * of the same awareness), as a XAML host inside the CoreWindow does. */
+    SetThreadDpiAwarenessContext( DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE );
+
     window_get_client_rect( window, &rect );
     AdjustWindowRectEx( &rect, style, FALSE, 0 );
     window->hwnd = CreateWindowExW( 0, CORE_WINDOW_CLASS, name, style, CW_USEDEFAULT, CW_USEDEFAULT,

@@ -160,15 +160,20 @@
 @ stdcall -syscall NtAlpcCreatePort(ptr ptr ptr)
 @ stdcall -syscall NtAlpcDisconnectPort(ptr long)
 @ stdcall -syscall NtAlpcImpersonateClientOfPort(ptr ptr ptr)
+@ stdcall NtAlpcQueryInformation(ptr long ptr long ptr)
+@ stdcall NtAlpcCreateSecurityContext(ptr long ptr)
+@ stdcall NtAlpcDeleteSecurityContext(ptr long ptr)
 @ stdcall -syscall NtAlpcSendWaitReceivePort(ptr long ptr ptr ptr ptr ptr ptr)
 @ stub -syscall=0x004c NtApphelpCacheControl
 @ stdcall -syscall NtAreMappedFilesTheSame(ptr ptr)
 @ stdcall -syscall NtAssignProcessToJobObject(long long)
+@ stdcall -syscall NtAssociateWaitCompletionPacket(ptr ptr ptr ptr ptr long ptr ptr)
 @ stdcall -syscall=0x0005 NtCallbackReturn(ptr long long)
 @ stdcall -syscall=0x005d NtCancelIoFile(long ptr)
 @ stdcall -syscall NtCancelIoFileEx(long ptr ptr)
 @ stdcall -syscall NtCancelSynchronousIoFile(long ptr ptr)
 @ stdcall -syscall=0x0061 NtCancelTimer(long ptr)
+@ stdcall -syscall NtCancelWaitCompletionPacket(ptr long)
 @ stdcall -syscall=0x003e NtClearEvent(long)
 @ stdcall -syscall=0x000f NtClose(long)
 @ stdcall -syscall=0x003b NtCloseObjectAuditAlarm(ptr long long)
@@ -212,6 +217,7 @@
 @ stdcall -syscall NtCreateToken(ptr long ptr long ptr ptr ptr ptr ptr ptr ptr ptr ptr)
 @ stdcall -syscall NtCreateTransaction(ptr long ptr ptr long long long long ptr ptr)
 @ stdcall -syscall NtCreateUserProcess(ptr ptr long long ptr ptr long long ptr ptr ptr)
+@ stdcall -syscall NtCreateWaitCompletionPacket(ptr long ptr)
 # @ stub NtCreateWaitablePort
 @ stdcall -arch=i386 NtCurrentTeb()
 @ stdcall -syscall NtDebugActiveProcess(long long)
@@ -632,7 +638,7 @@
 @ stdcall RtlDeleteCriticalSection(ptr)
 @ stdcall -arch=!i386 RtlDeleteGrowableFunctionTable(ptr)
 @ stdcall RtlDeleteElementGenericTable(ptr ptr)
-@ stub RtlDeleteElementGenericTableAvl
+@ stdcall RtlDeleteElementGenericTableAvl(ptr ptr)
 @ cdecl -arch=!i386 RtlDeleteFunctionTable(ptr)
 @ stdcall RtlDeleteNoSplay(ptr ptr)
 @ stub RtlDeleteOwnersRanges
@@ -677,7 +683,7 @@
 @ stdcall RtlEnterCriticalSection(ptr)
 @ stub RtlEnumProcessHeaps
 @ stdcall RtlEnumerateGenericTable(ptr long)
-# @ stub RtlEnumerateGenericTableAvl
+@ stdcall RtlEnumerateGenericTableAvl(ptr long)
 # @ stub RtlEnumerateGenericTableLikeADirectory
 @ stdcall RtlEnumerateGenericTableWithoutSplaying(ptr ptr)
 @ stdcall RtlEnumerateGenericTableWithoutSplayingAvl(ptr ptr)
@@ -756,7 +762,7 @@
 @ stdcall RtlGetCurrentTransaction()
 @ stdcall RtlGetDaclSecurityDescriptor(ptr ptr ptr ptr)
 @ stdcall RtlGetElementGenericTable(ptr long)
-# @ stub RtlGetElementGenericTableAvl
+@ stdcall RtlGetElementGenericTableAvl(ptr long)
 @ stdcall RtlGetEnabledExtendedFeatures(int64)
 @ stdcall RtlGetExePath(wstr ptr)
 @ stdcall RtlGetExtendedContextLength(long ptr)
@@ -875,7 +881,8 @@
 @ stdcall RtlIsDosDeviceName_U(wstr)
 @ stdcall -arch=x86_64 -norelay RtlIsEcCode(ptr)
 @ stdcall RtlIsGenericTableEmpty(ptr)
-# @ stub RtlIsGenericTableEmptyAvl
+@ stdcall RtlIsGenericTableEmptyAvl(ptr)
+@ stdcall RtlIsNameInExpression(ptr ptr long ptr)
 @ stdcall RtlIsNameLegalDOS8Dot3(ptr ptr ptr)
 @ stdcall RtlIsNormalizedString(long wstr long ptr)
 @ stdcall RtlIsProcessorFeaturePresent(long)
@@ -1066,6 +1073,9 @@
 @ stub RtlStartRXact
 # @ stub RtlStatMemoryStream
 @ stdcall RtlStringFromGUID(ptr ptr)
+@ stdcall NtQueryWnfStateData(ptr ptr ptr ptr ptr ptr)
+@ stdcall RtlSubscribeWnfStateChangeNotification(ptr ptr long ptr ptr ptr long long)
+@ stdcall RtlUnsubscribeWnfStateChangeNotification(ptr)
 @ stdcall RtlSubAuthorityCountSid(ptr)
 @ stdcall RtlSubAuthoritySid(ptr long)
 @ stdcall RtlSubtreePredecessor(ptr)
@@ -1249,6 +1259,9 @@
 @ stdcall -private ZwAlpcCreatePort(ptr ptr ptr) NtAlpcCreatePort
 @ stdcall -private ZwAlpcDisconnectPort(ptr long) NtAlpcDisconnectPort
 @ stdcall -private ZwAlpcImpersonateClientOfPort(ptr ptr ptr) NtAlpcImpersonateClientOfPort
+@ stdcall -private ZwAlpcQueryInformation(ptr long ptr long ptr) NtAlpcQueryInformation
+@ stdcall -private ZwAlpcCreateSecurityContext(ptr long ptr) NtAlpcCreateSecurityContext
+@ stdcall -private ZwAlpcDeleteSecurityContext(ptr long ptr) NtAlpcDeleteSecurityContext
 @ stdcall -private ZwAlpcSendWaitReceivePort(ptr long ptr ptr ptr ptr ptr ptr) NtAlpcSendWaitReceivePort
 @ stdcall -private ZwApphelpCacheControl() NtApphelpCacheControl
 @ stdcall -private ZwAreMappedFilesTheSame(ptr ptr) NtAreMappedFilesTheSame

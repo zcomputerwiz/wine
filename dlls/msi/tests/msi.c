@@ -13567,6 +13567,67 @@ static void test_command_line_parsing(void)
     delete_test_files();
 }
 
+static void test_MsiIsProductElevated(void)
+{
+    char prodcode[MAX_PATH], prod_squashed[MAX_PATH], keypath[MAX_PATH];
+    REGSAM access = KEY_ALL_ACCESS;
+    BOOL elevated;
+    HKEY key;
+    UINT r;
+    LONG res;
+
+    if (is_wow64) access |= KEY_WOW64_64KEY;
+    create_test_guid(prodcode, prod_squashed);
+
+    r = MsiIsProductElevatedA(NULL, &elevated);
+    ok(r == ERROR_INVALID_PARAMETER, "got %u\n", r);
+    r = MsiIsProductElevatedA(prodcode, NULL);
+    ok(r == ERROR_INVALID_PARAMETER, "got %u\n", r);
+    elevated = 0xdead;
+    r = MsiIsProductElevatedA("", &elevated);
+    ok(r == ERROR_INVALID_PARAMETER, "got %u\n", r);
+    ok(elevated == 0xdead, "got %#x\n", elevated);
+    r = MsiIsProductElevatedA("garbage", &elevated);
+    ok(r == ERROR_INVALID_PARAMETER, "got %u\n", r);
+    r = MsiIsProductElevatedA("00000000-0000-0000-0000-000000000000", &elevated);
+    ok(r == ERROR_INVALID_PARAMETER, "got %u\n", r);
+
+    /* not installed */
+    elevated = 0xdead;
+    r = MsiIsProductElevatedA(prodcode, &elevated);
+    ok(r == ERROR_UNKNOWN_PRODUCT, "got %u\n", r);
+    ok(!elevated, "got %#x\n", elevated);
+
+    /* per-user, unmanaged: not elevated */
+    lstrcpyA(keypath, "Software\\Microsoft\\Installer\\Products\\");
+    lstrcatA(keypath, prod_squashed);
+    res = RegCreateKeyA(HKEY_CURRENT_USER, keypath, &key);
+    ok(!res, "got %ld\n", res);
+    elevated = 0xdead;
+    r = MsiIsProductElevatedA(prodcode, &elevated);
+    ok(r == ERROR_SUCCESS, "got %u\n", r);
+    ok(!elevated, "got %#x\n", elevated);
+    RegDeleteKeyA(key, "");
+    RegCloseKey(key);
+
+    /* per-machine: elevated */
+    lstrcpyA(keypath, "Software\\Classes\\Installer\\Products\\");
+    lstrcatA(keypath, prod_squashed);
+    res = RegCreateKeyExA(HKEY_LOCAL_MACHINE, keypath, 0, NULL, 0, access, NULL, &key, NULL);
+    if (res == ERROR_ACCESS_DENIED)
+    {
+        skip("Not enough rights to perform tests\n");
+        return;
+    }
+    ok(!res, "got %ld\n", res);
+    elevated = FALSE;
+    r = MsiIsProductElevatedA(prodcode, &elevated);
+    ok(r == ERROR_SUCCESS, "got %u\n", r);
+    ok(elevated == TRUE, "got %#x\n", elevated);
+    RegDeleteKeyExA(key, "", access & KEY_WOW64_64KEY, 0);
+    RegCloseKey(key);
+}
+
 START_TEST(msi)
 {
     DWORD len;
@@ -13625,6 +13686,7 @@ START_TEST(msi)
     test_sourcedir_props();
     test_concurrentinstall();
     test_command_line_parsing();
+    test_MsiIsProductElevated();
     test_MsiProvideQualifiedComponentEx();
 
     SetCurrentDirectoryA(prev_path);

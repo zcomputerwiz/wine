@@ -115,7 +115,23 @@ THEMEAPI GetCurrentThemeName(LPWSTR,int,LPWSTR,int,LPWSTR,int);
 #define STAP_ALLOW_CONTROLS     (1<<1)
 #define STAP_ALLOW_WEBCONTENT   (1<<2)
 
+typedef enum TA_PROPERTY
+{
+    TAP_FLAGS,
+    TAP_TRANSFORMCOUNT,
+    TAP_STAGGERDELAY,
+    TAP_STAGGERDELAYCAP,
+    TAP_STAGGERDELAYFACTOR,
+    TAP_ZORDER,
+} TA_PROPERTY;
+
+typedef struct TA_TRANSFORM TA_TRANSFORM;
+typedef struct TA_TIMINGFUNCTION TA_TIMINGFUNCTION;
+
+THEMEAPI GetThemeAnimationProperty(HTHEME,int,int,TA_PROPERTY,void*,DWORD,DWORD*);
+THEMEAPI GetThemeAnimationTransform(HTHEME,int,int,DWORD,TA_TRANSFORM*,DWORD,DWORD*);
 THEMEAPI_(DWORD) GetThemeAppProperties(void);
+THEMEAPI GetThemeTimingFunction(HTHEME,int,TA_TIMINGFUNCTION*,DWORD,DWORD*);
 THEMEAPI GetThemeBackgroundContentRect(HTHEME,HDC,int,int, const RECT*,RECT*);
 THEMEAPI GetThemeBackgroundExtent(HTHEME,HDC,int,int,const RECT*,RECT*);
 THEMEAPI GetThemeBackgroundRegion(HTHEME,HDC,int,int,const RECT*,HRGN*);

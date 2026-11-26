@@ -34,16 +34,30 @@ namespace Windows.Management.Deployment {
 
     typedef struct DeploymentProgress DeploymentProgress;
 
+    typedef enum AddPackageByAppInstallerOptions AddPackageByAppInstallerOptions;
+    typedef enum StubPackageOption StubPackageOption;
+
     interface IDeploymentResult;
     interface IPackageManager;
     interface IPackageManager2;
+    interface IPackageManager6;
     interface IPackageUserInformation;
+    interface IPackageVolume;
+    interface IStagePackageOptions;
 
     runtimeclass DeploymentResult;
     runtimeclass PackageManager;
     runtimeclass PackageUserInformation;
+    runtimeclass PackageVolume;
+    runtimeclass StagePackageOptions;
 
     declare {
+        interface Windows.Foundation.Collections.IVector<Windows.Foundation.Uri *>;
+        interface Windows.Foundation.Collections.IVectorView<Windows.Foundation.Uri *>;
+        interface Windows.Foundation.Collections.IVector<HSTRING>;
+        interface Windows.Foundation.Collections.IVectorView<HSTRING>;
+        interface Windows.Foundation.Collections.IVector<Windows.ApplicationModel.Package *>;
+        interface Windows.Foundation.Collections.IVectorView<Windows.ApplicationModel.Package *>;
         interface Windows.Foundation.Collections.IIterable<Windows.Foundation.Uri *>;
         interface Windows.Foundation.Collections.IIterator<Windows.Foundation.Uri *>;
         interface Windows.Foundation.Collections.IIterable<Windows.ApplicationModel.Package *>;
@@ -129,6 +143,28 @@ namespace Windows.Management.Deployment {
         PreserveRoamableApplicationData = 0x80,
         [contract(Windows.Foundation.UniversalApiContract, 7.0)]
         RemoveForAllUsers               = 0x80000,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        flags
+    ]
+    enum AddPackageByAppInstallerOptions
+    {
+        None                    = 0x0,
+        InstallAllResources     = 0x20,
+        ForceTargetAppShutdown  = 0x40,
+        RequiredContentGroupOnly = 0x100,
+        LimitToExistingPackages = 0x200,
+    };
+
+    [contract(Windows.Foundation.UniversalApiContract, 10.0)]
+    enum StubPackageOption
+    {
+        Default       = 0,
+        InstallFull   = 1,
+        InstallStub   = 2,
+        UsePreference = 3,
     };
 
     [contract(Windows.Foundation.UniversalApiContract, 1.0)]
@@ -239,6 +275,109 @@ namespace Windows.Management.Deployment {
     }
 
     [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        exclusiveto(Windows.Management.Deployment.PackageManager),
+        uuid(0847e909-53cd-4e4f-832e-57d180f6e447)
+    ]
+    interface IPackageManager6 : IInspectable
+    {
+        HRESULT ProvisionPackageForAllUsersAsync([in] HSTRING family_name,
+                                                 [out, retval] Windows.Foundation.IAsyncOperationWithProgress<Windows.Management.Deployment.DeploymentResult *, Windows.Management.Deployment.DeploymentProgress> **operation);
+        HRESULT AddPackageByAppInstallerFileAsync([in] Windows.Foundation.Uri *uri, [in] Windows.Management.Deployment.AddPackageByAppInstallerOptions options,
+                                                  [in] Windows.Management.Deployment.PackageVolume *volume,
+                                                  [out, retval] Windows.Foundation.IAsyncOperationWithProgress<Windows.Management.Deployment.DeploymentResult *, Windows.Management.Deployment.DeploymentProgress> **operation);
+        HRESULT RequestAddPackageByAppInstallerFileAsync([in] Windows.Foundation.Uri *uri, [in] Windows.Management.Deployment.AddPackageByAppInstallerOptions options,
+                                                         [in] Windows.Management.Deployment.PackageVolume *volume,
+                                                         [out, retval] Windows.Foundation.IAsyncOperationWithProgress<Windows.Management.Deployment.DeploymentResult *, Windows.Management.Deployment.DeploymentProgress> **operation);
+        [overload("AddPackageAsync")]
+        HRESULT AddPackageToVolumeAndRelatedSetAsync([in] Windows.Foundation.Uri *uri, [in] Windows.Foundation.Collections.IIterable<Windows.Foundation.Uri *> *dependencies,
+                                                     [in] Windows.Management.Deployment.DeploymentOptions options, [in] Windows.Management.Deployment.PackageVolume *volume,
+                                                     [in] Windows.Foundation.Collections.IIterable<HSTRING> *optional_family_names,
+                                                     [in] Windows.Foundation.Collections.IIterable<Windows.Foundation.Uri *> *uris_to_install,
+                                                     [in] Windows.Foundation.Collections.IIterable<Windows.Foundation.Uri *> *related_uris,
+                                                     [out, retval] Windows.Foundation.IAsyncOperationWithProgress<Windows.Management.Deployment.DeploymentResult *, Windows.Management.Deployment.DeploymentProgress> **operation);
+        [overload("StagePackageAsync")]
+        HRESULT StagePackageToVolumeAndRelatedSetAsync([in] Windows.Foundation.Uri *uri, [in] Windows.Foundation.Collections.IIterable<Windows.Foundation.Uri *> *dependencies,
+                                                       [in] Windows.Management.Deployment.DeploymentOptions options, [in] Windows.Management.Deployment.PackageVolume *volume,
+                                                       [in] Windows.Foundation.Collections.IIterable<HSTRING> *optional_family_names,
+                                                       [in] Windows.Foundation.Collections.IIterable<Windows.Foundation.Uri *> *uris_to_install,
+                                                       [in] Windows.Foundation.Collections.IIterable<Windows.Foundation.Uri *> *related_uris,
+                                                       [out, retval] Windows.Foundation.IAsyncOperationWithProgress<Windows.Management.Deployment.DeploymentResult *, Windows.Management.Deployment.DeploymentProgress> **operation);
+        HRESULT RequestAddPackageAsync([in] Windows.Foundation.Uri *uri, [in] Windows.Foundation.Collections.IIterable<Windows.Foundation.Uri *> *dependencies,
+                                       [in] Windows.Management.Deployment.DeploymentOptions options, [in] Windows.Management.Deployment.PackageVolume *volume,
+                                       [in] Windows.Foundation.Collections.IIterable<HSTRING> *optional_family_names,
+                                       [in] Windows.Foundation.Collections.IIterable<Windows.Foundation.Uri *> *related_uris,
+                                       [out, retval] Windows.Foundation.IAsyncOperationWithProgress<Windows.Management.Deployment.DeploymentResult *, Windows.Management.Deployment.DeploymentProgress> **operation);
+    }
+
+    /* the properties of IPackageVolume only; its FindPackages methods are not declared yet */
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Management.Deployment.PackageVolume),
+        uuid(cf2672c3-1a40-4450-9739-2ace2e898853)
+    ]
+    interface IPackageVolume : IInspectable
+    {
+        [propget] HRESULT IsOffline([out, retval] boolean *value);
+        [propget] HRESULT IsSystemVolume([out, retval] boolean *value);
+        [propget] HRESULT MountPoint([out, retval] HSTRING *value);
+        [propget] HRESULT Name([out, retval] HSTRING *value);
+        [propget] HRESULT PackageStorePath([out, retval] HSTRING *value);
+        [propget] HRESULT SupportsHardLinks([out, retval] boolean *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 10.0),
+        exclusiveto(Windows.Management.Deployment.StagePackageOptions),
+        uuid(0b110c9c-b95d-4c56-bd36-6d656800d06b)
+    ]
+    interface IStagePackageOptions : IInspectable
+    {
+        [propget] HRESULT DependencyPackageUris([out, retval] Windows.Foundation.Collections.IVector<Windows.Foundation.Uri *> **value);
+        [propget] HRESULT TargetVolume([out, retval] Windows.Management.Deployment.PackageVolume **value);
+        [propput] HRESULT TargetVolume([in] Windows.Management.Deployment.PackageVolume *value);
+        [propget] HRESULT OptionalPackageFamilyNames([out, retval] Windows.Foundation.Collections.IVector<HSTRING> **value);
+        [propget] HRESULT OptionalPackageUris([out, retval] Windows.Foundation.Collections.IVector<Windows.Foundation.Uri *> **value);
+        [propget] HRESULT RelatedPackageUris([out, retval] Windows.Foundation.Collections.IVector<Windows.Foundation.Uri *> **value);
+        [propget] HRESULT ExternalLocationUri([out, retval] Windows.Foundation.Uri **value);
+        [propput] HRESULT ExternalLocationUri([in] Windows.Foundation.Uri *value);
+        [propget] HRESULT StubPackageOption([out, retval] Windows.Management.Deployment.StubPackageOption *value);
+        [propput] HRESULT StubPackageOption([in] Windows.Management.Deployment.StubPackageOption value);
+        [propget] HRESULT DeveloperMode([out, retval] boolean *value);
+        [propput] HRESULT DeveloperMode([in] boolean value);
+        [propget] HRESULT ForceUpdateFromAnyVersion([out, retval] boolean *value);
+        [propput] HRESULT ForceUpdateFromAnyVersion([in] boolean value);
+        [propget] HRESULT InstallAllResources([out, retval] boolean *value);
+        [propput] HRESULT InstallAllResources([in] boolean value);
+        [propget] HRESULT RequiredContentGroupOnly([out, retval] boolean *value);
+        [propput] HRESULT RequiredContentGroupOnly([in] boolean value);
+        [propget] HRESULT StageInPlace([out, retval] boolean *value);
+        [propput] HRESULT StageInPlace([in] boolean value);
+        [propget] HRESULT AllowUnsigned([out, retval] boolean *value);
+        [propput] HRESULT AllowUnsigned([in] boolean value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass PackageVolume
+    {
+        [default] interface Windows.Management.Deployment.IPackageVolume;
+    }
+
+    [
+        activatable(Windows.Foundation.UniversalApiContract, 10.0),
+        contract(Windows.Foundation.UniversalApiContract, 10.0),
+        marshaling_behavior(agile),
+        threading(both)
+    ]
+    runtimeclass StagePackageOptions
+    {
+        [default] interface Windows.Management.Deployment.IStagePackageOptions;
+    }
+
+    [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
         marshaling_behavior(agile)
     ]
@@ -261,7 +400,7 @@ namespace Windows.Management.Deployment {
         /* [contract(Windows.Foundation.UniversalApiContract, 1.0)] interface Windows.Management.Deployment.IPackageManager3; */
         /* [contract(Windows.Foundation.UniversalApiContract, 3.0)] interface Windows.Management.Deployment.IPackageManager4; */
         /* [contract(Windows.Foundation.UniversalApiContract, 4.0)] interface Windows.Management.Deployment.IPackageManager5; */
-        /* [contract(Windows.Foundation.UniversalApiContract, 5.0)] interface Windows.Management.Deployment.IPackageManager6; */
+        [contract(Windows.Foundation.UniversalApiContract, 5.0)] interface Windows.Management.Deployment.IPackageManager6;
         /* [contract(Windows.Foundation.UniversalApiContract, 6.0)] interface Windows.Management.Deployment.IPackageManager7; */
         /* [contract(Windows.Foundation.UniversalApiContract, 7.0)] interface Windows.Management.Deployment.IPackageManager8; */
         /* [contract(Windows.Foundation.UniversalApiContract, 10.0)] interface Windows.Management.Deployment.IPackageManager9; */

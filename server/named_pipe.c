@@ -50,93 +50,13 @@
 #include "accounts.h"
 #include "session0.h"
 #include "unicode.h"
+#include "wex_e1lab.h"
+#define WEX_CALLER_CONSTANTS_ONLY
+#include "wine/wex_caller.h"
+#define WEX_ACCOUNTS_CONSTANTS_ONLY
+#include "wine/wex_accounts.h"
 
 struct named_pipe;
-
-#ifdef WEX_E1S6_TRANSPORT_TEST
-#include <sys/socket.h>
-#include <sys/uio.h>
-#include <poll.h>
-#include <time.h>
-#include "e1s_token.h"
-struct pipe_binding
-{
-    unsigned char prefix_id[16];
-    unsigned char host_process_id[16];
-    unsigned char opener_id[16];
-    unsigned char writer_id[16];
-    unsigned char desktop_route[16];
-    unsigned long long server_gen;
-    unsigned long long root_gen;
-    unsigned long long broker_gen;
-    unsigned long long map_gen;
-    unsigned long long policy_gen;
-    unsigned int caller_session;
-    unsigned long long host_uid;
-    struct process *opener_process;
-    struct process *writer_process;
-    struct desktop *desktop;
-    struct token *opener_token;
-    struct luid opener_token_id;
-    struct luid opener_modified_id;
-    int endorsed;
-    struct process *dialog_process;
-    struct token *dialog_token;
-    struct luid dialog_token_id;
-    struct luid dialog_modified_id;
-    int dialog_pin_pid;
-    unsigned char dialog_id[16];
-    unsigned char sealed_tuple[220];
-    int receipt_used;   /* R10: one receipt installation attempt per binding */
-};
-
-static inline unsigned long long unpack_u64_le( const unsigned char *p )
-{
-    unsigned long long v = 0;
-    int i;
-    for (i = 0; i < 8; i++) v |= ((unsigned long long)p[i]) << (8 * i);
-    return v;
-}
-
-static inline unsigned int unpack_u32_le( const unsigned char *p )
-{
-    unsigned int v = 0;
-    int i;
-    for (i = 0; i < 4; i++) v |= ((unsigned int)p[i]) << (8 * i);
-    return v;
-}
-
-/* R8 desktop rule (3e decision 4 as corrected by Claude, 2026-11-10): like the consent prompt on
- * Windows, D runs on the session's interactive (visible) window station whatever window station the
- * caller uses: on its secure desktop for desktop_mode 1, or on the caller's own desktop for mode 2
- * (which therefore needs a caller on that window station). The session is checked separately. */
-static int dialog_desktop_ok( struct process *dialog, const struct pipe_binding *b, unsigned int mode )
-{
-    struct desktop *d = NULL;
-    struct winstation *visible = get_visible_winstation();
-    int ok;
-
-    if (dialog->desktop && !(d = get_desktop_obj( dialog, dialog->desktop, 0 ))) clear_error();
-    ok = d && visible && d->winstation == visible &&
-         ((mode == 1 && d->secure) || (mode == 2 && d == b->desktop));
-#ifdef WEX_R8_SERVER_TEST
-    {
-        char dn[64] = "", cn[64] = "";
-        data_size_t len = 0, i;
-        const WCHAR *name;
-        if (d && (name = get_object_name( &d->winstation->obj, &len )))
-            for (i = 0; i < len / sizeof(WCHAR) && i < sizeof(dn) - 1; i++) dn[i] = name[i] < 128 ? name[i] : '?';
-        if (b->desktop && (name = get_object_name( &b->desktop->winstation->obj, &len )))
-            for (i = 0; i < len / sizeof(WCHAR) && i < sizeof(cn) - 1; i++) cn[i] = name[i] < 128 ? name[i] : '?';
-        fprintf( stderr, "wex-r8: desktop ok=%d mode=%u d_secure=%d d_ws=%s visible=%d caller_ws=%s caller_visible=%d\n",
-                 ok, mode, d ? d->secure : -1, dn, d && d->winstation == visible, cn,
-                 b->desktop && b->desktop->winstation == visible );
-    }
-#endif
-    if (d) release_object( d );
-    return ok;
-}
-#endif
 
 /* WineExplorer private: immutable identity at client message submission. */
 struct pipe_writer
@@ -169,7 +89,9 @@ struct pipe_end
     struct named_pipe   *pipe;
     struct pipe_end     *connection; /* the other end of the pipe */
     process_id_t         client_pid; /* process that created the client */
-    unsigned int         client_session; /* its session (a bridge: the session of the server that opened it) */
+    unsigned int         client_lease; /* a bridge: the lease of client_pid's block (R6), 0 for a local client */
+    unsigned int         client_session; /* its session (a bridge: the session of the server that opened it), or: */
+#define PIPE_SESSION_UNKNOWN (~0u)         /* not known (no client yet, no token, a bridge without a session link) */
     process_id_t         server_pid; /* process that created the server */
     struct token        *client_token; /* token of the thread that opened the client end (elevation enforced) */
     struct process      *client_process; /* retained opener, not a later PID lookup */
@@ -180,6 +102,9 @@ struct pipe_end
     struct pipe_writer   consumed_writer; /* retained before freeing the consumed message */
     unsigned int         binding_reads; /* E1 supports one request read per connection */
     int                  consumed_valid;
+    char                *acc_msg;    /* H1 (A3): a reserved accounts instance's last client message, read whole */
+    data_size_t          acc_len;
+    int                  acc_valid;  /* set by such a read, cleared by any other read and by accounts_forward */
     data_size_t          buffer_size;/* size of buffered data that doesn't block caller */
     struct list          message_queue;
     struct async_queue   read_q;     /* read queue */
@@ -195,6 +120,7 @@ struct pipe_server
     struct list          entry;      /* entry in named pipe listeners list */
     unsigned int         options;    /* pipe options */
     struct async_queue   listen_q;   /* listen queue */
+    int                  reserved;   /* WineExplorer H1: an instance of a reserved name, made by LocalSystem in session 0 */
 };
 
 struct named_pipe
@@ -212,6 +138,8 @@ struct named_pipe
     WCHAR              *s0_name;     /* WineExplorer T5.2: a pipe of session 0 (opening it bridges there) */
     data_size_t         s0_len;
 };
+
+static int creating_pipe;  /* B17: create_named_pipe is looking the name up (an lrpc\ name stays local) */
 
 struct named_pipe_device
 {
@@ -284,6 +212,7 @@ static void pipe_end_flush( struct fd *fd, struct async *async );
 static void pipe_end_get_volume_info( struct fd *fd, struct async *async, unsigned int info_class );
 static void pipe_end_reselect_async( struct fd *fd, struct async_queue *queue );
 static void pipe_end_get_file_info( struct fd *fd, obj_handle_t handle, unsigned int info_class );
+static void pipe_end_set_file_info( struct fd *fd, struct async *async, unsigned int info_class );
 
 /* server end functions */
 static void pipe_server_dump( struct object *obj, int verbose );
@@ -317,6 +246,7 @@ static const struct fd_ops pipe_server_fd_ops =
     .write           = pipe_end_write,
     .flush           = pipe_end_flush,
     .get_file_info   = pipe_end_get_file_info,
+    .set_file_info   = pipe_end_set_file_info,
     .get_volume_info = pipe_end_get_volume_info,
     .ioctl           = pipe_server_ioctl,
     .reselect_async  = pipe_end_reselect_async,
@@ -347,6 +277,7 @@ static const struct fd_ops pipe_client_fd_ops =
     .write           = pipe_end_write,
     .flush           = pipe_end_flush,
     .get_file_info   = pipe_end_get_file_info,
+    .set_file_info   = pipe_end_set_file_info,
     .get_volume_info = pipe_end_get_volume_info,
     .ioctl           = pipe_client_ioctl,
     .reselect_async  = pipe_end_reselect_async,
@@ -403,6 +334,7 @@ static const struct fd_ops named_pipe_device_fd_ops =
 {
     .get_fd_type   = named_pipe_device_file_get_fd_type,
     .get_file_info = default_fd_get_file_info,
+    .set_file_info = default_fd_set_file_info,
     .ioctl         = named_pipe_device_ioctl,
     .queue_async   = default_fd_queue_async,
 };
@@ -433,6 +365,7 @@ static const struct object_ops named_pipe_dir_ops =
 static const struct fd_ops named_pipe_dir_fd_ops =
 {
     .get_file_info = default_fd_get_file_info,
+    .set_file_info = default_fd_set_file_info,
     .ioctl         = named_pipe_dir_ioctl,
     .queue_async   = default_fd_queue_async,
 };
@@ -503,22 +436,6 @@ static struct fd *pipe_end_get_fd( struct object *obj )
     return (struct fd *) grab_object( pipe_end->fd );
 }
 
-#ifdef WEX_E1S6_TRANSPORT_TEST
-static void clear_pipe_binding( struct pipe_end *pipe_end )
-{
-    if (pipe_end->binding)
-    {
-        if (pipe_end->binding->desktop) release_object( pipe_end->binding->desktop );
-        if (pipe_end->binding->opener_process) release_object( pipe_end->binding->opener_process );
-        if (pipe_end->binding->writer_process) release_object( pipe_end->binding->writer_process );
-        if (pipe_end->binding->opener_token) release_object( pipe_end->binding->opener_token );
-        if (pipe_end->binding->dialog_process) release_object( pipe_end->binding->dialog_process );
-        if (pipe_end->binding->dialog_token) release_object( pipe_end->binding->dialog_token );
-        free( pipe_end->binding );
-        pipe_end->binding = NULL;
-    }
-}
-#endif
 
 static void clear_pipe_writer( struct pipe_writer *writer )
 {
@@ -585,15 +502,24 @@ static void pipe_end_disconnect( struct pipe_end *pipe_end, unsigned int status 
 
     pipe_end->connection = NULL;
 #ifdef WEX_E1S6_TRANSPORT_TEST
-    clear_pipe_binding( pipe_end );
+    e1lab_pipe_binding_free( pipe_end->binding );
+    pipe_end->binding = NULL;
 #endif
     clear_pipe_writer( &pipe_end->consumed_writer );
     pipe_end->consumed_valid = 0;
     pipe_end->binding_reads = 0;
+    free( pipe_end->acc_msg );
+    pipe_end->acc_msg = NULL;
+    pipe_end->acc_len = 0;
+    pipe_end->acc_valid = 0;
     if (pipe_end->client_primary) release_object( pipe_end->client_primary );
     if (pipe_end->client_process) release_object( pipe_end->client_process );
     pipe_end->client_primary = NULL;
     pipe_end->client_process = NULL;
+    /* nothing of the last client is reported once it is gone (a server end keeps them until the next connect else) */
+    pipe_end->client_pid = 0;
+    pipe_end->client_lease = 0;
+    pipe_end->client_session = PIPE_SESSION_UNKNOWN;
 
     pipe_end->state = status == STATUS_PIPE_DISCONNECTED
         ? FILE_PIPE_DISCONNECTED_STATE : FILE_PIPE_CLOSING_STATE;
@@ -626,7 +552,8 @@ static void pipe_end_destroy( struct object *obj )
 
     pipe_end_disconnect( pipe_end, STATUS_PIPE_BROKEN );
 #ifdef WEX_E1S6_TRANSPORT_TEST
-    clear_pipe_binding( pipe_end );
+    e1lab_pipe_binding_free( pipe_end->binding );
+    pipe_end->binding = NULL;
 #endif
 
     while (!list_empty( &pipe_end->message_queue ))
@@ -1047,6 +974,45 @@ static void pipe_end_get_file_info( struct fd *fd, obj_handle_t handle, unsigned
     }
 }
 
+static void pipe_end_set_file_info( struct fd *fd, struct async *async, unsigned int info_class )
+{
+    struct pipe_end *pipe_end = get_fd_user( fd );
+
+    switch (info_class)
+    {
+    case FilePipeInformation:
+        {
+            const FILE_PIPE_INFORMATION *info = get_req_data();
+
+            if (get_req_data_size() < sizeof(*info))
+            {
+                set_error( STATUS_INFO_LENGTH_MISMATCH );
+            }
+            else if ((info->CompletionMode | info->ReadMode) & ~1)
+            {
+                set_error( STATUS_INVALID_PARAMETER );
+            }
+            else if (!pipe_end->pipe)
+            {
+                set_error( STATUS_PIPE_DISCONNECTED );
+            }
+            else if (info->ReadMode && !pipe_end->pipe->message_mode)
+            {
+                set_error( STATUS_INVALID_PARAMETER );
+            }
+            else
+            {
+                pipe_end->flags = (info->CompletionMode ? NAMED_PIPE_NONBLOCKING_MODE    : 0) |
+                                  (info->ReadMode       ? NAMED_PIPE_MESSAGE_STREAM_READ : 0);
+            }
+        }
+        break;
+
+    default:
+        default_fd_set_file_info( fd, async, info_class );
+    }
+}
+
 static struct security_descriptor *pipe_end_get_sd( struct object *obj )
 {
     struct pipe_end *pipe_end = (struct pipe_end *) obj;
@@ -1114,6 +1080,23 @@ static void retain_consumed_writer( struct pipe_end *pipe_end, struct pipe_messa
     pipe_end->consumed_valid = 1;
 }
 
+/* H1 (the reviewer's A3): a reserved accounts instance keeps the client message its service last read, when that read
+ * took one whole message in message mode; any other read forgets it. accounts_forward sends only those bytes. */
+static void accounts_record_read( struct pipe_end *pipe_end, struct pipe_message *message, unsigned int status,
+                                  data_size_t size )
+{
+    if (pipe_end->obj.ops != &pipe_server_ops || !((struct pipe_server *)pipe_end)->reserved) return;
+    free( pipe_end->acc_msg );
+    pipe_end->acc_msg = NULL;
+    pipe_end->acc_len = 0;
+    pipe_end->acc_valid = 0;
+    if (status != STATUS_SUCCESS || !(pipe_end->flags & NAMED_PIPE_MESSAGE_STREAM_READ) || message->read_pos ||
+        size != message->iosb->in_size || size > WEX_ACCOUNTS_MAX_FRAME) return;
+    if (size && !(pipe_end->acc_msg = memdup( message->iosb->in_data, size ))) return;
+    pipe_end->acc_len = size;
+    pipe_end->acc_valid = 1;
+}
+
 static void message_queue_read( struct pipe_end *pipe_end, struct async *async )
 {
     struct iosb *iosb = async_get_iosb( async );
@@ -1144,6 +1127,7 @@ static void message_queue_read( struct pipe_end *pipe_end, struct async *async )
     if (!message->read_pos && message->iosb->in_size == iosb->out_size) /* fast path */
     {
         retain_consumed_writer( pipe_end, message, status, out_size );
+        accounts_record_read( pipe_end, message, status, out_size );
         async_request_complete( async, status, out_size, out_size, message->iosb->in_data );
         message->iosb->in_data = NULL;
         wake_message( message, message->iosb->in_size );
@@ -1164,7 +1148,11 @@ static void message_queue_read( struct pipe_end *pipe_end, struct async *async )
         do
         {
             message = LIST_ENTRY( list_head(&pipe_end->message_queue), struct pipe_message, entry );
-            if (!write_pos) retain_consumed_writer( pipe_end, message, status, out_size );
+            if (!write_pos)
+            {
+                retain_consumed_writer( pipe_end, message, status, out_size );
+                accounts_record_read( pipe_end, message, status, out_size );
+            }
             writing = min( out_size - write_pos, message->iosb->in_size - message->read_pos );
             if (writing) memcpy( buf + write_pos, (const char *)message->iosb->in_data + message->read_pos, writing );
             write_pos += writing;
@@ -1441,12 +1429,16 @@ static void pipe_end_get_connection_attribute( struct pipe_end *pipe_end )
 {
     const char *attr = get_req_data();
     data_size_t value_size, attr_size = get_req_data_size();
+    process_id_t client_pid = pipe_end->client_pid;
     void *value;
 
     if (attr_size == sizeof("ClientProcessId") && !memcmp( attr, "ClientProcessId", attr_size ))
     {
-        value = &pipe_end->client_pid;
-        value_size = sizeof(pipe_end->client_pid);
+        /* a bridged opener's id, once its block went to another server, may name another process: 0 then */
+        if (pipe_end->client_lease && !session0_id_lease_current( client_pid, pipe_end->client_lease ))
+            client_pid = 0;
+        value = &client_pid;
+        value_size = sizeof(client_pid);
     }
     else if (attr_size == sizeof("ServerProcessId") && !memcmp( attr, "ServerProcessId", attr_size ))
     {
@@ -1455,6 +1447,12 @@ static void pipe_end_get_connection_attribute( struct pipe_end *pipe_end )
     }
     else if (attr_size == sizeof("ClientSessionId") && !memcmp( attr, "ClientSessionId", attr_size ))
     {
+        /* an unknown session fails: 0 would be session 0's, the answer a service trusts most */
+        if (pipe_end->client_session == PIPE_SESSION_UNKNOWN)
+        {
+            set_error( STATUS_NOT_FOUND );
+            return;
+        }
         value = &pipe_end->client_session;
         value_size = sizeof(pipe_end->client_session);
     }
@@ -1613,10 +1611,17 @@ static void init_pipe_end( struct pipe_end *pipe_end, struct named_pipe *pipe,
     memset( &pipe_end->client_token_id, 0, sizeof(pipe_end->client_token_id) );
     memset( &pipe_end->client_modified_id, 0, sizeof(pipe_end->client_modified_id) );
     pipe_end->client_impersonated = 0;
-    pipe_end->client_session = 0;
+    pipe_end->client_session = PIPE_SESSION_UNKNOWN;
+    pipe_end->client_lease = 0;
+    /* also on the bridge's user side, which sets neither: FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE reads them */
+    pipe_end->client_pid = 0;
+    pipe_end->server_pid = 0;
     memset( &pipe_end->consumed_writer, 0, sizeof(pipe_end->consumed_writer) );
     pipe_end->binding_reads = 0;
     pipe_end->consumed_valid = 0;
+    pipe_end->acc_msg = NULL;
+    pipe_end->acc_len = 0;
+    pipe_end->acc_valid = 0;
 #ifdef WEX_E1S6_TRANSPORT_TEST
     pipe_end->binding = NULL;
 #endif
@@ -1657,6 +1662,7 @@ static struct pipe_server *create_pipe_server( struct named_pipe *pipe, unsigned
         return NULL;
 
     server->options = options;
+    server->reserved = 0;
     init_pipe_end( &server->pipe_end, pipe, pipe_flags, pipe->insize );
     server->pipe_end.state = FILE_PIPE_LISTENING_STATE;
     server->pipe_end.server_pid = get_process_id( current->process );
@@ -1685,7 +1691,7 @@ static struct pipe_end *create_pipe_client( struct named_pipe *pipe, data_size_t
     init_pipe_end( client, pipe, 0, buffer_size );
     client->state = FILE_PIPE_CONNECTED_STATE;
     client->client_pid = get_process_id( current->process );
-    client->client_session = current->process->token ? token_get_session_id( current->process->token ) : 0;
+    client->client_session = current->process->token ? token_get_session_id( current->process->token ) : PIPE_SESSION_UNKNOWN;
     client->client_process = (struct process *)grab_object( current->process );
     client->client_impersonated = (current->token != NULL);
     if (current->process->token)
@@ -1755,6 +1761,7 @@ static struct object *named_pipe_open_file( struct object *obj, unsigned int acc
         server->pipe_end.connection = client;
         client->connection = &server->pipe_end;
         server->pipe_end.client_pid = client->client_pid;
+        server->pipe_end.client_lease = 0;  /* a local client (the instance may have served a bridge before) */
         server->pipe_end.client_session = client->client_session;
         client->server_pid = server->pipe_end.server_pid;
         list_remove( &server->entry );
@@ -1809,8 +1816,15 @@ static void named_pipe_dir_ioctl( struct fd *fd, ioctl_code_t code, struct async
             params.name.str = buffer->Name;
             params.name.len = (buffer->NameLength / sizeof(WCHAR)) * sizeof(WCHAR);
             if (!(pipe = open_named_object( &params ))) return;
-            if (pipe->s0_name)  /* T5.2: whether session 0 has an instance free shows at the open */
+            if (pipe->s0_name)
             {
+                /* T5.2: a pipe of session 0. A missing one is not found, as on Windows, else an RPC client's
+                 * connect loop (open fails, wait succeeds) spins for ever; whether an instance is free shows at
+                 * the open */
+                struct token *token = current->token ? current->token : current->process->token;
+                unsigned int status = session0_wait_pipe( token, pipe->s0_name, pipe->s0_len );
+
+                if (status) set_error( status );
                 release_object( pipe );
                 return;
             }
@@ -1833,10 +1847,29 @@ static void named_pipe_dir_ioctl( struct fd *fd, ioctl_code_t code, struct async
 }
 
 
+/* WineExplorer H1: names that only LocalSystem may serve in session 0 (the accounts service's: plain and as the
+ * bridged name a session 0 process would use); 1 when the pipe has one */
+static const struct sid accounts_service_sid =
+    { SID_REVISION, SECURITY_SERVICE_ID_RID_COUNT, SECURITY_NT_AUTHORITY,
+      { SECURITY_SERVICE_ID_BASE_RID, WEX_ACCOUNTS_SERVICE_RIDS } };
+
+static int pipe_name_reserved( struct named_pipe *pipe )
+{
+    static const WCHAR accounts[] = {'a','c','c','o','u','n','t','s'};
+    static const WCHAR bridged[] = {'W','e','x','S','e','s','s','i','o','n','0','\\','a','c','c','o','u','n','t','s'};
+    data_size_t len;
+    const WCHAR *name;
+
+    if (!session0_server || !(name = get_object_name( &pipe->obj, &len ))) return 0;
+    return (len == sizeof(accounts) && !memicmp_strW( name, accounts, len )) ||
+           (len == sizeof(bridged) && !memicmp_strW( name, bridged, len ));
+}
+
 DECL_HANDLER(create_named_pipe)
 {
     struct named_pipe *pipe;
     struct pipe_server *server;
+    int reserved;
     struct named_pipe_init_data data = { .maxinstances = req->maxinstances, .outsize = req->outsize,
                                          .insize = req->insize, .sharing = req->sharing,
                                          .timeout = req->timeout, .flags = req->flags };
@@ -1869,6 +1902,7 @@ DECL_HANDLER(create_named_pipe)
         if (!(params.root = get_handle_obj( current->process, params.objattr->rootdir, 0, NULL ))) return;
     }
 
+    creating_pipe = 1;  /* B17: an lrpc\ name is this server's own when created here */
     switch (req->disposition)
     {
     case FILE_OPEN:
@@ -1885,10 +1919,23 @@ DECL_HANDLER(create_named_pipe)
         set_error( STATUS_INVALID_PARAMETER );
         break;
     }
+    creating_pipe = 0;
 
     if (params.root) release_object( params.root );
     if (!pipe) return;
     if (pipe->s0_name)  /* T5.2: session 0's pipes are served in session 0 only */
+    {
+        release_object( pipe );
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
+    /* H1: in session 0 only LocalSystem (its primary token, not impersonating) makes instances of a reserved name;
+     * they are marked, and accounts_forward serves only marked instances */
+    /* the accounts service only (B114): LocalSystem, not impersonating, with NT SERVICE\wexaccounts */
+    if ((reserved = pipe_name_reserved( pipe )) &&
+        (current->token || !current->process->token ||
+         token_service_account( current->process->token ) != SERVICE_ACCOUNT_SYSTEM ||
+         !token_sid_present( current->process->token, &accounts_service_sid, FALSE )))
     {
         release_object( pipe );
         set_error( STATUS_ACCESS_DENIED );
@@ -1915,6 +1962,7 @@ DECL_HANDLER(create_named_pipe)
     server = create_pipe_server( pipe, req->options, req->flags );
     if (server)
     {
+        server->reserved = reserved;
         reply->handle = alloc_handle( current->process, server, req->access, params.attr );
         pipe->instances++;
         release_object( server );
@@ -1923,244 +1971,7 @@ DECL_HANDLER(create_named_pipe)
     release_object( pipe );
 }
 
-DECL_HANDLER(set_named_pipe_info)
-{
-    struct pipe_end *pipe_end;
-
-    pipe_end = (struct pipe_end *)get_handle_obj( current->process, req->handle,
-                                                  FILE_WRITE_ATTRIBUTES, &pipe_server_ops );
-    if (!pipe_end)
-    {
-        if (get_error() != STATUS_OBJECT_TYPE_MISMATCH)
-            return;
-
-        clear_error();
-        pipe_end = (struct pipe_end *)get_handle_obj( current->process, req->handle,
-                                                      0, &pipe_client_ops );
-        if (!pipe_end) return;
-    }
-
-    if (!pipe_end->pipe)
-    {
-        set_error( STATUS_PIPE_DISCONNECTED );
-    }
-    else if ((req->flags & ~(NAMED_PIPE_MESSAGE_STREAM_READ | NAMED_PIPE_NONBLOCKING_MODE)) ||
-            ((req->flags & NAMED_PIPE_MESSAGE_STREAM_READ) && !pipe_end->pipe->message_mode))
-    {
-        set_error( STATUS_INVALID_PARAMETER );
-    }
-    else
-    {
-        pipe_end->flags = req->flags;
-    }
-
-    release_object( pipe_end );
-}
-
 /* WineExplorer private: opener and the single complete request message consumed by this server end. */
-#ifdef WEX_E1S6_TRANSPORT_TEST
-#define E1S6_BINDING_AUDIT(site) fprintf( stderr, "E1S6_DENY pipe site=%s\n", site )
-#else
-#define E1S6_BINDING_AUDIT(site) do {} while (0)
-#endif
-
-#if defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
-/* E1-S18e R10: the consumed record for token issue comes from the verifier, never from broker bytes.
- * After the verifier has consumed the evidence it sends one RECEIPT packet (E1R8 type 30) on the control
- * socket the server retained at endorsement, before it answers the broker. The broker's E1R8 op 4 only
- * names its S10 context; the server reads that one packet without blocking, requires the kernel
- * credentials of the endorsed root verifier, compares every field with the tuple it sealed at
- * ENDORSE_DIALOG and with the current generations, builds the kind 4 input itself and installs it with
- * the retained opener objects. Any failure burns the context. */
-struct receipt_cookie
-{
-    int verifier_pin;
-    unsigned long long root_gen, map_gen, policy_gen;
-};
-
-static int receipt_validate( void *cookie, const unsigned char *input )
-{
-    struct receipt_cookie *c = cookie;
-    struct pollfd pin = { c->verifier_pin, POLLIN, 0 };
-    unsigned long long gen;
-
-    if (poll( &pin, 1, 0 )) return 0;  /* the verifier that vouched has gone */
-    if (!accounts_get_map_generation( &gen ) || gen != c->map_gen) return 0;
-    if (!sysrun_get_root_generation( &gen ) || gen != c->root_gen) return 0;
-    if (!sysrun_get_policy_generation( &gen ) || gen != c->policy_gen) return 0;
-    return 1;
-}
-
-static void receipt_release( void *cookie )
-{
-    struct receipt_cookie *c = cookie;
-    close( c->verifier_pin );
-    free( c );
-}
-
-static int receipt_nonzero( const unsigned char *p, unsigned int n )
-{
-    unsigned char bits = 0;
-    while (n--) bits |= *p++;
-    return bits != 0;
-}
-
-static int install_verifier_receipt( struct pipe_binding *b, obj_handle_t context )
-{
-    static const unsigned char evidence_head[8] = { 3, 0, 1, 0, 220, 0, 0, 0 };
-    unsigned char pkt[512], input[WEX_TOKEN_INPUT_SIZE];
-    const unsigned char *t = b->sealed_tuple, *ev = pkt + 92;
-    char canonical[64], ancillary[256];
-    struct iovec io = { pkt, sizeof(pkt) };
-    struct msghdr msg = { 0 };
-    struct cmsghdr *cmsg;
-    struct ucred peer, cred;
-    struct pollfd live = { -1, POLLIN, 0 };
-    socklen_t len = sizeof(peer);
-    struct e1s_token_consumed r;
-    struct receipt_cookie *cookie = NULL;
-    struct timespec ts;
-    struct luid id, mod;
-    unsigned long long now, completed, expiry, gen, server_gen, broker_gen;
-    unsigned int i, name_len, creds = 0;
-    int fd = current->process->e1s6_control_fd, pin = -1, one = 1, ok = 0;
-    const char *site;
-    ssize_t n;
-
-    site = "receipt-opener";
-    if (b->opener_process->is_terminating || !b->opener_process->running_threads ||
-        b->opener_process->token != b->opener_token) goto done;
-    token_get_ids( b->opener_token, &id, &mod );
-    if (memcmp( &id, &b->opener_token_id, sizeof(id) ) || memcmp( &mod, &b->opener_modified_id, sizeof(mod) )) goto done;
-
-    site = "receipt-generations";
-    if (!sysrun_get_s6_generations( current->process, &server_gen, &broker_gen ) ||
-        server_gen != b->server_gen || broker_gen != b->broker_gen) goto done;
-    if (!accounts_get_map_generation( &gen ) || gen != b->map_gen) goto done;
-    if (!sysrun_get_root_generation( &gen ) || gen != b->root_gen) goto done;
-    if (!sysrun_get_policy_generation( &gen ) || gen != b->policy_gen) goto done;
-
-    /* the endorsed verifier: root peer of the retained control socket, pinned and alive */
-    site = "receipt-verifier";
-    if (fd < 0 || getsockopt( fd, SOL_SOCKET, SO_PEERCRED, &peer, &len ) || len != sizeof(peer) ||
-        peer.uid != 0 || peer.pid <= 0) goto done;
-    len = sizeof(pin);
-    if (getsockopt( fd, SOL_SOCKET, 77 /* SO_PEERPIDFD */, &pin, &len ) || len != sizeof(pin) || pin < 0)
-    { pin = -1; goto done; }
-    live.fd = pin;
-    if (poll( &live, 1, 0 )) goto done;
-    if (setsockopt( fd, SOL_SOCKET, SO_PASSCRED, &one, sizeof(one) )) goto done;
-
-    /* exactly one packet, already queued: the verifier sends it before it answers the broker */
-    site = "receipt-receive";
-    msg.msg_iov = &io; msg.msg_iovlen = 1;
-    msg.msg_control = ancillary; msg.msg_controllen = sizeof(ancillary);
-    n = recvmsg( fd, &msg, MSG_DONTWAIT | MSG_TRUNC | MSG_CMSG_CLOEXEC );
-    if (n < 0) goto done;
-    for (cmsg = CMSG_FIRSTHDR( &msg ); cmsg; cmsg = CMSG_NXTHDR( &msg, cmsg ))
-    {
-        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_CREDENTIALS &&
-            cmsg->cmsg_len == CMSG_LEN( sizeof(cred) ))
-        {
-            memcpy( &cred, CMSG_DATA( cmsg ), sizeof(cred) );
-            if (cred.uid != 0 || cred.pid != peer.pid) creds = 2;
-            creds++;
-        }
-        else
-        {
-            if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS)
-            {
-                int *fds = (int *)CMSG_DATA( cmsg );
-                unsigned int count = (cmsg->cmsg_len - CMSG_LEN( 0 )) / sizeof(int);
-                for (i = 0; i < count; i++) close( fds[i] );
-            }
-            creds = 2;
-        }
-    }
-    site = "receipt-sender";
-    if (creds != 1 || (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC))) goto done;
-
-    /* header: this attempt's request, attempt, nonce and channel as sealed at ENDORSE_DIALOG */
-    site = "receipt-frame";
-    if (n < 317 || n > 379 || memcmp( pkt, "E1R8", 4 ) || pkt[4] != 1 || pkt[5] || pkt[6] != 30 || pkt[7] ||
-        unpack_u32_le( pkt + 8 ) != (unsigned int)n || memcmp( pkt + 12, t, 12 ) || unpack_u32_le( pkt + 24 ) ||
-        memcmp( pkt + 28, t + 12, 48 ) || !receipt_nonzero( pkt + 76, 16 )) goto done;
-
-    /* the exact 220-byte evidence record against the sealed tuple and the binding's generations */
-    site = "receipt-evidence";
-    if (clock_gettime( CLOCK_MONOTONIC, &ts ) || ts.tv_sec <= 0) goto done;
-    now = (unsigned long long)ts.tv_sec * 1000000000 + ts.tv_nsec;
-    completed = unpack_u64_le( ev + 148 );
-    expiry = unpack_u64_le( ev + 156 );
-    if (memcmp( ev, evidence_head, 8 ) || unpack_u64_le( ev + 8 ) != 0x3ff ||
-        unpack_u32_le( ev + 212 ) != 1 || unpack_u32_le( ev + 216 ) != 1) goto done;
-    site = "receipt-evidence-request";
-    if (memcmp( ev + 16, t, 8 ) || memcmp( ev + 24, t + 92, 32 ) || memcmp( ev + 56, t + 60, 32 ) ||
-        memcmp( ev + 88, t + 12, 32 ) || memcmp( ev + 120, t + 8, 4 )) goto done;
-    site = "receipt-evidence-account";
-    if (!receipt_nonzero( ev + 124, 16 ) || !unpack_u64_le( ev + 140 ) ||
-        unpack_u64_le( ev + 140 ) >= 0xffffffffull) goto done;
-    site = "receipt-evidence-time";
-    if (!completed || completed > now || now >= expiry || expiry > unpack_u64_le( t + 124 )) goto done;
-    /* The record's root and verifier generations are the verifier's own instance values: the verifier
-     * generation is the one sealed in the tuple; its root generation has no server counterpart (the
-     * server's root generation is a path generation and stays in the kind 4 input from the tuple). */
-    site = "receipt-evidence-generations";
-    if (unpack_u64_le( ev + 172 ) != b->server_gen || unpack_u64_le( ev + 180 ) != b->broker_gen ||
-        unpack_u64_le( ev + 188 ) != unpack_u64_le( t + 156 ) || unpack_u64_le( ev + 196 ) != b->map_gen ||
-        unpack_u64_le( ev + 204 ) != b->policy_gen) goto done;
-
-    site = "receipt-name";
-    name_len = unpack_u32_le( pkt + 312 );
-    if (!name_len || name_len > 63 || (unsigned int)n != 316 + name_len) goto done;
-    for (i = 0; i < name_len; i++) if (pkt[316 + i] <= 0x20 || pkt[316 + i] >= 0x7f) goto done;
-    memcpy( canonical, pkt + 316, name_len );
-    canonical[name_len] = 0;
-
-    /* kind 4 from the sealed tuple and the receipt; nothing here is a broker byte */
-    memset( input, 0, sizeof(input) );
-    wex_token_put32( input, 0x00010004 );
-    wex_token_put32( input + 4, WEX_TOKEN_REQUEST_SIZE );
-    wex_token_put64( input + 8, WEX_TOKEN_CAPS );
-    memcpy( input + 16, t, 8 );             /* request id */
-    memcpy( input + 24, t + 92, 32 );       /* request digest */
-    memcpy( input + 56, t + 60, 32 );       /* binding digest */
-    memcpy( input + 88, t + 12, 32 );       /* nonce */
-    memcpy( input + 120, t + 8, 4 );        /* attempt */
-    memcpy( input + 124, ev + 124, 16 );    /* account key the verifier authenticated */
-    memcpy( input + 140, t + 132, 24 );     /* root, server, broker generations */
-    memcpy( input + 164, t + 164, 16 );     /* map, policy generations */
-    wex_token_put32( input + 180, b->caller_session );
-    memcpy( input + 188, pkt + 76, 16 );    /* evidence reference */
-
-    site = "receipt-install";
-    if (!(cookie = malloc( sizeof(*cookie) ))) goto done;
-    cookie->verifier_pin = pin;
-    cookie->root_gen = b->root_gen; cookie->map_gen = b->map_gen; cookie->policy_gen = b->policy_gen;
-    memset( &r, 0, sizeof(r) );
-    memcpy( r.input, input, sizeof(r.input) );
-    r.canonical_name = canonical;
-    r.caller = b->opener_process;
-    r.primary = b->opener_token;
-    r.expiry = expiry;
-    r.validate = receipt_validate;
-    r.release = receipt_release;
-    r.cookie = cookie;
-    if ((ok = token_install_e1s_consumed( context, &r ))) { pin = -1; cookie = NULL; }
-done:
-    if (!ok)
-    {
-        E1S6_BINDING_AUDIT( site );
-        token_install_e1s_consumed( context, NULL );  /* a failed receipt burns the context */
-        set_error( STATUS_ACCESS_DENIED );
-    }
-    else fprintf( stderr, "wex-r8: receipt installed\n" );
-    free( cookie );
-    if (pin >= 0) close( pin );
-    return ok;
-}
-#endif
-
 static int check_pipe_writer_binding( struct pipe_end *client, struct pipe_writer *writer )
 {
     struct luid opener_id, opener_modified, writer_id, writer_modified;
@@ -2187,36 +1998,16 @@ DECL_HANDLER(get_pipe_caller_binding)
     struct pipe_writer *writer;
     struct luid token_id, modified_id;
     obj_handle_t process = 0, token = 0, writer_process = 0, writer_token = 0;
-#ifdef WEX_E1S6_TRANSPORT_TEST
-    const unsigned char *req_data;
-    data_size_t req_size;
-    struct pipe_binding *b;
-    int rng, i;
-    unsigned char reply_buf[132];
-    unsigned char *ptr;
-    static const unsigned char zero16[16] = {0};
-#endif
 
 #ifdef WEX_E1S6_TRANSPORT_TEST
-    /* E1 R9: session 0's broker B0 registers its S6 channel with the verifier here. It has no caller in this
-     * server to bind (its requests come over the bridge; the verifier binds each attempt to the agent's channel),
-     * so none of the binding below applies: only the endorsement, whose own checks (the broker image mapped by one
-     * of session 0's programs, a LocalSystem primary token with SeTcbPrivilege, no thread token) decide. */
-    if (session0_server)
+    if (session0_server)  /* E1 R9: session 0's broker B0 endorses its S6 channel (wex_e1lab_pipe.c) */
     {
-        if (get_req_data_size() < 4 || !memcmp( get_req_data(), "E1R8", 4 ))
-        {
-            E1S6_BINDING_AUDIT( "session0-op" );
-            set_error( STATUS_ACCESS_DENIED );
-            return;
-        }
-        sysrun_e1s6_endorse( get_req_data(), get_req_data_size() );  /* sets the error itself */
+        e1lab_pipe_session0_endorse( get_req_data(), get_req_data_size() );
         return;
     }
 #endif
     /* Keep the same system-role / SeTcbPrivilege gate as create_linked_token. */
-    if (!elevation_enforced() || token_service_account( current->process->token ) != SERVICE_ACCOUNT_SYSTEM ||
-        !sysrun_process_privileged( current->process ) || !token_has_privilege( current->process->token, SeTcbPrivilege ))
+    if (!elevation_enforced() || !sysrun_process_is_tcb_system( current->process ))
     {
         E1S6_BINDING_AUDIT( "authority" );
         set_error( STATUS_ACCESS_DENIED );
@@ -2253,686 +2044,16 @@ DECL_HANDLER(get_pipe_caller_binding)
         if (!check_pipe_writer_binding( client, writer )) goto done;
 
 #ifdef WEX_E1S6_TRANSPORT_TEST
-        req_data = get_req_data();
-        req_size = get_req_data_size();
-        if (req_size >= 4 && !memcmp( req_data, "E1R8", 4 ))
+        if (get_req_data_size() >= 4 && !memcmp( get_req_data(), "E1R8", 4 ))
         {
-            unsigned short version, op;
-
-            if (req_size < 8)
-            {
-                E1S6_BINDING_AUDIT( "e1r8-size" );
-                set_error( STATUS_ACCESS_DENIED );
+            /* the lab's R8 operations on this server end's binding (wex_e1lab_pipe.c) */
+            if (!e1lab_pipe_e1r8_op( &server->binding, client->client_process, client->client_primary,
+                                     writer->process, writer->desktop, get_req_data(), get_req_data_size() ))
                 goto done;
-            }
-            version = req_data[4] | (req_data[5] << 8);
-            if (version != 1)
-            {
-                E1S6_BINDING_AUDIT( "e1r8-version" );
-                set_error( STATUS_ACCESS_DENIED );
-                goto done;
-            }
-            op = req_data[6] | (req_data[7] << 8);
-
-            if (op == 1)
-            {
-                if (req_size != 8)
-                {
-                    E1S6_BINDING_AUDIT( "e1r8-size" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-
-                if (!sysrun_process_is_broker( current->process ))
-                {
-                    E1S6_BINDING_AUDIT( "caller-not-broker" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (!process_pin_matches( client->client_process ))
-                {
-                    E1S6_BINDING_AUDIT( "opener-pin-missing" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (!writer->desktop)
-                {
-                    E1S6_BINDING_AUDIT( "writer-desktop-missing" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (server->binding)
-                {
-                    E1S6_BINDING_AUDIT( "binding-exists" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-
-                b = mem_alloc( sizeof(*b) );
-                if (!b)
-                {
-                    E1S6_BINDING_AUDIT( "binding-alloc" );
-                    set_error( STATUS_NO_MEMORY );
-                    goto done;
-                }
-                memset( b, 0, sizeof(*b) );
-
-                if (!registry_get_prefix_id( b->prefix_id ))
-                {
-                    free( b );
-                    E1S6_BINDING_AUDIT( "prefix-id" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-
-                rng = open( "/dev/urandom", O_RDONLY | O_CLOEXEC );
-                if (rng < 0)
-                {
-                    free( b );
-                    E1S6_BINDING_AUDIT( "rng-open" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                while (!memcmp( b->host_process_id, zero16, 16 ) || !memcmp( b->host_process_id, b->prefix_id, 16 ))
-                    if (read( rng, b->host_process_id, 16 ) != 16) { close( rng ); free( b ); set_error( STATUS_ACCESS_DENIED ); goto done; }
-                while (!memcmp( b->opener_id, zero16, 16 ) || !memcmp( b->opener_id, b->prefix_id, 16 ) || !memcmp( b->opener_id, b->host_process_id, 16 ))
-                    if (read( rng, b->opener_id, 16 ) != 16) { close( rng ); free( b ); set_error( STATUS_ACCESS_DENIED ); goto done; }
-                while (!memcmp( b->writer_id, zero16, 16 ) || !memcmp( b->writer_id, b->prefix_id, 16 ) || !memcmp( b->writer_id, b->host_process_id, 16 ) || !memcmp( b->writer_id, b->opener_id, 16 ))
-                    if (read( rng, b->writer_id, 16 ) != 16) { close( rng ); free( b ); set_error( STATUS_ACCESS_DENIED ); goto done; }
-                while (!memcmp( b->desktop_route, zero16, 16 ) || !memcmp( b->desktop_route, b->prefix_id, 16 ) || !memcmp( b->desktop_route, b->host_process_id, 16 ) || !memcmp( b->desktop_route, b->opener_id, 16 ) || !memcmp( b->desktop_route, b->writer_id, 16 ))
-                    if (read( rng, b->desktop_route, 16 ) != 16) { close( rng ); free( b ); set_error( STATUS_ACCESS_DENIED ); goto done; }
-                close( rng );
-
-                if (!sysrun_get_s6_generations( current->process, &b->server_gen, &b->broker_gen ))
-                {
-                    free( b );
-                    E1S6_BINDING_AUDIT( "s6-generations" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (!accounts_get_map_generation( &b->map_gen ))
-                {
-                    free( b );
-                    E1S6_BINDING_AUDIT( "map-generation" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (!sysrun_get_root_generation( &b->root_gen ) || !sysrun_get_policy_generation( &b->policy_gen ))
-                {
-                    free( b );
-                    E1S6_BINDING_AUDIT( "path-generations" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-
-                b->caller_session = client->client_process->session_id;
-                b->host_uid = client->client_process->wex_pin_uid;
-                b->opener_process = (struct process *)grab_object( client->client_process );
-                b->writer_process = (struct process *)grab_object( writer->process );
-                b->desktop = (struct desktop *)grab_object( writer->desktop );
-                b->opener_token = (struct token *)grab_object( client->client_primary );
-                token_get_ids( b->opener_token, &b->opener_token_id, &b->opener_modified_id );
-                server->binding = b;
-
-                ptr = reply_buf;
-                memcpy( ptr, b->prefix_id, 16 ); ptr += 16;
-                memcpy( ptr, b->host_process_id, 16 ); ptr += 16;
-                memcpy( ptr, b->opener_id, 16 ); ptr += 16;
-                memcpy( ptr, b->writer_id, 16 ); ptr += 16;
-                memcpy( ptr, b->desktop_route, 16 ); ptr += 16;
-
-                for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->server_gen >> (8 * i));
-                for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->root_gen >> (8 * i));
-                for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->broker_gen >> (8 * i));
-                for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->map_gen >> (8 * i));
-                for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->policy_gen >> (8 * i));
-
-                for (i = 0; i < 4; i++) *ptr++ = (unsigned char)(b->caller_session >> (8 * i));
-                for (i = 0; i < 8; i++) *ptr++ = (unsigned char)(b->host_uid >> (8 * i));
-                assert( ptr - reply_buf == 132 );
-                set_reply_data( reply_buf, sizeof(reply_buf) );
-            }
-            else if (op == 2)
-            {
-                obj_handle_t d_handle;
-                const unsigned char *tuple;
-                struct process *D;
-                unsigned long long cur_server_gen, cur_broker_gen;
-                unsigned long long cur_map_gen, cur_root_gen, cur_policy_gen;
-                unsigned long long t_deadline, t_root_gen, t_server_gen, t_broker_gen;
-                unsigned long long t_map_gen, t_policy_gen;
-                unsigned int t_caller_session, t_desktop_mode;
-                struct luid op_id, op_mod;
-
-                if (req_size != 216)
-                {
-                    E1S6_BINDING_AUDIT( "e1r8-size" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (!sysrun_process_is_broker( current->process ))
-                {
-                    E1S6_BINDING_AUDIT( "caller-not-broker" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (current->token)
-                {
-                    E1S6_BINDING_AUDIT( "caller-has-token" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (!sysrun_get_s6_generations( current->process, &cur_server_gen, &cur_broker_gen ))
-                {
-                    E1S6_BINDING_AUDIT( "s6-generations" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (!server->binding)
-                {
-                    E1S6_BINDING_AUDIT( "binding-missing" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                b = server->binding;
-                /* A further attempt of the same request gets a fresh dialog: only once the previous
-                 * dialog is gone, before any receipt, with the next attempt number (at most 3) and the
-                 * same request id and deadline. */
-                if (b->endorsed &&
-                    (b->receipt_used || b->dialog_process->running_threads ||
-                     memcmp( req_data + 12, b->sealed_tuple, 8 ) ||
-                     unpack_u32_le( req_data + 12 + 8 ) != unpack_u32_le( b->sealed_tuple + 8 ) + 1 ||
-                     unpack_u32_le( req_data + 12 + 8 ) > 3 ||
-                     memcmp( req_data + 12 + 124, b->sealed_tuple + 124, 8 )))
-                {
-                    E1S6_BINDING_AUDIT( "already-endorsed" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-
-                d_handle = (obj_handle_t)unpack_u32_le( req_data + 8 );
-                D = get_process_from_handle( d_handle, PROCESS_QUERY_LIMITED_INFORMATION );
-                if (!D)
-                {
-                    E1S6_BINDING_AUDIT( "dialog-handle" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (D->wex_creator != current->process)
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "dialog-creator" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (!D->wex_protected[0])
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "dialog-not-protected" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (!D->wex_dialog_image)
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "dialog-image-not-consent" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (!process_unstarted_suspended( D ))
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "dialog-not-suspended" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (token_service_account( D->token ) != SERVICE_ACCOUNT_SYSTEM)
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "dialog-not-system" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (!process_pin_matches( D ))
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "dialog-pin-mismatch" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (D->session_id != b->caller_session)
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "dialog-session-mismatch" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-
-                if (!dialog_desktop_ok( D, b, unpack_u32_le( req_data + 12 + 200 ) ))
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "dialog-desktop-mismatch" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-
-                tuple = req_data + 12;
-                t_deadline = unpack_u64_le( tuple + 124 );
-                t_root_gen = unpack_u64_le( tuple + 132 );
-                t_server_gen = unpack_u64_le( tuple + 140 );
-                t_broker_gen = unpack_u64_le( tuple + 148 );
-                /* tuple + 156 is verifier_gen, not checked by server */
-                t_map_gen = unpack_u64_le( tuple + 164 );
-                t_policy_gen = unpack_u64_le( tuple + 172 );
-                t_caller_session = unpack_u32_le( tuple + 180 );
-                t_desktop_mode = unpack_u32_le( tuple + 200 );
-
-                if (!t_deadline)
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "tuple-deadline" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (t_root_gen != b->root_gen)
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "tuple-root-gen" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (t_server_gen != b->server_gen)
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "tuple-server-gen" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (t_broker_gen != b->broker_gen)
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "tuple-broker-gen" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (t_map_gen != b->map_gen)
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "tuple-map-gen" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (t_policy_gen != b->policy_gen)
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "tuple-policy-gen" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (t_caller_session != b->caller_session)
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "tuple-caller-session" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (memcmp( tuple + 184, b->desktop_route, 16 ))
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "tuple-desktop-route" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (t_desktop_mode != 1 && t_desktop_mode != 2)
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "tuple-desktop-mode" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-
-                if (cur_server_gen != b->server_gen || cur_broker_gen != b->broker_gen)
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "current-s6-generations" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (!accounts_get_map_generation( &cur_map_gen ) || cur_map_gen != b->map_gen)
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "current-map-generation" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (!sysrun_get_root_generation( &cur_root_gen ) || cur_root_gen != b->root_gen ||
-                    !sysrun_get_policy_generation( &cur_policy_gen ) || cur_policy_gen != b->policy_gen)
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "current-path-generations" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-
-                if (b->opener_process->is_terminating || b->opener_process->running_threads == 0)
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "opener-dead" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (b->opener_process->token != b->opener_token)
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "opener-token-changed" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                token_get_ids( b->opener_token, &op_id, &op_mod );
-                if (memcmp( &op_id, &b->opener_token_id, sizeof(op_id) ) ||
-                    memcmp( &op_mod, &b->opener_modified_id, sizeof(op_mod) ))
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "opener-token-id-changed" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-
-                rng = open( "/dev/urandom", O_RDONLY | O_CLOEXEC );
-                if (rng < 0)
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "rng-open" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (b->endorsed) memset( b->dialog_id, 0, 16 );  /* a further attempt: a new dialog id */
-                while (!memcmp( b->dialog_id, zero16, 16 ) ||
-                       !memcmp( b->dialog_id, b->prefix_id, 16 ) ||
-                       !memcmp( b->dialog_id, b->host_process_id, 16 ) ||
-                       !memcmp( b->dialog_id, b->opener_id, 16 ) ||
-                       !memcmp( b->dialog_id, b->writer_id, 16 ) ||
-                       !memcmp( b->dialog_id, b->desktop_route, 16 ))
-                {
-                    if (read( rng, b->dialog_id, 16 ) != 16)
-                    {
-                        close( rng );
-                        release_object( D );
-                        E1S6_BINDING_AUDIT( "rng-read" );
-                        set_error( STATUS_ACCESS_DENIED );
-                        goto done;
-                    }
-                }
-                close( rng );
-
-                if (current->process->e1s6_control_fd < 0)
-                {
-                    release_object( D );
-                    E1S6_BINDING_AUDIT( "endorsed-control-fd" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                else
-                {
-                    unsigned char endorsed_buf[244];
-                    struct ucred sender = { getpid(), geteuid(), getegid() };
-                    char ancillary[CMSG_SPACE(sizeof(sender)) + CMSG_SPACE(2 * sizeof(int))];
-                    struct iovec io = { endorsed_buf, sizeof(endorsed_buf) };
-                    struct msghdr msg = { 0 };
-                    struct cmsghdr *cmsg;
-                    int d_pidfd, raised, sent_ok, rights[2];
-
-                    memcpy( endorsed_buf, "E1R8", 4 );
-                    endorsed_buf[4] = 1; endorsed_buf[5] = 0;   /* version: 1 */
-                    endorsed_buf[6] = 16; endorsed_buf[7] = 0;  /* type: 16 (ENDORSED) */
-                    endorsed_buf[8] = 244; endorsed_buf[9] = 0; /* length: 244 */
-                    endorsed_buf[10] = 0; endorsed_buf[11] = 0;
-                    memcpy( endorsed_buf + 12, tuple, 8 );       /* request_id */
-                    memcpy( endorsed_buf + 20, tuple + 8, 4 );   /* attempt */
-                    endorsed_buf[24] = 0; endorsed_buf[25] = 0;  /* reserved: 0 */
-                    endorsed_buf[26] = 0; endorsed_buf[27] = 0;
-                    memcpy( endorsed_buf + 28, tuple + 12, 32 ); /* nonce */
-                    memcpy( endorsed_buf + 60, tuple + 44, 16 ); /* channel_id */
-                    /* Tuple tail: tuple[60..203] (144 bytes) + dialog_id (16 bytes) = 160 bytes */
-                    memcpy( endorsed_buf + 76, tuple + 60, 144 );
-                    memcpy( endorsed_buf + 220, b->dialog_id, 16 );
-                    /* D's pin pid and uid (u32 LE each) */
-                    for (i = 0; i < 4; i++) endorsed_buf[236 + i] = (unsigned char)((unsigned int)D->wex_pin_pid >> (8 * i));
-                    for (i = 0; i < 4; i++) endorsed_buf[240 + i] = (unsigned char)(D->wex_pin_uid >> (8 * i));
-
-                    /* a duplicate of D's kernel pin, never a fresh lookup by pid (pid reuse) */
-                    d_pidfd = fcntl( D->wex_pin_pidfd, F_DUPFD_CLOEXEC, 0 );
-                    if (d_pidfd < 0)
-                    {
-                        release_object( D );
-                        E1S6_BINDING_AUDIT( "endorsed-pidfd-open" );
-                        set_error( STATUS_ACCESS_DENIED );
-                        goto done;
-                    }
-
-                    memset( ancillary, 0, sizeof(ancillary) );
-                    msg.msg_iov = &io;
-                    msg.msg_iovlen = 1;
-                    msg.msg_control = ancillary;
-                    msg.msg_controllen = sizeof(ancillary);
-
-                    cmsg = CMSG_FIRSTHDR( &msg );
-                    cmsg->cmsg_level = SOL_SOCKET;
-                    cmsg->cmsg_type = SCM_CREDENTIALS;
-                    cmsg->cmsg_len = CMSG_LEN( sizeof(sender) );
-
-                    cmsg = CMSG_NXTHDR( &msg, cmsg );
-                    cmsg->cmsg_level = SOL_SOCKET;
-                    cmsg->cmsg_type = SCM_RIGHTS;
-                    /* second right: this prefix's directory, so the verifier can provision the
-                     * administrator's profile in it without trusting a path (the kernel duplicates it) */
-                    rights[0] = d_pidfd;
-                    rights[1] = config_dir_fd;
-                    cmsg->cmsg_len = CMSG_LEN( sizeof(rights) );
-                    memcpy( CMSG_DATA(cmsg), rights, sizeof(rights) );
-
-                    sent_ok = 0;
-                    raised = sysrun_raise();
-                    if (raised)
-                    {
-                        sender.pid = getpid();
-                        sender.uid = geteuid();
-                        sender.gid = getegid();
-                        cmsg = CMSG_FIRSTHDR( &msg );
-                        memcpy( CMSG_DATA(cmsg), &sender, sizeof(sender) );
-                        sent_ok = (sendmsg( current->process->e1s6_control_fd, &msg, MSG_DONTWAIT | MSG_NOSIGNAL ) == (ssize_t)sizeof(endorsed_buf));
-                    }
-                    sysrun_drop( raised );
-                    close( d_pidfd );
-
-                    if (!sent_ok)
-                    {
-                        close( current->process->e1s6_control_fd );
-                        current->process->e1s6_control_fd = -1;
-                        release_object( D );
-                        E1S6_BINDING_AUDIT( "endorsed-send" );
-                        set_error( STATUS_ACCESS_DENIED );
-                        goto done;
-                    }
-                }
-
-                if (b->dialog_process) release_object( b->dialog_process );
-                if (b->dialog_token) release_object( b->dialog_token );
-                b->dialog_process = (struct process *)grab_object( D );
-                b->dialog_token = (struct token *)grab_object( D->token );
-                token_get_ids( b->dialog_token, &b->dialog_token_id, &b->dialog_modified_id );
-                b->dialog_pin_pid = D->wex_pin_pid;
-                memcpy( b->sealed_tuple, tuple, 204 );
-                memcpy( b->sealed_tuple + 204, b->dialog_id, 16 );
-                b->endorsed = 1;
-                release_object( D );
-
-                set_reply_data( b->dialog_id, 16 );
-            }
-            else if (op == 3)
-            {
-                unsigned long long cur_server_gen, cur_broker_gen;
-                unsigned long long cur_map_gen, cur_root_gen, cur_policy_gen;
-                struct luid id, mod;
-
-                if (req_size != 24)
-                {
-                    E1S6_BINDING_AUDIT( "e1r8-size" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (!sysrun_process_is_broker( current->process ))
-                {
-                    E1S6_BINDING_AUDIT( "recheck-caller-not-broker" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (current->token)
-                {
-                    E1S6_BINDING_AUDIT( "recheck-caller-has-token" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (!sysrun_get_s6_generations( current->process, &cur_server_gen, &cur_broker_gen ))
-                {
-                    E1S6_BINDING_AUDIT( "recheck-s6-generations" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (!server->binding || !server->binding->endorsed)
-                {
-                    E1S6_BINDING_AUDIT( "recheck-not-endorsed" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                b = server->binding;
-                if (memcmp( req_data + 8, b->dialog_id, 16 ))
-                {
-                    E1S6_BINDING_AUDIT( "recheck-dialog-id-mismatch" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-
-                if (b->dialog_process->is_terminating || b->dialog_process->running_threads == 0)
-                {
-                    E1S6_BINDING_AUDIT( "recheck-dialog-dead" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (b->dialog_process->token != b->dialog_token)
-                {
-                    E1S6_BINDING_AUDIT( "recheck-dialog-token-changed" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                token_get_ids( b->dialog_token, &id, &mod );
-                if (memcmp( &id, &b->dialog_token_id, sizeof(id) ) ||
-                    memcmp( &mod, &b->dialog_modified_id, sizeof(mod) ))
-                {
-                    E1S6_BINDING_AUDIT( "recheck-dialog-token-id-changed" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (b->dialog_process->session_id != b->caller_session)
-                {
-                    E1S6_BINDING_AUDIT( "recheck-dialog-session-mismatch" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (!dialog_desktop_ok( b->dialog_process, b, unpack_u32_le( b->sealed_tuple + 200 ) ))
-                {
-                    E1S6_BINDING_AUDIT( "recheck-dialog-desktop-mismatch" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-
-                if (!process_pin_matches( b->dialog_process ) || b->dialog_process->wex_pin_pid != b->dialog_pin_pid)
-                {
-                    E1S6_BINDING_AUDIT( "recheck-dialog-pin-mismatch" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-
-                if (b->opener_process->is_terminating || b->opener_process->running_threads == 0)
-                {
-                    E1S6_BINDING_AUDIT( "recheck-opener-dead" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (b->opener_process->token != b->opener_token)
-                {
-                    E1S6_BINDING_AUDIT( "recheck-opener-token-changed" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                token_get_ids( b->opener_token, &id, &mod );
-                if (memcmp( &id, &b->opener_token_id, sizeof(id) ) ||
-                    memcmp( &mod, &b->opener_modified_id, sizeof(mod) ))
-                {
-                    E1S6_BINDING_AUDIT( "recheck-opener-token-id-changed" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-
-                if (cur_server_gen != b->server_gen || cur_broker_gen != b->broker_gen)
-                {
-                    E1S6_BINDING_AUDIT( "recheck-current-s6-generations" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (!accounts_get_map_generation( &cur_map_gen ) || cur_map_gen != b->map_gen)
-                {
-                    E1S6_BINDING_AUDIT( "recheck-current-map-generation" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (!sysrun_get_root_generation( &cur_root_gen ) || cur_root_gen != b->root_gen ||
-                    !sysrun_get_policy_generation( &cur_policy_gen ) || cur_policy_gen != b->policy_gen)
-                {
-                    E1S6_BINDING_AUDIT( "recheck-current-path-generations" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-            }
-#ifdef __linux__
-            else if (op == 4)
-            {
-                /* R10: install the verifier's receipt into the broker's S10 context (handle at 8) */
-                if (req_size != 12)
-                {
-                    E1S6_BINDING_AUDIT( "e1r8-size" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (!sysrun_process_is_broker( current->process ) || current->token)
-                {
-                    E1S6_BINDING_AUDIT( "receipt-caller-not-broker" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                if (!server->binding || !server->binding->endorsed || server->binding->receipt_used)
-                {
-                    E1S6_BINDING_AUDIT( "receipt-state" );
-                    set_error( STATUS_ACCESS_DENIED );
-                    goto done;
-                }
-                b = server->binding;
-                b->receipt_used = 1;
-                if (!install_verifier_receipt( b, (obj_handle_t)unpack_u32_le( req_data + 8 ) )) goto done;
-            }
-#endif
-            else
-            {
-                E1S6_BINDING_AUDIT( "e1r8-op" );
-                set_error( STATUS_ACCESS_DENIED );
-                goto done;
-            }
         }
         else
 #endif
-        {
-            if (!sysrun_e1s6_endorse( get_req_data(), get_req_data_size() )) goto done;
-        }
+        if (!sysrun_e1s6_endorse( get_req_data(), get_req_data_size() )) goto done;
     }
 
     process = alloc_handle( current->process, client->client_process,
@@ -3242,17 +2363,63 @@ static struct pipe_bridge *create_pipe_bridge( struct named_pipe *pipe, int sock
     return bridge;
 }
 
-/* a user's server: a name under WexSession0\ names a pipe of session 0. The object stands for it in the open */
+static const WCHAR lrpc_prefix[] = {'l','r','p','c','\\'};
+
+static int name_starts( const WCHAR *name, data_size_t len, const WCHAR *start, data_size_t start_len )
+{
+    return len >= start_len && !memicmp_strW( name, start, start_len );
+}
+
+/* a name under lrpc\ (rpcrt4's ncalrpc endpoints) that a service names itself. Not the endpoints every session's
+ * own rpcss has (epmapper, irpcss, irot), nor Wine's lsass (lsasspirpc: it reads and writes its callers' memory by
+ * process id, so it serves its own server's processes only; bridged, it made secur32's DllMain wait for ever), nor
+ * names made from a process id or an OXID (LRPC<pid>.<n>, COM's \pipe\OLE_<oxid>): process ids are per server, so
+ * the same name in session 0 is another process. */
+static int is_lrpc_pipe_name( const WCHAR *name, data_size_t len )
+{
+    static const WCHAR pipe_dir[] = {'\\','p','i','p','e','\\'};
+    static const WCHAR epmapper[] = {'e','p','m','a','p','p','e','r'};
+    static const WCHAR irpcss[] = {'i','r','p','c','s','s'};
+    static const WCHAR irot[] = {'i','r','o','t'};
+    static const WCHAR lsass[] = {'l','s','a','s','s','p','i','r','p','c'};
+    static const WCHAR ole[] = {'O','L','E','_'};
+    static const WCHAR lrpc[] = {'L','R','P','C'};
+
+    if (len <= sizeof(lrpc_prefix) || !name_starts( name, len, lrpc_prefix, sizeof(lrpc_prefix) )) return 0;
+    name += ARRAY_SIZE(lrpc_prefix);
+    len -= sizeof(lrpc_prefix);
+    if (name_starts( name, len, pipe_dir, sizeof(pipe_dir) ))
+    {
+        name += ARRAY_SIZE(pipe_dir);
+        len -= sizeof(pipe_dir);
+    }
+    if (!len) return 0;
+    if ((len == sizeof(epmapper) && name_starts( name, len, epmapper, len )) ||
+        (len == sizeof(irpcss) && name_starts( name, len, irpcss, len )) ||
+        (len == sizeof(irot) && name_starts( name, len, irot, len )) ||
+        (len == sizeof(lsass) && name_starts( name, len, lsass, len )))
+        return 0;
+    return !name_starts( name, len, ole, sizeof(ole) ) && !name_starts( name, len, lrpc, sizeof(lrpc) );
+}
+
+/* a user's server: a name under WexSession0\ names a pipe of session 0. So does an ncalrpc endpoint (lrpc\...) that
+ * this server does not have: on Windows one namespace serves every session, and a service in session 0 offers its
+ * RPC interface to the users' programs that way (B17). The object stands for the pipe in the open. */
 static struct object *pipe_bridge_lookup( struct unicode_str *name )
 {
     static const WCHAR prefix[] = {'W','e','x','S','e','s','s','i','o','n','0','\\'};
-    const data_size_t prefix_len = sizeof(prefix);
+    data_size_t prefix_len = sizeof(prefix);
     struct named_pipe_init_data data = { .maxinstances = 1, .outsize = 65536, .insize = 65536,
                                          .sharing = FILE_SHARE_READ | FILE_SHARE_WRITE,
                                          .flags = NAMED_PIPE_MESSAGE_STREAM_WRITE };
     struct named_pipe *pipe;
 
-    if (name->len <= prefix_len || memicmp_strW( name->str, prefix, prefix_len )) return NULL;
+    if (is_lrpc_pipe_name( name->str, name->len ))
+    {
+        if (creating_pipe) return NULL;  /* a server here makes its own endpoint */
+        prefix_len = 0;  /* the same name there */
+    }
+    else if (name->len <= prefix_len || memicmp_strW( name->str, prefix, prefix_len )) return NULL;
     if (!(pipe = alloc_object( &named_pipe_ops ))) return NULL;
     named_pipe_init( &pipe->obj, &data );
     if (!(pipe->s0_name = memdup( (const char *)name->str + prefix_len, name->len - prefix_len )))
@@ -3295,45 +2462,43 @@ static int pipe_bridge_allowed( const WCHAR *name, data_size_t len )
 {
     static const WCHAR svcctl[] = {'s','v','c','c','t','l'};
     static const WCHAR broker[] = {'w','e','x','e','l','e','v','a','t','e','.','r','9'};  /* E1 R9's B0 */
+    static const WCHAR eventlog[] = {'e','v','e','n','t','l','o','g'};  /* the EventLog service (L1) */
+    static const WCHAR accounts[] = {'a','c','c','o','u','n','t','s'};  /* the accounts service (H1) */
 
     if (len == sizeof(svcctl) && !memicmp_strW( name, svcctl, len )) return 1;
+    if (len == sizeof(eventlog) && !memicmp_strW( name, eventlog, len )) return 2;  /* link_bound_token needs the link */
+    if (len == sizeof(accounts) && !memicmp_strW( name, accounts, len )) return 2;
     if (len == sizeof(broker) && !memicmp_strW( name, broker, len )) return 2;
+    /* a service's ncalrpc endpoint: the pipe's descriptor decides, and the service checks its callers itself */
+    if (is_lrpc_pipe_name( name, len )) return 1;
     return 0;
 }
 
 /* session 0: connect a session's opener (described by token) to a listening instance of the named pipe, over sock
  * (owned from now on); the status for the session's server */
-unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_size_t len, int sock, uid_t uid,
-                                 int session )
+/* session 0: the pipe NAME that a session's program may reach (a name on the list, or an ncalrpc endpoint of a
+ * linked session's server); NULL with *status set */
+static struct named_pipe *pipe_bridge_find( const WCHAR *name, data_size_t len, uid_t uid, int session,
+                                            unsigned int *status )
 {
     static const WCHAR device[] = {'\\','D','e','v','i','c','e','\\','N','a','m','e','d','P','i','p','e','\\'};
     struct object_params params = { .ops = &named_pipe_ops, .attr = OBJ_CASE_INSENSITIVE };
-    unsigned int access = FILE_GENERIC_READ | FILE_GENERIC_WRITE, count = 0;
-    struct pipe_bridge *bridge, *other;
-    struct pipe_server *server;
     struct named_pipe *pipe;
     WCHAR *path;
-    int allowed;
+    int allowed = 0;
 
     if (!len || len % sizeof(WCHAR) || !(allowed = pipe_bridge_allowed( name, len )) ||
         (allowed == 2 && session < 0))
     {
         fprintf( stderr, "session0: pipe open refused for uid %u: %s\n", (unsigned int)uid,
                  allowed == 2 ? "the server has no session link" : "the name is not on the list" );
-        close( sock );
-        return STATUS_ACCESS_DENIED;
-    }
-    LIST_FOR_EACH_ENTRY( other, &bridges, struct pipe_bridge, entry )
-        if (other->peer_uid == uid) count++;
-    if (count >= PIPE_BRIDGE_MAX_PER_USER)
-    {
-        close( sock );
-        return STATUS_INSUFFICIENT_RESOURCES;
+        *status = STATUS_ACCESS_DENIED;
+        return NULL;
     }
     if (!(path = malloc( sizeof(device) + len )))
     {
-        close( sock );
-        return STATUS_NO_MEMORY;
+        *status = STATUS_NO_MEMORY;
+        return NULL;
     }
     memcpy( path, device, sizeof(device) );
     memcpy( (char *)path + sizeof(device), name, len );
@@ -3342,10 +2507,39 @@ unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_si
     clear_error();
     pipe = open_named_object( &params );
     free( path );
-    if (!pipe)
+    if (!pipe) *status = get_error() ? get_error() : STATUS_OBJECT_NAME_NOT_FOUND;
+    return pipe;
+}
+
+/* session 0: whether a session's program waiting for the pipe NAME finds it here (no instance is taken) */
+unsigned int pipe_bridge_query( const WCHAR *name, data_size_t len, uid_t uid, int session )
+{
+    unsigned int status = STATUS_SUCCESS;
+    struct named_pipe *pipe = pipe_bridge_find( name, len, uid, session, &status );
+
+    if (pipe) release_object( pipe );
+    return status;
+}
+
+unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_size_t len, int sock, uid_t uid,
+                                 int session, unsigned int client_pid, unsigned int lease )
+{
+    unsigned int access = FILE_GENERIC_READ | FILE_GENERIC_WRITE, count = 0, status = STATUS_SUCCESS;
+    struct pipe_bridge *bridge, *other;
+    struct pipe_server *server;
+    struct named_pipe *pipe;
+
+    LIST_FOR_EACH_ENTRY( other, &bridges, struct pipe_bridge, entry )
+        if (other->peer_uid == uid) count++;
+    if (count >= PIPE_BRIDGE_MAX_PER_USER)
     {
         close( sock );
-        return get_error() ? get_error() : STATUS_OBJECT_NAME_NOT_FOUND;
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    if (!(pipe = pipe_bridge_find( name, len, uid, session, &status )))
+    {
+        close( sock );
+        return status;
     }
     if (!check_object_access( token, &pipe->obj, &access ) ||
         !(pipe->sharing & FILE_SHARE_READ) || !(pipe->sharing & FILE_SHARE_WRITE))
@@ -3375,10 +2569,86 @@ unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_si
     server->pipe_end.connection = &bridge->pipe_end;
     bridge->pipe_end.connection = &server->pipe_end;
     bridge->pipe_end.server_pid = server->pipe_end.server_pid;
-    bridge->pipe_end.client_session = session > 0 ? session : 0;
+    /* the opener is a process of another server. Its id comes from a block session 0 leased to that server (R6), so
+       it names no process here and is unique on the machine; 0 when the opener's server gave none that session 0
+       could check (also no stale id of an earlier client) */
+    bridge->pipe_end.client_pid = client_pid;
+    server->pipe_end.client_pid = client_pid;
+    bridge->pipe_end.client_lease = client_pid ? lease : 0;
+    server->pipe_end.client_lease = bridge->pipe_end.client_lease;
+    bridge->pipe_end.client_session = session > 0 ? session : PIPE_SESSION_UNKNOWN;
     server->pipe_end.client_session = bridge->pipe_end.client_session;  /* R9: the session of the opener's server */
     list_remove( &server->entry );
     release_object( pipe );
     pipe_bridge_update_events( &bridge->pipe_end );
     return STATUS_SUCCESS;
+}
+
+/* WineExplorer (H3): the class of a service's caller: the client of a pipe connection (the server end's), or a token */
+DECL_HANDLER(get_caller_class)
+{
+    if (req->is_pipe)
+    {
+        struct pipe_server *server = (struct pipe_server *)get_handle_obj( current->process, req->handle, 0,
+                                                                           &pipe_server_ops );
+        struct pipe_end *client;
+
+        if (!server) return;
+        if (!(client = server->pipe_end.connection)) set_error( STATUS_PIPE_DISCONNECTED );
+        /* the token the client opened with (a bridge's: the link-bound description) */
+        else reply->caller_class = token_caller_class( client->client_token ? client->client_token : client->client_primary );
+        release_object( server );
+    }
+    else
+    {
+        struct token *token = get_token_obj( current->process, req->handle, TOKEN_QUERY );
+
+        if (!token) return;
+        reply->caller_class = token_caller_class( token );
+        release_object( token );
+    }
+}
+
+/* WineExplorer (H1): the accounts service forwards one request of a client of its reserved pipe to the root helper.
+ * Only an instance made under the reservation, connected to a session's program through the bridge with a link-bound
+ * description; the verdict and the uid come from that connection, never from the service. The body is the client's
+ * own bytes: a part of the message the service last read whole, and each message is forwarded once (A3) */
+DECL_HANDLER(accounts_forward)
+{
+    struct pipe_server *server = (struct pipe_server *)get_handle_obj( current->process, req->pipe, 0,
+                                                                       &pipe_server_ops );
+    struct pipe_end *client;
+    struct object *call;
+    unsigned int verdict;
+
+    if (!server) return;
+    client = server->pipe_end.connection;
+    if (!server->reserved || !client || client->obj.ops != &pipe_bridge_ops || !client->client_token ||
+        !token_is_link_bound( client->client_token ) || ((struct pipe_bridge *)client)->peer_uid == (uid_t)-1)
+    {
+        release_object( server );
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
+    if (!server->pipe_end.acc_valid || req->offset > server->pipe_end.acc_len ||
+        req->length > server->pipe_end.acc_len - req->offset)
+    {
+        release_object( server );
+        set_error( server->pipe_end.acc_valid ? STATUS_INVALID_PARAMETER : STATUS_INVALID_DEVICE_STATE );
+        return;
+    }
+    server->pipe_end.acc_valid = 0;  /* one forward per message */
+    switch (token_caller_class( client->client_token ))
+    {
+    case WEX_CALLER_ELEVATED_ADMIN: verdict = WEX_ACCOUNTS_VERDICT_ELEVATED; break;
+    case WEX_CALLER_USER:           verdict = WEX_ACCOUNTS_VERDICT_USER; break;
+    default:                        verdict = WEX_ACCOUNTS_VERDICT_NONE; break;
+    }
+    if ((call = accounts_call_start( req->op, verdict, ((struct pipe_bridge *)client)->peer_uid,
+                                     req->length ? server->pipe_end.acc_msg + req->offset : "", req->length )))
+    {
+        reply->call = alloc_handle( current->process, call, SYNCHRONIZE, 0 );
+        release_object( call );
+    }
+    release_object( server );
 }

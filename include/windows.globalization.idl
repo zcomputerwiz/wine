@@ -37,6 +37,10 @@ namespace Windows {
         interface ICalendar;
         interface ICalendarFactory;
         interface ICalendarFactory2;
+        interface ICalendarIdentifiersStatics;
+        interface ICalendarIdentifiersStatics2;
+        interface ICalendarIdentifiersStatics3;
+        interface IClockIdentifiersStatics;
         interface ILanguage;
         interface ILanguage2;
         interface ILanguage3;
@@ -51,6 +55,8 @@ namespace Windows {
         interface ITimeZoneOnCalendar;
         runtimeclass ApplicationLanguages;
         runtimeclass Calendar;
+        runtimeclass CalendarIdentifiers;
+        runtimeclass ClockIdentifiers;
         runtimeclass Language;
         runtimeclass GeographicRegion;
     }
@@ -196,6 +202,59 @@ namespace Windows {
             [propget] HRESULT NumberOfSecondsInThisMinute([out, retval] INT32 *value);
             [propget] HRESULT ResolvedLanguage([out, retval] HSTRING *value);
             [propget] HRESULT IsDaylightSavingTime([out, retval] boolean *value);
+        }
+
+        [
+            contract(Windows.Foundation.UniversalApiContract, 1.0),
+            exclusiveto(Windows.Globalization.CalendarIdentifiers),
+            uuid(80653f68-2cb2-4c1f-b590-f0f52bf4fd1a)
+        ]
+        interface ICalendarIdentifiersStatics : IInspectable
+        {
+            [propget] HRESULT Gregorian([out, retval] HSTRING *value);
+            [propget] HRESULT Hebrew([out, retval] HSTRING *value);
+            [propget] HRESULT Hijri([out, retval] HSTRING *value);
+            [propget] HRESULT Japanese([out, retval] HSTRING *value);
+            [propget] HRESULT Julian([out, retval] HSTRING *value);
+            [propget] HRESULT Korean([out, retval] HSTRING *value);
+            [propget] HRESULT Taiwan([out, retval] HSTRING *value);
+            [propget] HRESULT Thai([out, retval] HSTRING *value);
+            [propget] HRESULT UmAlQura([out, retval] HSTRING *value);
+        }
+
+        [
+            contract(Windows.Foundation.UniversalApiContract, 1.0),
+            exclusiveto(Windows.Globalization.CalendarIdentifiers),
+            uuid(7df4d488-5fd0-42a7-95b5-7d98d823075f)
+        ]
+        interface ICalendarIdentifiersStatics2 : IInspectable
+        {
+            [propget] HRESULT Persian([out, retval] HSTRING *value);
+        }
+
+        [
+            contract(Windows.Foundation.UniversalApiContract, 3.0),
+            exclusiveto(Windows.Globalization.CalendarIdentifiers),
+            uuid(2c225423-1fad-40c0-9334-a8eb90db04f5)
+        ]
+        interface ICalendarIdentifiersStatics3 : IInspectable
+        {
+            [propget] HRESULT ChineseLunar([out, retval] HSTRING *value);
+            [propget] HRESULT JapaneseLunar([out, retval] HSTRING *value);
+            [propget] HRESULT KoreanLunar([out, retval] HSTRING *value);
+            [propget] HRESULT TaiwanLunar([out, retval] HSTRING *value);
+            [propget] HRESULT VietnameseLunar([out, retval] HSTRING *value);
+        }
+
+        [
+            contract(Windows.Foundation.UniversalApiContract, 1.0),
+            exclusiveto(Windows.Globalization.ClockIdentifiers),
+            uuid(523805bb-12ec-4f83-bc31-b1b4376b0808)
+        ]
+        interface IClockIdentifiersStatics : IInspectable
+        {
+            [propget] HRESULT TwelveHour([out, retval] HSTRING *value);
+            [propget] HRESULT TwentyFourHour([out, retval] HSTRING *value);
         }
 
         [
@@ -398,6 +457,28 @@ namespace Windows {
         {
             [contract(Windows.Foundation.UniversalApiContract, 1.0)] [default] interface Windows.Globalization.ICalendar;
             [contract(Windows.Foundation.UniversalApiContract, 1.0)] interface Windows.Globalization.ITimeZoneOnCalendar;
+        }
+
+        [
+            contract(Windows.Foundation.UniversalApiContract, 1.0),
+            marshaling_behavior(agile),
+            static(Windows.Globalization.ICalendarIdentifiersStatics, Windows.Foundation.UniversalApiContract, 1.0),
+            static(Windows.Globalization.ICalendarIdentifiersStatics2, Windows.Foundation.UniversalApiContract, 1.0),
+            static(Windows.Globalization.ICalendarIdentifiersStatics3, Windows.Foundation.UniversalApiContract, 3.0),
+            threading(both)
+        ]
+        runtimeclass CalendarIdentifiers
+        {
+        }
+
+        [
+            contract(Windows.Foundation.UniversalApiContract, 1.0),
+            marshaling_behavior(agile),
+            static(Windows.Globalization.IClockIdentifiersStatics, Windows.Foundation.UniversalApiContract, 1.0),
+            threading(both)
+        ]
+        runtimeclass ClockIdentifiers
+        {
         }
 
         [

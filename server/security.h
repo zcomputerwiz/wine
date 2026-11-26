@@ -66,6 +66,8 @@ extern struct token *token_create_admin( unsigned primary, int impersonation_lev
 /* accounts of the system role (docs/ELEVATION_SYSTEM_ROLE_WORKORDER.md, C3); the numbers are in the protocol */
 enum { SERVICE_ACCOUNT_SYSTEM, SERVICE_ACCOUNT_LOCAL_SERVICE, SERVICE_ACCOUNT_NETWORK_SERVICE };
 extern struct token *token_create_service( unsigned int account, unsigned int session_id );
+extern struct token *token_create_service_sid( unsigned int account, unsigned int session_id,
+                                               const struct sid *own_sid );
 /* the first interactive user token of the server; gets a new logon (authentication) id */
 extern struct token *token_create_first_interactive( unsigned int session_id );
 /* copy the authentication (logon) id from src to dst */
@@ -73,9 +75,14 @@ extern void token_copy_auth_id( struct token *dst, const struct token *src );
 extern int token_service_account( const struct token *token );
 extern int token_is_elevated( const struct token *token );
 extern int token_protect_elevated( struct token *token );
+/* R7: Windows' descriptor for the token of a system process: a service's (service) or another's */
+extern int token_protect_system( struct token *token, int service );
+extern int token_keep_descriptor( struct token *dst, const struct token *src );
 extern void token_make_filtered( struct token *token );
+extern void token_make_full( struct token *token );
 extern void token_make_standard( struct token *token );
 extern int user_is_administrator(void);
+extern int security_server_user_in_domain_group( unsigned int rid );
 extern int standard_user_session;
 extern int token_assign_label( struct token *token, const struct sid *label );
 extern struct token *token_duplicate( struct token *src_token, unsigned primary,
@@ -91,9 +98,16 @@ extern const struct acl *token_get_default_dacl( struct token *token );
 extern const struct sid *token_get_owner( struct token *token );
 extern const struct sid *token_get_primary_group( struct token *token );
 extern unsigned int token_get_session_id( struct token *token );
+extern struct sid *token_desktop_manager_user( struct token *token );
+extern unsigned int token_desktop_manager_il( struct token *token );
+extern int token_may_take_desktop( struct token *token, const struct sid *user, unsigned int session, unsigned int il );
 /* WineExplorer system tier: a token described to session 0, and rebuilt there */
 extern data_size_t token_describe( struct token *token, void *data, data_size_t size );
 extern struct token *token_create_described( const void *data, data_size_t size );
+extern int token_can_act( const struct token *token );
+extern void token_set_link_bound( struct token *token, unsigned int session );
+extern int token_is_link_bound( struct token *token );
+extern unsigned int token_caller_class( struct token *token );  /* WEX_CALLER_* (wine/wex_caller.h) */
 extern void token_get_ids( const struct token *token, struct luid *token_id, struct luid *modified_id );
 extern int token_sid_present( struct token *token, const struct sid *sid, int deny );
 
@@ -148,6 +162,7 @@ extern int check_object_access( struct token *token, struct object *obj, unsigne
 
 /* elevation enforcement is on while an elevation helper is configured (registry.c) */
 extern int elevation_helper_unset(void);
+extern int uwp_compatibility_enabled( const struct sid *user );
 static inline int elevation_enforced(void) { return !elevation_helper_unset(); }
 extern int object_is_registry_key( struct object *obj );
 extern const struct luid SeAssignPrimaryTokenPrivilege;

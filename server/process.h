@@ -74,6 +74,8 @@ struct process
     unsigned int         is_terminating:1;/* is process terminating? */
     data_size_t          imagelen;        /* length of image path in bytes */
     WCHAR               *image;           /* main exe image full path */
+    data_size_t          cmdlinelen;      /* length of the command line in bytes */
+    WCHAR               *cmdline;         /* command line given at creation (ProcessCommandLineInformation) */
     struct job          *job;             /* job object associated with this process */
     struct list          job_entry;       /* list entry for job object */
     struct list          asyncs;          /* list of async object owned by the process */
@@ -129,6 +131,8 @@ struct process
 /* process functions */
 
 extern unsigned int alloc_ptid( void *ptr );
+extern int ptid_add_block( unsigned int block );
+extern unsigned int ptid_block( unsigned int i );
 extern void free_ptid( unsigned int id );
 extern int process_e1s_profile_busy( const struct sid * );
 extern int wex_handle_allowed( struct process *dst, struct object *obj );

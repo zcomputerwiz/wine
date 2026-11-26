@@ -175,6 +175,7 @@ struct fontface_desc
     UINT32 index;
     DWRITE_FONT_SIMULATIONS simulations;
     struct dwrite_font_data *font_data; /* could be NULL when face is created directly with IDWriteFactory::CreateFontFace() */
+    unsigned int instance; /* a variable font's named instance, 1-based; 0 for the font itself */
 };
 
 struct dwrite_fonttable
@@ -265,6 +266,7 @@ struct dwrite_fontface
     IDWriteFontFileStream *stream;
     IDWriteFontFile *file;
     UINT32 index;
+    unsigned int instance; /* a variable font's named instance, 1-based; 0 for the font itself */
 
     IDWriteFactory7 *factory;
     struct fontfacecached *cached;
@@ -360,8 +362,12 @@ extern HRESULT create_matching_font(IDWriteFontCollection *collection, const WCH
 extern HRESULT create_fontfacereference(IDWriteFactory7 *factory, IDWriteFontFile *file, UINT32 face_index,
         DWRITE_FONT_SIMULATIONS simulations, DWRITE_FONT_AXIS_VALUE const *axis_values, UINT32 axis_values_count,
         IDWriteFontFaceReference1 **reference);
+extern HRESULT factory_create_fontface(IDWriteFactory7 *factory, DWRITE_FONT_FACE_TYPE face_type, UINT32 files_number,
+        IDWriteFontFile * const *files, UINT32 index, DWRITE_FONT_SIMULATIONS simulations, unsigned int instance,
+        IDWriteFontFace **fontface);
 extern HRESULT factory_get_cached_fontface(IDWriteFactory7 *factory, IDWriteFontFile * const *files, UINT32 num_files,
-        DWRITE_FONT_SIMULATIONS simulations, struct list **cache, REFIID riid, void **obj);
+        DWRITE_FONT_SIMULATIONS simulations, unsigned int instance, struct list **cache, REFIID riid, void **obj);
+extern BOOL fontcollection_addref_if_alive(IDWriteFontCollection *iface);
 extern void factory_detach_fontcollection(IDWriteFactory7 *factory, IDWriteFontCollection3 *collection);
 extern void factory_detach_gdiinterop(IDWriteFactory7 *factory, IDWriteGdiInterop1 *interop);
 extern struct fontfacecached *factory_cache_fontface(IDWriteFactory7 *factory, struct list *fontfaces,
@@ -514,6 +520,18 @@ struct dwrite_var_axis
     unsigned int attributes;
 };
 
+/* a named instance of a variable font, as DirectWrite names it (opentype_get_named_instance) */
+struct dwrite_named_instance
+{
+    WCHAR typographic_face[128]; /* fvar subfamilyNameID: "Text", "Semibold Text" */
+    WCHAR wws_suffix[128];       /* STAT names of the non-WWS axes, added to the family name: "Text" */
+    WCHAR wws_face[128];         /* STAT names of the weight/width/italic/slant axes: "Semibold" */
+    DWRITE_FONT_WEIGHT weight;
+    DWRITE_FONT_STRETCH stretch;
+    DWRITE_FONT_STYLE style;
+    BOOL has_weight, has_stretch, has_style;
+};
+
 extern HRESULT opentype_analyze_font(IDWriteFontFileStream*,BOOL*,DWRITE_FONT_FILE_TYPE*,DWRITE_FONT_FACE_TYPE*,UINT32*);
 extern HRESULT opentype_try_get_font_table(const struct file_stream_desc *stream_desc, UINT32 tag, const void **data,
         void **context, UINT32 *size, BOOL *exists);
@@ -542,6 +560,13 @@ extern HRESULT opentype_get_kerning_pairs(struct dwrite_fontface *fontface, unsi
 extern BOOL opentype_has_kerning_pairs(struct dwrite_fontface *fontface);
 extern HRESULT opentype_get_font_var_axis(const struct file_stream_desc *stream_desc, struct dwrite_var_axis **axis,
         unsigned int *axis_count);
+extern unsigned int opentype_get_named_instance_count(const struct file_stream_desc *stream_desc);
+extern unsigned int opentype_find_named_instance(const struct file_stream_desc *stream_desc,
+        const DWRITE_FONT_AXIS_VALUE *values, unsigned int count);
+extern HRESULT opentype_get_named_instance(const struct file_stream_desc *stream_desc, unsigned int instance,
+        struct dwrite_named_instance *ret);
+extern unsigned int opentype_get_named_instance_values(const struct file_stream_desc *stream_desc,
+        unsigned int instance, DWRITE_FONT_AXIS_VALUE *values, unsigned int max_count);
 extern bool opentype_is_whitespace(unsigned int codepoint);
 extern float opentype_get_width_axis_value(DWRITE_FONT_STRETCH stretch);
 

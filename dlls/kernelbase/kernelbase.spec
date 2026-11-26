@@ -899,7 +899,7 @@
 @ stdcall IsDBCSLeadByte(long)
 @ stdcall IsDBCSLeadByteEx(long long)
 @ stdcall IsDebuggerPresent()
-# @ stub IsDeveloperModeEnabled
+@ stdcall IsDeveloperModeEnabled(ptr)
 # @ stub IsDeveloperModePolicyApplied
 # @ stub IsEnclaveTypeSupported
 # @ stub IsGlobalizationUserSettingsKeyRedirected
@@ -1049,7 +1049,7 @@
 @ stdcall OutputDebugStringA(str)
 @ stdcall OutputDebugStringW(wstr)
 # @ stub OverrideRoamingDataModificationTimesInRange
-# @ stub PackageFamilyNameFromFullName
+@ stdcall PackageFamilyNameFromFullName(wstr ptr ptr)
 @ stdcall PackageFamilyNameFromId(ptr ptr ptr)
 # @ stub PackageFamilyNameFromProductId
 @ stdcall PackageFullNameFromId(ptr ptr ptr)
@@ -1644,7 +1644,7 @@
 @ stdcall SwitchToThread()
 @ stdcall SystemTimeToFileTime(ptr ptr)
 @ stdcall SystemTimeToTzSpecificLocalTime(ptr ptr ptr)
-@ stub SystemTimeToTzSpecificLocalTimeEx
+@ stdcall SystemTimeToTzSpecificLocalTimeEx(ptr ptr ptr)
 @ stdcall TerminateProcess(long long)
 # @ stub TerminateProcessOnMemoryExhaustion
 @ stdcall TerminateThread(long long)
@@ -1662,7 +1662,7 @@
 @ stdcall TryEnterCriticalSection(ptr) ntdll.RtlTryEnterCriticalSection
 @ stdcall TrySubmitThreadpoolCallback(ptr ptr ptr)
 @ stdcall TzSpecificLocalTimeToSystemTime(ptr ptr ptr)
-@ stub TzSpecificLocalTimeToSystemTimeEx
+@ stdcall TzSpecificLocalTimeToSystemTimeEx(ptr ptr ptr)
 @ stdcall UnhandledExceptionFilter(ptr)
 @ stdcall UnlockFile(long long long long long)
 @ stdcall UnlockFileEx(long long long long ptr)

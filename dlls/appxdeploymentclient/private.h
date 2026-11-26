@@ -36,7 +36,33 @@
 #define WIDL_using_Windows_ApplicationModel
 #include "windows.management.deployment.h"
 
+#include "async_private.h"
+
+typedef IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress async_operation;
+HRESULT async_deployment_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback, async_operation **out );
+
+/* stage.c: install the package a file Uri names with wexappx, on a thread pool thread */
+HRESULT start_install( IUriRuntimeClass *uri, DeploymentOptions options, BOOL development, async_operation **out );
+
+HRESULT start_provision( HSTRING family_name, async_operation **out );
+
+#ifndef PACKAGE_FAMILY_NAME_MAX_LENGTH
+#define PACKAGE_FAMILY_NAME_MAX_LENGTH 64
+#endif
+
 extern IActivationFactory *package_manager_factory;
+extern IActivationFactory *stage_package_options_factory;
+
+/* vector.c (a copy of dlls/windows.applicationmodel/vector.c) */
+struct vector_iids
+{
+    const GUID *iterable;
+    const GUID *iterator;
+    const GUID *vector;
+    const GUID *view;
+};
+HRESULT vector_hstring_create( IVector_HSTRING **out );
+HRESULT vector_inspectable_create( const struct vector_iids *iids, IVector_IInspectable **out );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \
@@ -75,5 +101,7 @@ extern IActivationFactory *package_manager_factory;
     }
 #define DEFINE_IINSPECTABLE( pfx, iface_type, impl_type, base_iface )                              \
     DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from_##iface_type, iface_type##_iface, &impl->base_iface )
+#define DEFINE_IINSPECTABLE_OUTER( pfx, iface_type, impl_type, outer_iface )                       \
+    DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from_##iface_type, iface_type##_iface, impl->outer_iface )
 
 #endif

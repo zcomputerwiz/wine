@@ -1,0 +1,132 @@
+/*
+ * Copyright 2026 WineExplorer contributors
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+#ifdef __WIDL__
+#pragma winrt ns_prefix
+#endif
+
+import "inspectable.idl";
+import "asyncinfo.idl";
+import "eventtoken.idl";
+import "windowscontracts.idl";
+import "windows.foundation.idl";
+import "windows.ui.idl";
+
+namespace Windows.ApplicationModel.Resources {
+    interface IResourceLoader;
+    interface IResourceLoader2;
+    interface IResourceLoaderFactory;
+    interface IResourceLoaderStatics;
+    interface IResourceLoaderStatics2;
+    interface IResourceLoaderStatics3;
+    interface IResourceLoaderStatics4;
+
+    runtimeclass ResourceLoader;
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.ApplicationModel.Resources.ResourceLoader),
+        uuid(08524908-16ef-45ad-a602-293637d7e61a)
+    ]
+    interface IResourceLoader : IInspectable
+    {
+        HRESULT GetString([in] HSTRING resource, [out, retval] HSTRING *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.ApplicationModel.Resources.ResourceLoader),
+        uuid(10eb6ec6-8138-48c1-bc65-e1f14207367c)
+    ]
+    interface IResourceLoader2 : IInspectable
+    {
+        HRESULT GetStringForUri([in] Windows.Foundation.Uri *uri, [out, retval] HSTRING *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.ApplicationModel.Resources.ResourceLoader),
+        uuid(c33a3603-69dc-4285-a077-d5c0e47ccbe8)
+    ]
+    interface IResourceLoaderFactory : IInspectable
+    {
+        HRESULT CreateResourceLoaderByName([in] HSTRING name, [out, retval] Windows.ApplicationModel.Resources.ResourceLoader **loader);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.ApplicationModel.Resources.ResourceLoader),
+        uuid(bf777ce1-19c8-49c2-953c-47e9227b334e)
+    ]
+    interface IResourceLoaderStatics : IInspectable
+    {
+        HRESULT GetStringForReference([in] Windows.Foundation.Uri *uri, [out, retval] HSTRING *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.ApplicationModel.Resources.ResourceLoader),
+        uuid(0cc04141-6466-4989-9494-0b82dfc53f1f)
+    ]
+    interface IResourceLoaderStatics2 : IInspectable
+    {
+        [overload("GetForCurrentView")] HRESULT GetForCurrentView([out, retval] Windows.ApplicationModel.Resources.ResourceLoader **loader);
+        [overload("GetForCurrentView")] HRESULT GetForCurrentViewWithName([in] HSTRING name,
+                [out, retval] Windows.ApplicationModel.Resources.ResourceLoader **loader);
+        [overload("GetForViewIndependentUse")] HRESULT GetForViewIndependentUse([out, retval] Windows.ApplicationModel.Resources.ResourceLoader **loader);
+        [overload("GetForViewIndependentUse")] HRESULT GetForViewIndependentUseWithName([in] HSTRING name,
+                [out, retval] Windows.ApplicationModel.Resources.ResourceLoader **loader);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 8.0),
+        exclusiveto(Windows.ApplicationModel.Resources.ResourceLoader),
+        uuid(64609dfb-64ac-491b-8100-0e558d61c1d0)
+    ]
+    interface IResourceLoaderStatics3 : IInspectable
+    {
+        HRESULT GetForUIContext([in] Windows.UI.UIContext *context, [out, retval] Windows.ApplicationModel.Resources.ResourceLoader **result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 12.0),
+        exclusiveto(Windows.ApplicationModel.Resources.ResourceLoader),
+        uuid(9fb36c32-6c8c-4316-962e-909539b5c259)
+    ]
+    interface IResourceLoaderStatics4 : IInspectable
+    {
+        HRESULT GetDefaultPriPath([in] HSTRING package_full_name, [out, retval] HSTRING *value);
+    }
+
+    [
+        activatable(Windows.ApplicationModel.Resources.IResourceLoaderFactory, Windows.Foundation.UniversalApiContract, 1.0),
+        activatable(Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.ApplicationModel.Resources.IResourceLoaderStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        static(Windows.ApplicationModel.Resources.IResourceLoaderStatics2, Windows.Foundation.UniversalApiContract, 1.0),
+        static(Windows.ApplicationModel.Resources.IResourceLoaderStatics3, Windows.Foundation.UniversalApiContract, 8.0),
+        static(Windows.ApplicationModel.Resources.IResourceLoaderStatics4, Windows.Foundation.UniversalApiContract, 12.0),
+        threading(both)
+    ]
+    runtimeclass ResourceLoader
+    {
+        [default] interface Windows.ApplicationModel.Resources.IResourceLoader;
+        interface Windows.ApplicationModel.Resources.IResourceLoader2;
+    }
+}

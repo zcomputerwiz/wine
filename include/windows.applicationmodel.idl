@@ -33,6 +33,7 @@ namespace Windows.ApplicationModel.Core {
 
 namespace Windows.ApplicationModel {
     typedef enum AppExecutionContext AppExecutionContext;
+    typedef enum LimitedAccessFeatureStatus LimitedAccessFeatureStatus;
     typedef struct PackageVersion PackageVersion;
 
     interface IAppDisplayInfo;
@@ -45,6 +46,8 @@ namespace Windows.ApplicationModel {
     interface IDesignModeStatics2;
     interface IEnteredBackgroundEventArgs;
     interface ILeavingBackgroundEventArgs;
+    interface ILimitedAccessFeatureRequestResult;
+    interface ILimitedAccessFeaturesStatics;
     interface IPackage;
     interface IPackage2;
     interface IPackage3;
@@ -61,6 +64,8 @@ namespace Windows.ApplicationModel {
     runtimeclass DesignMode;
     runtimeclass EnteredBackgroundEventArgs;
     runtimeclass LeavingBackgroundEventArgs;
+    runtimeclass LimitedAccessFeatureRequestResult;
+    runtimeclass LimitedAccessFeatures;
     runtimeclass Package;
     runtimeclass PackageId;
     runtimeclass PackageStatus;
@@ -457,5 +462,56 @@ namespace Windows.ApplicationModel {
     runtimeclass SuspendingOperation
     {
         [default] interface Windows.ApplicationModel.ISuspendingOperation;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 7.0),
+        exclusiveto(Windows.ApplicationModel.LimitedAccessFeatures),
+        uuid(8be612d4-302b-5fbf-a632-1a99e43e8925)
+    ]
+    interface ILimitedAccessFeaturesStatics : IInspectable
+    {
+        HRESULT TryUnlockFeature([in] HSTRING featureId, [in] HSTRING token, [in] HSTRING attestation, [out, retval] Windows.ApplicationModel.LimitedAccessFeatureRequestResult * *result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 7.0)
+    ]
+    enum LimitedAccessFeatureStatus
+    {
+        Unavailable = 0,
+        Available = 1,
+        AvailableWithoutToken = 2,
+        Unknown = 3,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 7.0),
+        exclusiveto(Windows.ApplicationModel.LimitedAccessFeatureRequestResult),
+        uuid(d45156a6-1e24-5ddd-abb4-6188aba4d5bf)
+    ]
+    interface ILimitedAccessFeatureRequestResult : IInspectable
+    {
+        [propget] HRESULT FeatureId([out, retval] HSTRING *value);
+        [propget] HRESULT Status([out, retval] Windows.ApplicationModel.LimitedAccessFeatureStatus *value);
+        [propget] HRESULT EstimatedRemovalDate([out, retval] Windows.Foundation.IReference<Windows.Foundation.DateTime> * *value);
+    }
+
+    [
+        marshaling_behavior(agile),
+        contract(Windows.Foundation.UniversalApiContract, 7.0)
+    ]
+    runtimeclass LimitedAccessFeatureRequestResult
+    {
+        [default] interface Windows.ApplicationModel.ILimitedAccessFeatureRequestResult;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 7.0),
+        static(Windows.ApplicationModel.ILimitedAccessFeaturesStatics, Windows.Foundation.UniversalApiContract, 7.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass LimitedAccessFeatures
+    {
     }
 }

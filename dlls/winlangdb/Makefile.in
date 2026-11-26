@@ -1,0 +1,4 @@
+MODULE    = winlangdb.dll
+
+SOURCES = \
+	main.c

@@ -32,6 +32,7 @@
 #include "mssip.h"
 #include "imagehlp.h"
 #include "winternl.h"
+#include "wintrust_priv.h"
 
 #include "wine/debug.h"
 
@@ -51,7 +52,33 @@ struct cryptcat
     GUID      subject;
     DWORD     attr_count;
     CRYPTCATATTRIBUTE *attr;
+    CRYPTCATSTORE store;
+    DWORD     cat_attr_count;
+    CRYPTCATATTRIBUTE *cat_attr;
+    CAT_NAMEVALUE **cat_value;
 };
+
+typedef BOOL (WINAPI *asn_decode_func)(DWORD, LPCSTR, const BYTE *, DWORD, DWORD, void *, DWORD *);
+
+/* Calls one of wintrust's own decoders directly, so that decoding does not depend on their registration. */
+static void *decode_object(asn_decode_func func, DWORD encoding, const BYTE *data, DWORD len)
+{
+    DWORD size = 0;
+    void *ret;
+
+    if (!func(encoding, NULL, data, len, 0, NULL, &size)) return NULL;
+    if (!(ret = malloc(size)))
+    {
+        SetLastError(ERROR_OUTOFMEMORY);
+        return NULL;
+    }
+    if (!func(encoding, NULL, data, len, 0, ret, &size))
+    {
+        free(ret);
+        return NULL;
+    }
+    return ret;
+}
 
 struct catadmin
 {
@@ -545,6 +572,7 @@ HCATINFO WINAPI CryptCATAdminEnumCatalogFromHash(HCATADMIN hCatAdmin, BYTE* pbHa
         }
         while ((member = CryptCATEnumerateMember(hcat, member)))
         {
+            if (!member->pIndirectData) continue;
             if (member->pIndirectData->Digest.cbData != cbHash)
             {
                 WARN("amount of hash bytes differs: %lu/%lu\n", member->pIndirectData->Digest.cbData, cbHash);
@@ -724,6 +752,92 @@ BOOL WINAPI CryptCATAdminResolveCatalogPath(HCATADMIN hcatadmin, WCHAR *catalog_
     return TRUE;
 }
 
+static void free_cat_attrs(struct cryptcat *cc)
+{
+    DWORD i;
+
+    for (i = 0; i < cc->cat_attr_count; i++) free(cc->cat_value[i]);
+    free(cc->cat_value);
+    free(cc->cat_attr);
+    cc->cat_value = NULL;
+    cc->cat_attr = NULL;
+    cc->cat_attr_count = 0;
+}
+
+/* The catalog attributes are name-value extensions of the catalog's certificate trust list. */
+static BOOL load_cat_attrs(struct cryptcat *cc)
+{
+    DWORD i, count = 0;
+
+    if (!cc->inner->cExtension) return TRUE;
+    cc->cat_attr = calloc(cc->inner->cExtension, sizeof(*cc->cat_attr));
+    cc->cat_value = calloc(cc->inner->cExtension, sizeof(*cc->cat_value));
+    if (!cc->cat_attr || !cc->cat_value)
+    {
+        free_cat_attrs(cc);
+        SetLastError(ERROR_OUTOFMEMORY);
+        return FALSE;
+    }
+
+    /* list them backwards, like native */
+    for (i = cc->inner->cExtension; i--;)
+    {
+        CERT_EXTENSION *ext = &cc->inner->rgExtension[i];
+        CRYPTCATATTRIBUTE *attr = &cc->cat_attr[count];
+        CAT_NAMEVALUE *value;
+
+        if (strcmp(ext->pszObjId, CAT_NAMEVALUE_OBJID)) continue;
+        if (!(value = decode_object(WVTAsn1CatNameValueDecode, cc->encoding, ext->Value.pbData, ext->Value.cbData)))
+        {
+            WARN("can't decode catalog attribute %lu, error %lu\n", i, GetLastError());
+            continue;
+        }
+        cc->cat_value[count] = value;
+        attr->cbStruct = sizeof(*attr);
+        attr->pwszReferenceTag = value->pwszTag;
+        attr->dwAttrTypeAndAction = value->fdwFlags;
+        attr->cbValue = value->Value.cbData;
+        attr->pbValue = value->Value.pbData;
+        attr->dwReserved = count;
+        cc->cat_attr_count = ++count;
+    }
+    return TRUE;
+}
+
+static BOOL init_store(struct cryptcat *cc, const WCHAR *filename, HCRYPTPROV prov, DWORD version)
+{
+    DWORD size = (lstrlenW(filename) + 1) * sizeof(WCHAR);
+
+    if (!(cc->store.pwszP7File = malloc(size)))
+    {
+        SetLastError(ERROR_OUTOFMEMORY);
+        return FALSE;
+    }
+    memcpy(cc->store.pwszP7File, filename, size);
+    cc->store.cbStruct = sizeof(cc->store);
+    cc->store.dwPublicVersion = version;
+    cc->store.hProv = prov;
+    cc->store.dwEncodingType = cc->encoding;
+    return TRUE;
+}
+
+/***********************************************************************
+ *      CryptCATStoreFromHandle  (WINTRUST.@)
+ */
+CRYPTCATSTORE * WINAPI CryptCATStoreFromHandle(HANDLE catalog)
+{
+    struct cryptcat *cc = catalog;
+
+    TRACE("%p\n", catalog);
+
+    if (!catalog || catalog == INVALID_HANDLE_VALUE || cc->magic != CRYPTCAT_MAGIC)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+    return &cc->store;
+}
+
 /***********************************************************************
  *      CryptCATClose  (WINTRUST.@)
  */
@@ -738,6 +852,8 @@ BOOL WINAPI CryptCATClose(HANDLE hCatalog)
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
+    free_cat_attrs(cc);
+    free(cc->store.pwszP7File);
     free(cc->attr);
     free(cc->inner);
     CryptMsgClose(cc->msg);
@@ -772,14 +888,17 @@ CRYPTCATATTRIBUTE * WINAPI CryptCATGetAttrInfo(HANDLE hCatalog, CRYPTCATMEMBER *
 CRYPTCATATTRIBUTE * WINAPI CryptCATGetCatAttrInfo(HANDLE hCatalog, LPWSTR tag)
 {
     struct cryptcat *cc = hCatalog;
+    DWORD i;
 
-    FIXME("%p, %s\n", hCatalog, debugstr_w(tag));
+    TRACE("%p, %s\n", hCatalog, debugstr_w(tag));
 
-    if (!hCatalog || hCatalog == INVALID_HANDLE_VALUE || cc->magic != CRYPTCAT_MAGIC)
+    if (!hCatalog || hCatalog == INVALID_HANDLE_VALUE || cc->magic != CRYPTCAT_MAGIC || !tag)
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return NULL;
     }
+    for (i = 0; i < cc->cat_attr_count; i++)
+        if (!lstrcmpiW(cc->cat_attr[i].pwszReferenceTag, tag)) return &cc->cat_attr[i];
     SetLastError(CRYPT_E_NOT_FOUND);
     return NULL;
 }
@@ -823,16 +942,55 @@ CRYPTCATATTRIBUTE * WINAPI CryptCATEnumerateAttr(HANDLE hCatalog, CRYPTCATMEMBER
 CRYPTCATATTRIBUTE * WINAPI CryptCATEnumerateCatAttr(HANDLE hCatalog, CRYPTCATATTRIBUTE *prev)
 {
     struct cryptcat *cc = hCatalog;
+    DWORD index = 0;
 
-    FIXME("%p, %p\n", hCatalog, prev);
+    TRACE("%p, %p\n", hCatalog, prev);
 
     if (!hCatalog || hCatalog == INVALID_HANDLE_VALUE || cc->magic != CRYPTCAT_MAGIC)
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return NULL;
     }
+    if (prev)
+    {
+        if (prev < cc->cat_attr || prev >= cc->cat_attr + cc->cat_attr_count)
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return NULL;
+        }
+        index = prev - cc->cat_attr + 1;
+    }
+    if (index < cc->cat_attr_count) return &cc->cat_attr[index];
     SetLastError(CRYPT_E_NOT_FOUND);
     return NULL;
+}
+
+/* The member info of a version 2 catalog is a context-specific tag without content. As observed on
+ * native, its number selects the subject's SIP: the PE image, cabinet, flat file, catalog or CTL one. */
+static BOOL decode_member_info2(const CRYPT_ATTR_BLOB *blob, CAT_MEMBERINFO2 *info)
+{
+    static const GUID subjects[] =
+    {
+        { 0xc689aab8, 0x8e78, 0x11d0, { 0x8c, 0x47, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee }},
+        { 0xc689aaba, 0x8e78, 0x11d0, { 0x8c, 0x47, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee }},
+        { 0xde351a42, 0x8e59, 0x11d0, { 0x8c, 0x47, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee }},
+        { 0xde351a43, 0x8e59, 0x11d0, { 0x8c, 0x47, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee }},
+        { 0x9ba61d3f, 0xe73a, 0x11d0, { 0x8c, 0xd2, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee }},
+    };
+
+    /* a primitive context-specific tag (class bits 10, constructed bit clear) of length 0 */
+    if (blob->cbData != 2 || (blob->pbData[0] & 0xe0) != 0x80 || blob->pbData[1] ||
+        (blob->pbData[0] & 0x1f) >= ARRAY_SIZE(subjects))
+    {
+        WARN("unsupported member info of %lu bytes, first byte %#x\n", blob->cbData,
+             blob->cbData ? blob->pbData[0] : 0);
+        if (blob->cbData && (blob->pbData[0] & 0xe0) == 0xa0) SetLastError(CRYPT_E_ASN1_BADTAG);
+        else SetLastError(CRYPT_E_ASN1_CORRUPT);
+        return FALSE;
+    }
+    info->SubjectGuid = subjects[blob->pbData[0] & 0x1f];
+    info->dwCertVersion = 0x200;
+    return TRUE;
 }
 
 /***********************************************************************
@@ -844,6 +1002,8 @@ CRYPTCATMEMBER * WINAPI CryptCATEnumerateMember(HANDLE hCatalog, CRYPTCATMEMBER 
     CRYPTCATMEMBER *member = prev;
     CTL_ENTRY *entry;
     DWORD size, i;
+    WCHAR *tag;
+    BOOL v2;
 
     TRACE("%p, %p\n", hCatalog, prev);
 
@@ -852,6 +1012,12 @@ CRYPTCATMEMBER * WINAPI CryptCATEnumerateMember(HANDLE hCatalog, CRYPTCATMEMBER 
         SetLastError(ERROR_INVALID_PARAMETER);
         return NULL;
     }
+    if (!cc->inner)
+    {
+        SetLastError(CRYPT_E_NOT_FOUND);
+        return NULL;
+    }
+    v2 = cc->store.dwPublicVersion == CRYPTCAT_VERSION_2;
 
     /* dumping the contents makes me think that dwReserved is the iteration number */
     if (!member)
@@ -872,11 +1038,8 @@ CRYPTCATMEMBER * WINAPI CryptCATEnumerateMember(HANDLE hCatalog, CRYPTCATMEMBER 
     }
     else member->dwReserved++;
 
-    if (member->dwReserved >= cc->inner->cCTLEntry)
-    {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        goto error;
-    }
+    /* native leaves the last error alone at the end of the list */
+    if (member->dwReserved >= cc->inner->cCTLEntry) goto error;
 
     /* list them backwards, like native */
     entry = &cc->inner->rgCTLEntry[cc->inner->cCTLEntry - member->dwReserved - 1];
@@ -895,36 +1058,35 @@ CRYPTCATMEMBER * WINAPI CryptCATEnumerateMember(HANDLE hCatalog, CRYPTCATMEMBER 
             ERR("Can't handle attr->cValue of %lu\n", attr->cValue);
             continue;
         }
-        if (!strcmp(attr->pszObjId, CAT_MEMBERINFO_OBJID))
+        /* native decodes the member info by the catalog's version, whichever of the two object ids it has */
+        if (!strcmp(attr->pszObjId, CAT_MEMBERINFO_OBJID) || !strcmp(attr->pszObjId, CAT_MEMBERINFO2_OBJID))
         {
-            CAT_MEMBERINFO *mi;
-            BOOL ret;
-
             member->sEncodedMemberInfo.cbData = attr->rgValue->cbData;
             member->sEncodedMemberInfo.pbData = attr->rgValue->pbData;
 
-            CryptDecodeObject(cc->encoding, CAT_MEMBERINFO_OBJID, attr->rgValue->pbData, attr->rgValue->cbData, 0, NULL, &size);
-
-            if (!(mi = malloc(size)))
+            if (v2)
             {
-                SetLastError(ERROR_OUTOFMEMORY);
-                goto error;
+                CAT_MEMBERINFO2 mi;
+
+                if (!decode_member_info2(attr->rgValue, &mi)) goto error;
+                member->gSubjectType = mi.SubjectGuid;
+                member->dwCertVersion = mi.dwCertVersion;
             }
-            ret = CryptDecodeObject(cc->encoding, CAT_MEMBERINFO_OBJID, attr->rgValue->pbData, attr->rgValue->cbData, 0, mi, &size);
-            if (ret)
+            else
             {
+                CAT_MEMBERINFO *mi;
                 UNICODE_STRING guid;
+                NTSTATUS status;
 
+                if (!(mi = decode_object(WVTAsn1CatMemberInfoDecode, cc->encoding,
+                                         attr->rgValue->pbData, attr->rgValue->cbData)))
+                    goto error;
                 member->dwCertVersion = mi->dwCertVersion;
                 RtlInitUnicodeString(&guid, mi->pwszSubjGuid);
-                if (RtlGUIDFromString(&guid, &member->gSubjectType))
-                {
-                    free(mi);
-                    goto error;
-                }
+                status = RtlGUIDFromString(&guid, &member->gSubjectType);
+                free(mi);
+                if (status) goto error;
             }
-            free(mi);
-            if (!ret) goto error;
         }
         else if (!strcmp(attr->pszObjId, SPC_INDIRECT_DATA_OBJID))
         {
@@ -933,18 +1095,59 @@ CRYPTCATMEMBER * WINAPI CryptCATEnumerateMember(HANDLE hCatalog, CRYPTCATMEMBER 
             member->sEncodedIndirectData.cbData = attr->rgValue->cbData;
             member->sEncodedIndirectData.pbData = attr->rgValue->pbData;
 
-            CryptDecodeObject(cc->encoding, SPC_INDIRECT_DATA_OBJID, attr->rgValue->pbData, attr->rgValue->cbData, 0, NULL, &size);
-
-            if (!(member->pIndirectData = malloc(size)))
-            {
-                SetLastError(ERROR_OUTOFMEMORY);
+            free(member->pIndirectData);
+            if (!(member->pIndirectData = decode_object(WVTAsn1SpcIndirectDataContentDecode, cc->encoding,
+                                                        attr->rgValue->pbData, attr->rgValue->cbData)))
                 goto error;
-            }
-            CryptDecodeObject(cc->encoding, SPC_INDIRECT_DATA_OBJID, attr->rgValue->pbData, attr->rgValue->cbData, 0, member->pIndirectData, &size);
         }
         else
             /* this object id should probably be handled in CryptCATEnumerateAttr */
             FIXME("unhandled object id \"%s\"\n", attr->pszObjId);
+    }
+
+    if (v2)
+    {
+        if (!member->sEncodedMemberInfo.cbData)
+        {
+            WARN("version 2 catalog entry without member info\n");
+            SetLastError(CRYPT_E_ASN1_EOD);
+            goto error;
+        }
+        /* native gives a SHA1 tag without indirect data the indirect data of a flat file with that hash */
+        if (!member->pIndirectData && entry->SubjectIdentifier.cbData == 20)
+        {
+            SIP_INDIRECT_DATA *data;
+
+            if (!(data = calloc(1, sizeof(*data) + entry->SubjectIdentifier.cbData)))
+            {
+                SetLastError(ERROR_OUTOFMEMORY);
+                goto error;
+            }
+            data->Data.pszObjId = (char *)SPC_CAB_DATA_OBJID;
+            data->DigestAlgorithm.pszObjId = (char *)szOID_OIWSEC_sha1;
+            data->Digest.cbData = entry->SubjectIdentifier.cbData;
+            data->Digest.pbData = (BYTE *)(data + 1);
+            memcpy(data->Digest.pbData, entry->SubjectIdentifier.pbData, entry->SubjectIdentifier.cbData);
+            member->pIndirectData = data;
+        }
+
+        /* the reference tag is the subject identifier (the file hash) in hexadecimal */
+        size = (2 * entry->SubjectIdentifier.cbData + 1) * sizeof(WCHAR);
+        if (!(tag = realloc(member->pwszReferenceTag, size)))
+        {
+            SetLastError(ERROR_OUTOFMEMORY);
+            goto error;
+        }
+        member->pwszReferenceTag = tag;
+        for (i = 0; i < entry->SubjectIdentifier.cbData; i++)
+        {
+            static const WCHAR hex[] = L"0123456789ABCDEF";
+
+            tag[i * 2] = hex[entry->SubjectIdentifier.pbData[i] >> 4];
+            tag[i * 2 + 1] = hex[entry->SubjectIdentifier.pbData[i] & 0xf];
+        }
+        tag[i * 2] = 0;
+        return member;
     }
 
     if (!member->sEncodedMemberInfo.cbData || !member->sEncodedIndirectData.cbData)
@@ -953,25 +1156,17 @@ CRYPTCATMEMBER * WINAPI CryptCATEnumerateMember(HANDLE hCatalog, CRYPTCATMEMBER 
         SetLastError(CRYPT_E_ATTRIBUTES_MISSING);
         goto error;
     }
-    size = (2 * member->pIndirectData->Digest.cbData + 1) * sizeof(WCHAR);
-    member->pwszReferenceTag = realloc(member->pwszReferenceTag, size);
 
-    if (!member->pwszReferenceTag)
+    /* the reference tag of a version 1 catalog is the subject identifier, a string */
+    size = entry->SubjectIdentifier.cbData / sizeof(WCHAR);
+    if (!(tag = realloc(member->pwszReferenceTag, (size + 1) * sizeof(WCHAR))))
     {
         SetLastError(ERROR_OUTOFMEMORY);
         goto error;
     }
-    /* FIXME: reference tag is usually the file hash but doesn't have to be */
-    for (i = 0; i < member->pIndirectData->Digest.cbData; i++)
-    {
-        DWORD sub;
-
-        sub = member->pIndirectData->Digest.pbData[i] >> 4;
-        member->pwszReferenceTag[i * 2] = (sub < 10 ? '0' + sub : 'A' + sub - 10);
-        sub = member->pIndirectData->Digest.pbData[i] & 0xf;
-        member->pwszReferenceTag[i * 2 + 1] = (sub < 10 ? '0' + sub : 'A' + sub - 10);
-    }
-    member->pwszReferenceTag[i * 2] = 0;
+    member->pwszReferenceTag = tag;
+    memcpy(tag, entry->SubjectIdentifier.pbData, size * sizeof(WCHAR));
+    tag[size] = 0;
     return member;
 
 error:
@@ -1154,6 +1349,12 @@ HANDLE WINAPI CryptCATOpen(WCHAR *filename, DWORD flags, HCRYPTPROV hProv,
     cc->encoding = dwEncodingType;
     if (!valid)
     {
+        if (!init_store(cc, filename, hProv, dwPublicVersion == CRYPTCAT_VERSION_2 ? CRYPTCAT_VERSION_2 : CRYPTCAT_VERSION_1))
+        {
+            CryptMsgClose(hmsg);
+            free(cc);
+            return INVALID_HANDLE_VALUE;
+        }
         cc->magic = CRYPTCAT_MAGIC;
         SetLastError(ERROR_SUCCESS);
         return cc;
@@ -1200,9 +1401,15 @@ HANDLE WINAPI CryptCATOpen(WCHAR *filename, DWORD flags, HCRYPTPROV hProv,
             p += size;
         }
         cc->inner = decode_inner_content(hmsg, dwEncodingType, &cc->inner_len);
-        if (!cc->inner || !CryptSIPRetrieveSubjectGuid(filename, NULL, &cc->subject))
+        /* the version is not dwPublicVersion but that of the catalog's member list */
+        if (!cc->inner || !CryptSIPRetrieveSubjectGuid(filename, NULL, &cc->subject) ||
+            !init_store(cc, filename, hProv, cc->inner->SubjectAlgorithm.pszObjId &&
+                        !strcmp(cc->inner->SubjectAlgorithm.pszObjId, szOID_CATALOG_LIST_MEMBER2) ?
+                        CRYPTCAT_VERSION_2 : CRYPTCAT_VERSION_1) ||
+            !load_cat_attrs(cc))
         {
             CryptMsgClose(hmsg);
+            free(cc->store.pwszP7File);
             free(cc->attr);
             free(cc->inner);
             free(cc);
@@ -1619,6 +1826,73 @@ static const GUID cabGUID = { 0xC689AABA, 0x8E78, 0x11D0, { 0x8C,0x47,
 static const GUID catGUID = { 0xDE351A43, 0x8E59, 0x11D0, { 0x8C,0x47,
      0x00,0xC0,0x4F,0xC2,0x95,0xEE }};
 
+/* The digest of a signed cabinet (found by comparing signed cabinets with their signatures): the hash of the file from its
+ * start up to the signature, which the CFHEADER's cbCabinet already ends at, without the four reserved bytes at 4, without
+ * cbCFHeader (36) and without the header reserve area (40, cbCFHeader bytes: the offset and size of the signature). */
+static BOOL WINTRUST_VerifyCabDigest(SIP_SUBJECTINFO *info, SIP_INDIRECT_DATA *indirect)
+{
+    HANDLE file = info->hFile, own = INVALID_HANDLE_VALUE;
+    BYTE header[cfhead_SIZEOF + 4 + 0xffff], *digest = NULL, buf[4096];
+    DWORD read, cb_reserve, end, pos, dlen, cert_offset, cert_size;
+    HCRYPTPROV prov = 0;
+    HCRYPTHASH hash = 0;
+    ALG_ID alg;
+    BOOL ret = FALSE;
+    LARGE_INTEGER size;
+
+    if (!indirect->DigestAlgorithm.pszObjId || !(alg = CertOIDToAlgId(indirect->DigestAlgorithm.pszObjId)))
+        return FALSE;
+    if (!file || file == INVALID_HANDLE_VALUE)
+    {
+        if (!info->pwsFileName) return FALSE;
+        own = file = CreateFileW(info->pwsFileName, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                 NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (file == INVALID_HANDLE_VALUE) return FALSE;
+    }
+    if (!GetFileSizeEx(file, &size) || size.QuadPart < cfhead_SIZEOF + 4 || size.QuadPart > 0x7fffffff) goto done;
+    if (SetFilePointer(file, 0, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) goto done;
+    if (!ReadFile(file, header, cfhead_SIZEOF + 4, &read, NULL) || read != cfhead_SIZEOF + 4) goto done;
+    if (memcmp(header, "MSCF", 4) || !(EndGetI16(header + cfhead_Flags) & cfheadRESERVE_PRESENT)) goto done;
+    cb_reserve = EndGetI16(header + cfhead_SIZEOF);
+    if (cb_reserve < cfsigninfo_SIZEOF || !ReadFile(file, header + cfhead_SIZEOF + 4, cb_reserve, &read, NULL) ||
+        read != cb_reserve) goto done;
+    /* the reserve area, as the header reads it: cbCFHeader (2), cbCFFolder (1), cbCFData (1), then the signature info */
+    cert_offset = EndGetI32(header + cfhead_SIZEOF + 4 + cfsigninfo_CertOffset);
+    cert_size = EndGetI32(header + cfhead_SIZEOF + 4 + cfsigninfo_CertSize);
+    /* the signature ends the file (a byte behind it is a bad digest on Windows) */
+    if (!cert_size || cert_offset > size.QuadPart || cert_size != size.QuadPart - cert_offset) goto done;
+    end = cert_offset;
+    if (end < cfhead_SIZEOF + 4 + cb_reserve) goto done;
+
+    if (!CryptAcquireContextW(&prov, NULL, MS_ENH_RSA_AES_PROV_W, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) goto done;
+    if (!CryptCreateHash(prov, alg, 0, 0, &hash)) goto done;
+    /* [0,4) signature, [8,36) header up to cbCFHeader, [38,40) cbCFFolder and cbCFData, then after the reserve area */
+    if (!CryptHashData(hash, header, 4, 0) || !CryptHashData(hash, header + 8, 28, 0) ||
+        !CryptHashData(hash, header + 38, 2, 0)) goto done;
+    pos = cfhead_SIZEOF + 4 + cb_reserve;
+    if (SetFilePointer(file, pos, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER) goto done;
+    while (pos < end)
+    {
+        DWORD n = min(end - pos, sizeof(buf));
+        if (!ReadFile(file, buf, n, &read, NULL) || read != n) goto done;
+        if (!CryptHashData(hash, buf, n, 0)) goto done;
+        pos += n;
+    }
+    read = sizeof(dlen);
+    if (!CryptGetHashParam(hash, HP_HASHSIZE, (BYTE *)&dlen, &read, 0)) goto done;
+    if (!(digest = malloc(dlen))) goto done;
+    if (!CryptGetHashParam(hash, HP_HASHVAL, digest, &dlen, 0)) goto done;
+    ret = dlen == indirect->Digest.cbData && !memcmp(digest, indirect->Digest.pbData, dlen);
+    if (!ret) WARN("the digest of the cabinet does not match its signature\n");
+
+done:
+    free(digest);
+    if (hash) CryptDestroyHash(hash);
+    if (prov) CryptReleaseContext(prov, 0);
+    if (own != INVALID_HANDLE_VALUE) CloseHandle(own);
+    return ret;
+}
+
 /***********************************************************************
  *      CryptSIPGetSignedDataMsg  (WINTRUST.@)
  */
@@ -1697,7 +1971,17 @@ BOOL WINAPI CryptSIPRemoveSignedDataMsg(SIP_SUBJECTINFO* pSubjectInfo,
 BOOL WINAPI CryptSIPVerifyIndirectData(SIP_SUBJECTINFO* pSubjectInfo,
                                        SIP_INDIRECT_DATA* pIndirectData)
 {
-    FIXME("(%p %p) stub\n", pSubjectInfo, pIndirectData);
- 
+    TRACE("(%p %p)\n", pSubjectInfo, pIndirectData);
+
+    if (!pSubjectInfo || !pIndirectData || !pSubjectInfo->pgSubjectType)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (!memcmp(pSubjectInfo->pgSubjectType, &cabGUID, sizeof(cabGUID)))
+        return WINTRUST_VerifyCabDigest(pSubjectInfo, pIndirectData);
+
+    FIXME("unimplemented for subject type %s\n", debugstr_guid(pSubjectInfo->pgSubjectType));
     return FALSE;
 }

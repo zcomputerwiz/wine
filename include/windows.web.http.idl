@@ -1,0 +1,78 @@
+/*
+ * Copyright 2026 WineExplorer contributors
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+#ifdef __WIDL__
+#pragma winrt ns_prefix
+#endif
+
+import "inspectable.idl";
+import "asyncinfo.idl";
+import "windowscontracts.idl";
+import "windows.foundation.idl";
+
+/* Only what the HttpClient object needs so far. The asynchronous requests and the header collection are written with
+ * IInspectable pointers: the methods are not implemented, and the layout of the interface is the one of the contract. */
+namespace Windows.Web.Http {
+    interface IHttpClient;
+    interface IHttpClientFactory;
+
+    runtimeclass HttpClient;
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Web.Http.HttpClient),
+        uuid(7fda1151-3574-4880-a8ba-e6b1e0061f3d)
+    ]
+    interface IHttpClient : IInspectable
+    {
+        HRESULT DeleteAsync([in] Windows.Foundation.Uri *uri, [out, retval] IInspectable **operation);
+        HRESULT GetAsync([in] Windows.Foundation.Uri *uri, [out, retval] IInspectable **operation);
+        HRESULT GetWithOptionAsync([in] Windows.Foundation.Uri *uri, [in] INT32 completionOption, [out, retval] IInspectable **operation);
+        HRESULT GetBufferAsync([in] Windows.Foundation.Uri *uri, [out, retval] IInspectable **operation);
+        HRESULT GetInputStreamAsync([in] Windows.Foundation.Uri *uri, [out, retval] IInspectable **operation);
+        HRESULT GetStringAsync([in] Windows.Foundation.Uri *uri, [out, retval] IInspectable **operation);
+        HRESULT PostAsync([in] Windows.Foundation.Uri *uri, [in] IInspectable *content, [out, retval] IInspectable **operation);
+        HRESULT PutAsync([in] Windows.Foundation.Uri *uri, [in] IInspectable *content, [out, retval] IInspectable **operation);
+        HRESULT SendRequestAsync([in] IInspectable *request, [out, retval] IInspectable **operation);
+        HRESULT SendRequestWithOptionAsync([in] IInspectable *request, [in] INT32 completionOption, [out, retval] IInspectable **operation);
+        [propget] HRESULT DefaultRequestHeaders([out, retval] IInspectable **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Web.Http.HttpClient),
+        uuid(c30c4eca-e3fa-4f99-afb4-63cc65009462)
+    ]
+    interface IHttpClientFactory : IInspectable
+    {
+        HRESULT Create([in] IInspectable *filter, [out, retval] Windows.Web.Http.HttpClient **value);
+    }
+
+    [
+        activatable(Windows.Foundation.UniversalApiContract, 1.0),
+        activatable(Windows.Web.Http.IHttpClientFactory, Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        threading(both)
+    ]
+    runtimeclass HttpClient
+    {
+        [default] interface Windows.Web.Http.IHttpClient;
+        interface Windows.Foundation.IClosable;
+    }
+}
