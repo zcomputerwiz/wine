@@ -3384,6 +3384,36 @@ static void test_barrier(void)
     }
 }
 
+/* WineExplorer: Wine's internal locks are in \KernelObjects, out of the session's namespace (wine/internal_lock.h) */
+static void test_wine_internal_locks(void)
+{
+    UNICODE_STRING name;
+    OBJECT_ATTRIBUTES attr;
+    NTSTATUS status;
+    HANDLE handle;
+
+    if (strcmp( winetest_platform, "wine" ))
+    {
+        skip( "Wine's own locks\n" );
+        return;
+    }
+    /* services.exe holds its instance mutex while it runs */
+    SetLastError( 0xdeadbeef );
+    handle = OpenMutexW( SYNCHRONIZE, FALSE, L"__wine_SvcctlInstance" );
+    ok( !handle, "the instance mutex is in the session's namespace\n" );
+    ok( GetLastError() == ERROR_FILE_NOT_FOUND, "got error %lu\n", GetLastError() );
+    if (handle) CloseHandle( handle );
+    handle = OpenMutexW( SYNCHRONIZE, FALSE, L"Global\\__wine_SvcctlInstance" );
+    ok( !handle, "the instance mutex is in \\BaseNamedObjects\n" );
+    if (handle) CloseHandle( handle );
+
+    RtlInitUnicodeString( &name, L"\\KernelObjects\\__wine_SvcctlInstance" );
+    InitializeObjectAttributes( &attr, &name, 0, NULL, NULL );
+    status = NtOpenMutant( &handle, SYNCHRONIZE, &attr );
+    ok( !status, "the instance mutex is not in \\KernelObjects: %#lx\n", status );
+    if (!status) CloseHandle( handle );
+}
+
 START_TEST(sync)
 {
     char **argv;
@@ -3460,4 +3490,5 @@ START_TEST(sync)
     test_apc_deadlock();
     test_crit_section();
     test_barrier();
+    test_wine_internal_locks();
 }
