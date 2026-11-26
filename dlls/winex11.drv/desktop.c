@@ -40,7 +40,7 @@
 WINE_DEFAULT_DEBUG_CHANNEL(x11drv);
 
 static RECT host_primary_rect;
-static BOOL retain_desktop(void);
+static BOOL retain_desktop( const WCHAR *name );
 
 #define _NET_WM_STATE_REMOVE 0
 #define _NET_WM_STATE_ADD 1
@@ -94,7 +94,7 @@ BOOL X11DRV_CreateDesktop( const WCHAR *name, UINT width, UINT height )
     if (!win) return FALSE;
 
     x11drv_xinput2_enable( display, win );
-    if (retain_desktop()) XSetCloseDownMode( display, RetainTemporary );
+    if (retain_desktop( name )) XSetCloseDownMode( display, RetainTemporary );
     XFlush( display );
 
     X11DRV_init_desktop( win );
@@ -104,10 +104,18 @@ BOOL X11DRV_CreateDesktop( const WCHAR *name, UINT width, UINT height )
 /* B121: the session shell's X desktop window outlives the shell. The programs that run across a shell restart (B120) have
  * windows inside it, and a destroyed desktop window takes them with it. With WINE_X11_RETAIN_DESKTOP set (the session
  * scripts do), the X server keeps the dead desktop manager's resources, and the new manager takes the window over. */
-static BOOL retain_desktop(void)
+static BOOL retain_desktop( const WCHAR *name )
 {
+    static const char default_name[] = "Default";
     const char *env = getenv( "WINE_X11_RETAIN_DESKTOP" );
-    return env && *env && *env != '0';
+    unsigned int i;
+
+    if (!env || !*env || *env == '0') return FALSE;
+    if (!name) return TRUE;  /* the caller has no name: the desktop is the one that was retained */
+    /* the session shell's desktop only: another desktop a program makes goes with it when it ends */
+    for (i = 0; default_name[i]; i++)
+        if (!name[i] || (name[i] | 0x20) != (default_name[i] | 0x20)) return FALSE;
+    return !name[i];
 }
 
 static int ignore_x_error( Display *display, XErrorEvent *event, void *arg )
@@ -162,7 +170,7 @@ BOOL X11DRV_adopt_desktop( Window old )
     Window ours = root_window;
     int ok;
 
-    if (!retain_desktop() || !old || old == ours || !is_virtual_desktop()) return FALSE;
+    if (!retain_desktop( NULL ) || !old || old == ours || !is_virtual_desktop()) return FALSE;
 
     X11DRV_expect_error( display, ignore_x_error, NULL );
     ok = XGetWindowAttributes( display, old, &attrs );
@@ -170,13 +178,19 @@ BOOL X11DRV_adopt_desktop( Window old )
     if (X11DRV_check_error() || !ok) return FALSE;
 
     TRACE( "taking over the desktop window %lx from %lx\n", old, ours );
-    XSetCloseDownMode( display, RetainTemporary );
     /* the dead manager's ButtonPress selection is still held by the X server (one client only), and the shell's own windows cover the desktop */
     win_attr.event_mask = ExposureMask | KeyPressMask | KeyReleaseMask | EnterWindowMask |
                           PointerMotionMask | ButtonReleaseMask | FocusChangeMask |
                           StructureNotifyMask | PropertyChangeMask;
     win_attr.cursor = XCreateFontCursor( display, XC_top_left_arrow );
+    X11DRV_expect_error( display, ignore_x_error, NULL );
     XChangeWindowAttributes( display, old, CWEventMask | CWCursor, &win_attr );
+    XSync( display, False );
+    if (X11DRV_check_error())  /* another client refuses part of the mask: the window made here stays the desktop */
+    {
+        WARN( "cannot take over the desktop window %lx\n", old );
+        return FALSE;
+    }
     if (XGetWindowAttributes( display, ours, &attrs ))
         XResizeWindow( display, old, attrs.width, attrs.height );
     X11DRV_expect_error( display, ignore_x_error, NULL );  /* a button selection of the dead manager may remain */
