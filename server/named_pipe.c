@@ -2464,8 +2464,10 @@ static int pipe_bridge_allowed( const WCHAR *name, data_size_t len )
     static const WCHAR broker[] = {'w','e','x','e','l','e','v','a','t','e','.','r','9'};  /* E1 R9's B0 */
     static const WCHAR eventlog[] = {'e','v','e','n','t','l','o','g'};  /* the EventLog service (L1) */
     static const WCHAR accounts[] = {'a','c','c','o','u','n','t','s'};  /* the accounts service (H1) */
+    static const WCHAR msiserver[] = {'w','e','x','m','s','i','s','e','r','v','e','r'};  /* msi's SYSTEM host (B108) */
 
     if (len == sizeof(svcctl) && !memicmp_strW( name, svcctl, len )) return 1;
+    if (len == sizeof(msiserver) && !memicmp_strW( name, msiserver, len )) return 2;
     if (len == sizeof(eventlog) && !memicmp_strW( name, eventlog, len )) return 2;  /* link_bound_token needs the link */
     if (len == sizeof(accounts) && !memicmp_strW( name, accounts, len )) return 2;
     if (len == sizeof(broker) && !memicmp_strW( name, broker, len )) return 2;

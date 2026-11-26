@@ -184,6 +184,7 @@ AddService=nsiproxy,0x800,NsiProxyService
 AddService=wexelevate,0,WexElevateService
 AddService=gpsvc,0,WexPolicyService
 AddService=wexaccounts,0,WexAccountsService
+AddService=wexmsiserver,0,WexMsiServerService
 
 [DefaultInstall.ntx86.Services]
 AddService=BITS,0,BITSService
@@ -208,6 +209,7 @@ AddService=nsiproxy,0x800,NsiProxyService
 AddService=wexelevate,0,WexElevateService
 AddService=gpsvc,0,WexPolicyService
 AddService=wexaccounts,0,WexAccountsService
+AddService=wexmsiserver,0,WexMsiServerService
 
 [DefaultInstall.ntamd64.Services]
 AddService=BITS,0,BITSService
@@ -232,6 +234,7 @@ AddService=nsiproxy,0x800,NsiProxyService
 AddService=wexelevate,0,WexElevateService
 AddService=gpsvc,0,WexPolicyService
 AddService=wexaccounts,0,WexAccountsService
+AddService=wexmsiserver,0,WexMsiServerService
 
 [DefaultInstall.ntarm64.Services]
 AddService=BITS,0,BITSService
@@ -256,6 +259,7 @@ AddService=nsiproxy,0x800,NsiProxyService
 AddService=wexelevate,0,WexElevateService
 AddService=gpsvc,0,WexPolicyService
 AddService=wexaccounts,0,WexAccountsService
+AddService=wexmsiserver,0,WexMsiServerService
 
 [Strings]
 MciExtStr="Software\Microsoft\Windows NT\CurrentVersion\MCI Extensions"
@@ -1243,6 +1247,19 @@ ErrorControl=1
 [WexAccountsServiceKeys]
 HKLM,"System\CurrentControlSet\Services\wexaccounts","WexStartInSession0Only",0x10001,1
 HKLM,"System\CurrentControlSet\Services\wexaccounts","ServiceSidType",0x10001,1
+
+[WexMsiServerService]
+AddReg=WexMsiServerServiceKeys
+Description="Runs the deferred custom actions without impersonation of elevated per-machine installs as SYSTEM"
+DisplayName="Windows Installer SYSTEM actions"
+ServiceBinary="%11%\wexmsiserver.exe"
+ServiceType=16
+StartType=2
+ErrorControl=1
+
+[WexMsiServerServiceKeys]
+HKLM,"System\CurrentControlSet\Services\wexmsiserver","WexStartInSession0Only",0x10001,1
+HKLM,"System\CurrentControlSet\Services\wexmsiserver","ServiceSidType",0x10001,1
 
 [WexPolicyService]
 Description="Writes the registry policy of the computer and of the users who log on"

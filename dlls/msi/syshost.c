@@ -1,0 +1,1094 @@
+/*
+ * WineExplorer: deferred custom actions without impersonation run as SYSTEM in session 0
+ *
+ * Copyright 2026 WineExplorer Desktop Environment Project
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+/* Windows Installer runs a deferred custom action that has msidbCustomActionTypeNoImpersonate as LocalSystem when the
+ * install is elevated and per machine. Under WineExplorer the elevated msiexec runs in the user's server, so such an
+ * action runs in a host in session 0 instead (WineExplorer's docs/MSI_NOIMPERSONATE_SYSTEM.md, option B):
+ *
+ *  - the client (the elevated msiexec running the install) opens the session 0 service WexMsiServer over the pipe
+ *    bridge; the service checks the caller and starts the host (msiexec -WexSysHost, SYSTEM in session 0), which takes
+ *    over that one connection: the host has no other client;
+ *  - the client sends each action's binary; the host writes it into a folder of its own (SYSTEM and Administrators)
+ *    and loads or starts it from there: the client never names a path the host runs;
+ *  - a DLL action calls msi back (MsiGetProperty, MsiProcessMessage) over ncalrpc as in the ordinary custom action
+ *    server; the host serves a local endpoint for it and relays its RPC channels over the connection, and the client
+ *    passes on only what a deferred action may do: the msi interface, the calls a deferred action makes, and only
+ *    the restricted handle it gave that action (msi_handle_is_restricted), whose properties are CustomActionData,
+ *    ProductCode and UserSID (s_remote_GetProperty).
+ *
+ * Without session 0 (a plain prefix, development mode) the service is not there and actions run as the user, as
+ * before. */
+
+#include <stdarg.h>
+#include <stdio.h>
+
+#define COBJMACROS
+
+#include "windef.h"
+#include "winbase.h"
+#include "winerror.h"
+#include "winnls.h"
+#include "sddl.h"
+#include "msidefs.h"
+#include "winuser.h"
+#include "objbase.h"
+#include "oleauto.h"
+
+#include "msipriv.h"
+#include "wine/debug.h"
+#include "wine/list.h"
+#include "wine/wex_msisys.h"
+
+WINE_DEFAULT_DEBUG_CHANNEL(msi);
+
+/* RPC PDUs (DCE/RPC connection-oriented, as rpcrt4 sends them over ncalrpc) */
+#define PDU_HDR_SIZE        16
+#define PDU_REQUEST         0
+#define PDU_FAULT           3
+#define PDU_BIND            11
+#define PDU_ALTER_CONTEXT   14
+#define PDU_FIRST_FRAG      0x01
+#define PDU_LAST_FRAG       0x02
+#define PDU_OBJECT_UUID     0x80
+#define PDU_MAX_FRAG        0x10000
+
+/* IWineMsiRemote (winemsi.idl): the calls a deferred action makes, by operation number */
+static const GUID msi_remote_iid = {0x56d58b64, 0x8780, 0x4c22, {0xa8, 0xbc, 0x8b, 0x0b, 0x29, 0xe4, 0xa9, 0xf8}};
+#define OP_GETPROPERTY      13
+#define OP_PROCESSMESSAGE   15
+#define OP_GETMODE          21
+#define OP_GETLANGUAGE      27
+#define OP_FORMATRECORD     29
+#define OP_GETACTIONINFO    33
+#define OP_CLOSEHANDLE      34
+
+static BOOL read_full( HANDLE h, void *buffer, DWORD size )
+{
+    BYTE *p = buffer;
+    DWORD got;
+
+    while (size)
+    {
+        if (!ReadFile( h, p, size, &got, NULL ) && GetLastError() != ERROR_MORE_DATA) return FALSE;
+        if (!got) return FALSE;
+        p += got;
+        size -= got;
+    }
+    return TRUE;
+}
+
+static BOOL write_full( HANDLE h, const void *buffer, DWORD size )
+{
+    const BYTE *p = buffer;
+    DWORD done;
+
+    while (size)
+    {
+        if (!WriteFile( h, p, size, &done, NULL ) || !done) return FALSE;
+        p += done;
+        size -= done;
+    }
+    return TRUE;
+}
+
+/* one PDU from a message-mode pipe: the header, then the rest of the fragment */
+static BYTE *read_pdu( HANDLE h, DWORD *size )
+{
+    BYTE hdr[PDU_HDR_SIZE], *pdu;
+    USHORT frag;
+
+    if (!read_full( h, hdr, sizeof(hdr) )) return NULL;
+    memcpy( &frag, hdr + 8, sizeof(frag) );
+    if (frag < PDU_HDR_SIZE) return NULL;
+    if (!(pdu = malloc( frag ))) return NULL;
+    memcpy( pdu, hdr, sizeof(hdr) );
+    if (frag > PDU_HDR_SIZE && !read_full( h, pdu + PDU_HDR_SIZE, frag - PDU_HDR_SIZE ))
+    {
+        free( pdu );
+        return NULL;
+    }
+    *size = frag;
+    return pdu;
+}
+
+static BOOL send_frame( HANDLE pipe, CRITICAL_SECTION *cs, UINT32 type, UINT32 channel, const void *data1,
+                        UINT32 size1, const void *data2, UINT32 size2 )
+{
+    struct wex_msisys_frame frame = { type, channel, size1 + size2 };
+    BOOL ret;
+
+    EnterCriticalSection( cs );
+    ret = write_full( pipe, &frame, sizeof(frame) ) && (!size1 || write_full( pipe, data1, size1 )) &&
+          (!size2 || write_full( pipe, data2, size2 ));
+    LeaveCriticalSection( cs );
+    return ret;
+}
+
+static BYTE *read_frame( HANDLE pipe, struct wex_msisys_frame *frame )
+{
+    BYTE *data;
+
+    if (!read_full( pipe, frame, sizeof(*frame) )) return NULL;
+    if (frame->size > WEX_MSISYS_MAX_FRAME) return NULL;
+    if (!(data = malloc( frame->size ? frame->size : 1 ))) return NULL;
+    if (frame->size && !read_full( pipe, data, frame->size ))
+    {
+        free( data );
+        return NULL;
+    }
+    return data;
+}
+
+/******************************************************************************
+ * the client: the elevated msiexec running the install
+ */
+
+struct relay_channel
+{
+    struct list entry;
+    struct msi_syshost *host;
+    UINT32 id;
+    HANDLE local;           /* our connection to this process's own msi endpoint */
+    HANDLE thread;          /* the pump; cancelling its read ends the channel */
+    volatile BOOL closing;  /* for a pump that was not in its read when cancelled */
+    UINT32 pass_call;       /* a request whose first fragment was allowed: its further fragments pass */
+    BOOL   passing;
+    UINT32 drop_call;       /* a request that was refused: its further fragments are dropped */
+    BOOL   dropping;
+};
+
+struct run_wait
+{
+    struct list entry;
+    GUID guid;
+    HANDLE event;
+    UINT status;
+    UINT code;
+};
+
+struct msi_syshost
+{
+    HANDLE pipe;
+    DWORD pid;
+    HANDLE reader;
+    CRITICAL_SECTION write_cs;
+    CRITICAL_SECTION cs;    /* channels, waits, dead */
+    struct list channels;
+    struct list waits;
+    BOOL dead;
+};
+
+BOOL msi_syshost_wanted( MSIPACKAGE *package, UINT type )
+{
+    TOKEN_ELEVATION_TYPE elevation;
+    DWORD size;
+
+    if ((type & (msidbCustomActionTypeInScript | msidbCustomActionTypeNoImpersonate)) !=
+            (msidbCustomActionTypeInScript | msidbCustomActionTypeNoImpersonate))
+        return FALSE;
+    if (package->syshost_unavailable) return FALSE;
+    /* Windows: SYSTEM only for an elevated per-machine install; a per-user install runs the action as the user */
+    if (package->Context != MSIINSTALLCONTEXT_MACHINE) return FALSE;
+    if (!GetTokenInformation( GetCurrentThreadEffectiveToken(), TokenElevationType, &elevation, sizeof(elevation),
+                              &size ) || elevation != TokenElevationTypeFull)
+        return FALSE;
+    return TRUE;
+}
+
+static void fail_waits( struct msi_syshost *host )
+{
+    struct run_wait *wait;
+
+    EnterCriticalSection( &host->cs );
+    host->dead = TRUE;
+    LIST_FOR_EACH_ENTRY( wait, &host->waits, struct run_wait, entry )
+    {
+        wait->status = ERROR_BROKEN_PIPE;
+        SetEvent( wait->event );
+    }
+    LeaveCriticalSection( &host->cs );
+}
+
+static struct relay_channel *find_channel( struct msi_syshost *host, UINT32 id )
+{
+    struct relay_channel *channel;
+
+    LIST_FOR_EACH_ENTRY( channel, &host->channels, struct relay_channel, entry )
+        if (channel->id == id) return channel;
+    return NULL;
+}
+
+/* our own msi endpoint's answers go back to the host's channel */
+static DWORD WINAPI relay_pump( void *arg )
+{
+    struct relay_channel *channel = arg;
+    struct msi_syshost *host = channel->host;
+    BYTE *pdu;
+    DWORD size;
+
+    while (!channel->closing && (pdu = read_pdu( channel->local, &size )))
+    {
+        BOOL ok = send_frame( host->pipe, &host->write_cs, WEX_MSISYS_DATA, channel->id, pdu, size, NULL, 0 );
+        free( pdu );
+        if (!ok) break;
+    }
+    send_frame( host->pipe, &host->write_cs, WEX_MSISYS_CLOSE, channel->id, NULL, 0, NULL, 0 );
+
+    /* once off the list nobody else touches the channel's handles */
+    EnterCriticalSection( &host->cs );
+    list_remove( &channel->entry );
+    LeaveCriticalSection( &host->cs );
+    CloseHandle( channel->local );
+    CloseHandle( channel->thread );
+    free( channel );
+    return 0;
+}
+
+static void open_channel( struct msi_syshost *host, UINT32 id )
+{
+    struct relay_channel *channel;
+    WCHAR name[48];
+    DWORD mode = PIPE_READMODE_MESSAGE;
+    HANDLE thread;
+
+    swprintf( name, ARRAY_SIZE(name), L"\\\\.\\pipe\\lrpc\\msi%x", GetCurrentProcessId() );
+    if (!(channel = calloc( 1, sizeof(*channel) ))) goto refuse;
+    channel->host = host;
+    channel->id = id;
+    channel->local = CreateFileW( name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL );
+    if (channel->local == INVALID_HANDLE_VALUE)
+    {
+        ERR( "cannot open our own msi endpoint: %lu\n", GetLastError() );
+        free( channel );
+        goto refuse;
+    }
+    SetNamedPipeHandleState( channel->local, &mode, NULL, NULL );
+
+    if (!(thread = CreateThread( NULL, 0, relay_pump, channel, CREATE_SUSPENDED, NULL )))
+    {
+        CloseHandle( channel->local );
+        free( channel );
+        goto refuse;
+    }
+    channel->thread = thread;
+    EnterCriticalSection( &host->cs );
+    list_add_tail( &host->channels, &channel->entry );
+    LeaveCriticalSection( &host->cs );
+    ResumeThread( thread );
+    return;
+
+refuse:
+    send_frame( host->pipe, &host->write_cs, WEX_MSISYS_CLOSE, id, NULL, 0, NULL, 0 );
+}
+
+enum relay_verdict { RELAY_PASS, RELAY_FAULT, RELAY_DROP, RELAY_CLOSE };
+
+/* bind and alter context: only the msi interface */
+static enum relay_verdict check_bind( const BYTE *pdu, DWORD size )
+{
+    DWORD pos = PDU_HDR_SIZE + 8;  /* max_xmit_frag, max_recv_frag, assoc_group_id */
+    BYTE count, transfers;
+    unsigned int i;
+    GUID iid;
+
+    if (size < pos + 4) return RELAY_CLOSE;
+    count = pdu[pos];
+    pos += 4;
+    if (!count) return RELAY_CLOSE;
+    for (i = 0; i < count; i++)
+    {
+        /* p_cont_id, n_transfer_syn, reserved, abstract syntax (uuid, version), transfer syntaxes (uuid, version) */
+        if (size < pos + 4 + 20) return RELAY_CLOSE;
+        transfers = pdu[pos + 2];
+        memcpy( &iid, pdu + pos + 4, sizeof(iid) );
+        if (!IsEqualGUID( &iid, &msi_remote_iid ))
+        {
+            WARN( "SYSTEM custom action binds %s: refused\n", debugstr_guid(&iid) );
+            return RELAY_CLOSE;
+        }
+        pos += 4 + 20 + transfers * 20;
+    }
+    return pos <= size ? RELAY_PASS : RELAY_CLOSE;
+}
+
+/* a request from the host: what a deferred action may call, on its own restricted handle */
+static enum relay_verdict check_request( struct relay_channel *channel, const BYTE *pdu, DWORD size )
+{
+    BYTE flags = pdu[3];
+    UINT32 call_id, handle;
+    USHORT opnum;
+    DWORD stub;
+    GUID guid;
+
+    memcpy( &call_id, pdu + 12, sizeof(call_id) );
+    if (!(flags & PDU_FIRST_FRAG))
+    {
+        if (channel->dropping && call_id == channel->drop_call)
+        {
+            if (flags & PDU_LAST_FRAG) channel->dropping = FALSE;
+            return RELAY_DROP;
+        }
+        if (!channel->passing || call_id != channel->pass_call) return RELAY_CLOSE;
+        if (flags & PDU_LAST_FRAG) channel->passing = FALSE;
+        return RELAY_PASS;
+    }
+
+    if (size < PDU_HDR_SIZE + 8) return RELAY_CLOSE;
+    memcpy( &opnum, pdu + PDU_HDR_SIZE + 6, sizeof(opnum) );
+    stub = PDU_HDR_SIZE + 8 + ((flags & PDU_OBJECT_UUID) ? 16 : 0);
+
+    switch (opnum)
+    {
+    case OP_GETACTIONINFO:
+        if (size < stub + sizeof(guid)) goto fault;
+        memcpy( &guid, pdu + stub, sizeof(guid) );
+        if (!custom_action_runs_in_syshost( &guid )) goto fault;
+        break;
+    case OP_GETPROPERTY:
+    case OP_PROCESSMESSAGE:
+    case OP_GETMODE:
+    case OP_GETLANGUAGE:
+    case OP_FORMATRECORD:
+    case OP_CLOSEHANDLE:
+        if (size < stub + sizeof(handle)) goto fault;
+        memcpy( &handle, pdu + stub, sizeof(handle) );
+        if (!msi_handle_is_restricted( handle )) goto fault;
+        break;
+    default:
+        TRACE( "operation %u of a SYSTEM custom action refused\n", opnum );
+        goto fault;
+    }
+    if (!(flags & PDU_LAST_FRAG))
+    {
+        channel->passing = TRUE;
+        channel->pass_call = call_id;
+    }
+    return RELAY_PASS;
+
+fault:
+    if (!(flags & PDU_LAST_FRAG))
+    {
+        channel->dropping = TRUE;
+        channel->drop_call = call_id;
+    }
+    return RELAY_FAULT;
+}
+
+static enum relay_verdict check_pdu( struct relay_channel *channel, const BYTE *pdu, DWORD size )
+{
+    USHORT frag, auth;
+
+    if (size < PDU_HDR_SIZE || pdu[0] != 5 || !(pdu[4] & 0x10)) return RELAY_CLOSE;  /* version 5, little endian */
+    memcpy( &frag, pdu + 8, sizeof(frag) );
+    memcpy( &auth, pdu + 10, sizeof(auth) );
+    if (frag != size || auth) return RELAY_CLOSE;
+    switch (pdu[2])
+    {
+    case PDU_BIND:
+    case PDU_ALTER_CONTEXT:
+        return check_bind( pdu, size );
+    case PDU_REQUEST:
+        return check_request( channel, pdu, size );
+    default:
+        return RELAY_CLOSE;
+    }
+}
+
+/* the refusal of a request: a fault with ERROR_ACCESS_DENIED, which msi's remote call returns as its error */
+static void send_fault( struct msi_syshost *host, UINT32 id, const BYTE *request )
+{
+    BYTE fault[32] = { 5, 0, PDU_FAULT, PDU_FIRST_FRAG | PDU_LAST_FRAG, 0x10 };
+    USHORT frag = sizeof(fault);
+    UINT32 status = ERROR_ACCESS_DENIED;
+
+    memcpy( fault + 8, &frag, sizeof(frag) );
+    memcpy( fault + 12, request + 12, 4 );                  /* call id */
+    memcpy( fault + 20, request + PDU_HDR_SIZE + 4, 2 );    /* presentation context */
+    memcpy( fault + 24, &status, sizeof(status) );
+    send_frame( host->pipe, &host->write_cs, WEX_MSISYS_DATA, id, fault, sizeof(fault), NULL, 0 );
+}
+
+static void relay_data( struct msi_syshost *host, UINT32 id, const BYTE *pdu, DWORD size )
+{
+    struct relay_channel *channel;
+    enum relay_verdict verdict = RELAY_DROP;
+    DWORD written;
+
+    /* under the lock: the pump frees the channel only after taking it off the list */
+    EnterCriticalSection( &host->cs );
+    if ((channel = find_channel( host, id )))
+    {
+        verdict = check_pdu( channel, pdu, size );
+        if (verdict == RELAY_PASS && !WriteFile( channel->local, pdu, size, &written, NULL ))
+            verdict = RELAY_CLOSE;
+        if (verdict == RELAY_CLOSE)
+        {
+            WARN( "closing a SYSTEM custom action's RPC channel %u\n", id );
+            channel->closing = TRUE;
+            CancelSynchronousIo( channel->thread );  /* the pump's read fails: it sends CLOSE and frees it */
+        }
+    }
+    LeaveCriticalSection( &host->cs );
+    if (verdict == RELAY_FAULT) send_fault( host, id, pdu );
+}
+
+static void close_channel( struct msi_syshost *host, UINT32 id )
+{
+    struct relay_channel *channel;
+
+    EnterCriticalSection( &host->cs );
+    if ((channel = find_channel( host, id )))
+    {
+        channel->closing = TRUE;
+        CancelSynchronousIo( channel->thread );
+    }
+    LeaveCriticalSection( &host->cs );
+}
+
+static DWORD WINAPI client_reader( void *arg )
+{
+    struct msi_syshost *host = arg;
+    struct wex_msisys_frame frame;
+    struct run_wait *wait;
+    BYTE *data;
+
+    while ((data = read_frame( host->pipe, &frame )))
+    {
+        switch (frame.type)
+        {
+        case WEX_MSISYS_DONE:
+            if (frame.size == sizeof(struct wex_msisys_done))
+            {
+                const struct wex_msisys_done *done = (const struct wex_msisys_done *)data;
+
+                EnterCriticalSection( &host->cs );
+                LIST_FOR_EACH_ENTRY( wait, &host->waits, struct run_wait, entry )
+                {
+                    if (!IsEqualGUID( &wait->guid, &done->guid )) continue;
+                    wait->status = done->status;
+                    wait->code = done->code;
+                    SetEvent( wait->event );
+                    break;
+                }
+                LeaveCriticalSection( &host->cs );
+            }
+            break;
+        case WEX_MSISYS_OPEN:
+            open_channel( host, frame.channel );
+            break;
+        case WEX_MSISYS_DATA:
+            relay_data( host, frame.channel, data, frame.size );
+            break;
+        case WEX_MSISYS_CLOSE:
+            close_channel( host, frame.channel );
+            break;
+        default:
+            WARN( "unexpected frame %u from the SYSTEM host\n", frame.type );
+            break;
+        }
+        free( data );
+    }
+    TRACE( "the SYSTEM host %04lx is gone\n", host->pid );
+    fail_waits( host );
+    return 0;
+}
+
+UINT msi_syshost_connect( MSIPACKAGE *package, DWORD arch )
+{
+    struct wex_msisys_request request = { WEX_MSISYS_MAGIC, WEX_MSISYS_VERSION };
+    struct wex_msisys_frame frame;
+    struct msi_syshost *host;
+    unsigned int index = (arch == SCS_64BIT_BINARY);
+    const WCHAR *name;
+    UINT32 status;
+    BYTE *data;
+    HANDLE pipe;
+
+    if (package->syshost[index] && !package->syshost[index]->dead) return ERROR_SUCCESS;
+    if (package->syshost[index]) return ERROR_BROKEN_PIPE;  /* the host died: the install fails, no fallback */
+    if (package->syshost_unavailable) return ERROR_NOT_SUPPORTED;
+
+    /* identification only: the service checks who asks, it never acts as the user */
+    pipe = CreateFileW( WEX_MSISYS_PIPE, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+                        SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL );
+    if (pipe == INVALID_HANDLE_VALUE)
+    {
+        WARN( "no SYSTEM custom action host (%lu): actions without impersonation run as the installing user\n",
+              GetLastError() );
+        package->syshost_unavailable = 1;
+        return ERROR_NOT_SUPPORTED;
+    }
+
+    request.arch = arch == SCS_64BIT_BINARY ? 64 : 32;
+    request.flags = WEX_MSISYS_PER_MACHINE;  /* msi_syshost_wanted: package->Context is MSIINSTALLCONTEXT_MACHINE */
+    if (package->ProductCode) lstrcpynW( request.product, package->ProductCode, ARRAY_SIZE(request.product) );
+    if (package->PackagePath)
+    {
+        name = wcsrchr( package->PackagePath, '\\' );
+        lstrcpynW( request.package, name ? name + 1 : package->PackagePath, ARRAY_SIZE(request.package) );
+    }
+    if (!write_full( pipe, &request, sizeof(request) ) || !read_full( pipe, &status, sizeof(status) ))
+    {
+        ERR( "the session 0 service did not answer: %lu\n", GetLastError() );
+        CloseHandle( pipe );
+        package->syshost_unavailable = 1;
+        return ERROR_NOT_SUPPORTED;
+    }
+    if (status)
+    {
+        WARN( "the session 0 service refused a SYSTEM host: %u; actions run as the installing user\n", status );
+        CloseHandle( pipe );
+        package->syshost_unavailable = 1;
+        return ERROR_NOT_SUPPORTED;
+    }
+    if (!(data = read_frame( pipe, &frame )) || frame.type != WEX_MSISYS_READY ||
+            frame.size != sizeof(struct wex_msisys_ready))
+    {
+        ERR( "the SYSTEM host did not start\n" );
+        free( data );
+        CloseHandle( pipe );
+        return ERROR_BROKEN_PIPE;
+    }
+
+    if (!(host = calloc( 1, sizeof(*host) )))
+    {
+        free( data );
+        CloseHandle( pipe );
+        return ERROR_OUTOFMEMORY;
+    }
+    host->pipe = pipe;
+    host->pid = ((struct wex_msisys_ready *)data)->pid;
+    free( data );
+    InitializeCriticalSection( &host->write_cs );
+    InitializeCriticalSection( &host->cs );
+    list_init( &host->channels );
+    list_init( &host->waits );
+    if (!(host->reader = CreateThread( NULL, 0, client_reader, host, 0, NULL )))
+    {
+        DeleteCriticalSection( &host->write_cs );
+        DeleteCriticalSection( &host->cs );
+        CloseHandle( pipe );
+        free( host );
+        return ERROR_OUTOFMEMORY;
+    }
+    TRACE( "SYSTEM custom action host %04lx (%u bit) in session 0\n", host->pid, request.arch );
+    package->syshost[index] = host;
+    return ERROR_SUCCESS;
+}
+
+static BYTE *read_binary( const WCHAR *path, DWORD *size )
+{
+    LARGE_INTEGER len;
+    HANDLE file;
+    BYTE *data = NULL;
+
+    file = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL );
+    if (file == INVALID_HANDLE_VALUE) return NULL;
+    if (GetFileSizeEx( file, &len ) && len.QuadPart > 0 && len.QuadPart <= WEX_MSISYS_MAX_FRAME / 2 &&
+            (data = malloc( len.LowPart )))
+    {
+        if (read_full( file, data, len.LowPart )) *size = len.LowPart;
+        else
+        {
+            free( data );
+            data = NULL;
+        }
+    }
+    CloseHandle( file );
+    return data;
+}
+
+UINT msi_syshost_run( MSIPACKAGE *package, DWORD arch, UINT kind, const GUID *guid, const WCHAR *binary,
+                      const WCHAR *entry, BOOL async, UINT *code )
+{
+    struct wex_msisys_run run = { *guid, kind, async ? WEX_MSISYS_RUN_ASYNC : 0 };
+    struct msi_syshost *host;
+    struct run_wait wait = { .guid = *guid };
+    BYTE *data, *payload;
+    char *entry_a = NULL;
+    DWORD size;
+    UINT r;
+    BOOL sent;
+
+    if ((r = msi_syshost_connect( package, arch ))) return r;
+    host = package->syshost[arch == SCS_64BIT_BINARY];
+
+    if (!(data = read_binary( binary, &size )))
+    {
+        ERR( "cannot read %s: %lu\n", debugstr_w(binary), GetLastError() );
+        return ERROR_FUNCTION_FAILED;
+    }
+    run.binary_size = size;
+    if (kind == WEX_MSISYS_KIND_DLL)
+    {
+        entry_a = strdupWtoA( entry );
+        run.entry_size = entry_a ? strlen( entry_a ) + 1 : 0;
+    }
+    else run.entry_size = (lstrlenW( entry ) + 1) * sizeof(WCHAR);
+    if (!(payload = malloc( sizeof(run) + run.entry_size )))
+    {
+        free( data );
+        free( entry_a );
+        return ERROR_OUTOFMEMORY;
+    }
+    memcpy( payload, &run, sizeof(run) );
+    memcpy( payload + sizeof(run), kind == WEX_MSISYS_KIND_DLL ? (void *)entry_a : (void *)entry, run.entry_size );
+    free( entry_a );
+
+    wait.event = CreateEventW( NULL, TRUE, FALSE, NULL );
+    EnterCriticalSection( &host->cs );
+    if (host->dead) wait.status = ERROR_BROKEN_PIPE;
+    else list_add_tail( &host->waits, &wait.entry );
+    LeaveCriticalSection( &host->cs );
+    if (wait.status)
+    {
+        CloseHandle( wait.event );
+        free( payload );
+        free( data );
+        return wait.status;
+    }
+
+    sent = send_frame( host->pipe, &host->write_cs, WEX_MSISYS_RUN, 0, payload, sizeof(run) + run.entry_size,
+                       data, size );
+    free( payload );
+    free( data );
+    if (!sent)
+    {
+        EnterCriticalSection( &host->cs );
+        list_remove( &wait.entry );
+        LeaveCriticalSection( &host->cs );
+        CloseHandle( wait.event );
+        return ERROR_BROKEN_PIPE;
+    }
+    WaitForSingleObject( wait.event, INFINITE );
+    EnterCriticalSection( &host->cs );
+    list_remove( &wait.entry );
+    LeaveCriticalSection( &host->cs );
+    CloseHandle( wait.event );
+    *code = wait.code;
+    return wait.status;
+}
+
+void msi_syshost_stop( MSIPACKAGE *package )
+{
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(package->syshost); i++)
+    {
+        struct msi_syshost *host = package->syshost[i];
+
+        if (!host) continue;
+        send_frame( host->pipe, &host->write_cs, WEX_MSISYS_END, 0, NULL, 0, NULL, 0 );
+        if (WaitForSingleObject( host->reader, 60000 ))
+        {
+            WARN( "the SYSTEM host %04lx does not end\n", host->pid );
+            CancelSynchronousIo( host->reader );
+            WaitForSingleObject( host->reader, 5000 );
+        }
+        CloseHandle( host->reader );
+        /* the relay's pumps wait on our own endpoint: end them, and wait until they have let go of the host */
+        for (;;)
+        {
+            struct relay_channel *channel;
+            BOOL empty;
+
+            EnterCriticalSection( &host->cs );
+            empty = list_empty( &host->channels );
+            LIST_FOR_EACH_ENTRY( channel, &host->channels, struct relay_channel, entry )
+            {
+                channel->closing = TRUE;
+                CancelSynchronousIo( channel->thread );
+            }
+            LeaveCriticalSection( &host->cs );
+            if (empty) break;
+            Sleep( 10 );
+        }
+        CloseHandle( host->pipe );
+        DeleteCriticalSection( &host->write_cs );
+        DeleteCriticalSection( &host->cs );
+        free( host );
+        package->syshost[i] = NULL;
+    }
+}
+
+/******************************************************************************
+ * the host: msiexec -WexSysHost <handle>, SYSTEM in session 0
+ */
+
+struct host_channel
+{
+    struct list entry;
+    UINT32 id;
+    HANDLE pipe;
+};
+
+static struct
+{
+    HANDLE pipe;                    /* the client's connection */
+    CRITICAL_SECTION write_cs;
+    CRITICAL_SECTION cs;            /* channels */
+    struct list channels;
+    UINT32 next_channel;
+    WCHAR endpoint[48];             /* our ncalrpc endpoint, relayed to the client */
+    WCHAR endpoint_pipe[80];
+    WCHAR folder[MAX_PATH];         /* the binaries we write */
+    LONG files;
+    SECURITY_ATTRIBUTES endpoint_sa;
+} syshost;
+
+static void random_hex( WCHAR *buffer, size_t size )
+{
+    GUID guid;
+
+    CoCreateGuid( &guid );
+    swprintf( buffer, size, L"%08x%04x%04x%02x%02x%02x%02x%02x%02x%02x%02x", (unsigned int)guid.Data1, guid.Data2, guid.Data3,
+              guid.Data4[0], guid.Data4[1], guid.Data4[2], guid.Data4[3], guid.Data4[4], guid.Data4[5],
+              guid.Data4[6], guid.Data4[7] );
+}
+
+/* the folder for the binaries: SYSTEM and Administrators only, made by us before the first binary */
+static BOOL make_folder(void)
+{
+    SECURITY_ATTRIBUTES sa = { sizeof(sa) };
+    WCHAR windir[MAX_PATH], name[40];
+    BOOL ret = FALSE;
+    int tries;
+
+    if (!GetWindowsDirectoryW( windir, ARRAY_SIZE(windir) )) return FALSE;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW( L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)",
+                                                                SDDL_REVISION_1, &sa.lpSecurityDescriptor, NULL ))
+        return FALSE;
+    swprintf( syshost.folder, ARRAY_SIZE(syshost.folder), L"%s\\Installer", windir );
+    CreateDirectoryW( syshost.folder, NULL );
+    for (tries = 0; tries < 8 && !ret; tries++)
+    {
+        random_hex( name, ARRAY_SIZE(name) );
+        swprintf( syshost.folder, ARRAY_SIZE(syshost.folder), L"%s\\Installer\\WexSys%s", windir, name );
+        ret = CreateDirectoryW( syshost.folder, &sa );  /* a fresh one, never one that is there already */
+    }
+    LocalFree( sa.lpSecurityDescriptor );
+    if (!ret) ERR( "cannot make a folder for the binaries: %lu\n", GetLastError() );
+    return ret;
+}
+
+static void remove_folder(void)
+{
+    WIN32_FIND_DATAW data;
+    WCHAR path[MAX_PATH];
+    HANDLE find;
+
+    if (!syshost.folder[0]) return;
+    swprintf( path, ARRAY_SIZE(path), L"%s\\*", syshost.folder );
+    if ((find = FindFirstFileW( path, &data )) != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            if (!wcscmp( data.cFileName, L"." ) || !wcscmp( data.cFileName, L".." )) continue;
+            swprintf( path, ARRAY_SIZE(path), L"%s\\%s", syshost.folder, data.cFileName );
+            if (!DeleteFileW( path )) WARN( "cannot remove %s: %lu\n", debugstr_w(path), GetLastError() );
+        } while (FindNextFileW( find, &data ));
+        FindClose( find );
+    }
+    if (!RemoveDirectoryW( syshost.folder ))
+        WARN( "cannot remove %s: %lu\n", debugstr_w(syshost.folder), GetLastError() );
+}
+
+static BOOL write_binary( const BYTE *data, DWORD size, const WCHAR *ext, WCHAR *path, size_t path_size )
+{
+    HANDLE file;
+    BOOL ret;
+
+    swprintf( path, path_size, L"%s\\%u%s", syshost.folder, (unsigned int)InterlockedIncrement( &syshost.files ), ext );
+    file = CreateFileW( path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL );
+    if (file == INVALID_HANDLE_VALUE) return FALSE;
+    ret = write_full( file, data, size );
+    CloseHandle( file );
+    if (!ret) DeleteFileW( path );
+    return ret;
+}
+
+static void host_send( UINT32 type, UINT32 channel, const void *data, UINT32 size )
+{
+    send_frame( syshost.pipe, &syshost.write_cs, type, channel, data, size, NULL, 0 );
+}
+
+static struct host_channel *host_find_channel( UINT32 id )
+{
+    struct host_channel *channel;
+
+    LIST_FOR_EACH_ENTRY( channel, &syshost.channels, struct host_channel, entry )
+        if (channel->id == id) return channel;
+    return NULL;
+}
+
+/* one of the action's RPC connections to our endpoint: its requests go to the client */
+static DWORD WINAPI host_pump( void *arg )
+{
+    struct host_channel *channel = arg;
+    BYTE *pdu;
+    DWORD size;
+
+    while ((pdu = read_pdu( channel->pipe, &size )))
+    {
+        host_send( WEX_MSISYS_DATA, channel->id, pdu, size );
+        free( pdu );
+    }
+    host_send( WEX_MSISYS_CLOSE, channel->id, NULL, 0 );
+    EnterCriticalSection( &syshost.cs );
+    list_remove( &channel->entry );
+    LeaveCriticalSection( &syshost.cs );
+    DisconnectNamedPipe( channel->pipe );
+    CloseHandle( channel->pipe );
+    free( channel );
+    return 0;
+}
+
+static HANDLE new_endpoint_instance( BOOL first )
+{
+    return CreateNamedPipeW( syshost.endpoint_pipe,
+                             PIPE_ACCESS_DUPLEX | (first ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0),
+                             PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT, PIPE_UNLIMITED_INSTANCES,
+                             PDU_MAX_FRAG, PDU_MAX_FRAG, 0, &syshost.endpoint_sa );
+}
+
+static DWORD WINAPI host_listener( void *arg )
+{
+    HANDLE pipe = arg;
+
+    for (;;)
+    {
+        struct host_channel *channel;
+        HANDLE thread;
+
+        if (!ConnectNamedPipe( pipe, NULL ) && GetLastError() != ERROR_PIPE_CONNECTED)
+        {
+            CloseHandle( pipe );
+        }
+        else if ((channel = calloc( 1, sizeof(*channel) )))
+        {
+            channel->pipe = pipe;
+            EnterCriticalSection( &syshost.cs );
+            channel->id = ++syshost.next_channel;
+            list_add_tail( &syshost.channels, &channel->entry );
+            LeaveCriticalSection( &syshost.cs );
+            host_send( WEX_MSISYS_OPEN, channel->id, NULL, 0 );
+            if ((thread = CreateThread( NULL, 0, host_pump, channel, 0, NULL ))) CloseHandle( thread );
+            else
+            {
+                EnterCriticalSection( &syshost.cs );
+                list_remove( &channel->entry );
+                LeaveCriticalSection( &syshost.cs );
+                host_send( WEX_MSISYS_CLOSE, channel->id, NULL, 0 );
+                CloseHandle( pipe );
+                free( channel );
+            }
+        }
+        else CloseHandle( pipe );
+
+        if ((pipe = new_endpoint_instance( FALSE )) == INVALID_HANDLE_VALUE)
+        {
+            ERR( "cannot make another instance of %s: %lu\n", debugstr_w(syshost.endpoint_pipe), GetLastError() );
+            return 1;
+        }
+    }
+}
+
+struct host_run
+{
+    struct wex_msisys_run run;
+    BYTE *entry;
+    BYTE *binary;
+};
+
+static DWORD WINAPI host_run_thread( void *arg )
+{
+    struct host_run *job = arg;
+    struct wex_msisys_done done = { job->run.guid };
+    PROCESS_INFORMATION pi;
+    STARTUPINFOW si = { sizeof(si) };
+    WCHAR path[MAX_PATH], *cmd = NULL;
+    const WCHAR *args;
+    DWORD code;
+
+    if (!write_binary( job->binary, job->run.binary_size, job->run.kind == WEX_MSISYS_KIND_DLL ? L".dll" : L".exe",
+                       path, ARRAY_SIZE(path) ))
+    {
+        ERR( "cannot write the binary: %lu\n", GetLastError() );
+        done.status = GetLastError() ? GetLastError() : ERROR_WRITE_FAULT;
+        goto end;
+    }
+
+    if (job->run.kind == WEX_MSISYS_KIND_DLL)
+    {
+        CoInitializeEx( NULL, COINIT_MULTITHREADED );
+        done.code = custom_call_dll_function( syshost.endpoint, &job->run.guid, path );
+        CoUninitialize();
+        if (!DeleteFileW( path )) WARN( "cannot remove %s: %lu\n", debugstr_w(path), GetLastError() );
+        goto end;
+    }
+
+    /* an EXE: "path" arguments, run from C:\ as msi does */
+    args = (const WCHAR *)job->entry;
+    if (!(cmd = malloc( (lstrlenW( path ) + lstrlenW( args ) + 4) * sizeof(WCHAR) )))
+    {
+        done.status = ERROR_OUTOFMEMORY;
+        goto end;
+    }
+    swprintf( cmd, lstrlenW( path ) + lstrlenW( args ) + 4, L"\"%s\"%s%s", path, args[0] ? L" " : L"", args );
+    if (!CreateProcessW( path, cmd, NULL, NULL, FALSE, 0, NULL, L"C:\\", &si, &pi ))
+    {
+        ERR( "cannot start %s: %lu\n", debugstr_w(path), GetLastError() );
+        done.status = GetLastError();
+        DeleteFileW( path );
+        goto end;
+    }
+    CloseHandle( pi.hThread );
+    if (!(job->run.flags & WEX_MSISYS_RUN_ASYNC))
+    {
+        WaitForSingleObject( pi.hProcess, INFINITE );
+        if (GetExitCodeProcess( pi.hProcess, &code )) done.code = code;
+        if (!DeleteFileW( path )) WARN( "cannot remove %s: %lu\n", debugstr_w(path), GetLastError() );
+    }
+    CloseHandle( pi.hProcess );
+
+end:
+    host_send( WEX_MSISYS_DONE, 0, &done, sizeof(done) );
+    free( cmd );
+    free( job->entry );
+    free( job->binary );
+    free( job );
+    return 0;
+}
+
+static void host_start_run( const BYTE *data, UINT32 size )
+{
+    struct wex_msisys_done done = { { 0 } };
+    struct host_run *job = NULL;
+    HANDLE thread;
+
+    if (size < sizeof(job->run)) return;
+    memcpy( &done.guid, data, sizeof(done.guid) );
+    if (!(job = calloc( 1, sizeof(*job) ))) goto fail;
+    memcpy( &job->run, data, sizeof(job->run) );
+    if ((UINT64)sizeof(job->run) + job->run.entry_size + job->run.binary_size != size || !job->run.binary_size ||
+            (job->run.kind != WEX_MSISYS_KIND_DLL && job->run.kind != WEX_MSISYS_KIND_EXE))
+        goto fail;
+    /* the entry is terminated: a function name, or arguments */
+    if (job->run.kind == WEX_MSISYS_KIND_DLL ? (!job->run.entry_size || data[sizeof(job->run) + job->run.entry_size - 1])
+            : (job->run.entry_size < sizeof(WCHAR) || job->run.entry_size % sizeof(WCHAR) ||
+               ((const WCHAR *)(data + sizeof(job->run)))[job->run.entry_size / sizeof(WCHAR) - 1]))
+        goto fail;
+    if (!(job->entry = malloc( job->run.entry_size )) || !(job->binary = malloc( job->run.binary_size ))) goto fail;
+    memcpy( job->entry, data + sizeof(job->run), job->run.entry_size );
+    memcpy( job->binary, data + sizeof(job->run) + job->run.entry_size, job->run.binary_size );
+    if ((thread = CreateThread( NULL, 0, host_run_thread, job, 0, NULL )))
+    {
+        CloseHandle( thread );
+        return;
+    }
+
+fail:
+    if (job)
+    {
+        free( job->entry );
+        free( job->binary );
+        free( job );
+    }
+    done.status = ERROR_INVALID_DATA;
+    host_send( WEX_MSISYS_DONE, 0, &done, sizeof(done) );
+}
+
+UINT CDECL __wine_msi_syshost( HANDLE pipe )
+{
+    struct wex_msisys_ready ready = { GetCurrentProcessId() };
+    struct wex_msisys_frame frame;
+    struct host_channel *channel;
+    HANDLE instance, thread;
+    WCHAR hex[40];
+    BYTE *data;
+
+    syshost.pipe = pipe;
+    InitializeCriticalSection( &syshost.write_cs );
+    InitializeCriticalSection( &syshost.cs );
+    list_init( &syshost.channels );
+
+    /* our endpoint: a random name; only SYSTEM opens it (the bridge checks a session's opener against this DACL),
+     * so only the action's own connections come in */
+    random_hex( hex, ARRAY_SIZE(hex) );
+    swprintf( syshost.endpoint, ARRAY_SIZE(syshost.endpoint), L"wexsys%s", hex );
+    swprintf( syshost.endpoint_pipe, ARRAY_SIZE(syshost.endpoint_pipe), L"\\\\.\\pipe\\lrpc\\%s", syshost.endpoint );
+    syshost.endpoint_sa.nLength = sizeof(syshost.endpoint_sa);
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW( L"D:P(A;;GA;;;SY)", SDDL_REVISION_1,
+                                                                &syshost.endpoint_sa.lpSecurityDescriptor, NULL ) ||
+            !make_folder() ||
+            (instance = new_endpoint_instance( TRUE )) == INVALID_HANDLE_VALUE)
+    {
+        ERR( "cannot set up the host: %lu\n", GetLastError() );
+        remove_folder();
+        return 1;
+    }
+    if (!(thread = CreateThread( NULL, 0, host_listener, instance, 0, NULL )))
+    {
+        remove_folder();
+        return 1;
+    }
+    CloseHandle( thread );
+    host_send( WEX_MSISYS_READY, 0, &ready, sizeof(ready) );
+
+    while ((data = read_frame( pipe, &frame )))
+    {
+        BOOL end = FALSE;
+
+        switch (frame.type)
+        {
+        case WEX_MSISYS_RUN:
+            host_start_run( data, frame.size );
+            break;
+        case WEX_MSISYS_DATA:
+            EnterCriticalSection( &syshost.cs );
+            if ((channel = host_find_channel( frame.channel )))
+            {
+                DWORD written;
+
+                if (!WriteFile( channel->pipe, data, frame.size, &written, NULL ))
+                    DisconnectNamedPipe( channel->pipe );
+            }
+            LeaveCriticalSection( &syshost.cs );
+            break;
+        case WEX_MSISYS_CLOSE:
+            EnterCriticalSection( &syshost.cs );
+            if ((channel = host_find_channel( frame.channel ))) DisconnectNamedPipe( channel->pipe );
+            LeaveCriticalSection( &syshost.cs );
+            break;
+        case WEX_MSISYS_END:
+            end = TRUE;
+            break;
+        default:
+            WARN( "unexpected frame %u\n", frame.type );
+            break;
+        }
+        free( data );
+        if (end) break;
+    }
+
+    TRACE( "the install is over, ending\n" );
+    remove_folder();
+    return 0;
+}

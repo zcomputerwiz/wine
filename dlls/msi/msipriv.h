@@ -449,6 +449,7 @@ typedef struct tagMSIPACKAGE
     HANDLE custom_server_64_process;
     HANDLE custom_server_32_pipe;
     HANDLE custom_server_64_pipe;
+    struct msi_syshost *syshost[2];  /* WineExplorer: the SYSTEM hosts, 32 and 64 bit (syshost.c) */
 
     LPWSTR PackagePath;
     LPWSTR ProductCode;
@@ -476,6 +477,7 @@ typedef struct tagMSIPACKAGE
     unsigned char need_reboot_now : 1;
     unsigned char need_rollback : 1;
     unsigned char rpc_server_started : 1;
+    unsigned char syshost_unavailable : 1;  /* WineExplorer: no session 0 service; SYSTEM actions run as the user */
 } MSIPACKAGE;
 
 typedef struct tagMSIPREVIEW
@@ -778,6 +780,8 @@ extern LONG WINAPI rpc_filter(EXCEPTION_POINTERS *eptr);
 extern void *msihandle2msiinfo(MSIHANDLE handle, UINT type);
 extern MSIHANDLE alloc_msihandle( MSIOBJECTHDR * );
 extern MSIHANDLE alloc_msi_remote_handle(MSIHANDLE remote);
+extern MSIHANDLE alloc_msihandle_restricted( MSIOBJECTHDR * );
+extern BOOL msi_handle_is_restricted( MSIHANDLE );
 extern void *alloc_msiobject(UINT type, UINT size, msihandledestructor destroy );
 extern void msiobj_addref(MSIOBJECTHDR *);
 extern int msiobj_release(MSIOBJECTHDR *);
@@ -1016,6 +1020,14 @@ extern UINT ACTION_PerformAction(MSIPACKAGE *package, const WCHAR *action);
 extern void ACTION_FinishCustomActions( const MSIPACKAGE* package);
 extern UINT ACTION_CustomAction(MSIPACKAGE *package, const WCHAR *action);
 extern void custom_stop_server(HANDLE process, HANDLE pipe);
+/* WineExplorer: deferred custom actions without impersonation as SYSTEM in session 0 (syshost.c) */
+extern UINT custom_call_dll_function(const WCHAR *endpoint, const GUID *guid, const WCHAR *dll);
+extern BOOL custom_action_runs_in_syshost(const GUID *guid);
+extern BOOL msi_syshost_wanted(MSIPACKAGE *package, UINT type);
+extern UINT msi_syshost_connect(MSIPACKAGE *package, DWORD arch);
+extern UINT msi_syshost_run(MSIPACKAGE *package, DWORD arch, UINT kind, const GUID *guid, const WCHAR *binary,
+                            const WCHAR *entry, BOOL async, UINT *code);
+extern void msi_syshost_stop(MSIPACKAGE *package);
 extern BOOL msi_elevation_helper_unset(void);
 extern BOOL msi_package_file_is_machine(const WCHAR *path, const WCHAR *props);
 extern BOOL msi_install_through_broker(const WCHAR *package, const WCHAR *props, DWORD ui_level, UINT *result);

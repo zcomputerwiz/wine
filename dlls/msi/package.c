@@ -339,6 +339,7 @@ static void MSI_FreePackage( MSIOBJECTHDR *arg)
     free_package_structures(package);
     CloseHandle( package->log_file );
 
+    msi_syshost_stop( package );
     if (package->rpc_server_started)
         RpcServerUnregisterIf(s_IWineMsiRemote_v0_0_s_ifspec, NULL, FALSE);
     if (package->custom_server_32_process)
@@ -2561,6 +2562,14 @@ UINT __cdecl s_remote_GetProperty(MSIHANDLE hinst, LPCWSTR property, LPWSTR *val
     UINT r;
 
     *size = 0;
+    /* WineExplorer: a SYSTEM custom action (syshost.c) gets what a deferred action gets */
+    if (msi_handle_is_restricted(hinst) && wcscmp(property, L"CustomActionData") &&
+            wcscmp(property, L"ProductCode") && wcscmp(property, L"UserSID"))
+    {
+        if (!(*value = midl_user_allocate(sizeof(WCHAR)))) return ERROR_OUTOFMEMORY;
+        (*value)[0] = 0;
+        return ERROR_SUCCESS;
+    }
     r = MsiGetPropertyW(hinst, property, empty, size);
     if (r == ERROR_MORE_DATA)
     {
@@ -2694,6 +2703,8 @@ UINT __cdecl s_remote_FormatRecord(MSIHANDLE hinst, struct wire_record *remote_r
     if ((r = unmarshal_record(remote_rec, &rec)))
         return r;
 
+    /* WineExplorer: a SYSTEM custom action's record is formatted without the package's properties (syshost.c) */
+    if (msi_handle_is_restricted(hinst)) hinst = 0;
     r = MsiFormatRecordW(hinst, rec, empty, &size);
     if (r == ERROR_MORE_DATA)
     {

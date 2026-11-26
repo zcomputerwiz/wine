@@ -34,6 +34,7 @@
 
 #include "msipriv.h"
 #include "winemsi.h"
+#include "wine/wex_msisys.h"
 #include "wine/asm.h"
 #include "wine/debug.h"
 #include "wine/exception.h"
@@ -381,6 +382,7 @@ typedef struct
     INT type;
     GUID guid;
     DWORD arch;
+    BOOL syshost;  /* WineExplorer: runs as SYSTEM in session 0 (syshost.c) */
 } custom_action_info;
 
 static void free_custom_action_data( custom_action_info *info )
@@ -483,6 +485,16 @@ static UINT custom_proc_wrapper( MsiCustomActionEntryPoint entry, MSIHANDLE hins
 
 UINT CDECL __wine_msi_call_dll_function(DWORD client_pid, const GUID *guid)
 {
+    WCHAR endpoint[12];
+
+    swprintf(endpoint, ARRAY_SIZE(endpoint), L"msi%x", client_pid);
+    return custom_call_dll_function(endpoint, guid, NULL);
+}
+
+/* WineExplorer: the SYSTEM host (syshost.c) names its own endpoint, a relay to the client, and loads the copy of
+ * the DLL it wrote itself, not the client's path that remote_GetActionInfo returns */
+UINT custom_call_dll_function(const WCHAR *endpoint, const GUID *guid, const WCHAR *dll_override)
+{
     MsiCustomActionEntryPoint fn;
     MSIHANDLE remote_package = 0;
     RPC_WSTR binding_str;
@@ -498,10 +510,7 @@ UINT CDECL __wine_msi_call_dll_function(DWORD client_pid, const GUID *guid)
 
     if (!rpc_handle)
     {
-        WCHAR endpoint[12];
-
-        swprintf(endpoint, ARRAY_SIZE(endpoint), L"msi%x", client_pid);
-        status = RpcStringBindingComposeW(NULL, (WCHAR *)L"ncalrpc", NULL, endpoint, NULL, &binding_str);
+        status = RpcStringBindingComposeW(NULL, (WCHAR *)L"ncalrpc", NULL, (WCHAR *)endpoint, NULL, &binding_str);
         if (status != RPC_S_OK)
         {
             ERR("RpcStringBindingCompose failed: %#lx\n", status);
@@ -530,10 +539,10 @@ UINT CDECL __wine_msi_call_dll_function(DWORD client_pid, const GUID *guid)
         return ERROR_INSTALL_FAILURE;
     }
 
-    hModule = LoadLibraryW( dll );
+    hModule = LoadLibraryW( dll_override ? dll_override : dll );
     if (!hModule)
     {
-        ERR( "failed to load dll %s (%lu)\n", debugstr_w( dll ), GetLastError() );
+        ERR( "failed to load dll %s (%lu)\n", debugstr_w( dll_override ? dll_override : dll ), GetLastError() );
         midl_user_free( action );
         midl_user_free( dll );
         midl_user_free( proc );
@@ -930,13 +939,37 @@ static BOOL get_binary_type( const WCHAR *name, DWORD *type, USHORT *machine )
     }
 }
 
-static custom_action_info *do_msidbCustomActionTypeDll(
-    MSIPACKAGE *package, INT type, LPCWSTR source, LPCWSTR target, LPCWSTR action )
+static BOOL custom_start_rpc_server( MSIPACKAGE *package )
+{
+    RPC_STATUS status;
+    WCHAR endpoint[12];
+
+    if (package->rpc_server_started) return TRUE;
+
+    swprintf(endpoint, ARRAY_SIZE(endpoint), L"msi%x", GetCurrentProcessId());
+    status = RpcServerUseProtseqEpW((WCHAR *)L"ncalrpc", RPC_C_PROTSEQ_MAX_REQS_DEFAULT, endpoint, NULL);
+    if (status != RPC_S_OK)
+    {
+        ERR("RpcServerUseProtseqEp failed: %#lx\n", status);
+        return FALSE;
+    }
+
+    status = RpcServerRegisterIfEx(s_IWineMsiRemote_v0_0_s_ifspec, NULL, NULL,
+        RPC_IF_AUTOLISTEN, RPC_C_LISTEN_MAX_CALLS_DEFAULT, NULL);
+    if (status != RPC_S_OK)
+    {
+        ERR("RpcServerRegisterIfEx failed: %#lx\n", status);
+        return FALSE;
+    }
+
+    package->rpc_server_started = 1;
+    return TRUE;
+}
+
+static custom_action_info *new_custom_action_info( MSIPACKAGE *package, INT type, LPCWSTR source, LPCWSTR target,
+                                                   LPCWSTR action )
 {
     custom_action_info *info;
-    RPC_STATUS status;
-    USHORT machine = IMAGE_FILE_MACHINE_UNKNOWN;
-    BOOL ret;
 
     if (!(info = calloc( 1, sizeof(*info) ))) return NULL;
 
@@ -951,31 +984,22 @@ static custom_action_info *do_msidbCustomActionTypeDll(
     EnterCriticalSection( &custom_action_cs );
     list_add_tail( &pending_custom_actions, &info->entry );
     LeaveCriticalSection( &custom_action_cs );
+    return info;
+}
 
-    if (!package->rpc_server_started)
+static custom_action_info *do_msidbCustomActionTypeDll(
+    MSIPACKAGE *package, INT type, LPCWSTR source, LPCWSTR target, LPCWSTR action )
+{
+    custom_action_info *info;
+    USHORT machine = IMAGE_FILE_MACHINE_UNKNOWN;
+    BOOL ret;
+
+    if (!(info = new_custom_action_info( package, type, source, target, action ))) return NULL;
+
+    if (!custom_start_rpc_server( package ))
     {
-        WCHAR endpoint[12];
-
-        swprintf(endpoint, ARRAY_SIZE(endpoint), L"msi%x", GetCurrentProcessId());
-        status = RpcServerUseProtseqEpW((WCHAR *)L"ncalrpc", RPC_C_PROTSEQ_MAX_REQS_DEFAULT,
-            endpoint, NULL);
-        if (status != RPC_S_OK)
-        {
-            ERR("RpcServerUseProtseqEp failed: %#lx\n", status);
-            free_custom_action_data( info );
-            return NULL;
-        }
-
-        status = RpcServerRegisterIfEx(s_IWineMsiRemote_v0_0_s_ifspec, NULL, NULL,
-            RPC_IF_AUTOLISTEN, RPC_C_LISTEN_MAX_CALLS_DEFAULT, NULL);
-        if (status != RPC_S_OK)
-        {
-            ERR("RpcServerRegisterIfEx failed: %#lx\n", status);
-            free_custom_action_data( info );
-            return NULL;
-        }
-
-        info->package->rpc_server_started = 1;
+        free_custom_action_data( info );
+        return NULL;
     }
 
     ret = get_binary_type(source, &info->arch, &machine);
@@ -1001,14 +1025,132 @@ static custom_action_info *do_msidbCustomActionTypeDll(
     return info;
 }
 
+/* WineExplorer: a deferred action without impersonation of an elevated per-machine install runs as SYSTEM in
+ * session 0 (syshost.c; docs/MSI_NOIMPERSONATE_SYSTEM.md). The action's thread here waits for the host's answer; its
+ * exit code is what the action returned, as for a DLL that runs in the ordinary custom action server. */
+static DWORD WINAPI syshost_dll_thread( void *arg )
+{
+    custom_action_info *info = arg;
+    UINT code = ERROR_INSTALL_FAILURE, r;
+
+    r = msi_syshost_run( info->package, info->arch, WEX_MSISYS_KIND_DLL, &info->guid, info->source, info->target,
+                         FALSE, &code );
+    if (r)
+    {
+        ERR( "SYSTEM custom action %s did not run: %u\n", debugstr_w(info->action), r );
+        return ERROR_INSTALL_FAILURE;
+    }
+    return code;
+}
+
+BOOL custom_action_runs_in_syshost( const GUID *guid )
+{
+    custom_action_info *info = find_action_by_guid( guid );
+
+    return info && info->syshost;
+}
+
+/* NULL with *fallback set: no host (no session 0); the action then runs as the user, as before */
+static custom_action_info *do_syshost_dll( MSIPACKAGE *package, INT type, LPCWSTR source, LPCWSTR target,
+                                           LPCWSTR action, BOOL *fallback )
+{
+    custom_action_info *info;
+    USHORT machine = IMAGE_FILE_MACHINE_UNKNOWN;
+    DWORD arch;
+
+    *fallback = FALSE;
+    if (!get_binary_type( source, &arch, &machine ))
+        arch = (sizeof(void *) == 8 ? SCS_64BIT_BINARY : SCS_32BIT_BINARY);
+    if (msi_syshost_connect( package, arch ))
+    {
+        *fallback = TRUE;
+        return NULL;
+    }
+    if (!custom_start_rpc_server( package )) return NULL;
+    if (!(info = new_custom_action_info( package, type, source, target, action ))) return NULL;
+    info->arch = arch;
+    info->syshost = TRUE;
+    if (!(info->handle = CreateThread( NULL, 0, syshost_dll_thread, info, 0, NULL )))
+    {
+        free_custom_action_data( info );
+        return NULL;
+    }
+    return info;
+}
+
+/* EXE actions: the host starts the process; here a thread waits for its answer (the exit code) */
+struct syshost_exe
+{
+    MSIPACKAGE *package;
+    DWORD arch;
+    const WCHAR *exe;
+    const WCHAR *arg;
+    BOOL async;
+    UINT code;
+    UINT status;
+};
+
+static DWORD WINAPI syshost_exe_thread( void *arg )
+{
+    struct syshost_exe *exe = arg;
+    GUID guid;
+
+    CoCreateGuid( &guid );
+    exe->status = msi_syshost_run( exe->package, exe->arch, WEX_MSISYS_KIND_EXE, &guid, exe->exe,
+                                   exe->arg ? exe->arg : L"", exe->async, &exe->code );
+    return 0;
+}
+
+/* TRUE when the action ran in the host (*rc is its result); FALSE: the caller runs it as before */
+static BOOL syshost_exe( MSIPACKAGE *package, const WCHAR *path, const WCHAR *arg, INT type, const WCHAR *action,
+                         UINT *rc )
+{
+    struct syshost_exe exe = { package, 0, path, arg, !!(type & msidbCustomActionTypeAsync) };
+    USHORT machine;
+    HANDLE thread;
+
+    if (!msi_syshost_wanted( package, type )) return FALSE;
+    if (!get_binary_type( path, &exe.arch, &machine ))
+        exe.arch = (sizeof(void *) == 8 ? SCS_64BIT_BINARY : SCS_32BIT_BINARY);
+    if (msi_syshost_connect( package, exe.arch )) return FALSE;
+
+    TRACE( "running %s as SYSTEM in session 0\n", debugstr_w(action) );
+    if (!(thread = CreateThread( NULL, 0, syshost_exe_thread, &exe, 0, NULL )))
+    {
+        *rc = ERROR_FUNCTION_FAILED;
+        return TRUE;
+    }
+    msi_dialog_check_messages( thread );
+    CloseHandle( thread );
+
+    *rc = ERROR_SUCCESS;
+    if (exe.status)
+        ERR( "SYSTEM custom action %s did not run: %u\n", debugstr_w(action), exe.status );  /* as execute_command */
+    else if (!exe.async && !(type & msidbCustomActionTypeContinue) && exe.code)
+    {
+        TRACE( "exit code is %u\n", exe.code );
+        *rc = ERROR_FUNCTION_FAILED;
+    }
+    return TRUE;
+}
+
 static UINT HANDLE_CustomType1( MSIPACKAGE *package, const WCHAR *source, const WCHAR *target,
                                 INT type, const WCHAR *action )
 {
     custom_action_info *info;
     MSIBINARY *binary;
+    BOOL fallback;
 
     if (!(binary = get_temp_binary(package, source)))
         return ERROR_FUNCTION_FAILED;
+
+    if (msi_syshost_wanted( package, type ))
+    {
+        TRACE("Calling function %s from %s as SYSTEM in session 0\n", debugstr_w(target), debugstr_w(binary->tmpfile));
+        if ((info = do_syshost_dll( package, type, binary->tmpfile, target, action, &fallback )))
+            return wait_thread_handle( info );
+        if (!fallback) return ERROR_FUNCTION_FAILED;
+    }
 
     TRACE("Calling function %s from %s\n", debugstr_w(target), debugstr_w(binary->tmpfile));
 
@@ -1090,6 +1232,7 @@ static UINT HANDLE_CustomType2( MSIPACKAGE *package, const WCHAR *source, const 
     MSIBINARY *binary;
     HANDLE handle;
     WCHAR *arg;
+    UINT rc;
 
     if (!(binary = get_temp_binary(package, source)))
         return ERROR_FUNCTION_FAILED;
@@ -1097,6 +1240,11 @@ static UINT HANDLE_CustomType2( MSIPACKAGE *package, const WCHAR *source, const 
     deformat_string( package, target, &arg );
     TRACE("exe %s arg %s\n", debugstr_w(binary->tmpfile), debugstr_w(arg));
 
+    if (syshost_exe( package, binary->tmpfile, arg, type, action, &rc ))
+    {
+        free( arg );
+        return rc;
+    }
     handle = execute_command( binary->tmpfile, arg, L"C:\\" );
     free( arg );
     if (handle == INVALID_HANDLE_VALUE) return ERROR_SUCCESS;
@@ -1640,8 +1788,14 @@ UINT ACTION_CustomAction(MSIPACKAGE *package, const WCHAR *action)
 
     if (type & msidbCustomActionTypeInScript)
     {
-        if (type & msidbCustomActionTypeNoImpersonate)
+        /* WineExplorer: DLL and Binary-table EXE actions of an elevated per-machine install run as SYSTEM in
+         * session 0 when its service is there (syshost.c); the rest still runs as the installing user */
+        if ((type & msidbCustomActionTypeNoImpersonate) && !msi_syshost_wanted( package, type ))
             WARN("msidbCustomActionTypeNoImpersonate not handled\n");
+        else if ((type & msidbCustomActionTypeNoImpersonate) && (type & CUSTOM_ACTION_TYPE_MASK) != 1 &&
+                 (type & CUSTOM_ACTION_TYPE_MASK) != 2)
+            FIXME("custom action %s (type %u) without impersonation runs as the installing user\n",
+                  debugstr_w(action), type & CUSTOM_ACTION_TYPE_MASK);
 
         if (!action_type_matches_script(type, package->script))
         {
@@ -1815,7 +1969,8 @@ UINT __cdecl s_remote_GetActionInfo(const GUID *guid, WCHAR **name, int *type, W
 
     *name = wcsdup(info->action);
     *type = info->type;
-    *hinst = alloc_msihandle(&info->package->hdr);
+    /* WineExplorer: a SYSTEM action gets a deferred action's view of the package (syshost.c) */
+    *hinst = info->syshost ? alloc_msihandle_restricted(&info->package->hdr) : alloc_msihandle(&info->package->hdr);
     *dll = wcsdup(info->source);
     *func = strdupWtoA(info->target);
 

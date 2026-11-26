@@ -397,6 +397,7 @@ static DWORD DoUnregServer(void)
 }
 
 extern UINT CDECL __wine_msi_call_dll_function(DWORD client_pid, const GUID *guid);
+extern UINT CDECL __wine_msi_syshost(HANDLE pipe);
 
 static DWORD client_pid;
 
@@ -706,6 +707,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	if (argc == 3 && msi_option_equal(argvW[1], "Embedding"))
         return custom_action_server(argvW[2]);
+
+	/* WineExplorer: the SYSTEM custom action host in session 0, started by the WexMsiServer service with the
+	 * client's connection (an inherited handle); msi's syshost.c does the work */
+	if (argc == 3 && msi_option_equal(argvW[1], "WexSysHost"))
+	{
+		HANDLE pipe = (HANDLE)(ULONG_PTR)wcstoul(argvW[2], NULL, 16);
+
+		if (!pipe || GetFileType(pipe) != FILE_TYPE_PIPE) return ERROR_INVALID_PARAMETER;
+		return __wine_msi_syshost(pipe);
+	}
 
 	for(i = 1; i < argc; i++)
 	{

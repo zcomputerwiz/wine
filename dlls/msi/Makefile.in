@@ -45,6 +45,7 @@ SOURCES = \
 	streams.c \
 	string.c \
 	suminfo.c \
+	syshost.c \
 	table.c \
 	tokenize.c \
 	update.c \

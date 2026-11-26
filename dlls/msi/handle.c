@@ -58,6 +58,7 @@ static CRITICAL_SECTION object_cs = { &object_cs_debug, -1, 0, 0, 0, 0 };
 struct handle_info
 {
     BOOL remote;
+    BOOL restricted;  /* WineExplorer: given to a SYSTEM custom action (syshost.c): a deferred action's view only */
     union {
         MSIOBJECTHDR *obj;
         MSIHANDLE rem;
@@ -123,12 +124,40 @@ MSIHANDLE alloc_msihandle( MSIOBJECTHDR *obj )
         entry->u.obj = obj;
         entry->dwThreadId = GetCurrentThreadId();
         entry->remote = FALSE;
+        entry->restricted = FALSE;
     }
 
     LeaveCriticalSection( &handle_cs );
 
     TRACE( "%p -> %lu\n", obj, ret );
 
+    return ret;
+}
+
+/* WineExplorer: a handle for a custom action that runs as SYSTEM in session 0 (syshost.c). Calls that arrive over
+ * the host's relay must name such a handle, and its properties are the ones a deferred action gets. */
+MSIHANDLE alloc_msihandle_restricted( MSIOBJECTHDR *obj )
+{
+    MSIHANDLE ret = alloc_msihandle( obj );
+
+    if (ret)
+    {
+        EnterCriticalSection( &handle_cs );
+        handle_table[ret - 1].restricted = TRUE;
+        LeaveCriticalSection( &handle_cs );
+    }
+    return ret;
+}
+
+BOOL msi_handle_is_restricted( MSIHANDLE handle )
+{
+    BOOL ret = FALSE;
+
+    EnterCriticalSection( &handle_cs );
+    if (handle && handle - 1 < handle_table_size && !handle_table[handle - 1].remote &&
+            handle_table[handle - 1].u.obj)
+        ret = handle_table[handle - 1].restricted;
+    LeaveCriticalSection( &handle_cs );
     return ret;
 }
 
@@ -146,6 +175,7 @@ MSIHANDLE alloc_msi_remote_handle(MSIHANDLE remote)
         entry->u.rem = remote;
         entry->dwThreadId = GetCurrentThreadId();
         entry->remote = TRUE;
+        entry->restricted = FALSE;
     }
 
     LeaveCriticalSection( &handle_cs );
@@ -301,6 +331,7 @@ UINT WINAPI MsiCloseHandle(MSIHANDLE handle)
 
     handle_table[handle].u.obj = NULL;
     handle_table[handle].remote = 0;
+    handle_table[handle].restricted = 0;
     handle_table[handle].dwThreadId = 0;
 
     ret = ERROR_SUCCESS;
