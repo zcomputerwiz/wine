@@ -257,6 +257,20 @@ static struct coinit_spy *get_thread_coinit_spy(void)
     return (struct coinit_spy *)(UINT_PTR)NtUserGetThreadInfo()->client_imm;
 }
 
+/* The thread manager started by CtfImmTIMActivate lives as long as the thread's default IME window, whatever the thread's
+ * apartment: on Windows 11 it is created in a thread that is in the MTA too, and it stays when the thread leaves imm32's
+ * implicit STA for the MTA. */
+static void imm_release_thread_tim(void)
+{
+    struct coinit_spy *spy = get_thread_coinit_spy();
+    ITfThreadMgr *tim;
+
+    if (!spy || !(tim = spy->tim)) return;
+    spy->tim = NULL;
+    ITfThreadMgr_Deactivate( tim );
+    ITfThreadMgr_Release( tim );
+}
+
 static void imm_couninit_thread(BOOL cleanup)
 {
     struct coinit_spy *spy;
@@ -275,15 +289,6 @@ static void imm_couninit_thread(BOOL cleanup)
     if (!(spy->apt_flags & IMM_APT_INIT))
         return;
     spy->apt_flags &= ~IMM_APT_INIT;
-
-    if (spy->tim)
-    {
-        ITfThreadMgr *tim = spy->tim;
-
-        spy->tim = NULL;
-        ITfThreadMgr_Deactivate( tim );
-        ITfThreadMgr_Release( tim );
-    }
 
     if (spy->apt_flags & IMM_APT_CREATED)
     {
@@ -3336,7 +3341,10 @@ LRESULT WINAPI __wine_ime_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
         {
             HWND default_hwnd = ImmGetDefaultIMEWnd(0);
             if (!default_hwnd || hwnd == default_hwnd)
+            {
+                imm_release_thread_tim();
                 imm_couninit_thread(TRUE);
+            }
         }
         return TRUE;
 
@@ -3366,8 +3374,8 @@ LRESULT WINAPI __wine_ime_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
  *      CtfImmTIMActivate (IMM32.@)
  *
  * Starts the text services framework for the calling thread: with activate TRUE the thread gets an active msctf thread
- * manager (TF_GetThreadMgr then returns it) and an apartment; with FALSE nothing happens. Returns S_OK (Windows 11: also
- * when called again). user32 on Windows calls it when a window of the thread is first activated (SetForegroundWindow,
+ * manager (TF_GetThreadMgr then returns it) and, if it has none, an apartment; with FALSE nothing happens. Returns S_OK
+ * (Windows 11: also when called again, and in a thread that is in the MTA, which keeps the MTA and gets the manager too). user32 on Windows calls it when a window of the thread is first activated (SetForegroundWindow,
  * SetFocus, a show that activates), not on a show without activation.
  */
 HRESULT WINAPI CtfImmTIMActivate( HKL hkl, BOOL activate )

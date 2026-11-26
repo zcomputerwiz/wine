@@ -8492,6 +8492,51 @@ static DWORD WINAPI tim_focus_thread( void *arg )
     return 0;
 }
 
+static DWORD WINAPI tim_mta_thread( void *arg )
+{
+    APTTYPEQUALIFIER qualifier;
+    APTTYPE type;
+    HRESULT hr;
+    HWND hwnd;
+
+    /* a thread in the MTA gets the thread manager too, and stays in the MTA */
+    hr = CoInitializeEx( NULL, COINIT_MULTITHREADED );
+    ok( hr == S_OK, "CoInitializeEx returned %#lx\n", hr );
+    hwnd = CreateWindowW( L"static", L"tim", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, NULL, NULL, NULL, NULL );
+    ok( !!hwnd, "CreateWindowW failed, error %lu\n", GetLastError() );
+    SetFocus( hwnd );
+    pump_messages();
+    ok( thread_has_tim(), "no thread manager after SetFocus in the MTA\n" );
+    hr = CoGetApartmentType( &type, &qualifier );
+    ok( hr == S_OK && type == APTTYPE_MTA, "got hr %#lx, type %d\n", hr, type );
+    DestroyWindow( hwnd );
+    CoUninitialize();
+    return 0;
+}
+
+static DWORD WINAPI tim_sta_then_mta_thread( void *arg )
+{
+    APTTYPEQUALIFIER qualifier;
+    APTTYPE type;
+    HRESULT hr;
+    HWND hwnd;
+
+    /* the manager stays when the thread leaves imm32's implicit apartment for the MTA */
+    hwnd = CreateWindowW( L"static", L"tim", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, NULL, NULL, NULL, NULL );
+    ok( !!hwnd, "CreateWindowW failed, error %lu\n", GetLastError() );
+    SetFocus( hwnd );
+    pump_messages();
+    ok( thread_has_tim(), "no thread manager after SetFocus\n" );
+    hr = CoInitializeEx( NULL, COINIT_MULTITHREADED );
+    ok( hr == S_OK, "CoInitializeEx returned %#lx\n", hr );
+    hr = CoGetApartmentType( &type, &qualifier );
+    ok( hr == S_OK && type == APTTYPE_MTA, "got hr %#lx, type %d\n", hr, type );
+    ok( thread_has_tim(), "no thread manager after entering the MTA\n" );
+    DestroyWindow( hwnd );
+    CoUninitialize();
+    return 0;
+}
+
 /* user32 starts the text services of a thread (CtfImmTIMActivate) when one of its windows is first activated */
 static void test_CtfImmTIMActivate(void)
 {
@@ -8512,6 +8557,14 @@ static void test_CtfImmTIMActivate(void)
     CloseHandle( thread );
 
     thread = CreateThread( NULL, 0, tim_focus_thread, NULL, 0, NULL );
+    ok( !WaitForSingleObject( thread, 5000 ), "thread did not finish\n" );
+    CloseHandle( thread );
+
+    thread = CreateThread( NULL, 0, tim_mta_thread, NULL, 0, NULL );
+    ok( !WaitForSingleObject( thread, 5000 ), "thread did not finish\n" );
+    CloseHandle( thread );
+
+    thread = CreateThread( NULL, 0, tim_sta_then_mta_thread, NULL, 0, NULL );
     ok( !WaitForSingleObject( thread, 5000 ), "thread did not finish\n" );
     CloseHandle( thread );
 }
