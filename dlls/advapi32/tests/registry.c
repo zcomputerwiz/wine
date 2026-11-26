@@ -5387,6 +5387,49 @@ static void test_reg_create_key_security(void)
     FreeSid( world );
 }
 
+/* RegFlushKey writes the key's branch to its file at once (Wine's server otherwise saves every 30 s and at exit) */
+static void test_flush_key_saves(void)
+{
+    static const char marker[] = "FlushKeyMarker";
+    char prefix[MAX_PATH], path[MAX_PATH + 16], value[64];
+    char *buf;
+    DWORD size, read;
+    HANDLE file;
+    BOOL found;
+    LONG res;
+
+    if (!winetest_platform_is_wine) { skip( "the registry file is Wine's\n" ); return; }
+    if (!GetEnvironmentVariableA( "WINEPREFIX", prefix, sizeof(prefix) ))
+    {
+        skip( "no WINEPREFIX\n" );
+        return;
+    }
+    sprintf( path, "%s/user.reg", prefix );
+    sprintf( value, "value%lu", GetTickCount() );
+    res = RegSetValueExA( hkey_main, marker, 0, REG_SZ, (const BYTE *)value, strlen( value ) + 1 );
+    ok( !res, "RegSetValueExA failed: %li\n", res );
+    res = RegFlushKey( hkey_main );
+    ok( !res, "RegFlushKey failed: %li\n", res );
+
+    {
+        /* the Unix path as a DOS one: Z:\ is the root */
+        char *p;
+        char dos[MAX_PATH + 16];
+        sprintf( dos, "Z:%s", path );
+        for (p = dos; *p; p++) if (*p == '/') *p = '\\';
+        file = CreateFileA( dos, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, 0 );
+    }
+    if (file == INVALID_HANDLE_VALUE) { skip( "cannot read the prefix's user.reg\n" ); return; }
+    size = GetFileSize( file, NULL );
+    buf = calloc( 1, size + 1 );
+    ReadFile( file, buf, size, &read, NULL );
+    CloseHandle( file );
+    found = strstr( buf, value ) != NULL;
+    free( buf );
+    ok( found, "the value written before RegFlushKey is not in user.reg\n" );
+    RegDeleteValueA( hkey_main, marker );
+}
+
 START_TEST(registry)
 {
     /* Load pointers for functions that are not available in all Windows versions */
@@ -5399,6 +5442,7 @@ START_TEST(registry)
     test_enum_value();
     test_query_value_ex();
     test_get_value();
+    test_flush_key_saves();
     test_reg_open_key();
     test_reg_create_key();
     test_reg_create_key_security();
