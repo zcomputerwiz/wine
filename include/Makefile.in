@@ -1157,6 +1157,7 @@ SOURCES = \
 	wine/hid.h \
 	wine/http.h \
 	wine/iaccessible2.idl \
+	wine/internal_lock.h \
 	wine/irot.idl \
 	wine/irpcss.idl \
 	wine/itss.idl \

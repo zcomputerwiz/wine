@@ -1,5 +1,5 @@
 /*
- * WineExplorer: named locks that only Wine's own processes of one server use
+ * WineExplorer: named locks that only Wine's own processes of one session use
  *
  * Copyright 2026 WineExplorer Desktop Environment Project
  *
@@ -21,28 +21,34 @@
 #ifndef __WINE_WINE_INTERNAL_LOCK_H
 #define __WINE_WINE_INTERNAL_LOCK_H
 
-#include <string.h>
+/* Wine's internal locks (an init-once mutex, a cache lock) live in \Sessions\<session>\WineObjects, which the server
+ * makes for every session next to BaseNamedObjects (server/directory.c, create_session), not in the session's
+ * \BaseNamedObjects: programs cannot reach them by a Win32 name, and for session 0, whose BaseNamedObjects is the
+ * root \BaseNamedObjects that WineExplorer shares with the sessions (SESSION0_CROSS_SERVER.md, M1), they stay out of
+ * the shared directory. The session is the PEB's, so a lock keeps the scope its unprefixed name had.
+ *
+ * Every user goes through these definitions: the format for code that builds the name itself (the Unix side), the
+ * helpers for PE code. The helpers behave like CreateMutexW and CreateSemaphoreW: NULL and the last error on failure,
+ * the last error ERROR_ALREADY_EXISTS when the object existed. */
 
-/* Wine's internal locks (an init-once mutex, a cache lock) live in \KernelObjects, not in the session's
- * \BaseNamedObjects: programs cannot reach them by a Win32 name, and a server that shares \BaseNamedObjects with
- * other servers (WineExplorer's session 0) does not share them. The scope is the server, as it was the session's
- * namespace before. Like CreateMutexW and CreateSemaphoreW: NULL and the last error on failure, the last error
- * ERROR_ALREADY_EXISTS when the object existed. Include after windef.h, winbase.h and winternl.h. */
+#define WINE_INTERNAL_LOCK_DIR_FMT  "\\Sessions\\%u\\WineObjects\\"
+#define WINE_INTERNAL_LOCK_DIR_FMTW L"\\Sessions\\%u\\WineObjects\\"
 
-#define WINE_INTERNAL_LOCK_DIR L"\\KernelObjects\\"
+#ifndef WINE_UNIX_LIB
 
-static inline BOOL wine_internal_lock_name( const WCHAR *name, WCHAR *buffer, size_t size, UNICODE_STRING *str )
+#include <stdio.h>
+
+/* Include after windef.h, winbase.h and winternl.h. */
+
+static inline BOOL wine_internal_lock_path( const WCHAR *name, WCHAR *buffer, size_t size )
 {
-    size_t dir_len = ARRAY_SIZE( WINE_INTERNAL_LOCK_DIR ) - 1, len = wcslen( name );
+    int len = _snwprintf( buffer, size, WINE_INTERNAL_LOCK_DIR_FMTW L"%s", NtCurrentTeb()->Peb->SessionId, name );
 
-    if (dir_len + len >= size)
+    if (len < 0 || (size_t)len >= size)
     {
         SetLastError( ERROR_FILENAME_EXCED_RANGE );
         return FALSE;
     }
-    memcpy( buffer, WINE_INTERNAL_LOCK_DIR, dir_len * sizeof(WCHAR) );
-    memcpy( buffer + dir_len, name, (len + 1) * sizeof(WCHAR) );
-    RtlInitUnicodeString( str, buffer );
     return TRUE;
 }
 
@@ -64,7 +70,8 @@ static inline HANDLE wine_create_internal_mutex( BOOL owned, const WCHAR *name )
     UNICODE_STRING str;
     HANDLE handle = NULL;
 
-    if (!wine_internal_lock_name( name, buffer, ARRAY_SIZE(buffer), &str )) return NULL;
+    if (!wine_internal_lock_path( name, buffer, ARRAY_SIZE(buffer) )) return NULL;
+    RtlInitUnicodeString( &str, buffer );
     InitializeObjectAttributes( &attr, &str, OBJ_OPENIF, NULL, NULL );
     return wine_internal_lock_result( NtCreateMutant( &handle, MUTEX_ALL_ACCESS, &attr, owned ), handle );
 }
@@ -76,9 +83,12 @@ static inline HANDLE wine_create_internal_semaphore( LONG initial, LONG max, con
     UNICODE_STRING str;
     HANDLE handle = NULL;
 
-    if (!wine_internal_lock_name( name, buffer, ARRAY_SIZE(buffer), &str )) return NULL;
+    if (!wine_internal_lock_path( name, buffer, ARRAY_SIZE(buffer) )) return NULL;
+    RtlInitUnicodeString( &str, buffer );
     InitializeObjectAttributes( &attr, &str, OBJ_OPENIF, NULL, NULL );
     return wine_internal_lock_result( NtCreateSemaphore( &handle, SEMAPHORE_ALL_ACCESS, &attr, initial, max ), handle );
 }
+
+#endif /* WINE_UNIX_LIB */
 
 #endif /* __WINE_WINE_INTERNAL_LOCK_H */
