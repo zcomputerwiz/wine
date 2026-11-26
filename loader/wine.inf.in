@@ -1260,6 +1260,7 @@ ErrorControl=1
 [WexMsiServerServiceKeys]
 HKLM,"System\CurrentControlSet\Services\wexmsiserver","WexStartInSession0Only",0x10001,1
 HKLM,"System\CurrentControlSet\Services\wexmsiserver","ServiceSidType",0x10001,1
+HKLM,"System\CurrentControlSet\Services\EventLog\System\WexMsiServer","TypesSupported",0x10001,7
 
 [WexPolicyService]
 Description="Writes the registry policy of the computer and of the users who log on"

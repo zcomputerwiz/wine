@@ -1033,8 +1033,8 @@ static DWORD WINAPI syshost_dll_thread( void *arg )
     custom_action_info *info = arg;
     UINT code = ERROR_INSTALL_FAILURE, r;
 
-    r = msi_syshost_run( info->package, info->arch, WEX_MSISYS_KIND_DLL, &info->guid, info->source, info->target,
-                         FALSE, &code );
+    r = msi_syshost_run( info->package, info->arch, WEX_MSISYS_KIND_DLL, &info->guid, info->action, info->source,
+                         info->target, FALSE, &code );
     if (r)
     {
         ERR( "SYSTEM custom action %s did not run: %u\n", debugstr_w(info->action), r );
@@ -1086,6 +1086,7 @@ struct syshost_exe
     const WCHAR *exe;
     const WCHAR *arg;
     BOOL async;
+    const WCHAR *action;
     UINT code;
     UINT status;
 };
@@ -1096,7 +1097,7 @@ static DWORD WINAPI syshost_exe_thread( void *arg )
     GUID guid;
 
     CoCreateGuid( &guid );
-    exe->status = msi_syshost_run( exe->package, exe->arch, WEX_MSISYS_KIND_EXE, &guid, exe->exe,
+    exe->status = msi_syshost_run( exe->package, exe->arch, WEX_MSISYS_KIND_EXE, &guid, exe->action, exe->exe,
                                    exe->arg ? exe->arg : L"", exe->async, &exe->code );
     return 0;
 }
@@ -1105,7 +1106,7 @@ static DWORD WINAPI syshost_exe_thread( void *arg )
 static BOOL syshost_exe( MSIPACKAGE *package, const WCHAR *path, const WCHAR *arg, INT type, const WCHAR *action,
                          UINT *rc )
 {
-    struct syshost_exe exe = { package, 0, path, arg, !!(type & msidbCustomActionTypeAsync) };
+    struct syshost_exe exe = { package, 0, path, arg, !!(type & msidbCustomActionTypeAsync), action };
     USHORT machine;
     HANDLE thread;
 

@@ -2653,6 +2653,11 @@ UINT __cdecl s_remote_GetSourcePath(MSIHANDLE hinst, LPCWSTR folder, LPWSTR *val
 
 BOOL __cdecl s_remote_GetMode(MSIHANDLE hinst, MSIRUNMODE mode)
 {
+    /* WineExplorer: a SYSTEM custom action (syshost.c) is a deferred one: only these modes are answered, as Windows
+     * answers a deferred action */
+    if (msi_handle_is_restricted(hinst) && mode != MSIRUNMODE_SCHEDULED && mode != MSIRUNMODE_ROLLBACK &&
+            mode != MSIRUNMODE_COMMIT)
+        return FALSE;
     return MsiGetMode(hinst, mode);
 }
 

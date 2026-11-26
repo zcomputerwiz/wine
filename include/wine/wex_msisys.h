@@ -41,9 +41,22 @@ struct wex_msisys_request
     UINT32 version;
     UINT32 arch;            /* 32 or 64: the host's bitness */
     UINT32 flags;           /* WEX_MSISYS_* */
-    WCHAR  product[40];     /* the ProductCode, for the event */
-    WCHAR  package[64];     /* the package's file name, for the event */
+    WCHAR  product[40];     /* the ProductCode, for the events */
+    WCHAR  package[260];    /* the package's path, for the events */
 };
+
+/* what the service tells the host about the install it serves, for the host's event after each action: environment
+ * variables of the host process (the service sets them; the client never does) */
+#define WEX_MSISYS_ENV_USER     L"WEXMSISYS_USER"      /* the caller's SID */
+#define WEX_MSISYS_ENV_SESSION  L"WEXMSISYS_SESSION"   /* the caller's session */
+#define WEX_MSISYS_ENV_PRODUCT  L"WEXMSISYS_PRODUCT"
+#define WEX_MSISYS_ENV_PACKAGE  L"WEXMSISYS_PACKAGE"
+
+/* the events, source WexMsiServer in the System log */
+#define WEX_MSISYS_EVENT_SOURCE  L"WexMsiServer"
+#define WEX_MSISYS_EVENT_HOST    1  /* a host started: package, product, user, session, host pid */
+#define WEX_MSISYS_EVENT_REFUSED 2  /* a request refused: package, product, user, session, reason */
+#define WEX_MSISYS_EVENT_ACTION  3  /* an action ran as SYSTEM: action, status, code, package, product, user, session */
 
 /* the service's answer: one UINT32, 0 or a Win32 error (ERROR_ACCESS_DENIED: the caller is not an elevated
  * administrator, or the install is per user) */
@@ -85,7 +98,8 @@ struct wex_msisys_run
     UINT32 kind;            /* WEX_MSISYS_KIND_* */
     UINT32 flags;           /* WEX_MSISYS_RUN_* */
     UINT32 entry_size;      /* bytes */
-    UINT32 binary_size;     /* bytes */
+    UINT32 action_size;     /* bytes: the action's name (WCHAR, with its 0), for the event; after the entry */
+    UINT32 binary_size;     /* bytes; after the action's name */
 };
 
 struct wex_msisys_done

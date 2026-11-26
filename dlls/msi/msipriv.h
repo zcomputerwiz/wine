@@ -1025,8 +1025,8 @@ extern UINT custom_call_dll_function(const WCHAR *endpoint, const GUID *guid, co
 extern BOOL custom_action_runs_in_syshost(const GUID *guid);
 extern BOOL msi_syshost_wanted(MSIPACKAGE *package, UINT type);
 extern UINT msi_syshost_connect(MSIPACKAGE *package, DWORD arch);
-extern UINT msi_syshost_run(MSIPACKAGE *package, DWORD arch, UINT kind, const GUID *guid, const WCHAR *binary,
-                            const WCHAR *entry, BOOL async, UINT *code);
+extern UINT msi_syshost_run(MSIPACKAGE *package, DWORD arch, UINT kind, const GUID *guid, const WCHAR *action,
+                            const WCHAR *binary, const WCHAR *entry, BOOL async, UINT *code);
 extern void msi_syshost_stop(MSIPACKAGE *package);
 extern BOOL msi_elevation_helper_unset(void);
 extern BOOL msi_package_file_is_machine(const WCHAR *path, const WCHAR *props);

@@ -54,6 +54,7 @@
 #include "msipriv.h"
 #include "wine/debug.h"
 #include "wine/list.h"
+#include "wine/wex_eventlog.h"
 #include "wine/wex_msisys.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(msi);
@@ -204,10 +205,12 @@ BOOL msi_syshost_wanted( MSIPACKAGE *package, UINT type )
             (msidbCustomActionTypeInScript | msidbCustomActionTypeNoImpersonate))
         return FALSE;
     if (package->syshost_unavailable) return FALSE;
-    /* Windows: SYSTEM only for an elevated per-machine install; a per-user install runs the action as the user */
+    /* Windows: SYSTEM only for an elevated per-machine install; a per-user install runs the action as the user. A
+     * full token or an unfiltered administrator's (default type: UAC off, the built-in Administrator) asks; a filtered
+     * one never does. The service decides whether the caller is an elevated administrator. */
     if (package->Context != MSIINSTALLCONTEXT_MACHINE) return FALSE;
     if (!GetTokenInformation( GetCurrentThreadEffectiveToken(), TokenElevationType, &elevation, sizeof(elevation),
-                              &size ) || elevation != TokenElevationTypeFull)
+                              &size ) || elevation == TokenElevationTypeLimited)
         return FALSE;
     return TRUE;
 }
@@ -516,7 +519,6 @@ UINT msi_syshost_connect( MSIPACKAGE *package, DWORD arch )
     struct wex_msisys_frame frame;
     struct msi_syshost *host;
     unsigned int index = (arch == SCS_64BIT_BINARY);
-    const WCHAR *name;
     UINT32 status;
     BYTE *data;
     HANDLE pipe;
@@ -539,11 +541,7 @@ UINT msi_syshost_connect( MSIPACKAGE *package, DWORD arch )
     request.arch = arch == SCS_64BIT_BINARY ? 64 : 32;
     request.flags = WEX_MSISYS_PER_MACHINE;  /* msi_syshost_wanted: package->Context is MSIINSTALLCONTEXT_MACHINE */
     if (package->ProductCode) lstrcpynW( request.product, package->ProductCode, ARRAY_SIZE(request.product) );
-    if (package->PackagePath)
-    {
-        name = wcsrchr( package->PackagePath, '\\' );
-        lstrcpynW( request.package, name ? name + 1 : package->PackagePath, ARRAY_SIZE(request.package) );
-    }
+    if (package->PackagePath) lstrcpynW( request.package, package->PackagePath, ARRAY_SIZE(request.package) );
     if (!write_full( pipe, &request, sizeof(request) ) || !read_full( pipe, &status, sizeof(status) ))
     {
         ERR( "the session 0 service did not answer: %lu\n", GetLastError() );
@@ -615,8 +613,8 @@ static BYTE *read_binary( const WCHAR *path, DWORD *size )
     return data;
 }
 
-UINT msi_syshost_run( MSIPACKAGE *package, DWORD arch, UINT kind, const GUID *guid, const WCHAR *binary,
-                      const WCHAR *entry, BOOL async, UINT *code )
+UINT msi_syshost_run( MSIPACKAGE *package, DWORD arch, UINT kind, const GUID *guid, const WCHAR *action,
+                      const WCHAR *binary, const WCHAR *entry, BOOL async, UINT *code )
 {
     struct wex_msisys_run run = { *guid, kind, async ? WEX_MSISYS_RUN_ASYNC : 0 };
     struct msi_syshost *host;
@@ -626,6 +624,9 @@ UINT msi_syshost_run( MSIPACKAGE *package, DWORD arch, UINT kind, const GUID *gu
     DWORD size;
     UINT r;
     BOOL sent;
+
+    if (!action) action = L"";
+    run.action_size = (lstrlenW( action ) + 1) * sizeof(WCHAR);
 
     if ((r = msi_syshost_connect( package, arch ))) return r;
     host = package->syshost[arch == SCS_64BIT_BINARY];
@@ -642,7 +643,7 @@ UINT msi_syshost_run( MSIPACKAGE *package, DWORD arch, UINT kind, const GUID *gu
         run.entry_size = entry_a ? strlen( entry_a ) + 1 : 0;
     }
     else run.entry_size = (lstrlenW( entry ) + 1) * sizeof(WCHAR);
-    if (!(payload = malloc( sizeof(run) + run.entry_size )))
+    if (!(payload = malloc( sizeof(run) + run.entry_size + run.action_size )))
     {
         free( data );
         free( entry_a );
@@ -650,6 +651,7 @@ UINT msi_syshost_run( MSIPACKAGE *package, DWORD arch, UINT kind, const GUID *gu
     }
     memcpy( payload, &run, sizeof(run) );
     memcpy( payload + sizeof(run), kind == WEX_MSISYS_KIND_DLL ? (void *)entry_a : (void *)entry, run.entry_size );
+    memcpy( payload + sizeof(run) + run.entry_size, action, run.action_size );
     free( entry_a );
 
     wait.event = CreateEventW( NULL, TRUE, FALSE, NULL );
@@ -665,8 +667,8 @@ UINT msi_syshost_run( MSIPACKAGE *package, DWORD arch, UINT kind, const GUID *gu
         return wait.status;
     }
 
-    sent = send_frame( host->pipe, &host->write_cs, WEX_MSISYS_RUN, 0, payload, sizeof(run) + run.entry_size,
-                       data, size );
+    sent = send_frame( host->pipe, &host->write_cs, WEX_MSISYS_RUN, 0, payload,
+                       sizeof(run) + run.entry_size + run.action_size, data, size );
     free( payload );
     free( data );
     if (!sent)
@@ -914,8 +916,92 @@ struct host_run
 {
     struct wex_msisys_run run;
     BYTE *entry;
+    WCHAR *action;
     BYTE *binary;
 };
+
+/* the audit (the orchestrator's condition in place of a consent record): an event in the System log from session 0
+ * for every action run as SYSTEM, with what the service told us about the caller and the install */
+static void host_audit( const WCHAR *action, UINT status, UINT code )
+{
+    struct wex_evtlog_header hdr = { WEX_EVTLOG_MAGIC, WEX_EVTLOG_VERSION, WEX_EVTLOG_OPEN }, reply;
+    struct wex_evtlog_open open = { WEX_EVTLOG_OPEN_SOURCE, sizeof(WEX_MSISYS_EVENT_SOURCE) };
+    struct wex_evtlog_report report = { status || code ? EVENTLOG_WARNING_TYPE : EVENTLOG_INFORMATION_TYPE, 0,
+                                        WEX_MSISYS_EVENT_ACTION };
+    static const WCHAR *names[] = { WEX_MSISYS_ENV_PACKAGE, WEX_MSISYS_ENV_PRODUCT, WEX_MSISYS_ENV_USER,
+                                    WEX_MSISYS_ENV_SESSION };
+    WCHAR values[4][MAX_PATH], status_str[16], code_str[16];
+    const WCHAR *strings[7];
+    DWORD mode = PIPE_READMODE_MESSAGE, done, size, pos, len;
+    PSID sid = NULL;
+    BYTE *msg;
+    HANDLE pipe;
+    int i;
+
+    for (i = 0; i < 4; i++)
+        if (!GetEnvironmentVariableW( names[i], values[i], MAX_PATH )) values[i][0] = 0;
+    swprintf( status_str, ARRAY_SIZE(status_str), L"%u", status );
+    swprintf( code_str, ARRAY_SIZE(code_str), L"%u", code );
+    strings[0] = action;
+    strings[1] = status_str;
+    strings[2] = code_str;
+    for (i = 0; i < 4; i++) strings[3 + i] = values[i];
+    TRACE( "%s: status %u, code %u, user %s session %s\n", debugstr_w(action), status, code, debugstr_w(values[2]),
+           debugstr_w(values[3]) );
+
+    pipe = CreateFileW( WEX_EVTLOG_PIPE, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+                        SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL );
+    if (pipe == INVALID_HANDLE_VALUE)
+    {
+        ERR( "no event log for the audit of %s: %lu\n", debugstr_w(action), GetLastError() );
+        return;
+    }
+    SetNamedPipeHandleState( pipe, &mode, NULL, NULL );
+
+    size = sizeof(hdr) + sizeof(open) + sizeof(WEX_MSISYS_EVENT_SOURCE);
+    if (!(msg = malloc( size ))) goto done;
+    hdr.size = size;
+    memcpy( msg, &hdr, sizeof(hdr) );
+    memcpy( msg + sizeof(hdr), &open, sizeof(open) );
+    memcpy( msg + sizeof(hdr) + sizeof(open), WEX_MSISYS_EVENT_SOURCE, sizeof(WEX_MSISYS_EVENT_SOURCE) );
+    if (!WriteFile( pipe, msg, size, &done, NULL ) || !ReadFile( pipe, &reply, sizeof(reply), &done, NULL ) ||
+            done < sizeof(reply) || reply.status)
+    {
+        ERR( "the event log refused the audit source\n" );
+        free( msg );
+        goto done;
+    }
+    free( msg );
+
+    if (values[2][0]) ConvertStringSidToSidW( values[2], &sid );
+    report.num_strings = ARRAY_SIZE(strings);
+    for (i = 0; i < ARRAY_SIZE(strings); i++) report.strings_size += (lstrlenW( strings[i] ) + 1) * sizeof(WCHAR);
+    report.sid_size = sid ? GetLengthSid( sid ) : 0;
+    size = sizeof(hdr) + sizeof(report) + report.sid_size + report.strings_size;
+    if (!(msg = calloc( 1, size ))) goto done;
+    hdr.op = WEX_EVTLOG_REPORT;
+    hdr.size = size;
+    hdr.handle = reply.handle;
+    memcpy( msg, &hdr, sizeof(hdr) );
+    memcpy( msg + sizeof(hdr), &report, sizeof(report) );
+    pos = sizeof(hdr) + sizeof(report);
+    if (sid) memcpy( msg + pos, sid, report.sid_size );
+    pos += report.sid_size;
+    for (i = 0; i < ARRAY_SIZE(strings); i++)
+    {
+        len = (lstrlenW( strings[i] ) + 1) * sizeof(WCHAR);
+        memcpy( msg + pos, strings[i], len );
+        pos += len;
+    }
+    if (!WriteFile( pipe, msg, size, &done, NULL ) || !ReadFile( pipe, &reply, sizeof(reply), &done, NULL ) ||
+            done < sizeof(reply) || reply.status)
+        ERR( "the audit of %s was not written\n", debugstr_w(action) );
+    free( msg );
+
+done:
+    if (sid) LocalFree( sid );
+    CloseHandle( pipe );
+}
 
 static DWORD WINAPI host_run_thread( void *arg )
 {
@@ -969,50 +1055,83 @@ static DWORD WINAPI host_run_thread( void *arg )
     CloseHandle( pi.hProcess );
 
 end:
+    host_audit( job->action, done.status, done.code );
     host_send( WEX_MSISYS_DONE, 0, &done, sizeof(done) );
     free( cmd );
     free( job->entry );
+    free( job->action );
     free( job->binary );
     free( job );
     return 0;
 }
 
-static void host_start_run( const BYTE *data, UINT32 size )
+static BOOL wide_terminated( const BYTE *data, UINT32 size )
+{
+    WCHAR last;
+
+    if (size < sizeof(WCHAR) || size % sizeof(WCHAR)) return FALSE;
+    memcpy( &last, data + size - sizeof(WCHAR), sizeof(last) );
+    return !last;
+}
+
+/* the client's request, read as untrusted: sizes that add up, terminated strings; FALSE ends the connection */
+static BOOL host_start_run( const BYTE *data, UINT32 size )
 {
     struct wex_msisys_done done = { { 0 } };
-    struct host_run *job = NULL;
+    struct host_run *job;
+    const BYTE *p;
     HANDLE thread;
 
-    if (size < sizeof(job->run)) return;
-    memcpy( &done.guid, data, sizeof(done.guid) );
-    if (!(job = calloc( 1, sizeof(*job) ))) goto fail;
+    if (size < sizeof(job->run) || !(job = calloc( 1, sizeof(*job) ))) return FALSE;
     memcpy( &job->run, data, sizeof(job->run) );
-    if ((UINT64)sizeof(job->run) + job->run.entry_size + job->run.binary_size != size || !job->run.binary_size ||
-            (job->run.kind != WEX_MSISYS_KIND_DLL && job->run.kind != WEX_MSISYS_KIND_EXE))
+    p = data + sizeof(job->run);
+    if ((UINT64)sizeof(job->run) + job->run.entry_size + job->run.action_size + job->run.binary_size != size ||
+            !job->run.binary_size || (job->run.kind != WEX_MSISYS_KIND_DLL && job->run.kind != WEX_MSISYS_KIND_EXE) ||
+            (job->run.flags & ~WEX_MSISYS_RUN_ASYNC) ||
+            /* the entry: a function name, or arguments */
+            (job->run.kind == WEX_MSISYS_KIND_DLL ? (!job->run.entry_size || p[job->run.entry_size - 1])
+                                                  : !wide_terminated( p, job->run.entry_size )) ||
+            !wide_terminated( p + job->run.entry_size, job->run.action_size ))
         goto fail;
-    /* the entry is terminated: a function name, or arguments */
-    if (job->run.kind == WEX_MSISYS_KIND_DLL ? (!job->run.entry_size || data[sizeof(job->run) + job->run.entry_size - 1])
-            : (job->run.entry_size < sizeof(WCHAR) || job->run.entry_size % sizeof(WCHAR) ||
-               ((const WCHAR *)(data + sizeof(job->run)))[job->run.entry_size / sizeof(WCHAR) - 1]))
+    if (!(job->entry = malloc( job->run.entry_size )) || !(job->action = malloc( job->run.action_size )) ||
+            !(job->binary = malloc( job->run.binary_size )))
         goto fail;
-    if (!(job->entry = malloc( job->run.entry_size )) || !(job->binary = malloc( job->run.binary_size ))) goto fail;
-    memcpy( job->entry, data + sizeof(job->run), job->run.entry_size );
-    memcpy( job->binary, data + sizeof(job->run) + job->run.entry_size, job->run.binary_size );
+    memcpy( job->entry, p, job->run.entry_size );
+    memcpy( job->action, p + job->run.entry_size, job->run.action_size );
+    memcpy( job->binary, p + job->run.entry_size + job->run.action_size, job->run.binary_size );
     if ((thread = CreateThread( NULL, 0, host_run_thread, job, 0, NULL )))
     {
         CloseHandle( thread );
-        return;
+        return TRUE;
     }
+    /* a valid request we cannot run: the client hears so, the connection stays */
+    done.guid = job->run.guid;
+    done.status = ERROR_OUTOFMEMORY;
+    host_audit( job->action, done.status, 0 );
+    host_send( WEX_MSISYS_DONE, 0, &done, sizeof(done) );
+    free( job->entry );
+    free( job->action );
+    free( job->binary );
+    free( job );
+    return TRUE;
 
 fail:
-    if (job)
-    {
-        free( job->entry );
-        free( job->binary );
-        free( job );
-    }
-    done.status = ERROR_INVALID_DATA;
-    host_send( WEX_MSISYS_DONE, 0, &done, sizeof(done) );
+    ERR( "a malformed request from the client: ending\n" );
+    free( job->entry );
+    free( job->action );
+    free( job->binary );
+    free( job );
+    return FALSE;
+}
+
+/* a relayed answer of the client's msi endpoint, read as untrusted before the action's rpcrt4 parses it */
+static BOOL valid_pdu( const BYTE *pdu, UINT32 size )
+{
+    USHORT frag;
+
+    if (size < PDU_HDR_SIZE || size > PDU_MAX_FRAG || pdu[0] != 5 || !(pdu[4] & 0x10)) return FALSE;
+    memcpy( &frag, pdu + 8, sizeof(frag) );
+    return frag == size;
 }
 
 UINT CDECL __wine_msi_syshost( HANDLE pipe )
@@ -1059,9 +1178,15 @@ UINT CDECL __wine_msi_syshost( HANDLE pipe )
         switch (frame.type)
         {
         case WEX_MSISYS_RUN:
-            host_start_run( data, frame.size );
+            if (!host_start_run( data, frame.size )) end = TRUE;
             break;
         case WEX_MSISYS_DATA:
+            if (!valid_pdu( data, frame.size ))
+            {
+                ERR( "a malformed RPC answer from the client: ending\n" );
+                end = TRUE;
+                break;
+            }
             EnterCriticalSection( &syshost.cs );
             if ((channel = host_find_channel( frame.channel )))
             {
@@ -1081,7 +1206,8 @@ UINT CDECL __wine_msi_syshost( HANDLE pipe )
             end = TRUE;
             break;
         default:
-            WARN( "unexpected frame %u\n", frame.type );
+            ERR( "unexpected frame %u from the client: ending\n", frame.type );
+            end = TRUE;
             break;
         }
         free( data );
