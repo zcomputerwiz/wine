@@ -604,6 +604,7 @@ ATOM WINAPI NtUserRegisterClassExWOW( const WNDCLASSEXW *wc, UNICODE_STRING *nam
     ATOM atom;
     BOOL ret;
 
+    set_gui_thread();
     /* create the desktop window to trigger builtin class registration */
     if (!fnid) get_desktop_window();
 
@@ -751,6 +752,7 @@ ATOM WINAPI NtUserGetClassInfoEx( HINSTANCE instance, UNICODE_STRING *name, WNDC
     CLASS *class;
     ATOM atom = 0;
 
+    set_gui_thread();
     /* create the desktop window to trigger builtin class registration */
     if (!is_desktop_class( name ) && !is_message_class( name )) get_desktop_window();
 

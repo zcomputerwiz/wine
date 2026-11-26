@@ -205,6 +205,7 @@ DC *alloc_dc_ptr( DWORD magic )
 {
     DC *dc;
 
+    set_gui_thread();
     if (!(dc = calloc( 1, sizeof(*dc) ))) return NULL;
     if (!(dc->attr = alloc_dc_attr()))
     {
