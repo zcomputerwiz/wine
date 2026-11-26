@@ -2857,7 +2857,18 @@ void X11DRV_SetDesktopWindow( HWND hwnd )
     else
     {
         Window win = (Window)NtUserGetProp( hwnd, whole_window_prop );
-        if (win && win != root_window) X11DRV_init_desktop( win );
+        if (is_virtual_desktop())
+        {
+            /* This process made its own X desktop window (it is the desktop's manager) and the server's desktop window
+             * is older: a manager that died and was replaced (B120). The stored X window id is the dead one's; use
+             * ours and store it. */
+            if (win != root_window && !create_desktop_win_data( root_window, hwnd ))
+            {
+                ERR( "Failed to create virtual desktop window data\n" );
+                root_window = DefaultRootWindow( gdi_display );
+            }
+        }
+        else if (win && win != root_window) X11DRV_init_desktop( win );
     }
 }
 

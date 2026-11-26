@@ -3740,6 +3740,17 @@ DECL_HANDLER(flush_key)
             if (!m) set_error( STATUS_REGISTRY_CORRUPT );
             else e1s_save_hive( m );
         }
+        else
+        {
+            /* RegFlushKey writes the key's branch now (stock Wine leaves it to the periodic and the exit save, which
+             * a server that is killed does not get to run) */
+            struct save_branch_info *info = find_branch_info( key );
+            if (info && fchdir( config_dir_fd ) != -1)
+            {
+                save_branch( info );
+                if (fchdir( server_dir_fd ) == -1) fatal_error( "chdir to server dir: %s\n", strerror( errno ));
+            }
+        }
         release_object( key );
     }
 }

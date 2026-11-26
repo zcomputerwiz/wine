@@ -1944,6 +1944,29 @@ done:
     return ret;
 }
 
+/* WineExplorer: a session that ends on purpose (Log Off, shut down) leaves the file C:\wex-session-ending
+ * before it starts ending, and removes it when the end is refused. The session's supervisor (wex_run_shell) restarts
+ * the shell when it ended without it, as Winlogon does (AutoRestartShell); the exit status of the launcher cannot tell
+ * a crash from a Log Off. */
+static void mark_session_ending( BOOL on )
+{
+    /* the root of the prefix's C: drive, which the account can write (the Windows directory of a prefix can be shared
+     * and read-only, and the profile's name is not known to the supervisor). One name for the prefix: its sessions
+     * share one wineserver and --end-session ends them all, and the caller of ExitWindowsEx (an elevated broker, a
+     * logoff script) need not have the login session's environment */
+    const WCHAR *path = L"C:\\wex-session-ending";
+    HANDLE file;
+
+    if (!on)
+    {
+        DeleteFileW( path );
+        return;
+    }
+    file = CreateFileW( path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS,
+                        FILE_ATTRIBUTE_NORMAL, NULL );
+    if (file != INVALID_HANDLE_VALUE) CloseHandle( file );
+}
+
 static void usage( int status )
 {
     WINE_MESSAGE( "Usage: wineboot [options]\n" );
@@ -2033,13 +2056,14 @@ int __cdecl main( int argc, char *argv[] )
         }
     }
 
+    if (end_session || kill) mark_session_ending( TRUE );
     if (end_session)
     {
         if (kill)
         {
-            if (!shutdown_all_desktops( force )) return 1;
+            if (!shutdown_all_desktops( force )) { mark_session_ending( FALSE ); return 1; }
         }
-        else if (!shutdown_close_windows( force )) return 1;
+        else if (!shutdown_close_windows( force )) { mark_session_ending( FALSE ); return 1; }
     }
 
     if (kill) kill_processes( shutdown );

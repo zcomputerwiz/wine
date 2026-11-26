@@ -273,6 +273,10 @@ static bool desktop_init( struct object *obj, const void *init_data )
 
     desktop->winstation = (struct winstation *)grab_object( winstation );
     desktop->top_window = NULL;
+    desktop->manager_user = NULL;
+    desktop->manager_session = 0;
+    desktop->manager_il = 0;
+    desktop->manager_died = 0;
     desktop->msg_window = NULL;
     desktop->shell_window = NULL;
     desktop->shell_listview = NULL;
@@ -376,6 +380,7 @@ static void desktop_destroy( struct object *obj )
     free_hotkeys( desktop, 0 );
     free_pointers( desktop );
     if (desktop->top_window) free_window_handle( desktop->top_window );
+    free( desktop->manager_user );
     if (desktop->msg_window) free_window_handle( desktop->msg_window );
     if (desktop->global_hooks) release_object( desktop->global_hooks );
     if (desktop->close_timeout) remove_timeout_user( desktop->close_timeout );

@@ -89,6 +89,10 @@ struct desktop
     user_handle_t        cursor_win;       /* window that contains the cursor */
     desktop_shm_t       *shared;           /* desktop session shared memory */
     unsigned char        secure;           /* the secure desktop (Winlogon created by the system role) */
+    struct sid          *manager_user;     /* user of the process that created the top window (B120) */
+    unsigned int         manager_session;  /* its session */
+    unsigned int         manager_il;       /* its integrity level */
+    unsigned char        manager_died;     /* the thread that owned the top window ended, and the window is kept */
 };
 
 /* user handles functions */
@@ -98,6 +102,7 @@ extern void *get_user_object( user_handle_t handle, unsigned short type );
 extern void *get_user_object_handle( user_handle_t *handle, unsigned short type );
 extern user_handle_t get_user_full_handle( user_handle_t handle );
 extern void *free_user_handle( user_handle_t handle );
+extern void set_user_handle_owner( user_handle_t handle, struct thread *thread );
 extern void *next_user_handle( user_handle_t *handle, unsigned short type );
 extern void free_process_user_handles( struct process *process );
 

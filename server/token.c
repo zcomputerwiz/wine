@@ -1875,6 +1875,26 @@ unsigned int token_get_session_id( struct token *token )
     return token->session_id;
 }
 
+/* WineExplorer (B120): the identity of the process that manages a desktop (creates its top window) is kept with the
+ * desktop. When that process died, only a process of the same user and session, with an integrity level at least as
+ * high and a token that is neither an AppContainer's nor restricted, may take the desktop window over. */
+struct sid *token_desktop_manager_user( struct token *token )
+{
+    return token ? memdup( token->user, sid_len( token->user )) : NULL;
+}
+
+unsigned int token_desktop_manager_il( struct token *token )
+{
+    return token->integrity_rid;
+}
+
+int token_may_take_desktop( struct token *token, const struct sid *user, unsigned int session, unsigned int il )
+{
+    if (!token || !user) return 0;
+    if (token->app_container || token->is_restricted) return 0;
+    return equal_sid( token->user, user ) && token->session_id == session && token->integrity_rid >= il;
+}
+
 void token_get_ids( const struct token *token, struct luid *token_id, struct luid *modified_id )
 {
     *token_id = token->token_id;
