@@ -3384,9 +3384,11 @@ static void test_barrier(void)
     }
 }
 
-/* WineExplorer: Wine's internal locks are in \KernelObjects, out of the session's namespace (wine/internal_lock.h) */
+/* WineExplorer: Wine's internal locks are in \Sessions\<session>\WineObjects, out of the session's namespace
+ * (wine/internal_lock.h) */
 static void test_wine_internal_locks(void)
 {
+    WCHAR path[96];
     UNICODE_STRING name;
     OBJECT_ATTRIBUTES attr;
     NTSTATUS status;
@@ -3407,10 +3409,13 @@ static void test_wine_internal_locks(void)
     ok( !handle, "the instance mutex is in \\BaseNamedObjects\n" );
     if (handle) CloseHandle( handle );
 
-    RtlInitUnicodeString( &name, L"\\KernelObjects\\__wine_SvcctlInstance" );
+    /* services.exe is in this process's session (a plain prefix's) */
+    swprintf( path, ARRAY_SIZE(path), L"\\Sessions\\%lu\\WineObjects\\__wine_SvcctlInstance",
+              NtCurrentTeb()->Peb->SessionId );
+    RtlInitUnicodeString( &name, path );
     InitializeObjectAttributes( &attr, &name, 0, NULL, NULL );
     status = NtOpenMutant( &handle, SYNCHRONIZE, &attr );
-    ok( !status, "the instance mutex is not in \\KernelObjects: %#lx\n", status );
+    ok( !status, "the instance mutex is not in %s: %#lx\n", wine_dbgstr_w( path ), status );
     if (!status) CloseHandle( handle );
 }
 
