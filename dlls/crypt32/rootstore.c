@@ -26,6 +26,7 @@
 #include "wincrypt.h"
 #include "winternl.h"
 #include "wine/debug.h"
+#include "wine/internal_lock.h"
 #include "crypt32_private.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(crypt);
@@ -770,7 +771,7 @@ void CRYPT_ImportSystemRootCertsToReg(void)
     if (root_certs_imported)
         return;
 
-    hsem = CreateSemaphoreW( NULL, 0, 1, L"crypt32_root_semaphore");
+    hsem = wine_create_internal_semaphore( 0, 1, L"crypt32_root_semaphore" );
     if (!hsem)
     {
         ERR("Failed to create semaphore\n");
