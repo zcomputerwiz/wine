@@ -21995,6 +21995,14 @@ static void test_core_messaging_completions(void)
     WaitForSingleObjectEx(GetCurrentThread(), 50, TRUE);
     ok(!core_msgs.count, "got %d messages.\n", core_msgs.count);
 
+    /* PeekMessage without a filter does not deliver it; GetQueueStatus does, to one window per call (wparam 8), and the packet
+     * stays queued for the other window: the wait below delivers it there (measured on Windows 11 with plain windows) */
+    ret = PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE);
+    ok(!ret && !core_msgs.count, "got ret %d, %d messages.\n", ret, core_msgs.count);
+    GetQueueStatus(QS_ALLINPUT);
+    ok(core_msgs.count == 1 && core_msgs.wp[0] == 8 && core_msgs.lp[0] == 0x21, "got %d messages, wparam %#Ix, lparam %#Ix.\n",
+       core_msgs.count, core_msgs.wp[0], core_msgs.lp[0]);
+
     /* a message wait delivers it, whatever the wake mask: message 0x60, wparam 8, lparam the apc context, to every
      * registered window, and returns as if input was available */
     status = MsgWaitForMultipleObjectsEx(0, NULL, 2000, QS_ALLINPUT, 0);

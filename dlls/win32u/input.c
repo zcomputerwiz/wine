@@ -962,6 +962,7 @@ DWORD WINAPI NtUserGetQueueStatus( UINT flags )
         return 0;
     }
 
+    deliver_pending_core_completion();
     check_for_events( flags );
 
     if (get_shared_queue_bits( &wake_bits, &changed_bits ) && !(changed_bits & flags))

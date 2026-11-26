@@ -137,6 +137,13 @@ struct user_thread_info
     HANDLE                        core_port;              /* completion port owned by the queue (CoreMessaging) */
     HWND                         *core_windows;           /* windows that get the CoreMessaging completions */
     UINT                          core_window_count;
+    struct                                                /* a packet with an APC context that some windows have seen */
+    {
+        BOOL                      valid;
+        ULONG_PTR                 key, apc, information;
+        NTSTATUS                  status;
+        UINT                      next;                   /* the next window of core_windows that gets it */
+    } core_pending;
 };
 
 extern struct user_thread_info *get_user_thread_info(void);

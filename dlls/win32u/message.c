@@ -3426,41 +3426,69 @@ static inline LARGE_INTEGER *get_nt_timeout( LARGE_INTEGER *time, DWORD timeout 
  * passed on). No queue status bit is involved. */
 #define WM_CORE_MESSAGING_COMPLETION 0x0060
 
-/* returns whether a message wait should return as for input: only for a packet with a non-zero APC context (measured: a
- * packet with a zero APC context is delivered as (3,0) but the wait goes on, and a packet someone else took is not an event) */
-static BOOL dispatch_core_completion(void)
+/* Delivers a completion waiting on the thread's port (measured on Windows 11).
+ * A packet with a zero APC context: the first window gets a posted (0x60, 1, 0) (Windows App SDK's threads: the message wait
+ * returns as for input, and the retrieval of the posted message calls the window procedure with (1, 0) and returns it with
+ * 0x80000001; no (3, 0) ever reaches them; plain test windows got (3, 0) in the wait on Windows, not understood).
+ * A packet with an APC context: (8, apc) goes to every registered window in a message wait (which then returns as for input), and
+ * to one window per call of GetQueueStatus, GetMessage and PeekMessage with a filter that names 0x60, the next one each time; the
+ * packet is consumed after the last window. PeekMessage without a filter delivers nothing.
+ * Returns whether a message wait should return as for input. */
+static BOOL deliver_core_completion( BOOL in_wait )
 {
     struct user_thread_info *info = get_user_thread_info();
     LARGE_INTEGER zero = {0};
-    ULONG_PTR key, apc;
+    ULONG_PTR apc;
     IO_STATUS_BLOCK io;
     HWND *windows;
-    UINT i, count;
+    UINT i, first, last, count;
 
     if (!info->core_port) return FALSE;
-    /* a packet that someone else took in the meantime is not an error */
-    if (NtRemoveIoCompletion( info->core_port, &key, &apc, &io, &zero )) return FALSE;
-
-    /* the window procedures may register or destroy windows: work on a copy */
-    if (!(count = info->core_window_count) || !(windows = malloc( count * sizeof(*windows) ))) return apc != 0;
-    memcpy( windows, info->core_windows, count * sizeof(*windows) );
-    if (!apc)
+    if (!info->core_pending.valid)
     {
-        /* a packet without an APC context: the first window gets a posted (0x60, 1, 0) (measured in Windows App SDK's
-         * threads: the message wait returns as for input, and the retrieval of the posted message calls the window
-         * procedure with (1, 0) and returns it with 0x80000001; no (3, 0) ever reaches them). Plain test windows got
-         * (3, 0) inside the wait on Windows, the difference is not understood. */
-        if (is_window( windows[0] )) NtUserPostMessage( windows[0], WM_CORE_MESSAGING_COMPLETION, 1, 0 );
-        free( windows );
-        return FALSE;
+        ULONG_PTR key;
+
+        /* a packet that someone else took in the meantime is not an error */
+        if (NtRemoveIoCompletion( info->core_port, &key, &apc, &io, &zero )) return FALSE;
+        if (!(count = info->core_window_count)) return in_wait && apc;
+        if (!apc)
+        {
+            if (is_window( info->core_windows[0] ))
+                NtUserPostMessage( info->core_windows[0], WM_CORE_MESSAGING_COMPLETION, 1, 0 );
+            return FALSE;
+        }
+        info->core_pending.valid = TRUE;
+        info->core_pending.key = key;
+        info->core_pending.apc = apc;
+        info->core_pending.status = io.Status;
+        info->core_pending.information = io.Information;
+        info->core_pending.next = 0;
     }
-    /* measured: a packet with an APC context goes to every registered window */
-    for (i = 0; i < count; i++)
+
+    apc = info->core_pending.apc;
+    count = info->core_window_count;
+    first = info->core_pending.next;
+    last = in_wait ? count : min( first + 1, count );
+    info->core_pending.next = last;
+    if (last >= count) info->core_pending.valid = FALSE;
+    if (first >= count || !(windows = malloc( count * sizeof(*windows) ))) return in_wait;
+    /* the window procedures may register or destroy windows: work on a copy */
+    memcpy( windows, info->core_windows, count * sizeof(*windows) );
+    for (i = first; i < last; i++)
         if (is_window( windows[i] )) send_message( windows[i], WM_CORE_MESSAGING_COMPLETION, 8, apc );
     free( windows );
-    return TRUE;
+    return in_wait;
 }
 
+static BOOL dispatch_core_completion(void)
+{
+    return deliver_core_completion( TRUE );
+}
+
+void deliver_pending_core_completion(void)
+{
+    deliver_core_completion( FALSE );
+}
 void core_messaging_window_destroyed( HWND hwnd )
 {
     struct user_thread_info *info = get_user_thread_info();
@@ -3490,6 +3518,7 @@ void cleanup_core_messaging(void)
     free( info->core_windows );
     info->core_windows = NULL;
     info->core_window_count = 0;
+    info->core_pending.valid = FALSE;
 }
 
 /***********************************************************************
@@ -3602,7 +3631,8 @@ static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DW
     process_driver_events( QS_ALLINPUT, wake_mask, changed_mask );
     if (!(changed_mask & QS_SMRESULT) && (event = get_user_thread_info()->idle_event)) NtSetEvent( event, NULL );
 
-    do ret = NtWaitForMultipleObjects( count, handles, type, !!(flags & MWMO_ALERTABLE), abs );
+    if (get_user_thread_info()->core_pending.valid) ret = count - 1;   /* a CoreMessaging packet that some windows have not seen */
+    else do ret = NtWaitForMultipleObjects( count, handles, type, !!(flags & MWMO_ALERTABLE), abs );
     while (ret == count - 1 && !process_driver_events( QS_ALLINPUT, wake_mask, changed_mask ) &&
            !check_internal_bits( QS_COMPLETION ));
 
@@ -3619,7 +3649,7 @@ static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DW
 
     /* a CoreMessaging completion woke the queue: deliver it now that the user locks are back; a completion that does not
      * count as input (zero APC context) lets the wait go on for the rest of its time */
-    if (ret == count - 1 && check_internal_bits( QS_COMPLETION ) && !dispatch_core_completion())
+    if (ret == count - 1 && (check_internal_bits( QS_COMPLETION ) || get_user_thread_info()->core_pending.valid) && !dispatch_core_completion())
     {
         DWORD rest = INFINITE;
 
@@ -3760,6 +3790,9 @@ BOOL WINAPI NtUserPeekMessage( MSG *msg_out, HWND hwnd, UINT first, UINT last, U
     user_check_not_lock();
     check_for_driver_events();
 
+    if ((first || last) && first <= WM_CORE_MESSAGING_COMPLETION && last >= WM_CORE_MESSAGING_COMPLETION)
+        deliver_pending_core_completion();
+
     if ((ret = peek_message( &msg, &filter )) <= 0)
     {
         if (!ret)
@@ -3809,6 +3842,7 @@ BOOL WINAPI NtUserGetMessage( MSG *msg, HWND hwnd, UINT first, UINT last )
 
     user_check_not_lock();
     check_for_driver_events();
+    deliver_pending_core_completion();
 
     if (first || last)
     {

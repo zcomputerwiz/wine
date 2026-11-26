@@ -139,6 +139,7 @@ extern LRESULT send_internal_message_timeout( DWORD dest_pid, DWORD dest_tid, UI
                                               PDWORD_PTR res_ptr );
 extern LRESULT send_message( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam );
 extern BOOL send_deferred_message( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam );
+extern void deliver_pending_core_completion(void);
 extern void core_messaging_window_destroyed( HWND hwnd );
 extern void cleanup_core_messaging(void);
 extern BOOL send_notify_message( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, BOOL ansi );
