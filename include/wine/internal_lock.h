@@ -69,11 +69,14 @@ static inline HANDLE wine_create_internal_mutex( BOOL owned, const WCHAR *name )
     OBJECT_ATTRIBUTES attr;
     UNICODE_STRING str;
     HANDLE handle = NULL;
+    NTSTATUS status;
 
     if (!wine_internal_lock_path( name, buffer, ARRAY_SIZE(buffer) )) return NULL;
     RtlInitUnicodeString( &str, buffer );
     InitializeObjectAttributes( &attr, &str, OBJ_OPENIF, NULL, NULL );
-    return wine_internal_lock_result( NtCreateMutant( &handle, MUTEX_ALL_ACCESS, &attr, owned ), handle );
+    /* a separate statement: the order in which arguments are evaluated is unspecified */
+    status = NtCreateMutant( &handle, MUTEX_ALL_ACCESS, &attr, owned );
+    return wine_internal_lock_result( status, handle );
 }
 
 static inline HANDLE wine_create_internal_semaphore( LONG initial, LONG max, const WCHAR *name )
@@ -82,11 +85,13 @@ static inline HANDLE wine_create_internal_semaphore( LONG initial, LONG max, con
     OBJECT_ATTRIBUTES attr;
     UNICODE_STRING str;
     HANDLE handle = NULL;
+    NTSTATUS status;
 
     if (!wine_internal_lock_path( name, buffer, ARRAY_SIZE(buffer) )) return NULL;
     RtlInitUnicodeString( &str, buffer );
     InitializeObjectAttributes( &attr, &str, OBJ_OPENIF, NULL, NULL );
-    return wine_internal_lock_result( NtCreateSemaphore( &handle, SEMAPHORE_ALL_ACCESS, &attr, initial, max ), handle );
+    status = NtCreateSemaphore( &handle, SEMAPHORE_ALL_ACCESS, &attr, initial, max );
+    return wine_internal_lock_result( status, handle );
 }
 
 #endif /* WINE_UNIX_LIB */
