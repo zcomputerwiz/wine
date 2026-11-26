@@ -32,6 +32,7 @@
 #include <setupapi.h>
 
 #include "wine/debug.h"
+#include "wine/internal_lock.h"
 #include "svcctl.h"
 #include "forward.h"
 
@@ -1877,7 +1878,7 @@ int __cdecl main(int argc, char *argv[])
      * of each other, before either sets the started event. Each would keep its own service database, so a service
      * created through one could not be opened by a service process talking to the other. Only the first one serves;
      * a duplicate waits until it is up (so its wineboot sees the event) and leaves. */
-    if (CreateMutexW(NULL, FALSE, L"__wine_SvcctlInstance") && GetLastError() == ERROR_ALREADY_EXISTS)
+    if (wine_create_internal_mutex(FALSE, L"__wine_SvcctlInstance") && GetLastError() == ERROR_ALREADY_EXISTS)
     {
         WaitForSingleObject(started_event, 30000);
         return 0;
