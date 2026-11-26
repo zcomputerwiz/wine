@@ -75,6 +75,19 @@ static ULONG STDMETHODCALLTYPE dxgi_factory_Release(IWineDXGIFactory *iface)
 
     if (!refcount)
     {
+        struct dxgi_adapters_changed *entry, *next;
+
+        LIST_FOR_EACH_ENTRY_SAFE(entry, next, &factory->adapters_changed, struct dxgi_adapters_changed, entry)
+        {
+            CloseHandle(entry->event);
+            free(entry);
+        }
+        LIST_FOR_EACH_ENTRY_SAFE(entry, next, &factory->occlusion_events, struct dxgi_adapters_changed, entry)
+        {
+            CloseHandle(entry->event);
+            free(entry);
+        }
+
         if (factory->device_window)
             DestroyWindow(factory->device_window);
 
@@ -402,97 +415,90 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_RegisterStereoStatusWindow(IWineDX
     return E_NOTIMPL;
 }
 
+/* As measured on Windows 11 (WineExplorer tests/uwp/alpc/occlusion-kmt-probe.c): the event is set at once, reporting the current
+ * status; cookies count from 1 and the smallest free one is used again; a NULL event or cookie, and an event already registered, give
+ * DXGI_ERROR_INVALID_CALL. Windows are never reported as occluded here, so the event is not set again later. The compositor of the
+ * Windows App SDK waits for this event before it renders. */
 static HRESULT STDMETHODCALLTYPE dxgi_factory_RegisterOcclusionStatusEvent(IWineDXGIFactory *iface,
         HANDLE event, DWORD *cookie)
 {
-    FIXME("iface %p, event %p, cookie %p stub!\n", iface, event, cookie);
+    struct dxgi_factory *factory = impl_from_IWineDXGIFactory(iface);
+    struct dxgi_adapters_changed *entry, *other;
+    HANDLE duplicate;
+    DWORD free_cookie;
+    BOOL taken;
 
-    return E_NOTIMPL;
+    TRACE("iface %p, event %p, cookie %p.\n", iface, event, cookie);
+
+    if (!event || !cookie)
+        return DXGI_ERROR_INVALID_CALL;
+    /* the event is set at once and on every change: a handle without EVENT_MODIFY_STATE would fail silently */
+    if (!dxgi_event_handle_valid(event))
+        return DXGI_ERROR_INVALID_CALL;   /* measured */
+
+    if (!DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        return DXGI_ERROR_INVALID_CALL;
+
+    if (!(entry = calloc(1, sizeof(*entry))))
+    {
+        CloseHandle(duplicate);
+        return E_OUTOFMEMORY;
+    }
+    entry->event = duplicate;
+
+    wined3d_mutex_lock();
+    LIST_FOR_EACH_ENTRY(other, &factory->occlusion_events, struct dxgi_adapters_changed, entry)
+    {
+        if (!NtCompareObjects(other->event, duplicate))   /* the same event again */
+        {
+            wined3d_mutex_unlock();
+            CloseHandle(duplicate);
+            free(entry);
+            return DXGI_ERROR_INVALID_CALL;
+        }
+    }
+    for (free_cookie = 1;; ++free_cookie)
+    {
+        taken = FALSE;
+        LIST_FOR_EACH_ENTRY(other, &factory->occlusion_events, struct dxgi_adapters_changed, entry)
+            if (other->cookie == free_cookie) taken = TRUE;
+        if (!taken) break;
+    }
+    entry->cookie = free_cookie;
+    list_add_tail(&factory->occlusion_events, &entry->entry);
+    *cookie = entry->cookie;
+    SetEvent(entry->event);
+    wined3d_mutex_unlock();
+
+    return S_OK;
 }
 
 static void STDMETHODCALLTYPE dxgi_factory_UnregisterOcclusionStatus(IWineDXGIFactory *iface, DWORD cookie)
 {
-    FIXME("iface %p, cookie %#lx stub!\n", iface, cookie);
-}
+    struct dxgi_factory *factory = impl_from_IWineDXGIFactory(iface);
+    struct dxgi_adapters_changed *entry;
 
-/* Derive the visible destination rectangle and the matching back buffer source
- * rectangle from the unclipped destination and the clip. Cropping only the
- * destination would squash the whole image into the clipped area. */
-static void dcomp_layer_compute_placement(const struct wine_dcomp_layer_params *params,
-        unsigned int bb_width, unsigned int bb_height, RECT *dst, RECT *src, BOOL *fully_clipped)
-{
-    RECT full, visible;
-    LONGLONG w, h;
+    TRACE("iface %p, cookie %#lx.\n", iface, cookie);
 
-    SetRect(&full, params->offset_x, params->offset_y,
-            params->offset_x + params->width, params->offset_y + params->height);
-    w = params->width;
-    h = params->height;
-    visible = full;
-    SetRectEmpty(src);
-    *fully_clipped = FALSE;
-
-    if (params->has_clip && !IntersectRect(&visible, &full, &params->clip_rect))
-        *fully_clipped = TRUE;
-    if (w <= 0 || h <= 0 || IsRectEmpty(&visible) || !bb_width || !bb_height)
-        *fully_clipped = TRUE;
-
-    if (*fully_clipped)
+    wined3d_mutex_lock();
+    LIST_FOR_EACH_ENTRY(entry, &factory->occlusion_events, struct dxgi_adapters_changed, entry)
     {
-        SetRectEmpty(dst);
+        if (entry->cookie != cookie) continue;
+        list_remove(&entry->entry);
+        wined3d_mutex_unlock();
+        CloseHandle(entry->event);
+        free(entry);
         return;
     }
-
-    *dst = visible;
-    src->left = (visible.left - full.left) * (LONGLONG)bb_width / w;
-    src->top = (visible.top - full.top) * (LONGLONG)bb_height / h;
-    src->right = ((visible.right - full.left) * (LONGLONG)bb_width + w - 1) / w;
-    src->bottom = ((visible.bottom - full.top) * (LONGLONG)bb_height + h - 1) / h;
-    if (src->right > (LONG)bb_width) src->right = bb_width;
-    if (src->bottom > (LONG)bb_height) src->bottom = bb_height;
-    if (IsRectEmpty(src))
-        *fully_clipped = TRUE;
+    wined3d_mutex_unlock();
 }
 
-void dcomp_swapchain_apply_target(struct d3d11_swapchain *swapchain, WPARAM mode, LPARAM lparam)
+/* The swapchain is no longer a composition target's content: Present draws into its own window again. */
+void dcomp_swapchain_clear_target(struct d3d11_swapchain *swapchain)
 {
-    HWND target_hwnd = NULL;
-
-    if ((mode == WINE_DCOMP_SET_TARGET_PARAMS || mode == WINE_DCOMP_SET_TARGET_PARAMS_OWNED) && lparam)
-    {
-        const struct wine_dcomp_layer_params *params = (const struct wine_dcomp_layer_params *)lparam;
-        struct wined3d_swapchain_desc desc;
-        RECT dst, src;
-        BOOL clipped;
-
-        target_hwnd = params->target_hwnd;
-
-        wined3d_mutex_lock();
-        wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &desc);
-        dcomp_layer_compute_placement(params, desc.backbuffer_width, desc.backbuffer_height,
-                &dst, &src, &clipped);
-        swapchain->target_hwnd = target_hwnd;
-        swapchain->has_dst_rect = TRUE;
-        swapchain->fully_clipped = clipped;
-        swapchain->dst_rect = dst;
-        swapchain->src_rect = src;
-        wined3d_mutex_unlock();
-    }
-    else
-    {
-        target_hwnd = (HWND)lparam;
-        wined3d_mutex_lock();
-        swapchain->target_hwnd = target_hwnd;
-        swapchain->has_dst_rect = FALSE;
-        swapchain->fully_clipped = FALSE;
-        wined3d_mutex_unlock();
-    }
-
-    if (target_hwnd)
-    {
-        TRACE("DComp: binding swapchain %p to target_hwnd %p.\n", swapchain, target_hwnd);
-        wined3d_swapchain_set_window(swapchain->wined3d_swapchain, target_hwnd);
-    }
+    wined3d_mutex_lock();
+    swapchain->target_hwnd = NULL;
+    wined3d_mutex_unlock();
 }
 
 static LRESULT CALLBACK dcomp_swapchain_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
@@ -524,17 +530,6 @@ static LRESULT CALLBACK dcomp_swapchain_wndproc(HWND hwnd, UINT msg, WPARAM wpar
             EndPaint(hwnd, &ps);
             return 0;
         }
-        case WM_WINE_DCOMP_SET_TARGET:
-        {
-            IDXGISwapChain4 *iface = (IDXGISwapChain4 *)GetPropW(hwnd, L"__wine_dcomp_swapchain");
-
-            if (iface)
-                dcomp_swapchain_apply_target(d3d11_swapchain_from_IDXGISwapChain4(iface), wparam, lparam);
-            /* Owned parameter blocks are freed even if the swapchain is gone. */
-            if (wparam == WINE_DCOMP_SET_TARGET_PARAMS_OWNED && lparam)
-                HeapFree(GetProcessHeap(), 0, (void *)lparam);
-            return 0;
-        }
     }
     return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
@@ -563,10 +558,103 @@ static BOOL dcomp_register_window_class(void)
     return TRUE;
 }
 
+/* The repaint sinks of composition targets live on a thread of dxgi's own that always handles messages:
+ * WM_WINE_DCOMP_REPAINT, which asks for a target's frames again, must reach them while the thread that made the
+ * swapchain handles none (Chromium's compositor thread, say). Only the message-only sinks live there; the
+ * composition windows themselves stay with the swapchain's thread. */
+#define WM_DCOMP_HELPER_CREATE_SINK (WM_USER + 1)
+
+static HWND dcomp_helper;
+static INIT_ONCE dcomp_helper_once = INIT_ONCE_STATIC_INIT;
+
+static LRESULT CALLBACK dcomp_sink_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    if (msg == WM_WINE_DCOMP_REPAINT)
+    {
+        MSG pending;
+        unsigned int count;
+
+        for (count = 0; count < 64; ++count)
+            if (!PeekMessageW(&pending, hwnd, WM_WINE_DCOMP_REPAINT, WM_WINE_DCOMP_REPAINT, PM_REMOVE)) break;
+        dcomp_swapchain_repaint(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+static LRESULT CALLBACK dcomp_helper_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    if (msg == WM_DCOMP_HELPER_CREATE_SINK)
+        return (LRESULT)CreateWindowExW(0, L"WineDCompRepaintSink", NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, NULL,
+                GetModuleHandleW(NULL), NULL);
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+static DWORD WINAPI dcomp_helper_thread(void *ready)
+{
+    WNDCLASSW wc = {0};
+    MSG msg;
+
+    SetThreadDescription(GetCurrentThread(), L"wine_dxgi_dcomp");
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpfnWndProc = dcomp_sink_wndproc;
+    wc.lpszClassName = L"WineDCompRepaintSink";
+    if (RegisterClassW(&wc) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS)
+    {
+        wc.lpfnWndProc = dcomp_helper_wndproc;
+        wc.lpszClassName = L"WineDCompHelper";
+        if (RegisterClassW(&wc) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS)
+            dcomp_helper = CreateWindowExW(0, L"WineDCompHelper", NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, NULL,
+                    GetModuleHandleW(NULL), NULL);
+    }
+    SetEvent(ready);
+    if (!dcomp_helper) return 1;
+    while (GetMessageW(&msg, NULL, 0, 0))
+    {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    return 0;
+}
+
+static BOOL WINAPI dcomp_helper_init(INIT_ONCE *once, void *param, void **context)
+{
+    HANDLE ready, thread;
+
+    if (!(ready = CreateEventW(NULL, TRUE, FALSE, NULL))) return TRUE;
+    if ((thread = CreateThread(NULL, 0, dcomp_helper_thread, ready, 0, NULL)))
+    {
+        WaitForSingleObject(ready, INFINITE);
+        CloseHandle(thread);
+    }
+    CloseHandle(ready);
+    if (!dcomp_helper) WARN("No repaint thread; the composition windows receive their repaints themselves.\n");
+    return TRUE;
+}
+
+/* NULL without dxgi's thread: the composition window is its own sink then. */
+HWND dcomp_create_repaint_sink(void)
+{
+    InitOnceExecuteOnce(&dcomp_helper_once, dcomp_helper_init, NULL, NULL);
+    if (!dcomp_helper) return NULL;
+    return (HWND)SendMessageW(dcomp_helper, WM_DCOMP_HELPER_CREATE_SINK, 0, 0);
+}
+
+BOOL dcomp_window_on_helper_thread(HWND window)
+{
+    return dcomp_helper && GetWindowThreadProcessId(window, NULL) == GetWindowThreadProcessId(dcomp_helper, NULL);
+}
+
+/* Only the window's own thread can destroy it. */
+void dcomp_destroy_window(HWND window)
+{
+    if (GetWindowThreadProcessId(window, NULL) == GetCurrentThreadId()) DestroyWindow(window);
+    else SendMessageW(window, WM_CLOSE, 0, 0);
+}
+
 static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWineDXGIFactory *iface,
         IUnknown *device, const DXGI_SWAP_CHAIN_DESC1 *desc, IDXGIOutput *output, IDXGISwapChain1 **swapchain)
 {
-    WCHAR prop_name[64];
     HWND window;
     HRESULT hr;
 
@@ -606,12 +694,12 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
             return E_NOTIMPL;
         }
         d3d11_sc->comp_wnd = window;
+        if (!(d3d11_sc->sink_wnd = dcomp_create_repaint_sink())) d3d11_sc->sink_wnd = window;
         d3d11_sc->composition_alpha_mode = desc->AlphaMode;
 
-        swprintf(prop_name, ARRAY_SIZE(prop_name),
-                WINE_DCOMP_WND_PROP_FMT, GetCurrentProcessId(), (UINT_PTR)*swapchain);
-        SetPropW(GetDesktopWindow(), prop_name, (HANDLE)window);
         SetPropW(window, L"__wine_dcomp_swapchain", (HANDLE)*swapchain);
+        if (d3d11_sc->sink_wnd != window)
+            SetPropW(d3d11_sc->sink_wnd, L"__wine_dcomp_swapchain", (HANDLE)*swapchain);
         TRACE("Created composition window %p (%ux%u) for swapchain %p.\n",
                 window, desc->Width, desc->Height, *swapchain);
     }
@@ -736,17 +824,67 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_EnumAdapterByGpuPreference(IWineDX
 static HRESULT STDMETHODCALLTYPE dxgi_factory_RegisterAdaptersChangedEvent(IWineDXGIFactory *iface,
         HANDLE event, DWORD *cookie)
 {
-    FIXME("iface %p, event %p, cookie %p stub!\n", iface, event, cookie);
+    struct dxgi_factory *factory = impl_from_IWineDXGIFactory(iface);
+    struct dxgi_adapters_changed *entry, *other;
+    HANDLE duplicate;
 
-    return E_NOTIMPL;
+    TRACE("iface %p, event %p, cookie %p.\n", iface, event, cookie);
+
+    /* The adapters of this process never change, so the event is never signaled; as on Windows the registration keeps
+     * a duplicate of the handle (the composition engine of the Windows App Runtime treats a failure here as fatal). */
+    if (!event || !cookie)
+        return DXGI_ERROR_INVALID_CALL;
+
+    if (!DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        return E_OUTOFMEMORY;
+
+    if (!(entry = calloc(1, sizeof(*entry))))
+    {
+        CloseHandle(duplicate);
+        return E_OUTOFMEMORY;
+    }
+    entry->event = duplicate;
+
+    wined3d_mutex_lock();
+    LIST_FOR_EACH_ENTRY(other, &factory->adapters_changed, struct dxgi_adapters_changed, entry)
+    {
+        if (!NtCompareObjects(other->event, duplicate))   /* the same event again */
+        {
+            wined3d_mutex_unlock();
+            CloseHandle(duplicate);
+            free(entry);
+            return DXGI_ERROR_INVALID_CALL;
+        }
+    }
+    entry->cookie = ++factory->next_adapters_changed_cookie;
+    list_add_tail(&factory->adapters_changed, &entry->entry);
+    *cookie = entry->cookie;
+    wined3d_mutex_unlock();
+
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE dxgi_factory_UnregisterAdaptersChangedEvent(IWineDXGIFactory *iface,
         DWORD cookie)
 {
-    FIXME("iface %p, cookie %#lx stub!\n", iface, cookie);
+    struct dxgi_factory *factory = impl_from_IWineDXGIFactory(iface);
+    struct dxgi_adapters_changed *entry;
 
-    return E_NOTIMPL;
+    TRACE("iface %p, cookie %#lx.\n", iface, cookie);
+
+    wined3d_mutex_lock();
+    LIST_FOR_EACH_ENTRY(entry, &factory->adapters_changed, struct dxgi_adapters_changed, entry)
+    {
+        if (entry->cookie != cookie) continue;
+        list_remove(&entry->entry);
+        wined3d_mutex_unlock();
+        CloseHandle(entry->event);
+        free(entry);
+        return S_OK;
+    }
+    wined3d_mutex_unlock();
+
+    return DXGI_ERROR_NOT_FOUND;
 }
 
 static const struct IWineDXGIFactoryVtbl dxgi_factory_vtbl =
@@ -815,6 +953,8 @@ static HRESULT dxgi_factory_init(struct dxgi_factory *factory, BOOL extended)
 {
     factory->IWineDXGIFactory_iface.lpVtbl = &dxgi_factory_vtbl;
     factory->refcount = 1;
+    list_init(&factory->adapters_changed);
+    list_init(&factory->occlusion_events);
     wined3d_private_store_init(&factory->private_store);
 
     wined3d_mutex_lock();

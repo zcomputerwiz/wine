@@ -31,7 +31,7 @@
 @ stub DllGetActivationFactory
 @ stub DllGetClassObject
 @ stub GetApplicationLanguageOverride
-@ stub GetApplicationLanguages
+@ stdcall GetApplicationLanguages(ptr long ptr)
 @ stub GetApplicationManifestLanguages
 @ stub GetAppropriateUserLocaleForUserLanguages
 @ stub GetAppropriateUserPreferredAndDisplayLanguagesForUser
@@ -53,7 +53,7 @@
 @ stub GetUserLanguagesForUser
 @ stub GetUserLocaleFromLanguageProfileOptOut
 @ stub IsTransientLcid
-@ stub LanguageListAsMuiForm
+@ stdcall LanguageListAsMuiForm(long ptr long ptr)
 @ stub LcidFromBcp47
 @ stub RemoveInputsForAllLanguagesInternal
 @ stub RemoveUserLanguageInputMethods

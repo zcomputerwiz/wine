@@ -683,6 +683,7 @@ NTSTATUS WINAPI wow64_NtQueryInformationProcess( UINT *args )
 
     case ProcessImageFileName:
     case ProcessImageFileNameWin32:  /* UNICODE_STRING + string */
+    case ProcessCommandLineInformation:
         {
             ULONG retsize, size = len + sizeof(UNICODE_STRING) - sizeof(UNICODE_STRING32);
             UNICODE_STRING *str = Wow64AllocateTemp( size );
@@ -947,7 +948,6 @@ NTSTATUS WINAPI wow64_NtSetInformationProcess( UINT *args )
     case ProcessPowerThrottlingState:   /* PROCESS_POWER_THROTTLING_STATE */
     case ProcessLeapSecondInformation:   /* PROCESS_LEAP_SECOND_INFO */
     case ProcessWineGrantAdminToken:   /* NULL */
-    case ProcessWineDwmChannel:   /* struct dwm_channel_call */
         return NtSetInformationProcess( handle, class, ptr, len );
 
     case ProcessExecuteFlags:   /* ULONG */

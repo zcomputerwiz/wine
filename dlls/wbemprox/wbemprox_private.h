@@ -109,6 +109,7 @@ enum fill_status
 };
 
 #define TABLE_FLAG_DYNAMIC 0x00000001
+#define TABLE_FLAG_SLOW_FILL 0x00000002  /* fill() walks the disk: not run to build a class object */
 
 struct table
 {
@@ -208,6 +209,8 @@ void free_query( struct query * );
 struct query *addref_query( struct query * );
 void release_query( struct query *query );
 HRESULT exec_query( enum wbm_namespace, const WCHAR *, IEnumWbemClassObject ** );
+HRESULT exec_class_query( enum wbm_namespace, const WCHAR *, IEnumWbemClassObject ** );
+BOOL add_blank_row( struct table * );
 HRESULT parse_query( enum wbm_namespace, const WCHAR *, struct view **, struct list * );
 HRESULT create_view( enum view_type, enum wbm_namespace, const WCHAR *, const struct keyword *, const WCHAR *,
                      const struct property *, const struct expr *, struct view ** );
@@ -222,6 +225,8 @@ struct table *create_table( enum wbm_namespace, const WCHAR * );
 struct table *grab_table( struct table * );
 void release_table( struct table * );
 BOOL add_table( enum wbm_namespace, struct table * );
+UINT get_table_names( enum wbm_namespace, WCHAR *** );
+HRESULT EnumWbemClassObject_create_classes( enum wbm_namespace, LPVOID * );
 void free_columns( struct column *, UINT );
 void free_row_values( const struct table *, UINT );
 UINT get_type_size( CIMTYPE );
@@ -266,6 +271,9 @@ HRESULT reg_set_stringvalue(IWbemClassObject *obj, IWbemContext *context, IWbemC
 HRESULT reg_set_dwordvalue(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
 HRESULT reg_delete_key(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
 HRESULT service_change_start_mode(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
+HRESULT compsys_join_domain_or_workgroup(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
+HRESULT compsys_rename(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
+HRESULT compsys_unjoin_domain_or_workgroup(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
 HRESULT service_pause_service(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
 HRESULT service_resume_service(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);
 HRESULT service_start_service(IWbemClassObject *obj, IWbemContext *context, IWbemClassObject *in, IWbemClassObject **out);

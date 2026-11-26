@@ -15,7 +15,6 @@ SOURCES = \
 	debugger.c \
 	device.c \
 	directory.c \
-	dwm.c \
 	e1s_profile.c \
 	e1s_profile.h \
 	e1s_token.h \
@@ -45,6 +44,7 @@ SOURCES = \
 	signal.c \
 	sock.c \
 	session0.c \
+	session0_x.c \
 	symlink.c \
 	sysrun.c \
 	sysrun.h \
@@ -56,6 +56,13 @@ SOURCES = \
 	user.c \
 	uwp_context.c \
 	uwp_context.h \
+	wex_e1lab.h \
+	wex_e1lab_pipe.c \
+	wex_e1lab_registry.h \
+	wex_e1lab_sysrun.c \
+	wex_e1lab_token.h \
+	wex_accounts.c \
+	wex_x0lab.c \
 	wex_profile_storage.c \
 	wex_profile_storage.h \
 	window.c \

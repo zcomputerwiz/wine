@@ -1,0 +1,463 @@
+/*
+ * Copyright 2026 WineExplorer contributors
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+#ifdef __WIDL__
+#pragma winrt ns_prefix
+#endif
+
+import "inspectable.idl";
+import "asyncinfo.idl";
+import "eventtoken.idl";
+import "windowscontracts.idl";
+import "windows.foundation.idl";
+import "windows.ui.idl";
+import "windows.ui.shell.idl";
+import "windows.system.idl";
+import "windows.security.credentials.idl";
+
+namespace Windows.ApplicationModel.UserActivities {
+    typedef enum UserActivityState UserActivityState;
+
+    interface IUserActivity;
+    interface IUserActivity2;
+    interface IUserActivity3;
+    interface IUserActivityAttributionFactory;
+    interface IUserActivityChannel;
+    interface IUserActivityChannel2;
+    interface IUserActivityChannelStatics;
+    interface IUserActivityChannelStatics2;
+    interface IUserActivityChannelStatics3;
+    interface IUserActivityContentInfoStatics;
+    interface IUserActivityFactory;
+    interface IUserActivitySessionHistoryItem;
+    interface IUserActivityStatics;
+    interface IUserActivityVisualElements2;
+    interface IUserActivityAttribution;
+    interface IUserActivityContentInfo;
+    interface IUserActivityRequest;
+    interface IUserActivityRequestManager;
+    interface IUserActivityRequestManagerStatics;
+    interface IUserActivityRequestedEventArgs;
+    interface IUserActivitySession;
+    interface IUserActivityVisualElements;
+
+    runtimeclass UserActivity;
+    runtimeclass UserActivityAttribution;
+    runtimeclass UserActivityChannel;
+    runtimeclass UserActivityContentInfo;
+    runtimeclass UserActivitySessionHistoryItem;
+    runtimeclass UserActivityRequest;
+    runtimeclass UserActivityRequestManager;
+    runtimeclass UserActivityRequestedEventArgs;
+    runtimeclass UserActivitySession;
+    runtimeclass UserActivityVisualElements;
+
+    declare {
+        interface Windows.Foundation.Collections.IIterable<Windows.ApplicationModel.UserActivities.UserActivity *>;
+        interface Windows.Foundation.Collections.IIterable<Windows.ApplicationModel.UserActivities.UserActivitySessionHistoryItem *>;
+        interface Windows.Foundation.Collections.IIterator<Windows.ApplicationModel.UserActivities.UserActivity *>;
+        interface Windows.Foundation.Collections.IIterator<Windows.ApplicationModel.UserActivities.UserActivitySessionHistoryItem *>;
+        interface Windows.Foundation.Collections.IVectorView<Windows.ApplicationModel.UserActivities.UserActivity *>;
+        interface Windows.Foundation.Collections.IVectorView<Windows.ApplicationModel.UserActivities.UserActivitySessionHistoryItem *>;
+        interface Windows.Foundation.Collections.IVector<Windows.ApplicationModel.UserActivities.UserActivity *>;
+        interface Windows.Foundation.Collections.IVector<Windows.ApplicationModel.UserActivities.UserActivitySessionHistoryItem *>;
+        interface Windows.Foundation.AsyncOperationCompletedHandler<Windows.ApplicationModel.UserActivities.UserActivity *>;
+        interface Windows.Foundation.AsyncOperationCompletedHandler<Windows.Foundation.Collections.IVector<Windows.ApplicationModel.UserActivities.UserActivitySessionHistoryItem *> *>;
+        interface Windows.Foundation.IAsyncOperation<Windows.ApplicationModel.UserActivities.UserActivity *>;
+        interface Windows.Foundation.IAsyncOperation<Windows.Foundation.Collections.IVector<Windows.ApplicationModel.UserActivities.UserActivitySessionHistoryItem *> *>;
+    }
+
+    declare
+    {
+        interface Windows.Foundation.TypedEventHandler<Windows.ApplicationModel.UserActivities.UserActivityRequestManager *, Windows.ApplicationModel.UserActivities.UserActivityRequestedEventArgs *>;
+    }
+
+    [contract(Windows.Foundation.UniversalApiContract, 5.0)]
+    enum UserActivityState
+    {
+        New       = 0,
+        Published = 1
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        exclusiveto(Windows.ApplicationModel.UserActivities.UserActivity),
+        uuid(fc103e9e-2cab-4d36-aea2-b4bb556cef0f)
+    ]
+    interface IUserActivity : IInspectable
+    {
+        [propget] HRESULT State([out, retval] Windows.ApplicationModel.UserActivities.UserActivityState *value);
+        [propget] HRESULT ActivityId([out, retval] HSTRING *value);
+        [propget] HRESULT VisualElements([out, retval] Windows.ApplicationModel.UserActivities.UserActivityVisualElements **value);
+        [propget] HRESULT ContentUri([out, retval] Windows.Foundation.Uri **value);
+        [propput] HRESULT ContentUri([in] Windows.Foundation.Uri *value);
+        [propget] HRESULT ContentType([out, retval] HSTRING *value);
+        [propput] HRESULT ContentType([in] HSTRING value);
+        [propget] HRESULT FallbackUri([out, retval] Windows.Foundation.Uri **value);
+        [propput] HRESULT FallbackUri([in] Windows.Foundation.Uri *value);
+        [propget] HRESULT ActivationUri([out, retval] Windows.Foundation.Uri **value);
+        [propput] HRESULT ActivationUri([in] Windows.Foundation.Uri *value);
+        [propget] HRESULT ContentInfo([out, retval] Windows.ApplicationModel.UserActivities.IUserActivityContentInfo **value);
+        [propput] HRESULT ContentInfo([in] Windows.ApplicationModel.UserActivities.IUserActivityContentInfo *value);
+        HRESULT SaveAsync([out, retval] Windows.Foundation.IAsyncAction **operation);
+        HRESULT CreateSession([out, retval] Windows.ApplicationModel.UserActivities.UserActivitySession **result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        exclusiveto(Windows.ApplicationModel.UserActivities.UserActivityAttribution),
+        uuid(34a5c8b5-86dd-4aec-a491-6a4faea5d22e)
+    ]
+    interface IUserActivityAttribution : IInspectable
+    {
+        [propget] HRESULT IconUri([out, retval] Windows.Foundation.Uri **value);
+        [propput] HRESULT IconUri([in] Windows.Foundation.Uri *value);
+        [propget] HRESULT AlternateText([out, retval] HSTRING *value);
+        [propput] HRESULT AlternateText([in] HSTRING value);
+        [propget] HRESULT AddImageQuery([out, retval] boolean *value);
+        [propput] HRESULT AddImageQuery([in] boolean value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        uuid(b399e5ad-137f-409d-822d-e1af27ce08dc)
+    ]
+    interface IUserActivityContentInfo : IInspectable
+    {
+        HRESULT ToJson([out, retval] HSTRING *result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 6.0),
+        exclusiveto(Windows.ApplicationModel.UserActivities.UserActivityRequest),
+        uuid(a0ef6355-cf35-4ff0-8833-50cb4b72e06d)
+    ]
+    interface IUserActivityRequest : IInspectable
+    {
+        HRESULT SetUserActivity([in] Windows.ApplicationModel.UserActivities.UserActivity *activity);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 6.0),
+        exclusiveto(Windows.ApplicationModel.UserActivities.UserActivityRequestManager),
+        uuid(0c30be4e-903d-48d6-82d4-4043ed57791b)
+    ]
+    interface IUserActivityRequestManager : IInspectable
+    {
+        [eventadd] HRESULT UserActivityRequested([in] Windows.Foundation.TypedEventHandler<Windows.ApplicationModel.UserActivities.UserActivityRequestManager *, Windows.ApplicationModel.UserActivities.UserActivityRequestedEventArgs *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT UserActivityRequested([in] EventRegistrationToken token);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 6.0),
+        exclusiveto(Windows.ApplicationModel.UserActivities.UserActivityRequestManager),
+        uuid(c0392df1-224a-432c-81e5-0c76b4c4cefa)
+    ]
+    interface IUserActivityRequestManagerStatics : IInspectable
+    {
+        HRESULT GetForCurrentView([out, retval] Windows.ApplicationModel.UserActivities.UserActivityRequestManager **result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 6.0),
+        exclusiveto(Windows.ApplicationModel.UserActivities.UserActivityRequestedEventArgs),
+        uuid(a4cc7a4c-8229-4cfd-a3bc-c61d318575a4)
+    ]
+    interface IUserActivityRequestedEventArgs : IInspectable
+    {
+        [propget] HRESULT Request([out, retval] Windows.ApplicationModel.UserActivities.UserActivityRequest **value);
+        HRESULT GetDeferral([out, retval] Windows.Foundation.Deferral **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        exclusiveto(Windows.ApplicationModel.UserActivities.UserActivitySession),
+        uuid(ae434d78-24fa-44a3-ad48-6eda61aa1924)
+    ]
+    interface IUserActivitySession : IInspectable
+    {
+        [propget] HRESULT ActivityId([out, retval] HSTRING *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        exclusiveto(Windows.ApplicationModel.UserActivities.UserActivityVisualElements),
+        uuid(94757513-262f-49ef-bbbf-9b75d2e85250)
+    ]
+    interface IUserActivityVisualElements : IInspectable
+    {
+        [propget] HRESULT DisplayText([out, retval] HSTRING *value);
+        [propput] HRESULT DisplayText([in] HSTRING value);
+        [propget] HRESULT Description([out, retval] HSTRING *value);
+        [propput] HRESULT Description([in] HSTRING value);
+        [propget] HRESULT BackgroundColor([out, retval] Windows.UI.Color *value);
+        [propput] HRESULT BackgroundColor([in] Windows.UI.Color value);
+        [propget] HRESULT Attribution([out, retval] Windows.ApplicationModel.UserActivities.UserActivityAttribution **value);
+        [propput] HRESULT Attribution([in] Windows.ApplicationModel.UserActivities.UserActivityAttribution *value);
+        [propput] HRESULT Content([in] Windows.UI.Shell.IAdaptiveCard *value);
+        [propget] HRESULT Content([out, retval] Windows.UI.Shell.IAdaptiveCard **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 6.0),
+        exclusiveto(Windows.ApplicationModel.UserActivities.UserActivity),
+        uuid(9dc40c62-08c4-47ac-aa9c-2bb2221c55fd)
+    ]
+    interface IUserActivity2 : IInspectable
+    {
+        HRESULT ToJson([out, retval] HSTRING *result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 7.0),
+        exclusiveto(Windows.ApplicationModel.UserActivities.UserActivity),
+        uuid(e7697744-e1a2-5147-8e06-55f1eeef271c)
+    ]
+    interface IUserActivity3 : IInspectable
+    {
+        [propget] HRESULT IsRoamable([out, retval] boolean *value);
+        [propput] HRESULT IsRoamable([in] boolean value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        exclusiveto(Windows.ApplicationModel.UserActivities.UserActivityAttribution),
+        uuid(e62bd252-c566-4f42-9974-916c4d76377e)
+    ]
+    interface IUserActivityAttributionFactory : IInspectable
+    {
+        HRESULT CreateWithUri([in] Windows.Foundation.Uri *iconUri, [out, retval] Windows.ApplicationModel.UserActivities.UserActivityAttribution **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        exclusiveto(Windows.ApplicationModel.UserActivities.UserActivityChannel),
+        uuid(bac0f8b8-a0e4-483b-b948-9cbabd06070c)
+    ]
+    interface IUserActivityChannel : IInspectable
+    {
+        HRESULT GetOrCreateUserActivityAsync([in] HSTRING activityId, [out, retval] Windows.Foundation.IAsyncOperation<Windows.ApplicationModel.UserActivities.UserActivity *> **operation);
+        HRESULT DeleteActivityAsync([in] HSTRING activityId, [out, retval] Windows.Foundation.IAsyncAction **operation);
+        HRESULT DeleteAllActivitiesAsync([out, retval] Windows.Foundation.IAsyncAction **operation);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 6.0),
+        exclusiveto(Windows.ApplicationModel.UserActivities.UserActivityChannel),
+        uuid(1698e35b-eb7e-4ea0-bf17-a459e8be706c)
+    ]
+    interface IUserActivityChannel2 : IInspectable
+    {
+        HRESULT GetRecentUserActivitiesAsync([in] INT32 maxUniqueActivities, [out, retval] Windows.Foundation.IAsyncOperation<Windows.Foundation.Collections.IVector<Windows.ApplicationModel.UserActivities.UserActivitySessionHistoryItem *> *> **operation);
+        HRESULT GetSessionHistoryItemsForUserActivityAsync([in] HSTRING activityId, [in] Windows.Foundation.DateTime startTime, [out, retval] Windows.Foundation.IAsyncOperation<Windows.Foundation.Collections.IVector<Windows.ApplicationModel.UserActivities.UserActivitySessionHistoryItem *> *> **operation);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        exclusiveto(Windows.ApplicationModel.UserActivities.UserActivityChannel),
+        uuid(c8c005ab-198d-4d80-abb2-c9775ec4a729)
+    ]
+    interface IUserActivityChannelStatics : IInspectable
+    {
+        HRESULT GetDefault([out, retval] Windows.ApplicationModel.UserActivities.UserActivityChannel **result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 6.0),
+        exclusiveto(Windows.ApplicationModel.UserActivities.UserActivityChannel),
+        uuid(8e87de30-aa4f-4624-9ad0-d40f3ba0317c)
+    ]
+    interface IUserActivityChannelStatics2 : IInspectable
+    {
+        HRESULT DisableAutoSessionCreation();
+        HRESULT TryGetForWebAccount([in] Windows.Security.Credentials.WebAccount *account, [out, retval] Windows.ApplicationModel.UserActivities.UserActivityChannel **result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 8.0),
+        exclusiveto(Windows.ApplicationModel.UserActivities.UserActivityChannel),
+        uuid(53bc4ddb-bbdf-5984-802a-5305874e205c)
+    ]
+    interface IUserActivityChannelStatics3 : IInspectable
+    {
+        HRESULT GetForUser([in] Windows.System.User *user, [out, retval] Windows.ApplicationModel.UserActivities.UserActivityChannel **result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        exclusiveto(Windows.ApplicationModel.UserActivities.UserActivityContentInfo),
+        uuid(9988c34b-0386-4bc9-968a-8200b004144f)
+    ]
+    interface IUserActivityContentInfoStatics : IInspectable
+    {
+        HRESULT FromJson([in] HSTRING value, [out, retval] Windows.ApplicationModel.UserActivities.UserActivityContentInfo **result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 6.0),
+        exclusiveto(Windows.ApplicationModel.UserActivities.UserActivity),
+        uuid(7c385758-361d-4a67-8a3b-34ca2978f9a3)
+    ]
+    interface IUserActivityFactory : IInspectable
+    {
+        HRESULT CreateWithActivityId([in] HSTRING activityId, [out, retval] Windows.ApplicationModel.UserActivities.UserActivity **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 6.0),
+        exclusiveto(Windows.ApplicationModel.UserActivities.UserActivitySessionHistoryItem),
+        uuid(e8d59bd3-3e5d-49fd-98d7-6da97521e255)
+    ]
+    interface IUserActivitySessionHistoryItem : IInspectable
+    {
+        [propget] HRESULT UserActivity([out, retval] Windows.ApplicationModel.UserActivities.UserActivity **value);
+        [propget] HRESULT StartTime([out, retval] Windows.Foundation.DateTime *value);
+        [propget] HRESULT EndTime([out, retval] Windows.Foundation.IReference<Windows.Foundation.DateTime> **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 6.0),
+        exclusiveto(Windows.ApplicationModel.UserActivities.UserActivity),
+        uuid(8c8fd333-0e09-47f6-9ac7-95cf5c39367b)
+    ]
+    interface IUserActivityStatics : IInspectable
+    {
+        HRESULT TryParseFromJson([in] HSTRING json, [out, retval] Windows.ApplicationModel.UserActivities.UserActivity **result);
+        HRESULT TryParseFromJsonArray([in] HSTRING json, [out, retval] Windows.Foundation.Collections.IVector<Windows.ApplicationModel.UserActivities.UserActivity *> **result);
+        HRESULT ToJsonArray([in] Windows.Foundation.Collections.IIterable<Windows.ApplicationModel.UserActivities.UserActivity *> *activities, [out, retval] HSTRING *result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 6.0),
+        exclusiveto(Windows.ApplicationModel.UserActivities.UserActivityVisualElements),
+        uuid(caae7fc7-3eef-4359-825c-9d51b9220de3)
+    ]
+    interface IUserActivityVisualElements2 : IInspectable
+    {
+        [propget] HRESULT AttributionDisplayText([out, retval] HSTRING *value);
+        [propput] HRESULT AttributionDisplayText([in] HSTRING value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        activatable(Windows.ApplicationModel.UserActivities.IUserActivityFactory, Windows.Foundation.UniversalApiContract, 6.0),
+        marshaling_behavior(agile),
+        static(Windows.ApplicationModel.UserActivities.IUserActivityStatics, Windows.Foundation.UniversalApiContract, 6.0),
+        threading(both)
+    ]
+    runtimeclass UserActivity
+    {
+        [default] interface Windows.ApplicationModel.UserActivities.IUserActivity;
+        [contract(Windows.Foundation.UniversalApiContract, 6.0)] interface Windows.ApplicationModel.UserActivities.IUserActivity2;
+        [contract(Windows.Foundation.UniversalApiContract, 7.0)] interface Windows.ApplicationModel.UserActivities.IUserActivity3;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        activatable(Windows.ApplicationModel.UserActivities.IUserActivityAttributionFactory, Windows.Foundation.UniversalApiContract, 5.0),
+        activatable(Windows.Foundation.UniversalApiContract, 5.0),
+        marshaling_behavior(agile),
+        threading(both)
+    ]
+    runtimeclass UserActivityAttribution
+    {
+        [default] interface Windows.ApplicationModel.UserActivities.IUserActivityAttribution;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 6.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass UserActivityRequest
+    {
+        [default] interface Windows.ApplicationModel.UserActivities.IUserActivityRequest;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 6.0),
+        marshaling_behavior(standard),
+        static(Windows.ApplicationModel.UserActivities.IUserActivityRequestManagerStatics, Windows.Foundation.UniversalApiContract, 6.0)
+    ]
+    runtimeclass UserActivityRequestManager
+    {
+        [default] interface Windows.ApplicationModel.UserActivities.IUserActivityRequestManager;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 6.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass UserActivityRequestedEventArgs
+    {
+        [default] interface Windows.ApplicationModel.UserActivities.IUserActivityRequestedEventArgs;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass UserActivitySession
+    {
+        [default] interface Windows.ApplicationModel.UserActivities.IUserActivitySession;
+        interface Windows.Foundation.IClosable;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass UserActivityVisualElements
+    {
+        [default] interface Windows.ApplicationModel.UserActivities.IUserActivityVisualElements;
+        [contract(Windows.Foundation.UniversalApiContract, 6.0)] interface Windows.ApplicationModel.UserActivities.IUserActivityVisualElements2;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        marshaling_behavior(agile),
+        static(Windows.ApplicationModel.UserActivities.IUserActivityChannelStatics, Windows.Foundation.UniversalApiContract, 5.0),
+        static(Windows.ApplicationModel.UserActivities.IUserActivityChannelStatics2, Windows.Foundation.UniversalApiContract, 6.0),
+        static(Windows.ApplicationModel.UserActivities.IUserActivityChannelStatics3, Windows.Foundation.UniversalApiContract, 8.0),
+        threading(both)
+    ]
+    runtimeclass UserActivityChannel
+    {
+        [default] interface Windows.ApplicationModel.UserActivities.IUserActivityChannel;
+        [contract(Windows.Foundation.UniversalApiContract, 6.0)] interface Windows.ApplicationModel.UserActivities.IUserActivityChannel2;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        marshaling_behavior(agile),
+        static(Windows.ApplicationModel.UserActivities.IUserActivityContentInfoStatics, Windows.Foundation.UniversalApiContract, 5.0),
+        threading(both)
+    ]
+    runtimeclass UserActivityContentInfo
+    {
+        [default] interface Windows.ApplicationModel.UserActivities.IUserActivityContentInfo;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 6.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass UserActivitySessionHistoryItem
+    {
+        [default] interface Windows.ApplicationModel.UserActivities.IUserActivitySessionHistoryItem;
+    }
+}

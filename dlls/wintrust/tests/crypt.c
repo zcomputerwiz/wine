@@ -98,6 +98,45 @@ static const BYTE test_catalog[] = {
     0x76, 0x00, 0x61, 0x00, 0x6c, 0x00, 0x75, 0x00, 0x65, 0x00, 0x31, 0x00, 0x00, 0x00, 0x31, 0x00,
 };
 
+/*
+ * Unsigned version 2 catalog (member list algorithm 1.3.6.1.4.1.311.12.1.3), built by hand. Its entries are,
+ * in this order:
+ *   - tag 01..20 (32 bytes) with member info 2 ([0], no content) and the indirect data of a PE image whose
+ *     SHA256 hash is the tag;
+ *   - tag a0..b3 (20 bytes) with member info 2 only;
+ *   - tag 41..60 (32 bytes) with member info 2 only;
+ * and it has one catalog attribute, attr1 = value1 (flags 0x10010001).
+ */
+static const BYTE test_catalog_v2[] = {
+    0x30, 0x82, 0x01, 0xa6, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02, 0xa0,
+    0x82, 0x01, 0x97, 0x30, 0x82, 0x01, 0x93, 0x02, 0x01, 0x01, 0x31, 0x00, 0x30, 0x82, 0x01, 0x88,
+    0x06, 0x09, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x0a, 0x01, 0xa0, 0x82, 0x01, 0x79, 0x30,
+    0x82, 0x01, 0x75, 0x30, 0x0c, 0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x0c, 0x01,
+    0x01, 0x04, 0x10, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c,
+    0x3d, 0x3e, 0x3f, 0x17, 0x0d, 0x32, 0x36, 0x31, 0x31, 0x32, 0x32, 0x31, 0x32, 0x30, 0x30, 0x30,
+    0x30, 0x5a, 0x30, 0x0e, 0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x0c, 0x01, 0x03,
+    0x05, 0x00, 0x30, 0x81, 0xfb, 0x30, 0x81, 0x94, 0x04, 0x20, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+    0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
+    0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x31, 0x70, 0x30, 0x10, 0x06, 0x0a,
+    0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x0c, 0x02, 0x03, 0x31, 0x02, 0x80, 0x00, 0x30, 0x5c,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x01, 0x04, 0x31, 0x4e, 0x30, 0x4c,
+    0x30, 0x17, 0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x01, 0x0f, 0x30, 0x09,
+    0x03, 0x01, 0x00, 0xa0, 0x04, 0xa2, 0x02, 0x80, 0x00, 0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60,
+    0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20, 0x01, 0x02, 0x03, 0x04,
+    0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14,
+    0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x30, 0x2a, 0x04, 0x14,
+    0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf,
+    0xb0, 0xb1, 0xb2, 0xb3, 0x31, 0x12, 0x30, 0x10, 0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82,
+    0x37, 0x0c, 0x02, 0x03, 0x31, 0x02, 0x80, 0x00, 0x30, 0x36, 0x04, 0x20, 0x41, 0x42, 0x43, 0x44,
+    0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50, 0x51, 0x52, 0x53, 0x54,
+    0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f, 0x60, 0x31, 0x12, 0x30, 0x10,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x0c, 0x02, 0x03, 0x31, 0x02, 0x80, 0x00,
+    0xa0, 0x36, 0x30, 0x34, 0x30, 0x32, 0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x0c,
+    0x02, 0x01, 0x04, 0x24, 0x30, 0x22, 0x1e, 0x0a, 0x00, 0x61, 0x00, 0x74, 0x00, 0x74, 0x00, 0x72,
+    0x00, 0x31, 0x02, 0x04, 0x10, 0x01, 0x00, 0x01, 0x04, 0x0e, 0x76, 0x00, 0x61, 0x00, 0x6c, 0x00,
+    0x75, 0x00, 0x65, 0x00, 0x31, 0x00, 0x00, 0x00, 0x31, 0x00,
+};
+
 static BOOL (WINAPI * pCryptCATAdminAcquireContext)(HCATADMIN*, const GUID*, DWORD);
 static BOOL (WINAPI * pCryptCATAdminAcquireContext2)(HCATADMIN*, const GUID*, const WCHAR *, const CERT_STRONG_SIGN_PARA *, DWORD);
 static BOOL (WINAPI * pCryptCATAdminReleaseContext)(HCATADMIN, DWORD);
@@ -118,6 +157,8 @@ static CRYPTCATATTRIBUTE * (WINAPI * pCryptCATEnumerateCatAttr)(HANDLE, CRYPTCAT
 static CRYPTCATMEMBER * (WINAPI * pCryptCATEnumerateMember)(HANDLE, CRYPTCATMEMBER *);
 static CRYPTCATATTRIBUTE * (WINAPI * pCryptCATEnumerateAttr)(HANDLE, CRYPTCATMEMBER *, CRYPTCATATTRIBUTE *);
 static BOOL (WINAPI * pCryptCATClose)(HANDLE);
+static CRYPTCATATTRIBUTE * (WINAPI * pCryptCATGetCatAttrInfo)(HANDLE, LPWSTR);
+static CRYPTCATSTORE * (WINAPI * pCryptCATStoreFromHandle)(HANDLE);
 static pCryptSIPGetSignedDataMsg pGetSignedDataMsg;
 static pCryptSIPPutSignedDataMsg pPutSignedDataMsg;
 
@@ -149,6 +190,8 @@ static void InitFunctionPtrs(void)
     WINTRUST_GET_PROC(CryptCATEnumerateMember)
     WINTRUST_GET_PROC(CryptCATEnumerateAttr)
     WINTRUST_GET_PROC(CryptCATClose)
+    WINTRUST_GET_PROC(CryptCATGetCatAttrInfo)
+    WINTRUST_GET_PROC(CryptCATStoreFromHandle)
 
 #undef WINTRUST_GET_PROC
 
@@ -846,7 +889,7 @@ static void test_catalog_properties(const char *catfile, int attributes, int mem
     while ((m = pCryptCATEnumerateMember(hcat, m)))
     {
         ok(m->cbStruct == sizeof(CRYPTCATMEMBER), "unexpected size %lu\n", m->cbStruct);
-        todo_wine ok(!lstrcmpW(m->pwszReferenceTag, hashmeW), "unexpected tag\n");
+        ok(!lstrcmpW(m->pwszReferenceTag, hashmeW), "unexpected tag %s\n", wine_dbgstr_w(m->pwszReferenceTag));
         ok(!memcmp(&m->gSubjectType, &subject, sizeof(subject)), "guid differs\n");
         ok(!m->fdwMemberFlags, "got %lx expected 0\n", m->fdwMemberFlags);
         ok(m->dwCertVersion == 0x200, "got %lx expected 0x200\n", m->dwCertVersion);
@@ -875,7 +918,6 @@ static void test_catalog_properties(const char *catfile, int attributes, int mem
 
         attrcount++;
     }
-    todo_wine
     ok(attrcount == attributes, "Expected %d catalog attributes, got %d\n", attributes, attrcount);
 
     ret = pCryptCATClose(hcat);
@@ -1448,6 +1490,189 @@ static void test_sip(void)
     DeleteFileW(nameW);
 }
 
+static HANDLE open_test_catalog(const BYTE *data, DWORD size, DWORD version, WCHAR *path)
+{
+    WCHAR dir[MAX_PATH];
+    DWORD written;
+    HANDLE file;
+
+    GetTempPathW(MAX_PATH, dir);
+    GetTempFileNameW(dir, L"cat", 0, path);
+    file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    ok(file != INVALID_HANDLE_VALUE, "CreateFileW failed %lu\n", GetLastError());
+    WriteFile(file, data, size, &written, NULL);
+    CloseHandle(file);
+    return pCryptCATOpen(path, CRYPTCAT_OPEN_EXISTING, 0, version, 0);
+}
+
+static void check_hex_tag(const WCHAR *tag, const BYTE *data, DWORD size)
+{
+    WCHAR expect[80];
+    DWORD i;
+
+    for (i = 0; i < size; i++) swprintf(expect + 2 * i, 3, L"%02X", data[i]);
+    expect[2 * i] = 0;
+    ok(!lstrcmpW(tag, expect), "got tag %s, expected %s\n", wine_dbgstr_w(tag), wine_dbgstr_w(expect));
+}
+
+static void test_catalog_versions(void)
+{
+    static const GUID subjects[] =
+    {
+        { 0xc689aab8, 0x8e78, 0x11d0, { 0x8c, 0x47, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee }}, /* PE image */
+        { 0xc689aaba, 0x8e78, 0x11d0, { 0x8c, 0x47, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee }}, /* cabinet */
+        { 0xde351a42, 0x8e59, 0x11d0, { 0x8c, 0x47, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee }}, /* flat file */
+        { 0xde351a43, 0x8e59, 0x11d0, { 0x8c, 0x47, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee }}, /* catalog */
+        { 0x9ba61d3f, 0xe73a, 0x11d0, { 0x8c, 0xd2, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee }}, /* CTL */
+    };
+    static const BYTE member_info2[] = { 0x31, 0x02, 0x80, 0x00 };
+    static const WCHAR value1[] = L"value1";
+    BYTE tag32[32], tag32b[32], tag20[20], catalog[sizeof(test_catalog_v2)];
+    CRYPTCATATTRIBUTE *attr, *found;
+    CRYPTCATMEMBER *m;
+    CRYPTCATSTORE *store;
+    WCHAR path[MAX_PATH];
+    HANDLE cat;
+    DWORD i, j;
+    int count;
+
+    if (!pCryptCATStoreFromHandle)
+    {
+        win_skip("CryptCATStoreFromHandle is not available\n");
+        return;
+    }
+    for (i = 0; i < sizeof(tag32); i++) tag32[i] = 0x01 + i;
+    for (i = 0; i < sizeof(tag32b); i++) tag32b[i] = 0x41 + i;
+    for (i = 0; i < sizeof(tag20); i++) tag20[i] = 0xa0 + i;
+
+    /* a version 1 catalog stays one, whatever version is asked for */
+    cat = open_test_catalog(test_catalog, sizeof(test_catalog), CRYPTCAT_VERSION_2, path);
+    ok(cat != INVALID_HANDLE_VALUE, "CryptCATOpen failed %lu\n", GetLastError());
+    store = pCryptCATStoreFromHandle(cat);
+    ok(store != NULL, "CryptCATStoreFromHandle failed %lu\n", GetLastError());
+    ok(store->cbStruct == sizeof(*store), "got cbStruct %lu\n", store->cbStruct);
+    ok(store->dwPublicVersion == CRYPTCAT_VERSION_1, "got version %#lx\n", store->dwPublicVersion);
+    ok(store->dwEncodingType == (X509_ASN_ENCODING | PKCS_7_ASN_ENCODING), "got encoding %#lx\n", store->dwEncodingType);
+    ok(!lstrcmpW(store->pwszP7File, path), "got file %s\n", wine_dbgstr_w(store->pwszP7File));
+    m = pCryptCATEnumerateMember(cat, NULL);
+    ok(m != NULL, "CryptCATEnumerateMember failed %lu\n", GetLastError());
+    ok(!lstrcmpW(m->pwszReferenceTag, hashmeW), "got tag %s\n", wine_dbgstr_w(m->pwszReferenceTag));
+    ok(m->dwCertVersion == 0x200, "got version %#lx\n", m->dwCertVersion);
+    ok(!pCryptCATEnumerateMember(cat, m), "got another member\n");
+    pCryptCATClose(cat);
+    DeleteFileW(path);
+
+    /* version 2 */
+    cat = open_test_catalog(test_catalog_v2, sizeof(test_catalog_v2), 0, path);
+    ok(cat != INVALID_HANDLE_VALUE, "CryptCATOpen failed %lu\n", GetLastError());
+    store = pCryptCATStoreFromHandle(cat);
+    ok(store != NULL, "CryptCATStoreFromHandle failed %lu\n", GetLastError());
+    ok(store->cbStruct == sizeof(*store), "got cbStruct %lu\n", store->cbStruct);
+    ok(store->dwPublicVersion == CRYPTCAT_VERSION_2, "got version %#lx\n", store->dwPublicVersion);
+    ok(store->dwEncodingType == (X509_ASN_ENCODING | PKCS_7_ASN_ENCODING), "got encoding %#lx\n", store->dwEncodingType);
+    ok(!store->fdwStoreFlags, "got flags %#lx\n", store->fdwStoreFlags);
+    ok(!lstrcmpW(store->pwszP7File, path), "got file %s\n", wine_dbgstr_w(store->pwszP7File));
+
+    attr = pCryptCATEnumerateCatAttr(cat, NULL);
+    ok(attr != NULL, "CryptCATEnumerateCatAttr failed %lu\n", GetLastError());
+    ok(attr->cbStruct == sizeof(*attr), "got cbStruct %lu\n", attr->cbStruct);
+    ok(!lstrcmpW(attr->pwszReferenceTag, attr1W), "got tag %s\n", wine_dbgstr_w(attr->pwszReferenceTag));
+    ok(attr->dwAttrTypeAndAction == 0x10010001, "got flags %#lx\n", attr->dwAttrTypeAndAction);
+    ok(attr->cbValue == sizeof(value1), "got %lu bytes\n", attr->cbValue);
+    ok(!memcmp(attr->pbValue, value1, sizeof(value1)), "got value %s\n", wine_dbgstr_w((WCHAR *)attr->pbValue));
+    ok(!attr->dwReserved, "got dwReserved %lu\n", attr->dwReserved);
+    SetLastError(0xdeadbeef);
+    ok(!pCryptCATEnumerateCatAttr(cat, attr), "got another attribute\n");
+    ok(GetLastError() == CRYPT_E_NOT_FOUND, "got error %#lx\n", GetLastError());
+    found = pCryptCATGetCatAttrInfo(cat, (WCHAR *)L"attr1");
+    ok(found != NULL, "CryptCATGetCatAttrInfo failed %#lx\n", GetLastError());
+    if (found) ok(!lstrcmpW(found->pwszReferenceTag, attr1W), "got tag %s\n", wine_dbgstr_w(found->pwszReferenceTag));
+    found = pCryptCATGetCatAttrInfo(cat, (WCHAR *)L"ATTR1");
+    ok(found != NULL, "CryptCATGetCatAttrInfo failed %#lx\n", GetLastError());
+    SetLastError(0xdeadbeef);
+    ok(!pCryptCATGetCatAttrInfo(cat, (WCHAR *)L"attr2"), "found attr2\n");
+    ok(GetLastError() == CRYPT_E_NOT_FOUND, "got error %#lx\n", GetLastError());
+
+    /* listed backwards */
+    m = NULL;
+    count = 0;
+    while ((m = pCryptCATEnumerateMember(cat, m)))
+    {
+        winetest_push_context("member %d", count);
+        ok(m->cbStruct == sizeof(*m), "got cbStruct %lu\n", m->cbStruct);
+        ok(!m->pwszFileName, "got file %s\n", wine_dbgstr_w(m->pwszFileName));
+        ok(IsEqualGUID(&m->gSubjectType, &subjects[0]), "got subject %s\n", wine_dbgstr_guid(&m->gSubjectType));
+        ok(!m->fdwMemberFlags, "got flags %#lx\n", m->fdwMemberFlags);
+        ok(m->dwCertVersion == 0x200, "got version %#lx\n", m->dwCertVersion);
+        ok(m->dwReserved == count, "got dwReserved %lu\n", m->dwReserved);
+        ok(m->sEncodedMemberInfo.cbData == 2, "got %lu bytes of member info\n", m->sEncodedMemberInfo.cbData);
+        ok(!memcmp(m->sEncodedMemberInfo.pbData, member_info2 + 2, 2), "wrong member info\n");
+        switch (count)
+        {
+        case 0:
+            check_hex_tag(m->pwszReferenceTag, tag32b, sizeof(tag32b));
+            ok(!m->sEncodedIndirectData.cbData, "got %lu bytes of indirect data\n", m->sEncodedIndirectData.cbData);
+            ok(!m->pIndirectData, "got indirect data\n");
+            break;
+        case 1:
+            /* a SHA1 tag without indirect data is given that of a flat file */
+            check_hex_tag(m->pwszReferenceTag, tag20, sizeof(tag20));
+            ok(!m->sEncodedIndirectData.cbData, "got %lu bytes of indirect data\n", m->sEncodedIndirectData.cbData);
+            ok(m->pIndirectData != NULL, "no indirect data\n");
+            if (!m->pIndirectData) break;
+            ok(!strcmp(m->pIndirectData->Data.pszObjId, "1.3.6.1.4.1.311.2.1.25"), "got type %s\n",
+               m->pIndirectData->Data.pszObjId);
+            ok(!strcmp(m->pIndirectData->DigestAlgorithm.pszObjId, szOID_OIWSEC_sha1), "got algorithm %s\n",
+               m->pIndirectData->DigestAlgorithm.pszObjId);
+            ok(m->pIndirectData->Digest.cbData == sizeof(tag20), "got %lu bytes of digest\n", m->pIndirectData->Digest.cbData);
+            ok(!memcmp(m->pIndirectData->Digest.pbData, tag20, sizeof(tag20)), "wrong digest\n");
+            break;
+        case 2:
+            check_hex_tag(m->pwszReferenceTag, tag32, sizeof(tag32));
+            ok(m->sEncodedIndirectData.cbData == 78, "got %lu bytes of indirect data\n", m->sEncodedIndirectData.cbData);
+            ok(m->pIndirectData != NULL, "no indirect data\n");
+            if (!m->pIndirectData) break;
+            ok(!strcmp(m->pIndirectData->Data.pszObjId, "1.3.6.1.4.1.311.2.1.15"), "got type %s\n",
+               m->pIndirectData->Data.pszObjId);
+            ok(!strcmp(m->pIndirectData->DigestAlgorithm.pszObjId, szOID_NIST_sha256), "got algorithm %s\n",
+               m->pIndirectData->DigestAlgorithm.pszObjId);
+            ok(m->pIndirectData->Digest.cbData == sizeof(tag32), "got %lu bytes of digest\n", m->pIndirectData->Digest.cbData);
+            ok(!memcmp(m->pIndirectData->Digest.pbData, tag32, sizeof(tag32)), "wrong digest\n");
+            break;
+        }
+        winetest_pop_context();
+        count++;
+        SetLastError(0xdeadbeef);
+    }
+    ok(count == 3, "got %d members\n", count);
+    /* the end of the list leaves the last error alone */
+    ok(GetLastError() == 0xdeadbeef, "got error %lu\n", GetLastError());
+    pCryptCATClose(cat);
+    DeleteFileW(path);
+
+    /* the number of the member info's tag selects the subject type */
+    for (i = 1; i <= ARRAY_SIZE(subjects); i++)
+    {
+        winetest_push_context("tag %lu", i);
+        memcpy(catalog, test_catalog_v2, sizeof(catalog));
+        for (j = 0; j + sizeof(member_info2) <= sizeof(catalog); j++)
+            if (!memcmp(catalog + j, member_info2, sizeof(member_info2))) catalog[j + 2] = 0x80 + i;
+        cat = open_test_catalog(catalog, sizeof(catalog), 0, path);
+        ok(cat != INVALID_HANDLE_VALUE, "CryptCATOpen failed %lu\n", GetLastError());
+        m = pCryptCATEnumerateMember(cat, NULL);
+        if (i < ARRAY_SIZE(subjects))
+        {
+            ok(m != NULL, "CryptCATEnumerateMember failed %#lx\n", GetLastError());
+            if (m) ok(IsEqualGUID(&m->gSubjectType, &subjects[i]), "got subject %s\n", wine_dbgstr_guid(&m->gSubjectType));
+            while (m) m = pCryptCATEnumerateMember(cat, m);
+        }
+        else ok(!m, "got a member\n");
+        pCryptCATClose(cat);
+        DeleteFileW(path);
+        winetest_pop_context();
+    }
+}
+
 START_TEST(crypt)
 {
     char** myARGV;
@@ -1481,6 +1706,7 @@ START_TEST(crypt)
     test_cdf_parsing();
     /* Create a catalog file out of our own catalog definition file */
     test_create_catalog_file();
+    test_catalog_versions();
     test_CryptCATAdminAddRemoveCatalog();
     test_sip();
 }

@@ -1102,6 +1102,11 @@ SymbolicName=ERROR_PIPE_LISTENING
 Language=ENU
 Pipe listening.
 .
+MessageId=740
+SymbolicName=ERROR_ELEVATION_REQUIRED
+Language=ENU
+Elevation required.
+.
 MessageId=994
 SymbolicName=ERROR_EA_ACCESS_DENIED
 Language=ENU

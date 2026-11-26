@@ -29,6 +29,7 @@ import "windows.applicationmodel.background.idl";
 import "windows.applicationmodel.core.idl";
 import "windows.storage.idl";
 import "windows.system.idl";
+import "windows.ui.viewmanagement.idl";
 
 namespace Windows.ApplicationModel.Background {
     interface IBackgroundTaskInstance;
@@ -45,12 +46,19 @@ namespace Windows.ApplicationModel.Activation {
     typedef enum ApplicationExecutionState ApplicationExecutionState;
 
     interface IActivatedEventArgs;
+    interface IActivatedEventArgsWithUser;
+    interface IApplicationViewActivatedEventArgs;
     interface IBackgroundActivatedEventArgs;
     interface ILaunchActivatedEventArgs;
+    interface ILaunchActivatedEventArgs2;
+    interface IPrelaunchActivatedEventArgs;
     interface ISplashScreen;
+    interface ITileActivatedInfo;
+    interface IViewSwitcherProvider;
 
     runtimeclass BackgroundActivatedEventArgs;
     runtimeclass SplashScreen;
+    runtimeclass TileActivatedInfo;
 
     declare {
         interface Windows.Foundation.EventHandler<Windows.ApplicationModel.Activation.BackgroundActivatedEventArgs *>;
@@ -175,6 +183,46 @@ namespace Windows.ApplicationModel.Activation {
     {
         [propget] HRESULT Arguments([out, retval] HSTRING *value);
         [propget] HRESULT TileId([out, retval] HSTRING *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 3.0),
+        uuid(1cf09b9e-9962-4936-80ff-afc8e8ae5c8c)
+    ]
+    interface IActivatedEventArgsWithUser : IInspectable
+        requires Windows.ApplicationModel.Activation.IActivatedEventArgs
+    {
+        [propget] HRESULT User([out, retval] Windows.System.User **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(930cef4b-b829-40fc-88f4-8513e8a64738)
+    ]
+    interface IApplicationViewActivatedEventArgs : IInspectable
+        requires Windows.ApplicationModel.Activation.IActivatedEventArgs
+    {
+        [propget] HRESULT CurrentlyShownApplicationViewId([out, retval] INT32 *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(0c44717b-19f7-48d6-b046-cf22826eaa74)
+    ]
+    interface IPrelaunchActivatedEventArgs : IInspectable
+        requires Windows.ApplicationModel.Activation.IActivatedEventArgs
+    {
+        [propget] HRESULT PrelaunchActivated([out, retval] boolean *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(33f288a6-5c2c-4d27-bac7-7536088f1219)
+    ]
+    interface IViewSwitcherProvider : IInspectable
+        requires Windows.ApplicationModel.Activation.IActivatedEventArgs
+    {
+        [propget] HRESULT ViewSwitcher([out, retval] Windows.UI.ViewManagement.ActivationViewSwitcher **value);
     }
 
     [

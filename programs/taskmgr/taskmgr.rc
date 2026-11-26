@@ -39,7 +39,7 @@ BEGIN
     END
     POPUP "&Options"
     BEGIN
-        MENUITEM "&Always on Top",              ID_OPTIONS_ALWAYSONTOP
+        MENUITEM "&Always On Top",              ID_OPTIONS_ALWAYSONTOP
         , CHECKED
         MENUITEM "&Minimize On Use",            ID_OPTIONS_MINIMIZEONUSE
         , CHECKED
@@ -83,9 +83,15 @@ BEGIN
         MENUITEM "&Cascade",                    ID_WINDOWS_CASCADE
         MENUITEM "&Bring To Front",             ID_WINDOWS_BRINGTOFRONT
     END
+    POPUP "Sh&ut Down"
+    BEGIN
+        /* filled by ShutDown_InitMenu() each time it opens */
+        MENUITEM "T&urn Off",                   ID_SHUTDOWN_POWEROFF
+    END
     POPUP "&Help"
     BEGIN
-        MENUITEM "&Contents",                   ID_HELP_TOPICS
+        MENUITEM "Task Manager &Help Topics",   ID_HELP_TOPICS
+        MENUITEM SEPARATOR
         MENUITEM "&About Task Manager",         ID_HELP_ABOUT
     END
 END
@@ -137,7 +143,7 @@ BEGIN
         MENUITEM "#msgctxt#window#&Restore",    ID_RESTORE
         MENUITEM "&Close",                      ID_FILE_EXIT
         MENUITEM SEPARATOR
-        MENUITEM "&Always on Top",              ID_OPTIONS_ALWAYSONTOP
+        MENUITEM "&Always On Top",              ID_OPTIONS_ALWAYSONTOP
     END
 END
 
@@ -176,8 +182,8 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_APP_TITLE           "Task Manager"
-    IDC_TASKMGR             "Task Manager"
+    IDS_APP_TITLE           "Windows Task Manager"
+    IDC_TASKMGR             "Windows Task Manager"
     IDS_RUNDLG_CAPTION      "Create New Task"
 END
 
@@ -261,9 +267,9 @@ BEGIN
     IDS_APPLICATIONS                   "Applications"
     IDS_PROCESSES                      "Processes"
     IDS_PERFORMANCE                    "Performance"
-    IDS_STATUS_BAR_CPU_USAGE           "CPU Usage: %3d%%"
+    IDS_STATUS_BAR_CPU_USAGE           "CPU Usage: %d%%"
     IDS_STATUS_BAR_PROCESSES           "Processes: %d"
-    IDS_STATUS_BAR_MEMORY_USAGE        "Mem Usage: %1!u!kB / %2!u!kB"
+    IDS_STATUS_BAR_MEMORY_USAGE        "Commit Charge: %1!u!M / %2!u!M"
 END
 
 STRINGTABLE
@@ -280,7 +286,7 @@ BEGIN
     IDS_IOREADS           "I/O Reads"
     IDS_IOREADBYTES       "I/O Read Bytes"
     IDS_SESSIONID         "Session ID"
-    IDS_USERNAME          "Username"
+    IDS_USERNAME          "User Name"
     IDS_PAGEFAULTSDELTA   "PF Delta"
     IDS_VIRTUALMEMORYSIZE "VM Size"
     IDS_PAGEDPOOL         "Paged Pool"
@@ -316,6 +322,102 @@ BEGIN
     IDS_AFFINITY_UNABLE2ACCESS      "Unable to Access or Set Process Affinity"
 END
 
+IDR_USERS_PAGE_CONTEXT MENU
+BEGIN
+    POPUP ""
+    BEGIN
+        MENUITEM "&Send Message...",            ID_USERS_SENDMESSAGE, GRAYED
+        MENUITEM SEPARATOR
+        MENUITEM "&Connect",                    ID_USERS_CONNECT, GRAYED
+        MENUITEM "&Disconnect",                 ID_USERS_DISCONNECT, GRAYED
+        MENUITEM "&Log Off",                    ID_USERS_LOGOFF
+        MENUITEM "&Remote Control",             ID_USERS_REMOTECONTROL, GRAYED
+    END
+END
+
+STRINGTABLE
+BEGIN
+    IDS_NETWORKING                     "Networking"
+    IDS_USERS                          "Users"
+    IDS_VIEW_NETHISTORY                "&Network Adapter History"
+    IDS_OPT_NET_TABALWAYSACTIVE        "&Tab Always Active"
+    IDS_OPT_NET_SHOWCUMULATIVE         "Show &Cumulative Data"
+    IDS_OPT_NET_AUTOSCALE              "&Auto Scale"
+    IDS_OPT_NET_RESET                  "&Reset"
+    IDS_OPT_NET_SHOWSCALE              "&Show Scale"
+    IDS_NETHISTORY_SENT                "Bytes &Sent\t(Red)"
+    IDS_NETHISTORY_RECEIVED            "Bytes &Received\t(Yellow)"
+    IDS_NETHISTORY_TOTAL               "Bytes &Total\t(Green)"
+    IDS_OPT_USERS_FULLNAME             "&Show Full Account Name"
+    IDS_NET_OPERATIONAL                "Operational"
+    IDS_NET_NONOPERATIONAL             "Non Operational"
+    IDS_NET_DISCONNECTED               "Disconnected"
+    IDS_NET_CONNECTING                 "Connecting"
+    IDS_NET_UNREACHABLE                "Unreachable"
+    IDS_NET_NOADAPTERS                 "No Active Network Adapters Found."
+    IDS_USERS_ACTIVE                   "Active"
+    IDS_USERS_DISCONNECTED             "Disconnected"
+    IDS_USERS_CONSOLE                  "Console"
+    IDS_USERS_LOGOFF_CONFIRM           "Are you sure you want to logoff the selected user(s)?"
+    IDS_USERS_LOGOFF_TITLE             "Windows Task Manager"
+    IDS_ACCESS_DENIED                  "The operation could not be completed.\n\nAccess is denied."
+    ID_OPTIONS_NET_TABALWAYSACTIVE     "The Networking tab collects data even if it is not selected."
+    ID_OPTIONS_NET_SHOWCUMULATIVE      "Shows all the data that passed through the network adapter."
+    ID_OPTIONS_NET_AUTOSCALE           "Adjusts the scale of the graphs."
+    ID_OPTIONS_NET_RESET               "Reset all adapter history."
+    ID_OPTIONS_NET_SHOWSCALE           "Show the scale."
+    ID_VIEW_NETHISTORY_SENT            "Graph bytes sent."
+    ID_VIEW_NETHISTORY_RECEIVED        "Graph bytes received."
+    ID_VIEW_NETHISTORY_TOTAL           "Graph the sum of the bytes sent and received."
+    ID_OPTIONS_USERS_FULLNAME          "Shows the domain to which each user account belongs"
+END
+
+STRINGTABLE
+BEGIN
+    IDS_NET_COL_FIRST+0                "Adapter Name"
+    IDS_NET_COL_FIRST+1                "Adapter Description"
+    IDS_NET_COL_FIRST+2                "Network Utilization"
+    IDS_NET_COL_FIRST+3                "Link Speed"
+    IDS_NET_COL_FIRST+4                "State"
+    IDS_NET_COL_FIRST+5                "Bytes Sent Throughput"
+    IDS_NET_COL_FIRST+6                "Bytes Received Throughput"
+    IDS_NET_COL_FIRST+7                "Bytes Throughput"
+    IDS_NET_COL_FIRST+8                "Bytes Sent"
+    IDS_NET_COL_FIRST+9                "Bytes Received"
+    IDS_NET_COL_FIRST+10               "Bytes"
+    IDS_NET_COL_FIRST+11               "Bytes Sent/Interval"
+    IDS_NET_COL_FIRST+12               "Bytes Received/Interval"
+    IDS_NET_COL_FIRST+13               "Bytes/Interval"
+    IDS_NET_COL_FIRST+14               "Unicasts Sent"
+    IDS_NET_COL_FIRST+15               "Unicasts Received"
+    IDS_NET_COL_FIRST+16               "Unicasts"
+    IDS_NET_COL_FIRST+17               "Unicasts Sent/Interval"
+    IDS_NET_COL_FIRST+18               "Unicasts Received/Interval"
+    IDS_NET_COL_FIRST+19               "Unicasts/Interval"
+    IDS_NET_COL_FIRST+20               "Nonunicasts Sent"
+    IDS_NET_COL_FIRST+21               "Nonunicasts Received"
+    IDS_NET_COL_FIRST+22               "Nonunicasts"
+    IDS_NET_COL_FIRST+23               "Nonunicasts Sent/Interval"
+    IDS_NET_COL_FIRST+24               "Nonunicasts Received/Interval"
+    IDS_NET_COL_FIRST+25               "Nonunicasts/Interval"
+    IDS_USER_COL_FIRST+0               "User"
+    IDS_USER_COL_FIRST+1               "ID"
+    IDS_USER_COL_FIRST+2               "Status"
+    IDS_USER_COL_FIRST+3               "Client Name"
+    IDS_USER_COL_FIRST+4               "Session"
+END
+
+STRINGTABLE
+BEGIN
+    IDS_SHUTDOWN_STANDBY               "Stand &By"
+    IDS_SHUTDOWN_HIBERNATE             "&Hibernate"
+    IDS_SHUTDOWN_POWEROFF              "T&urn Off"
+    IDS_SHUTDOWN_REBOOT                "&Restart"
+    IDS_SHUTDOWN_LOGOFF                "&Log Off %s"
+    IDS_SHUTDOWN_SWITCHUSER            "&Switch User\tWinKey+L"
+    IDS_SHUTDOWN_LOCKCOMPUTER          "Loc&k Computer\tWinKey+L"
+END
+
 STRINGTABLE
 BEGIN
     IDS_SYSTEM_IDLE_PROCESS            "System Idle Process"
@@ -334,7 +436,7 @@ IDD_TASKMGR_DIALOG DIALOG  0, 0, 264, 246
 STYLE DS_CENTER | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_POPUP |
     WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_CAPTION | WS_SYSMENU |
     WS_THICKFRAME
-CAPTION "Task Manager"
+CAPTION "Windows Task Manager"
 MENU IDR_TASKMANAGER
 FONT 8, "MS Shell Dlg"
 BEGIN
@@ -346,10 +448,10 @@ STYLE DS_CONTROL | WS_CHILD | WS_CLIPCHILDREN
 FONT 8, "MS Shell Dlg"
 BEGIN
     CONTROL         "",IDC_APPLIST,"SysListView32",LVS_REPORT |
-                    LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP,4,4,239,180
-    PUSHBUTTON      "&New Task...",IDC_NEWTASK,175,189,68,14
-    PUSHBUTTON      "&Switch To",IDC_SWITCHTO,104,189,68,14,WS_DISABLED
-    PUSHBUTTON      "&End Task",IDC_ENDTASK,33,189,68,14,WS_DISABLED
+                    LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP,5,7,235,177
+    PUSHBUTTON      "&End Task",IDC_ENDTASK,75,189,53,14,WS_DISABLED
+    PUSHBUTTON      "&Switch To",IDC_SWITCHTO,131,189,53,14,WS_DISABLED
+    PUSHBUTTON      "&New Task...",IDC_NEWTASK,187,189,53,14
 END
 
 IDD_PROCESS_PAGE DIALOG  0, 0, 247, 210
@@ -358,22 +460,98 @@ FONT 8, "MS Shell Dlg"
 BEGIN
     CONTROL         "",IDC_PROCESSLIST,"SysListView32",LVS_REPORT |
                     LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_OWNERDATA |
-                    WS_BORDER | WS_TABSTOP,4,4,239,180
-    PUSHBUTTON      "&End Process",IDC_ENDPROCESS,165,189,78,14
+                    WS_BORDER | WS_TABSTOP,5,7,235,177
     CONTROL         "&Show processes from all users",IDC_SHOWALLPROCESSES,
-                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,4,191,160,10
+                    "Button",BS_AUTOCHECKBOX | WS_TABSTOP,5,191,150,10
+    PUSHBUTTON      "&Show processes from all users",IDC_SHOWALLPROCESSES_ELEVATE,5,189,150,14,NOT WS_VISIBLE
+    PUSHBUTTON      "&End Process",IDC_ENDPROCESS,174,189,66,14
+END
+
+IDD_NETWORK_PAGE DIALOG  0, 0, 247, 210
+STYLE DS_CONTROL | WS_CHILD | WS_CLIPCHILDREN
+FONT 8, "MS Shell Dlg"
+BEGIN
+    /* the adapters' frames and graphs are laid out in this area */
+    LTEXT           "",IDC_NETWORK_GRAPHAREA,0,6,244,154,NOT WS_VISIBLE
+    CTEXT           "No Active Network Adapters Found.",IDC_NETWORK_NOADAPTERS,0,70,244,10,NOT WS_VISIBLE
+    CONTROL         "",IDC_NETWORK_ADAPTERS,"SysListView32",LVS_REPORT |
+                    LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP,0,160,244,48
+END
+
+IDD_USERS_PAGE DIALOG  0, 0, 247, 210
+STYLE DS_CONTROL | WS_CHILD | WS_CLIPCHILDREN
+FONT 8, "MS Shell Dlg"
+BEGIN
+    CONTROL         "",IDC_USERLIST,"SysListView32",LVS_REPORT |
+                    LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP,5,7,235,177
+    PUSHBUTTON      "&Disconnect",IDC_DISCONNECT,58,189,53,14,WS_DISABLED
+    PUSHBUTTON      "&Logoff",IDC_LOGOFF,118,189,51,14,WS_DISABLED
+    PUSHBUTTON      "Send &Message...",IDC_SENDMESSAGE,176,189,64,14,WS_DISABLED
+END
+
+IDD_NET_COLUMNS_DIALOG DIALOG  0, 0, 248, 199
+STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Select Columns"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT           "Select the columns that will appear on the Networking page of the Task Manager.",
+                    IDC_STATIC,7,7,170,17
+    CONTROL         "Network Adapter Name",IDC_NETCOL_FIRST+0,"Button",BS_AUTOCHECKBOX | WS_DISABLED | WS_TABSTOP,7,28,115,10
+    CONTROL         "Adapter Description",IDC_NETCOL_FIRST+1,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,7,39,115,10
+    CONTROL         "Network Utilization",IDC_NETCOL_FIRST+2,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,7,50,115,10
+    CONTROL         "Link Speed",IDC_NETCOL_FIRST+3,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,7,61,115,10
+    CONTROL         "State",IDC_NETCOL_FIRST+4,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,7,72,115,10
+    CONTROL         "Bytes Sent Throughput",IDC_NETCOL_FIRST+5,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,7,83,115,10
+    CONTROL         "Bytes Received Throughput",IDC_NETCOL_FIRST+6,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,7,94,115,10
+    CONTROL         "Bytes Throughput",IDC_NETCOL_FIRST+7,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,7,105,115,10
+    CONTROL         "Bytes Sent",IDC_NETCOL_FIRST+8,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,7,116,115,10
+    CONTROL         "Bytes Received",IDC_NETCOL_FIRST+9,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,7,127,115,10
+    CONTROL         "Bytes",IDC_NETCOL_FIRST+10,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,7,138,115,10
+    CONTROL         "Bytes Sent/Interval",IDC_NETCOL_FIRST+11,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,7,149,115,10
+    CONTROL         "Bytes Received/Interval",IDC_NETCOL_FIRST+12,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,7,160,115,10
+    CONTROL         "Bytes/Interval",IDC_NETCOL_FIRST+13,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,133,28,110,10
+    CONTROL         "Unicasts Sent",IDC_NETCOL_FIRST+14,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,133,39,110,10
+    CONTROL         "Unicasts Received",IDC_NETCOL_FIRST+15,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,133,50,110,10
+    CONTROL         "Unicasts",IDC_NETCOL_FIRST+16,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,133,61,110,10
+    CONTROL         "Unicasts Sent/Interval",IDC_NETCOL_FIRST+17,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,133,72,110,10
+    CONTROL         "Unicasts Received/Interval",IDC_NETCOL_FIRST+18,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,133,83,110,10
+    CONTROL         "Unicasts/Interval",IDC_NETCOL_FIRST+19,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,133,94,110,10
+    CONTROL         "Nonunicasts Sent",IDC_NETCOL_FIRST+20,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,133,105,110,10
+    CONTROL         "Nonunicasts Received",IDC_NETCOL_FIRST+21,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,133,116,110,10
+    CONTROL         "Nonunicasts",IDC_NETCOL_FIRST+22,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,133,127,110,10
+    CONTROL         "Nonunicasts Sent/Interval",IDC_NETCOL_FIRST+23,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,133,138,110,10
+    CONTROL         "Nonunicasts Received/Interval",IDC_NETCOL_FIRST+24,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,133,149,110,10
+    CONTROL         "Nonunicasts/Interval",IDC_NETCOL_FIRST+25,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,133,160,110,10
+    DEFPUSHBUTTON   "OK",IDOK,84,178,50,14
+    PUSHBUTTON      "Cancel",IDCANCEL,138,178,50,14
+END
+
+IDD_USER_COLUMNS_DIALOG DIALOG  0, 0, 200, 99
+STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Select Columns"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT           "Select the columns that will appear on the Users page of the Task Manager.",
+                    IDC_STATIC,7,7,186,17
+    CONTROL         "User Name",IDC_USERCOL_FIRST+0,"Button",BS_AUTOCHECKBOX | WS_DISABLED | WS_TABSTOP,7,28,80,10
+    CONTROL         "&ID",IDC_USERCOL_FIRST+1,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,7,39,80,10
+    CONTROL         "&Status",IDC_USERCOL_FIRST+2,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,7,50,80,10
+    CONTROL         "&Client Name",IDC_USERCOL_FIRST+3,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,107,39,80,10
+    CONTROL         "S&ession",IDC_USERCOL_FIRST+4,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,107,50,80,10
+    DEFPUSHBUTTON   "OK",IDOK,89,78,50,14
+    PUSHBUTTON      "Cancel",IDCANCEL,143,78,50,14
 END
 
 IDD_PERFORMANCE_PAGE DIALOGEX  0, 0, 247, 210
 STYLE DS_CONTROL | WS_CHILD | WS_CLIPCHILDREN
 FONT 8, "MS Shell Dlg"
 BEGIN
-    GROUPBOX        "CPU usage",IDC_CPU_USAGE_FRAME,5,5,60,54,WS_TABSTOP, WS_EX_TRANSPARENT
-    GROUPBOX        "Mem usage",IDC_MEM_USAGE_FRAME,5,63,60,54,BS_LEFTTEXT, WS_EX_TRANSPARENT
+    GROUPBOX        "CPU Usage",IDC_CPU_USAGE_FRAME,5,5,60,54,WS_TABSTOP, WS_EX_TRANSPARENT
+    GROUPBOX        "PF Usage",IDC_MEM_USAGE_FRAME,5,63,60,54,BS_LEFTTEXT, WS_EX_TRANSPARENT
     GROUPBOX        "Totals",IDC_TOTALS_FRAME,5,122,111,39,0,WS_EX_TRANSPARENT
-    GROUPBOX        "Commit charge (K)",IDC_COMMIT_CHARGE_FRAME,5,166,111,39,0,WS_EX_TRANSPARENT
-    GROUPBOX        "Physical memory (K)",IDC_PHYSICAL_MEMORY_FRAME,126,122,116,39,0,WS_EX_TRANSPARENT
-    GROUPBOX        "Kernel memory (K)",IDC_KERNEL_MEMORY_FRAME,126,166,116,39,0,WS_EX_TRANSPARENT
+    GROUPBOX        "Commit Charge (K)",IDC_COMMIT_CHARGE_FRAME,5,166,111,39,0,WS_EX_TRANSPARENT
+    GROUPBOX        "Physical Memory (K)",IDC_PHYSICAL_MEMORY_FRAME,126,122,116,39,0,WS_EX_TRANSPARENT
+    GROUPBOX        "Kernel Memory (K)",IDC_KERNEL_MEMORY_FRAME,126,166,116,39,0,WS_EX_TRANSPARENT
     LTEXT           "Handles",IDS_TOTALS_HANDLE_COUNT,12,131,43,8
     LTEXT           "Threads",IDS_TOTALS_THREAD_COUNT,12,140,43,8
     LTEXT           "Processes",IDS_TOTALS_PROCESS_COUNT,12,149,43,8
@@ -410,8 +588,8 @@ BEGIN
                     ES_READONLY | ES_NUMBER | NOT WS_BORDER
     EDITTEXT        IDC_KERNEL_MEMORY_NONPAGED,185,193,48,8,ES_RIGHT |
                     ES_READONLY | ES_NUMBER | NOT WS_BORDER
-    GROUPBOX        "CPU usage history",IDC_CPU_USAGE_HISTORY_FRAME,74,5,168,54,0,WS_EX_TRANSPARENT
-    GROUPBOX        "Memory usage history",IDC_MEMORY_USAGE_HISTORY_FRAME,74,63,168,54,0,WS_EX_TRANSPARENT
+    GROUPBOX        "CPU Usage History",IDC_CPU_USAGE_HISTORY_FRAME,74,5,168,54,0,WS_EX_TRANSPARENT
+    GROUPBOX        "Page File Usage History",IDC_MEMORY_USAGE_HISTORY_FRAME,74,63,168,54,0,WS_EX_TRANSPARENT
     PUSHBUTTON      "",IDC_CPU_USAGE_GRAPH,12,17,47,37,0,
 		    WS_EX_CLIENTEDGE
     PUSHBUTTON      "",IDC_MEM_USAGE_GRAPH,12,75,47,37,0,
@@ -533,7 +711,7 @@ BEGIN
                     BS_AUTOCHECKBOX | WS_TABSTOP,7,94,120,10
     CONTROL         "Page &Faults",IDC_PAGEFAULTS,"Button",BS_AUTOCHECKBOX |
                     WS_TABSTOP,7,105,120,10
-    CONTROL         "&USER Objects",IDC_USEROBJECTS,"Button",BS_AUTOCHECKBOX |
+    CONTROL         "&USER Objects",IDC_USEROBJECTS,"Button",BS_AUTOCHECKBOX | WS_DISABLED |
                     WS_TABSTOP,7,116,120,10
     CONTROL         "I/O Reads",IDC_IOREADS,"Button",BS_AUTOCHECKBOX |
                     WS_TABSTOP,7,127,120,10
@@ -557,7 +735,7 @@ BEGIN
                     WS_TABSTOP,132,83,120,10
     CONTROL         "&Thread Count",IDC_THREADCOUNT,"Button",BS_AUTOCHECKBOX |
                     WS_TABSTOP,132,94,120,10
-    CONTROL         "GDI Objects",IDC_GDIOBJECTS,"Button",BS_AUTOCHECKBOX |
+    CONTROL         "GDI Objects",IDC_GDIOBJECTS,"Button",BS_AUTOCHECKBOX | WS_DISABLED |
                     WS_TABSTOP,132,105,120,10
     CONTROL         "I/O Writes",IDC_IOWRITES,"Button",BS_AUTOCHECKBOX |
                     WS_TABSTOP,132,116,120,10

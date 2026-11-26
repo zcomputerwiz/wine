@@ -34,6 +34,7 @@
 #include "x11drv.h"
 #include "xcomposite.h"
 #include "wine/debug.h"
+#include "wine/dcomp_underlay.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(x11drv);
 
@@ -241,6 +242,47 @@ void set_dc_drawable( HDC hdc, Drawable drawable, const RECT *rect, int mode )
     NtGdiExtEscape( hdc, NULL, 0, X11DRV_ESCAPE, sizeof(escape), (LPSTR)&escape, 0, NULL );
 }
 
+static int window_visual_error( Display *display, XErrorEvent *event, void *arg )
+{
+    return 1;
+}
+
+/* The visual of an X window, which may belong to another process: the default visual is wrong for a 32-bit window
+ * (a glass window with per-pixel alpha), and a copy between drawables of different depths is a fatal X error, while
+ * with the right visuals the copy converts the pixels. */
+void get_x_window_visual( Window window, XVisualInfo *visual )
+{
+    XWindowAttributes attr;
+    XVisualInfo templ, *infos;
+    Status ok;
+    int count;
+
+    *visual = default_visual;
+    if (!window) return;
+    X11DRV_expect_error( gdi_display, window_visual_error, NULL );
+    ok = XGetWindowAttributes( gdi_display, window, &attr );
+    if (X11DRV_check_error() || !ok || attr.visual == default_visual.visual) return;
+    templ.visualid = XVisualIDFromVisual( attr.visual );
+    if ((infos = XGetVisualInfo( gdi_display, VisualIDMask, &templ, &count )))
+    {
+        *visual = infos[0];
+        XFree( infos );
+    }
+}
+
+static void set_dc_drawable_visual( HDC hdc, Drawable drawable, const RECT *rect, int mode )
+{
+    struct x11drv_escape_set_drawable escape =
+    {
+        .code = X11DRV_SET_DRAWABLE,
+        .drawable = drawable,
+        .dc_rect = *rect,
+        .mode = mode,
+    };
+    get_x_window_visual( drawable, &escape.visual );
+    NtGdiExtEscape( hdc, NULL, 0, X11DRV_ESCAPE, sizeof(escape), (LPSTR)&escape, 0, NULL );
+}
+
 Drawable get_dc_drawable( HDC hdc, RECT *rect )
 {
     struct x11drv_escape_get_drawable escape = {.code = X11DRV_GET_DRAWABLE};
@@ -355,7 +397,7 @@ static void client_surface_update_offscreen( HWND hwnd, struct x11drv_client_sur
         OffsetRect( &rect, -rect.left, -rect.top );
         surface->hdc_dst = NtGdiOpenDCW( &device_str, NULL, NULL, 0, TRUE, NULL, NULL, NULL );
         surface->hdc_src = NtGdiOpenDCW( &device_str, NULL, NULL, 0, TRUE, NULL, NULL, NULL );
-        set_dc_drawable( surface->hdc_src, surface->window, &rect, IncludeInferiors );
+        set_dc_drawable_visual( surface->hdc_src, surface->window, &rect, IncludeInferiors );
 
 #ifdef SONAME_LIBXCOMPOSITE
         if (usexcomposite) pXCompositeRedirectWindow( gdi_display, surface->window, CompositeRedirectManual );
@@ -398,8 +440,9 @@ static void X11DRV_client_surface_present( struct client_surface *client, HDC hd
     TRACE( "hwnd %p %s to toplevel %p %s region %p\n", hwnd, wine_dbgstr_rect(&rect_src),
            toplevel, wine_dbgstr_rect(&rect_dst), region );
 
+    /* the toplevel window may be 32-bit (a glass window) and another process's */
     if (get_dc_drawable( surface->hdc_dst, &rect ) != window || !EqualRect( &rect, &rect_dst ))
-        set_dc_drawable( surface->hdc_dst, window, &rect_dst, IncludeInferiors );
+        set_dc_drawable_visual( surface->hdc_dst, window, &rect_dst, IncludeInferiors );
     if (region) NtGdiExtSelectClipRgn( surface->hdc_dst, region, RGN_COPY );
 
     NtGdiStretchBlt( surface->hdc_dst, 0, 0, rect_dst.right - rect_dst.left, rect_dst.bottom - rect_dst.top,
@@ -429,14 +472,34 @@ struct x11drv_client_surface *impl_from_client_surface( struct client_surface *c
     return CONTAINING_RECORD( client, struct x11drv_client_surface, client );
 }
 
+static const WCHAR dcomp_argb_propW[] =
+    {'_','_','w','i','n','e','_','d','c','o','m','p','_','a','r','g','b',0};
+
+/* A DirectComposition target (it has dxgi's repaint sink) that is a child of a glass window (DwmAlpha): its frame
+ * has alpha that only the compositor can blend, so its client window gets the 32-bit visual. */
+static BOOL client_surface_wants_argb( HWND hwnd )
+{
+    HWND root = NtUserGetAncestor( hwnd, GA_ROOT );
+
+    return argb_visual.visualid && root && root != hwnd && NtUserGetProp( hwnd, WINE_DCOMP_REPAINT_SINK_PROP ) &&
+           window_dwm_alpha( root );
+}
+
 struct client_surface *X11DRV_CreateClientSurface( HWND hwnd, int format, BOOL raw )
 {
     struct x11drv_client_surface *surface;
     XVisualInfo visual = default_visual;
+    void *argb_config = NULL;
     Colormap colormap;
     RECT rect;
 
     if (format && !visual_from_pixel_format( format, &visual )) return NULL;
+    /* GL needs an EGL config with that visual; Vulkan (no format) only the visual */
+    if (client_surface_wants_argb( hwnd ) && (!format || (argb_config = egl_argb_config_for_format( format ))))
+        visual = argb_visual;
+    /* wined3d then keeps the frame's alpha instead of shaping the window from it */
+    if (visual.visualid == argb_visual.visualid && argb_visual.visualid) NtUserSetProp( hwnd, dcomp_argb_propW, (HANDLE)1 );
+    else NtUserRemoveProp( hwnd, dcomp_argb_propW );
 
     if (visual.visualid == default_visual.visualid) colormap = default_colormap;
     else colormap = XCreateColormap( gdi_display, get_dummy_parent(), visual.visual, visual_class_alloc( visual.class ) );
@@ -444,6 +507,7 @@ struct client_surface *X11DRV_CreateClientSurface( HWND hwnd, int format, BOOL r
 
     if (!(surface = client_surface_create( &x11drv_client_surface_funcs, hwnd, format, raw ))) goto failed;
     surface->colormap = colormap;
+    surface->argb_config = argb_config;
     rect = raw ? surface->client.monitor_rect : surface->client.virtual_rect;
     if (!(surface->window = create_client_window( hwnd, rect, &visual, colormap ))) goto failed;
 

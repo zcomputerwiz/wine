@@ -1299,6 +1299,53 @@ static HRESULT analyze_linebreaks(IDWriteTextAnalysisSource *source, UINT32 posi
     return S_OK;
 }
 
+/* The private interface {b7e6163e-7f46-43b4-84b3-e4e6249c365e} of the text analyzer (one digit away from IDWriteTextAnalyzer).
+ * XAML of the Windows App SDK asks the analyzer for it and fails fast without it. Measured black box on 64-bit Windows 11: the
+ * analyzer answers it with a second interface of its own (not the analyzer pointer), whose vtable has one method after IUnknown;
+ * XAML calls it with an object of its own, NULL and a small count, and it returns 0 and writes nothing through its arguments.
+ * Here it does nothing and returns S_OK. The argument sizes are not measured on i386, so 32-bit callers do not get the interface. */
+#ifdef __x86_64__
+static const GUID textanalyzer_private_iid = {0xb7e6163e, 0x7f46, 0x43b4, {0x84, 0xb3, 0xe4, 0xe6, 0x24, 0x9c, 0x36, 0x5e}};
+
+static HRESULT WINAPI textanalyzer_private_QueryInterface(void *iface, REFIID riid, void **obj)
+{
+    TRACE("%s, %p.\n", debugstr_guid(riid), obj);
+
+    if (IsEqualIID(riid, &textanalyzer_private_iid))
+    {
+        *obj = iface;
+        return S_OK;
+    }
+    return IDWriteTextAnalyzer2_QueryInterface(get_text_analyzer(), riid, obj);
+}
+
+static ULONG WINAPI textanalyzer_private_AddRef(void *iface)
+{
+    return 2;
+}
+
+static ULONG WINAPI textanalyzer_private_Release(void *iface)
+{
+    return 1;
+}
+
+static HRESULT WINAPI textanalyzer_private_method3(void *iface, IUnknown *object, void *arg2, UINT_PTR count)
+{
+    FIXME("%p, %p, %p, %#Ix: semi-stub.\n", iface, object, arg2, count);
+    return S_OK;
+}
+
+static const void * const textanalyzer_private_vtbl[] =
+{
+    textanalyzer_private_QueryInterface,
+    textanalyzer_private_AddRef,
+    textanalyzer_private_Release,
+    textanalyzer_private_method3,
+};
+
+static const void * const *textanalyzer_private = textanalyzer_private_vtbl;
+#endif
+
 static HRESULT WINAPI dwritetextanalyzer_QueryInterface(IDWriteTextAnalyzer2 *iface, REFIID riid, void **obj)
 {
     TRACE("%s, %p.\n", debugstr_guid(riid), obj);
@@ -1311,6 +1358,13 @@ static HRESULT WINAPI dwritetextanalyzer_QueryInterface(IDWriteTextAnalyzer2 *if
         *obj = iface;
         return S_OK;
     }
+#ifdef __x86_64__
+    if (IsEqualIID(riid, &textanalyzer_private_iid))
+    {
+        *obj = (void *)&textanalyzer_private;
+        return S_OK;
+    }
+#endif
 
     WARN("%s not implemented.\n", debugstr_guid(riid));
 
@@ -2664,15 +2718,82 @@ static HRESULT WINAPI fontfallback_MapCharacters(IDWriteFontFallback1 *iface, ID
     return fallback_map_characters(fallback, source, position, length, weight, style, stretch, ret_font, mapped_length, scale);
 }
 
+/* The font properties that the registered axes stand for: weight (wght), stretch (wdth, the nearest of the nine widths in
+ * percent), style (ital 0..1, slnt -90..90). The DWriteCore specification (MIT, github.com/microsoft/WindowsAppSDK,
+ * specs/dwritecore/DWriteCore.md, "Typographic Font Selection") matches oblique fonts as if they were slanted by 20 degrees, so a
+ * slant of at least half of that counts as oblique here. */
+static void fallback_props_from_axis_values(DWRITE_FONT_AXIS_VALUE const *values, UINT32 count, DWRITE_FONT_WEIGHT *weight,
+        DWRITE_FONT_STYLE *style, DWRITE_FONT_STRETCH *stretch)
+{
+    static const float widths[] = { 50.0f, 62.5f, 75.0f, 87.5f, 100.0f, 112.5f, 125.0f, 150.0f, 200.0f };
+    unsigned int i, j, best;
+
+    *weight = DWRITE_FONT_WEIGHT_NORMAL;
+    *style = DWRITE_FONT_STYLE_NORMAL;
+    *stretch = DWRITE_FONT_STRETCH_NORMAL;
+
+    for (i = 0; i < count; ++i)
+    {
+        switch (values[i].axisTag)
+        {
+        case DWRITE_FONT_AXIS_TAG_WEIGHT:
+            if (values[i].value >= 1.0f && values[i].value <= 1000.0f) *weight = (DWRITE_FONT_WEIGHT)(values[i].value + 0.5f);
+            break;
+        case DWRITE_FONT_AXIS_TAG_WIDTH:
+            for (j = 1, best = 0; j < ARRAY_SIZE(widths); ++j)
+                if (fabsf(widths[j] - values[i].value) < fabsf(widths[best] - values[i].value)) best = j;
+            *stretch = DWRITE_FONT_STRETCH_ULTRA_CONDENSED + best;
+            break;
+        case DWRITE_FONT_AXIS_TAG_ITALIC:
+            if (values[i].value >= 0.5f) *style = DWRITE_FONT_STYLE_ITALIC;
+            break;
+        case DWRITE_FONT_AXIS_TAG_SLANT:
+            if (fabsf(values[i].value) >= 10.0f && *style == DWRITE_FONT_STYLE_NORMAL) *style = DWRITE_FONT_STYLE_OBLIQUE;
+            break;
+        default:
+            ;
+        }
+    }
+}
+
+/* The mapping of MapCharacters, with the font chosen from the axis values and returned as a font face. The axis values are not
+ * applied to the face (a variable font gives its default instance). */
 static HRESULT WINAPI fontfallback1_MapCharacters(IDWriteFontFallback1 *iface, IDWriteTextAnalysisSource *source,
     UINT32 position, UINT32 length, IDWriteFontCollection *basecollection, const WCHAR *basefamily,
     DWRITE_FONT_AXIS_VALUE const *axis_values, UINT32 values_count, UINT32 *mapped_length, FLOAT *scale,
     IDWriteFontFace5 **ret_fontface)
 {
-    FIXME("%p, %p, %u, %u, %p, %s, %p, %u, %p, %p, %p.\n", iface, source, position, length, basecollection,
+    DWRITE_FONT_STRETCH stretch;
+    DWRITE_FONT_WEIGHT weight;
+    DWRITE_FONT_STYLE style;
+    IDWriteFontFace *fontface;
+    IDWriteFont *font = NULL;
+    HRESULT hr;
+
+    TRACE("%p, %p, %u, %u, %p, %s, %p, %u, %p, %p, %p.\n", iface, source, position, length, basecollection,
             debugstr_w(basefamily), axis_values, values_count, mapped_length, scale, ret_fontface);
 
-    return E_NOTIMPL;
+    if (!ret_fontface || !mapped_length || !scale) return E_INVALIDARG;
+    *ret_fontface = NULL;
+    if (values_count && !axis_values)
+    {
+        *mapped_length = 0;
+        *scale = 1.0f;
+        return E_INVALIDARG;
+    }
+
+    fallback_props_from_axis_values(axis_values, values_count, &weight, &style, &stretch);
+    if (FAILED(hr = fontfallback_MapCharacters(iface, source, position, length, basecollection, basefamily, weight, style,
+            stretch, mapped_length, &font, scale)))
+        return hr;
+    if (!font) return S_OK;
+
+    hr = IDWriteFont_CreateFontFace(font, &fontface);
+    IDWriteFont_Release(font);
+    if (FAILED(hr)) return hr;
+    hr = IDWriteFontFace_QueryInterface(fontface, &IID_IDWriteFontFace5, (void **)ret_fontface);
+    IDWriteFontFace_Release(fontface);
+    return hr;
 }
 
 static const IDWriteFontFallback1Vtbl fontfallbackvtbl =
@@ -2892,11 +3013,45 @@ failed:
     return E_OUTOFMEMORY;
 }
 
+/* Appends the mappings of a fallback made by this module (the system fallback or one from a builder), locale by locale in their
+ * order, as AddMapping would have added them. */
 static HRESULT WINAPI fontfallbackbuilder_AddMappings(IDWriteFontFallbackBuilder *iface, IDWriteFontFallback *fallback)
 {
-    FIXME("%p, %p stub.\n", iface, fallback);
+    const struct fallback_data *data;
+    const struct fallback_locale *locale;
+    struct dwrite_fontfallback *source;
+    HRESULT hr;
+    size_t i, j;
 
-    return E_NOTIMPL;
+    TRACE("%p, %p.\n", iface, fallback);
+
+    if (!fallback) return E_INVALIDARG;
+    if (fallback->lpVtbl != (const IDWriteFontFallbackVtbl *)&fontfallbackvtbl &&
+            fallback->lpVtbl != (const IDWriteFontFallbackVtbl *)&customfontfallbackvtbl)
+    {
+        FIXME("Fallback %p is not one of this module.\n", fallback);
+        return E_NOTIMPL;
+    }
+    source = impl_from_IDWriteFontFallback1((IDWriteFontFallback1 *)fallback);
+    data = source->data.count == ~0u ? &system_fallback : &source->data;
+
+    LIST_FOR_EACH_ENTRY(locale, &data->locales, struct fallback_locale, entry)
+    {
+        for (i = 0; i + 1 < locale->ranges.count; i += 2)
+        {
+            for (j = locale->ranges.data[i]; j <= locale->ranges.data[i + 1] && j < data->count; ++j)
+            {
+                const struct fallback_mapping *mapping = &data->mappings[j];
+
+                if (FAILED(hr = IDWriteFontFallbackBuilder_AddMapping(iface, mapping->ranges, mapping->ranges_count,
+                        (const WCHAR **)mapping->families, mapping->families_count, mapping->collection, locale->name,
+                        NULL, mapping->scale)))
+                    return hr;
+            }
+        }
+    }
+
+    return S_OK;
 }
 
 static HRESULT fallbackbuilder_init_fallback_data(const struct dwrite_fontfallback_builder *builder,

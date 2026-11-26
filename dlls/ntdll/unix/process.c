@@ -67,7 +67,6 @@
 #include "ddk/ntddk.h"
 #include "unix_private.h"
 #include "wine/condrv.h"
-#include "wine/dwm_protocol.h"
 #include "wine/server.h"
 #include "wine/debug.h"
 
@@ -1171,8 +1170,22 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
                 else if (!handle) ret = STATUS_INVALID_HANDLE;
                 else
                 {
-                    /* FIXME : real data */
                     memset(&pii, 0 , sizeof(IO_COUNTERS));
+                    SERVER_START_REQ(get_process_io_counters)
+                    {
+                        req->handle = wine_server_obj_handle( handle );
+                        if (!(ret = wine_server_call( req )))
+                        {
+                            pii.ReadOperationCount = reply->read_operations;
+                            pii.WriteOperationCount = reply->write_operations;
+                            pii.OtherOperationCount = reply->other_operations;
+                            pii.ReadTransferCount = reply->read_bytes;
+                            pii.WriteTransferCount = reply->write_bytes;
+                            pii.OtherTransferCount = reply->other_bytes;
+                        }
+                    }
+                    SERVER_END_REQ;
+                    if (ret) break;
                     memcpy(info, &pii, sizeof(IO_COUNTERS));
                     len = sizeof(IO_COUNTERS);
                 }
@@ -1470,6 +1483,29 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
             ret = wine_server_call( req );
             if (ret == STATUS_BUFFER_TOO_SMALL) ret = STATUS_INFO_LENGTH_MISMATCH;
             len = min_size + reply->len;
+            if (ret == STATUS_SUCCESS)
+            {
+                str->Length = reply->len;
+                str->MaximumLength = str->Length + sizeof(WCHAR);
+                str->Buffer = (PWSTR)(str + 1);
+                str->Buffer[str->Length / sizeof(WCHAR)] = 0;
+            }
+        }
+        SERVER_END_REQ;
+        break;
+
+    case ProcessCommandLineInformation:
+        SERVER_START_REQ( get_process_command_line )
+        {
+            const unsigned int min_size = sizeof(UNICODE_STRING) + sizeof(WCHAR);
+            UNICODE_STRING *str = info;
+
+            req->handle = wine_server_obj_handle( handle );
+            wine_server_set_reply( req, str ? str + 1 : NULL, size > min_size ? size - min_size : 0 );
+            ret = wine_server_call( req );
+            if (ret == STATUS_BUFFER_TOO_SMALL) ret = STATUS_INFO_LENGTH_MISMATCH;
+            len = min_size + reply->len;
+            if (ret == STATUS_SUCCESS && size < len) ret = STATUS_INFO_LENGTH_MISMATCH;
             if (ret == STATUS_SUCCESS)
             {
                 str->Length = reply->len;
@@ -1864,10 +1900,15 @@ NTSTATUS WINAPI NtSetInformationProcess( HANDLE handle, PROCESSINFOCLASS class, 
         return ret;
 
     case ProcessWineCreateServiceToken:  /* in: account (0 LocalSystem, 1 LocalService, 2 NetworkService), out: token handle */
-        if (size != sizeof(HANDLE *)) return STATUS_INFO_LENGTH_MISMATCH;
+        /* WineExplorer: the account may be followed by the service's SID (NT SERVICE\name, RtlCreateServiceSid),
+         * which the token gets as a group */
+        if (size < sizeof(HANDLE *) || size > sizeof(HANDLE *) + SECURITY_MAX_SID_SIZE)
+            return STATUS_INFO_LENGTH_MISMATCH;
         SERVER_START_REQ( create_service_token )
         {
             req->account = *(ULONG_PTR *)info;
+            if (size > sizeof(HANDLE *))
+                wine_server_add_data( req, (const char *)info + sizeof(HANDLE *), size - sizeof(HANDLE *) );
             if (!(ret = wine_server_call( req )))
                 *(HANDLE *)info = wine_server_ptr_handle( reply->token );
         }
@@ -1882,110 +1923,6 @@ NTSTATUS WINAPI NtSetInformationProcess( HANDLE handle, PROCESSINFOCLASS class, 
         }
         SERVER_END_REQ;
         break;
-
-    case ProcessWineDwmChannel:
-    {
-        struct dwm_channel_call *call = info;
-
-        if (!call || size != sizeof(*call)) return STATUS_INFO_LENGTH_MISMATCH;
-        if (handle != NtCurrentProcess()) return STATUS_ACCESS_DENIED;
-
-        switch (call->op)
-        {
-        case DWM_CHANNEL_OP_CONNECT:
-            SERVER_START_REQ( dwm_connect )
-            {
-                if (!(ret = wine_server_call( req )))
-                {
-                    call->handle  = reply->handle;
-                    call->version = reply->version;
-                    call->epoch   = reply->epoch;
-                }
-            }
-            SERVER_END_REQ;
-            return ret;
-
-        case DWM_CHANNEL_OP_GET_CAPABILITY:
-            SERVER_START_REQ( dwm_get_broker_capability )
-            {
-                if (!(ret = wine_server_call( req )))
-                {
-                    call->capability = reply->capability;
-                    call->epoch      = reply->epoch;
-                }
-            }
-            SERVER_END_REQ;
-            return ret;
-
-        case DWM_CHANNEL_OP_BROKER_REGISTER:
-            SERVER_START_REQ( dwm_broker_register )
-            {
-                req->flags      = 0;
-                req->capability = call->capability;
-                if (!(ret = wine_server_call( req )))
-                {
-                    call->handle  = reply->handle;
-                    call->version = reply->version;
-                    call->epoch   = reply->epoch;
-                }
-            }
-            SERVER_END_REQ;
-            return ret;
-
-        case DWM_CHANNEL_OP_SEND:
-            if (call->in_len && !call->in_ptr) return STATUS_INVALID_PARAMETER;
-            SERVER_START_REQ( dwm_send )
-            {
-                req->handle = call->handle;
-                if (call->in_len)
-                    wine_server_add_data( req, (const void *)(uintptr_t)call->in_ptr, call->in_len );
-                if (!(ret = wine_server_call( req )))
-                {
-                    call->request_id = reply->request_id;
-                    call->epoch      = reply->epoch;
-                }
-            }
-            SERVER_END_REQ;
-            return ret;
-
-        case DWM_CHANNEL_OP_RECV:
-            if (call->out_len && !call->out_ptr) return STATUS_INVALID_PARAMETER;
-            SERVER_START_REQ( dwm_recv )
-            {
-                req->handle = call->handle;
-                if (call->out_len)
-                    wine_server_set_reply( req, (void *)(uintptr_t)call->out_ptr, call->out_len );
-                if (!(ret = wine_server_call( req )))
-                {
-                    call->request_id = reply->request_id;
-                    call->sender_pid = reply->sender_pid;
-                    call->sender_tid = reply->sender_tid;
-                    call->desktop_id = reply->desktop_id;
-                    call->status     = reply->status;
-                    call->out_len    = wine_server_reply_size( reply );
-                }
-            }
-            SERVER_END_REQ;
-            return ret;
-
-        case DWM_CHANNEL_OP_REPLY:
-            if (call->in_len && !call->in_ptr) return STATUS_INVALID_PARAMETER;
-            SERVER_START_REQ( dwm_reply )
-            {
-                req->handle     = call->handle;
-                req->request_id = call->request_id;
-                req->status     = call->status;
-                if (call->in_len)
-                    wine_server_add_data( req, (const void *)(uintptr_t)call->in_ptr, call->in_len );
-                ret = wine_server_call( req );
-            }
-            SERVER_END_REQ;
-            return ret;
-
-        default:
-            return STATUS_INVALID_PARAMETER;
-        }
-    }
 
     case ProcessPowerThrottlingState:
         FIXME( "ProcessPowerThrottlingState - stub\n" );

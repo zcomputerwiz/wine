@@ -155,6 +155,9 @@ struct d3d_texture2d
     DWORD shared_pitch;
     BOOL is_shared;
     BOOL modified;
+    BOOL opened;                        /* opened from a shared handle: reads what the creator wrote back */
+    LONG shared_seen;                   /* the shared memory's sequence number this device last loaded */
+    ID3D11Texture2D *shared_staging;    /* the creator's read-back target, kept between frames */
     struct list entry;
 };
 
@@ -577,6 +580,7 @@ struct d3d11_device_context
     struct d3d_device *device;
 
     struct wined3d_private_store private_store;
+    BOOL shared_dirty;   /* work that may have changed a shared texture was recorded since the last write-back */
 };
 
 /* ID3D11Device, ID3D10Device1 */
@@ -588,10 +592,12 @@ struct d3d_device
     ID3D10Multithread ID3D10Multithread_iface;
     IWineDXGIDeviceParent IWineDXGIDeviceParent_iface;
     ID3D11VideoDevice1 ID3D11VideoDevice1_iface;
+    const void * const *compositor_private_vtbl;  /* the private interface {26c5dc23-...} that the compositor asks for */
     IUnknown *outer_unk;
     LONG refcount;
 
     BOOL d3d11_only;
+    UINT creation_flags;    /* the D3D11_CREATE_DEVICE_* flags that the device was created with */
 
     struct d3d_device_context_state *state;
     struct d3d11_device_context immediate_context;
@@ -612,6 +618,7 @@ struct d3d_device
 };
 
 void d3d11_device_context_flush_shared_resources(struct d3d11_device_context *context);
+void d3d11_device_context_refresh_shared_resources(struct d3d11_device_context *context);
 
 struct d3d11_command_list
 {

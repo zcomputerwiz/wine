@@ -26,8 +26,26 @@ struct package_manager
 {
     IPackageManager IPackageManager_iface;
     IPackageManager2 IPackageManager2_iface;
+    IPackageManager6 IPackageManager6_iface;
     LONG ref;
 };
+
+/* no package is known to the package manager yet: every search finds an empty list */
+static HRESULT empty_package_list( IIterable_Package **packages )
+{
+    static const struct vector_iids iids =
+    {
+        &IID_IIterable_Package, &IID_IIterator_Package, &IID_IVector_Package, &IID_IVectorView_Package,
+    };
+    IVector_IInspectable *vector;
+    HRESULT hr;
+
+    *packages = NULL;
+    if (FAILED(hr = vector_inspectable_create( &iids, &vector ))) return hr;
+    hr = IVector_IInspectable_QueryInterface( vector, &IID_IIterable_Package, (void **)packages );
+    IVector_IInspectable_Release( vector );
+    return hr;
+}
 
 static inline struct package_manager *impl_from_IPackageManager( IPackageManager *iface )
 {
@@ -53,6 +71,13 @@ static HRESULT WINAPI package_manager_QueryInterface( IPackageManager *iface, RE
     if (IsEqualGUID( iid, &IID_IPackageManager2 ))
     {
         *out = &impl->IPackageManager2_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IPackageManager6 ))
+    {
+        *out = &impl->IPackageManager6_iface;
         IInspectable_AddRef( *out );
         return S_OK;
     }
@@ -103,14 +128,14 @@ static HRESULT WINAPI package_manager_AddPackageAsync( IPackageManager *iface, I
     IIterable_Uri *dependencies, DeploymentOptions options, IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
     FIXME( "iface %p, uri %p, dependencies %p, options %d, operation %p stub!\n", iface, uri, dependencies, options, operation );
-    return E_NOTIMPL;
+    return start_install( uri, options, FALSE, operation );
 }
 
 static HRESULT WINAPI package_manager_UpdatePackageAsync( IPackageManager *iface, IUriRuntimeClass *uri, IIterable_Uri *dependencies,
     DeploymentOptions options, IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
     FIXME( "iface %p, uri %p, dependencies %p, options %d, operation %p stub!\n", iface, uri, dependencies, options, operation );
-    return E_NOTIMPL;
+    return start_install( uri, options, FALSE, operation );
 }
 
 static HRESULT WINAPI package_manager_RemovePackageAsync( IPackageManager *iface, HSTRING name,
@@ -124,7 +149,7 @@ static HRESULT WINAPI package_manager_StagePackageAsync( IPackageManager *iface,
     IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
     FIXME( "iface %p, uri %p, dependencies %p, operation %p stub!\n", iface, uri, dependencies, operation );
-    return E_NOTIMPL;
+    return start_install( uri, DeploymentOptions_None, FALSE, operation );
 }
 
 static HRESULT WINAPI package_manager_RegisterPackageAsync( IPackageManager *iface, IUriRuntimeClass *uri, IIterable_Uri *dependencies,
@@ -137,13 +162,13 @@ static HRESULT WINAPI package_manager_RegisterPackageAsync( IPackageManager *ifa
 static HRESULT WINAPI package_manager_FindPackages( IPackageManager *iface, IIterable_Package **packages )
 {
     FIXME( "iface %p, packages %p stub!\n", iface, packages );
-    return E_NOTIMPL;
+    return empty_package_list( packages );
 }
 
 static HRESULT WINAPI package_manager_FindPackagesByUserSecurityId( IPackageManager *iface, HSTRING sid, IIterable_Package **packages )
 {
     FIXME( "iface %p, sid %s, packages %p stub!\n", iface, debugstr_hstring(sid), packages );
-    return E_NOTIMPL;
+    return empty_package_list( packages );
 }
 
 static HRESULT WINAPI package_manager_FindPackagesByNamePublisher( IPackageManager *iface, HSTRING name, HSTRING publisher, IIterable_Package **packages )
@@ -151,14 +176,14 @@ static HRESULT WINAPI package_manager_FindPackagesByNamePublisher( IPackageManag
     FIXME( "iface %p, name %s, publisher %s, packages %p stub!\n", iface, debugstr_hstring(name), debugstr_hstring(publisher), packages );
 
     if (!name || !publisher) return E_INVALIDARG;
-    return E_NOTIMPL;
+    return empty_package_list( packages );
 }
 
 static HRESULT WINAPI package_manager_FindPackagesByUserSecurityIdNamePublisher( IPackageManager *iface, HSTRING sid,
     HSTRING name, HSTRING publisher, IIterable_Package **packages )
 {
     FIXME( "iface %p, sid %s, name %s, publisher %s, packages %p stub!\n", iface, debugstr_hstring(sid), debugstr_hstring(name), debugstr_hstring(publisher), packages );
-    return E_NOTIMPL;
+    return empty_package_list( packages );
 }
 
 static HRESULT WINAPI package_manager_FindUsers( IPackageManager *iface, HSTRING name, IIterable_PackageUserInformation **users )
@@ -190,14 +215,14 @@ static HRESULT WINAPI package_manager_FindPackagesByPackageFamilyName( IPackageM
     IIterable_Package **packages )
 {
     FIXME( "iface %p, family_name %s, packages %p stub!\n", iface, debugstr_hstring(family_name), packages );
-    return E_NOTIMPL;
+    return empty_package_list( packages );
 }
 
 static HRESULT WINAPI package_manager_FindPackagesByUserSecurityIdPackageFamilyName( IPackageManager *iface, HSTRING sid,
     HSTRING family_name, IIterable_Package **packages )
 {
     FIXME( "iface %p, sid %s, family_name %s, packages %p stub!\n", iface, debugstr_hstring(sid), debugstr_hstring(family_name), packages );
-    return E_NOTIMPL;
+    return empty_package_list( packages );
 }
 
 static HRESULT WINAPI package_manager_FindPackageByUserSecurityIdPackageFullName( IPackageManager *iface, HSTRING sid, HSTRING name, IPackage **package )
@@ -247,7 +272,7 @@ static HRESULT WINAPI package_manager2_StagePackageWithOptionsAsync( IPackageMan
     DeploymentOptions options, IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
     FIXME( "iface %p, uri %p, dependencies %p, options %d, operation %p stub!\n", iface, uri, dependencies, options, operation );
-    return E_NOTIMPL;
+    return start_install( uri, options, FALSE, operation );
 }
 
 static HRESULT WINAPI package_manager2_RegisterPackageByFullNameAsync( IPackageManager2 *iface, HSTRING name, IIterable_HSTRING *dependencies,
@@ -260,42 +285,42 @@ static HRESULT WINAPI package_manager2_RegisterPackageByFullNameAsync( IPackageM
 static HRESULT WINAPI package_manager2_FindPackagesWithPackageTypes( IPackageManager2 *iface, PackageTypes types, IIterable_Package **packages )
 {
     FIXME( "iface %p, types %d, packages %p stub!\n", iface, types, packages );
-    return E_NOTIMPL;
+    return empty_package_list( packages );
 }
 
 static HRESULT WINAPI package_manager2_FindPackagesByUserSecurityIdWithPackageTypes( IPackageManager2 *iface, HSTRING sid,
     PackageTypes types, IIterable_Package **packages )
 {
     FIXME( "iface %p, sid %s, types %d, packages %p stub!\n", iface, debugstr_hstring(sid), types, packages );
-    return E_NOTIMPL;
+    return empty_package_list( packages );
 }
 
 static HRESULT WINAPI package_manager2_FindPackagesByNamePublisherWithPackageTypes( IPackageManager2 *iface, HSTRING name, HSTRING publisher,
     PackageTypes types, IIterable_Package **packages )
 {
     FIXME( "iface %p, name %s, publisher %s, types %d, packages %p stub!\n", iface, debugstr_hstring(name), debugstr_hstring(publisher), types, packages );
-    return E_NOTIMPL;
+    return empty_package_list( packages );
 }
 
 static HRESULT WINAPI package_manager2_FindPackagesByUserSecurityIdNamePublisherWithPackageTypes( IPackageManager2 *iface, HSTRING sid, HSTRING name,
     HSTRING publisher, PackageTypes types, IIterable_Package **packages )
 {
     FIXME( "iface %p, sid %s, name %s, publisher %s, types %d, packages %p stub!\n", iface, debugstr_hstring(sid), debugstr_hstring(name), debugstr_hstring(publisher), types, packages );
-    return E_NOTIMPL;
+    return empty_package_list( packages );
 }
 
 static HRESULT WINAPI package_manager2_FindPackagesByPackageFamilyNameWithPackageTypes( IPackageManager2 *iface, HSTRING family_name, PackageTypes types,
    IIterable_Package **packages )
 {
     FIXME( "iface %p, family_name %s, types %d, packages %p stub!\n", iface, debugstr_hstring(family_name), types, packages );
-    return E_NOTIMPL;
+    return empty_package_list( packages );
 }
 
 static HRESULT WINAPI package_manager2_FindPackagesByUserSecurityIdPackageFamilyNameWithPackageTypes( IPackageManager2 *iface, HSTRING sid, HSTRING family_name,
     PackageTypes types, IIterable_Package **packages )
 {
     FIXME( "iface %p, sid %s, family_name %s, types %d, packages %p stub!\n", iface, debugstr_hstring(sid), debugstr_hstring(family_name), types, packages );
-    return E_NOTIMPL;
+    return empty_package_list( packages );
 }
 
 static HRESULT WINAPI package_manager2_StageUserDataAsync( IPackageManager2 *iface, HSTRING name,
@@ -325,6 +350,64 @@ static const struct IPackageManager2Vtbl package_manager2_vtbl =
     package_manager2_FindPackagesByPackageFamilyNameWithPackageTypes,
     package_manager2_FindPackagesByUserSecurityIdPackageFamilyNameWithPackageTypes,
     package_manager2_StageUserDataAsync,
+};
+
+DEFINE_IINSPECTABLE( package_manager6, IPackageManager6, struct package_manager, IPackageManager_iface );
+
+/* The staging and the provisioning calls of Windows 10 2004 and later: Office Click-to-Run stages its own packages through them.
+ * The provisioning and the app installer calls fail with E_NOTIMPL for now (the caller sees an error it handles). */
+#define PM6_FAIL( name, ... ) \
+    static HRESULT WINAPI package_manager6_##name( IPackageManager6 *iface, __VA_ARGS__ ) \
+    { \
+        FIXME( "iface %p, " #name " stub!\n", iface ); \
+        *operation = NULL; \
+        return E_NOTIMPL; \
+    }
+
+static HRESULT WINAPI package_manager6_ProvisionPackageForAllUsersAsync( IPackageManager6 *iface, HSTRING family_name,
+                                                                         async_operation **operation )
+{
+    TRACE( "iface %p, family_name %s.\n", iface, debugstr_hstring( family_name ) );
+    return start_provision( family_name, operation );
+}
+PM6_FAIL( AddPackageByAppInstallerFileAsync, IUriRuntimeClass *uri, AddPackageByAppInstallerOptions options,
+          IPackageVolume *volume, async_operation **operation )
+PM6_FAIL( RequestAddPackageByAppInstallerFileAsync, IUriRuntimeClass *uri, AddPackageByAppInstallerOptions options,
+          IPackageVolume *volume, async_operation **operation )
+/* the three that name a package by Uri install it (stage.c); the volume, the optional packages and the related packages are
+ * not honoured yet */
+#define PM6_INSTALL( name, ... ) \
+    static HRESULT WINAPI package_manager6_##name( IPackageManager6 *iface, __VA_ARGS__ ) \
+    { \
+        TRACE( "iface %p, " #name ".\n", iface ); \
+        return start_install( uri, options, FALSE, operation ); \
+    }
+PM6_INSTALL( AddPackageToVolumeAndRelatedSetAsync, IUriRuntimeClass *uri, IIterable_Uri *dependencies, DeploymentOptions options,
+             IPackageVolume *volume, IIterable_HSTRING *optional_family_names, IIterable_Uri *uris_to_install,
+             IIterable_Uri *related_uris, async_operation **operation )
+PM6_INSTALL( StagePackageToVolumeAndRelatedSetAsync, IUriRuntimeClass *uri, IIterable_Uri *dependencies, DeploymentOptions options,
+             IPackageVolume *volume, IIterable_HSTRING *optional_family_names, IIterable_Uri *uris_to_install,
+             IIterable_Uri *related_uris, async_operation **operation )
+PM6_INSTALL( RequestAddPackageAsync, IUriRuntimeClass *uri, IIterable_Uri *dependencies, DeploymentOptions options,
+             IPackageVolume *volume, IIterable_HSTRING *optional_family_names, IIterable_Uri *related_uris,
+             async_operation **operation )
+
+static const struct IPackageManager6Vtbl package_manager6_vtbl =
+{
+    package_manager6_QueryInterface,
+    package_manager6_AddRef,
+    package_manager6_Release,
+    /* IInspectable methods */
+    package_manager6_GetIids,
+    package_manager6_GetRuntimeClassName,
+    package_manager6_GetTrustLevel,
+    /* IPackageManager6 methods */
+    package_manager6_ProvisionPackageForAllUsersAsync,
+    package_manager6_AddPackageByAppInstallerFileAsync,
+    package_manager6_RequestAddPackageByAppInstallerFileAsync,
+    package_manager6_AddPackageToVolumeAndRelatedSetAsync,
+    package_manager6_StagePackageToVolumeAndRelatedSetAsync,
+    package_manager6_RequestAddPackageAsync,
 };
 
 struct package_manager_statics
@@ -406,6 +489,7 @@ static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInsp
 
     impl->IPackageManager_iface.lpVtbl = &package_manager_vtbl;
     impl->IPackageManager2_iface.lpVtbl = &package_manager2_vtbl;
+    impl->IPackageManager6_iface.lpVtbl = &package_manager6_vtbl;
     impl->ref = 1;
 
     *instance = (IInspectable *)&impl->IPackageManager_iface;

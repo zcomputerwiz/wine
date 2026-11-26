@@ -3053,6 +3053,165 @@ void test_NtUserGetPointerDeviceRects( const char *arg )
         wine_dbgstr_rect( &display ), wine_dbgstr_rect( &screen ) );
 }
 
+static int nchittest_count;
+
+static LRESULT CALLBACK nchittest_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
+{
+    if (msg == WM_NCHITTEST) nchittest_count++;
+    return DefWindowProcW( hwnd, msg, wparam, lparam );
+}
+
+/* Positioning a window sends no WM_NCHITTEST to another window of the thread that lies under its top left corner (the owner hint of
+ * apply_window_pos is found from the geometry). Observed on Windows 11 with tests/uwp/alpc/nchittest-probe.c. */
+static void test_position_sends_no_nchittest(void)
+{
+    WNDCLASSW cls = {0};
+    HWND a, b;
+    MSG msg;
+    int before;
+
+    cls.lpfnWndProc = nchittest_proc;
+    cls.hInstance = GetModuleHandleW( NULL );
+    cls.lpszClassName = L"WineNcHitTestProbe";
+    RegisterClassW( &cls );
+    a = CreateWindowW( cls.lpszClassName, L"A", WS_POPUP | WS_VISIBLE, 100, 100, 300, 300, 0, 0, cls.hInstance, 0 );
+    b = CreateWindowW( cls.lpszClassName, L"B", WS_POPUP, 500, 500, 50, 50, 0, 0, cls.hInstance, 0 );
+    ok( a && b, "Failed to create the windows.\n" );
+    while (PeekMessageW( &msg, 0, 0, 0, PM_REMOVE )) DispatchMessageW( &msg );
+
+    before = nchittest_count;
+    SetWindowPos( b, HWND_TOP, 151, 151, 120, 120, SWP_SHOWWINDOW );
+    ok( nchittest_count == before, "WM_NCHITTEST was sent %d times during SetWindowPos.\n", nchittest_count - before );
+    SetWindowPos( b, HWND_TOP, 160, 160, 120, 120, 0 );
+    ok( nchittest_count == before, "WM_NCHITTEST was sent %d times after a second move.\n", nchittest_count - before );
+
+    DestroyWindow( b );
+    DestroyWindow( a );
+    UnregisterClassW( cls.lpszClassName, cls.hInstance );
+}
+
+/* The composition input sinks of the Windows App Runtime. Observed on Windows 11: a block of 0xe8 bytes (a size and four entries of 0x38
+ * bytes, each a kind and a window), one sink handle out. The layout of a 32-bit caller's block is not known, so 32-bit is skipped. */
+static void test_composition_input_sink(void)
+{
+    BYTE block[0xe8];
+    HWND hwnd, hwnd2, child;
+    HANDLE sink, sink2;
+    NTSTATUS status;
+    LUID luid, luid2;
+    unsigned int i;
+
+    if (sizeof(void *) == 4)
+    {
+        skip( "The block of a 32-bit caller is not known.\n" );
+        return;
+    }
+
+    hwnd = CreateWindowW( L"static", L"sink", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, 0, 0, 0, 0 );
+    hwnd2 = CreateWindowW( L"static", L"sink2", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, 0, 0, 0, 0 );
+    child = CreateWindowW( L"static", L"child", WS_CHILD | WS_VISIBLE, 0, 0, 10, 10, hwnd, 0, 0, 0 );
+    ok( hwnd && hwnd2 && child, "Failed to create the windows.\n" );
+
+#define FILL( kind, w0, w1, w2, w3 ) \
+    do { \
+        HWND windows[4] = {(w0), (w1), (w2), (w3)}; \
+        memset( block, 0, sizeof(block) ); \
+        *(ULONG_PTR *)block = sizeof(block); \
+        for (i = 0; i < 4; i++) \
+        { \
+            *(ULONG_PTR *)(block + 8 + i * 0x38) = (kind); \
+            *(HWND *)(block + 16 + i * 0x38) = windows[i]; \
+        } \
+    } while (0)
+
+    FILL( 2, hwnd, hwnd, hwnd, hwnd );
+    sink = (HANDLE)0xdeadbeef;
+    status = NtCreateCompositionInputSink( block, &sink );
+    ok( !status, "Got status %#lx.\n", status );
+    ok( sink && sink != INVALID_HANDLE_VALUE && sink != (HANDLE)0xdeadbeef, "Got handle %p.\n", sink );
+
+    memset( &luid, 0xcc, sizeof(luid) );
+    status = NtQueryCompositionInputSinkLuid( sink, &luid );
+    ok( !status, "Got status %#lx.\n", status );
+    memset( &luid2, 0xdd, sizeof(luid2) );
+    status = NtQueryCompositionInputSinkLuid( sink, &luid2 );
+    ok( !status, "Got status %#lx.\n", status );
+    ok( !memcmp( &luid, &luid2, sizeof(luid) ), "The LUID of a sink changed.\n" );
+
+    status = NtQueryCompositionInputSinkLuid( sink, NULL );
+    ok( status == STATUS_ACCESS_VIOLATION, "Got status %#lx.\n", status );
+    status = NtQueryCompositionInputSinkLuid( (HANDLE)0x12345678, &luid2 );
+    ok( status == STATUS_INVALID_HANDLE, "Got status %#lx.\n", status );
+
+    /* different windows and a child window are fine, the kinds 0 and 1 too, the size is not looked at */
+    FILL( 2, hwnd, hwnd2, child, hwnd );
+    sink2 = NULL;
+    status = NtCreateCompositionInputSink( block, &sink2 );
+    ok( !status, "Got status %#lx.\n", status );
+    if (!status) NtCloseCompositionInputSink( sink2 );
+    FILL( 1, hwnd, hwnd, hwnd, hwnd );
+    *(ULONG_PTR *)block = 0x40;
+    status = NtCreateCompositionInputSink( block, &sink2 );
+    ok( !status, "Got status %#lx.\n", status );
+    if (!status) NtCloseCompositionInputSink( sink2 );
+
+    /* what is refused, with the handle set to INVALID_HANDLE_VALUE */
+    FILL( 3, hwnd, hwnd, hwnd, hwnd );
+    sink2 = NULL;
+    status = NtCreateCompositionInputSink( block, &sink2 );
+    ok( status == STATUS_INVALID_PARAMETER, "Got status %#lx.\n", status );
+    ok( sink2 == INVALID_HANDLE_VALUE, "Got handle %p.\n", sink2 );
+    FILL( 2, hwnd, hwnd, hwnd, NULL );
+    sink2 = NULL;
+    status = NtCreateCompositionInputSink( block, &sink2 );
+    ok( status == STATUS_INVALID_PARAMETER, "Got status %#lx.\n", status );
+    ok( sink2 == INVALID_HANDLE_VALUE, "Got handle %p.\n", sink2 );
+    FILL( 2, GetDesktopWindow(), hwnd, hwnd, hwnd );
+    sink2 = NULL;
+    status = NtCreateCompositionInputSink( block, &sink2 );
+    ok( status == STATUS_INVALID_PARAMETER, "Got status %#lx.\n", status );
+    sink2 = NULL;
+    status = NtCreateCompositionInputSink( NULL, &sink2 );
+    ok( status == STATUS_INVALID_PARAMETER, "Got status %#lx.\n", status );
+    ok( sink2 == INVALID_HANDLE_VALUE, "Got handle %p.\n", sink2 );
+    FILL( 2, hwnd, hwnd, hwnd, hwnd );
+    status = NtCreateCompositionInputSink( block, NULL );
+    ok( status == STATUS_INVALID_PARAMETER, "Got status %#lx.\n", status );
+
+    status = NtCloseCompositionInputSink( sink );
+    ok( !status, "Got status %#lx.\n", status );
+    status = NtQueryCompositionInputSinkLuid( sink, &luid2 );
+    ok( status == STATUS_INVALID_HANDLE, "Got status %#lx.\n", status );
+    status = NtCloseCompositionInputSink( sink );
+    ok( status == STATUS_INVALID_HANDLE, "Got status %#lx.\n", status );
+
+    /* a sink closed with CloseHandle, whose handle value is taken by an unrelated object: the close call leaves that object alone */
+    FILL( 2, hwnd, hwnd, hwnd, hwnd );
+    sink2 = NULL;
+    status = NtCreateCompositionInputSink( block, &sink2 );
+    ok( !status, "Got status %#lx.\n", status );
+    if (!status)
+    {
+        HANDLE event;
+        DWORD flags;
+
+        CloseHandle( sink2 );
+        event = CreateEventW( NULL, TRUE, FALSE, NULL );
+        status = NtCloseCompositionInputSink( event );
+        ok( status, "Got status %#lx.\n", status );
+        ok( GetHandleInformation( event, &flags ), "The unrelated handle %p was closed.\n", event );
+        CloseHandle( event );
+    }
+
+    DestroyWindow( hwnd2 );
+    FILL( 2, hwnd, hwnd2, hwnd, hwnd );
+    sink2 = NULL;
+    status = NtCreateCompositionInputSink( block, &sink2 );
+    ok( status == STATUS_INVALID_PARAMETER, "Got status %#lx.\n", status );
+    DestroyWindow( hwnd );
+#undef FILL
+}
+
 START_TEST(win32u)
 {
     char **argv;
@@ -3111,6 +3270,8 @@ START_TEST(win32u)
     test_NtUserDisplayConfigGetDeviceInfo();
     test_NtUserQueryWindow();
     test_RegisterClipboardFormat();
+    test_composition_input_sink();
+    test_position_sends_no_nchittest();
     test_NtUserRegisterWindowMessage();
 
     run_in_process( argv, "NtUserEnableMouseInPointer 0" );

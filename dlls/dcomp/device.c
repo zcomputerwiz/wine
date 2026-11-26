@@ -44,6 +44,7 @@ struct wined3d_device_parent;
 #include "wine/winedxgi.h"
 #include "dcomp.h"
 #include "wine/debug.h"
+#include "wine/exception.h"
 #include "wine/list.h"
 #include "wine/dcomp_layer.h"
 #include "wine/dcomp_underlay.h"
@@ -55,7 +56,13 @@ struct dcomp_target;
 struct dcomp_visual;
 
 static void dcomp_visual_unbind_tree(struct dcomp_visual *visual);
-static const struct IDCompositionVisual2Vtbl dcomp_visual_vtbl;
+/* the vtable of the visuals: the public methods, then the private slots from index 22 */
+struct dcomp_visual_ext_vtbl
+{
+    struct IDCompositionVisual2Vtbl base;
+    void *private_methods[42];   /* slots 22 to 63 */
+};
+static const struct dcomp_visual_ext_vtbl dcomp_visual_vtbl;
 static const struct IDCompositionAnimationVtbl dcomp_animation_vtbl;
 struct dcomp_animation;
 static inline struct dcomp_animation *impl_from_IDCompositionAnimation(IDCompositionAnimation *iface);
@@ -70,6 +77,8 @@ static SRWLOCK target_registration_lock = SRWLOCK_INIT;
 struct dcomp_device;
 struct dcomp_target;
 struct dcomp_visual;
+struct dcomp_share;
+struct dcomp_portal_snapshot;
 
 struct dcomp_effect_group
 {
@@ -138,6 +147,10 @@ struct dcomp_visual
     IDCompositionVisual2 IDCompositionVisual2_iface;
     LONG refcount;
     struct dcomp_device *device;
+    /* A visual opened from a shared visual handle: its share (a reference) and its link in the share's visuals, which holds no
+     * reference (Release takes the shared lock first). */
+    struct dcomp_share *share;
+    struct list share_entry;
 
     /* Pending state (modified by setters, staged for next Commit) */
     struct dcomp_visual_state pending;
@@ -151,7 +164,6 @@ struct dcomp_visual
     struct dcomp_visual *active_parent;
     struct dcomp_visual *active_children;
     struct dcomp_visual *active_next_sibling;
-    HWND last_comp_wnd;
 };
 
 enum dcomp_transform_type
@@ -185,11 +197,17 @@ struct dcomp_target
     IDCompositionTarget IDCompositionTarget_iface;
     LONG refcount;
     struct dcomp_device *device;
-    struct list entry;
+    struct list entry;   /* in the device's targets, or in its portal_targets for a portal */
     HWND hwnd;
     BOOL topmost;
     struct dcomp_visual *pending_root;
     struct dcomp_visual *active_root;
+    /* A target opened from a shared visual handle is a portal: its device publishes a snapshot of its committed tree in the
+     * share (a reference), and the visuals opened from the same object show it. */
+    struct dcomp_share *share;
+    /* A window target: the portal snapshots its active scene shows (references), kept until a later scene replaces it. */
+    struct dcomp_portal_snapshot **shown;
+    unsigned int shown_count;
     /* Lazily created auxiliary producer for scenes whose content is only
      * IDCompositionSurface layers (which have no IWineDCompSwapChain binding
      * of their own). Created from the first surface layer's rendering device. */
@@ -204,9 +222,15 @@ struct dcomp_device
     IDCompositionDevice2 IDCompositionDevice2_iface;
     IDCompositionDevice3 IDCompositionDevice3_iface;
     IDCompositionDesktopDevice IDCompositionDesktopDevice_iface;
+    const void *const *commit_iface;   /* the interface {6b556968-...}: dcomp_commit_vtbl */
+    HANDLE commit_event;
+    LONG batch;   /* the id of the newest batch submitted (methods 45 and 46); a Commit completes before it returns */
     int version;
     LONG refcount;
     struct list targets;
+    struct list portal_targets;   /* targets opened from shared handles (no window): activated at Commit, shown elsewhere */
+    LONG serial;                  /* names the device for the shares whose visual it owns (a pointer could be reused) */
+    BOOL portal_swapchain_logged; /* the FIXME for a swap chain in a portal was printed (under the device's lock) */
     CRITICAL_SECTION cs;
     IUnknown *rendering_device;
     GUID rendering_device_iid;
@@ -549,10 +573,9 @@ static ULONG STDMETHODCALLTYPE dcomp_surface_Release(IDCompositionSurface *iface
     {
         struct dcomp_device *device = impl_from_IDCompositionDevice(surface->device);
 
-        EnterCriticalSection(&device->cs);
-        if (device->drawing_surface == &surface->IDCompositionSurface_iface)
-            device->drawing_surface = NULL;
-        LeaveCriticalSection(&device->cs);
+        /* without the device's lock: the last reference of a surface may go where another device's lock is held (a portal
+         * snapshot), and the device's own users set this pointer only to surfaces with references */
+        InterlockedCompareExchangePointer((void **)&device->drawing_surface, NULL, &surface->IDCompositionSurface_iface);
 
         if (surface->physical_surface)
             ID3D11Texture2D_Release(surface->physical_surface);
@@ -913,20 +936,25 @@ static HRESULT dcomp_surface_resize(struct dcomp_surface *surface, UINT width, U
     if (!width || !height || width > 16384 || height > 16384)
         return E_INVALIDARG;
 
+    /* the whole resize under the device lock: a committing thread reads physical_surface and the size */
     EnterCriticalSection(&device->cs);
     if (device->drawing_surface)
     {
         LeaveCriticalSection(&device->cs);
         return DCOMPOSITION_ERROR_SURFACE_BEING_RENDERED;
     }
-    LeaveCriticalSection(&device->cs);
-
     if (width == surface->width && height == surface->height)
+    {
+        LeaveCriticalSection(&device->cs);
         return S_OK;
+    }
 
     if (FAILED(hr = dcomp_get_d3d11_device(surface->rendering_device,
             &surface->rendering_device_iid, &d3d11_device)))
+    {
+        LeaveCriticalSection(&device->cs);
         return hr;
+    }
     ID3D11Texture2D_GetDesc(surface->physical_surface, &desc);
     desc.Width = width;
     desc.Height = height;
@@ -969,6 +997,7 @@ static HRESULT dcomp_surface_resize(struct dcomp_surface *surface, UINT width, U
         else
             ID3D11Texture2D_Release(texture);
     }
+    LeaveCriticalSection(&device->cs);
     ID3D11Device_Release(d3d11_device);
     return hr;
 }
@@ -977,7 +1006,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_surface_unknown_Unknown3(IDCompositionSur
         UINT width, UINT height)
 {
     struct dcomp_surface *surface = impl_from_IDCompositionSurfaceUnknown(iface);
-    FIXME("iface %p, width %u, height %u.\n", iface, width, height);
+    TRACE("iface %p, width %u, height %u.\n", iface, width, height);
     return dcomp_surface_resize(surface, width, height);
 }
 
@@ -2165,18 +2194,23 @@ static HRESULT dcomp_animation_create(struct dcomp_device *device, IDComposition
     return S_OK;
 }
 
+/* The value of a property at `now_100ns`: its animation's value when one is attached, else the plain value.
+ * Caller holds the device lock. */
+static float dcomp_sample_animation(IDCompositionAnimation *animation, float value, LONGLONG now_100ns)
+{
+    struct dcomp_animation *anim;
+
+    if (!animation) return value;
+    anim = impl_from_IDCompositionAnimation(animation);
+    return dcomp_animation_value_at(anim, (now_100ns - anim->begin_time.QuadPart) / 10000000.0);
+}
+
 /* Sample one clip property (plain value or attached animation) at
  * `now_100ns`. Caller holds the device lock. */
 static float dcomp_clip_sample_value(struct dcomp_rectangle_clip *clip, float value,
         IDCompositionAnimation *animation, LONGLONG now_100ns)
 {
-    if (animation)
-    {
-        struct dcomp_animation *anim = impl_from_IDCompositionAnimation(animation);
-        double elapsed = (now_100ns - anim->begin_time.QuadPart) / 10000000.0;
-        return dcomp_animation_value_at(anim, elapsed);
-    }
-    return value;
+    return dcomp_sample_animation(animation, value, now_100ns);
 }
 
 /* Sample all clip properties at `now_100ns` into the visual state's clip and
@@ -2203,13 +2237,7 @@ static void dcomp_rectangle_clip_sample(struct dcomp_rectangle_clip *clip, LONGL
  * animation if present. Caller holds the device lock. */
 static float dcomp_effect_group_sample_opacity(struct dcomp_effect_group *eg, LONGLONG now_100ns)
 {
-    if (eg->opacity_animation)
-    {
-        struct dcomp_animation *anim = impl_from_IDCompositionAnimation(eg->opacity_animation);
-        double elapsed = (now_100ns - anim->begin_time.QuadPart) / 10000000.0;
-        return dcomp_animation_value_at(anim, elapsed);
-    }
-    return eg->opacity;
+    return dcomp_sample_animation(eg->opacity_animation, eg->opacity, now_100ns);
 }
 
 /* =====================================================================
@@ -2374,13 +2402,7 @@ static HRESULT dcomp_transform_set_animation(struct dcomp_transform *t, struct d
 
 static float dcomp_animated_float_sample(const struct dcomp_animated_float *prop, LONGLONG now_100ns)
 {
-    if (prop->animation)
-    {
-        struct dcomp_animation *anim = impl_from_IDCompositionAnimation(prop->animation);
-        double elapsed = (now_100ns - anim->begin_time.QuadPart) / 10000000.0;
-        return dcomp_animation_value_at(anim, elapsed);
-    }
-    return prop->value;
+    return dcomp_sample_animation(prop->animation, prop->value, now_100ns);
 }
 
 /* Build the 2D matrix of a transform object, sampling its animations at
@@ -2632,68 +2654,26 @@ static HRESULT STDMETHODCALLTYPE dcomp_matrix_SetMatrixElement(IDCompositionMatr
     return dcomp_transform_set_value(t, &t->matrix[row * 2 + column], value);
 }
 
-/* Per-type IUnknown wrappers so each vtable's first three slots match its
- * interface's exact function-pointer types. */
-static HRESULT STDMETHODCALLTYPE dcomp_translate_qi(IDCompositionTranslateTransform *iface, REFIID iid, void **out)
-{
-    return dcomp_transform_qi_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface), iid, out);
+/* Per-type IUnknown wrappers so each vtable's first three slots match its interface's exact function-pointer types. */
+#define DCOMP_TRANSFORM_IUNKNOWN(name, type) \
+static HRESULT STDMETHODCALLTYPE dcomp_##name##_qi(type *iface, REFIID iid, void **out) \
+{ \
+    return dcomp_transform_qi_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface), iid, out); \
+} \
+static ULONG STDMETHODCALLTYPE dcomp_##name##_addref(type *iface) \
+{ \
+    return dcomp_transform_addref_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface)); \
+} \
+static ULONG STDMETHODCALLTYPE dcomp_##name##_release(type *iface) \
+{ \
+    return dcomp_transform_release_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface)); \
 }
-static ULONG STDMETHODCALLTYPE dcomp_translate_addref(IDCompositionTranslateTransform *iface)
-{
-    return dcomp_transform_addref_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface));
-}
-static ULONG STDMETHODCALLTYPE dcomp_translate_release(IDCompositionTranslateTransform *iface)
-{
-    return dcomp_transform_release_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface));
-}
-static HRESULT STDMETHODCALLTYPE dcomp_scale_qi(IDCompositionScaleTransform *iface, REFIID iid, void **out)
-{
-    return dcomp_transform_qi_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface), iid, out);
-}
-static ULONG STDMETHODCALLTYPE dcomp_scale_addref(IDCompositionScaleTransform *iface)
-{
-    return dcomp_transform_addref_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface));
-}
-static ULONG STDMETHODCALLTYPE dcomp_scale_release(IDCompositionScaleTransform *iface)
-{
-    return dcomp_transform_release_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface));
-}
-static HRESULT STDMETHODCALLTYPE dcomp_rotate_qi(IDCompositionRotateTransform *iface, REFIID iid, void **out)
-{
-    return dcomp_transform_qi_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface), iid, out);
-}
-static ULONG STDMETHODCALLTYPE dcomp_rotate_addref(IDCompositionRotateTransform *iface)
-{
-    return dcomp_transform_addref_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface));
-}
-static ULONG STDMETHODCALLTYPE dcomp_rotate_release(IDCompositionRotateTransform *iface)
-{
-    return dcomp_transform_release_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface));
-}
-static HRESULT STDMETHODCALLTYPE dcomp_skew_qi(IDCompositionSkewTransform *iface, REFIID iid, void **out)
-{
-    return dcomp_transform_qi_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface), iid, out);
-}
-static ULONG STDMETHODCALLTYPE dcomp_skew_addref(IDCompositionSkewTransform *iface)
-{
-    return dcomp_transform_addref_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface));
-}
-static ULONG STDMETHODCALLTYPE dcomp_skew_release(IDCompositionSkewTransform *iface)
-{
-    return dcomp_transform_release_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface));
-}
-static HRESULT STDMETHODCALLTYPE dcomp_matrix_qi(IDCompositionMatrixTransform *iface, REFIID iid, void **out)
-{
-    return dcomp_transform_qi_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface), iid, out);
-}
-static ULONG STDMETHODCALLTYPE dcomp_matrix_addref(IDCompositionMatrixTransform *iface)
-{
-    return dcomp_transform_addref_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface));
-}
-static ULONG STDMETHODCALLTYPE dcomp_matrix_release(IDCompositionMatrixTransform *iface)
-{
-    return dcomp_transform_release_impl(impl_from_IDCompositionTransform((IDCompositionTransform *)iface));
-}
+
+DCOMP_TRANSFORM_IUNKNOWN(translate, IDCompositionTranslateTransform)
+DCOMP_TRANSFORM_IUNKNOWN(scale, IDCompositionScaleTransform)
+DCOMP_TRANSFORM_IUNKNOWN(rotate, IDCompositionRotateTransform)
+DCOMP_TRANSFORM_IUNKNOWN(skew, IDCompositionSkewTransform)
+DCOMP_TRANSFORM_IUNKNOWN(matrix, IDCompositionMatrixTransform)
 
 static const IDCompositionTranslateTransformVtbl dcomp_translate_transform_vtbl =
 {
@@ -2816,6 +2796,90 @@ static void dcomp_visual_state_copy(struct dcomp_visual_state *dst, const struct
         IDCompositionAnimation_AddRef(dst->offset_y_animation);
 }
 
+/*
+ * {2c4eef28-1bc0-4736-b7dd-b62692f9bd67}: the private interface of the visuals. Measured on Windows 11 (tests/uwp/alpc/dcomp-visualpriv-probe.cpp,
+ * both versions of the device): QueryInterface for it returns the visual itself, the same pointer as for IUnknown and IDCompositionVisual2, with
+ * the reference count of the visual. The private methods are therefore further slots of the vtable of the visual, after the public ones; the
+ * Windows App Runtime calls slots 40 and 41, always as a pair on one visual, each with one pointer argument (32-bit Windows removes 8 bytes: the
+ * interface pointer and one argument), and both return S_OK without any effect that a caller can see (no output, no change of the reference
+ * count). The meaning of the argument is not known. The other private slots are not known at all: their argument counts cannot be guessed on
+ * i386, so calling one raises the stub exception instead of returning.
+ */
+static const GUID IID_dcomp_visual_private = {0x2c4eef28, 0x1bc0, 0x4736, {0xb7, 0xdd, 0xb6, 0x26, 0x92, 0xf9, 0xbd, 0x67}};
+
+static HRESULT STDMETHODCALLTYPE dcomp_visual_private_method40(IDCompositionVisual2 *iface, void *arg)
+{
+    FIXME("iface %p, visual private method 40: %p semi-stub\n", iface, arg);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_visual_private_method41(IDCompositionVisual2 *iface, void *arg)
+{
+    FIXME("iface %p, visual private method 41: %p semi-stub\n", iface, arg);
+    return S_OK;
+}
+
+#ifdef __x86_64__
+/* Slot 35, measured on 64-bit Windows 11 (wintrace dcomp.dll!visual[35] in Notepad): called by the framework of the Windows App SDK for
+ * its input state manager with one small value that looks like a kernel handle, returns 0 and writes nothing through its arguments.
+ * Its size on the stack of i386 is not measured, so 32-bit callers still get the stub exception. */
+static HRESULT STDMETHODCALLTYPE dcomp_visual_private_method35(IDCompositionVisual2 *iface, HANDLE handle)
+{
+    FIXME("iface %p, visual private method 35: %p semi-stub\n", iface, handle);
+    return S_OK;
+}
+#endif
+
+#define DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(n) \
+static void STDMETHODCALLTYPE dcomp_visual_private_unimplemented##n(void) \
+{ \
+    ULONG_PTR args[2] = {(ULONG_PTR)L"dcomp.dll", (ULONG_PTR)"visual private method " #n}; \
+    ERR("visual private method " #n " is not implemented\n"); \
+    RaiseException(0x80000100 /* EXCEPTION_WINE_STUB */, EXCEPTION_NONCONTINUABLE, 2, args); \
+}
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(22)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(23)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(24)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(25)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(26)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(27)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(28)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(29)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(30)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(31)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(32)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(33)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(34)
+#ifndef __x86_64__
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(35)
+#endif
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(36)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(37)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(38)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(39)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(42)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(43)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(44)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(45)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(46)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(47)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(48)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(49)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(50)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(51)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(52)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(53)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(54)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(55)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(56)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(57)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(58)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(59)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(60)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(61)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(62)
+DCOMP_VISUAL_PRIVATE_UNIMPLEMENTED(63)
+
 static HRESULT STDMETHODCALLTYPE dcomp_visual_QueryInterface(IDCompositionVisual2 *iface,
         REFIID iid, void **out)
 {
@@ -2828,6 +2892,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_QueryInterface(IDCompositionVisual
 
     if (IsEqualGUID(iid, &IID_IUnknown) ||
         IsEqualGUID(iid, &IID_IDCompositionVisual) ||
+        IsEqualGUID(iid, &IID_dcomp_visual_private) ||
         (visual->device->version >= 2 && IsEqualGUID(iid, &IID_IDCompositionVisual2)))
     {
         *out = &visual->IDCompositionVisual2_iface;
@@ -2849,10 +2914,29 @@ static ULONG STDMETHODCALLTYPE dcomp_visual_AddRef(IDCompositionVisual2 *iface)
     return refcount;
 }
 
+static void dcomp_shared_lock_acquire(void);
+static void dcomp_shared_lock_release(void);
+static void dcomp_share_release(struct dcomp_share *share);
+static struct dcomp_portal_snapshot *dcomp_share_remove_visual_locked(struct dcomp_visual *visual);
+static void dcomp_snapshot_release(struct dcomp_portal_snapshot *snapshot);
+
 static ULONG STDMETHODCALLTYPE dcomp_visual_Release(IDCompositionVisual2 *iface)
 {
     struct dcomp_visual *visual = impl_from_IDCompositionVisual2(iface);
-    ULONG refcount = InterlockedDecrement(&visual->refcount);
+    ULONG refcount;
+
+    if (visual->share)
+    {
+        struct dcomp_portal_snapshot *unused = NULL;
+
+        /* the share's lookup takes a reference under this lock, so the last one is dropped under it too */
+        dcomp_shared_lock_acquire();
+        refcount = InterlockedDecrement(&visual->refcount);
+        if (!refcount) unused = dcomp_share_remove_visual_locked(visual);
+        dcomp_shared_lock_release();
+        dcomp_snapshot_release(unused);
+    }
+    else refcount = InterlockedDecrement(&visual->refcount);
 
     TRACE("iface %p, refcount %lu.\n", iface, refcount);
 
@@ -2860,12 +2944,6 @@ static ULONG STDMETHODCALLTYPE dcomp_visual_Release(IDCompositionVisual2 *iface)
     {
         struct dcomp_device *device = visual->device;
         EnterCriticalSection(&device->cs);
-        if (visual->last_comp_wnd && IsWindow(visual->last_comp_wnd))
-        {
-            SendMessageW(visual->last_comp_wnd, WM_WINE_DCOMP_SET_TARGET, WINE_DCOMP_SET_TARGET_LEGACY, 0);
-            visual->last_comp_wnd = NULL;
-        }
-
         dcomp_visual_state_cleanup(&visual->pending);
         dcomp_visual_state_cleanup(&visual->active);
 
@@ -2898,6 +2976,7 @@ static ULONG STDMETHODCALLTYPE dcomp_visual_Release(IDCompositionVisual2 *iface)
         }
 
         LeaveCriticalSection(&device->cs);
+        if (visual->share) dcomp_share_release(visual->share);
         free(visual);
         IDCompositionDevice_Release(&device->IDCompositionDevice_iface);
     }
@@ -3330,7 +3409,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_AddVisual_locked(IDCompositionVisu
     if (!visual || visual == (IDCompositionVisual *)iface)
         return E_INVALIDARG;
 
-    if ((const void *)visual->lpVtbl != &dcomp_visual_vtbl) return E_NOTIMPL;
+    if ((const void *)visual->lpVtbl != &dcomp_visual_vtbl.base) return E_NOTIMPL;
 
     child = impl_from_IDCompositionVisual(visual);
     if (child->device != parent->device) return E_INVALIDARG;
@@ -3347,7 +3426,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_AddVisual_locked(IDCompositionVisu
 
     if (reference_visual)
     {
-        if ((const void *)reference_visual->lpVtbl != &dcomp_visual_vtbl) return E_NOTIMPL;
+        if ((const void *)reference_visual->lpVtbl != &dcomp_visual_vtbl.base) return E_NOTIMPL;
         if (reference_visual == visual)
             return E_INVALIDARG;
         ref = impl_from_IDCompositionVisual(reference_visual);
@@ -3528,7 +3607,8 @@ static HRESULT STDMETHODCALLTYPE dcomp_visual_SetBackFaceVisibility(IDCompositio
     return S_OK;
 }
 
-static const struct IDCompositionVisual2Vtbl dcomp_visual_vtbl =
+static const struct dcomp_visual_ext_vtbl dcomp_visual_vtbl =
+{
 {
     dcomp_visual_QueryInterface,
     dcomp_visual_AddRef,
@@ -3552,6 +3632,55 @@ static const struct IDCompositionVisual2Vtbl dcomp_visual_vtbl =
     dcomp_visual_SetCompositeMode,
     dcomp_visual_SetOpacityMode,
     dcomp_visual_SetBackFaceVisibility,
+},
+{
+    dcomp_visual_private_unimplemented22,
+    dcomp_visual_private_unimplemented23,
+    dcomp_visual_private_unimplemented24,
+    dcomp_visual_private_unimplemented25,
+    dcomp_visual_private_unimplemented26,
+    dcomp_visual_private_unimplemented27,
+    dcomp_visual_private_unimplemented28,
+    dcomp_visual_private_unimplemented29,
+    dcomp_visual_private_unimplemented30,
+    dcomp_visual_private_unimplemented31,
+    dcomp_visual_private_unimplemented32,
+    dcomp_visual_private_unimplemented33,
+    dcomp_visual_private_unimplemented34,
+#ifdef __x86_64__
+    dcomp_visual_private_method35,
+#else
+    dcomp_visual_private_unimplemented35,
+#endif
+    dcomp_visual_private_unimplemented36,
+    dcomp_visual_private_unimplemented37,
+    dcomp_visual_private_unimplemented38,
+    dcomp_visual_private_unimplemented39,
+    dcomp_visual_private_method40,
+    dcomp_visual_private_method41,
+    dcomp_visual_private_unimplemented42,
+    dcomp_visual_private_unimplemented43,
+    dcomp_visual_private_unimplemented44,
+    dcomp_visual_private_unimplemented45,
+    dcomp_visual_private_unimplemented46,
+    dcomp_visual_private_unimplemented47,
+    dcomp_visual_private_unimplemented48,
+    dcomp_visual_private_unimplemented49,
+    dcomp_visual_private_unimplemented50,
+    dcomp_visual_private_unimplemented51,
+    dcomp_visual_private_unimplemented52,
+    dcomp_visual_private_unimplemented53,
+    dcomp_visual_private_unimplemented54,
+    dcomp_visual_private_unimplemented55,
+    dcomp_visual_private_unimplemented56,
+    dcomp_visual_private_unimplemented57,
+    dcomp_visual_private_unimplemented58,
+    dcomp_visual_private_unimplemented59,
+    dcomp_visual_private_unimplemented60,
+    dcomp_visual_private_unimplemented61,
+    dcomp_visual_private_unimplemented62,
+    dcomp_visual_private_unimplemented63,
+},
 };
 
 static HRESULT dcomp_visual_create(struct dcomp_device *device, struct dcomp_visual **out)
@@ -3564,7 +3693,7 @@ static HRESULT dcomp_visual_create(struct dcomp_device *device, struct dcomp_vis
     if (!(visual = calloc(1, sizeof(*visual))))
         return E_OUTOFMEMORY;
 
-    visual->IDCompositionVisual2_iface.lpVtbl = &dcomp_visual_vtbl;
+    visual->IDCompositionVisual2_iface.lpVtbl = &dcomp_visual_vtbl.base;
     visual->refcount = 1;
     visual->device = device;
     IDCompositionDevice_AddRef(&device->IDCompositionDevice_iface);
@@ -3616,6 +3745,9 @@ static ULONG STDMETHODCALLTYPE dcomp_target_AddRef(IDCompositionTarget *iface)
     return refcount;
 }
 
+static void dcomp_portal_target_unlink(struct dcomp_target *target);
+static void dcomp_target_release_shown(struct dcomp_target *target);
+
 static ULONG STDMETHODCALLTYPE dcomp_target_Release(IDCompositionTarget *iface)
 {
     struct dcomp_target *target = impl_from_IDCompositionTarget(iface);
@@ -3639,6 +3771,9 @@ static ULONG STDMETHODCALLTYPE dcomp_target_Release(IDCompositionTarget *iface)
 
         list_remove(&target->entry);
         LeaveCriticalSection(&device->cs);
+
+        if (target->share) dcomp_portal_target_unlink(target);
+        dcomp_target_release_shown(target);
 
         AcquireSRWLockExclusive(&target_registration_lock);
         if (GetPropW(target->hwnd, target->topmost ? WINE_DCOMP_UNDERLAY_TOP_PROP
@@ -3666,7 +3801,7 @@ static HRESULT STDMETHODCALLTYPE dcomp_target_SetRoot_locked(IDCompositionTarget
 
     if (visual)
     {
-        if ((const void *)visual->lpVtbl != &dcomp_visual_vtbl) return E_NOTIMPL;
+        if ((const void *)visual->lpVtbl != &dcomp_visual_vtbl.base) return E_NOTIMPL;
         new_root = impl_from_IDCompositionVisual(visual);
         if (new_root->device != target->device) return E_INVALIDARG;
         if (new_root->is_root) return E_INVALIDARG;
@@ -3777,19 +3912,15 @@ static HRESULT dcomp_target_create(struct dcomp_device *device, HWND hwnd, BOOL 
  * IDCompositionDevice Traversal and Commit
  * ===================================================================== */
 
-static HRESULT dcomp_bind_content(IUnknown *content, HWND hwnd, const RECT *dst, const RECT *clip)
+/* the content no longer shows in a target: revoke its swapchain's scene */
+static void dcomp_unbind_content(IUnknown *content)
 {
     IWineDCompSwapChain *binding;
-    HRESULT hr;
 
-    if (!content) return S_OK;
-    if (FAILED(hr = IUnknown_QueryInterface(content, &IID_IWineDCompSwapChain, (void **)&binding)))
-        return E_NOTIMPL;
-    if (!hwnd)
-        IWineDCompSwapChain_set_target_scene(binding, NULL, NULL);
-    hr = IWineDCompSwapChain_set_target(binding, hwnd, dst, clip);
+    if (!content || FAILED(IUnknown_QueryInterface(content, &IID_IWineDCompSwapChain, (void **)&binding)))
+        return;
+    IWineDCompSwapChain_set_target_scene(binding, NULL, NULL);
     IWineDCompSwapChain_Release(binding);
-    return hr;
 }
 
 static void dcomp_visual_unbind_tree(struct dcomp_visual *visual)
@@ -3797,7 +3928,7 @@ static void dcomp_visual_unbind_tree(struct dcomp_visual *visual)
     struct dcomp_visual *child;
 
     if (!visual) return;
-    dcomp_bind_content(visual->active.content, NULL, NULL, NULL);
+    dcomp_unbind_content(visual->active.content);
     for (child = visual->active_children; child; child = child->active_next_sibling)
         dcomp_visual_unbind_tree(child);
 }
@@ -3810,7 +3941,7 @@ static void dcomp_visual_apply_commit(struct dcomp_visual *visual, LONGLONG now_
 
     /* Detach while the old active content still owns its COM reference. */
     if (visual->active.content != visual->pending.content)
-        dcomp_bind_content(visual->active.content, NULL, NULL, NULL);
+        dcomp_unbind_content(visual->active.content);
     /* Apply visual state: pending -> active */
     dcomp_visual_state_copy(&visual->active, &visual->pending);
 
@@ -3879,10 +4010,12 @@ static void dcomp_visual_apply_commit(struct dcomp_visual *visual, LONGLONG now_
     }
 }
 
+/* active: the committed state and children of the visual (a redraw of committed scenes), else the pending ones */
 static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int *contents,
         unsigned int *visuals, struct dcomp_visual **seen, IUnknown **content_device, enum DCOMPOSITION_OPACITY_MODE parent_mode,
-        const D2D_MATRIX_3X2_F *parent_mat, unsigned int depth, LONGLONG now_100ns)
+        const D2D_MATRIX_3X2_F *parent_mat, unsigned int depth, LONGLONG now_100ns, BOOL active)
 {
+    const struct dcomp_visual_state *state;
     struct dcomp_visual *child;
     IWineDCompSwapChain *binding;
     D2D_MATRIX_3X2_F loc_mat, cur_mat;
@@ -3894,18 +4027,19 @@ static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int 
     if (depth > WINE_DCOMP_MAX_LAYERS || *visuals == WINE_DCOMP_MAX_LAYERS) return E_INVALIDARG;
     for (i = 0; i < *visuals; ++i) if (seen[i] == visual) return E_NOTIMPL;
     seen[(*visuals)++] = visual;
-    mode = visual->pending.opacity_mode == DCOMPOSITION_OPACITY_MODE_INHERIT
-            ? parent_mode : visual->pending.opacity_mode;
+    state = active ? &visual->active : &visual->pending;
+    mode = state->opacity_mode == DCOMPOSITION_OPACITY_MODE_INHERIT
+            ? parent_mode : state->opacity_mode;
 
-    if (visual->pending.transform_obj)
-        dcomp_transform_matrix(impl_from_IDCompositionTransform(visual->pending.transform_obj), now_100ns, &loc_mat);
-    else if (visual->pending.has_transform)
-        loc_mat = visual->pending.transform;
+    if (state->transform_obj)
+        dcomp_transform_matrix(impl_from_IDCompositionTransform(state->transform_obj), now_100ns, &loc_mat);
+    else if (state->has_transform)
+        loc_mat = state->transform;
     else
         loc_mat = (D2D_MATRIX_3X2_F){1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
 
-    loc_mat._31 += visual->pending.offset_x;
-    loc_mat._32 += visual->pending.offset_y;
+    loc_mat._31 += state->offset_x;
+    loc_mat._32 += state->offset_y;
 
     cur_mat._11 = loc_mat._11 * parent_mat->_11 + loc_mat._12 * parent_mat->_21;
     cur_mat._12 = loc_mat._11 * parent_mat->_12 + loc_mat._12 * parent_mat->_22;
@@ -3920,11 +4054,11 @@ static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int 
         return E_INVALIDARG;
 
 
-    if (visual->pending.content)
+    if (state->content)
     {
         IDCompositionSurface *surface;
         if (++*contents > WINE_DCOMP_MAX_CONTENTS) return E_NOTIMPL;
-        if (SUCCEEDED(IUnknown_QueryInterface(visual->pending.content,
+        if (SUCCEEDED(IUnknown_QueryInterface(state->content,
                 &IID_IDCompositionSurface, (void **)&surface)))
         {
             struct dcomp_surface *impl = impl_from_IDCompositionSurface(surface);
@@ -3940,10 +4074,10 @@ static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int 
             IDXGISwapChain1 *swapchain;
             IUnknown *device;
             DXGI_SWAP_CHAIN_DESC1 desc;
-            if (FAILED(hr = IUnknown_QueryInterface(visual->pending.content,
+            if (FAILED(hr = IUnknown_QueryInterface(state->content,
                     &IID_IWineDCompSwapChain, (void **)&binding))) return E_NOTIMPL;
             IWineDCompSwapChain_Release(binding);
-            if (FAILED(IUnknown_QueryInterface(visual->pending.content, &IID_IDXGISwapChain1,
+            if (FAILED(IUnknown_QueryInterface(state->content, &IID_IDXGISwapChain1,
                     (void **)&swapchain))) return E_NOTIMPL;
             hr = IDXGISwapChain1_GetDesc1(swapchain, &desc);
             if (SUCCEEDED(hr))
@@ -3968,9 +4102,12 @@ static HRESULT dcomp_validate_pending(struct dcomp_visual *visual, unsigned int 
         }
     }
 
-    for (child = visual->pending_children; child; child = child->pending_next_sibling)
+    /* A portal shown in a shared visual is a published snapshot: it is not validated here (it fits the scene or is left out
+     * when the scene is collected, dcomp_collect_share). */
+    for (child = active ? visual->active_children : visual->pending_children; child;
+            child = active ? child->active_next_sibling : child->pending_next_sibling)
         if (FAILED(hr = dcomp_validate_pending(child, contents, visuals, seen, content_device, mode, &cur_mat, depth + 1,
-                now_100ns)))
+                now_100ns, active)))
             return hr;
 
     return S_OK;
@@ -3980,7 +4117,17 @@ struct dcomp_collect_context
 {
     struct dcomp_target *target;
     struct wine_dcomp_target_scene scene;
+    BOOL active;     /* collect the committed state and children (a redraw, a portal snapshot) */
+    BOOL overflow;   /* more layers than a scene holds */
+    BOOL building;   /* a portal snapshot: a nested snapshot is cut at the layer limit instead of left out */
+    BOOL from_portal[WINE_DCOMP_MAX_LAYERS];   /* the layer was copied from a portal snapshot */
+    /* the portal snapshots the scene shows (references) */
+    struct dcomp_portal_snapshot *snapshots[WINE_DCOMP_MAX_LAYERS];
+    unsigned int snapshot_count;
 };
+
+static void dcomp_collect_share(struct dcomp_visual *visual, const D2D_MATRIX_3X2_F *matrix,
+        struct dcomp_collect_context *ctx);
 
 static void dcomp_collect_children(struct dcomp_visual *child,
         const D2D_MATRIX_3X2_F *parent, float opacity, enum DCOMPOSITION_OPACITY_MODE mode,
@@ -3996,11 +4143,17 @@ static void dcomp_collect_pending(struct dcomp_visual *visual,
         LONGLONG now_100ns,
         struct dcomp_collect_context *ctx)
 {
-    struct dcomp_visual_state state = visual->pending;
+    struct dcomp_visual_state state = ctx->active ? visual->active : visual->pending;
     D2D_MATRIX_3X2_F local = {1,0,0,1,0,0}, matrix;
     struct wine_dcomp_layer_desc *layer;
     IDXGISwapChain1 *sc;
     DXGI_SWAP_CHAIN_DESC1 desc;
+
+    if (ctx->scene.layer_count >= WINE_DCOMP_MAX_LAYERS)
+    {
+        ctx->overflow = TRUE;
+        return;
+    }
 
     if (state.clip_obj)
     {
@@ -4083,8 +4236,10 @@ static void dcomp_collect_pending(struct dcomp_visual *visual,
         layer->interpolation_mode = interpolation;
         layer->soft_border = border == DCOMPOSITION_BORDER_MODE_SOFT;
     }
-    dcomp_collect_children(visual->pending_children, &matrix, opacity, mode, interpolation, border,
-            now_100ns, ctx);
+    /* A shared visual shows the snapshot its portal published, in front of its own content and behind its children. */
+    if (visual->share) dcomp_collect_share(visual, &matrix, ctx);
+    dcomp_collect_children(ctx->active ? visual->active_children : visual->pending_children, &matrix, opacity, mode,
+            interpolation, border, now_100ns, ctx);
     layer->subtree_end = ctx->scene.layer_count;
 }
 
@@ -4096,8 +4251,8 @@ static void dcomp_collect_children(struct dcomp_visual *child,
         struct dcomp_collect_context *ctx)
 {
     if (!child) return;
-    dcomp_collect_children(child->pending_next_sibling, parent, opacity, mode, interpolation, border,
-            now_100ns, ctx);
+    dcomp_collect_children(ctx->active ? child->active_next_sibling : child->pending_next_sibling, parent, opacity, mode,
+            interpolation, border, now_100ns, ctx);
     dcomp_collect_pending(child, parent, opacity, mode, interpolation, border, now_100ns, ctx);
 }
 
@@ -4117,7 +4272,18 @@ static HRESULT dcomp_retain_active_tree(struct dcomp_visual *visual, struct dcom
     return S_OK;
 }
 
-static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
+#define DCOMP_MAX_VIEWERS WINE_DCOMP_MAX_CONTENTS
+
+static void dcomp_portal_publish(struct dcomp_target *target, LONGLONG now_100ns,
+        struct dcomp_device **viewers, unsigned int *viewer_count);
+static void dcomp_snapshot_release(struct dcomp_portal_snapshot *snapshot);
+
+/* Commits the pending changes of the device and presents the scenes of its window targets. With redraw, nothing is committed:
+ * the scenes are made again from the committed trees, because a portal shown in them has published a new snapshot. Both publish
+ * the snapshots of the device's portal targets (a redraw from the committed trees, before its scenes) and return the devices that
+ * show them in viewers (with a reference each), to be redrawn once no lock is held. */
+static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev, BOOL redraw, struct dcomp_device **viewers,
+        unsigned int *viewer_count)
 {
     struct dcomp_target *target;
     D2D_MATRIX_3X2_F ident = {1,0,0,1,0,0};
@@ -4127,12 +4293,9 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
     /* Content IUnknown each binding was prepared from (no ref held); used to
      * dedupe duplicate producers by the underlying object, not the interface. */
     IUnknown *binding_content[WINE_DCOMP_MAX_CONTENTS];
-    /* Targets whose auxiliary producer must be revoked, deferred until the
-     * commit is known to succeed so a failed transaction keeps it intact. */
-    struct dcomp_target *aux_release[WINE_DCOMP_MAX_CONTENTS];
-    unsigned int aux_release_count = 0;
     struct dcomp_visual *pending_nodes[WINE_DCOMP_MAX_LAYERS], *old_nodes[WINE_DCOMP_MAX_LAYERS];
-    unsigned int old_count = 0;
+    struct dcomp_visual *portal_nodes[WINE_DCOMP_MAX_LAYERS];
+    unsigned int old_count = 0, portal_visuals = 0, portal_contents = 0;
     unsigned int contents = 0, visuals = 0, targets = 0, count = 0, i, j, c = 0;
     IUnknown *content_device = NULL;
     /* Commit reference time (100 ns units); attached animations are sampled
@@ -4144,10 +4307,16 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
     GetSystemTimeAsFileTime(&commit_time);
     now_100ns = ((LONGLONG)commit_time.dwHighDateTime << 32) | commit_time.dwLowDateTime;
 
+    if (viewer_count) *viewer_count = 0;
     EnterCriticalSection(&dev->cs);
+    /* A redraw publishes the snapshots of the device's portals again first: a portal tree may show a portal that changed, and
+     * the device's own window may show one of these portals. */
+    if (redraw && viewers)
+        LIST_FOR_EACH_ENTRY(target, &dev->portal_targets, struct dcomp_target, entry)
+            dcomp_portal_publish(target, now_100ns, viewers, viewer_count);
     LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
     {
-        if (target->pending_root && ++targets > WINE_DCOMP_MAX_CONTENTS)
+        if ((redraw ? target->active_root : target->pending_root) && ++targets > WINE_DCOMP_MAX_CONTENTS)
         {
             hr = E_NOTIMPL;
             goto done;
@@ -4160,22 +4329,39 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
     }
     LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
     {
-        if (!target->pending_root) continue;
+        struct dcomp_visual *root = redraw ? target->active_root : target->pending_root;
+
+        if (!root) continue;
         if (!IsWindow(target->hwnd)) { hr = E_INVALIDARG; goto done; }
         for (j = 0; j < c; ++j)
             if (contexts[j].scene.target_hwnd == target->hwnd) { hr = E_NOTIMPL; goto done; }
         /* Distinct targets may use different D3D devices. A scene still cannot
          * mix devices until the backend provides a cross-device image route. */
-        if (FAILED(hr = dcomp_validate_pending(target->pending_root, &contents, &visuals, pending_nodes,
-                &content_device, DCOMPOSITION_OPACITY_MODE_LAYER, &ident, 0, now_100ns))) goto done;
+        if (FAILED(hr = dcomp_validate_pending(root, &contents, &visuals, pending_nodes,
+                &content_device, DCOMPOSITION_OPACITY_MODE_LAYER, &ident, 0, now_100ns, redraw))) goto done;
         if (content_device) IUnknown_Release(content_device);
         content_device = NULL;
         contexts[c].target = target;
         contexts[c].scene.target_hwnd = target->hwnd;
-        dcomp_collect_pending(target->pending_root, &ident, 1, DCOMPOSITION_OPACITY_MODE_LAYER,
+        contexts[c].active = redraw;
+        dcomp_collect_pending(root, &ident, 1, DCOMPOSITION_OPACITY_MODE_LAYER,
                 DCOMPOSITION_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, DCOMPOSITION_BORDER_MODE_HARD,
                 now_100ns, &contexts[c]);
+        if (contexts[c].overflow) { hr = E_NOTIMPL; goto done; }
+        TRACE("device %p%s: target %p (hwnd %p), %u layers.\n", dev, redraw ? " (redraw)" : "", target, target->hwnd,
+                contexts[c].scene.layer_count);
         ++c;
+    }
+    /* The pending trees of the portal targets are committed with the device; they are shown where their shared visuals are. */
+    if (!redraw)
+    {
+        LIST_FOR_EACH_ENTRY(target, &dev->portal_targets, struct dcomp_target, entry)
+        {
+            if (FAILED(hr = dcomp_validate_pending(target->pending_root, &portal_contents, &portal_visuals, portal_nodes,
+                    &content_device, DCOMPOSITION_OPACITY_MODE_LAYER, &ident, 0, now_100ns, FALSE))) goto done;
+            if (content_device) IUnknown_Release(content_device);
+            content_device = NULL;
+        }
     }
     /* Prepare ALL targets before changing active state. Keep one prepared scene
      * per producer, and reject ambiguous cross-target producer routing before
@@ -4184,9 +4370,9 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
      * only of them is presented through the target's auxiliary producer. */
     for (c = 0; c < targets; ++c)
     {
-        const struct wine_dcomp_target_scene *scene = &contexts[c].scene;
+        struct wine_dcomp_target_scene *scene = &contexts[c].scene;
         struct dcomp_target *target = contexts[c].target;
-        struct dcomp_surface *first_surface = NULL;
+        struct dcomp_surface *first_surface = NULL, *first_portal_surface = NULL;
         BOOL has_surface = FALSE, has_swapchain = FALSE;
 
         for (i = 0; i < scene->layer_count; ++i)
@@ -4200,7 +4386,12 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
                 struct dcomp_surface *impl = impl_from_IDCompositionSurface(surface);
                 IDCompositionSurface_Release(surface);
                 has_surface = TRUE;
-                if (!first_surface)
+                /* the producer is made for the device's own surfaces first, portal surfaces have to match it */
+                if (contexts[c].from_portal[i])
+                {
+                    if (!first_portal_surface) first_portal_surface = impl;
+                }
+                else if (!first_surface)
                     first_surface = impl;
                 continue;
             }
@@ -4224,6 +4415,7 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
         if (has_surface && !has_swapchain)
         {
             ID3D11Device *layer_device;
+            if (!first_surface) first_surface = first_portal_surface;
             if (FAILED(hr = dcomp_target_ensure_aux_producer(target,
                     first_surface->rendering_device, &first_surface->rendering_device_iid)))
                 goto done;
@@ -4245,6 +4437,15 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
                     if (layer_device != target->aux_device)
                     {
                         ID3D11Device_Release(layer_device);
+                        /* another device's portal does not fail this device's commit: its surface is left out */
+                        if (contexts[c].from_portal[i])
+                        {
+                            static LONG once;
+                            if (!InterlockedExchange(&once, 1))
+                                WARN("Leaving out a portal surface of another D3D device than target %p's producer.\n", target);
+                            scene->layers[i].content = NULL;
+                            continue;
+                        }
                         hr = E_NOTIMPL;
                         goto done;
                     }
@@ -4262,22 +4463,17 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
                     scene->target_hwnd, scene)))
                 goto done;
         }
-        else if (target->aux_binding)
-        {
-            /* The scene has a real producer (or no content): the auxiliary
-             * producer is revoked, but only once the commit is known to succeed. */
-            aux_release[aux_release_count++] = target;
-        }
     }
-    /* A target whose scene went away keeps no auxiliary producer (deferred). */
-    LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
-        if (!target->pending_root && target->aux_binding)
-            aux_release[aux_release_count++] = target;
     /* Retain the old active tree before any activation so its nodes stay alive
      * while the new graph is built; a failed commit releases these extra refs
-     * and leaves the old tree untouched. */
-    LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
-        if (FAILED(hr = dcomp_retain_active_tree(target->active_root, old_nodes, &old_count))) goto done;
+     * and leaves the old tree untouched. A redraw changes no tree. */
+    if (!redraw)
+    {
+        LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
+            if (FAILED(hr = dcomp_retain_active_tree(target->active_root, old_nodes, &old_count))) goto done;
+        LIST_FOR_EACH_ENTRY(target, &dev->portal_targets, struct dcomp_target, entry)
+            if (FAILED(hr = dcomp_retain_active_tree(target->active_root, old_nodes, &old_count))) goto done;
+    }
     /* Activate every producer before switching the visual tree, so a failure
      * leaves the previous scene and tree intact. */
     for (i = 0; i < count; ++i)
@@ -4292,7 +4488,7 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
             break;
         }
     }
-    if (SUCCEEDED(hr))
+    if (SUCCEEDED(hr) && !redraw)
     {
         /* Reparenting must not reuse active sibling links while a different old
          * parent still traverses them. Remove ALL old edges, then build the new
@@ -4302,7 +4498,11 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
         {
             struct dcomp_visual *visual = old_nodes[i];
             for (j = 0; j < visuals && pending_nodes[j] != visual; ++j) {}
-            if (j == visuals) dcomp_bind_content(visual->active.content, NULL, NULL, NULL);
+            if (j == visuals)
+            {
+                for (j = 0; j < portal_visuals && portal_nodes[j] != visual; ++j) {}
+                if (j == portal_visuals) dcomp_unbind_content(visual->active.content);
+            }
             while (visual->active_children)
             {
                 struct dcomp_visual *child = visual->active_children;
@@ -4326,12 +4526,63 @@ static HRESULT dcomp_device_internal_commit(struct dcomp_device *dev)
             }
             if (target->active_root) dcomp_visual_apply_commit(target->active_root, now_100ns);
         }
-        /* The commit succeeded: now revoke the auxiliary producers that are no
-         * longer needed. */
-        for (i = 0; i < aux_release_count; ++i)
-            dcomp_target_release_aux_producer(aux_release[i]);
+        LIST_FOR_EACH_ENTRY(target, &dev->portal_targets, struct dcomp_target, entry)
+        {
+            if (target->active_root != target->pending_root)
+            {
+                if (target->pending_root) IDCompositionVisual2_AddRef(&target->pending_root->IDCompositionVisual2_iface);
+                if (target->active_root)
+                {
+                    dcomp_visual_unbind_tree(target->active_root);
+                    IDCompositionVisual2_Release(&target->active_root->IDCompositionVisual2_iface);
+                }
+                target->active_root = target->pending_root;
+            }
+            if (target->active_root) dcomp_visual_apply_commit(target->active_root, now_100ns);
+        }
+        /* after the switch, the portal targets publish snapshots of their committed trees */
+        LIST_FOR_EACH_ENTRY(target, &dev->portal_targets, struct dcomp_target, entry)
+            dcomp_portal_publish(target, now_100ns, viewers, viewer_count);
+    }
+    if (SUCCEEDED(hr))
+    {
+        /* The commit (or redraw) succeeded: now revoke the auxiliary producers it
+         * does not present through (a real producer, no content, or no scene;
+         * after a redraw, a portal that is gone). A failed commit keeps them,
+         * with the previous scene. */
+        LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
+        {
+            if (!target->aux_binding) continue;
+            if (redraw && !target->active_root) continue;
+            for (j = 0; j < count && bindings[j] != target->aux_binding; ++j) {}
+            if (j == count) dcomp_target_release_aux_producer(target);
+        }
+        /* the window targets keep the snapshots of the scenes they show now; a target without a scene shows none */
+        LIST_FOR_EACH_ENTRY(target, &dev->targets, struct dcomp_target, entry)
+        {
+            struct dcomp_collect_context *ctx = NULL;
+
+            for (c = 0; c < targets; ++c) if (contexts[c].target == target) ctx = &contexts[c];
+            if (!ctx && redraw) continue;
+            for (i = 0; i < target->shown_count; ++i) dcomp_snapshot_release(target->shown[i]);
+            free(target->shown);
+            target->shown = NULL;
+            target->shown_count = 0;
+            if (!ctx || !ctx->snapshot_count) continue;
+            if ((target->shown = malloc(ctx->snapshot_count * sizeof(*target->shown))))
+            {
+                memcpy(target->shown, ctx->snapshots, ctx->snapshot_count * sizeof(*target->shown));
+                target->shown_count = ctx->snapshot_count;
+            }
+            else for (i = 0; i < ctx->snapshot_count; ++i) dcomp_snapshot_release(ctx->snapshots[i]);
+            ctx->snapshot_count = 0;
+        }
     }
 done:
+    /* the snapshots of scenes that were not presented; a snapshot may be released under a device's lock, never under the shared
+     * lock: a surface's last Release takes no lock (see dcomp_surface_Release) */
+    for (c = 0; contexts && c < targets; ++c)
+        for (i = 0; i < contexts[c].snapshot_count; ++i) dcomp_snapshot_release(contexts[c].snapshots[i]);
     for (i = 0; i < old_count; ++i) IDCompositionVisual2_Release(&old_nodes[i]->IDCompositionVisual2_iface);
     for (i = 0; i < count; ++i)
     {
@@ -4347,6 +4598,340 @@ done:
 /* =====================================================================
  * IDCompositionDevice (1) Implementation
  * ===================================================================== */
+
+/* Methods with the same body in the four device interfaces, written once. */
+#define DCOMP_DEVICE_QUERY_INTERFACE(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_QueryInterface(type *iface, \
+        REFIID iid, void **out) \
+{ \
+    struct dcomp_device *dev = impl(iface); \
+    return IDCompositionDevice_QueryInterface(&dev->IDCompositionDevice_iface, iid, out); \
+}
+
+#define DCOMP_DEVICE_ADDREF(prefix, type, impl) \
+static ULONG STDMETHODCALLTYPE dcomp_##prefix##_AddRef(type *iface) \
+{ \
+    struct dcomp_device *dev = impl(iface); \
+    return IDCompositionDevice_AddRef(&dev->IDCompositionDevice_iface); \
+}
+
+#define DCOMP_DEVICE_RELEASE(prefix, type, impl) \
+static ULONG STDMETHODCALLTYPE dcomp_##prefix##_Release(type *iface) \
+{ \
+    struct dcomp_device *dev = impl(iface); \
+    return IDCompositionDevice_Release(&dev->IDCompositionDevice_iface); \
+}
+
+/* The devices that show a portal which has published a new snapshot present their committed scenes again. A redraw also
+ * publishes the snapshots of the device's own portals again (from its committed trees), because a portal tree may hold the
+ * visual of the portal that changed (Notepad's does: the window shows the UI thread's portal, whose tree holds the shared visual
+ * of the compositor's portal); their viewers are redrawn in turn. Each device is redrawn once per call, so a cycle of portals
+ * ends. Called with no lock held: a redraw takes only the device's own lock (and the shared lock, as a leaf). Releases the
+ * references of devices. */
+static void dcomp_redraw_viewers(struct dcomp_device **viewers, unsigned int count)
+{
+    struct dcomp_device *queue[DCOMP_MAX_VIEWERS], *more[DCOMP_MAX_VIEWERS];
+    unsigned int head, total = 0, more_count, i, j;
+    HRESULT hr;
+
+    for (i = 0; i < count; ++i) queue[total++] = viewers[i];
+    for (head = 0; head < total; ++head)
+    {
+        TRACE("Redrawing device %p.\n", queue[head]);
+        more_count = 0;
+        if (FAILED(hr = dcomp_device_internal_commit(queue[head], TRUE, more, &more_count)))
+            WARN("Redrawing device %p failed, hr %#lx.\n", queue[head], hr);
+        for (i = 0; i < more_count; ++i)
+        {
+            for (j = 0; j < total && queue[j] != more[i]; ++j) {}
+            if (j < total || total == ARRAY_SIZE(queue))
+                IDCompositionDevice_Release(&more[i]->IDCompositionDevice_iface);
+            else
+                queue[total++] = more[i];
+        }
+    }
+    for (i = 0; i < total; ++i) IDCompositionDevice_Release(&queue[i]->IDCompositionDevice_iface);
+}
+
+/* A commit has completed when dcomp_device_internal_commit returns, with success or not: the event of SetCommitCompletionEvent is signaled then.
+ * Only a commit that succeeded submitted a batch (methods 45 and 46 count those). The viewers of the device's portals are redrawn
+ * before that, so a completed commit is shown wherever it is shown. */
+static HRESULT dcomp_device_commit(struct dcomp_device *dev)
+{
+    struct dcomp_device *viewers[DCOMP_MAX_VIEWERS];
+    unsigned int viewer_count = 0;
+    HRESULT hr = dcomp_device_internal_commit(dev, FALSE, viewers, &viewer_count);
+
+    dcomp_redraw_viewers(viewers, viewer_count);
+    EnterCriticalSection(&dev->cs);
+    if (SUCCEEDED(hr)) ++dev->batch;
+    if (dev->commit_event) SetEvent(dev->commit_event);
+    LeaveCriticalSection(&dev->cs);
+    return hr;
+}
+
+#define DCOMP_DEVICE_COMMIT(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_Commit(type *iface) \
+{ \
+    struct dcomp_device *dev = impl(iface); \
+    HRESULT hr; \
+    TRACE("iface %p.\n", iface); \
+    hr = dcomp_device_commit(dev); \
+    TRACE("iface %p, hr %#lx, batch %ld.\n", iface, hr, dev->batch); \
+    return hr; \
+}
+
+#define DCOMP_DEVICE_WAIT_FOR_COMMIT_COMPLETION(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_WaitForCommitCompletion(type *iface) \
+{ \
+    struct dcomp_device *dev = impl(iface); \
+    /* Direct binding has completed before Commit releases this lock. */ \
+    EnterCriticalSection(&dev->cs); \
+    LeaveCriticalSection(&dev->cs); \
+    return S_OK; \
+}
+
+#define DCOMP_DEVICE_GET_FRAME_STATISTICS(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_GetFrameStatistics(type *iface, \
+        DCOMPOSITION_FRAME_STATISTICS *statistics) \
+{ \
+    FIXME("iface %p, statistics %p stub!\n", iface, statistics); \
+    if (!statistics) \
+        return E_POINTER; \
+    memset(statistics, 0, sizeof(*statistics)); \
+    return S_OK; \
+}
+
+#define DCOMP_DEVICE_CREATE_VIRTUAL_SURFACE(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateVirtualSurface(type *iface, \
+        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode, \
+        IDCompositionVirtualSurface **surface) \
+{ \
+    struct dcomp_device *dev = impl(iface); \
+    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n", \
+            iface, width, height, pixel_format, alpha_mode, surface); \
+    return dcomp_device_create_virtual_surface(dev, width, height, pixel_format, alpha_mode, surface); \
+}
+
+#define DCOMP_DEVICE_CREATE_TRANSLATE_TRANSFORM(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateTranslateTransform(type *iface, \
+        IDCompositionTranslateTransform **transform) \
+{ \
+    TRACE("iface %p, transform %p.\n", iface, transform); \
+    return dcomp_transform_create(impl(iface), DCOMP_TRANSFORM_TRANSLATE, \
+            (IDCompositionTransform **)transform); \
+}
+
+#define DCOMP_DEVICE_CREATE_SCALE_TRANSFORM(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateScaleTransform(type *iface, \
+        IDCompositionScaleTransform **transform) \
+{ \
+    TRACE("iface %p, transform %p.\n", iface, transform); \
+    return dcomp_transform_create(impl(iface), DCOMP_TRANSFORM_SCALE, \
+            (IDCompositionTransform **)transform); \
+}
+
+#define DCOMP_DEVICE_CREATE_ROTATE_TRANSFORM(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateRotateTransform(type *iface, \
+        IDCompositionRotateTransform **transform) \
+{ \
+    TRACE("iface %p, transform %p.\n", iface, transform); \
+    return dcomp_transform_create(impl(iface), DCOMP_TRANSFORM_ROTATE, \
+            (IDCompositionTransform **)transform); \
+}
+
+#define DCOMP_DEVICE_CREATE_SKEW_TRANSFORM(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateSkewTransform(type *iface, \
+        IDCompositionSkewTransform **transform) \
+{ \
+    TRACE("iface %p, transform %p.\n", iface, transform); \
+    return dcomp_transform_create(impl(iface), DCOMP_TRANSFORM_SKEW, \
+            (IDCompositionTransform **)transform); \
+}
+
+#define DCOMP_DEVICE_CREATE_MATRIX_TRANSFORM(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateMatrixTransform(type *iface, \
+        IDCompositionMatrixTransform **transform) \
+{ \
+    TRACE("iface %p, transform %p.\n", iface, transform); \
+    return dcomp_transform_create(impl(iface), DCOMP_TRANSFORM_MATRIX, \
+            (IDCompositionTransform **)transform); \
+}
+
+#define DCOMP_DEVICE_CREATE_TRANSFORM_GROUP(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateTransformGroup(type *iface, \
+        IDCompositionTransform **transforms, UINT elements, IDCompositionTransform **transform_group) \
+{ \
+    FIXME("iface %p, transforms %p, elements %u, transform_group %p stub!\n", \
+            iface, transforms, elements, transform_group); \
+    return E_NOTIMPL; \
+}
+
+#define DCOMP_DEVICE_CREATE_TRANSLATE_TRANSFORM_3D(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateTranslateTransform3D(type *iface, \
+        IDCompositionTranslateTransform3D **transform_3d) \
+{ \
+    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d); \
+    return E_NOTIMPL; \
+}
+
+#define DCOMP_DEVICE_CREATE_SCALE_TRANSFORM_3D(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateScaleTransform3D(type *iface, \
+        IDCompositionScaleTransform3D **transform_3d) \
+{ \
+    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d); \
+    return E_NOTIMPL; \
+}
+
+#define DCOMP_DEVICE_CREATE_ROTATE_TRANSFORM_3D(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateRotateTransform3D(type *iface, \
+        IDCompositionRotateTransform3D **transform_3d) \
+{ \
+    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d); \
+    return E_NOTIMPL; \
+}
+
+#define DCOMP_DEVICE_CREATE_MATRIX_TRANSFORM_3D(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateMatrixTransform3D(type *iface, \
+        IDCompositionMatrixTransform3D **transform_3d) \
+{ \
+    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d); \
+    return E_NOTIMPL; \
+}
+
+#define DCOMP_DEVICE_CREATE_TRANSFORM_3D_GROUP(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateTransform3DGroup(type *iface, \
+        IDCompositionTransform3D **transforms_3d, UINT elements, IDCompositionTransform3D **transform_3d_group) \
+{ \
+    FIXME("iface %p, transforms_3d %p, elements %u, transform_3d_group %p stub!\n", \
+            iface, transforms_3d, elements, transform_3d_group); \
+    return E_NOTIMPL; \
+}
+
+#define DCOMP_DEVICE_CREATE_EFFECT_GROUP(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateEffectGroup(type *iface, \
+        IDCompositionEffectGroup **effect_group) \
+{ \
+    TRACE("iface %p, effect_group %p.\n", iface, effect_group); \
+    return dcomp_effect_group_create(impl(iface), effect_group); \
+}
+
+#define DCOMP_DEVICE_CREATE_RECTANGLE_CLIP(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateRectangleClip(type *iface, \
+        IDCompositionRectangleClip **clip) \
+{ \
+    TRACE("iface %p, clip %p.\n", iface, clip); \
+    return dcomp_rectangle_clip_create(impl(iface), clip); \
+}
+
+#define DCOMP_DEVICE_CREATE_ANIMATION(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateAnimation(type *iface, \
+        IDCompositionAnimation **animation) \
+{ \
+    TRACE("iface %p, animation %p.\n", iface, animation); \
+    return dcomp_animation_create(impl(iface), animation); \
+}
+
+#define DCOMP_DEVICE_CREATE_SURFACE_FACTORY(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateSurfaceFactory(type *iface, \
+        IUnknown *rendering_device, IDCompositionSurfaceFactory **surface_factory) \
+{ \
+    struct dcomp_device *dev = impl(iface); \
+    TRACE("iface %p, rendering_device %p, surface_factory %p.\n", iface, rendering_device, \
+            surface_factory); \
+    return dcomp_surface_factory_create(&dev->IDCompositionDevice_iface, rendering_device, \
+            surface_factory); \
+}
+
+#define DCOMP_DEVICE_CREATE_SURFACE(prefix, type, impl) \
+static HRESULT STDMETHODCALLTYPE dcomp_##prefix##_CreateSurface(type *iface, \
+        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode, \
+        IDCompositionSurface **surface) \
+{ \
+    struct dcomp_device *dev = impl(iface); \
+    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n", \
+            iface, width, height, pixel_format, alpha_mode, surface); \
+    return dcomp_surface_create(&dev->IDCompositionDevice_iface, dev->rendering_device, \
+            &dev->rendering_device_iid, width, height, pixel_format, alpha_mode, surface); \
+}
+
+static const GUID IID_dcomp_alias_a = {0xd14b6158, 0xc3fa, 0x4bce, {0x9c, 0x1f, 0xb6, 0x1d, 0x86, 0x65, 0xea, 0xb0}};
+static const GUID IID_dcomp_alias_b = {0x28d6ad3d, 0xee2a, 0x4bcd, {0x94, 0x19, 0x7d, 0x54, 0x80, 0x04, 0x35, 0xb1}};
+
+/* The interface {6b556968-2d25-11e2-99f6-8bc36088709b} of the device. The Windows App Runtime (FrameworkUdk) asks the device for it after
+ * a call of its export DCompPrivates_SetCommitCompletionEvent (QueryInterface in the Wine log) and then calls slot 8 with the event handle
+ * (traced on Wine with a logging object). Windows 11 build 26300 answers the same slot differently (it removes 12 bytes on 32-bit Windows,
+ * two arguments, and returns E_INVALIDARG for an event handle: tests/uwp/alpc/dcomp-dslot32b.cpp); a trace there shows the runtime reaching
+ * the device through a system-side module. Slot 8 is implemented for the caller on Wine, not measured on Windows 11: the call shape
+ * observed at the caller is (event handle, 0, 0, a pointer) in the registers of a 64-bit run. The shape on i386 is not measured: the registers
+ * would make four arguments, but Windows 11 removes 12 bytes on 32-bit Windows, so what this function takes there is not known.
+ * The event is duplicated and signaled when a Commit has completed, which here is when Commit returns, successful or not, so a waiter
+ * cannot hang on a failed commit. A NULL handle clears the event. The other slots raise the stub exception: their argument counts are not known. */
+static const GUID IID_dcomp_commit = {0x6b556968, 0x2d25, 0x11e2, {0x99, 0xf6, 0x8b, 0xc3, 0x60, 0x88, 0x70, 0x9b}};
+
+static struct dcomp_device *impl_from_commit_iface(const void *const **iface)
+{
+    return CONTAINING_RECORD(iface, struct dcomp_device, commit_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_commit_QueryInterface(const void *const **iface, REFIID iid, void **out)
+{
+    struct dcomp_device *dev = impl_from_commit_iface(iface);
+
+    return IDCompositionDevice_QueryInterface(&dev->IDCompositionDevice_iface, iid, out);
+}
+
+static ULONG STDMETHODCALLTYPE dcomp_commit_AddRef(const void *const **iface)
+{
+    struct dcomp_device *dev = impl_from_commit_iface(iface);
+
+    return IDCompositionDevice_AddRef(&dev->IDCompositionDevice_iface);
+}
+
+static ULONG STDMETHODCALLTYPE dcomp_commit_Release(const void *const **iface)
+{
+    struct dcomp_device *dev = impl_from_commit_iface(iface);
+
+    return IDCompositionDevice_Release(&dev->IDCompositionDevice_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_commit_SetCommitCompletionEvent(const void *const **iface, HANDLE event, void *arg)
+{
+    struct dcomp_device *dev = impl_from_commit_iface(iface);
+    HANDLE copy = NULL, old;
+
+    TRACE("iface %p, event %p, arg %p.\n", iface, event, arg);
+
+    if (event && !DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(), &copy, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        return HRESULT_FROM_WIN32(GetLastError());
+
+    EnterCriticalSection(&dev->cs);
+    old = dev->commit_event;
+    dev->commit_event = copy;
+    LeaveCriticalSection(&dev->cs);
+    if (old) CloseHandle(old);
+    return S_OK;
+}
+
+#define DCOMP_COMMIT_STUB(n) \
+static void STDMETHODCALLTYPE dcomp_commit_method##n(void) \
+{ \
+    ULONG_PTR args[2] = {(ULONG_PTR)L"dcomp.dll", (ULONG_PTR)"commit interface method " #n}; \
+    ERR("commit interface method " #n " is not implemented\n"); \
+    RaiseException(0x80000100 /* EXCEPTION_WINE_STUB */, EXCEPTION_NONCONTINUABLE, 2, args); \
+}
+DCOMP_COMMIT_STUB(3) DCOMP_COMMIT_STUB(4) DCOMP_COMMIT_STUB(5) DCOMP_COMMIT_STUB(6) DCOMP_COMMIT_STUB(7)
+DCOMP_COMMIT_STUB(9) DCOMP_COMMIT_STUB(10) DCOMP_COMMIT_STUB(11) DCOMP_COMMIT_STUB(12) DCOMP_COMMIT_STUB(13)
+DCOMP_COMMIT_STUB(14) DCOMP_COMMIT_STUB(15)
+
+static const void *const dcomp_commit_vtbl[] =
+{
+    dcomp_commit_QueryInterface, dcomp_commit_AddRef, dcomp_commit_Release,
+    dcomp_commit_method3, dcomp_commit_method4, dcomp_commit_method5, dcomp_commit_method6, dcomp_commit_method7,
+    dcomp_commit_SetCommitCompletionEvent,
+    dcomp_commit_method9, dcomp_commit_method10, dcomp_commit_method11, dcomp_commit_method12, dcomp_commit_method13,
+    dcomp_commit_method14, dcomp_commit_method15,
+};
 
 static HRESULT STDMETHODCALLTYPE dcomp_device_QueryInterface(IDCompositionDevice *iface,
         REFIID iid, void **out)
@@ -4371,8 +4956,11 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_QueryInterface(IDCompositionDevice
         IDCompositionDevice_AddRef(iface);
         return S_OK;
     }
-    else if (dev->version >= 2 && IsEqualGUID(iid, &IID_IDCompositionDesktopDevice))
+    else if (dev->version >= 2 && (IsEqualGUID(iid, &IID_IDCompositionDesktopDevice) ||
+             IsEqualGUID(iid, &IID_dcomp_alias_a) || IsEqualGUID(iid, &IID_dcomp_alias_b)))
     {
+        /* Windows 11 answers {d14b6158-...} and {28d6ad3d-...}, which the Windows App Runtime asks the device for (QueryInterface calls
+         * in the Wine log), with the very interface of IDCompositionDesktopDevice (tests/uwp/alpc/dcomp-privqi-probe.c) */
         *out = &dev->IDCompositionDesktopDevice_iface;
         IDCompositionDevice_AddRef(iface);
         return S_OK;
@@ -4380,6 +4968,12 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_QueryInterface(IDCompositionDevice
     else if (dev->version >= 3 && IsEqualGUID(iid, &IID_IDCompositionDevice3))
     {
         *out = &dev->IDCompositionDevice3_iface;
+        IDCompositionDevice_AddRef(iface);
+        return S_OK;
+    }
+    else if (dev->version >= 2 && IsEqualGUID(iid, &IID_dcomp_commit))
+    {
+        *out = &dev->commit_iface;
         IDCompositionDevice_AddRef(iface);
         return S_OK;
     }
@@ -4409,6 +5003,8 @@ static ULONG STDMETHODCALLTYPE dcomp_device_Release(IDCompositionDevice *iface)
     {
         if (dev->rendering_device)
             IUnknown_Release(dev->rendering_device);
+        if (dev->commit_event)
+            CloseHandle(dev->commit_event);
         DeleteCriticalSection(&dev->cs);
         free(dev);
     }
@@ -4416,30 +5012,11 @@ static ULONG STDMETHODCALLTYPE dcomp_device_Release(IDCompositionDevice *iface)
     return refcount;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_Commit(IDCompositionDevice *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice(iface);
-    return dcomp_device_internal_commit(dev);
-}
+DCOMP_DEVICE_COMMIT(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_WaitForCommitCompletion(IDCompositionDevice *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice(iface);
-    /* Direct binding has completed before Commit releases this lock. */
-    EnterCriticalSection(&dev->cs);
-    LeaveCriticalSection(&dev->cs);
-    return S_OK;
-}
+DCOMP_DEVICE_WAIT_FOR_COMMIT_COMPLETION(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_GetFrameStatistics(IDCompositionDevice *iface,
-        DCOMPOSITION_FRAME_STATISTICS *statistics)
-{
-    FIXME("iface %p, statistics %p stub!\n", iface, statistics);
-    if (!statistics)
-        return E_POINTER;
-    memset(statistics, 0, sizeof(*statistics));
-    return S_OK;
-}
+DCOMP_DEVICE_GET_FRAME_STATISTICS(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
 static HRESULT STDMETHODCALLTYPE dcomp_device_CreateTargetForHwnd(IDCompositionDevice *iface,
         HWND hwnd, BOOL topmost, IDCompositionTarget **target)
@@ -4477,25 +5054,8 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_CreateVisual(IDCompositionDevice *
     return hr;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateSurface(IDCompositionDevice *iface,
-        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
-        IDCompositionSurface **surface)
-{
-    FIXME("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p stub!\n",
-            iface, width, height, pixel_format, alpha_mode, surface);
-    return E_NOTIMPL;
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateVirtualSurface(IDCompositionDevice *iface,
-        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
-        IDCompositionVirtualSurface **surface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice(iface);
-
-    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n",
-            iface, width, height, pixel_format, alpha_mode, surface);
-    return dcomp_device_create_virtual_surface(dev, width, height, pixel_format, alpha_mode, surface);
-}
+DCOMP_DEVICE_CREATE_SURFACE(device, IDCompositionDevice, impl_from_IDCompositionDevice)
+DCOMP_DEVICE_CREATE_VIRTUAL_SURFACE(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
 static HRESULT STDMETHODCALLTYPE dcomp_device_CreateSurfaceFromHandle(IDCompositionDevice *iface,
         HANDLE handle, IUnknown **surface)
@@ -4511,110 +5071,33 @@ static HRESULT STDMETHODCALLTYPE dcomp_device_CreateSurfaceFromHwnd(IDCompositio
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateTranslateTransform(IDCompositionDevice *iface,
-        IDCompositionTranslateTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice(iface), DCOMP_TRANSFORM_TRANSLATE,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_TRANSLATE_TRANSFORM(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateScaleTransform(IDCompositionDevice *iface,
-        IDCompositionScaleTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice(iface), DCOMP_TRANSFORM_SCALE,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_SCALE_TRANSFORM(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateRotateTransform(IDCompositionDevice *iface,
-        IDCompositionRotateTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice(iface), DCOMP_TRANSFORM_ROTATE,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_ROTATE_TRANSFORM(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateSkewTransform(IDCompositionDevice *iface,
-        IDCompositionSkewTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice(iface), DCOMP_TRANSFORM_SKEW,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_SKEW_TRANSFORM(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateMatrixTransform(IDCompositionDevice *iface,
-        IDCompositionMatrixTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice(iface), DCOMP_TRANSFORM_MATRIX,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_MATRIX_TRANSFORM(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateTransformGroup(IDCompositionDevice *iface,
-        IDCompositionTransform **transforms, UINT elements, IDCompositionTransform **transform_group)
-{
-    FIXME("iface %p, transforms %p, elements %u, transform_group %p stub!\n",
-            iface, transforms, elements, transform_group);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_TRANSFORM_GROUP(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateTranslateTransform3D(IDCompositionDevice *iface,
-        IDCompositionTranslateTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_TRANSLATE_TRANSFORM_3D(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateScaleTransform3D(IDCompositionDevice *iface,
-        IDCompositionScaleTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_SCALE_TRANSFORM_3D(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateRotateTransform3D(IDCompositionDevice *iface,
-        IDCompositionRotateTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_ROTATE_TRANSFORM_3D(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateMatrixTransform3D(IDCompositionDevice *iface,
-        IDCompositionMatrixTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_MATRIX_TRANSFORM_3D(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateTransform3DGroup(IDCompositionDevice *iface,
-        IDCompositionTransform3D **transforms_3d, UINT elements, IDCompositionTransform3D **transform_3d_group)
-{
-    FIXME("iface %p, transforms_3d %p, elements %u, transform_3d_group %p stub!\n",
-            iface, transforms_3d, elements, transform_3d_group);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_TRANSFORM_3D_GROUP(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateEffectGroup(IDCompositionDevice *iface,
-        IDCompositionEffectGroup **effect_group)
-{
-    TRACE("iface %p, effect_group %p.\n", iface, effect_group);
-    return dcomp_effect_group_create(impl_from_IDCompositionDevice(iface), effect_group);
-}
+DCOMP_DEVICE_CREATE_EFFECT_GROUP(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateRectangleClip(IDCompositionDevice *iface,
-        IDCompositionRectangleClip **clip)
-{
-    TRACE("iface %p, clip %p.\n", iface, clip);
-    return dcomp_rectangle_clip_create(impl_from_IDCompositionDevice(iface), clip);
-}
+DCOMP_DEVICE_CREATE_RECTANGLE_CLIP(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device_CreateAnimation(IDCompositionDevice *iface,
-        IDCompositionAnimation **animation)
-{
-    TRACE("iface %p, animation %p.\n", iface, animation);
-    return dcomp_animation_create(impl_from_IDCompositionDevice(iface), animation);
-}
+DCOMP_DEVICE_CREATE_ANIMATION(device, IDCompositionDevice, impl_from_IDCompositionDevice)
 
 static HRESULT STDMETHODCALLTYPE dcomp_device_CheckDeviceState(IDCompositionDevice *iface,
         BOOL *valid)
@@ -4661,49 +5144,17 @@ static const struct IDCompositionDeviceVtbl dcomp_device_vtbl =
  * IDCompositionDevice2 Implementation
  * ===================================================================== */
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_QueryInterface(IDCompositionDevice2 *iface,
-        REFIID iid, void **out)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice2(iface);
-    return IDCompositionDevice_QueryInterface(&dev->IDCompositionDevice_iface, iid, out);
-}
+DCOMP_DEVICE_QUERY_INTERFACE(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static ULONG STDMETHODCALLTYPE dcomp_device2_AddRef(IDCompositionDevice2 *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice2(iface);
-    return IDCompositionDevice_AddRef(&dev->IDCompositionDevice_iface);
-}
+DCOMP_DEVICE_ADDREF(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static ULONG STDMETHODCALLTYPE dcomp_device2_Release(IDCompositionDevice2 *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice2(iface);
-    return IDCompositionDevice_Release(&dev->IDCompositionDevice_iface);
-}
+DCOMP_DEVICE_RELEASE(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_Commit(IDCompositionDevice2 *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice2(iface);
-    return dcomp_device_internal_commit(dev);
-}
+DCOMP_DEVICE_COMMIT(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_WaitForCommitCompletion(IDCompositionDevice2 *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice2(iface);
-    /* Direct binding has completed before Commit releases this lock. */
-    EnterCriticalSection(&dev->cs);
-    LeaveCriticalSection(&dev->cs);
-    return S_OK;
-}
+DCOMP_DEVICE_WAIT_FOR_COMMIT_COMPLETION(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_GetFrameStatistics(IDCompositionDevice2 *iface,
-        DCOMPOSITION_FRAME_STATISTICS *statistics)
-{
-    FIXME("iface %p, statistics %p stub!\n", iface, statistics);
-    if (!statistics)
-        return E_POINTER;
-    memset(statistics, 0, sizeof(*statistics));
-    return S_OK;
-}
+DCOMP_DEVICE_GET_FRAME_STATISTICS(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
 static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateVisual(IDCompositionDevice2 *iface,
         IDCompositionVisual2 **visual)
@@ -4723,146 +5174,39 @@ static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateVisual(IDCompositionDevice2
     return hr;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateSurfaceFactory(IDCompositionDevice2 *iface,
-        IUnknown *rendering_device, IDCompositionSurfaceFactory **surface_factory)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice2(iface);
+DCOMP_DEVICE_CREATE_SURFACE_FACTORY(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-    TRACE("iface %p, rendering_device %p, surface_factory %p.\n", iface, rendering_device,
-            surface_factory);
+DCOMP_DEVICE_CREATE_SURFACE(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-    return dcomp_surface_factory_create(&dev->IDCompositionDevice_iface, rendering_device,
-            surface_factory);
-}
+DCOMP_DEVICE_CREATE_VIRTUAL_SURFACE(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateSurface(IDCompositionDevice2 *iface,
-        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
-        IDCompositionSurface **surface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice2(iface);
+DCOMP_DEVICE_CREATE_TRANSLATE_TRANSFORM(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n",
-            iface, width, height, pixel_format, alpha_mode, surface);
+DCOMP_DEVICE_CREATE_SCALE_TRANSFORM(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-    return dcomp_surface_create(&dev->IDCompositionDevice_iface, dev->rendering_device,
-            &dev->rendering_device_iid, width, height, pixel_format, alpha_mode, surface);
-}
+DCOMP_DEVICE_CREATE_ROTATE_TRANSFORM(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateVirtualSurface(IDCompositionDevice2 *iface,
-        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
-        IDCompositionVirtualSurface **surface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice2(iface);
+DCOMP_DEVICE_CREATE_SKEW_TRANSFORM(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n",
-            iface, width, height, pixel_format, alpha_mode, surface);
-    return dcomp_device_create_virtual_surface(dev, width, height, pixel_format, alpha_mode, surface);
-}
+DCOMP_DEVICE_CREATE_MATRIX_TRANSFORM(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateTranslateTransform(IDCompositionDevice2 *iface,
-        IDCompositionTranslateTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice2(iface), DCOMP_TRANSFORM_TRANSLATE,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_TRANSFORM_GROUP(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateScaleTransform(IDCompositionDevice2 *iface,
-        IDCompositionScaleTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice2(iface), DCOMP_TRANSFORM_SCALE,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_TRANSLATE_TRANSFORM_3D(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateRotateTransform(IDCompositionDevice2 *iface,
-        IDCompositionRotateTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice2(iface), DCOMP_TRANSFORM_ROTATE,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_SCALE_TRANSFORM_3D(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateSkewTransform(IDCompositionDevice2 *iface,
-        IDCompositionSkewTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice2(iface), DCOMP_TRANSFORM_SKEW,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_ROTATE_TRANSFORM_3D(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateMatrixTransform(IDCompositionDevice2 *iface,
-        IDCompositionMatrixTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice2(iface), DCOMP_TRANSFORM_MATRIX,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_MATRIX_TRANSFORM_3D(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateTransformGroup(IDCompositionDevice2 *iface,
-        IDCompositionTransform **transforms, UINT elements, IDCompositionTransform **transform_group)
-{
-    FIXME("iface %p, transforms %p, elements %u, transform_group %p stub!\n",
-            iface, transforms, elements, transform_group);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_TRANSFORM_3D_GROUP(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateTranslateTransform3D(IDCompositionDevice2 *iface,
-        IDCompositionTranslateTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_EFFECT_GROUP(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateScaleTransform3D(IDCompositionDevice2 *iface,
-        IDCompositionScaleTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_RECTANGLE_CLIP(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateRotateTransform3D(IDCompositionDevice2 *iface,
-        IDCompositionRotateTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateMatrixTransform3D(IDCompositionDevice2 *iface,
-        IDCompositionMatrixTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateTransform3DGroup(IDCompositionDevice2 *iface,
-        IDCompositionTransform3D **transforms_3d, UINT elements, IDCompositionTransform3D **transform_3d_group)
-{
-    FIXME("iface %p, transforms_3d %p, elements %u, transform_3d_group %p stub!\n",
-            iface, transforms_3d, elements, transform_3d_group);
-    return E_NOTIMPL;
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateEffectGroup(IDCompositionDevice2 *iface,
-        IDCompositionEffectGroup **effect_group)
-{
-    TRACE("iface %p, effect_group %p.\n", iface, effect_group);
-    return dcomp_effect_group_create(impl_from_IDCompositionDevice2(iface), effect_group);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateRectangleClip(IDCompositionDevice2 *iface,
-        IDCompositionRectangleClip **clip)
-{
-    TRACE("iface %p, clip %p.\n", iface, clip);
-    return dcomp_rectangle_clip_create(impl_from_IDCompositionDevice2(iface), clip);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_device2_CreateAnimation(IDCompositionDevice2 *iface,
-        IDCompositionAnimation **animation)
-{
-    TRACE("iface %p, animation %p.\n", iface, animation);
-    return dcomp_animation_create(impl_from_IDCompositionDevice2(iface), animation);
-}
+DCOMP_DEVICE_CREATE_ANIMATION(device2, IDCompositionDevice2, impl_from_IDCompositionDevice2)
 
 static const struct IDCompositionDevice2Vtbl dcomp_device2_vtbl =
 {
@@ -4896,49 +5240,17 @@ static const struct IDCompositionDevice2Vtbl dcomp_device2_vtbl =
  * IDCompositionDevice3 Implementation
  * ===================================================================== */
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_QueryInterface(IDCompositionDevice3 *iface,
-        REFIID iid, void **out)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice3(iface);
-    return IDCompositionDevice_QueryInterface(&dev->IDCompositionDevice_iface, iid, out);
-}
+DCOMP_DEVICE_QUERY_INTERFACE(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static ULONG STDMETHODCALLTYPE dcomp_device3_AddRef(IDCompositionDevice3 *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice3(iface);
-    return IDCompositionDevice_AddRef(&dev->IDCompositionDevice_iface);
-}
+DCOMP_DEVICE_ADDREF(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static ULONG STDMETHODCALLTYPE dcomp_device3_Release(IDCompositionDevice3 *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice3(iface);
-    return IDCompositionDevice_Release(&dev->IDCompositionDevice_iface);
-}
+DCOMP_DEVICE_RELEASE(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_Commit(IDCompositionDevice3 *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice3(iface);
-    return dcomp_device_internal_commit(dev);
-}
+DCOMP_DEVICE_COMMIT(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_WaitForCommitCompletion(IDCompositionDevice3 *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice3(iface);
-    /* Direct binding has completed before Commit releases this lock. */
-    EnterCriticalSection(&dev->cs);
-    LeaveCriticalSection(&dev->cs);
-    return S_OK;
-}
+DCOMP_DEVICE_WAIT_FOR_COMMIT_COMPLETION(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_GetFrameStatistics(IDCompositionDevice3 *iface,
-        DCOMPOSITION_FRAME_STATISTICS *statistics)
-{
-    FIXME("iface %p, statistics %p stub!\n", iface, statistics);
-    if (!statistics)
-        return E_POINTER;
-    memset(statistics, 0, sizeof(*statistics));
-    return S_OK;
-}
+DCOMP_DEVICE_GET_FRAME_STATISTICS(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
 static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateVisual(IDCompositionDevice3 *iface,
         IDCompositionVisual2 **visual)
@@ -4947,81 +5259,21 @@ static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateVisual(IDCompositionDevice3
     return IDCompositionDevice2_CreateVisual(&dev->IDCompositionDevice2_iface, visual);
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateSurfaceFactory(IDCompositionDevice3 *iface,
-        IUnknown *rendering_device, IDCompositionSurfaceFactory **surface_factory)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice3(iface);
+DCOMP_DEVICE_CREATE_SURFACE_FACTORY(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-    TRACE("iface %p, rendering_device %p, surface_factory %p.\n", iface, rendering_device,
-            surface_factory);
+DCOMP_DEVICE_CREATE_SURFACE(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-    return dcomp_surface_factory_create(&dev->IDCompositionDevice_iface, rendering_device,
-            surface_factory);
-}
+DCOMP_DEVICE_CREATE_VIRTUAL_SURFACE(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateSurface(IDCompositionDevice3 *iface,
-        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
-        IDCompositionSurface **surface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice3(iface);
+DCOMP_DEVICE_CREATE_TRANSLATE_TRANSFORM(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n",
-            iface, width, height, pixel_format, alpha_mode, surface);
+DCOMP_DEVICE_CREATE_SCALE_TRANSFORM(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-    return dcomp_surface_create(&dev->IDCompositionDevice_iface, dev->rendering_device,
-            &dev->rendering_device_iid, width, height, pixel_format, alpha_mode, surface);
-}
+DCOMP_DEVICE_CREATE_ROTATE_TRANSFORM(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateVirtualSurface(IDCompositionDevice3 *iface,
-        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
-        IDCompositionVirtualSurface **surface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDevice3(iface);
+DCOMP_DEVICE_CREATE_SKEW_TRANSFORM(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n",
-            iface, width, height, pixel_format, alpha_mode, surface);
-    return dcomp_device_create_virtual_surface(dev, width, height, pixel_format, alpha_mode, surface);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateTranslateTransform(IDCompositionDevice3 *iface,
-        IDCompositionTranslateTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice3(iface), DCOMP_TRANSFORM_TRANSLATE,
-            (IDCompositionTransform **)transform);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateScaleTransform(IDCompositionDevice3 *iface,
-        IDCompositionScaleTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice3(iface), DCOMP_TRANSFORM_SCALE,
-            (IDCompositionTransform **)transform);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateRotateTransform(IDCompositionDevice3 *iface,
-        IDCompositionRotateTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice3(iface), DCOMP_TRANSFORM_ROTATE,
-            (IDCompositionTransform **)transform);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateSkewTransform(IDCompositionDevice3 *iface,
-        IDCompositionSkewTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice3(iface), DCOMP_TRANSFORM_SKEW,
-            (IDCompositionTransform **)transform);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateMatrixTransform(IDCompositionDevice3 *iface,
-        IDCompositionMatrixTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDevice3(iface), DCOMP_TRANSFORM_MATRIX,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_MATRIX_TRANSFORM(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
 static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateTransformGroup(IDCompositionDevice3 *iface,
         IDCompositionTransform **transforms, UINT elements, IDCompositionTransform **transform_group)
@@ -5030,33 +5282,13 @@ static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateTransformGroup(IDCompositio
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateTranslateTransform3D(IDCompositionDevice3 *iface,
-        IDCompositionTranslateTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_TRANSLATE_TRANSFORM_3D(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateScaleTransform3D(IDCompositionDevice3 *iface,
-        IDCompositionScaleTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_SCALE_TRANSFORM_3D(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateRotateTransform3D(IDCompositionDevice3 *iface,
-        IDCompositionRotateTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_ROTATE_TRANSFORM_3D(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateMatrixTransform3D(IDCompositionDevice3 *iface,
-        IDCompositionMatrixTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_MATRIX_TRANSFORM_3D(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
 static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateTransform3DGroup(IDCompositionDevice3 *iface,
         IDCompositionTransform3D **transforms_3d, UINT elements, IDCompositionTransform3D **transform_3d_group)
@@ -5065,26 +5297,11 @@ static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateTransform3DGroup(IDComposit
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateEffectGroup(IDCompositionDevice3 *iface,
-        IDCompositionEffectGroup **effect_group)
-{
-    TRACE("iface %p, effect_group %p.\n", iface, effect_group);
-    return dcomp_effect_group_create(impl_from_IDCompositionDevice3(iface), effect_group);
-}
+DCOMP_DEVICE_CREATE_EFFECT_GROUP(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateRectangleClip(IDCompositionDevice3 *iface,
-        IDCompositionRectangleClip **clip)
-{
-    TRACE("iface %p, clip %p.\n", iface, clip);
-    return dcomp_rectangle_clip_create(impl_from_IDCompositionDevice3(iface), clip);
-}
+DCOMP_DEVICE_CREATE_RECTANGLE_CLIP(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
-static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateAnimation(IDCompositionDevice3 *iface,
-        IDCompositionAnimation **animation)
-{
-    TRACE("iface %p, animation %p.\n", iface, animation);
-    return dcomp_animation_create(impl_from_IDCompositionDevice3(iface), animation);
-}
+DCOMP_DEVICE_CREATE_ANIMATION(device3, IDCompositionDevice3, impl_from_IDCompositionDevice3)
 
 static HRESULT STDMETHODCALLTYPE dcomp_device3_CreateGaussianBlurEffect(IDCompositionDevice3 *iface,
         IDCompositionGaussianBlurEffect **effect)
@@ -5222,49 +5439,17 @@ static const struct IDCompositionDevice3Vtbl dcomp_device3_vtbl =
  * IDCompositionDesktopDevice Implementation
  * ===================================================================== */
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_QueryInterface(IDCompositionDesktopDevice *iface,
-        REFIID iid, void **out)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDesktopDevice(iface);
-    return IDCompositionDevice_QueryInterface(&dev->IDCompositionDevice_iface, iid, out);
-}
+DCOMP_DEVICE_QUERY_INTERFACE(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static ULONG STDMETHODCALLTYPE dcomp_desktop_device_AddRef(IDCompositionDesktopDevice *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDesktopDevice(iface);
-    return IDCompositionDevice_AddRef(&dev->IDCompositionDevice_iface);
-}
+DCOMP_DEVICE_ADDREF(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static ULONG STDMETHODCALLTYPE dcomp_desktop_device_Release(IDCompositionDesktopDevice *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDesktopDevice(iface);
-    return IDCompositionDevice_Release(&dev->IDCompositionDevice_iface);
-}
+DCOMP_DEVICE_RELEASE(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_Commit(IDCompositionDesktopDevice *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDesktopDevice(iface);
-    return dcomp_device_internal_commit(dev);
-}
+DCOMP_DEVICE_COMMIT(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_WaitForCommitCompletion(IDCompositionDesktopDevice *iface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDesktopDevice(iface);
-    /* Direct binding has completed before Commit releases this lock. */
-    EnterCriticalSection(&dev->cs);
-    LeaveCriticalSection(&dev->cs);
-    return S_OK;
-}
+DCOMP_DEVICE_WAIT_FOR_COMMIT_COMPLETION(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_GetFrameStatistics(IDCompositionDesktopDevice *iface,
-        DCOMPOSITION_FRAME_STATISTICS *statistics)
-{
-    FIXME("iface %p, statistics %p stub!\n", iface, statistics);
-    if (!statistics)
-        return E_POINTER;
-    memset(statistics, 0, sizeof(*statistics));
-    return S_OK;
-}
+DCOMP_DEVICE_GET_FRAME_STATISTICS(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
 static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateVisual(IDCompositionDesktopDevice *iface,
         IDCompositionVisual2 **visual)
@@ -5273,81 +5458,21 @@ static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateVisual(IDComposition
     return IDCompositionDevice2_CreateVisual(&dev->IDCompositionDevice2_iface, visual);
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateSurfaceFactory(IDCompositionDesktopDevice *iface,
-        IUnknown *rendering_device, IDCompositionSurfaceFactory **surface_factory)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDesktopDevice(iface);
+DCOMP_DEVICE_CREATE_SURFACE_FACTORY(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-    TRACE("iface %p, rendering_device %p, surface_factory %p.\n", iface, rendering_device,
-            surface_factory);
+DCOMP_DEVICE_CREATE_SURFACE(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-    return dcomp_surface_factory_create(&dev->IDCompositionDevice_iface, rendering_device,
-            surface_factory);
-}
+DCOMP_DEVICE_CREATE_VIRTUAL_SURFACE(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateSurface(IDCompositionDesktopDevice *iface,
-        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
-        IDCompositionSurface **surface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDesktopDevice(iface);
+DCOMP_DEVICE_CREATE_TRANSLATE_TRANSFORM(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n",
-            iface, width, height, pixel_format, alpha_mode, surface);
+DCOMP_DEVICE_CREATE_SCALE_TRANSFORM(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-    return dcomp_surface_create(&dev->IDCompositionDevice_iface, dev->rendering_device,
-            &dev->rendering_device_iid, width, height, pixel_format, alpha_mode, surface);
-}
+DCOMP_DEVICE_CREATE_ROTATE_TRANSFORM(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateVirtualSurface(IDCompositionDesktopDevice *iface,
-        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
-        IDCompositionVirtualSurface **surface)
-{
-    struct dcomp_device *dev = impl_from_IDCompositionDesktopDevice(iface);
+DCOMP_DEVICE_CREATE_SKEW_TRANSFORM(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-    TRACE("iface %p, width %u, height %u, pixel_format %#x, alpha_mode %#x, surface %p.\n",
-            iface, width, height, pixel_format, alpha_mode, surface);
-    return dcomp_device_create_virtual_surface(dev, width, height, pixel_format, alpha_mode, surface);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateTranslateTransform(IDCompositionDesktopDevice *iface,
-        IDCompositionTranslateTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDesktopDevice(iface), DCOMP_TRANSFORM_TRANSLATE,
-            (IDCompositionTransform **)transform);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateScaleTransform(IDCompositionDesktopDevice *iface,
-        IDCompositionScaleTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDesktopDevice(iface), DCOMP_TRANSFORM_SCALE,
-            (IDCompositionTransform **)transform);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateRotateTransform(IDCompositionDesktopDevice *iface,
-        IDCompositionRotateTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDesktopDevice(iface), DCOMP_TRANSFORM_ROTATE,
-            (IDCompositionTransform **)transform);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateSkewTransform(IDCompositionDesktopDevice *iface,
-        IDCompositionSkewTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDesktopDevice(iface), DCOMP_TRANSFORM_SKEW,
-            (IDCompositionTransform **)transform);
-}
-
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateMatrixTransform(IDCompositionDesktopDevice *iface,
-        IDCompositionMatrixTransform **transform)
-{
-    TRACE("iface %p, transform %p.\n", iface, transform);
-    return dcomp_transform_create(impl_from_IDCompositionDesktopDevice(iface), DCOMP_TRANSFORM_MATRIX,
-            (IDCompositionTransform **)transform);
-}
+DCOMP_DEVICE_CREATE_MATRIX_TRANSFORM(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
 static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateTransformGroup(IDCompositionDesktopDevice *iface,
         IDCompositionTransform **transforms, UINT elements, IDCompositionTransform **transform_group)
@@ -5356,33 +5481,13 @@ static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateTransformGroup(IDCom
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateTranslateTransform3D(IDCompositionDesktopDevice *iface,
-        IDCompositionTranslateTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_TRANSLATE_TRANSFORM_3D(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateScaleTransform3D(IDCompositionDesktopDevice *iface,
-        IDCompositionScaleTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_SCALE_TRANSFORM_3D(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateRotateTransform3D(IDCompositionDesktopDevice *iface,
-        IDCompositionRotateTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_ROTATE_TRANSFORM_3D(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateMatrixTransform3D(IDCompositionDesktopDevice *iface,
-        IDCompositionMatrixTransform3D **transform_3d)
-{
-    FIXME("iface %p, transform_3d %p stub!\n", iface, transform_3d);
-    return E_NOTIMPL;
-}
+DCOMP_DEVICE_CREATE_MATRIX_TRANSFORM_3D(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
 static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateTransform3DGroup(IDCompositionDesktopDevice *iface,
         IDCompositionTransform3D **transforms_3d, UINT elements, IDCompositionTransform3D **transform_3d_group)
@@ -5391,26 +5496,11 @@ static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateTransform3DGroup(IDC
     return E_NOTIMPL;
 }
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateEffectGroup(IDCompositionDesktopDevice *iface,
-        IDCompositionEffectGroup **effect_group)
-{
-    TRACE("iface %p, effect_group %p.\n", iface, effect_group);
-    return dcomp_effect_group_create(impl_from_IDCompositionDesktopDevice(iface), effect_group);
-}
+DCOMP_DEVICE_CREATE_EFFECT_GROUP(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateRectangleClip(IDCompositionDesktopDevice *iface,
-        IDCompositionRectangleClip **clip)
-{
-    TRACE("iface %p, clip %p.\n", iface, clip);
-    return dcomp_rectangle_clip_create(impl_from_IDCompositionDesktopDevice(iface), clip);
-}
+DCOMP_DEVICE_CREATE_RECTANGLE_CLIP(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
-static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateAnimation(IDCompositionDesktopDevice *iface,
-        IDCompositionAnimation **animation)
-{
-    TRACE("iface %p, animation %p.\n", iface, animation);
-    return dcomp_animation_create(impl_from_IDCompositionDesktopDevice(iface), animation);
-}
+DCOMP_DEVICE_CREATE_ANIMATION(desktop_device, IDCompositionDesktopDevice, impl_from_IDCompositionDesktopDevice)
 
 static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateTargetForHwnd(IDCompositionDesktopDevice *iface,
         HWND hwnd, BOOL topmost, IDCompositionTarget **target)
@@ -5444,7 +5534,520 @@ static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_CreateSurfaceFromHwnd(IDCo
     return E_NOTIMPL;
 }
 
-static const struct IDCompositionDesktopDeviceVtbl dcomp_desktop_device_vtbl =
+/* =====================================================================
+ * Shared visuals, as the Windows App Runtime uses them
+ *
+ * The Windows App Runtime makes a visual that several parties see in two steps (observed in a trace of Notepad on Windows 11):
+ * DCompositionCreateSharedVisualHandle (export 1040) gives a handle, and a private method of the device, slot 29 of the interface of
+ * IDCompositionDesktopDevice (after the three methods the public interface ends with), opens that handle as an IDCompositionVisual or
+ * as an IDCompositionTarget. Observed on Windows 11 (tests/uwp/alpc/wintrace.c): the handle is a kernel object, the device is the one
+ * DCompositionCreateDevice3 returns, the same handle opened twice gives a visual and then a target. There is no system compositor to
+ * share with here: a handle stands for one visual of this process and device (made on the first open), and a target opened from a
+ * handle is a portal into that visual: what is committed as the target's root is shown inside the visual. In Notepad the UI thread
+ * makes the handle, opens it as a visual and puts the visual into the tree of its window's target; the compositor of the Windows
+ * App SDK opens a duplicate of the handle as a target on its own device and sets the root of its scene (title, tabs, status bar)
+ * there. A handle is found by its kernel object (a duplicate is the same visual), not by its value.
+ * ===================================================================== */
+
+/* A published snapshot of the committed tree of a portal target: the layers that tree is collected to, relative to its root,
+ * with a reference to each surface and to nothing else (docs/uwp/PORTAL_SNAPSHOT_DESIGN.md in WineExplorer). It never changes
+ * once published. It is freed where its last reference goes, never under the shared lock; the last Release of a surface takes
+ * no lock, so that may be under any device's lock. */
+struct dcomp_portal_snapshot
+{
+    LONG refcount;
+    unsigned int layer_count;
+    struct wine_dcomp_layer_desc layers[];
+};
+
+/* A kernel object made by DCompositionCreateSharedVisualHandle. It is in the registry of the process while a handle of the
+ * caller's to it is open (the registry holds a reference then); its visuals and its portal target hold references too. */
+struct dcomp_share
+{
+    LONG refcount;
+    struct list entry;      /* in dcomp_share_registry while listed */
+    HANDLE object;          /* a private duplicate of the handle: its kernel object names the share */
+    struct list visuals;    /* struct dcomp_visual share_entry (one at a time); no references */
+    LONG visual_device;     /* the serial of the device that opened it as a visual first: the only one that may, 0 before */
+    BOOL target_opened;     /* an object opens as a target once (Windows 11: E_ACCESSDENIED after that, also after release) */
+    BOOL target_alive;      /* the portal target has references */
+    /* published by the portal target's device, or NULL; it stays after the target is released (Windows 11 shows it still), and
+     * goes when neither a visual nor the target is left */
+    struct dcomp_portal_snapshot *snapshot;
+};
+
+static LONG dcomp_device_serial;
+static struct list dcomp_share_registry = LIST_INIT(dcomp_share_registry);
+/* A leaf lock, taken after a device's lock and never before one. Under it pointers are followed, references counted (a last
+ * reference is never released under it) and lists changed; only opening a handle and making one also query the server under it
+ * (the registry's lookup and sweep). */
+static SRWLOCK dcomp_shared_lock = SRWLOCK_INIT;
+
+static void dcomp_shared_lock_acquire(void)
+{
+    AcquireSRWLockExclusive(&dcomp_shared_lock);
+}
+
+static void dcomp_shared_lock_release(void)
+{
+    ReleaseSRWLockExclusive(&dcomp_shared_lock);
+}
+
+static BOOL dcomp_same_object(HANDLE a, HANDLE b)
+{
+    return a == b || !NtCompareObjects(a, b);
+}
+
+/* not under the shared lock */
+static void dcomp_snapshot_release(struct dcomp_portal_snapshot *snapshot)
+{
+    unsigned int i;
+
+    if (!snapshot || InterlockedDecrement(&snapshot->refcount)) return;
+    for (i = 0; i < snapshot->layer_count; ++i)
+        if (snapshot->layers[i].content) IUnknown_Release(snapshot->layers[i].content);
+    free(snapshot);
+}
+
+/* With the shared lock held, when a visual of the share or its target is gone: with neither left, nothing shows the snapshot any
+ * more; it is returned, to be released after the lock is left. */
+static struct dcomp_portal_snapshot *dcomp_share_unused_snapshot_locked(struct dcomp_share *share)
+{
+    struct dcomp_portal_snapshot *snapshot = NULL;
+
+    if (list_empty(&share->visuals) && !share->target_alive)
+    {
+        snapshot = share->snapshot;
+        share->snapshot = NULL;
+    }
+    return snapshot;
+}
+
+/* the last reference of a visual opened from a share is gone: with the shared lock held */
+static struct dcomp_portal_snapshot *dcomp_share_remove_visual_locked(struct dcomp_visual *visual)
+{
+    list_remove(&visual->share_entry);
+    return dcomp_share_unused_snapshot_locked(visual->share);
+}
+
+/* with no shared lock held */
+static void dcomp_share_release(struct dcomp_share *share)
+{
+    if (InterlockedDecrement(&share->refcount)) return;
+    dcomp_snapshot_release(share->snapshot);
+    CloseHandle(share->object);
+    free(share);
+}
+
+/* With the shared lock held: the shares whose handles the caller has all closed (the share's duplicate is the only handle left)
+ * leave the registry; their registry references are moved to dropped, to be released after the lock is left. A share still
+ * linked to visuals or a target lives on, but nothing can open it any more. */
+static void dcomp_share_sweep_locked(struct list *dropped)
+{
+    struct dcomp_share *share, *next;
+    OBJECT_BASIC_INFORMATION info;
+
+    LIST_FOR_EACH_ENTRY_SAFE(share, next, &dcomp_share_registry, struct dcomp_share, entry)
+    {
+        if (NtQueryObject(share->object, ObjectBasicInformation, &info, sizeof(info), NULL) || info.HandleCount > 1) continue;
+        TRACE("share %p: no handle of the caller's is left.\n", share);
+        list_remove(&share->entry);
+        list_add_tail(dropped, &share->entry);
+    }
+}
+
+static void dcomp_share_release_dropped(struct list *dropped)
+{
+    struct dcomp_share *share, *next;
+
+    LIST_FOR_EACH_ENTRY_SAFE(share, next, dropped, struct dcomp_share, entry)
+    {
+        list_remove(&share->entry);
+        dcomp_share_release(share);
+    }
+}
+
+/* With the shared lock held: the share of a handle of DCompositionCreateSharedVisualHandle, found by its kernel object (a
+ * duplicate is the same share), or NULL for any other handle (Windows 11 refuses those with E_HANDLE). The only place that
+ * compares objects: opening a handle links visuals and targets to their share, later lookups follow the pointers. */
+static struct dcomp_share *dcomp_share_find_locked(HANDLE handle)
+{
+    struct dcomp_share *share;
+
+    if (!handle || handle == INVALID_HANDLE_VALUE) return NULL;
+    LIST_FOR_EACH_ENTRY(share, &dcomp_share_registry, struct dcomp_share, entry)
+        if (dcomp_same_object(share->object, handle)) return share;
+    return NULL;
+}
+
+static BOOL dcomp_share_known(HANDLE handle)
+{
+    BOOL known;
+
+    AcquireSRWLockExclusive(&dcomp_shared_lock);
+    known = !!dcomp_share_find_locked(handle);
+    ReleaseSRWLockExclusive(&dcomp_shared_lock);
+    return known;
+}
+
+/* With the shared lock held: the devices of the share's visuals, with a reference each, added to viewers once. A visual in the
+ * list has references (its last Release unlinks it under this lock), and a visual holds its device. */
+static void dcomp_share_get_viewers_locked(struct dcomp_share *share, struct dcomp_device **viewers, unsigned int *count)
+{
+    struct dcomp_visual *visual;
+    unsigned int i;
+
+    LIST_FOR_EACH_ENTRY(visual, &share->visuals, struct dcomp_visual, share_entry)
+    {
+        for (i = 0; i < *count && viewers[i] != visual->device; ++i) {}
+        if (i < *count) continue;
+        if (*count == DCOMP_MAX_VIEWERS)
+        {
+            WARN("More than %u devices show portals of one commit; some are not redrawn.\n", DCOMP_MAX_VIEWERS);
+            break;
+        }
+        IDCompositionDevice_AddRef(&visual->device->IDCompositionDevice_iface);
+        viewers[(*count)++] = visual->device;
+    }
+}
+
+/* A viewer's collection: the snapshot published for the shared visual is appended after the visual's content layer and before its
+ * children (inside the visual's subtree), under the visual's world matrix. A clip is tested per pixel in its layer's own space,
+ * so clips stay exact under any transform. The scene keeps a reference to the snapshot. A snapshot that does not fit is left out;
+ * while a snapshot is built, a nested one is cut at the layer limit instead. Another device's lock is never taken. */
+static void dcomp_collect_share(struct dcomp_visual *visual, const D2D_MATRIX_3X2_F *matrix,
+        struct dcomp_collect_context *ctx)
+{
+    unsigned int base = ctx->scene.layer_count, count, i;
+    struct dcomp_portal_snapshot *snapshot;
+
+    AcquireSRWLockExclusive(&dcomp_shared_lock);
+    if ((snapshot = visual->share->snapshot)) InterlockedIncrement(&snapshot->refcount);
+    ReleaseSRWLockExclusive(&dcomp_shared_lock);
+    if (!snapshot) return;
+
+    count = snapshot->layer_count;
+    if (count > WINE_DCOMP_MAX_LAYERS - base)
+    {
+        static LONG once;
+
+        if (!ctx->building)
+        {
+            if (!InterlockedExchange(&once, 1))
+                WARN("Leaving out the portal of visual %p: its %u layers do not fit the scene.\n", visual, count);
+            dcomp_snapshot_release(snapshot);
+            return;
+        }
+        if (!InterlockedExchange(&once, 1))
+            WARN("Cutting the nested portal of visual %p to %u of %u layers.\n", visual, WINE_DCOMP_MAX_LAYERS - base, count);
+        count = WINE_DCOMP_MAX_LAYERS - base;
+    }
+    for (i = 0; i < count; ++i)
+    {
+        const struct wine_dcomp_layer_desc *src = &snapshot->layers[i];
+        struct wine_dcomp_layer_desc *dst = &ctx->scene.layers[base + i];
+
+        *dst = *src;
+        dst->m11 = src->m11 * matrix->_11 + src->m12 * matrix->_21;
+        dst->m12 = src->m11 * matrix->_12 + src->m12 * matrix->_22;
+        dst->m21 = src->m21 * matrix->_11 + src->m22 * matrix->_21;
+        dst->m22 = src->m21 * matrix->_12 + src->m22 * matrix->_22;
+        dst->m31 = src->m31 * matrix->_11 + src->m32 * matrix->_21 + matrix->_31;
+        dst->m32 = src->m31 * matrix->_12 + src->m32 * matrix->_22 + matrix->_32;
+        dst->subtree_end = base + min(src->subtree_end, count);
+        ctx->from_portal[base + i] = TRUE;
+    }
+    ctx->scene.layer_count = base + count;
+    /* every snapshot kept adds a layer at least, so there is room */
+    if (count) ctx->snapshots[ctx->snapshot_count++] = snapshot;
+    else dcomp_snapshot_release(snapshot);
+}
+
+/* In the Commit of the portal target's device, under its lock, after the tree switch succeeded: the target's committed tree is
+ * collected to a snapshot and published in its share (a root of NULL publishes NULL), and the devices of the share's visuals are
+ * added to viewers. A nested shared visual's snapshot is copied in (flattened), so a snapshot refers to surfaces only. Every
+ * Commit publishes: a surface drawn since the last one is only shown after a Commit of its device. */
+static void dcomp_portal_publish(struct dcomp_target *target, LONGLONG now_100ns,
+        struct dcomp_device **viewers, unsigned int *viewer_count)
+{
+    D2D_MATRIX_3X2_F ident = {1,0,0,1,0,0};
+    struct dcomp_portal_snapshot *snapshot = NULL, *old;
+    struct dcomp_share *share = target->share;
+    struct dcomp_collect_context *ctx;
+    unsigned int i;
+
+    if (target->active_root)
+    {
+        if (!(ctx = calloc(1, sizeof(*ctx))))
+        {
+            ERR("Out of memory, portal %p keeps its previous snapshot.\n", target);
+            return;
+        }
+        ctx->active = TRUE;
+        ctx->building = TRUE;
+        dcomp_collect_pending(target->active_root, &ident, 1, DCOMPOSITION_OPACITY_MODE_LAYER,
+                DCOMPOSITION_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, DCOMPOSITION_BORDER_MODE_HARD, now_100ns, ctx);
+        if ((snapshot = malloc(offsetof(struct dcomp_portal_snapshot, layers[ctx->scene.layer_count]))))
+        {
+            snapshot->refcount = 1;
+            snapshot->layer_count = ctx->scene.layer_count;
+            memcpy(snapshot->layers, ctx->scene.layers, snapshot->layer_count * sizeof(*snapshot->layers));
+            for (i = 0; i < snapshot->layer_count; ++i)
+            {
+                IUnknown *content = snapshot->layers[i].content;
+                IDCompositionSurface *surface;
+
+                if (!content) continue;
+                if (SUCCEEDED(IUnknown_QueryInterface(content, &IID_IDCompositionSurface, (void **)&surface)))
+                {
+                    IDCompositionSurface_Release(surface);
+                    IUnknown_AddRef(content);
+                }
+                else
+                {
+                    /* a viewer would bind the portal device's producer to its window, where that device could revoke it;
+                     * logged once per device */
+                    if (!target->device->portal_swapchain_logged)
+                    {
+                        target->device->portal_swapchain_logged = TRUE;
+                        FIXME("device %p: a swap chain in a portal is not shown.\n", target->device);
+                    }
+                    snapshot->layers[i].content = NULL;
+                }
+            }
+        }
+        for (i = 0; i < ctx->snapshot_count; ++i) dcomp_snapshot_release(ctx->snapshots[i]);
+        free(ctx);
+        if (!snapshot)
+        {
+            ERR("Out of memory, portal %p keeps its previous snapshot.\n", target);
+            return;
+        }
+    }
+    else if (!share->snapshot) return;   /* nothing was shown, nothing is: no redraw (only this device writes the snapshot) */
+
+    TRACE("portal %p publishes snapshot %p, %u layers.\n", target, snapshot, snapshot ? snapshot->layer_count : 0);
+    AcquireSRWLockExclusive(&dcomp_shared_lock);
+    old = share->snapshot;
+    share->snapshot = snapshot;
+    if (viewers) dcomp_share_get_viewers_locked(share, viewers, viewer_count);
+    ReleaseSRWLockExclusive(&dcomp_shared_lock);
+    dcomp_snapshot_release(old);
+}
+
+/* A released portal target: its last published snapshot stays in the share and is still shown (measured on Windows 11: what a
+ * released portal target committed last stays visible in the shared visual, also after the viewer commits, takes the visual out
+ * and puts it back; only a root of NULL committed before takes it away). With no lock held. */
+static void dcomp_portal_target_unlink(struct dcomp_target *target)
+{
+    struct dcomp_share *share = target->share;
+    struct dcomp_portal_snapshot *unused;
+
+    AcquireSRWLockExclusive(&dcomp_shared_lock);
+    share->target_alive = FALSE;
+    unused = dcomp_share_unused_snapshot_locked(share);
+    ReleaseSRWLockExclusive(&dcomp_shared_lock);
+    dcomp_snapshot_release(unused);
+    target->share = NULL;
+    dcomp_share_release(share);
+}
+
+/* the snapshots a window target's scene showed, released with the target (with no lock held) */
+static void dcomp_target_release_shown(struct dcomp_target *target)
+{
+    unsigned int i;
+
+    for (i = 0; i < target->shown_count; ++i) dcomp_snapshot_release(target->shown[i]);
+    free(target->shown);
+    target->shown = NULL;
+    target->shown_count = 0;
+}
+
+/* One visual per object at a time, on the device that opened it first: while a visual opened from the object lives, another open is
+ * refused, and another device is refused also after that (Windows 11: E_ACCESSDENIED, tests/uwp/alpc/dcomp-sharedopen-probe.c).
+ * Once the visual is released, the first device opens the object as a visual again. */
+static HRESULT dcomp_shared_open_visual(struct dcomp_device *dev, HANDLE handle, REFIID iid, void **out)
+{
+    struct dcomp_visual *visual = NULL;
+    struct dcomp_share *share;
+    struct list dropped;
+    BOOL created = FALSE;
+    HRESULT hr;
+
+    list_init(&dropped);
+    /* the check and the insert are one step under the lock, so of two opens at the same time one is refused */
+    AcquireSRWLockExclusive(&dcomp_shared_lock);
+    dcomp_share_sweep_locked(&dropped);
+    if (!(share = dcomp_share_find_locked(handle))) hr = E_HANDLE;
+    else if (!list_empty(&share->visuals) || (share->visual_device && share->visual_device != dev->serial)) hr = E_ACCESSDENIED;
+    else
+    {
+        if (SUCCEEDED(hr = dcomp_visual_create(dev, &visual)))
+        {
+            share->visual_device = dev->serial;
+            created = TRUE;
+            InterlockedIncrement(&share->refcount);
+            visual->share = share;
+            list_add_tail(&share->visuals, &visual->share_entry);
+            hr = IDCompositionVisual2_QueryInterface(&visual->IDCompositionVisual2_iface, iid, out);
+        }
+    }
+    ReleaseSRWLockExclusive(&dcomp_shared_lock);
+
+    /* the reference of dcomp_visual_create belongs to the caller now; releasing it takes the lock, so it is done outside (the
+     * caller's reference from the query is still held, or this release ends the visual when the query failed) */
+    if (created) IDCompositionVisual2_Release(&visual->IDCompositionVisual2_iface);
+    dcomp_share_release_dropped(&dropped);
+    return hr;
+}
+
+/* A target that no window backs, a portal: its device publishes snapshots of what it commits as its root, and the visuals opened
+ * from the same object show them (dcomp_portal_publish, dcomp_collect_share). */
+static HRESULT dcomp_shared_open_target(struct dcomp_device *dev, HANDLE handle, REFIID iid, void **out)
+{
+    struct dcomp_target *target;
+    struct dcomp_share *share;
+    struct list dropped;
+    HRESULT hr = S_OK;
+
+    if (!(target = calloc(1, sizeof(*target)))) return E_OUTOFMEMORY;
+    target->IDCompositionTarget_iface.lpVtbl = &dcomp_target_vtbl;
+    target->refcount = 1;
+    target->device = dev;
+
+    list_init(&dropped);
+    AcquireSRWLockExclusive(&dcomp_shared_lock);
+    dcomp_share_sweep_locked(&dropped);
+    if (!(share = dcomp_share_find_locked(handle))) hr = E_HANDLE;
+    else if (share->target_opened) hr = E_ACCESSDENIED;
+    else
+    {
+        share->target_opened = TRUE;
+        share->target_alive = TRUE;
+        InterlockedIncrement(&share->refcount);
+        target->share = share;
+    }
+    ReleaseSRWLockExclusive(&dcomp_shared_lock);
+    dcomp_share_release_dropped(&dropped);
+    if (FAILED(hr))
+    {
+        free(target);
+        return hr;
+    }
+
+    IDCompositionDevice_AddRef(&dev->IDCompositionDevice_iface);
+    EnterCriticalSection(&dev->cs);
+    list_add_tail(&dev->portal_targets, &target->entry);
+    LeaveCriticalSection(&dev->cs);
+    hr = IDCompositionTarget_QueryInterface(&target->IDCompositionTarget_iface, iid, out);
+    IDCompositionTarget_Release(&target->IDCompositionTarget_iface);
+    return hr;
+}
+
+/* Methods 29 (opens a shared object) and 46 are known. The argument counts of the others are not: guessed, a stdcall stub corrupts the
+ * stack on i386, so calling one raises the stub exception instead of returning. */
+#define DCOMP_PRIVATE_STUB(n) \
+static void STDMETHODCALLTYPE dcomp_desktop_device_private##n(void) \
+{ \
+    ULONG_PTR args[2] = {(ULONG_PTR)L"dcomp.dll", (ULONG_PTR)"desktop device private method " #n}; \
+    ERR("desktop device private method " #n " is not implemented\n"); \
+    RaiseException(0x80000100 /* EXCEPTION_WINE_STUB */, EXCEPTION_NONCONTINUABLE, 2, args); \
+}
+DCOMP_PRIVATE_STUB(27) DCOMP_PRIVATE_STUB(28) DCOMP_PRIVATE_STUB(30) DCOMP_PRIVATE_STUB(31) DCOMP_PRIVATE_STUB(32)
+DCOMP_PRIVATE_STUB(33) DCOMP_PRIVATE_STUB(34) DCOMP_PRIVATE_STUB(35) DCOMP_PRIVATE_STUB(36) DCOMP_PRIVATE_STUB(37)
+DCOMP_PRIVATE_STUB(38) DCOMP_PRIVATE_STUB(39) DCOMP_PRIVATE_STUB(40) DCOMP_PRIVATE_STUB(41) DCOMP_PRIVATE_STUB(42)
+DCOMP_PRIVATE_STUB(43) DCOMP_PRIVATE_STUB(44) DCOMP_PRIVATE_STUB(47)
+#ifndef __x86_64__
+DCOMP_PRIVATE_STUB(45)
+#endif
+
+/* Method 46 of the batch-query interface ({28d6ad3d-...}, the very interface of the desktop device) takes one pointer (on 32-bit Windows 11 it
+ * removes 8 bytes: the interface and one argument) and stores a dword in it: the id of the newest batch of changes that the composition has
+ * completed. Measured on Windows 11 (tests/uwp/alpc/dcomp-dslot32.cpp; a trace of the composition engine of the Windows App Runtime shows the
+ * value rise 1, 1, 2, 3, 3, 4, 4 as it submits batches): 0 on a device nothing was submitted to; the second dword of an eight-byte block is
+ * not touched. Here each Commit submits a batch and completes it before it returns, so the answer counts the Commits of the device
+ * (from 0) and equals that of method 45. (Windows reads 1 in Notepad before its first Commit and lags one batch behind; neither is
+ * needed by the compositor, which commits either way. The other registers of the call that a trace shows belong to the caller.) */
+#ifdef __x86_64__
+/* Method 45 stores the id of the newest batch submitted to the composition. Measured on 64-bit Windows 11 (wintrace dcomp.dll!desktop[45]
+ * and [46] in Notepad): the dword rises 3, 4, 5, ... with each submitted batch (one per Commit), and method 46 (completed) follows it one
+ * step behind. Here it counts the Commits of the device, which complete before Commit returns: nothing is outstanding. Its size on the
+ * stack of i386 is not measured, so 32-bit callers still get the stub exception. */
+static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_private45(IDCompositionDesktopDevice *iface, DWORD *submitted)
+{
+    HRESULT hr = S_OK;
+
+    TRACE("iface %p, submitted %p.\n", iface, submitted);
+
+    if (!submitted) return E_POINTER;
+
+    __TRY
+    {
+        *submitted = ReadNoFence(&impl_from_IDCompositionDesktopDevice(iface)->batch);
+    }
+    __EXCEPT_PAGE_FAULT
+    {
+        hr = E_POINTER;
+    }
+    __ENDTRY
+
+    return hr;
+}
+#endif
+
+static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_private46(IDCompositionDesktopDevice *iface, DWORD *completed)
+{
+    HRESULT hr = S_OK;
+
+    TRACE("iface %p, completed %p.\n", iface, completed);
+
+    if (!completed) return E_POINTER;
+
+    __TRY
+    {
+        *completed = ReadNoFence(&impl_from_IDCompositionDesktopDevice(iface)->batch);
+    }
+    __EXCEPT_PAGE_FAULT
+    {
+        hr = E_POINTER;
+    }
+    __ENDTRY
+
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE dcomp_desktop_device_OpenSharedObject(IDCompositionDesktopDevice *iface, HANDLE handle,
+        REFIID iid, void **out)
+{
+    struct dcomp_device *dev = impl_from_IDCompositionDesktopDevice(iface);
+
+    TRACE("iface %p, handle %p, iid %s, out %p.\n", iface, handle, debugstr_guid(iid), out);
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!iid) return E_INVALIDARG;
+
+    /* only a handle of DCompositionCreateSharedVisualHandle opens (Windows 11: anything else, a closed handle too, is E_HANDLE) */
+    if (IsEqualGUID(iid, &IID_IDCompositionTarget)) return dcomp_shared_open_target(dev, handle, iid, out);
+    if (IsEqualGUID(iid, &IID_IUnknown) || IsEqualGUID(iid, &IID_IDCompositionVisual)
+            || IsEqualGUID(iid, &IID_IDCompositionVisual2))
+        return dcomp_shared_open_visual(dev, handle, iid, out);
+    if (!dcomp_share_known(handle)) return E_HANDLE;
+
+    /* Windows 11 answers E_INVALIDARG for another interface (IDispatch) */
+    WARN("Unsupported interface %s.\n", debugstr_guid(iid));
+    return E_INVALIDARG;
+}
+
+/* the interface of IDCompositionDesktopDevice and its private methods, in the order of the vtable */
+struct dcomp_desktop_device_ext_vtbl
+{
+    struct IDCompositionDesktopDeviceVtbl base;
+    void *private_methods[21];   /* slots 27 to 47 */
+};
+
+static const struct dcomp_desktop_device_ext_vtbl dcomp_desktop_device_ext_vtbl =
+{
 {
     dcomp_desktop_device_QueryInterface,
     dcomp_desktop_device_AddRef,
@@ -5473,6 +6076,16 @@ static const struct IDCompositionDesktopDeviceVtbl dcomp_desktop_device_vtbl =
     dcomp_desktop_device_CreateTargetForHwnd,
     dcomp_desktop_device_CreateSurfaceFromHandle,
     dcomp_desktop_device_CreateSurfaceFromHwnd,
+},
+{
+    dcomp_desktop_device_private27, dcomp_desktop_device_private28, dcomp_desktop_device_OpenSharedObject,
+    dcomp_desktop_device_private30, dcomp_desktop_device_private31, dcomp_desktop_device_private32,
+    dcomp_desktop_device_private33, dcomp_desktop_device_private34, dcomp_desktop_device_private35,
+    dcomp_desktop_device_private36, dcomp_desktop_device_private37, dcomp_desktop_device_private38,
+    dcomp_desktop_device_private39, dcomp_desktop_device_private40, dcomp_desktop_device_private41,
+    dcomp_desktop_device_private42, dcomp_desktop_device_private43, dcomp_desktop_device_private44,
+    dcomp_desktop_device_private45, dcomp_desktop_device_private46, dcomp_desktop_device_private47,
+},
 };
 
 static HRESULT dcomp_device_create(int version, IUnknown *rendering_device, REFIID iid, void **device)
@@ -5489,10 +6102,13 @@ static HRESULT dcomp_device_create(int version, IUnknown *rendering_device, REFI
     dev->IDCompositionDevice_iface.lpVtbl = &dcomp_device_vtbl;
     dev->IDCompositionDevice2_iface.lpVtbl = &dcomp_device2_vtbl;
     dev->IDCompositionDevice3_iface.lpVtbl = &dcomp_device3_vtbl;
-    dev->IDCompositionDesktopDevice_iface.lpVtbl = &dcomp_desktop_device_vtbl;
+    dev->IDCompositionDesktopDevice_iface.lpVtbl = &dcomp_desktop_device_ext_vtbl.base;
+    dev->commit_iface = dcomp_commit_vtbl;
     dev->version = version;
     dev->refcount = 1;
+    dev->serial = InterlockedIncrement(&dcomp_device_serial);
     list_init(&dev->targets);
+    list_init(&dev->portal_targets);
     InitializeCriticalSection(&dev->cs);
 
     if (rendering_device)
@@ -5546,4 +6162,127 @@ HRESULT WINAPI DCompositionCreateDevice3(IUnknown *rendering_device, REFIID iid,
         return E_NOINTERFACE;
 
     return dcomp_device_create(3, rendering_device, iid, device);
+}
+
+/*
+ * Export 1040 of the real dcomp.dll (tests/uwp/alpc/dcomp-exports-probe.c: a GetProcAddress sweep finds the ordinal, and the name
+ * DCompositionCreateSharedVisualHandle resolves to the same address); dcompi.dll of the Windows App Runtime asks for it (the Wine
+ * loader's message for the missing import names ordinal 1040). The signature is HRESULT (HANDLE *out), measured on Windows 11 with
+ * tests/uwp/alpc/dcomp-visualhandle-probe.c: a NULL out is E_INVALIDARG, otherwise the handle is an object of type "Composition".
+ * The compositor passes the handle on in a property of a visual; here the handle is an unnamed event, which is what a caller can
+ * do with it (duplicate it, close it) until there is a system compositor to share the visual with. (Windows returns an object of
+ * the type "Composition", here it is an event: NtQueryObject tells them apart.) The device opens only these handles: on Windows 11
+ * a handle of another object (an event, a handle of DCompositionCreateSurfaceHandle, the process) or a closed handle is E_HANDLE
+ * (tests/uwp/alpc/dcomp-sharedopen-probe.c). So each event made here has a share in the process's registry, which keeps a duplicate
+ * of it; opening a handle finds the share by its kernel object. No name is put into \BaseNamedObjects.
+ */
+HRESULT WINAPI DCompositionCreateSharedVisualHandle(HANDLE *out)
+{
+    struct dcomp_share *share;
+    struct list dropped;
+    HANDLE handle;
+    HRESULT hr;
+
+    TRACE("(%p)\n", out);
+
+    if (!out) return E_INVALIDARG;
+    *out = NULL;
+    if (!(share = calloc(1, sizeof(*share)))) return E_OUTOFMEMORY;
+    if (!(handle = CreateEventW(NULL, TRUE, FALSE, NULL)))
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        free(share);
+        return hr;
+    }
+    if (!DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &share->object, 0, FALSE, DUPLICATE_SAME_ACCESS))
+    {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        CloseHandle(handle);
+        free(share);
+        return hr;
+    }
+    share->refcount = 1;   /* the registry's */
+    list_init(&share->visuals);
+
+    /* the shares whose handles were all closed leave the registry first */
+    list_init(&dropped);
+    AcquireSRWLockExclusive(&dcomp_shared_lock);
+    dcomp_share_sweep_locked(&dropped);
+    list_add_tail(&dcomp_share_registry, &share->entry);
+    ReleaseSRWLockExclusive(&dcomp_shared_lock);
+    dcomp_share_release_dropped(&dropped);
+
+    TRACE("share %p, handle %p.\n", share, handle);
+    *out = handle;
+    return S_OK;
+}
+
+/* The compositor clock (documented in the Windows SDK, dcomp.h). Wine has no system compositor, so the clock is a fixed 60 Hz clock
+ * of the performance counter: frame N starts at N / 60 seconds. The compositor of the Windows App SDK paces its frames with
+ * DCompositionWaitForCompositorClock (on Windows 11 it calls it with no handles and a timeout of 80 ms, and gets 0, the number of
+ * handles, at each tick). */
+#define DCOMP_CLOCK_HZ 60
+#define DCOMP_MAX_WAIT_HANDLES 32   /* DCOMPOSITION_MAX_WAITFORCOMPOSITORCLOCK_OBJECTS */
+
+static UINT64 dcomp_clock_frame(LARGE_INTEGER *freq_out)
+{
+    LARGE_INTEGER now, freq;
+
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    if (freq_out) *freq_out = freq;
+    return (UINT64)now.QuadPart * DCOMP_CLOCK_HZ / (UINT64)freq.QuadPart;
+}
+
+DWORD WINAPI DCompositionWaitForCompositorClock(UINT count, const HANDLE *handles, DWORD timeout)
+{
+    LARGE_INTEGER freq, now;
+    UINT64 frame, next_tick;
+    DWORD to_tick, ret;
+
+    TRACE("count %u, handles %p, timeout %lu.\n", count, handles, timeout);
+
+    if (count > DCOMP_MAX_WAIT_HANDLES || (count && !handles))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return WAIT_FAILED;
+    }
+
+    frame = dcomp_clock_frame(&freq);
+    QueryPerformanceCounter(&now);
+    next_tick = (frame + 1) * (UINT64)freq.QuadPart / DCOMP_CLOCK_HZ;
+    to_tick = (DWORD)(((next_tick > (UINT64)now.QuadPart ? next_tick - now.QuadPart : 0) * 1000 + freq.QuadPart - 1)
+            / freq.QuadPart);
+
+    if (count)
+    {
+        ret = WaitForMultipleObjects(count, handles, FALSE, min(timeout, to_tick));
+        if (ret != WAIT_TIMEOUT) return ret;   /* a handle (or an abandoned mutex), or a failure */
+    }
+    else Sleep(min(timeout, to_tick));
+
+    return timeout < to_tick ? WAIT_TIMEOUT : count;
+}
+
+typedef enum
+{
+    COMPOSITION_FRAME_ID_CREATED,
+    COMPOSITION_FRAME_ID_CONFIRMED,
+    COMPOSITION_FRAME_ID_COMPLETED,
+} COMPOSITION_FRAME_ID_TYPE;
+
+/* every frame of the clock is created, confirmed and completed at its start here */
+HRESULT WINAPI DCompositionGetFrameId(COMPOSITION_FRAME_ID_TYPE type, UINT64 *id)
+{
+    TRACE("type %d, id %p.\n", type, id);
+
+    if (!id || (unsigned int)type > COMPOSITION_FRAME_ID_COMPLETED) return E_INVALIDARG;
+    *id = dcomp_clock_frame(NULL);
+    return S_OK;
+}
+
+HRESULT WINAPI DCompositionBoostCompositorClock(BOOL enable)
+{
+    TRACE("enable %d.\n", enable);
+    return S_OK;
 }

@@ -56,6 +56,7 @@ static const BOOL is_win64 = (sizeof(void *) > sizeof(int));
 /* Set when the server gave this services.exe the system role (SYSTEM token, ELEVATION_SYSTEM_ROLE_WORKORDER.md C3).
  * Only then are services started with the token of their account; otherwise they run with the caller's token. */
 static BOOL system_role;
+static BOOL in_session0;   /* WineExplorer: this service manager is session 0's own (session 0, with the system role) */
 
 static BOOL has_system_role(void)
 {
@@ -93,10 +94,18 @@ static void set_default_dacl(void)
 }
 
 /* The token of the account that ObjectName names. An empty name or LocalSystem is the SYSTEM token. Other accounts
- * (a user name needs a logon) are refused for now. *sddl is the security descriptor of the control pipe. */
-static DWORD get_service_token(const WCHAR *account, HANDLE *token, const WCHAR **sddl)
+ * (a user name needs a logon) are refused for now. *sddl is the security descriptor of the control pipe. A service
+ * whose SID type is not NONE gets its SID, NT SERVICE\name, as a group (B114). */
+static DWORD get_service_token(const WCHAR *account, const WCHAR *name, DWORD sid_type, HANDLE *token,
+                               const WCHAR **sddl)
 {
-    HANDLE handle;
+    struct
+    {
+        HANDLE handle;
+        BYTE sid[SECURITY_MAX_SID_SIZE];
+    } params;
+    UNICODE_STRING name_str;
+    DWORD sid_size = 0;
     NTSTATUS status;
     int type;
 
@@ -121,10 +130,18 @@ static DWORD get_service_token(const WCHAR *account, HANDLE *token, const WCHAR 
     }
     else return ERROR_SERVICE_LOGON_FAILED;
 
-    handle = (HANDLE)(ULONG_PTR)type;
-    if ((status = NtSetInformationProcess(GetCurrentProcess(), ProcessWineCreateServiceToken, &handle, sizeof(handle))))
+    params.handle = (HANDLE)(ULONG_PTR)type;
+    if (sid_type != SERVICE_SID_TYPE_NONE)
+    {
+        RtlInitUnicodeString(&name_str, name);
+        sid_size = sizeof(params.sid);
+        if ((status = RtlCreateServiceSid(&name_str, params.sid, &sid_size)))
+            return RtlNtStatusToDosError(status);
+    }
+    if ((status = NtSetInformationProcess(GetCurrentProcess(), ProcessWineCreateServiceToken, &params,
+                                          sizeof(params.handle) + sid_size)))
         return RtlNtStatusToDosError(status);
-    *token = handle;
+    *token = params.handle;
     return ERROR_SUCCESS;
 }
 
@@ -213,8 +230,70 @@ void free_service_entry(struct service_entry *entry)
     free(entry->dependOnServices);
     free(entry->dependOnGroups);
     free(entry->security);
+    free(entry->reboot_msg);
+    free(entry->failure_command);
+    free(entry->failure_actions);
     if (entry->process) release_process(entry->process);
     free(entry);
+}
+
+/* The "FailureActions" value, as Windows writes it: a SERVICE_FAILURE_ACTIONS header of five 32-bit fields (reset
+ * period, two unused pointer slots, the number of actions, the offset of the actions from the start of the value),
+ * then the SC_ACTIONs. A value that does not fit is ignored, and so are the actions of an unknown type. */
+#define FAILURE_ACTIONS_HEADER 20
+
+static void load_failure_actions(HKEY hKey, struct service_entry *entry)
+{
+    DWORD type, size = 0, count, offset, i;
+    BYTE *data;
+
+    if (load_reg_string(hKey, L"RebootMessage", TRUE, &entry->reboot_msg)) entry->reboot_msg = NULL;
+    if (load_reg_string(hKey, L"FailureCommand", TRUE, &entry->failure_command)) entry->failure_command = NULL;
+
+    if (RegQueryValueExW(hKey, L"FailureActions", NULL, &type, NULL, &size) || type != REG_BINARY ||
+        size < FAILURE_ACTIONS_HEADER || size > 0x10000) return;
+    if (!(data = malloc(size))) return;
+    if (!RegQueryValueExW(hKey, L"FailureActions", NULL, &type, data, &size) && size >= FAILURE_ACTIONS_HEADER)
+    {
+        memcpy(&count, data + 12, sizeof(count));
+        memcpy(&offset, data + 16, sizeof(offset));
+        if (count && offset >= FAILURE_ACTIONS_HEADER && offset <= size &&
+            count <= (size - offset) / sizeof(SC_ACTION) && (entry->failure_actions = malloc(count * sizeof(SC_ACTION))))
+        {
+            memcpy(entry->failure_actions, data + offset, count * sizeof(SC_ACTION));
+            entry->failure_actions_count = count;
+            for (i = 0; i < count; i++)
+                if (entry->failure_actions[i].Type > SC_ACTION_RUN_COMMAND)
+                    entry->failure_actions[i].Type = SC_ACTION_NONE;
+        }
+        if (entry->failure_actions_count || !count) memcpy(&entry->failure_reset_period, data, sizeof(DWORD));
+    }
+    free(data);
+}
+
+static DWORD save_failure_actions(HKEY hKey, const struct service_entry *entry)
+{
+    DWORD err, size, header[5];
+    BYTE *data;
+
+    if (!entry->failure_actions_count && !entry->failure_reset_period)
+    {
+        err = RegDeleteValueW(hKey, L"FailureActions");
+        return err == ERROR_FILE_NOT_FOUND ? ERROR_SUCCESS : err;
+    }
+    if (entry->failure_actions_count > MAX_FAILURE_ACTIONS) return ERROR_INVALID_PARAMETER;
+    size = FAILURE_ACTIONS_HEADER + entry->failure_actions_count * sizeof(SC_ACTION);
+    if (!(data = malloc(size))) return ERROR_NOT_ENOUGH_MEMORY;
+    header[0] = entry->failure_reset_period;
+    header[1] = header[2] = 0;
+    header[3] = entry->failure_actions_count;
+    header[4] = entry->failure_actions_count ? FAILURE_ACTIONS_HEADER : 0;
+    memcpy(data, header, sizeof(header));
+    if (entry->failure_actions_count)
+        memcpy(data + FAILURE_ACTIONS_HEADER, entry->failure_actions, entry->failure_actions_count * sizeof(SC_ACTION));
+    err = RegSetValueExW(hKey, L"FailureActions", 0, REG_BINARY, data, size);
+    free(data);
+    return err;
 }
 
 /* the per-service security descriptor of the "Security" value; an invalid one is ignored (the native default applies) */
@@ -232,6 +311,33 @@ static void load_service_security(HKEY hKey, struct service_entry *entry)
     }
     entry->security = sd;
     entry->security_size = size;
+}
+
+/* WineExplorer T5.4: the service's WexSessionService value (is_session_service); a value of another type or
+ * another number is reported and leaves the default */
+static void load_session_service(HKEY hKey, struct service_entry *entry)
+{
+    DWORD type, value, size = sizeof(value);
+
+    entry->session_service = SESSION_SERVICE_DEFAULT;
+    if (RegQueryValueExW(hKey, L"WexSessionService", NULL, &type, (BYTE *)&value, &size)) return;
+    if (type == REG_DWORD && size == sizeof(value) && value <= 1)
+        entry->session_service = value ? SESSION_SERVICE_EVERY_SESSION : SESSION_SERVICE_SESSION0;
+    else
+        WINE_WARN("%s: WexSessionService is not 0 or 1, ignored\n", wine_dbgstr_w(entry->name));
+}
+
+/* WineExplorer: a service that means something only in session 0 (Local Accounts: its pipes are the bridge's and its helper
+ * is the machine's) has WexStartInSession0Only (REG_DWORD) 1: it is auto-started there and nowhere else, so a plain prefix
+ * and a session without session 0 do not run a copy of their own. It can still be started on demand. */
+static void load_session0_start_only(HKEY hKey, struct service_entry *entry)
+{
+    DWORD type, value, size = sizeof(value);
+
+    entry->session0_start_only = FALSE;
+    if (!RegQueryValueExW(hKey, L"WexStartInSession0Only", NULL, &type, (BYTE *)&value, &size) &&
+        type == REG_DWORD && size == sizeof(value))
+        entry->session0_start_only = value != 0;
 }
 
 static DWORD load_service_config(HKEY hKey, struct service_entry *entry)
@@ -253,10 +359,16 @@ static DWORD load_service_config(HKEY hKey, struct service_entry *entry)
     if ((err = load_reg_dword(hKey, L"PreshutdownTimeout", &entry->preshutdown_timeout))) return err;
 
     load_service_security(hKey, entry);
+    load_failure_actions(hKey, entry);
     if (load_reg_dword(hKey, L"WOW64", &value) == 0 && value == 1)
         entry->is_wow64 = TRUE;
     if (load_reg_dword(hKey, L"DelayedAutoStart", &value) == 0 && value == 1)
         entry->delayed_autostart = TRUE;
+    if (load_reg_dword(hKey, L"ServiceSidType", &value) == 0 &&
+        (value == SERVICE_SID_TYPE_UNRESTRICTED || value == SERVICE_SID_TYPE_RESTRICTED))
+        entry->sid_type = value;
+    load_session_service(hKey, entry);
+    load_session0_start_only(hKey, entry);
 
     WINE_TRACE("Image path           = %s\n", wine_dbgstr_w(entry->config.lpBinaryPathName) );
     WINE_TRACE("Group                = %s\n", wine_dbgstr_w(entry->config.lpLoadOrderGroup) );
@@ -332,11 +444,21 @@ DWORD save_service_config(struct service_entry *entry)
     if ((err = reg_set_dword_value(hKey, L"ErrorControl", entry->config.dwErrorControl))) goto cleanup;
     if ((err = reg_set_dword_value(hKey, L"Type", entry->config.dwServiceType))) goto cleanup;
     if ((err = reg_set_dword_value(hKey, L"PreshutdownTimeout", entry->preshutdown_timeout))) goto cleanup;
+    if ((err = reg_set_string_value(hKey, L"RebootMessage", entry->reboot_msg, FALSE))) goto cleanup;
+    if ((err = reg_set_string_value(hKey, L"FailureCommand", entry->failure_command, FALSE))) goto cleanup;
+    if ((err = save_failure_actions(hKey, entry))) goto cleanup;
 
     if (entry->delayed_autostart)
         err = reg_set_dword_value(hKey, L"DelayedAutoStart", entry->delayed_autostart);
     else
         err = RegDeleteValueW(hKey, L"DelayedAutoStart");
+    if (err != 0 && err != ERROR_FILE_NOT_FOUND)
+        goto cleanup;
+
+    if (entry->sid_type)
+        err = reg_set_dword_value(hKey, L"ServiceSidType", entry->sid_type);
+    else
+        err = RegDeleteValueW(hKey, L"ServiceSidType");
     if (err != 0 && err != ERROR_FILE_NOT_FOUND)
         goto cleanup;
 
@@ -392,10 +514,16 @@ static void scmdatabase_remove_service(struct scmdatabase *db, struct service_en
     service->entry.next = service->entry.prev = NULL;
 }
 
+static BOOL always_started(const struct service_entry *service);
+
 static int __cdecl compare_service(const void *a, const void *b)
 {
     struct service_entry *service_a = *(struct service_entry **)a;
     struct service_entry *service_b = *(struct service_entry **)b;
+    /* the services that always run (always_started: SamSs, a demand-start service) before the auto-start ones,
+     * whose start-up may need them (B44) */
+    if (always_started(service_a) != always_started(service_b))
+        return always_started(service_a) ? -1 : 1;
     if (service_a->config.dwStartType != service_b->config.dwStartType)
         return service_a->config.dwStartType - service_b->config.dwStartType;
     return service_a->config.dwTagId - service_b->config.dwTagId;
@@ -544,6 +672,16 @@ static BOOL is_root_pnp_service(HDEVINFO set, const struct service_entry *servic
     return FALSE;
 }
 
+/* WineExplorer system tier (B44): every session's service manager with the system role (session 0's and a user
+ * session's, where SamSs is one of the session's own services) runs the Security Accounts Manager (lsass) from the
+ * start, as Windows does. Started on demand instead (secur32's start_samss), a service that authenticates in its own
+ * start-up asks for it while the database's startup lock is still held for that same start, and waits out the lock's
+ * timeout; and a standard user's program may not start a service at all, so its authentication packages fail. */
+static BOOL always_started(const struct service_entry *service)
+{
+    return system_role && !wcsicmp(service->name, L"SamSs");
+}
+
 static void scmdatabase_autostart_services(struct scmdatabase *db)
 {
     struct service_entry **services_list;
@@ -566,7 +704,7 @@ static void scmdatabase_autostart_services(struct scmdatabase *db)
     {
         if (service->config.dwStartType == SERVICE_BOOT_START ||
             service->config.dwStartType == SERVICE_SYSTEM_START ||
-            service->config.dwStartType == SERVICE_AUTO_START ||
+            service->config.dwStartType == SERVICE_AUTO_START || always_started(service) ||
             (set != INVALID_HANDLE_VALUE && is_root_pnp_service(set, service)))
         {
             if (i+1 >= size)
@@ -597,7 +735,13 @@ static void scmdatabase_autostart_services(struct scmdatabase *db)
             release_service(service);
             continue;
         }
-        if (forward_mode && !is_session_service(service->name, service->config.dwServiceType))
+        if (service->session0_start_only && !in_session0)
+        {
+            TRACE("%s is started in session 0 only\n", wine_dbgstr_w(service->name));
+            release_service(service);
+            continue;
+        }
+        if (service_is_session0s(service))
         {
             TRACE("%s is session 0's\n", wine_dbgstr_w(service->name));
             release_service(service);
@@ -970,6 +1114,37 @@ static DWORD get_service_binary_path(const struct service_entry *service_entry, 
     return ERROR_SUCCESS;
 }
 
+static WCHAR *get_windir_path( const WCHAR *path )
+{
+    WCHAR buffer[MAX_PATH];
+    int len = GetWindowsDirectoryW( buffer, MAX_PATH );
+    int len2 = wcslen( path );
+    WCHAR *ret = malloc( (len + len2 + 2) * sizeof(WCHAR) );
+    swprintf( ret, len + len2 + 2, L"%s\\%s", buffer, path );
+    return ret;
+}
+
+static BOOL get_binary_type(WCHAR *path, DWORD *type)
+{
+    BOOL ret = FALSE;
+    WCHAR *str = NULL;
+
+    if (!wcsnicmp( path, L"\\SystemRoot\\", 12 ))
+    {
+        path = str = get_windir_path( path + 12 );
+    }
+    else if (RtlDetermineDosPathNameType_U( path ) == RtlPathTypeRelative)
+    {
+        path = str = get_windir_path( path );
+    }
+    else if (!wcsncmp( path, L"\\??\\", 4 ))
+        path = path + 4;
+
+    ret = GetBinaryTypeW(path, type);
+    free(str);
+    return ret;
+}
+
 static DWORD get_winedevice_binary_path(struct service_entry *service_entry, WCHAR **path, BOOL *is_wow64)
 {
     WCHAR system_dir[MAX_PATH];
@@ -977,7 +1152,7 @@ static DWORD get_winedevice_binary_path(struct service_entry *service_entry, WCH
 
     if (!is_win64)
         *is_wow64 = FALSE;
-    else if (GetBinaryTypeW(*path, &type))
+    else if (get_binary_type(*path, &type))
         *is_wow64 = (type == SCS_32BIT_BINARY);
     else
         *is_wow64 = service_entry->is_wow64;
@@ -1077,6 +1252,9 @@ static DWORD service_start_process(struct service_entry *service_entry, struct p
 
     service_lock(service_entry);
 
+    /* No marked-for-delete check here: a winedevice host's entry is marked for delete when it is made
+     * (add_winedevice_service) and then started. StartService refuses a deleted service (rpc.c), and so does a
+     * restart after a failure (failure_restart_callback). */
     if ((process = service_entry->process))
     {
         if (WaitForSingleObject(process->process, 0) == WAIT_TIMEOUT)
@@ -1166,7 +1344,8 @@ found:
         return ERROR_SUCCESS;
     }
 
-    if ((err = get_service_token(service_entry->config.lpServiceStartName, &service_token, &sddl)))
+    if ((err = get_service_token(service_entry->config.lpServiceStartName, service_entry->name,
+                                 service_entry->sid_type, &service_token, &sddl)))
     {
         WINE_ERR("cannot start %s as %s, error = %lu\n", wine_dbgstr_w(service_entry->name),
                  wine_dbgstr_w(service_entry->config.lpServiceStartName), err);
@@ -1400,6 +1579,153 @@ static void load_registry_parameters(void)
     RegCloseKey( key );
 }
 
+/* SERVICE_CONFIG_FAILURE_ACTIONS: a restart, once its delay has passed. A service has at most one pending restart,
+ * its restart_timer, which holds a reference to it and is taken out of it under the database lock by whoever ends
+ * it: this callback, or service_cancel_restart (DeleteService, the end of services.exe), which then closes it. */
+/* Under the database lock: services.exe is ending (no restart starts any more), and the number of callbacks that took
+ * their timer and still run, which the end waits for before the database is torn down. */
+static BOOL restarts_stopping;
+static LONG restarts_running;
+
+static void CALLBACK failure_restart_callback(TP_CALLBACK_INSTANCE *instance, void *context, TP_TIMER *timer)
+{
+    struct service_entry *service = context;
+    struct scmdatabase *db = service->db;
+    BOOL mine, start;
+    DWORD err;
+
+    scmdatabase_lock(db);
+    if ((mine = service->restart_timer == timer))
+    {
+        service->restart_timer = NULL;
+        restarts_running++;
+    }
+    scmdatabase_unlock(db);
+    if (!mine) return;  /* cancelled: the canceller waits for this, then closes the timer and releases the service */
+
+    scmdatabase_lock_startup(db, INFINITE);
+    scmdatabase_lock(db);
+    start = !restarts_stopping;
+    scmdatabase_unlock(db);
+    service_lock(service);
+    /* not a service deleted or disabled meanwhile */
+    start = start && service->status.dwCurrentState == SERVICE_STOPPED && !is_marked_for_delete(service) &&
+            service->config.dwStartType != SERVICE_DISABLED;
+    service_unlock(service);
+    if (start)
+    {
+        WINE_TRACE("restarting %s after its failure\n", wine_dbgstr_w(service->name));
+        if ((err = service_start(service, 0, NULL)))
+            WINE_WARN("%s did not restart after its failure: %lu\n", wine_dbgstr_w(service->name), err);
+    }
+    scmdatabase_unlock_startup(db);
+    CloseThreadpoolTimer(timer);
+    release_service(service);
+    scmdatabase_lock(db);
+    restarts_running--;
+    scmdatabase_unlock(db);
+}
+
+void service_cancel_restart(struct service_entry *service)
+{
+    TP_TIMER *timer;
+
+    scmdatabase_lock(service->db);
+    timer = service->restart_timer;
+    service->restart_timer = NULL;
+    scmdatabase_unlock(service->db);
+    if (!timer) return;
+    SetThreadpoolTimer(timer, NULL, 0, 0);
+    WaitForThreadpoolTimerCallbacks(timer, TRUE);
+    CloseThreadpoolTimer(timer);
+    release_service(service);
+}
+
+/* the end of services.exe, before the database is torn down: no restart starts any more, the pending ones are
+ * cancelled, and the ones already running are waited for */
+static void scmdatabase_cancel_restarts(struct scmdatabase *db)
+{
+    struct service_entry *service, *found;
+    LONG running;
+
+    scmdatabase_lock(db);
+    restarts_stopping = TRUE;
+    scmdatabase_unlock(db);
+    for (;;)
+    {
+        found = NULL;
+        scmdatabase_lock(db);
+        LIST_FOR_EACH_ENTRY(service, &db->services, struct service_entry, entry)
+        {
+            if (!service->restart_timer) continue;
+            found = grab_service(service);
+            break;
+        }
+        scmdatabase_unlock(db);
+        if (!found) break;
+        service_cancel_restart(found);
+        release_service(found);
+    }
+    for (;;)
+    {
+        scmdatabase_lock(db);
+        running = restarts_running;
+        scmdatabase_unlock(db);
+        if (!running) break;
+        Sleep(10);
+    }
+}
+
+/* The service failed (its process ended while it ran): count the failure, restarting the count when the reset
+ * period has passed since the last one, and take the action for this failure (the last action repeats). Called with
+ * the database locked. */
+static void service_failed(struct service_entry *service)
+{
+    ULONGLONG now = GetTickCount64();
+    LARGE_INTEGER due;
+    SC_ACTION action;
+    TP_TIMER *timer;
+    FILETIME ft;
+    DWORD index;
+
+    if (!service->failure_actions_count || is_marked_for_delete(service) || restarts_stopping) return;
+    if (service->failure_count && service->failure_reset_period != INFINITE &&
+        now - service->last_failure > (ULONGLONG)service->failure_reset_period * 1000)
+        service->failure_count = 0;
+    service->failure_count++;
+    service->last_failure = now;
+    index = service->failure_count < service->failure_actions_count ? service->failure_count : service->failure_actions_count;
+    action = service->failure_actions[index - 1];
+
+    switch (action.Type)
+    {
+    case SC_ACTION_RESTART:
+        /* one pending restart per service, never set again: its timer may have expired with the callback waiting
+         * for the lock we hold, and a second expiry would run the callback once more after the first released it */
+        if (service->restart_timer) break;
+        if (!(timer = CreateThreadpoolTimer(failure_restart_callback, grab_service(service), NULL)))
+        {
+            release_service(service);
+            break;
+        }
+        service->restart_timer = timer;
+        due.QuadPart = -(LONGLONG)action.Delay * 10000;
+        ft.dwLowDateTime = due.u.LowPart;
+        ft.dwHighDateTime = due.u.HighPart;
+        SetThreadpoolTimer(timer, &ft, 0, 0);
+        break;
+    case SC_ACTION_RUN_COMMAND:
+        WINE_FIXME("%s failed: running %s is not implemented\n", wine_dbgstr_w(service->name),
+                   wine_dbgstr_w(service->failure_command));
+        break;
+    case SC_ACTION_REBOOT:
+        WINE_FIXME("%s failed: a reboot is not implemented\n", wine_dbgstr_w(service->name));
+        break;
+    default:
+        break;
+    }
+}
+
 static DWORD WINAPI process_monitor_thread_proc( void *arg )
 {
     struct scmdatabase *db = active_database;
@@ -1437,6 +1763,7 @@ static DWORD WINAPI process_monitor_thread_proc( void *arg )
             process->use_count--;
             release_process(process);
             notify_service_state(service);
+            service_failed(service);
         }
         scmdatabase_unlock(db);
     }
@@ -1448,22 +1775,60 @@ static DWORD WINAPI process_monitor_thread_proc( void *arg )
  * and Wine's services that work on the session's devices, desktop, processes or user (printing, scanners, smart
  * cards, WMI, terminal services, scheduled tasks and transfers run as the user, msiexec's installs, E1's broker
  * until T6). Session 0 runs them for itself too. Every other service, in practice those that programs install,
- * runs once, in session 0. */
-BOOL is_session_service(const WCHAR *name, DWORD type)
+ * runs once, in session 0.
+ *
+ * A service's own key can say otherwise: WexSessionService (REG_DWORD) 1 makes it a service of every session, 0 one
+ * of session 0 only; without the value the defaults below decide. A program's service that has to share process ids
+ * or handles with that program's processes, which session 0 cannot (each server numbers its own), is set to 1 (B76:
+ * Office's ClickToRunSvc). The value lives with the service in the machine registry (only administrators can write a
+ * service's key), goes with it when it is deleted, and is read when the service manager loads the service. Drivers
+ * and their hosts are always the session's: each server loads its own. */
+static BOOL default_session_service(const WCHAR *name)
 {
     static const WCHAR * const session_services[] =
     {
-        L"BITS", L"EventLog", L"FontCache", L"FontCache3.0.0.0", L"LanmanServer", L"MSIServer", L"PlugPlay",
+        L"BITS", L"FontCache", L"FontCache3.0.0.0", L"LanmanServer", L"MSIServer", L"PlugPlay",
         L"RpcSs", L"SamSs", L"scardsvr", L"Schedule", L"Spooler", L"StiSvc", L"TermService", L"Winmgmt",
         L"wexelevate",
     };
     unsigned int i;
 
-    if (type & (SERVICE_KERNEL_DRIVER | SERVICE_FILE_SYSTEM_DRIVER)) return TRUE;
-    if (!wcsnicmp(name, L"Winedevice", 10)) return TRUE;  /* the driver hosts (add_winedevice_service) */
     for (i = 0; i < ARRAY_SIZE(session_services); i++)
         if (!wcsicmp(name, session_services[i])) return TRUE;
     return FALSE;
+}
+
+/* configured: the service's WexSessionService value (SESSION_SERVICE_*) */
+BOOL is_session_service(const WCHAR *name, DWORD type, int configured)
+{
+    if (type & (SERVICE_KERNEL_DRIVER | SERVICE_FILE_SYSTEM_DRIVER)) return TRUE;
+    if (!wcsnicmp(name, L"Winedevice", 10)) return TRUE;  /* the driver hosts (add_winedevice_service) */
+    if (configured != SESSION_SERVICE_DEFAULT) return configured == SESSION_SERVICE_EVERY_SESSION;
+    return default_session_service(name);
+}
+
+BOOL service_is_session_service(const struct service_entry *entry)
+{
+    return is_session_service(entry->name, entry->config.dwServiceType, entry->session_service);
+}
+
+/* the calls on a service go to session 0: this session forwards, and the service is not its own, or this session
+ * does not know it (entry NULL: made since it started) */
+BOOL service_is_session0s(const struct service_entry *entry)
+{
+    return forward_mode && (!entry || !service_is_session_service(entry));
+}
+
+/* a service known by name (and type) only: this session's entry of that name decides, when there is one */
+BOOL is_session_service_name(struct scmdatabase *db, const WCHAR *name, DWORD type)
+{
+    struct service_entry *entry;
+    int configured = SESSION_SERVICE_DEFAULT;
+
+    scmdatabase_lock(db);
+    if ((entry = scmdatabase_find_service(db, name))) configured = entry->session_service;
+    scmdatabase_unlock(db);
+    return is_session_service(name, type, configured);
 }
 
 /* a session whose server reaches session 0 (its service manager answers) forwards; session 0 and a machine
@@ -1472,8 +1837,11 @@ static void init_forward_mode(void)
 {
     DWORD session = 0;
 
-    if (!ProcessIdToSessionId(GetCurrentProcessId(), &session) || !session) return;
-    if ((forward_mode = forward_available())) WINE_TRACE("services that are not the session's are session 0's\n");
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &session)) session = 0;
+    in_session0 = !session && system_role;
+    if (!session) return;
+    if ((forward_mode = forward_available()))
+        WINE_TRACE("services that are not the session's are session 0's\n");
 }
 
 int __cdecl main(int argc, char *argv[])
@@ -1537,6 +1905,7 @@ int __cdecl main(int argc, char *argv[])
         WaitForSingleObject(exit_event, INFINITE);
         PostQueuedCompletionStatus(job_completion_port, 0, 0, NULL);
         WaitForSingleObject(process_monitor_thread, INFINITE);
+        scmdatabase_cancel_restarts(active_database);  /* no new failure can arm one now */
         scmdatabase_wait_terminate(active_database);
         if (delayed_autostart_cleanup)
         {

@@ -2342,7 +2342,6 @@ static LRESULT ShellView_OnNotify(IShellViewImpl * This, UINT CtlID, LPNMHDR lpn
 	    {
 	      LPNMLVKEYDOWN plvKeyDown = (LPNMLVKEYDOWN) lpnmh;
 
-              /* initiate a rename of the selected file or directory */
               switch (plvKeyDown->wVKey)
               {
               case VK_F2:

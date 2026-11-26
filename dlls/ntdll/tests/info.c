@@ -2035,6 +2035,36 @@ static void test_query_process_io(void)
     {
         ok( pii.OtherOperationCount > 0, "Expected an OtherOperationCount > 0\n");
     }
+
+    /* a write and a read of a file count in the process's counters */
+    {
+        IO_COUNTERS after;
+        char path[MAX_PATH], dir[MAX_PATH], buffer[4096] = { 1 };
+        HANDLE file;
+        DWORD done;
+
+        GetTempPathA(sizeof(dir), dir);
+        GetTempFileNameA(dir, "ioc", 0, path);
+        file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                           FILE_FLAG_DELETE_ON_CLOSE, NULL);
+        ok( file != INVALID_HANDLE_VALUE, "CreateFile failed, error %lu\n", GetLastError());
+        status = NtQueryInformationProcess( GetCurrentProcess(), ProcessIoCounters, &pii, sizeof(pii), NULL);
+        ok( !status, "got %08lx\n", status);
+        WriteFile(file, buffer, sizeof(buffer), &done, NULL);
+        SetFilePointer(file, 0, NULL, FILE_BEGIN);
+        ReadFile(file, buffer, sizeof(buffer), &done, NULL);
+        status = NtQueryInformationProcess( GetCurrentProcess(), ProcessIoCounters, &after, sizeof(after), NULL);
+        ok( !status, "got %08lx\n", status);
+        ok( after.WriteOperationCount > pii.WriteOperationCount, "write operations %s -> %s\n",
+            wine_dbgstr_longlong(pii.WriteOperationCount), wine_dbgstr_longlong(after.WriteOperationCount));
+        ok( after.ReadOperationCount > pii.ReadOperationCount, "read operations %s -> %s\n",
+            wine_dbgstr_longlong(pii.ReadOperationCount), wine_dbgstr_longlong(after.ReadOperationCount));
+        ok( after.WriteTransferCount >= pii.WriteTransferCount + sizeof(buffer), "write bytes %s -> %s\n",
+            wine_dbgstr_longlong(pii.WriteTransferCount), wine_dbgstr_longlong(after.WriteTransferCount));
+        ok( after.ReadTransferCount >= pii.ReadTransferCount + sizeof(buffer), "read bytes %s -> %s\n",
+            wine_dbgstr_longlong(pii.ReadTransferCount), wine_dbgstr_longlong(after.ReadTransferCount));
+        CloseHandle(file);
+    }
 }
 
 static void test_query_process_times(void)
@@ -2449,6 +2479,56 @@ static void test_thread_page_priority(void)
     priority = 5;
     status = NtSetInformationThread( GetCurrentThread(), ThreadPagePriority, &priority, sizeof(priority) );
     ok( status == STATUS_SUCCESS, "expected STATUS_SUCCESS, got %08lx\n", status );
+}
+
+static void test_query_process_command_line(int argc, char **argv)
+{
+    WCHAR cmdline[MAX_PATH + 64], buffer[MAX_PATH + 128];
+    UNICODE_STRING *str = (UNICODE_STRING *)buffer;
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi;
+    NTSTATUS status;
+    HANDLE process;
+    ULONG len;
+
+    /* the current process: what GetCommandLineW gives */
+    status = NtQueryInformationProcess( GetCurrentProcess(), ProcessCommandLineInformation, buffer, sizeof(buffer), &len );
+    if (status == STATUS_INVALID_INFO_CLASS)
+    {
+        win_skip( "ProcessCommandLineInformation is not supported\n" );
+        return;
+    }
+    ok( !status, "got %#lx\n", status );
+    ok( str->Buffer == (WCHAR *)(str + 1), "got buffer %p\n", str->Buffer );
+    ok( str->Length == wcslen( GetCommandLineW() ) * sizeof(WCHAR), "got length %u\n", str->Length );
+    ok( !memcmp( str->Buffer, GetCommandLineW(), str->Length ), "got %s\n", debugstr_wn( str->Buffer, str->Length / 2 ) );
+    ok( len >= sizeof(UNICODE_STRING) + str->Length, "got len %lu\n", len );
+
+    status = NtQueryInformationProcess( GetCurrentProcess(), ProcessCommandLineInformation, buffer,
+                                        sizeof(UNICODE_STRING), &len );
+    ok( status == STATUS_INFO_LENGTH_MISMATCH, "got %#lx\n", status );
+    ok( len >= sizeof(UNICODE_STRING) + wcslen( GetCommandLineW() ) * sizeof(WCHAR), "got len %lu\n", len );
+
+    /* another process, opened with the limited query right only */
+    swprintf( cmdline, ARRAY_SIZE(cmdline), L"\"%hs\" info check_cmdline \"with spaces\" 42", argv[0] );
+    ok( CreateProcessW( NULL, cmdline, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &si, &pi ),
+        "CreateProcess failed %lu\n", GetLastError() );
+    process = OpenProcess( PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pi.dwProcessId );
+    ok( process != NULL, "OpenProcess failed %lu\n", GetLastError() );
+    memset( buffer, 0xcc, sizeof(buffer) );
+    status = NtQueryInformationProcess( process, ProcessCommandLineInformation, buffer, sizeof(buffer), &len );
+    ok( !status, "got %#lx\n", status );
+    ok( str->Length == wcslen( cmdline ) * sizeof(WCHAR), "got length %u\n", str->Length );
+    ok( !memcmp( str->Buffer, cmdline, str->Length ), "got %s\n", debugstr_wn( str->Buffer, str->Length / 2 ) );
+    CloseHandle( process );
+
+    process = OpenProcess( SYNCHRONIZE, FALSE, pi.dwProcessId );
+    status = NtQueryInformationProcess( process, ProcessCommandLineInformation, buffer, sizeof(buffer), &len );
+    ok( status == STATUS_ACCESS_DENIED, "got %#lx\n", status );
+    CloseHandle( process );
+
+    TerminateProcess( pi.hProcess, 0 );
+    wait_child_process( &pi );
 }
 
 static void test_query_process_image_file_name(void)
@@ -4804,6 +4884,7 @@ START_TEST(info)
     test_query_process_handlecount();
     test_query_process_wow64();
     test_query_process_image_file_name();
+    test_query_process_command_line(argc, argv);
     test_query_process_debug_object_handle(argc, argv);
     test_query_process_debug_flags(argc, argv);
     test_query_process_image_info();

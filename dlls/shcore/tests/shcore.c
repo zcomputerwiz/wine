@@ -27,6 +27,10 @@
 #include "shlwapi.h"
 #include "winternl.h"
 #include "appmodel.h"
+#include "lmcons.h"
+#include "lmerr.h"
+#include "lmjoin.h"
+#include "lmapibuf.h"
 
 #include "wine/test.h"
 
@@ -843,6 +847,27 @@ static void test_AppUserModelID(void)
     CoTaskMemFree(appid);
 }
 
+/* OS_DOMAINMEMBER follows the machine's domain join (Chromium reads it to decide whether a device is managed) */
+static void test_IsOS_domain_member(HMODULE hshcore)
+{
+    BOOL (WINAPI *pIsOS)(DWORD) = (void *)GetProcAddress(hshcore, "IsOS");
+    NETSETUP_JOIN_STATUS status = NetSetupUnknownStatus;
+    WCHAR *name = NULL;
+    NET_API_STATUS ret;
+
+    if (!pIsOS)
+    {
+        win_skip("IsOS is not exported by name.\n");
+        return;
+    }
+    ret = NetGetJoinInformation(NULL, &name, &status);
+    ok(ret == NERR_Success, "NetGetJoinInformation returned %lu.\n", ret);
+    if (ret) return;
+    NetApiBufferFree(name);
+    ok(!pIsOS(OS_DOMAINMEMBER) == (status != NetSetupDomainName), "IsOS(OS_DOMAINMEMBER) %d, join status %d.\n",
+       pIsOS(OS_DOMAINMEMBER), status);
+}
+
 START_TEST(shcore)
 {
     HMODULE hshcore = LoadLibraryA("shcore.dll");
@@ -869,4 +894,5 @@ START_TEST(shcore)
     test_SHRegGetPath();
     test_SHCopyKey();
     test_stream_size();
+    test_IsOS_domain_member(hshcore);
 }

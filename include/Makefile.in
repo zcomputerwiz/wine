@@ -1,6 +1,7 @@
 SOURCES = \
 	accctrl.h \
 	access.idl \
+	accountssettingspaneinterop.idl \
 	aclapi.h \
 	aclui.h \
 	activation.idl \
@@ -323,6 +324,7 @@ SOURCES = \
 	dxva2api.idl \
 	dxvahd.idl \
 	dyngraph.idl \
+	elscore.h \
 	endpointvolume.idl \
 	errhandlingapi.h \
 	errlup.idl \
@@ -913,6 +915,7 @@ SOURCES = \
 	spatialaudioclient.idl \
 	specstrings.h \
 	specstrings_strict.h \
+	spellcheck.idl \
 	sperror.h \
 	sql.h \
 	sqlext.h \
@@ -997,6 +1000,7 @@ SOURCES = \
 	wct.h \
 	wdbgexts.h \
 	weakreference.idl \
+	webauthenticationcoremanagerinterop.idl \
 	webservices.h \
 	websocket.h \
 	werapi.h \
@@ -1021,12 +1025,16 @@ SOURCES = \
 	windns.h \
 	windot11.h \
 	windows.applicationmodel.activation.idl \
+	windows.applicationmodel.appservice.idl \
 	windows.applicationmodel.background.idl \
 	windows.applicationmodel.core.idl \
 	windows.applicationmodel.datatransfer.dragdrop.core.idl \
 	windows.applicationmodel.datatransfer.dragdrop.idl \
 	windows.applicationmodel.datatransfer.idl \
 	windows.applicationmodel.idl \
+	windows.applicationmodel.useractivities.idl \
+	windows.applicationmodel.resources.core.idl \
+	windows.applicationmodel.resources.idl \
 	windows.data.json.idl \
 	windows.data.xml.dom.idl \
 	windows.devices.bluetooth.advertisement.idl \
@@ -1041,6 +1049,7 @@ SOURCES = \
 	windows.devices.radios.idl \
 	windows.devices.usb.idl \
 	windows.foundation.collections.idl \
+	windows.foundation.diagnostics.idl \
 	windows.foundation.idl \
 	windows.foundation.metadata.idl \
 	windows.foundation.numerics.idl \
@@ -1048,6 +1057,9 @@ SOURCES = \
 	windows.gaming.input.forcefeedback.idl \
 	windows.gaming.input.idl \
 	windows.gaming.ui.idl \
+	windows.globalization.datetimeformatting.idl \
+	windows.globalization.fonts.idl \
+	windows.globalization.numberformatting.idl \
 	windows.globalization.idl \
 	windows.graphics.capture.idl \
 	windows.graphics.capture.interop.idl \
@@ -1060,7 +1072,10 @@ SOURCES = \
 	windows.graphics.idl \
 	windows.graphics.imaging.idl \
 	windows.h \
+	windows.internal.staterepository.idl \
+	windows.management.core.idl \
 	windows.management.deployment.idl \
+	windows.management.policies.idl \
 	windows.media.capture.idl \
 	windows.media.closedcaptioning.idl \
 	windows.media.core.idl \
@@ -1081,6 +1096,7 @@ SOURCES = \
 	windows.perception.spatial.idl \
 	windows.perception.spatial.surfaces.idl \
 	windows.security.authentication.onlineid.idl \
+	windows.security.authentication.web.core.idl \
 	windows.security.authorization.appcapabilityaccess.idl \
 	windows.security.credentials.idl \
 	windows.security.credentials.ui.idl \
@@ -1093,19 +1109,24 @@ SOURCES = \
 	windows.storage.idl \
 	windows.storage.search.idl \
 	windows.storage.streams.idl \
+	windows.system.display.idl \
 	windows.system.idl \
 	windows.system.power.idl \
 	windows.system.profile.idl \
 	windows.system.profile.systemmanufacturers.idl \
 	windows.system.threading.idl \
 	windows.system.userprofile.idl \
+	windows.ui.applicationsettings.idl \
 	windows.ui.composition.idl \
 	windows.ui.composition.interop.idl \
 	windows.ui.core.corewindow.interop.idl \
 	windows.ui.core.idl \
 	windows.ui.idl \
+	windows.ui.shell.idl \
+	windows.ui.startscreen.idl \
 	windows.ui.input.idl \
 	windows.ui.notifications.idl \
+	windows.ui.popups.idl \
 	windows.ui.text.core.idl \
 	windows.ui.text.idl \
 	windows.ui.viewmanagement.core.idl \
@@ -1114,6 +1135,7 @@ SOURCES = \
 	windows.ui.xaml.hosting.desktopwindowxamlsource.idl \
 	windows.ui.xaml.idl \
 	windows.ui.xaml.interop.idl \
+	windows.web.http.idl \
 	windowscontracts.idl \
 	windowsx.h \
 	wine/afd.h \
@@ -1155,10 +1177,16 @@ SOURCES = \
 	wine/strmbase.h \
 	wine/svcctl.idl \
 	wine/test.h \
+	wine/tokenbroker.h \
 	wine/unixlib.h \
 	wine/vulkan.h \
 	wine/vulkan_driver.h \
+	wine/wex_accounts.h \
+	wine/wex_caller.h \
+	wine/wex_eventlog.h \
 	wine/wex_session0.h \
+	wine/wex_sysrun_conf.h \
+	wine/wex_sysrun_peer.h \
 	wine/wex_token.h \
 	wine/wex_profile.h \
 	wine/wgl.h \
@@ -1168,6 +1196,7 @@ SOURCES = \
 	wine/wined3d.h \
 	wine/winedmo.h \
 	wine/winedxgi.idl \
+	wine/wex_pipe.h \
 	wine/wingdi16.h \
 	wine/winnet16.h \
 	wine/winuser16.h \

@@ -33,6 +33,64 @@ import "windows.system.userprofile.idl";
 import "windows.ui.viewmanagement.idl";
 import "windows.applicationmodel.core.idl";
 import "windows.applicationmodel.datatransfer.idl";
+import "windows.applicationmodel.useractivities.idl";
+import "windows.ui.startscreen.idl";
+import "windows.system.display.idl";
+import "windows.web.http.idl";
+import "windows.management.core.idl";
+import "windows.system.power.idl";
+import "windows.security.authorization.appcapabilityaccess.idl";
+import "windows.devices.input.idl";
+import "windows.management.policies.idl";
+
+namespace Windows.Management.Policies {
+    runtimeclass NamedPolicy;
+}
+namespace Windows.System {
+    runtimeclass Launcher;
+    runtimeclass MemoryManager;
+    runtimeclass User;
+}
+namespace Windows.ApplicationModel.UserActivities {
+    runtimeclass UserActivity;
+    runtimeclass UserActivityAttribution;
+    runtimeclass UserActivityChannel;
+    runtimeclass UserActivityContentInfo;
+    runtimeclass UserActivityRequestManager;
+}
+namespace Windows.Security.Authorization.AppCapabilityAccess {
+    runtimeclass AppCapability;
+}
+namespace Windows.System.Power {
+    runtimeclass PowerManager;
+}
+namespace Windows.Management.Core {
+    runtimeclass ApplicationDataManager;
+}
+namespace Windows.System.Profile {
+    runtimeclass EducationSettings;
+    runtimeclass PlatformDiagnosticsAndUsageDataSettings;
+}
+namespace Windows.System.UserProfile {
+    runtimeclass AssignedAccessSettings;
+    runtimeclass DiagnosticsSettings;
+}
+namespace Windows.Web.Http {
+    runtimeclass HttpClient;
+}
+namespace Windows.System.Display {
+    runtimeclass DisplayRequest;
+}
+namespace Windows.Devices.Input {
+    runtimeclass PenDevice;
+    runtimeclass KeyboardCapabilities;
+    runtimeclass MouseCapabilities;
+    runtimeclass TouchCapabilities;
+}
+namespace Windows.UI.StartScreen {
+    runtimeclass JumpList;
+    runtimeclass JumpListItem;
+}
 
 namespace Windows.Security.ExchangeActiveSyncProvisioning {
     runtimeclass EasClientDeviceInformation;
@@ -45,10 +103,15 @@ namespace Windows.System.UserProfile {
 }
 namespace Windows.UI.ViewManagement {
     runtimeclass ApplicationView;
+    runtimeclass ViewModePreferences;
 }
 namespace Windows.ApplicationModel.Core {
     runtimeclass CoreApplication;
 }
 namespace Windows.ApplicationModel.DataTransfer {
+    runtimeclass Clipboard;
+    runtimeclass DataPackage;
     runtimeclass DataTransferManager;
+    runtimeclass HtmlFormatHelper;
+    runtimeclass StandardDataFormats;
 }

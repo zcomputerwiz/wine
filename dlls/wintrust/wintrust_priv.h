@@ -25,4 +25,11 @@ BOOL WINAPI WINTRUST_AddCert(CRYPT_PROVIDER_DATA *data, DWORD idxSigner,
  BOOL fCounterSigner, DWORD idxCounterSigner, PCCERT_CONTEXT pCert2Add);
 BOOL WINAPI WINTRUST_AddPrivData(CRYPT_PROVIDER_DATA *data, CRYPT_PROVIDER_PRIVDATA *pPrivData2Add);
 
+BOOL WINAPI WVTAsn1SpcIndirectDataContentDecode(DWORD dwCertEncodingType, LPCSTR lpszStructType,
+ const BYTE *pbEncoded, DWORD cbEncoded, DWORD dwFlags, void *pvStructInfo, DWORD *pcbStructInfo);
+BOOL WINAPI WVTAsn1CatMemberInfoDecode(DWORD dwCertEncodingType, LPCSTR lpszStructType,
+ const BYTE *pbEncoded, DWORD cbEncoded, DWORD dwFlags, void *pvStructInfo, DWORD *pcbStructInfo);
+BOOL WINAPI WVTAsn1CatNameValueDecode(DWORD dwCertEncodingType, LPCSTR lpszStructType,
+ const BYTE *pbEncoded, DWORD cbEncoded, DWORD dwFlags, void *pvStructInfo, DWORD *pcbStructInfo);
+
 #endif /* ndef __WINTRUST_PRIV_H__ */

@@ -42,6 +42,8 @@ extern void session0_init( int server_mode );
 extern uid_t session0_hive_owner(void);
 /* the requests a registry-only client may make */
 extern int session0_request_allowed( enum request req );
+/* R6: a block of process and thread ids for this server (wanted: one it held before; 0: a new one); 0 for none */
+extern unsigned int session0_new_id_block( unsigned int wanted );
 /* session 0: report a change to a registry-only client's relay */
 extern void session0_relay_notify( struct process *process, unsigned int cookie );
 /* a user's server: drop a process's relay, setting its pending events */
@@ -63,8 +65,20 @@ extern void session0_client_exit(void);
  * -1 with the error set */
 struct token;
 extern int session0_open_pipe( struct token *token, const WCHAR *name, data_size_t len );
-/* T5.2, session 0 (named_pipe.c): connect a session's opener to a pipe here over sock (owned from now on) */
+extern unsigned int session0_wait_pipe( struct token *token, const WCHAR *name, data_size_t len );
+extern unsigned int pipe_bridge_query( const WCHAR *name, data_size_t len, uid_t uid, int session );
+/* T5.2, session 0 (named_pipe.c): connect a session's opener to a pipe here over sock (owned from now on);
+ * client_pid: the opener's process id, unique across servers (R6), or 0; lease: the serial of the lease of its block */
 extern unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_size_t len, int sock,
-                                        uid_t uid, int session );
+                                        uid_t uid, int session, unsigned int client_pid, unsigned int lease );
+/* X0: a token from a description received on the link of the peer of account uid and session; NULL with *status set
+ * (session0.c, docs/SESSION0_CROSS_SERVER.md, condition 1) */
+extern struct token *link_bound_token( uid_t uid, unsigned int session, const void *desc, data_size_t size,
+                                       unsigned int *status );
+/* R6, session 0: the lease an opener's id came from is still its block's */
+extern int session0_id_lease_current( unsigned int id, unsigned int serial );
+/* WineExplorer H1: wex_accounts.c */
+extern struct object *accounts_call_start( unsigned int op, unsigned int verdict, unsigned int caller_uid,
+                                           const void *body, data_size_t size );
 
 #endif /* __WINE_SERVER_SESSION0_H */

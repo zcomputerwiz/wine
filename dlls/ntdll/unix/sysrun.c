@@ -53,45 +53,24 @@
 #include "windef.h"
 #include "winternl.h"
 #include "unix_private.h"
+#include "wine/wex_sysrun_conf.h"
+#include "wine/wex_sysrun_peer.h"
 
 #define SYSRUN_CONF     "/etc/wineexplorer/sysrun.conf"
 #define SYSRUN_LAUNCHER "/usr/local/libexec/wineexplorer/wex-sysrun"
 
 extern char **environ;
 
-/* the group and the machine root of the configuration, which must be a regular root-owned file that only root
- * can write (checked on the open descriptor) */
+/* Both keys must come from one valid protected configuration snapshot. */
 static BOOL read_config( char *group, size_t size )
 {
-    char buf[4096], *line, *next, root[8] = "";
-    struct stat st;
-    ssize_t n;
-    int fd;
+    struct wex_sysrun_conf conf;
+    char root[PATH_MAX];
 
-    group[0] = 0;
-    if ((fd = open( SYSRUN_CONF, O_RDONLY | O_NOFOLLOW | O_CLOEXEC )) == -1) return FALSE;
-    if (fstat( fd, &st ) || !S_ISREG( st.st_mode ) || st.st_uid != 0 || (st.st_mode & (S_IWGRP | S_IWOTH)))
-        n = 0;
-    else
-        n = read( fd, buf, sizeof(buf) - 1 );
-    close( fd );
-    if (n <= 0) return FALSE;
-    buf[n] = 0;
-    for (line = buf; line; line = next)
-    {
-        if ((next = strchr( line, '\n' ))) *next++ = 0;
-        if (!strncmp( line, "group=", 6 ))
-        {
-            if (strlen( line + 6 ) >= size) return FALSE;
-            strcpy( group, line + 6 );
-        }
-        else if (!strncmp( line, "machine_root=", 13 ))
-        {
-            if (line[13] != '/') return FALSE;
-            strcpy( root, "set" );
-        }
-    }
-    return group[0] && root[0];
+    return wex_sysrun_conf_load( SYSRUN_CONF, &conf ) &&
+           wex_sysrun_conf_get( &conf, "group", group, size ) == WEX_SYSRUN_CONF_VALUE &&
+           wex_sysrun_conf_get( &conf, "machine_root", root, sizeof(root) ) == WEX_SYSRUN_CONF_VALUE &&
+           root[0] == '/';
 }
 
 /* the group id of the system group, or -1 if there is no valid configuration */
@@ -131,6 +110,9 @@ BOOL sysrun_launcher_usable(void)
     if (get_system_gid() == (gid_t)-1) return FALSE;
     if (lstat( SYSRUN_LAUNCHER, &st ) || !S_ISREG( st.st_mode ) || st.st_uid != 0 || !(st.st_mode & S_ISGID))
         return FALSE;  /* not installed: stock behavior, nothing to report */
+    /* session 0's own programs (another account on the root-owned machine root) have no use for the launcher:
+     * nothing to report for them */
+    if (!stat( config_dir, &st ) && st.st_uid == 0 && getuid()) return FALSE;
     if (!(pwd = getpwuid( getuid() )) || pwd->pw_dir[0] != '/' || asprintf( &prefix, "%s/.wine", pwd->pw_dir ) < 0)
         return FALSE;
     if (strcmp( config_dir, prefix ))
@@ -158,38 +140,18 @@ void sysrun_warn_refused( const char *mode )
 
 /* Is the process at the other end of the socket the system role server of this user? It has no write access
  * to the machine root unless it is raised, so the check is on the saved group: only a process that the launcher
- * started has the system group as its saved group and the user's own ids otherwise. The caller must run with
- * the system group, so a server that a user started without the launcher is never trusted. */
+ * started has the system group as its saved group and the user's own ids otherwise (wine/wex_sysrun_peer.h, with
+ * the pidfd pin). The caller must run with the system group, so a server that a user started without the launcher
+ * is never trusted. */
 BOOL sysrun_server_ok( int fd )
 {
-    unsigned int ruid, euid, suid, fuid, rgid, egid, sgid, fgid;
-    char path[64], buf[8192], *p;
-    struct ucred cred;
-    socklen_t len = sizeof(cred);
-    gid_t gid = get_system_gid();
-    BOOL got_uid = FALSE, got_gid = FALSE;
-    ssize_t n;
-    int sfd;
+    struct wex_sysrun_peer_rule rule;
 
-    if (gid == (gid_t)-1 || getsockopt( fd, SOL_SOCKET, SO_PEERCRED, &cred, &len ) || cred.pid <= 0) return FALSE;
-    if (cred.uid != getuid()) return FALSE;
-    snprintf( path, sizeof(path), "/proc/%d/status", (int)cred.pid );
-    if ((sfd = open( path, O_RDONLY | O_CLOEXEC )) == -1) return FALSE;
-    n = read( sfd, buf, sizeof(buf) - 1 );
-    close( sfd );
-    if (n <= 0) return FALSE;
-    buf[n] = 0;
-    for (p = buf; p; p = strchr( p, '\n' ))
-    {
-        if (*p == '\n') p++;
-        if (!strncmp( p, "Uid:", 4 ))
-            got_uid = sscanf( p + 4, "%u %u %u %u", &ruid, &euid, &suid, &fuid ) == 4;
-        else if (!strncmp( p, "Gid:", 4 ))
-            got_gid = sscanf( p + 4, "%u %u %u %u", &rgid, &egid, &sgid, &fgid ) == 4;
-    }
-    if (!got_uid || !got_gid) return FALSE;
-    return ruid == getuid() && euid == ruid && suid == ruid && fuid == ruid &&
-           rgid == getgid() && sgid == gid && (egid == rgid || egid == gid);
+    rule.uid = getuid();
+    rule.real_gid = getgid();
+    rule.sys_gid = get_system_gid();
+    rule.server_name = 0;
+    return wex_sysrun_peer_ok( fd, &rule );
 }
 
 /* A process of the system role is not dumpable (it has the system group), so the user cannot ptrace it. A service
@@ -226,6 +188,21 @@ BOOL sysrun_must_drop_group( HANDLE token )
     sid = ((TOKEN_USER *)buf)->User.Sid;
     return !(sid->SubAuthorityCount == 1 && sid->SubAuthority[0] == SECURITY_LOCAL_SYSTEM_RID &&
              !memcmp( &sid->IdentifierAuthority, &nt_authority, sizeof(nt_authority) ));
+}
+
+/* The launcher's safe-shell (an administrator's elevated desktop in Safe Mode, docs/SAFE_MODE_ELEVATED_DESKTOP.md):
+ * the second gate, before anything of the prefix is loaded. The desktop keeps the system group only with the full
+ * token, which the server gives an administrator's programs in Safe Mode alone; otherwise it drops the group for good
+ * now (and the server ends it once its image is mapped). */
+void sysrun_safe_shell_gate(void)
+{
+    ULONG elevation, len;
+    gid_t gid = getgid();
+
+    if (!NtQueryInformationToken( (HANDLE)~(ULONG_PTR)3 /* the process token */, TokenElevationType, &elevation,
+                                  sizeof(elevation), &len ) && elevation == TokenElevationTypeFull)
+        return;
+    if (setresgid( gid, gid, gid )) _exit( 1 );
 }
 
 /* In the forked child, before the exec of the loader. Returns FALSE if the child must not run. */

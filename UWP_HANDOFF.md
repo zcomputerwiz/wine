@@ -1,6 +1,25 @@
-# UWP work handoff — 2026-11-12
+# UWP work handoff — 2026-11-12, updated 2026-11-13
 
-## State and scope
+## Current state (2026-11-13)
+
+This section is newer than the rest of the file, which describes the state at the handoff of 2026-11-12.
+
+* Branch `codex/uwp-runtime` and Wine `development` are at 9484da1a. The status table is in the parent checkout:
+  `docs/uwp/README.md`; the list of Wine changes is `docs/STOCK_CHANGES.md` there.
+* Done, measured on Windows 11 and passing on Wine x64 and x86 with the same binaries: package identity and
+  activation (U1.0), view lifecycle (U1.1), presentation and input (U1.1b), package information (U1.2), package
+  dependencies (U1.3), `ApplicationData` (U1.4), storage files, `FileIO`, `PathIO`, file streams, `DataReader`,
+  `DataWriter` (U1.5).
+* Where the code is: `server/uwp_context.c`, `dlls/twinapi.appcore`, `dlls/windows.ui`, `dlls/dxgi/factory.c`,
+  `dlls/kernelbase/version.c`, `dlls/windows.storage.applicationdata`, `dlls/windows.storage` (`folder.c`, `fileio.c`,
+  `filestream.c`, `vector.c`, `async.c`), `dlls/wintypes` (`datareader.c`, `storage.c`).
+* Not done: suspend and resume (the Windows probe needs a person at the machine), MRT/PRI resources, installer
+  signature check, server-side gate, `Windows.UI.Xaml` (plan: `docs/uwp/PLAN_XAML.md` in the parent, not started).
+* Tests: the probes of `tests/uwp/u1_1` and `tests/uwp/u1_3` in the parent (`run-wine-lifecycle.sh`,
+  `run-wine-deps.sh`), and the Wine tests of `windows.storage`, `wintypes`, `windows.storage.applicationdata`,
+  `windows.ui`, `twinapi.appcore`. The two `np_basic` failures of the `rpcrt4` server test are older than this work.
+
+## State and scope (2026-11-12)
 
 The UWP feature is **not complete**. U1.0 requires a real AUMID activation of
 our full-trust packaged fixture, consistent process/token identity and

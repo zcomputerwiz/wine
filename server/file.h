@@ -29,6 +29,7 @@ struct fd;
 struct mapping;
 struct async_queue;
 struct completion;
+struct completion_packet;
 struct reserve;
 
 /* server-side representation of I/O status block */
@@ -67,6 +68,8 @@ struct fd_ops
     void (*flush)(struct fd *, struct async *);
     /* query file info */
     void (*get_file_info)( struct fd *, obj_handle_t, unsigned int );
+    /* set file info */
+    void (*set_file_info)( struct fd *, struct async *, unsigned int );
     /* query volume info */
     void (*get_volume_info)( struct fd *, struct async *, unsigned int );
     /* perform an ioctl on the file */
@@ -85,8 +88,8 @@ extern int e1s_profile_inode_busy( dev_t, ino_t );
 extern struct fd *alloc_pseudo_fd( const struct fd_ops *fd_user_ops, struct object *user,
                                    unsigned int options );
 extern struct fd *open_fd( struct fd *root, const char *name, struct unicode_str nt_name,
-                           int flags, mode_t *mode, unsigned int access,
-                           unsigned int sharing, unsigned int options );
+                           mode_t *mode, unsigned int access, unsigned int sharing,
+                           unsigned int disposition, unsigned int options );
 extern struct fd *create_anonymous_fd( const struct fd_ops *fd_user_ops,
                                        int unix_fd, struct object *user, unsigned int options );
 extern struct fd *dup_fd_object( struct fd *orig, unsigned int access, unsigned int sharing,
@@ -120,6 +123,7 @@ extern void fd_queue_async( struct fd *fd, struct async *async, int type );
 extern void fd_async_wake_up( struct fd *fd, int type, unsigned int status );
 extern void fd_reselect_async( struct fd *fd, struct async_queue *queue );
 extern void default_fd_get_file_info( struct fd *fd, obj_handle_t handle, unsigned int info_class );
+extern void default_fd_set_file_info( struct fd *fd, struct async *async, unsigned int info_class );
 extern void default_fd_ioctl( struct fd *fd, ioctl_code_t code, struct async *async );
 extern void default_fd_queue_async( struct fd *fd, struct async *async, int type, int count );
 extern void default_fd_reselect_async( struct fd *fd, struct async_queue *queue );
@@ -163,6 +167,8 @@ extern struct file *create_file_for_fd_obj( struct fd *fd, unsigned int access, 
 extern void file_set_error(void);
 extern struct security_descriptor *mode_to_sd( mode_t mode, const struct sid *user, const struct sid *group );
 extern mode_t sd_to_mode( const struct security_descriptor *sd, const struct sid *owner );
+extern mode_t sd_system_group_mode( const struct security_descriptor *sd, gid_t gid, mode_t mode );
+extern int sysrun_fchmod( int fd, mode_t mode );
 extern int is_file_executable( const char *name );
 
 /* file mapping functions */
@@ -235,7 +241,7 @@ extern struct dir *get_dir_obj( struct process *process, obj_handle_t handle, un
 extern struct completion *get_completion_obj( struct process *process, obj_handle_t handle, unsigned int access );
 extern struct reserve *get_completion_reserve_obj( struct process *process, obj_handle_t handle, unsigned int access );
 extern void add_completion( struct completion *completion, apc_param_t ckey, apc_param_t cvalue,
-                            unsigned int status, apc_param_t information );
+                            unsigned int status, apc_param_t information, struct completion_packet *packet );
 extern void cleanup_thread_completion( struct thread *thread );
 
 /* serial port functions */
@@ -287,12 +293,6 @@ static inline int async_queued( struct async_queue *queue )
     return !list_empty( &queue->queue );
 }
 
-
-/* access rights that require Unix read permission */
-#define FILE_UNIX_READ_ACCESS (FILE_READ_DATA|FILE_READ_ATTRIBUTES|FILE_READ_EA)
-
-/* access rights that require Unix write permission */
-#define FILE_UNIX_WRITE_ACCESS (FILE_WRITE_DATA|FILE_APPEND_DATA|FILE_WRITE_ATTRIBUTES|FILE_WRITE_EA)
 
 /* magic file access rights for mappings */
 #define FILE_MAPPING_IMAGE  0x80000000  /* set for SEC_IMAGE mappings */

@@ -25,6 +25,7 @@
 #include "d2d1_3.h"
 #include "d2d1effectauthor.h"
 #include "d3d11.h"
+#include "dxgi1_2.h"
 #include "wincrypt.h"
 #include "wine/test.h"
 #include "initguid.h"
@@ -10336,6 +10337,443 @@ static void test_bitmap_surface(BOOL d3d11)
     release_test_context(&ctx);
 }
 
+/* A surface made by IDXGIResource1::CreateSubresourceSurface does not answer QueryInterface for the texture, but Direct2D takes it
+ * as a target (the lifted compositor of the Windows App SDK draws into composition surfaces this way). */
+static void test_subresource_surface(BOOL d3d11)
+{
+    D3D11_TEXTURE2D_DESC texture_desc = {64, 32, 1, 1, DXGI_FORMAT_B8G8R8A8_UNORM, {1, 0}, D3D11_USAGE_DEFAULT,
+            D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, 0, 0};
+    D2D1_BITMAP_PROPERTIES1 desc = {{DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED}, 96.0f, 96.0f,
+            D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW, NULL};
+    ID2D1DeviceContext *context;
+    struct d2d1_test_context ctx;
+    ID3D11Texture2D *texture, *texture2;
+    ID3D11Device *d3d_device;
+    IDXGIResource1 *resource;
+    IDXGISurface2 *surface;
+    ID2D1Bitmap1 *bitmap;
+    ID2D1Device *device;
+    unsigned int index;
+    HRESULT hr;
+
+    if (!d3d11 || !init_test_context(&ctx, d3d11))
+        return;
+    if (!ctx.factory1)
+    {
+        win_skip("ID2D1Factory1 is not supported.\n");
+        release_test_context(&ctx);
+        return;
+    }
+    hr = IDXGIDevice_QueryInterface(ctx.device, &IID_ID3D11Device, (void **)&d3d_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID3D11Device_CreateTexture2D(d3d_device, &texture_desc, NULL, &texture);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIResource1, (void **)&resource);
+    if (FAILED(hr))
+    {
+        win_skip("IDXGIResource1 is not supported.\n");
+        ID3D11Texture2D_Release(texture);
+        ID3D11Device_Release(d3d_device);
+        release_test_context(&ctx);
+        return;
+    }
+    hr = IDXGIResource1_CreateSubresourceSurface(resource, 0, &surface);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDXGISurface2_QueryInterface(surface, &IID_ID3D11Texture2D, (void **)&texture2);
+    ok(hr == E_NOINTERFACE, "Got unexpected hr %#lx.\n", hr);
+    hr = IDXGISurface2_GetResource(surface, &IID_ID3D11Texture2D, (void **)&texture2, &index);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(texture2 == texture && !index, "Got texture %p, index %u.\n", texture2, index);
+    ID3D11Texture2D_Release(texture2);
+
+    hr = ID2D1Factory1_CreateDevice(ctx.factory1, ctx.device, &device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1Device_CreateDeviceContext(device, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &context);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1DeviceContext_CreateBitmapFromDxgiSurface(context, (IDXGISurface *)surface, &desc, &bitmap);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        IDXGISurface *surface2, *texture_surface = NULL;
+
+        ok(ID2D1Bitmap1_GetOptions(bitmap) == desc.bitmapOptions, "Got options %#x.\n", ID2D1Bitmap1_GetOptions(bitmap));
+        ID3D11Texture2D_QueryInterface(texture, &IID_IDXGISurface, (void **)&texture_surface);
+        hr = ID2D1Bitmap1_GetSurface(bitmap, &surface2);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        /* the surface of the texture, not the subresource surface */
+        ok(surface2 == texture_surface, "Got surface %p, expected the texture's %p.\n", surface2, texture_surface);
+        if (surface2)
+            IDXGISurface_Release(surface2);
+        if (texture_surface)
+            IDXGISurface_Release(texture_surface);
+        ID2D1Bitmap1_Release(bitmap);
+    }
+
+    ID2D1DeviceContext_Release(context);
+    ID2D1Device_Release(device);
+    IDXGISurface2_Release(surface);
+    IDXGIResource1_Release(resource);
+    ID3D11Texture2D_Release(texture);
+    ID3D11Device_Release(d3d_device);
+    release_test_context(&ctx);
+}
+
+#ifdef __x86_64__
+/* an object for slot 15 of the context's private interface: Direct2D calls its slot 3 when it flushes */
+struct queued_draw
+{
+    const void **vtbl;
+    LONG refcount;
+    unsigned int calls;
+    ID3D11Device *d3d_device;
+    ID3D11Resource *expected_target;
+    UINT expected_width, expected_height;
+    float colour[4];
+    HRESULT result;
+    IUnknown *requeue;   /* when set, the call queues the object once more through this private interface */
+};
+
+static HRESULT STDMETHODCALLTYPE queued_draw_QueryInterface(void *iface, REFIID iid, void **out)
+{
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG STDMETHODCALLTYPE queued_draw_AddRef(void *iface)
+{
+    return InterlockedIncrement(&((struct queued_draw *)iface)->refcount);
+}
+
+static ULONG STDMETHODCALLTYPE queued_draw_Release(void *iface)
+{
+    return InterlockedDecrement(&((struct queued_draw *)iface)->refcount);
+}
+
+static HRESULT STDMETHODCALLTYPE queued_draw_draw(void *iface)
+{
+    struct queued_draw *draw = iface;
+    ID3D11RenderTargetView *rtv = NULL;
+    ID3D11DeviceContext *d3d_context;
+    ID3D11Resource *resource = NULL;
+    D3D11_VIEWPORT vp;
+    UINT count = 1;
+
+    ++draw->calls;
+    ID3D11Device_GetImmediateContext(draw->d3d_device, &d3d_context);
+    ID3D11DeviceContext_OMGetRenderTargets(d3d_context, 1, &rtv, NULL);
+    ok(!!rtv, "No render target is bound.\n");
+    if (rtv)
+    {
+        ID3D11RenderTargetView_GetResource(rtv, &resource);
+        ok(resource == draw->expected_target, "Got target %p, expected %p.\n", resource, draw->expected_target);
+        ID3D11DeviceContext_ClearRenderTargetView(d3d_context, rtv, draw->colour);
+        ID3D11Resource_Release(resource);
+        ID3D11RenderTargetView_Release(rtv);
+    }
+    ID3D11DeviceContext_RSGetViewports(d3d_context, &count, &vp);
+    ok(count == 1, "Got %u viewports.\n", count);
+    ok(vp.Width == draw->expected_width && vp.Height == draw->expected_height, "Got viewport %.8ex%.8e.\n", vp.Width, vp.Height);
+    ID3D11DeviceContext_Release(d3d_context);
+    if (draw->requeue)
+    {
+        IUnknown *priv = draw->requeue;
+        HRESULT hr;
+
+        draw->requeue = NULL;
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, IUnknown *, UINT_PTR))(*(void ***)priv)[15])(priv, iface, 0);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    }
+    return draw->result;
+}
+
+static const void *queued_draw_vtbl[] =
+{
+    queued_draw_QueryInterface,
+    queued_draw_AddRef,
+    queued_draw_Release,
+    queued_draw_draw,
+};
+
+/* the first pixel of a bitmap */
+static DWORD get_bitmap_pixel(ID2D1DeviceContext *context, ID2D1Bitmap1 *bitmap)
+{
+    D2D1_BITMAP_PROPERTIES1 desc = {{DXGI_FORMAT_R8G8B8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED}, 96.0f, 96.0f};
+    D2D1_SIZE_U size = {16, 16};
+    D2D1_POINT_2U origin = {0, 0};
+    D2D1_MAPPED_RECT mapped;
+    ID2D1Bitmap1 *readback;
+    DWORD pixel = 0xdeadbeef;
+    HRESULT hr;
+
+    desc.bitmapOptions = D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
+    hr = ID2D1DeviceContext_CreateBitmap(context, size, NULL, 0, &desc, &readback);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1Bitmap1_CopyFromBitmap(readback, &origin, (ID2D1Bitmap *)bitmap, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1Bitmap1_Map(readback, D2D1_MAP_OPTIONS_READ, &mapped);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        pixel = *(DWORD *)mapped.bits;
+        ID2D1Bitmap1_Unmap(readback);
+    }
+    ID2D1Bitmap1_Release(readback);
+    return pixel;
+}
+
+/* slot 15 of the private interface {2ea67ed7-...}: (object, 0) queues the object; at the next Flush or EndDraw Direct2D calls its
+ * slot 3, in order with its own drawing, with the target it was queued for bound, and releases it (measured:
+ * tests/uwp/alpc/d2d-ctx-slot15-probe.cpp of WineExplorer) */
+static void test_context_private_queued_draw(ID2D1DeviceContext *context, IUnknown *priv, ID3D11Device *d3d_device)
+{
+    typedef HRESULT (STDMETHODCALLTYPE *method15_t)(void *, IUnknown *, UINT_PTR);
+    D2D1_BITMAP_PROPERTIES1 desc = {{DXGI_FORMAT_R8G8B8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED}, 96.0f, 96.0f};
+    D2D1_COLOR_F red = {1.0f, 0.0f, 0.0f, 1.0f}, blue = {0.0f, 0.0f, 1.0f, 1.0f};
+    struct queued_draw draw = {queued_draw_vtbl, 1};
+    method15_t method15 = (method15_t)(*(void ***)priv)[15];
+    D2D1_SIZE_U size = {16, 16}, other_size = {8, 4};
+    ID2D1Bitmap1 *bitmap, *other;
+    IDXGISurface *surface;
+    DWORD pixel;
+    HRESULT hr;
+
+    desc.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
+    hr = ID2D1DeviceContext_CreateBitmap(context, size, NULL, 0, &desc, &bitmap);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1DeviceContext_CreateBitmap(context, other_size, NULL, 0, &desc, &other);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1Bitmap1_GetSurface(bitmap, &surface);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    IDXGISurface_QueryInterface(surface, &IID_ID3D11Resource, (void **)&draw.expected_target);
+    IDXGISurface_Release(surface);
+    draw.d3d_device = d3d_device;
+    draw.expected_width = 16;
+    draw.expected_height = 16;
+    draw.colour[1] = draw.colour[3] = 1.0f; /* green */
+    ID2D1DeviceContext_SetTarget(context, (ID2D1Image *)bitmap);
+
+    /* after Direct2D's clear: green; the object holds a reference until it is called */
+    ID2D1DeviceContext_BeginDraw(context);
+    ID2D1DeviceContext_Clear(context, &red);
+    hr = method15(priv, (IUnknown *)&draw, 0);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(draw.refcount == 2, "Got refcount %lu.\n", draw.refcount);
+    ok(!draw.calls, "Called %u times.\n", draw.calls);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(draw.calls == 1, "Called %u times.\n", draw.calls);
+    ok(draw.refcount == 1, "Got refcount %lu.\n", draw.refcount);
+    pixel = get_bitmap_pixel(context, bitmap);
+    ok(pixel == 0xff00ff00, "Got unexpected pixel %08lx.\n", pixel);
+
+    /* before a later clear: blue; twice: called twice; Flush calls it too */
+    draw.calls = 0;
+    ID2D1DeviceContext_BeginDraw(context);
+    method15(priv, (IUnknown *)&draw, 0);
+    method15(priv, (IUnknown *)&draw, 0);
+    ok(draw.refcount == 3, "Got refcount %lu.\n", draw.refcount);
+    ID2D1DeviceContext_Clear(context, &blue);
+    hr = ID2D1DeviceContext_Flush(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(draw.calls == 2, "Called %u times.\n", draw.calls);
+    ok(draw.refcount == 1, "Got refcount %lu.\n", draw.refcount);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(draw.calls == 2, "Called %u times.\n", draw.calls);
+    pixel = get_bitmap_pixel(context, bitmap);
+    ok(pixel == 0xffff0000, "Got unexpected pixel %08lx.\n", pixel);
+
+    /* a target change before the flush: it draws on the target it was queued for */
+    draw.calls = 0;
+    ID2D1DeviceContext_BeginDraw(context);
+    method15(priv, (IUnknown *)&draw, 0);
+    ID2D1DeviceContext_SetTarget(context, (ID2D1Image *)other);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(draw.calls == 1, "Called %u times.\n", draw.calls);
+    ok(draw.refcount == 1, "Got refcount %lu.\n", draw.refcount);
+    ID2D1DeviceContext_SetTarget(context, (ID2D1Image *)bitmap);
+
+    /* an object queued while EndDraw calls the queue is released without being called */
+    draw.calls = 0;
+    draw.requeue = priv;
+    ID2D1DeviceContext_BeginDraw(context);
+    method15(priv, (IUnknown *)&draw, 0);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(draw.calls == 1, "Called %u times.\n", draw.calls);
+    ok(draw.refcount == 1, "Got refcount %lu.\n", draw.refcount);
+    ok(!draw.requeue, "Not requeued.\n");
+    ID2D1DeviceContext_BeginDraw(context);
+    ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(draw.calls == 1, "Called %u times.\n", draw.calls);
+
+    /* a failure of the object is the result of EndDraw */
+    draw.calls = 0;
+    draw.result = E_FAIL;
+    ID2D1DeviceContext_BeginDraw(context);
+    method15(priv, (IUnknown *)&draw, 0);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == E_FAIL, "Got unexpected hr %#lx.\n", hr);
+    ok(draw.calls == 1, "Called %u times.\n", draw.calls);
+    ok(draw.refcount == 1, "Got refcount %lu.\n", draw.refcount);
+
+    /* a second BeginDraw keeps the queue (last: Windows fails the EndDraw calls after it) */
+    draw.calls = 0;
+    draw.result = S_OK;
+    ID2D1DeviceContext_BeginDraw(context);
+    method15(priv, (IUnknown *)&draw, 0);
+    ID2D1DeviceContext_BeginDraw(context);
+    ok(draw.refcount == 2, "Got refcount %lu.\n", draw.refcount);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    todo_wine ok(hr == D2DERR_WRONG_STATE, "Got unexpected hr %#lx.\n", hr);
+    ok(draw.calls == 1, "Called %u times.\n", draw.calls);
+    ok(draw.refcount == 1, "Got refcount %lu.\n", draw.refcount);
+    ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+
+    ID2D1DeviceContext_SetTarget(context, NULL);
+    ID3D11Resource_Release(draw.expected_target);
+    ID2D1Bitmap1_Release(other);
+    ID2D1Bitmap1_Release(bitmap);
+}
+#endif
+
+/* The private interface {46fdbfea-53f8-440c-b9e2-81dfec612a72} of the device, which the lifted compositor of the Windows App SDK asks
+ * for; slot 5 as it calls it. Only x86_64 is measured, and Wine answers the interface there only. */
+static void test_device_private(BOOL d3d11)
+{
+#ifdef __x86_64__
+    static const GUID iid_private = {0x46fdbfea, 0x53f8, 0x440c, {0xb9, 0xe2, 0x81, 0xdf, 0xec, 0x61, 0x2a, 0x72}};
+    static const GUID iid_context_private = {0x2ea67ed7, 0xd42e, 0x4c07, {0x9d, 0xd5, 0xa9, 0x1e, 0xa2, 0x3e, 0x01, 0xd2}};
+    typedef HRESULT (STDMETHODCALLTYPE *method5_t)(void *, UINT_PTR, UINT_PTR, DWORD *);
+    typedef HRESULT (STDMETHODCALLTYPE *method7_t)(void *, ID2D1Bitmap1 *, void *);
+    static const UINT_PTR args[][2] = {{2000, 0x1e0000}, {0, 0}, {0xffffffff, 0}, {2000, 0xffffffff}};
+    static const D2D1_SIZE_U size = {16, 16};
+    ID2D1DeviceContext *context;
+    struct d2d1_test_context ctx;
+    IUnknown *priv, *priv2, *unk;
+    ID2D1Device *device;
+    unsigned int i;
+    DWORD out[2];
+    HRESULT hr;
+
+    if (!init_test_context(&ctx, d3d11))
+        return;
+    if (!ctx.factory1)
+    {
+        win_skip("ID2D1Factory1 is not supported.\n");
+        release_test_context(&ctx);
+        return;
+    }
+
+    hr = ID2D1Factory1_CreateDevice(ctx.factory1, ctx.device, &device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1Device_QueryInterface(device, &iid_private, (void **)&priv);
+    if (hr == E_NOINTERFACE)
+    {
+        win_skip("The private device interface is not supported.\n");
+        ID2D1Device_Release(device);
+        release_test_context(&ctx);
+        return;
+    }
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(priv != (IUnknown *)device, "Got the device itself.\n");
+
+    hr = IUnknown_QueryInterface(priv, &iid_private, (void **)&priv2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(priv2 == priv, "Got another object.\n");
+    IUnknown_Release(priv2);
+    hr = IUnknown_QueryInterface(priv, &IID_ID2D1Device, (void **)&unk);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(unk == (IUnknown *)device, "Did not get the device.\n");
+    IUnknown_Release(unk);
+
+    /* the return value is not an HRESULT on Windows (it varies, the bits of a float were seen): only the output is checked */
+    for (i = 0; i < ARRAY_SIZE(args); ++i)
+    {
+        out[0] = out[1] = 0xaaaaaaaa;
+        ((method5_t)(*(void ***)priv)[5])(priv, args[i][0], args[i][1], out);
+        ok(out[0] == 1, "%u: Got unexpected value %#lx.\n", i, out[0]);
+        ok(out[1] == 0xaaaaaaaa, "%u: Got unexpected value %#lx after it.\n", i, out[1]);
+    }
+    ((method5_t)(*(void ***)priv)[5])(priv, 2000, 0x1e0000, NULL);
+
+    /* a device context does not answer it */
+    hr = ID2D1Device_CreateDeviceContext(device, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &context);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1DeviceContext_QueryInterface(context, &iid_private, (void **)&unk);
+    ok(hr == E_NOINTERFACE, "Got unexpected hr %#lx.\n", hr);
+
+    /* slot 7 of the context's private interface {2ea67ed7-...} sets the target, as the compositor calls it (bitmap, NULL) after
+     * BeginDraw without calling SetTarget (measured: tests/uwp/alpc/d2d-ctx-slot7-probe.cpp of WineExplorer) */
+    hr = ID2D1DeviceContext_QueryInterface(context, &iid_context_private, (void **)&unk);
+    if (hr == S_OK)
+    {
+        D2D1_BITMAP_PROPERTIES1 bitmap_desc = {{DXGI_FORMAT_R8G8B8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED}, 96.0f, 96.0f};
+        ID2D1Bitmap1 *bitmap, *plain;
+        ID2D1Image *target;
+        D2D1_COLOR_F colour = {1.0f, 0.0f, 0.0f, 1.0f};
+
+        bitmap_desc.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
+        hr = ID2D1DeviceContext_CreateBitmap(context, size, NULL, 0, &bitmap_desc, &bitmap);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        bitmap_desc.bitmapOptions = D2D1_BITMAP_OPTIONS_NONE;
+        hr = ID2D1DeviceContext_CreateBitmap(context, size, NULL, 0, &bitmap_desc, &plain);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+        /* without a target, drawing fails */
+        ID2D1DeviceContext_BeginDraw(context);
+        ID2D1DeviceContext_Clear(context, &colour);
+        hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+        ok(hr == D2DERR_WRONG_STATE, "Got unexpected hr %#lx.\n", hr);
+
+        ID2D1DeviceContext_BeginDraw(context);
+        hr = ((method7_t)(*(void ***)unk)[7])(unk, bitmap, NULL);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ID2D1DeviceContext_GetTarget(context, &target);
+        ok(target == (ID2D1Image *)bitmap, "Got unexpected target %p.\n", target);
+        if (target) ID2D1Image_Release(target);
+        ID2D1DeviceContext_Clear(context, &colour);
+        hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+        /* NULL clears it; a bitmap without the target option is not taken, and the call still succeeds */
+        hr = ((method7_t)(*(void ***)unk)[7])(unk, NULL, NULL);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ID2D1DeviceContext_GetTarget(context, &target);
+        ok(!target, "Got unexpected target %p.\n", target);
+        hr = ((method7_t)(*(void ***)unk)[7])(unk, plain, NULL);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ID2D1DeviceContext_GetTarget(context, &target);
+        ok(target != (ID2D1Image *)plain, "Got the bitmap without the target option.\n");
+        if (target) ID2D1Image_Release(target);
+
+        ID2D1DeviceContext_SetTarget(context, NULL);
+        ID2D1Bitmap1_Release(plain);
+        ID2D1Bitmap1_Release(bitmap);
+
+        if (d3d11)
+        {
+            ID3D11Device *d3d_device;
+
+            IDXGIDevice_QueryInterface(ctx.device, &IID_ID3D11Device, (void **)&d3d_device);
+            test_context_private_queued_draw(context, unk, d3d_device);
+            ID3D11Device_Release(d3d_device);
+        }
+        IUnknown_Release(unk);
+    }
+    else
+    {
+        win_skip("The private context interface is not supported.\n");
+    }
+    ID2D1DeviceContext_Release(context);
+
+    IUnknown_Release(priv);
+    ID2D1Device_Release(device);
+    release_test_context(&ctx);
+#endif
+}
+
 static void test_device_context(BOOL d3d11)
 {
     D2D1_HWND_RENDER_TARGET_PROPERTIES hwnd_rt_desc;
@@ -11561,6 +11999,221 @@ static void test_colour_space(BOOL d3d11)
             }
         }
     }
+}
+
+/* Results of Windows 11 for shapes of straight lines (curves are kept as Bézier segments there and flattened on Wine). */
+static void test_combine_geometry(BOOL d3d11)
+{
+    static const struct geometry_segment segments[] =
+    {
+        /* 0: 0..100 */
+        {SEGMENT_LINE, {{{100.0f,   0.0f}}}}, {SEGMENT_LINE, {{{100.0f, 100.0f}}}},
+        {SEGMENT_LINE, {{{  0.0f, 100.0f}}}}, {SEGMENT_LINE, {{{  0.0f,   0.0f}}}},
+        /* 4: 20..80 */
+        {SEGMENT_LINE, {{{ 80.0f,  20.0f}}}}, {SEGMENT_LINE, {{{ 80.0f,  80.0f}}}},
+        {SEGMENT_LINE, {{{ 20.0f,  80.0f}}}}, {SEGMENT_LINE, {{{ 20.0f,  20.0f}}}},
+        /* 8: 20..80 as a hole */
+        {SEGMENT_LINE, {{{ 20.0f,  80.0f}}}}, {SEGMENT_LINE, {{{ 80.0f,  80.0f}}}},
+        {SEGMENT_LINE, {{{ 80.0f,  20.0f}}}}, {SEGMENT_LINE, {{{ 20.0f,  20.0f}}}},
+        /* 12: union of 0..100 and 50..150 */
+        {SEGMENT_LINE, {{{100.0f,   0.0f}}}}, {SEGMENT_LINE, {{{100.0f,  50.0f}}}},
+        {SEGMENT_LINE, {{{150.0f,  50.0f}}}}, {SEGMENT_LINE, {{{150.0f, 150.0f}}}},
+        {SEGMENT_LINE, {{{ 50.0f, 150.0f}}}}, {SEGMENT_LINE, {{{ 50.0f, 100.0f}}}},
+        {SEGMENT_LINE, {{{  0.0f, 100.0f}}}}, {SEGMENT_LINE, {{{  0.0f,   0.0f}}}},
+        /* 20: intersection 50..100 */
+        {SEGMENT_LINE, {{{100.0f,  50.0f}}}}, {SEGMENT_LINE, {{{100.0f, 100.0f}}}},
+        {SEGMENT_LINE, {{{ 50.0f, 100.0f}}}}, {SEGMENT_LINE, {{{ 50.0f,  50.0f}}}},
+        /* 24: 50..150 without 0..100 */
+        {SEGMENT_LINE, {{{150.0f,  50.0f}}}}, {SEGMENT_LINE, {{{150.0f, 150.0f}}}},
+        {SEGMENT_LINE, {{{ 50.0f, 150.0f}}}}, {SEGMENT_LINE, {{{ 50.0f, 100.0f}}}},
+        {SEGMENT_LINE, {{{100.0f, 100.0f}}}}, {SEGMENT_LINE, {{{100.0f,  50.0f}}}},
+        /* 30: 0..100 without 50..150 */
+        {SEGMENT_LINE, {{{100.0f,   0.0f}}}}, {SEGMENT_LINE, {{{100.0f,  50.0f}}}},
+        {SEGMENT_LINE, {{{ 50.0f,  50.0f}}}}, {SEGMENT_LINE, {{{ 50.0f, 100.0f}}}},
+        {SEGMENT_LINE, {{{  0.0f, 100.0f}}}}, {SEGMENT_LINE, {{{  0.0f,   0.0f}}}},
+        /* 36: 200..210 */
+        {SEGMENT_LINE, {{{210.0f, 200.0f}}}}, {SEGMENT_LINE, {{{210.0f, 210.0f}}}},
+        {SEGMENT_LINE, {{{200.0f, 210.0f}}}}, {SEGMENT_LINE, {{{200.0f, 200.0f}}}},
+        /* 40: the band -10..110 x 40..60 crossing 0..100, XOR: bottom part, right end, left end, top part */
+        {SEGMENT_LINE, {{{100.0f,  60.0f}}}}, {SEGMENT_LINE, {{{100.0f, 100.0f}}}},
+        {SEGMENT_LINE, {{{  0.0f, 100.0f}}}}, {SEGMENT_LINE, {{{  0.0f,  60.0f}}}},
+        {SEGMENT_LINE, {{{110.0f,  40.0f}}}}, {SEGMENT_LINE, {{{110.0f,  60.0f}}}},
+        {SEGMENT_LINE, {{{100.0f,  60.0f}}}}, {SEGMENT_LINE, {{{100.0f,  40.0f}}}},
+        {SEGMENT_LINE, {{{  0.0f,  40.0f}}}}, {SEGMENT_LINE, {{{  0.0f,  60.0f}}}},
+        {SEGMENT_LINE, {{{-10.0f,  60.0f}}}}, {SEGMENT_LINE, {{{-10.0f,  40.0f}}}},
+        {SEGMENT_LINE, {{{100.0f,   0.0f}}}}, {SEGMENT_LINE, {{{100.0f,  40.0f}}}},
+        {SEGMENT_LINE, {{{  0.0f,  40.0f}}}}, {SEGMENT_LINE, {{{  0.0f,   0.0f}}}},
+        /* 56: 30..90 x 20..80 */
+        {SEGMENT_LINE, {{{ 90.0f,  20.0f}}}}, {SEGMENT_LINE, {{{ 90.0f,  80.0f}}}},
+        {SEGMENT_LINE, {{{ 30.0f,  80.0f}}}}, {SEGMENT_LINE, {{{ 30.0f,  20.0f}}}},
+    };
+    static const struct expected_geometry_figure figures[] =
+    {
+        /* 0 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {  0.0f,   0.0f}, 4, &segments[0]},
+        /* 1 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, { 20.0f,  20.0f}, 4, &segments[4]},
+        /* 2 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, { 20.0f,  20.0f}, 4, &segments[8]},
+        /* 3 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {  0.0f,   0.0f}, 4, &segments[0]},
+        /* 4 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {  0.0f,   0.0f}, 8, &segments[12]},
+        /* 5 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, { 50.0f,  50.0f}, 4, &segments[20]},
+        /* 6 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {100.0f,  50.0f}, 6, &segments[24]},
+        /* 7 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {  0.0f,   0.0f}, 6, &segments[30]},
+        /* 8 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {  0.0f,   0.0f}, 6, &segments[30]},
+        /* 9 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {200.0f, 200.0f}, 4, &segments[36]},
+        /* 10 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {  0.0f,   0.0f}, 4, &segments[0]},
+        /* 11 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {  0.0f,  60.0f}, 4, &segments[40]},
+        /* 12 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {100.0f,  40.0f}, 4, &segments[44]},
+        /* 13 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {-10.0f,  40.0f}, 4, &segments[48]},
+        /* 14 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, {  0.0f,   0.0f}, 4, &segments[52]},
+        /* 15 */ {D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, { 30.0f,  20.0f}, 4, &segments[56]},
+    };
+    static const struct
+    {
+        unsigned int first, second;
+        D2D1_COMBINE_MODE mode;
+        BOOL shift;
+        unsigned int figure_count, figure;
+    }
+    tests[] =
+    {
+        /* geometries: 0 = 0..100, 1 = 20..80 (inside), 2 = 50..150 (overlapping), 3 = 200..210 (apart),
+         * 4 = -10..110 x 40..60 (a band through 0) */
+        {0, 1, D2D1_COMBINE_MODE_UNION,     FALSE, 1, 0},
+        {0, 1, D2D1_COMBINE_MODE_INTERSECT, FALSE, 1, 1},
+        {0, 1, D2D1_COMBINE_MODE_XOR,       FALSE, 2, 2},
+        {0, 1, D2D1_COMBINE_MODE_EXCLUDE,   FALSE, 2, 2},
+        {0, 2, D2D1_COMBINE_MODE_UNION,     FALSE, 1, 4},
+        {0, 2, D2D1_COMBINE_MODE_INTERSECT, FALSE, 1, 5},
+        {0, 2, D2D1_COMBINE_MODE_XOR,       FALSE, 2, 6},
+        {0, 2, D2D1_COMBINE_MODE_EXCLUDE,   FALSE, 1, 7},
+        {0, 3, D2D1_COMBINE_MODE_UNION,     FALSE, 2, 9},
+        {0, 3, D2D1_COMBINE_MODE_INTERSECT, FALSE, 0, 0},
+        {0, 3, D2D1_COMBINE_MODE_EXCLUDE,   FALSE, 1, 10},
+        {0, 4, D2D1_COMBINE_MODE_XOR,       FALSE, 4, 11},
+        {0, 1, D2D1_COMBINE_MODE_INTERSECT, TRUE,  1, 15},
+        {0, 0, D2D1_COMBINE_MODE_UNION,     FALSE, 1, 0},
+        {0, 0, D2D1_COMBINE_MODE_EXCLUDE,   FALSE, 0, 0},
+    };
+    static const D2D1_RECT_F rects[] =
+    {
+        {0.0f, 0.0f, 100.0f, 100.0f}, {20.0f, 20.0f, 80.0f, 80.0f}, {50.0f, 50.0f, 150.0f, 150.0f},
+        {200.0f, 200.0f, 210.0f, 210.0f}, {-10.0f, 40.0f, 110.0f, 60.0f},
+    };
+    ID2D1RectangleGeometry *geometries[ARRAY_SIZE(rects)];
+    struct geometry_sink sink;
+    struct d2d1_test_context ctx;
+    D2D1_MATRIX_3X2_F matrix;
+    unsigned int i;
+    HRESULT hr;
+
+    if (!init_test_context(&ctx, d3d11))
+        return;
+
+    for (i = 0; i < ARRAY_SIZE(rects); ++i)
+    {
+        hr = ID2D1Factory_CreateRectangleGeometry(ctx.factory, &rects[i], &geometries[i]);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    }
+    set_matrix_identity(&matrix);
+    translate_matrix(&matrix, 10.0f, 0.0f);
+
+    for (i = 0; i < ARRAY_SIZE(tests); ++i)
+    {
+        winetest_push_context("Test %u", i);
+        geometry_sink_init(&sink);
+        hr = ID2D1RectangleGeometry_CombineWithGeometry(geometries[tests[i].first],
+                (ID2D1Geometry *)geometries[tests[i].second], tests[i].mode, tests[i].shift ? &matrix : NULL, 0.25f,
+                (ID2D1SimplifiedGeometrySink *)&sink.ID2D1GeometrySink_iface);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        geometry_sink_check(&sink, D2D1_FILL_MODE_ALTERNATE, tests[i].figure_count, &figures[tests[i].figure], 0);
+        geometry_sink_cleanup(&sink);
+        winetest_pop_context();
+    }
+
+    /* an invalid mode; a tolerance of 0 or less is accepted */
+    geometry_sink_init(&sink);
+    hr = ID2D1RectangleGeometry_CombineWithGeometry(geometries[0], (ID2D1Geometry *)geometries[1], 4, NULL, 0.25f,
+            (ID2D1SimplifiedGeometrySink *)&sink.ID2D1GeometrySink_iface);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1RectangleGeometry_CombineWithGeometry(geometries[0], (ID2D1Geometry *)geometries[1],
+            D2D1_COMBINE_MODE_UNION, NULL, -1.0f, (ID2D1SimplifiedGeometrySink *)&sink.ID2D1GeometrySink_iface);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    geometry_sink_cleanup(&sink);
+
+    /* curved geometries: the union and the intersection of two ellipses, checked by the inside test of the result at points
+     * clear of both outlines (the pieces next to crossings that are not on the grid must be classified right) */
+    {
+        static const D2D1_ELLIPSE ellipse_desc[2] = {{{100.0f, 100.0f}, 60.0f, 40.0f}, {{140.0f, 120.0f}, 50.0f, 70.0f}};
+        static const D2D1_COMBINE_MODE modes[2] = {D2D1_COMBINE_MODE_UNION, D2D1_COMBINE_MODE_INTERSECT};
+        ID2D1EllipseGeometry *ellipses[2];
+        unsigned int m, bad;
+        int x, y;
+
+        for (i = 0; i < 2; ++i)
+        {
+            hr = ID2D1Factory_CreateEllipseGeometry(ctx.factory, &ellipse_desc[i], &ellipses[i]);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        }
+        for (m = 0; m < ARRAY_SIZE(modes); ++m)
+        {
+            ID2D1PathGeometry *path;
+            ID2D1GeometrySink *path_sink;
+
+            winetest_push_context("Ellipses, mode %u", modes[m]);
+            hr = ID2D1Factory_CreatePathGeometry(ctx.factory, &path);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            hr = ID2D1PathGeometry_Open(path, &path_sink);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            hr = ID2D1EllipseGeometry_CombineWithGeometry(ellipses[0], (ID2D1Geometry *)ellipses[1], modes[m], NULL, 0.25f,
+                    (ID2D1SimplifiedGeometrySink *)path_sink);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            hr = ID2D1GeometrySink_Close(path_sink);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            ID2D1GeometrySink_Release(path_sink);
+            for (y = 50, bad = 0; y <= 200; y += 3)
+            {
+                for (x = 30; x <= 200; x += 3)
+                {
+                    D2D1_POINT_2F p = {x + 0.5f, y + 0.5f};
+                    float d[2];
+                    BOOL in[2], expect, contains = FALSE;
+
+                    for (i = 0; i < 2; ++i)
+                    {
+                        float dx = (p.x - ellipse_desc[i].point.x) / ellipse_desc[i].radiusX;
+                        float dy = (p.y - ellipse_desc[i].point.y) / ellipse_desc[i].radiusY;
+
+                        d[i] = dx * dx + dy * dy;
+                        in[i] = d[i] < 1.0f;
+                    }
+                    if (fabsf(d[0] - 1.0f) < 0.06f || fabsf(d[1] - 1.0f) < 0.06f) continue;   /* near an outline */
+                    expect = m ? in[0] && in[1] : in[0] || in[1];
+                    hr = ID2D1PathGeometry_FillContainsPoint(path, p, NULL, 0.25f, &contains);
+                    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                    if (!!contains != expect) ++bad;
+                }
+            }
+            ok(!bad, "%u points are on the wrong side of the result.\n", bad);
+            ID2D1PathGeometry_Release(path);
+            winetest_pop_context();
+        }
+
+        /* a transform with a NaN */
+        {
+            D2D1_MATRIX_3X2_F nan_matrix = {{{1.0f, 0.0f, 0.0f, 1.0f, NAN, 0.0f}}};
+
+            geometry_sink_init(&sink);
+            hr = ID2D1EllipseGeometry_CombineWithGeometry(ellipses[0], (ID2D1Geometry *)ellipses[1], D2D1_COMBINE_MODE_UNION,
+                    &nan_matrix, 0.25f, (ID2D1SimplifiedGeometrySink *)&sink.ID2D1GeometrySink_iface);
+            ok(hr == D2DERR_BAD_NUMBER, "Got unexpected hr %#lx.\n", hr);
+            geometry_sink_cleanup(&sink);
+        }
+        for (i = 0; i < 2; ++i)
+            ID2D1EllipseGeometry_Release(ellipses[i]);
+    }
+
+    for (i = 0; i < ARRAY_SIZE(rects); ++i)
+        ID2D1RectangleGeometry_Release(geometries[i]);
+    release_test_context(&ctx);
 }
 
 static void test_geometry_group(BOOL d3d11)
@@ -18368,6 +19021,8 @@ START_TEST(d2d1)
     queue_test(test_create_device_context);
     queue_test(test_bitmap_surface);
     queue_test(test_device_context);
+    queue_test(test_device_private);
+    queue_test(test_subresource_surface);
     queue_d3d10_test(test_invert_matrix);
     queue_d3d10_test(test_skew_matrix);
     queue_test(test_command_list);
@@ -18378,6 +19033,7 @@ START_TEST(d2d1)
     queue_d3d10_test(test_math);
     queue_d3d10_test(test_colour_space);
     queue_d3d10_test(test_geometry_group);
+    queue_d3d10_test(test_combine_geometry);
     queue_test(test_mt_factory);
     queue_d3d10_test(test_effect_register);
     queue_test(test_effect_context);

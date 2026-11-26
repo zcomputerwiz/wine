@@ -496,6 +496,7 @@ CRYPT_PROVIDER_PRIVDATA * WINAPI WTHelperGetProvPrivateDataFromChain(CRYPT_PROVI
 #define SPC_SIGINFO_OBJID            "1.3.6.1.4.1.311.2.1.30"
 #define CAT_NAMEVALUE_OBJID          "1.3.6.1.4.1.311.12.2.1"
 #define CAT_MEMBERINFO_OBJID         "1.3.6.1.4.1.311.12.2.2"
+#define CAT_MEMBERINFO2_OBJID        "1.3.6.1.4.1.311.12.2.3"
 
 #define SPC_SP_AGENCY_INFO_STRUCT        ((LPCSTR) 2000)
 #define SPC_MINIMAL_CRITERIA_STRUCT      ((LPCSTR) 2001)
@@ -607,6 +608,12 @@ typedef struct _CAT_MEMBERINFO
     LPWSTR pwszSubjGuid;
     DWORD  dwCertVersion;
 } CAT_MEMBERINFO, *PCAT_MEMBERINFO;
+
+typedef struct _CAT_MEMBERINFO2
+{
+    GUID  SubjectGuid;
+    DWORD dwCertVersion;
+} CAT_MEMBERINFO2, *PCAT_MEMBERINFO2;
 
 /* PSDK protects the remaining defines with WT_DEFINE_ALL_APIS, but it's
  * defined by default.  No need to protect against bad headers from old PSDKs.

@@ -168,7 +168,7 @@ struct context_data
                  unsigned char regs[80]; } i386_regs;
         struct { struct { unsigned __int64 low, high; } fpregs[32]; } x86_64_regs;
         struct { unsigned __int64 d[32]; unsigned int fpscr; } arm_regs;
-        struct { struct { unsigned __int64 low, high; } q[32]; unsigned int fpcr, fpsr; } arm64_regs;
+        struct { struct { unsigned __int64 low, high; } q[16]; unsigned int fpcr, fpsr; } arm64_regs;
     } fp;  /* selected by SERVER_CTX_FLOATING_POINT */
     union
     {
@@ -187,8 +187,9 @@ struct context_data
     } exec_space;                /* selected by SERVER_CTX_EXEC_SPACE */
     union
     {
-        struct { struct { unsigned __int64 low, high; } ymm_high[16]; } regs;
-    } ymm;                       /* selected by SERVER_CTX_YMM_REGISTERS */
+        struct { struct { unsigned __int64 low, high; } ymm_high[16]; } ymm_regs;
+        struct { struct { unsigned __int64 low, high; } q16[16]; } arm64_regs;
+    } vector;                    /* selected by SERVER_CTX_VECTOR_REGISTERS */
     union
     {
         unsigned __int64 arm64_x18;
@@ -201,7 +202,7 @@ struct context_data
 #define SERVER_CTX_FLOATING_POINT     0x0008
 #define SERVER_CTX_DEBUG_REGISTERS    0x0010
 #define SERVER_CTX_EXTENDED_REGISTERS 0x0020
-#define SERVER_CTX_YMM_REGISTERS      0x0040
+#define SERVER_CTX_VECTOR_REGISTERS   0x0040
 #define SERVER_CTX_EXEC_SPACE         0x0080
 #define SERVER_CTX_TLS                0x0100
 
@@ -514,7 +515,8 @@ enum apc_type
     APC_MAP_VIEW_EX,
     APC_UNMAP_VIEW,
     APC_CREATE_THREAD,
-    APC_DUP_HANDLE
+    APC_DUP_HANDLE,
+    APC_WEX_REGKEY
 };
 
 struct user_apc
@@ -652,6 +654,12 @@ union apc_call
         unsigned int     attributes;   /* object attributes */
         unsigned int     options;      /* duplicate options */
     } dup_handle;
+    struct
+    {
+        enum apc_type    type;         /* APC_WEX_REGKEY (WineExplorer: dlls/ntdll/unix/wex_regkey.c) */
+        obj_handle_t     section;      /* section that holds the record of a registry key */
+        unsigned int     size;         /* size of the record */
+    } wex_regkey;
 };
 
 union apc_result
@@ -761,6 +769,12 @@ union apc_result
     } dup_handle;
     struct
     {
+        enum apc_type    type;      /* APC_WEX_REGKEY */
+        unsigned int     status;    /* status returned by call */
+        obj_handle_t     handle;    /* the key's handle in the process */
+    } wex_regkey;
+    struct
+    {
         enum apc_type    type;      /* APC_BREAK_PROCESS */
         unsigned int     status;    /* status returned by call */
     } break_process;
@@ -773,6 +787,7 @@ enum irp_type
     IRP_CALL_CLOSE,
     IRP_CALL_READ,
     IRP_CALL_WRITE,
+    IRP_CALL_SET_INFO,
     IRP_CALL_FLUSH,
     IRP_CALL_IOCTL,
     IRP_CALL_VOLUME,
@@ -814,6 +829,12 @@ union irp_params
         client_ptr_t     file;      /* opaque ptr for the file object */
         file_pos_t       pos;       /* file position */
     } write;
+    struct
+    {
+        enum irp_type    type;      /* IRP_CALL_SET_INFO */
+        int              class;     /* information class */
+        client_ptr_t     file;      /* opaque ptr for the file object */
+    } set_info;
     struct
     {
         enum irp_type    type;      /* IRP_CALL_FLUSH */
@@ -1291,6 +1312,15 @@ typedef volatile struct
 @END
 
 
+/* Retrieve the command line of a process */
+@REQ(get_process_command_line)
+    obj_handle_t handle;           /* process handle */
+@REPLY
+    data_size_t  len;              /* len in bytes of the command line */
+    VARARG(cmdline,unicode_str);   /* command line */
+@END
+
+
 /* Retrieve information about a process memory usage */
 @REQ(get_process_vm_counters)
     obj_handle_t handle;                        /* process handle */
@@ -1301,6 +1331,19 @@ typedef volatile struct
     mem_size_t working_set_size;                /* real memory in bytes */
     mem_size_t pagefile_usage;                  /* commit charge in bytes */
     mem_size_t peak_pagefile_usage;             /* peak commit charge in bytes */
+@END
+
+
+/* Retrieve a process's I/O counters */
+@REQ(get_process_io_counters)
+    obj_handle_t handle;                        /* process handle */
+@REPLY
+    file_pos_t read_operations;                 /* read calls */
+    file_pos_t write_operations;                /* write calls */
+    file_pos_t other_operations;                /* other I/O calls */
+    file_pos_t read_bytes;                      /* bytes read */
+    file_pos_t write_bytes;                     /* bytes written */
+    file_pos_t other_bytes;                     /* bytes of the other calls */
 @END
 
 
@@ -1747,6 +1790,16 @@ enum server_fd_type
     unsigned int info_class;    /* queried information class */
 @REPLY
     VARARG(data,bytes);         /* file info data */
+@END
+
+/* Set file information */
+@REQ(set_file_info)
+    obj_handle_t handle;        /* handle to the file */
+    struct async_data async;    /* async I/O parameters */
+    unsigned int info_class;    /* queried information class */
+    VARARG(data,bytes);         /* file info data */
+@REPLY
+    obj_handle_t wait;          /* handle to wait on for blocking read */
 @END
 
 /* Query volume information */
@@ -2261,6 +2314,40 @@ struct process_info
 @END
 
 
+/* WineExplorer (H3): the class of a service's caller, decided by the server (token_caller_class, WEX_CALLER_* of
+   wine/wex_caller.h): the client of the connection of a pipe server end, or a token */
+@REQ(get_caller_class)
+    obj_handle_t handle;       /* a pipe server end, or a token (TOKEN_QUERY) */
+    int          is_pipe;      /* 1: handle is a pipe server end */
+@REPLY
+    unsigned int caller_class; /* WEX_CALLER_* */
+@END
+
+
+/* WineExplorer (H1): the accounts service forwards one request of a client of its reserved pipe to the root helper;
+   the server decides the verdict and the uid, builds the header and waits for the reply without blocking
+   (wine/wex_accounts.h). The body is a part of the client message the service last read whole, once per message
+   (A3). The call is signaled when it has ended. */
+@REQ(accounts_forward)
+    obj_handle_t pipe;         /* the server end of the client's connection */
+    unsigned int op;           /* the helper's operation */
+    data_size_t  offset;       /* the body: these bytes of the client's last message */
+    data_size_t  length;
+@REPLY
+    obj_handle_t call;         /* waitable; accounts_result once signaled */
+@END
+
+
+/* WineExplorer (H1): the result of an accounts call that has ended */
+@REQ(accounts_result)
+    obj_handle_t call;
+@REPLY
+    unsigned int helper_status;/* the helper's status (wexa_status) */
+    data_size_t  total;        /* the reply body's size */
+    VARARG(body,bytes);        /* the reply body */
+@END
+
+
 /* WineExplorer system tier: the read end of a registry channel's wait pipe, where session 0 reports changes */
 @REQ(set_registry_relay)
     int          fd;           /* the pipe, in flight */
@@ -2699,12 +2786,6 @@ enum message_type
 #define NAMED_PIPE_MESSAGE_STREAM_READ  0x0002
 #define NAMED_PIPE_NONBLOCKING_MODE     0x0004
 #define NAMED_PIPE_SERVER_END           0x8000
-
-/* Set named pipe information by handle */
-@REQ(set_named_pipe_info)
-    obj_handle_t   handle;
-    unsigned int   flags;
-@END
 
 /* WineExplorer private: retained opener and consumed-message writer binding. */
 #define PIPE_CALLER_BINDING_VERSION 1
@@ -3772,18 +3853,6 @@ struct handle_info
 @END
 
 
-/* Set mailslot information */
-@REQ(set_mailslot_info)
-    obj_handle_t   handle;        /* handle to the mailslot */
-    timeout_t      read_timeout;
-    unsigned int   flags;
-@REPLY
-    timeout_t      read_timeout;
-    unsigned int   max_msgsize;
-@END
-#define MAILSLOT_SET_READ_TIMEOUT  1
-
-
 /* Create a directory object */
 @REQ(create_directory)
     unsigned int   access;        /* access flags */
@@ -3991,6 +4060,7 @@ struct handle_info
 /* Create the primary token of a service account (0 LocalSystem, 1 LocalService, 2 NetworkService); needs the system role */
 @REQ(create_service_token)
     unsigned int   account;       /* service account */
+    VARARG(sid,sid);              /* the service's SID (NT SERVICE\name), or nothing */
 @REPLY
     obj_handle_t   token;         /* handle to the new token */
 @END
@@ -4117,6 +4187,36 @@ struct handle_info
 @END
 
 
+/* create a wait completion packet */
+@REQ(create_completion_packet)
+    unsigned int access;          /* desired access */
+    VARARG(objattr,object_attributes); /* object attributes */
+@REPLY
+    obj_handle_t handle;          /* wait completion packet handle */
+@END
+
+
+/* Associate a wait completion packet */
+@REQ(associate_completion_packet)
+    obj_handle_t  packet;         /* wait completion packet handle */
+    obj_handle_t  completion;     /* completion handle */
+    obj_handle_t  target;         /* target object handle */
+    apc_param_t   ckey;           /* completion key */
+    apc_param_t   cvalue;         /* completion value */
+    apc_param_t   information;    /* IO_STATUS_BLOCK information */
+    unsigned int  status;         /* completion status */
+@REPLY
+    int           already_signaled; /* whether the object is already signaled */
+@END
+
+
+/* Cancel a wait completion packet */
+@REQ(cancel_completion_packet)
+    obj_handle_t  packet;         /* wait completion packet handle */
+    int           remove_signaled;/* whether to remove signaled packet */
+@END
+
+
 /* check for associated completion and push msg */
 @REQ(add_fd_completion)
     obj_handle_t   handle;        /* async' object */
@@ -4124,13 +4224,6 @@ struct handle_info
     apc_param_t    information;   /* IO_STATUS_BLOCK Information */
     unsigned int   status;        /* completion status */
     int            async;         /* completion is an async result */
-@END
-
-
-/* set fd completion information */
-@REQ(set_fd_completion_mode)
-    obj_handle_t handle;          /* handle to a file or directory */
-    unsigned int flags;           /* completion notification flags */
 @END
 
 
@@ -4150,13 +4243,6 @@ struct handle_info
     unsigned int flags;           /* FILE_RENAME_* flags */
     VARARG(name,unicode_str,namelen); /* NT name */
     VARARG(filename,string);      /* new file name */
-@END
-
-
-/* set fd eof information */
-@REQ(set_fd_eof_info)
-    obj_handle_t handle;        /* handle to a file or directory */
-    file_pos_t   eof;           /* offset of eof of file */
 @END
 
 
@@ -4496,63 +4582,68 @@ enum inproc_sync_type
 @END
 
 
-/* Connect a client channel to the current thread's desktop DWM broker endpoint */
-@REQ(dwm_connect)
+/* Connect to a named ALPC connection port; the answer arrives as a message of the client port */
+@REQ(alpc_connect)
+    unsigned int        flags;          /* connection flags */
+    unsigned int        port_flags;     /* flags of the port attributes of the client */
+    int                 sec_level;      /* impersonation level of the security attribute of the connection message, -1 if none */
+    VARARG(obj_attr,object_attributes); /* object attributes (the port name) */
+    VARARG(data,bytes);                 /* connection message data */
 @REPLY
-    obj_handle_t        handle;         /* waitable client channel handle */
-    unsigned int        version;        /* DWM protocol version */
-    unsigned __int64    epoch;          /* current desktop connection epoch */
+    obj_handle_t        handle;         /* handle to the client communication port */
+    unsigned int        msg_id;         /* id of the connection request */
 @END
 
 
-/* Mint a one-use DWM broker capability token for the desktop's top-window owner */
-@REQ(dwm_get_broker_capability)
+/* Accept or refuse a connection request */
+@REQ(alpc_accept)
+    obj_handle_t        handle;         /* connection port */
+    unsigned int        msg_id;         /* id of the connection request */
+    int                 accept;         /* accept or refuse */
+    mem_size_t          context;        /* port context of the new server communication port */
+    VARARG(data,bytes);                 /* data of the answer */
 @REPLY
-    unsigned __int64    capability;     /* one-use capability token */
-    unsigned __int64    epoch;          /* current desktop connection epoch */
+    obj_handle_t        handle;         /* handle to the server communication port */
 @END
 
 
-/* Register the current process as the DWM broker for the current thread's desktop */
-@REQ(dwm_broker_register)
-    unsigned int        flags;          /* reserved registration flags (must be 0) */
-    unsigned __int64    capability;     /* one-use capability token */
+/* Send a message and/or receive one */
+@REQ(alpc_send_receive)
+    obj_handle_t        handle;         /* port */
+    unsigned int        flags;          /* message flags */
+    int                 has_send;       /* a message is sent */
+    int                 has_recv;       /* a message is received */
+    unsigned int        msg_id;         /* id in the header of the sent message (a reply) */
+    unsigned int        max_recv;       /* size of the data the caller can take */
+    int                 sec_level;      /* impersonation level of the security attribute of the sent message, -1 if none */
+    VARARG(data,bytes);                 /* data of the sent message */
 @REPLY
-    obj_handle_t        handle;         /* waitable broker channel handle */
-    unsigned int        version;        /* DWM protocol version */
-    unsigned __int64    epoch;          /* new desktop connection epoch */
+    int                 has_msg;        /* a message was received */
+    unsigned int        type;           /* type of the received message */
+    unsigned int        msg_id;         /* id of the received message */
+    unsigned int        callback_id;    /* callback id of the received message */
+    unsigned int        pid;            /* sender process */
+    unsigned int        tid;            /* sender thread */
+    unsigned int        status;         /* status carried by a connection reply */
+    unsigned int        data_len;       /* length of the data of the received message */
+    unsigned int        sequence;       /* sequence number of the context attribute */
+    int                 has_context;    /* the context attribute is valid */
+    mem_size_t          port_context;   /* port context for the context attribute */
+    unsigned int        sent_id;        /* id given to the sent message */
+    VARARG(data,bytes);                 /* data of the received message */
 @END
 
 
-/* Send a bounded DWM control message from a client channel to its desktop broker */
-@REQ(dwm_send)
-    obj_handle_t        handle;         /* client channel handle */
-    VARARG(msg,bytes);                  /* message header + payload */
-@REPLY
-    unsigned __int64    epoch;          /* desktop connection epoch stamped on message */
-    unsigned int        request_id;     /* server-assigned request id */
+/* Disconnect an ALPC communication port */
+@REQ(alpc_disconnect)
+    obj_handle_t        handle;         /* communication port */
 @END
 
 
-/* Receive the next queued DWM request (broker) or completed reply (client) */
-@REQ(dwm_recv)
-    obj_handle_t        handle;         /* broker or client channel handle */
-@REPLY
-    unsigned int        request_id;     /* message request id */
-    process_id_t        sender_pid;     /* server-stamped sender process id */
-    thread_id_t         sender_tid;     /* server-stamped sender thread id */
-    unsigned int        desktop_id;     /* server-stamped desktop cookie */
-    unsigned int        status;         /* reply status (for client recv) */
-    VARARG(msg,bytes);                  /* message header + payload */
-@END
-
-
-/* Reply to a pending DWM client request from the broker channel */
-@REQ(dwm_reply)
-    obj_handle_t        handle;         /* broker channel handle */
-    unsigned int        request_id;     /* request id being answered */
-    unsigned int        status;         /* reply NTSTATUS */
-    VARARG(msg,bytes);                  /* reply message header + payload */
+/* Impersonate the sender of an ALPC message */
+@REQ(alpc_impersonate)
+    obj_handle_t        handle;         /* port the message was received on */
+    unsigned int        msg_id;         /* id of the message (the client id of the header is not used) */
 @END
 
 

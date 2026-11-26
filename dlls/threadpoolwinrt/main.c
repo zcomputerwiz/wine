@@ -35,6 +35,8 @@
 #define WIDL_using_Windows_System_Threading
 #include "windows.system.threading.h"
 
+#include "private.h"
+
 WINE_DEFAULT_DEBUG_CHANNEL(threadpool);
 
 struct threadpool_factory
@@ -627,6 +629,12 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
     if (!wcscmp(name, RuntimeClass_Windows_System_Threading_ThreadPool))
     {
         *factory = &threadpool_factory.IActivationFactory_iface;
+        IUnknown_AddRef(*factory);
+    }
+
+    if (!wcscmp(name, RuntimeClass_Windows_System_Threading_ThreadPoolTimer))
+    {
+        *factory = threadpool_timer_factory;
         IUnknown_AddRef(*factory);
     }
 

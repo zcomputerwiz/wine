@@ -715,7 +715,11 @@ static void sync_trusted_roots_from_known_locations( HKEY key, HCERTSTORE cached
             continue;
         }
 
-        CertAddEncodedCertificateToStore( cached, X509_ASN_ENCODING, params.buffer, needed, CERT_STORE_ADD_ALWAYS, &cert );
+        if (!CertAddEncodedCertificateToStore( cached, X509_ASN_ENCODING, params.buffer, needed, CERT_STORE_ADD_ALWAYS, &cert ))
+        {
+            WARN( "adding root cert failed: %08lx\n", GetLastError() );
+            continue;
+        }
         is_new = 1;
         if (!CertSetCertificateContextProperty( cert, CERT_FIRST_USER_PROP_ID, 0, &exists_blob ))
             ERR("Failed to set property.\n");
@@ -779,8 +783,9 @@ void CRYPT_ImportSystemRootCertsToReg(void)
         goto done;
     }
 
+    /* the shared (64-bit) view, which 32-bit and 64-bit programs both read (store.c, CRYPT_SysRegOpenStoreW) */
     rc = RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\SystemCertificates\\Root\\Certificates", 0, NULL, 0,
-            KEY_ALL_ACCESS, NULL, &key, 0);
+            KEY_ALL_ACCESS | KEY_WOW64_64KEY, NULL, &key, 0);
     if (rc)
         goto done;
 

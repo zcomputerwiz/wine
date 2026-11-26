@@ -47,6 +47,7 @@
 #include "request.h"
 #include "process.h"
 #include "security.h"
+#include "sysrun.h"
 #include "e1s_profile.h"
 
 static const WCHAR file_name[] = {'F','i','l','e'};
@@ -106,6 +107,7 @@ static const struct fd_ops file_fd_ops =
 {
     .get_fd_type   = file_get_fd_type,
     .get_file_info = default_fd_get_file_info,
+    .set_file_info = default_fd_set_file_info,
     .ioctl         = default_fd_ioctl,
     .queue_async   = default_fd_queue_async,
 };
@@ -192,14 +194,13 @@ int is_file_executable( const char *name )
 }
 
 static struct object *create_file( struct fd *root, const char *nameptr, data_size_t len,
-                                   struct unicode_str nt_name,
-                                   unsigned int access, unsigned int sharing, int create,
+                                   struct unicode_str nt_name, unsigned int access,
+                                   unsigned int sharing, unsigned int disposition,
                                    unsigned int options, unsigned int attrs,
                                    const struct security_descriptor *sd )
 {
     struct object *obj = NULL;
     struct fd *fd;
-    int flags;
     char *name;
     mode_t mode;
 
@@ -211,19 +212,6 @@ static struct object *create_file( struct fd *root, const char *nameptr, data_si
     if (!(name = mem_alloc( len + 1 ))) return NULL;
     memcpy( name, nameptr, len );
     name[len] = 0;
-
-    switch(create)
-    {
-    case FILE_CREATE:       flags = O_CREAT | O_EXCL; break;
-    case FILE_OVERWRITE_IF: /* FIXME: the difference is whether we trash existing attr or not */
-                            access |= FILE_WRITE_ATTRIBUTES;
-    case FILE_SUPERSEDE:    flags = O_CREAT | O_TRUNC; break;
-    case FILE_OPEN:         flags = 0; break;
-    case FILE_OPEN_IF:      flags = O_CREAT; break;
-    case FILE_OVERWRITE:    flags = O_TRUNC;
-                            access |= FILE_WRITE_ATTRIBUTES; break;
-    default:                set_error( STATUS_INVALID_PARAMETER ); goto done;
-    }
 
     if (sd)
     {
@@ -249,8 +237,7 @@ static struct object *create_file( struct fd *root, const char *nameptr, data_si
 
     access = map_access( access, &file_type.mapping );
 
-    /* FIXME: should set error to STATUS_OBJECT_NAME_COLLISION if file existed before */
-    fd = open_fd( root, name, nt_name, flags | O_NONBLOCK, &mode, access, sharing, options );
+    fd = open_fd( root, name, nt_name, &mode, access, sharing, disposition, options );
     if (!fd) goto done;
 
     if (S_ISDIR(mode))
@@ -482,6 +469,37 @@ mode_t sd_to_mode( const struct security_descriptor *sd, const struct sid *owner
     return new_mode;
 }
 
+/* WineExplorer system tier (B41): on a file of the machine root whose group is the system group, that group stands
+ * for SYSTEM, the service accounts and Administrators (an elevated program), none of which has a Unix account of its
+ * own. Their ACEs give the group bits, which sd_to_mode would derive from the owner instead; the owner and Everyone
+ * keep the user and other bits. Without the system role, or for any other group, the mode is as sd_to_mode makes it. */
+mode_t sd_system_group_mode( const struct security_descriptor *sd, gid_t gid, mode_t mode )
+{
+    static const struct sid local_service = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_LOCAL_SERVICE_RID } };
+    static const struct sid network_service = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_NETWORK_SERVICE_RID } };
+    mode_t group = 0, denied = 0, bits;
+    const struct acl *dacl;
+    const struct ace *ace;
+    unsigned int i;
+    int present;
+
+    if (!sysrun_machine_root() || gid != sysrun_group()) return mode;
+    if (!(dacl = sd_get_dacl( sd, &present )) || !present) return mode | S_IRWXG;  /* no DACL: full access */
+    for (i = 0, ace = ace_first( dacl ); i < dacl->count; i++, ace = ace_next( ace ))
+    {
+        const struct sid *sid = (const struct sid *)(ace + 1);
+
+        if (ace->flags & INHERIT_ONLY_ACE) continue;
+        if (!equal_sid( sid, &local_system_sid ) && !equal_sid( sid, &builtin_admins_sid ) &&
+            !equal_sid( sid, &local_service ) && !equal_sid( sid, &network_service ) && !equal_sid( sid, &world_sid ))
+            continue;
+        bits = file_access_to_mode( ace->mask ) << 3;
+        if (ace->type == ACCESS_DENIED_ACE_TYPE) denied |= bits;
+        else if (ace->type == ACCESS_ALLOWED_ACE_TYPE) group |= bits & ~denied;
+    }
+    return (mode & ~S_IRWXG) | group;
+}
+
 static int file_set_sd( struct object *obj, const struct security_descriptor *sd,
                         unsigned int set_info )
 {
@@ -525,14 +543,25 @@ static int file_set_sd( struct object *obj, const struct security_descriptor *sd
         /* keep the bits that we don't map to access rights in the ACL */
         mode = st.st_mode & (S_ISUID|S_ISGID|S_ISVTX);
         mode |= sd_to_mode( sd, owner );
+        mode = sd_system_group_mode( sd, st.st_gid, mode );
 
-        if (((st.st_mode ^ mode) & (S_IRWXU|S_IRWXG|S_IRWXO)) && fchmod( unix_fd, mode ) == -1)
+        if (((st.st_mode ^ mode) & (S_IRWXU|S_IRWXG|S_IRWXO)) && sysrun_fchmod( unix_fd, mode ) == -1)
         {
             file_set_error();
             return 0;
         }
     }
     return 1;
+}
+
+/* fchmod for a DACL change: an elevated caller's change runs with the system group, so that the kernel keeps the
+ * setgid bit of a machine-root directory (it clears it for a caller outside the file's group) */
+int sysrun_fchmod( int fd, mode_t mode )
+{
+    int raised = sysrun_raise_for_current(), ret = fchmod( fd, mode );
+
+    sysrun_drop( raised );
+    return ret;
 }
 
 static struct object *file_lookup_name( struct object *obj, struct unicode_str *name,
@@ -637,6 +666,12 @@ DECL_HANDLER(create_file)
 
     if (!get_req_object_attributes( &params )) return;
     if (params.root) release_object( params.root );
+
+    if (req->create < 0 || req->create > FILE_MAXIMUM_DISPOSITION)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
 
     if (params.objattr->rootdir)
     {

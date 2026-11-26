@@ -858,6 +858,100 @@ HMONITOR WINAPI MonitorFromPoint( POINT pt, DWORD flags )
     return MonitorFromRect( &rect, flags );
 }
 
+/* one axis of a popup: its start for an alignment (0 start, 1 centre, 2 end) at the anchor */
+static LONG popup_align( LONG anchor, LONG extent, int align )
+{
+    if (align == 2) return anchor - extent;
+    if (align == 1) return anchor - extent / 2;
+    return anchor;
+}
+
+/* one axis of a popup that must not cover the exclude range [ex_start, ex_end): after it, or before it for an end
+ * alignment, the other side when that does not fit in [min, max); FALSE when neither side fits */
+static BOOL popup_avoid( LONG ex_start, LONG ex_end, LONG extent, BOOL end_aligned, LONG min, LONG max, LONG *start )
+{
+    LONG after = ex_end, before = ex_start - extent;
+
+    if (end_aligned)
+    {
+        if (before >= min) *start = before;
+        else if (after + extent <= max) *start = after;
+        else return FALSE;
+    }
+    else
+    {
+        if (after + extent <= max) *start = after;
+        else if (before >= min) *start = before;
+        else return FALSE;
+    }
+    return TRUE;
+}
+
+/* one axis moved into [min, max); a popup larger than that keeps its start at min */
+static LONG popup_clamp( LONG start, LONG extent, LONG min, LONG max )
+{
+    if (start + extent > max) start = max - extent;
+    if (start < min) start = min;
+    return start;
+}
+
+/***********************************************************************
+ *		CalculatePopupWindowPosition (USER32.@)
+ *
+ * Behaviour measured on Windows 11: the popup is aligned at the anchor (TPM_*ALIGN), kept clear of the exclude
+ * rectangle on the TPM_VERTICAL or TPM_HORIZONTAL axis when the anchor is inside it (the other side when the first
+ * does not fit, the plain alignment when neither does), then moved into the work area of the anchor's monitor (when
+ * the anchor is in it, or with TPM_WORKAREA) or else the whole monitor. It never flips without an exclude rectangle.
+ */
+BOOL WINAPI CalculatePopupWindowPosition( const POINT *anchor, const SIZE *size, UINT flags, RECT *exclude,
+                                          RECT *popup )
+{
+    static const UINT valid_flags = TPM_RECURSE | TPM_RIGHTBUTTON | TPM_CENTERALIGN | TPM_RIGHTALIGN |
+            TPM_VCENTERALIGN | TPM_BOTTOMALIGN | TPM_VERTICAL | TPM_NONOTIFY | TPM_RETURNCMD |
+            TPM_HORPOSANIMATION | TPM_HORNEGANIMATION | TPM_VERPOSANIMATION | TPM_VERNEGANIMATION |
+            TPM_NOANIMATION | TPM_LAYOUTRTL | TPM_WORKAREA;
+    MONITORINFO info = { sizeof(info) };
+    int halign, valign;
+    RECT bounds;
+    LONG x, y;
+
+    TRACE( "anchor %s, size %s, flags %#x, exclude %s, popup %p\n", anchor ? wine_dbgstr_point( anchor ) : "(null)",
+           size ? wine_dbgstr_point( (const POINT *)size ) : "(null)", flags, wine_dbgstr_rect( exclude ), popup );
+
+    if (!anchor || !size || !popup) return FALSE;
+    if (flags & ~valid_flags)
+    {
+        SetLastError( ERROR_INVALID_FLAGS );
+        return FALSE;
+    }
+    if (size->cx < 0 || size->cy < 0)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+
+    if (!GetMonitorInfoW( MonitorFromPoint( *anchor, MONITOR_DEFAULTTONEAREST ), &info )) return FALSE;
+    bounds = (flags & TPM_WORKAREA) || PtInRect( &info.rcWork, *anchor ) ? info.rcWork : info.rcMonitor;
+
+    halign = (flags & TPM_RIGHTALIGN) ? 2 : (flags & TPM_CENTERALIGN) ? 1 : 0;
+    valign = (flags & TPM_BOTTOMALIGN) ? 2 : (flags & TPM_VCENTERALIGN) ? 1 : 0;
+    x = popup_align( anchor->x, size->cx, halign );
+    y = popup_align( anchor->y, size->cy, valign );
+
+    if (exclude && PtInRect( exclude, *anchor ))
+    {
+        if (flags & TPM_VERTICAL)
+            popup_avoid( exclude->top, exclude->bottom, size->cy, valign == 2, bounds.top, bounds.bottom, &y );
+        else
+            popup_avoid( exclude->left, exclude->right, size->cx, halign == 2, bounds.left, bounds.right, &x );
+    }
+
+    x = popup_clamp( x, size->cx, bounds.left, bounds.right );
+    y = popup_clamp( y, size->cy, bounds.top, bounds.bottom );
+    SetRect( popup, x, y, x + size->cx, y + size->cy );
+    return TRUE;
+}
+
 /***********************************************************************
  *		MonitorFromWindow (USER32.@)
  */

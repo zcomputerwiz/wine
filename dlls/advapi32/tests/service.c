@@ -2184,6 +2184,48 @@ static void test_sequence(void)
             bret = pQueryServiceObjectSecurity(svc_handle, DACL_SECURITY_INFORMATION, pSD, n1, &n2);
             ok(bret, "Expected QueryServiceObjectSecurity to succeed: result %d\n", bret);
             LocalFree(pSD);
+
+            /* SetSecurityInfo on a service sets its DACL (an installer lets users start a service this way) */
+            {
+                static SID_IDENTIFIER_AUTHORITY world_auth = {SECURITY_WORLD_SID_AUTHORITY};
+                static SID_IDENTIFIER_AUTHORITY nt_auth = {SECURITY_NT_AUTHORITY};
+                PSID world, admins;
+                ACL *new_dacl;
+                ACE_HEADER *ace;
+                ACL_SIZE_INFORMATION size_info;
+                BYTE acl_buffer[256];
+
+                ok(AllocateAndInitializeSid(&world_auth, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &world), "no sid\n");
+                ok(AllocateAndInitializeSid(&nt_auth, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0,
+                                            0, 0, 0, &admins), "no sid\n");
+                new_dacl = (ACL *)acl_buffer;
+                ok(InitializeAcl(new_dacl, sizeof(acl_buffer), ACL_REVISION), "InitializeAcl failed\n");
+                ok(AddAccessAllowedAce(new_dacl, ACL_REVISION, SERVICE_ALL_ACCESS | WRITE_DAC | DELETE, admins), "no ace\n");
+                ok(AddAccessAllowedAce(new_dacl, ACL_REVISION, SERVICE_START | SERVICE_QUERY_STATUS, world), "no ace\n");
+
+                retval = SetSecurityInfo(svc_handle, SE_SERVICE, DACL_SECURITY_INFORMATION, NULL, NULL, new_dacl, NULL);
+                ok(retval == ERROR_SUCCESS, "SetSecurityInfo failed: %ld\n", retval);
+
+                retval = GetSecurityInfo(svc_handle, SE_SERVICE, DACL_SECURITY_INFORMATION, NULL, NULL, &dacl, NULL, &pSD);
+                ok(retval == ERROR_SUCCESS, "GetSecurityInfo failed: %ld\n", retval);
+                if (!retval)
+                {
+                    ok(GetAclInformation(dacl, &size_info, sizeof(size_info), AclSizeInformation), "no info\n");
+                    ok(size_info.AceCount == 2, "got %lu aces\n", size_info.AceCount);
+                    for (n1 = 0; n1 < size_info.AceCount; n1++)
+                    {
+                        ok(GetAce(dacl, n1, (void **)&ace), "no ace\n");
+                        if (EqualSid((SID *)&((ACCESS_ALLOWED_ACE *)ace)->SidStart, world)) break;
+                    }
+                    ok(n1 < size_info.AceCount, "no ace for Everyone\n");
+                    if (n1 < size_info.AceCount)
+                        ok(((ACCESS_ALLOWED_ACE *)ace)->Mask == (SERVICE_START | SERVICE_QUERY_STATUS), "got mask %#lx\n",
+                           ((ACCESS_ALLOWED_ACE *)ace)->Mask);
+                    LocalFree(pSD);
+                }
+                FreeSid(world);
+                FreeSid(admins);
+            }
         }
     }
 
@@ -2263,6 +2305,7 @@ static void test_queryconfig2(void)
     LPSERVICE_DESCRIPTIONW pConfigW = (LPSERVICE_DESCRIPTIONW)buffer;
     SERVICE_PRESHUTDOWN_INFO preshutdown_info;
     SERVICE_DELAYED_AUTO_START_INFO auto_start_info;
+    SERVICE_SID_INFO sid_info;
     static const CHAR servicename [] = "winetest_query_config2";
     static const CHAR displayname [] = "Winetest dummy service";
     static const CHAR pathname    [] = "we_dont_care.exe";
@@ -2549,6 +2592,28 @@ static void test_queryconfig2(void)
     ok(ret, "expected QueryServiceConfig2W to succeed (%ld)\n", GetLastError());
     ok(needed == sizeof(auto_start_info), "needed = %ld\n", needed);
     ok(auto_start_info.fDelayedAutostart == 1, "fDelayedAutostart = %d\n", auto_start_info.fDelayedAutostart);
+
+    SetLastError(0xdeadbeef);
+    needed = 0;
+    sid_info.dwServiceSidType = 0xdeadbeef;
+    ret = pQueryServiceConfig2W(svc_handle, SERVICE_CONFIG_SERVICE_SID_INFO,
+            (LPBYTE)&sid_info, sizeof(sid_info), &needed);
+    ok(ret, "expected QueryServiceConfig2W to succeed (%ld)\n", GetLastError());
+    ok(needed == sizeof(sid_info), "needed = %ld\n", needed);
+    ok(sid_info.dwServiceSidType == SERVICE_SID_TYPE_NONE, "dwServiceSidType = %ld\n", sid_info.dwServiceSidType);
+
+    sid_info.dwServiceSidType = SERVICE_SID_TYPE_UNRESTRICTED;
+    ret = pChangeServiceConfig2A(svc_handle, SERVICE_CONFIG_SERVICE_SID_INFO, (LPBYTE)&sid_info);
+    ok(ret, "expected ChangeServiceConfig2A to succeed (%ld)\n", GetLastError());
+
+    needed = 0;
+    sid_info.dwServiceSidType = 0xdeadbeef;
+    ret = pQueryServiceConfig2W(svc_handle, SERVICE_CONFIG_SERVICE_SID_INFO,
+            (LPBYTE)&sid_info, sizeof(sid_info), &needed);
+    ok(ret, "expected QueryServiceConfig2W to succeed (%ld)\n", GetLastError());
+    ok(needed == sizeof(sid_info), "needed = %ld\n", needed);
+    ok(sid_info.dwServiceSidType == SERVICE_SID_TYPE_UNRESTRICTED, "dwServiceSidType = %ld\n",
+       sid_info.dwServiceSidType);
 
 cleanup:
     DeleteService(svc_handle);
@@ -3126,6 +3191,254 @@ static void run_service(void)
     StartServiceCtrlDispatcherA(table);
 }
 
+static DWORD WINAPI crash_ctrl_handler(DWORD ctl, DWORD type, void *data, void *context)
+{
+    return NO_ERROR;
+}
+
+/* the service of the failure action tests: it counts its starts on a semaphore, runs, and ends its process without
+ * reporting SERVICE_STOPPED, which is a failure */
+static void WINAPI crash_service_main(DWORD argc, char **argv)
+{
+    SERVICE_STATUS_HANDLE st_handle = RegisterServiceCtrlHandlerExA("", crash_ctrl_handler, NULL);
+    SERVICE_STATUS st = { SERVICE_WIN32_OWN_PROCESS, SERVICE_RUNNING, SERVICE_ACCEPT_STOP };
+    HANDLE sem = OpenSemaphoreA(SEMAPHORE_MODIFY_STATE, FALSE, "Global\\winetest_failure_starts");
+
+    SetServiceStatus(st_handle, &st);
+    if (sem) ReleaseSemaphore(sem, 1, NULL);
+    Sleep(500);
+    ExitProcess(1);
+}
+
+static void run_crash_service(void)
+{
+    char empty[] = {0};
+    SERVICE_TABLE_ENTRYA table[] = {{ empty, crash_service_main }, { 0, 0 }};
+
+    StartServiceCtrlDispatcherA(table);
+}
+
+static BOOL wait_stopped(SC_HANDLE svc)
+{
+    SERVICE_STATUS status;
+    int i;
+
+    for (i = 0; i < 100; i++)
+    {
+        if (QueryServiceStatus(svc, &status) && status.dwCurrentState == SERVICE_STOPPED) return TRUE;
+        Sleep(100);
+    }
+    return FALSE;
+}
+
+static SC_HANDLE create_crash_service(SC_HANDLE scm, const char *name, DWORD delay)
+{
+    SC_ACTION actions[2] = {{ SC_ACTION_RESTART, delay }, { SC_ACTION_NONE, 0 }};
+    SERVICE_FAILURE_ACTIONSA fa = { 3600, NULL, NULL, ARRAY_SIZE(actions), actions };
+    char cmd[MAX_PATH + 32];
+    SC_HANDLE svc;
+
+    sprintf(cmd, "\"%s\" service crash", selfname);
+    svc = CreateServiceA(scm, name, name, GENERIC_ALL, SERVICE_WIN32_OWN_PROCESS, SERVICE_DEMAND_START,
+                         SERVICE_ERROR_IGNORE, cmd, NULL, NULL, NULL, NULL, NULL);
+    ok(svc != NULL, "CreateServiceA failed: %lu\n", GetLastError());
+    if (svc) ok(ChangeServiceConfig2A(svc, SERVICE_CONFIG_FAILURE_ACTIONS, &fa), "ChangeServiceConfig2A failed: %lu\n",
+                GetLastError());
+    return svc;
+}
+
+/* the actions themselves: a restart, none after a deletion or a disabling during the delay */
+static void test_failure_restart(void)
+{
+    static const char name[] = "winetest_failure_restart";
+    SC_HANDLE scm, svc;
+    HANDLE sem;
+    DWORD ret;
+
+    if (!(scm = OpenSCManagerA(NULL, NULL, GENERIC_ALL)))
+    {
+        skip("Not enough rights to get a handle to the manager\n");
+        return;
+    }
+    if (!(sem = CreateSemaphoreA(NULL, 0, 16, "Global\\winetest_failure_starts")))
+    {
+        skip("no semaphore: %lu\n", GetLastError());
+        CloseServiceHandle(scm);
+        return;
+    }
+
+    /* restarted at once after the first failure; the second one's action is none */
+    if ((svc = create_crash_service(scm, name, 0)))
+    {
+        ok(StartServiceA(svc, 0, NULL), "StartServiceA failed: %lu\n", GetLastError());
+        ok(!WaitForSingleObject(sem, 10000), "the service did not start\n");
+        ok(!WaitForSingleObject(sem, 10000), "the service was not restarted after its failure\n");
+        ret = WaitForSingleObject(sem, 3000);
+        ok(ret == WAIT_TIMEOUT, "the service was restarted after its second failure\n");
+        wait_stopped(svc);
+        DeleteService(svc);
+        CloseServiceHandle(svc);
+    }
+
+    /* deleted during the delay: no restart, and the name can be used again at once */
+    if ((svc = create_crash_service(scm, name, 3000)))
+    {
+        ok(StartServiceA(svc, 0, NULL), "StartServiceA failed: %lu\n", GetLastError());
+        ok(!WaitForSingleObject(sem, 10000), "the service did not start\n");
+        ok(wait_stopped(svc), "the service did not stop\n");
+        ok(DeleteService(svc), "DeleteService failed: %lu\n", GetLastError());
+        /* a service marked for delete is not started again, also by a handle opened before */
+        SetLastError(0xdeadbeef);
+        ok(!StartServiceA(svc, 0, NULL), "StartServiceA succeeded\n");
+        ok(GetLastError() == ERROR_SERVICE_MARKED_FOR_DELETE, "got %lu\n", GetLastError());
+        CloseServiceHandle(svc);
+        if ((svc = create_crash_service(scm, name, 0)))
+        {
+            DeleteService(svc);
+            CloseServiceHandle(svc);
+        }
+        ret = WaitForSingleObject(sem, 4000);
+        ok(ret == WAIT_TIMEOUT, "a deleted service was restarted\n");
+    }
+
+    /* disabled during the delay: no restart */
+    if ((svc = create_crash_service(scm, name, 3000)))
+    {
+        ok(StartServiceA(svc, 0, NULL), "StartServiceA failed: %lu\n", GetLastError());
+        ok(!WaitForSingleObject(sem, 10000), "the service did not start\n");
+        ok(wait_stopped(svc), "the service did not stop\n");
+        ok(ChangeServiceConfigA(svc, SERVICE_NO_CHANGE, SERVICE_DISABLED, SERVICE_NO_CHANGE, NULL, NULL, NULL, NULL,
+                                NULL, NULL, NULL), "ChangeServiceConfigA failed: %lu\n", GetLastError());
+        ret = WaitForSingleObject(sem, 4000);
+        ok(ret == WAIT_TIMEOUT, "a disabled service was restarted\n");
+        DeleteService(svc);
+        CloseServiceHandle(svc);
+    }
+
+    CloseHandle(sem);
+    CloseServiceHandle(scm);
+}
+
+static void test_failure_actions(void)
+{
+    static const WCHAR servicename[] = L"winetest_failure_actions";
+    SC_ACTION actions[2] = {{ SC_ACTION_RESTART, 5000 }, { SC_ACTION_NONE, 0 }};
+    SERVICE_FAILURE_ACTIONSW set, *got;
+    BYTE buffer[1024], value[64];
+    SC_HANDLE scm, svc, svc_query;
+    DWORD needed, err, size, type;
+    WCHAR key[MAX_PATH];
+    HKEY hkey;
+    BOOL ret;
+
+    scm = OpenSCManagerW(NULL, NULL, GENERIC_ALL);
+    if (!scm)
+    {
+        skip("Not enough rights to get a handle to the manager\n");
+        return;
+    }
+    svc = CreateServiceW(scm, servicename, servicename, GENERIC_ALL, SERVICE_WIN32_OWN_PROCESS,
+                         SERVICE_DISABLED, SERVICE_ERROR_IGNORE, L"we_dont_care.exe", NULL, NULL, NULL, NULL, NULL);
+    if (!svc)
+    {
+        skip("Could not create the service: %lu\n", GetLastError());
+        CloseServiceHandle(scm);
+        return;
+    }
+    got = (SERVICE_FAILURE_ACTIONSW *)buffer;
+
+    /* a new service has none */
+    ret = QueryServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, buffer, sizeof(buffer), &needed);
+    ok(ret, "QueryServiceConfig2W failed: %lu\n", GetLastError());
+    ok(!got->cActions && !got->lpsaActions, "got %lu actions %p\n", got->cActions, got->lpsaActions);
+
+    /* reset period and actions */
+    memset(&set, 0, sizeof(set));
+    set.dwResetPeriod = 3600;
+    set.cActions = ARRAY_SIZE(actions);
+    set.lpsaActions = actions;
+    ret = ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, &set);
+    ok(ret, "ChangeServiceConfig2W failed: %lu\n", GetLastError());
+
+    SetLastError(0xdeadbeef);
+    ret = QueryServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, NULL, 0, &needed);
+    err = GetLastError();
+    ok(!ret && err == ERROR_INSUFFICIENT_BUFFER, "got %d, error %lu\n", ret, err);
+    ok(needed >= sizeof(*got) + sizeof(actions), "needed %lu\n", needed);
+
+    memset(buffer, 0xcc, sizeof(buffer));
+    ret = QueryServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, buffer, needed, &needed);
+    ok(ret, "QueryServiceConfig2W failed: %lu\n", GetLastError());
+    ok(got->dwResetPeriod == 3600, "reset period %lu\n", got->dwResetPeriod);
+    ok(got->cActions == 2, "got %lu actions\n", got->cActions);
+    ok(got->lpsaActions && got->lpsaActions[0].Type == SC_ACTION_RESTART && got->lpsaActions[0].Delay == 5000 &&
+       got->lpsaActions[1].Type == SC_ACTION_NONE, "wrong actions\n");
+    ok(!got->lpRebootMsg || !got->lpRebootMsg[0], "reboot message %s\n", wine_dbgstr_w(got->lpRebootMsg));
+    ok(!got->lpCommand || !got->lpCommand[0], "command %s\n", wine_dbgstr_w(got->lpCommand));
+
+    /* the registry value, as Windows writes it: a header of five 32-bit fields, then the actions at offset 20 */
+    swprintf(key, ARRAY_SIZE(key), L"System\\CurrentControlSet\\Services\\%s", servicename);
+    if (!RegOpenKeyExW(HKEY_LOCAL_MACHINE, key, 0, KEY_READ, &hkey))
+    {
+        size = sizeof(value);
+        err = RegQueryValueExW(hkey, L"FailureActions", NULL, &type, value, &size);
+        ok(!err && type == REG_BINARY && size == 20 + sizeof(actions), "error %lu type %lu size %lu\n", err, type, size);
+        if (!err && size == 20 + sizeof(actions))
+        {
+            ok(*(DWORD *)value == 3600, "reset period %lu\n", *(DWORD *)value);
+            ok(*(DWORD *)(value + 12) == 2, "count %lu\n", *(DWORD *)(value + 12));
+            ok(*(DWORD *)(value + 16) == 20, "offset %lu\n", *(DWORD *)(value + 16));
+            ok(!memcmp(value + 20, actions, sizeof(actions)), "wrong actions\n");
+        }
+        RegCloseKey(hkey);
+    }
+
+    /* strings; NULL actions leave the actions and the reset period alone */
+    set.lpRebootMsg = (WCHAR *)L"reboot message";
+    set.lpCommand = (WCHAR *)L"command line";
+    set.lpsaActions = NULL;
+    set.cActions = 0;
+    set.dwResetPeriod = 1;
+    ret = ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, &set);
+    ok(ret, "ChangeServiceConfig2W failed: %lu\n", GetLastError());
+    ret = QueryServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, buffer, sizeof(buffer), &needed);
+    ok(ret, "QueryServiceConfig2W failed: %lu\n", GetLastError());
+    ok(got->dwResetPeriod == 3600 && got->cActions == 2, "reset period %lu, %lu actions\n",
+       got->dwResetPeriod, got->cActions);
+    ok(got->lpRebootMsg && !wcscmp(got->lpRebootMsg, L"reboot message"), "reboot message %s\n",
+       wine_dbgstr_w(got->lpRebootMsg));
+    ok(got->lpCommand && !wcscmp(got->lpCommand, L"command line"), "command %s\n", wine_dbgstr_w(got->lpCommand));
+
+    /* empty strings remove them, no actions remove the actions */
+    set.lpRebootMsg = (WCHAR *)L"";
+    set.lpCommand = (WCHAR *)L"";
+    set.lpsaActions = actions;
+    set.cActions = 0;
+    ret = ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, &set);
+    ok(ret, "ChangeServiceConfig2W failed: %lu\n", GetLastError());
+    ret = QueryServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, buffer, sizeof(buffer), &needed);
+    ok(ret, "QueryServiceConfig2W failed: %lu\n", GetLastError());
+    ok(!got->cActions, "got %lu actions\n", got->cActions);
+    ok(!got->lpRebootMsg || !got->lpRebootMsg[0], "reboot message %s\n", wine_dbgstr_w(got->lpRebootMsg));
+    ok(!got->lpCommand || !got->lpCommand[0], "command %s\n", wine_dbgstr_w(got->lpCommand));
+
+    /* a restart action needs a handle with SERVICE_START */
+    svc_query = OpenServiceW(scm, servicename, SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG);
+    ok(svc_query != NULL, "OpenServiceW failed: %lu\n", GetLastError());
+    set.lpRebootMsg = NULL;
+    set.lpCommand = NULL;
+    set.cActions = 1;
+    SetLastError(0xdeadbeef);
+    ret = ChangeServiceConfig2W(svc_query, SERVICE_CONFIG_FAILURE_ACTIONS, &set);
+    err = GetLastError();
+    ok(!ret && err == ERROR_ACCESS_DENIED, "got %d, error %lu\n", ret, err);
+    CloseServiceHandle(svc_query);
+
+    DeleteService(svc);
+    CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+}
+
 START_TEST(service)
 {
     SC_HANDLE scm_handle;
@@ -3139,6 +3452,8 @@ START_TEST(service)
     {
         if (strcmp(myARGV[2], "serve") == 0)
             run_service();
+        else if (strcmp(myARGV[2], "crash") == 0)
+            run_crash_service();
         return;
     }
 
@@ -3163,6 +3478,8 @@ START_TEST(service)
     test_get_servicekeyname();
     test_query_svc();
     test_LockServiceDatabase();
+    test_failure_actions();
+    test_failure_restart();
 
     /* Services may start or stop between enumeration calls, leading to
      * inconsistencies and failures. So we may need a couple attempts.

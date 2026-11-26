@@ -1132,6 +1132,38 @@ BOOLEAN WINAPI GetUserNameExW(
             LPWSTR out;
             DWORD len;
 
+            /* WineExplorer domain logon WO 2: the domain of the token's user as LookupAccountSidW names it (the
+             * joined domain's flat name for a domain account, the computer's name for a local one) */
+            char token_buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+            WCHAR account[UNLEN + 1], domain[MAX_COMPUTERNAME_LENGTH + 1];
+            DWORD account_len = ARRAY_SIZE(account), domain_len = ARRAY_SIZE(domain), token_len;
+            SID_NAME_USE use;
+            HANDLE token;
+            BOOL named = FALSE;
+
+            if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+            {
+                named = GetTokenInformation(token, TokenUser, token_buffer, sizeof(token_buffer), &token_len) &&
+                        LookupAccountSidW(NULL, ((TOKEN_USER *)token_buffer)->User.Sid, account, &account_len,
+                                          domain, &domain_len, &use) && use == SidTypeUser;
+                CloseHandle(token);
+            }
+            if (named && lstrlenW(domain) + 1 + lstrlenW(account) <= ARRAY_SIZE(samname) - 1)
+            {
+                lstrcpyW(samname, domain);
+                lstrcatW(samname, L"\\");
+                lstrcatW(samname, account);
+                if (lstrlenW(samname) < *nSize)
+                {
+                    lstrcpyW(lpNameBuffer, samname);
+                    *nSize = lstrlenW(samname);
+                    return TRUE;
+                }
+                SetLastError(ERROR_MORE_DATA);
+                *nSize = lstrlenW(samname) + 1;
+                return FALSE;
+            }
+
             /* This assumes the current user is always a local account */
             len = MAX_COMPUTERNAME_LENGTH + 1;
             if (GetComputerNameW(samname, &len))

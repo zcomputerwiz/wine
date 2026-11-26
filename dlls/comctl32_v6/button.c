@@ -88,6 +88,7 @@ typedef struct _BUTTON_INFO
     SIZE             glyph_size;
     RECT             text_margin;
     HANDLE           image; /* Original handle set with BM_SETIMAGE and returned with BM_GETIMAGE. */
+    HICON            shield; /* BCM_SETSHIELD: drawn as the image when no image or image list is set */
     union
     {
         HICON   icon;
@@ -1033,6 +1034,13 @@ static LRESULT CALLBACK BUTTON_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, L
         }
         break;
 
+    case BCM_SETSHIELD:
+        /* the shared small icon of user32; it is never destroyed */
+        infoPtr->shield = lParam ? LoadImageW(NULL, (LPCWSTR)IDI_SHIELD, IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                                              GetSystemMetrics(SM_CYSMICON), LR_SHARED) : NULL;
+        InvalidateRect(hWnd, NULL, FALSE);
+        return 1;
+
     case BCM_SETTEXTMARGIN:
     {
         RECT *text_margin = (RECT *)lParam;
@@ -1089,6 +1097,29 @@ static RECT BUTTON_GetTextRect(const BUTTON_INFO *infoPtr, HDC hdc, const WCHAR 
     return rect;
 }
 
+/* The image set with BM_SETIMAGE, else the shield of BCM_SETSHIELD (an icon) */
+static HANDLE get_button_image(const BUTTON_INFO *infoPtr, DWORD *type)
+{
+    if (infoPtr->u.image)
+    {
+        *type = infoPtr->image_type;
+        return infoPtr->u.image;
+    }
+    *type = infoPtr->shield ? IMAGE_ICON : 0;
+    return infoPtr->shield;
+}
+
+/* Space between the shield and the text */
+static int get_shield_gap(const BUTTON_INFO *infoPtr)
+{
+    return (infoPtr->shield && !infoPtr->u.image && !infoPtr->imagelist.himl) ? 2 * GetSystemMetrics(SM_CXEDGE) : 0;
+}
+
+static BOOL has_image(const BUTTON_INFO *infoPtr)
+{
+    return infoPtr->u.image || infoPtr->imagelist.himl || infoPtr->shield;
+}
+
 static BOOL show_image_only(const BUTTON_INFO *infoPtr)
 {
     LONG style = GetWindowLongW(infoPtr->hwnd, GWL_STYLE);
@@ -1100,7 +1131,7 @@ static BOOL show_image_and_text(const BUTTON_INFO *infoPtr)
     LONG style = GetWindowLongW(infoPtr->hwnd, GWL_STYLE);
     UINT type = get_button_type(style);
     return !(style & (BS_ICON | BS_BITMAP))
-           && ((infoPtr->u.image
+           && (((infoPtr->u.image || infoPtr->shield)
                 && (type == BS_PUSHBUTTON || type == BS_DEFPUSHBUTTON || type == BS_USERBUTTON || type == BS_SPLITBUTTON
                     || type == BS_DEFSPLITBUTTON || type == BS_COMMANDLINK || type == BS_DEFCOMMANDLINK))
                || (infoPtr->imagelist.himl && type != BS_GROUPBOX));
@@ -1225,6 +1256,8 @@ static SIZE BUTTON_GetImageSize(const BUTTON_INFO *infoPtr)
     ICONINFO iconInfo;
     BITMAP bm = {0};
     SIZE size = {0};
+    HANDLE image;
+    DWORD type;
 
     /* ImageList has priority over image */
     if (infoPtr->imagelist.himl)
@@ -1234,17 +1267,17 @@ static SIZE BUTTON_GetImageSize(const BUTTON_INFO *infoPtr)
         size.cx = scx;
         size.cy = scy;
     }
-    else if (infoPtr->u.image)
+    else if ((image = get_button_image(infoPtr, &type)))
     {
-        if (infoPtr->image_type == IMAGE_ICON)
+        if (type == IMAGE_ICON)
         {
-            GetIconInfo(infoPtr->u.icon, &iconInfo);
+            GetIconInfo(image, &iconInfo);
             GetObjectW(iconInfo.hbmColor, sizeof(bm), &bm);
             DeleteObject(iconInfo.hbmColor);
             DeleteObject(iconInfo.hbmMask);
         }
-        else if (infoPtr->image_type == IMAGE_BITMAP)
-            GetObjectW(infoPtr->u.bitmap, sizeof(bm), &bm);
+        else if (type == IMAGE_BITMAP)
+            GetObjectW(image, sizeof(bm), &bm);
 
         size.cx = bm.bmWidth;
         size.cy = bm.bmHeight;
@@ -1302,6 +1335,7 @@ static void BUTTON_GetLabelIdealSize(BUTTON_INFO *infoPtr, LONG maxWidth, SIZE *
     BOOL horizontal;
 
     imageSize = BUTTON_GetImageSize(infoPtr);
+    imageSize.cx += get_shield_gap(infoPtr);
     if (infoPtr->imagelist.himl)
     {
         imageSize.cx += infoPtr->imagelist.margin.left + infoPtr->imagelist.margin.right;
@@ -1442,7 +1476,7 @@ static BOOL CL_GetIdealSize(BUTTON_INFO *infoPtr, SIZE *size)
     WCHAR *text;
 
     /* Get the image size */
-    if (infoPtr->u.image || infoPtr->imagelist.himl)
+    if (has_image(infoPtr))
         img_size = BUTTON_GetImageSize(infoPtr);
     else
     {
@@ -1614,6 +1648,7 @@ static UINT BUTTON_CalcLayoutRects(const BUTTON_INFO *infoPtr, HDC hdc, RECT *la
 
    SetRect(&imageRect, 0, 0, imageSize.cx, imageSize.cy);
    imageRectWithMargin = imageRect;
+   imageRectWithMargin.right += get_shield_gap(infoPtr);
    if (infoPtr->imagelist.himl)
    {
        imageRectWithMargin.top -= infoPtr->imagelist.margin.top;
@@ -1723,7 +1758,10 @@ static void BUTTON_DrawImage(const BUTTON_INFO *infoPtr, HDC hdc, HBRUSH hbr, UI
     }
     else
     {
-        switch (infoPtr->image_type)
+        DWORD type;
+        HANDLE image = get_button_image(infoPtr, &type);
+
+        switch (type)
         {
         case IMAGE_ICON:
             flags |= DST_ICON;
@@ -1735,7 +1773,7 @@ static void BUTTON_DrawImage(const BUTTON_INFO *infoPtr, HDC hdc, HBRUSH hbr, UI
             return;
         }
 
-        DrawStateW(hdc, hbr, NULL, (LPARAM)infoPtr->u.image, 0, rect->left, rect->top,
+        DrawStateW(hdc, hbr, NULL, (LPARAM)image, 0, rect->left, rect->top,
                    rect->right - rect->left, rect->bottom - rect->top, flags);
     }
 }
@@ -2627,7 +2665,7 @@ static void CL_Paint( const BUTTON_INFO *infoPtr, HDC hDC, UINT action )
         SIZE img_size;
 
         /* Command Links ignore the margins of the image list or its alignment */
-        if (infoPtr->u.image || infoPtr->imagelist.himl)
+        if (has_image(infoPtr))
             img_size = BUTTON_GetImageSize(infoPtr);
         else
         {
@@ -3133,7 +3171,7 @@ static void CL_ThemedPaint(HTHEME theme, const BUTTON_INFO *infoPtr, HDC hDC, in
         dtFlags = DT_TOP | DT_LEFT | DT_WORDBREAK;
 
         /* Command Links ignore the margins of the image list or its alignment */
-        if (infoPtr->u.image || infoPtr->imagelist.himl)
+        if (has_image(infoPtr))
             img_size = BUTTON_GetImageSize(infoPtr);
         else
             GetThemePartSize(theme, NULL, BP_COMMANDLINKGLYPH, state, NULL, TS_DRAW, &img_size);
@@ -3175,7 +3213,7 @@ static void CL_ThemedPaint(HTHEME theme, const BUTTON_INFO *infoPtr, HDC hDC, in
         img_rect.right = img_rect.left + img_size.cx;
         img_rect.bottom = img_rect.top + img_size.cy;
 
-        if (infoPtr->u.image || infoPtr->imagelist.himl)
+        if (has_image(infoPtr))
             BUTTON_DrawImage(infoPtr, hDC, NULL,
                              (state == CMDLS_DISABLED) ? DSS_DISABLED : DSS_NORMAL,
                              &img_rect);

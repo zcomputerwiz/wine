@@ -25,6 +25,7 @@ import "asyncinfo.idl";
 import "eventtoken.idl";
 import "windowscontracts.idl";
 import "windows.foundation.idl";
+import "windows.system.idl";
 import "windows.globalization.idl";
 
 namespace Windows.System.UserProfile {
@@ -36,6 +37,12 @@ namespace Windows.System.UserProfile {
     interface IGlobalizationPreferencesStatics3;
     runtimeclass AdvertisingManager;
     runtimeclass GlobalizationPreferences;
+    interface IAssignedAccessSettings;
+    interface IAssignedAccessSettingsStatics;
+    interface IDiagnosticsSettings;
+    interface IDiagnosticsSettingsStatics;
+    runtimeclass AssignedAccessSettings;
+    runtimeclass DiagnosticsSettings;
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
@@ -83,4 +90,70 @@ namespace Windows.System.UserProfile {
     {
     }
 
+    [
+        contract(Windows.Foundation.UniversalApiContract, 7.0),
+        exclusiveto(Windows.System.UserProfile.AssignedAccessSettings),
+        uuid(1bc57f1c-e971-5757-b8e0-512f8b8c46d2)
+    ]
+    interface IAssignedAccessSettings : IInspectable
+    {
+        [propget] HRESULT IsEnabled([out, retval] boolean *value);
+        [propget] HRESULT IsSingleAppKioskMode([out, retval] boolean *value);
+        [propget] HRESULT User([out, retval] Windows.System.User **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 7.0),
+        exclusiveto(Windows.System.UserProfile.AssignedAccessSettings),
+        uuid(34a81d0d-8a29-5ef3-a7be-618e6ac3bd01)
+    ]
+    interface IAssignedAccessSettingsStatics : IInspectable
+    {
+        HRESULT GetDefault([out, retval] Windows.System.UserProfile.AssignedAccessSettings **result);
+        HRESULT GetForUser([in] Windows.System.User *user, [out, retval] Windows.System.UserProfile.AssignedAccessSettings **result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 4.0),
+        exclusiveto(Windows.System.UserProfile.DiagnosticsSettings),
+        uuid(e5e9eccd-2711-44e0-973c-491d78048d24)
+    ]
+    interface IDiagnosticsSettings : IInspectable
+    {
+        [propget] HRESULT CanUseDiagnosticsToTailorExperiences([out, retval] boolean *value);
+        [propget] HRESULT User([out, retval] Windows.System.User **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 4.0),
+        exclusiveto(Windows.System.UserProfile.DiagnosticsSettings),
+        uuid(72d2e80f-5390-4793-990b-3ccc7d6ac9c8)
+    ]
+    interface IDiagnosticsSettingsStatics : IInspectable
+    {
+        HRESULT GetDefault([out, retval] Windows.System.UserProfile.DiagnosticsSettings **value);
+        HRESULT GetForUser([in] Windows.System.User *user, [out, retval] Windows.System.UserProfile.DiagnosticsSettings **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 7.0),
+        marshaling_behavior(agile),
+        static(Windows.System.UserProfile.IAssignedAccessSettingsStatics, Windows.Foundation.UniversalApiContract, 7.0),
+        threading(both)
+    ]
+    runtimeclass AssignedAccessSettings
+    {
+        [default] interface Windows.System.UserProfile.IAssignedAccessSettings;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 4.0),
+        marshaling_behavior(agile),
+        static(Windows.System.UserProfile.IDiagnosticsSettingsStatics, Windows.Foundation.UniversalApiContract, 4.0),
+        threading(both)
+    ]
+    runtimeclass DiagnosticsSettings
+    {
+        [default] interface Windows.System.UserProfile.IDiagnosticsSettings;
+    }
 }

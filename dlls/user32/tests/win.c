@@ -69,6 +69,7 @@ static BOOL (WINAPI *pNtUserModifyUserStartupInfoFlags)(DWORD,DWORD);
 static BOOL test_lbuttondown_flag;
 static DWORD num_gettext_msgs;
 static DWORD num_settext_msgs;
+static DWORD num_inactive_msgs;
 static HWND hwndMessage;
 static HWND hwndMain, hwndMain2;
 static HHOOK hhook;
@@ -1111,6 +1112,9 @@ static LRESULT WINAPI main_window_procA(HWND hwnd, UINT msg, WPARAM wparam, LPAR
             break;
         case WM_SETTEXT:
             num_settext_msgs++;
+            break;
+        case WM_ACTIVATE:
+            if (hwnd == hwndMain && LOWORD(wparam) == WA_INACTIVE) num_inactive_msgs++;
             break;
         case WM_ACTIVATEAPP:
             if (wparam) app_activated = TRUE;
@@ -11481,7 +11485,9 @@ static void test_activateapp(HWND window1)
     ok(!app_activated, "Received WM_ACTIVATEAPP(1), did not expect it.\n");
     ok(app_deactivated, "Expected WM_ACTIVATEAPP(0), did not receive it.\n");
 
+    num_inactive_msgs = 0;
     SetForegroundWindow(thread_params.thread_window);
+    ok(num_inactive_msgs == 1, "Expected one WM_ACTIVATE(WA_INACTIVE), got %lu.\n", num_inactive_msgs);
     check_wnd_state(0, thread_params.thread_window, 0, 0);
     flush_events(TRUE);
 
@@ -11527,6 +11533,22 @@ static void test_activateapp(HWND window1)
     check_wnd_state(window2, window2, window2, 0);
     ok(!app_activated, "Received WM_ACTIVATEAPP(1), did not expect it.\n");
     ok(!app_deactivated, "Received WM_ACTIVATEAPP(0), did not expect it.\n");
+
+    /* Reclaim foreground with window1 before processing the loss for window2. */
+    PostThreadMessageA(tid, thread_params.msg_command, SET_FOREGROUND_STEAL_1, 0);
+    WaitForSingleObject(thread_params.command_executed, INFINITE);
+    test_window = GetForegroundWindow();
+    ok(test_window == thread_params.thread_window, "Expected foreground window %p, got %p.\n",
+            thread_params.thread_window, test_window);
+
+    num_inactive_msgs = 0;
+    ok(SetForegroundWindow(window1), "SetForegroundWindow failed.\n");
+    check_wnd_state(window1, window1, window1, 0);
+
+    while (PeekMessageA(&msg, 0, 0, 0, PM_REMOVE)) DispatchMessageA(&msg);
+    ok(!num_inactive_msgs, "Received %lu unexpected WM_ACTIVATE(WA_INACTIVE) messages.\n", num_inactive_msgs);
+    test_window = GetForegroundWindow();
+    ok(test_window == window1, "Expected foreground window %p, got %p.\n", window1, test_window);
 
     PostThreadMessageA(tid, thread_params.msg_quit, 0, 0);
     WaitForSingleObject(thread, INFINITE);
@@ -14630,6 +14652,52 @@ static void test_toolwindow_width_clamping_size(void)
     DestroyWindow( normal );
 }
 
+static int sc_maximize_activations;
+
+static LRESULT WINAPI sc_maximize_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
+{
+    if (msg == WM_ACTIVATE && LOWORD(wparam) != WA_INACTIVE) sc_maximize_activations++;
+    return DefWindowProcA( hwnd, msg, wparam, lparam );
+}
+
+/* SC_MAXIMIZE on a window that is already maximized does nothing: a hidden one stays hidden and inactive.
+ * Chromium-based programs create their frame hidden with WS_MAXIMIZE and send SC_MAXIMIZE during setup. */
+static void test_SC_MAXIMIZE_maximized(void)
+{
+    WNDCLASSA cls = { 0 };
+    HWND hwnd;
+
+    cls.lpfnWndProc = sc_maximize_proc;
+    cls.hInstance = GetModuleHandleA( NULL );
+    cls.lpszClassName = "sc_maximize_class";
+    RegisterClassA( &cls );
+
+    /* hidden, created maximized */
+    hwnd = CreateWindowExA( 0, "sc_maximize_class", "test", WS_OVERLAPPEDWINDOW | WS_MAXIMIZE,
+                            100, 100, 300, 200, NULL, NULL, NULL, NULL );
+    ok( hwnd != NULL, "CreateWindowEx failed, error %lu.\n", GetLastError() );
+    ok( IsZoomed( hwnd ), "window is not maximized.\n" );
+    sc_maximize_activations = 0;
+    SendMessageA( hwnd, WM_SYSCOMMAND, SC_MAXIMIZE, 0 );
+    ok( !IsWindowVisible( hwnd ), "window was shown.\n" );
+    ok( IsZoomed( hwnd ), "window is not maximized.\n" );
+    ok( GetActiveWindow() != hwnd, "window was activated.\n" );
+    ok( !sc_maximize_activations, "got %d WM_ACTIVATE.\n", sc_maximize_activations );
+    DestroyWindow( hwnd );
+
+    /* hidden, not maximized: shown, maximized and activated */
+    hwnd = CreateWindowExA( 0, "sc_maximize_class", "test", WS_OVERLAPPEDWINDOW,
+                            100, 100, 300, 200, NULL, NULL, NULL, NULL );
+    sc_maximize_activations = 0;
+    SendMessageA( hwnd, WM_SYSCOMMAND, SC_MAXIMIZE, 0 );
+    ok( IsWindowVisible( hwnd ), "window was not shown.\n" );
+    ok( IsZoomed( hwnd ), "window is not maximized.\n" );
+    ok( sc_maximize_activations == 1, "got %d WM_ACTIVATE.\n", sc_maximize_activations );
+    DestroyWindow( hwnd );
+
+    UnregisterClassA( "sc_maximize_class", GetModuleHandleA( NULL ) );
+}
+
 START_TEST(win)
 {
     char **argv;
@@ -14795,6 +14863,7 @@ START_TEST(win)
     test_SetWindowLong();
     test_set_window_style();
     test_ShowWindow();
+    test_SC_MAXIMIZE_maximized();
     test_ShowWindow_owned(hwndMain);
     test_ShowWindow_child(hwndMain);
     test_ShowWindow_mdichild();

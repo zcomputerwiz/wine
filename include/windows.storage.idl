@@ -50,6 +50,8 @@ namespace Windows.Storage {
     typedef enum StorageDeleteOption StorageDeleteOption;
     typedef enum StorageItemTypes StorageItemTypes;
 
+    interface IAppDataPaths;
+    interface IAppDataPathsStatics;
     interface IApplicationData;
     interface IApplicationData2;
     interface IApplicationData3;
@@ -74,6 +76,7 @@ namespace Windows.Storage {
     interface IStorageFolderStatics2;
     interface IStorageItem;
 
+    runtimeclass AppDataPaths;
     runtimeclass ApplicationData;
     runtimeclass ApplicationDataContainer;
     runtimeclass FileIO;
@@ -370,6 +373,35 @@ namespace Windows.Storage {
         );
     }
 
+    [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        exclusiveto(Windows.Storage.AppDataPaths),
+        uuid(a05791e6-cc9f-4687-acab-a364fd785463)
+    ]
+    interface IAppDataPaths : IInspectable
+    {
+        [propget] HRESULT Cookies([out, retval] HSTRING *value);
+        [propget] HRESULT Desktop([out, retval] HSTRING *value);
+        [propget] HRESULT Documents([out, retval] HSTRING *value);
+        [propget] HRESULT Favorites([out, retval] HSTRING *value);
+        [propget] HRESULT History([out, retval] HSTRING *value);
+        [propget] HRESULT InternetCache([out, retval] HSTRING *value);
+        [propget] HRESULT LocalAppData([out, retval] HSTRING *value);
+        [propget] HRESULT ProgramData([out, retval] HSTRING *value);
+        [propget] HRESULT RoamingAppData([out, retval] HSTRING *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        exclusiveto(Windows.Storage.AppDataPaths),
+        uuid(d8eb2afe-a9d9-4b14-b999-e3921379d903)
+    ]
+    interface IAppDataPathsStatics : IInspectable
+    {
+        HRESULT GetForUser([in] Windows.System.User *user, [out, retval] Windows.Storage.AppDataPaths **result);
+        HRESULT GetDefault([out, retval] Windows.Storage.AppDataPaths **result);
+    }
+
 #ifndef _WINDOWS_APPLICATIONDATA
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
@@ -542,6 +574,29 @@ namespace Windows.Storage {
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Storage.StorageFile),
+        uuid(5984c710-daf2-43c8-8bb4-a4d3eacfd03f)
+    ]
+    interface IStorageFileStatics : IInspectable
+    {
+        HRESULT GetFileFromPathAsync([in] HSTRING path,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+        HRESULT GetFileFromApplicationUriAsync([in] Windows.Foundation.Uri *uri,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+        HRESULT CreateStreamedFileAsync([in] HSTRING name, [in] IInspectable *handler, [in] IInspectable *thumbnail,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+        HRESULT ReplaceWithStreamedFileAsync([in] Windows.Storage.IStorageFile *file, [in] IInspectable *handler,
+                [in] IInspectable *thumbnail,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+        HRESULT CreateStreamedFileFromUriAsync([in] HSTRING name, [in] Windows.Foundation.Uri *uri, [in] IInspectable *thumbnail,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+        HRESULT ReplaceWithStreamedFileFromUriAsync([in] Windows.Storage.IStorageFile *file, [in] Windows.Foundation.Uri *uri,
+                [in] IInspectable *thumbnail,
+                [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
         uuid(72d1cb78-b3ef-4f75-a80b-6fd9dae2944b)
     ]
     interface IStorageFolder : IInspectable
@@ -633,6 +688,17 @@ namespace Windows.Storage {
         HRESULT CommitAsync([out, retval] Windows.Foundation.IAsyncAction **operation);
     }
 #endif
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 5.0),
+        marshaling_behavior(agile),
+        static(Windows.Storage.IAppDataPathsStatics, Windows.Foundation.UniversalApiContract, 5.0),
+        threading(both)
+    ]
+    runtimeclass AppDataPaths
+    {
+        [default] interface Windows.Storage.IAppDataPaths;
+    }
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
@@ -759,7 +825,7 @@ namespace Windows.Storage {
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
-        /* static(Windows.Storage.IStorageFileStatics, Windows.Foundation.UniversalApiContract, 1.0), */
+        static(Windows.Storage.IStorageFileStatics, Windows.Foundation.UniversalApiContract, 1.0),
         /* static(Windows.Storage.IStorageFileStatics2, Windows.Foundation.UniversalApiContract, 10.0) */
     ]
     runtimeclass StorageFile

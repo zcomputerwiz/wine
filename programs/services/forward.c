@@ -116,6 +116,11 @@ static DWORD map_exception_code( DWORD code )
         return err; \
     } while (0)
 
+/* A size query (no buffer) arrives with a NULL out buffer of size 0, which the client stub refuses as a NULL reference
+ * (ERROR_INVALID_ADDRESS): such calls pass a buffer of one byte, as sechost does, so that the caller gets
+ * ERROR_INSUFFICIENT_BUFFER (or ERROR_MORE_DATA) and the size */
+#define OUT_BUFFER( buffer, size ) ((size) && (buffer) ? (buffer) : (BYTE[1]){ 0 })
+
 /* this session's server uses session 0: a WexSession0\ name is a pipe of session 0 there, and is not found in a
  * server that does not use it. That session 0 cannot be reached at this moment changes nothing (T5 review): the
  * session still leaves session 0's services to it, and their calls fail until it is back */
@@ -192,13 +197,13 @@ DWORD forward_GetServiceKeyNameW( SC_RPC_HANDLE manager, LPCWSTR display, WCHAR 
 DWORD forward_EnumServicesStatusW( SC_RPC_HANDLE manager, DWORD type, DWORD state, BYTE *buffer, DWORD size,
                                    DWORD *needed, DWORD *returned )
 {
-    FORWARD( s0_svcctl_EnumServicesStatusW( manager, type, state, buffer, size, needed, returned, NULL ) );
+    FORWARD( s0_svcctl_EnumServicesStatusW( manager, type, state, OUT_BUFFER( buffer, size ), size, needed, returned, NULL ) );
 }
 
 DWORD forward_EnumServicesStatusExW( SC_RPC_HANDLE manager, DWORD type, DWORD state, BYTE *buffer, DWORD size,
                                      DWORD *needed, DWORD *returned, LPCWSTR group )
 {
-    FORWARD( s0_svcctl_EnumServicesStatusExW( manager, SC_ENUM_PROCESS_INFO, type, state, buffer, size, needed,
+    FORWARD( s0_svcctl_EnumServicesStatusExW( manager, SC_ENUM_PROCESS_INFO, type, state, OUT_BUFFER( buffer, size ), size, needed,
                                               returned, NULL, group ) );
 }
 
@@ -228,23 +233,13 @@ DWORD forward_ChangeServiceConfig2W( SC_RPC_HANDLE service, SC_RPC_CONFIG_INFOW 
 
 DWORD forward_QueryServiceConfig2W( SC_RPC_HANDLE service, DWORD level, BYTE *buffer, DWORD size, DWORD *needed )
 {
-    FORWARD( s0_svcctl_QueryServiceConfig2W( service, level, buffer, size, needed ) );
-}
-
-DWORD forward_QueryServiceConfigEx( SC_RPC_HANDLE service, DWORD level, SC_RPC_CONFIG_INFOW *info )
-{
-    FORWARD( s0_svcctl_QueryServiceConfigEx( service, level, info ) );
+    FORWARD( s0_svcctl_QueryServiceConfig2W( service, level, OUT_BUFFER( buffer, size ), size, needed ) );
 }
 
 DWORD forward_QueryServiceStatusEx( SC_RPC_HANDLE service, SC_STATUS_TYPE level, BYTE *buffer, DWORD size,
                                     DWORD *needed )
 {
-    FORWARD( s0_svcctl_QueryServiceStatusEx( service, level, buffer, size, needed ) );
-}
-
-DWORD forward_QueryServiceStatus( SC_RPC_HANDLE service, SERVICE_STATUS *status )
-{
-    FORWARD( s0_svcctl_QueryServiceStatus( service, status ) );
+    FORWARD( s0_svcctl_QueryServiceStatusEx( service, level, OUT_BUFFER( buffer, size ), size, needed ) );
 }
 
 DWORD forward_StartServiceW( SC_RPC_HANDLE service, DWORD argc, LPCWSTR *argv )
@@ -257,26 +252,14 @@ DWORD forward_ControlService( SC_RPC_HANDLE service, DWORD control, SERVICE_STAT
     FORWARD( s0_svcctl_ControlService( service, control, status ) );
 }
 
-DWORD forward_ControlServiceExW( SC_RPC_HANDLE service, DWORD control, DWORD level,
-                                 SC_RPC_SERVICE_CONTROL_IN_PARAMSW *in, SC_RPC_SERVICE_CONTROL_OUT_PARAMSW *out )
-{
-    FORWARD( s0_svcctl_ControlServiceExW( service, control, level, in, out ) );
-}
-
 DWORD forward_QueryServiceObjectSecurity( SC_RPC_HANDLE service, SECURITY_INFORMATION info, BYTE *descriptor,
                                           DWORD size, DWORD *needed )
 {
-    FORWARD( s0_svcctl_QueryServiceObjectSecurity( service, info, descriptor, size, needed ) );
+    FORWARD( s0_svcctl_QueryServiceObjectSecurity( service, info, OUT_BUFFER( descriptor, size ), size, needed ) );
 }
 
 DWORD forward_SetServiceObjectSecurity( SC_RPC_HANDLE service, SECURITY_INFORMATION info, BYTE *descriptor,
                                         DWORD size )
 {
     FORWARD( s0_svcctl_SetServiceObjectSecurity( service, info, descriptor, size ) );
-}
-
-DWORD forward_EnumDependentServicesW( SC_RPC_HANDLE service, DWORD state, BYTE *buffer, DWORD size, DWORD *needed,
-                                      DWORD *returned )
-{
-    FORWARD( s0_svcctl_EnumDependentServicesW( service, state, buffer, size, needed, returned ) );
 }

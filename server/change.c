@@ -128,6 +128,7 @@ static const struct fd_ops dir_fd_ops =
     .get_poll_events = dir_get_poll_events,
     .get_fd_type     = dir_get_fd_type,
     .get_file_info   = default_fd_get_file_info,
+    .set_file_info   = default_fd_set_file_info,
     .ioctl           = default_fd_ioctl,
     .queue_async     = default_fd_queue_async,
 };
@@ -383,8 +384,9 @@ static int dir_set_sd( struct object *obj, const struct security_descriptor *sd,
         /* keep the bits that we don't map to access rights in the ACL */
         mode = st.st_mode & (S_ISUID|S_ISGID|S_ISVTX);
         mode |= sd_to_mode( sd, owner );
+        mode = sd_system_group_mode( sd, st.st_gid, mode );
 
-        if (((st.st_mode ^ mode) & (S_IRWXU|S_IRWXG|S_IRWXO)) && fchmod( unix_fd, mode ) == -1)
+        if (((st.st_mode ^ mode) & (S_IRWXU|S_IRWXG|S_IRWXO)) && sysrun_fchmod( unix_fd, mode ) == -1)
         {
             file_set_error();
             return 0;

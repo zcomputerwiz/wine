@@ -290,15 +290,27 @@ static BOOL arg_is(const WCHAR* str1, const WCHAR* str2)
     return CompareStringW(LOCALE_USER_DEFAULT, NORM_IGNORECASE, str1, -1, str2, -1) == CSTR_EQUAL;
 }
 
-/* WineExplorer: "net accounts", the lockout part only (NetUserModals level 3):
- * /lockoutthreshold:N (0 or NEVER: no lockout), /lockoutduration:minutes, /lockoutwindow:minutes. */
+/* WineExplorer: "net accounts" (NetUserModals levels 0, 1 and 3):
+ * /forcelogoff:{minutes|NO}, /minpwage:days, /maxpwage:{days|UNLIMITED}, /minpwlen:N, /uniquepw:N,
+ * /lockoutthreshold:N (0 or NEVER: no lockout), /lockoutduration:minutes, /lockoutwindow:minutes.
+ * /sync and /domain are for domain controllers: refused here. The password settings are kept, and shown, but
+ * nothing enforces them: the host's PAM owns password length and age. */
 static BOOL net_accounts(int argc, const WCHAR* argv[])
 {
-    static const WCHAR *names[] = { L"/lockoutthreshold:", L"/lockoutduration:", L"/lockoutwindow:" };
+    static const WCHAR *names[] =
+    {
+        L"/lockoutthreshold:", L"/lockoutduration:", L"/lockoutwindow:",
+        L"/forcelogoff:", L"/minpwage:", L"/maxpwage:", L"/minpwlen:", L"/uniquepw:"
+    };
+    enum { LOCK_THRESHOLD, LOCK_DURATION, LOCK_WINDOW, FORCE_LOGOFF, MIN_AGE, MAX_AGE, MIN_LEN, UNIQUE };
+    static const DWORD limits[] = { 99999, 99999, 99999, 99999, 998, 999, 14, 24 };
+    USER_MODALS_INFO_0 *info0, set0;
+    USER_MODALS_INFO_1 *info1;
     USER_MODALS_INFO_3 *info, set;
     NET_API_STATUS status;
-    BOOL change = FALSE;
+    BOOL change = FALSE, change0 = FALSE, change3 = FALSE;
     WCHAR line[256], *end;
+    DWORD parm = 0;
     int i, j;
 
     if ((status = NetUserModalsGet(NULL, 3, (BYTE **)&info)))
@@ -308,34 +320,62 @@ static BOOL net_accounts(int argc, const WCHAR* argv[])
     }
     set = *info;
     NetApiBufferFree(info);
+    if ((status = NetUserModalsGet(NULL, 0, (BYTE **)&info0)))
+    {
+        output_error_string(status);
+        return FALSE;
+    }
+    set0 = *info0;
+    NetApiBufferFree(info0);
 
     for (i = 2; i < argc; i++)
     {
         const WCHAR *value = NULL;
         DWORD number;
 
+        if (arg_is(argv[i], L"/sync") || arg_is(argv[i], L"/domain"))
+        {
+            output_error_string(ERROR_NOT_SUPPORTED);
+            return FALSE;
+        }
         for (j = 0; j < ARRAY_SIZE(names); j++)
             if (!wcsnicmp(argv[i], names[j], lstrlenW(names[j]))) break;
         if (j < ARRAY_SIZE(names)) value = argv[i] + lstrlenW(names[j]);
-        if (value && !j && arg_is(value, L"never")) number = 0;
+        if (value && ((j == LOCK_THRESHOLD && arg_is(value, L"never")) || (j == FORCE_LOGOFF && arg_is(value, L"no")) ||
+                      (j == MAX_AGE && arg_is(value, L"unlimited"))))
+            number = j == LOCK_THRESHOLD ? 0 : 0xffffffff;
         else
         {
             number = value ? wcstoul(value, &end, 10) : 0;
-            if (!value || end == value || *end || number > 99999)
+            if (!value || end == value || *end || number > limits[j] || (j == MAX_AGE && !number) ||
+                (j == FORCE_LOGOFF && !number))
             {
                 output_string(STRING_USAGE);
                 return FALSE;
             }
         }
-        if (j == 0) set.usrmod3_lockout_threshold = number;
-        else if (j == 1) set.usrmod3_lockout_duration = number ? number * 60 : 0xffffffff;
-        else set.usrmod3_lockout_observation_window = number * 60;
         change = TRUE;
+        switch (j)
+        {
+        case LOCK_THRESHOLD: set.usrmod3_lockout_threshold = number; change3 = TRUE; break;
+        case LOCK_DURATION: set.usrmod3_lockout_duration = number ? number * 60 : 0xffffffff; change3 = TRUE; break;
+        case LOCK_WINDOW: set.usrmod3_lockout_observation_window = number * 60; change3 = TRUE; break;
+        case FORCE_LOGOFF: set0.usrmod0_force_logoff = number == 0xffffffff ? number : number * 60; change0 = TRUE; break;
+        case MIN_AGE: set0.usrmod0_min_passwd_age = number * 86400; change0 = TRUE; break;
+        case MAX_AGE: set0.usrmod0_max_passwd_age = number == 0xffffffff ? number : number * 86400; change0 = TRUE; break;
+        case MIN_LEN: set0.usrmod0_min_passwd_len = number; change0 = TRUE; break;
+        case UNIQUE: set0.usrmod0_password_hist_len = number; change0 = TRUE; break;
+        }
     }
 
     if (change)
     {
-        if ((status = NetUserModalsSet(NULL, 3, (BYTE *)&set, NULL)))
+        if (change0 && (status = NetUserModalsSet(NULL, 0, (BYTE *)&set0, &parm)))
+        {
+            output_error_string(status);
+            return FALSE;
+        }
+        if (change3 && (status = NetUserModalsSet(NULL, 3, (BYTE *)&set, NULL)))
         {
             output_error_string(status);
             return FALSE;
@@ -343,6 +383,30 @@ static BOOL net_accounts(int argc, const WCHAR* argv[])
     }
     else
     {
+        if (set0.usrmod0_force_logoff != 0xffffffff)
+            swprintf(line, ARRAY_SIZE(line), L"Force user logoff how long after time expires?:       %u\n",
+                     set0.usrmod0_force_logoff / 60);
+        else
+            swprintf(line, ARRAY_SIZE(line), L"Force user logoff how long after time expires?:       Never\n");
+        output_write(line, lstrlenW(line));
+        swprintf(line, ARRAY_SIZE(line), L"Minimum password age (days):                          %u\n",
+                 set0.usrmod0_min_passwd_age / 86400);
+        output_write(line, lstrlenW(line));
+        if (set0.usrmod0_max_passwd_age != 0xffffffff)
+            swprintf(line, ARRAY_SIZE(line), L"Maximum password age (days):                          %u\n",
+                     set0.usrmod0_max_passwd_age / 86400);
+        else
+            swprintf(line, ARRAY_SIZE(line), L"Maximum password age (days):                          Unlimited\n");
+        output_write(line, lstrlenW(line));
+        swprintf(line, ARRAY_SIZE(line), L"Minimum password length:                              %u\n",
+                 set0.usrmod0_min_passwd_len);
+        output_write(line, lstrlenW(line));
+        if (set0.usrmod0_password_hist_len)
+            swprintf(line, ARRAY_SIZE(line), L"Length of password history maintained:                %u\n",
+                     set0.usrmod0_password_hist_len);
+        else
+            swprintf(line, ARRAY_SIZE(line), L"Length of password history maintained:                None\n");
+        output_write(line, lstrlenW(line));
         if (set.usrmod3_lockout_threshold)
             swprintf(line, ARRAY_SIZE(line), L"Lockout threshold:                                    %u\n",
                      set.usrmod3_lockout_threshold);
@@ -358,6 +422,13 @@ static BOOL net_accounts(int argc, const WCHAR* argv[])
         swprintf(line, ARRAY_SIZE(line), L"Lockout observation window (minutes):                 %u\n",
                  set.usrmod3_lockout_observation_window / 60);
         output_write(line, lstrlenW(line));
+        if (!(status = NetUserModalsGet(NULL, 1, (BYTE **)&info1)))
+        {
+            swprintf(line, ARRAY_SIZE(line), L"Computer role:                                        %s\n",
+                     info1->usrmod1_role == 3 ? L"PRIMARY" : info1->usrmod1_role == 2 ? L"BACKUP" : L"WORKSTATION");
+            output_write(line, lstrlenW(line));
+            NetApiBufferFree(info1);
+        }
     }
     swprintf(line, ARRAY_SIZE(line), L"The command completed successfully.\n\n");
     output_write(line, lstrlenW(line));

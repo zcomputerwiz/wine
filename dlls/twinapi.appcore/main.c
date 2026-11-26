@@ -81,6 +81,64 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
         IActivationFactory_QueryInterface( core_application_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_DataTransfer_DataTransferManager ))
         IActivationFactory_QueryInterface( data_transfer_manager_statics_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_DataTransfer_Clipboard ))
+        IActivationFactory_QueryInterface( clipboard_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_DataTransfer_DataPackage ))
+        IActivationFactory_QueryInterface( data_package_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_DataTransfer_HtmlFormatHelper ))
+        IActivationFactory_QueryInterface( html_format_helper_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_DataTransfer_StandardDataFormats ))
+        IActivationFactory_QueryInterface( standard_data_formats_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_System_User ))
+        IActivationFactory_QueryInterface( user_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_System_MemoryManager ))
+        IActivationFactory_QueryInterface( memory_manager_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Management_Policies_NamedPolicy ))
+        IActivationFactory_QueryInterface( named_policy_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_UserActivities_UserActivityRequestManager ))
+        IActivationFactory_QueryInterface( user_activity_request_manager_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_UserActivities_UserActivity ))
+        IActivationFactory_QueryInterface( user_activity_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_UserActivities_UserActivityAttribution ))
+        IActivationFactory_QueryInterface( user_activity_attribution_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_UserActivities_UserActivityChannel ))
+        IActivationFactory_QueryInterface( user_activity_channel_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_UserActivities_UserActivityContentInfo ))
+        IActivationFactory_QueryInterface( user_activity_content_info_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_UI_StartScreen_JumpList ))
+        IActivationFactory_QueryInterface( jump_list_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_UI_StartScreen_JumpListItem ))
+        IActivationFactory_QueryInterface( jump_list_item_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_System_Display_DisplayRequest ))
+        IActivationFactory_QueryInterface( display_request_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Devices_Input_KeyboardCapabilities ))
+        IActivationFactory_QueryInterface( keyboard_capabilities_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Devices_Input_MouseCapabilities ))
+        IActivationFactory_QueryInterface( mouse_capabilities_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Devices_Input_TouchCapabilities ))
+        IActivationFactory_QueryInterface( touch_capabilities_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Web_Http_HttpClient ))
+        IActivationFactory_QueryInterface( http_client_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_System_Power_PowerManager ))
+        IActivationFactory_QueryInterface( power_manager_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Security_Authorization_AppCapabilityAccess_AppCapability ))
+        IActivationFactory_QueryInterface( app_capability_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Management_Core_ApplicationDataManager ))
+        IActivationFactory_QueryInterface( application_data_manager_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_System_Profile_EducationSettings ))
+        IActivationFactory_QueryInterface( education_settings_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_System_Profile_PlatformDiagnosticsAndUsageDataSettings ))
+        IActivationFactory_QueryInterface( platform_diagnostics_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_System_UserProfile_AssignedAccessSettings ))
+        IActivationFactory_QueryInterface( assigned_access_settings_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_System_UserProfile_DiagnosticsSettings ))
+        IActivationFactory_QueryInterface( diagnostics_settings_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Devices_Input_PenDevice ))
+        IActivationFactory_QueryInterface( pen_device_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_System_Launcher ))
+        IActivationFactory_QueryInterface( launcher_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_UI_ViewManagement_ViewModePreferences ))
+        IActivationFactory_QueryInterface( view_mode_preferences_factory, &IID_IActivationFactory, (void **)factory );
 
     if (*factory) return S_OK;
     return CLASS_E_CLASSNOTAVAILABLE;

@@ -1,5 +1,5 @@
 MODULE    = msisip.dll
-IMPORTS   = crypt32 ole32
+IMPORTS   = crypt32 ole32 advapi32
 
 EXTRADLLFLAGS = -Wb,--prefer-native
 

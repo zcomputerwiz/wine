@@ -714,6 +714,60 @@ static	void	Control_DoWindow(CPanel* panel, HWND hWnd, HINSTANCE hInst)
     Control_DoInterface(panel, hWnd, hInst);
 }
 
+/* The text after the applet token, when it holds more than one argument; NULL otherwise. Windows passes it whole
+ * as the CPL_STARTWPARMS parameters: "desk.cpl desk,@Themes /Action:OpenTheme /file:"a b.theme"" gives desk.cpl
+ * "@Themes /Action:OpenTheme /file:"a b.theme"" (ReactOS's control.c splits the same way: the path, the applet
+ * name up to the next separator, the rest). The one-argument forms below keep their parsing. *name gets the
+ * applet token (quotes removed) for matching applet names. */
+static WCHAR *control_multi_params( const WCHAR *cmd, WCHAR **name )
+{
+    const WCHAR *p, *rest = NULL, *applet = NULL;
+    BOOL quoted = FALSE;
+    int fields = 0;
+
+    *name = NULL;
+    for (p = cmd; *p; p++)
+    {
+        if (*p == '"') quoted = !quoted;
+        else if (!quoted && (*p == ' ' || *p == ','))
+        {
+            const WCHAR *sep = p;
+            while (p[1] == ' ') p++;  /* a run of spaces after a separator is part of it */
+            if (++fields == 1) applet = p + 1;
+            else
+            {
+                if (applet && sep > applet && (*name = malloc( (sep - applet + 1) * sizeof(WCHAR) )))
+                {
+                    WCHAR *dst = *name;
+                    for (; applet < sep; applet++) if (*applet != '"') *dst++ = *applet;
+                    *dst = 0;
+                }
+                rest = p + 1;
+                break;
+            }
+        }
+    }
+    if (!rest || !*rest)
+    {
+        free( *name );
+        *name = NULL;
+        return NULL;
+    }
+
+    /* only when the rest has a second argument: an unquoted separator followed by more text */
+    for (p = rest, quoted = FALSE; *p; p++)
+    {
+        if (*p == '"') quoted = !quoted;
+        else if (!quoted && (*p == ' ' || *p == ','))
+        {
+            const WCHAR *q = p;
+            while (*q == ' ' || *q == ',') q++;
+            if (*q) return wcsdup( rest );
+        }
+    }
+    return NULL;
+}
+
 static	void	Control_DoLaunch(CPanel* panel, HWND hWnd, LPCWSTR wszCmd)
    /* forms to parse:
     *	foo.cpl,@sp,str
@@ -732,6 +786,8 @@ static	void	Control_DoLaunch(CPanel* panel, HWND hWnd, LPCWSTR wszCmd)
     signed 	sp = -1;
     LPWSTR	extraPmtsBuf = NULL;
     LPWSTR	extraPmts = NULL;
+    WCHAR      *multiPmts = NULL, *multiName = NULL;
+    LPCWSTR     matchName;
     BOOL        quoted = FALSE;
     CPlApplet *applet;
 
@@ -798,6 +854,16 @@ static	void	Control_DoLaunch(CPanel* panel, HWND hWnd, LPCWSTR wszCmd)
         sp = wcstol(extraPmts + 1, NULL, 10);
     }
 
+    /* several arguments after the applet go to it whole, as on Windows; the applet is then chosen by the token
+     * before them ("@n" or a name) */
+    matchName = extraPmts;
+    if ((multiPmts = control_multi_params(wszCmd, &multiName))) {
+        extraPmts = multiPmts;
+        sp = -1;
+        if (multiName && *multiName == '@') sp = wcstol(multiName + 1, NULL, 10);
+        matchName = multiName ? multiName : L"";
+    }
+
     TRACE("cmd %s, extra %s, sp %d\n", debugstr_w(buffer), debugstr_w(extraPmts), sp);
 
     applet = Control_LoadApplet(hWnd, buffer, panel);
@@ -808,7 +874,7 @@ static	void	Control_DoLaunch(CPanel* panel, HWND hWnd, LPCWSTR wszCmd)
             while ((++sp) != applet->count) {
                 TRACE("sp %d, name %s\n", sp, debugstr_w(applet->info[sp].name));
 
-                if (StrCmpIW(extraPmts, applet->info[sp].name) == 0)
+                if (StrCmpIW(matchName, applet->info[sp].name) == 0)
                     break;
             }
         }
@@ -824,6 +890,8 @@ static	void	Control_DoLaunch(CPanel* panel, HWND hWnd, LPCWSTR wszCmd)
         Control_UnloadApplet(applet);
     }
 
+    free(multiPmts);
+    free(multiName);
     free(buffer);
 }
 

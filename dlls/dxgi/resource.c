@@ -94,7 +94,7 @@ static ULONG STDMETHODCALLTYPE dxgi_resource_inner_Release(IUnknown *iface)
         if (resource->has_keyed_mutex)
             DeleteCriticalSection(&resource->keyed_mutex_cs);
         if (resource->shared_memory)
-            UnmapViewOfFile(resource->shared_memory);
+            UnmapViewOfFile(wine_dxgi_shared_base(resource->shared_memory));
         if (resource->shared_mapping)
             CloseHandle(resource->shared_mapping);
         if (resource->parent_resource)
@@ -497,6 +497,8 @@ static HRESULT STDMETHODCALLTYPE dxgi_keyed_mutex_GetDevice(IDXGIKeyedMutex *ifa
     return IDXGIResource1_GetDevice(&resource->IDXGIResource1_iface, riid, device);
 }
 
+static void dxgi_resource_flush(struct dxgi_resource *resource);
+
 static HRESULT STDMETHODCALLTYPE dxgi_keyed_mutex_AcquireSync(IDXGIKeyedMutex *iface, UINT64 key, DWORD dwMilliseconds)
 {
     struct dxgi_resource *resource = impl_from_IDXGIKeyedMutex(iface);
@@ -601,6 +603,9 @@ static HRESULT STDMETHODCALLTYPE dxgi_keyed_mutex_ReleaseSync(IDXGIKeyedMutex *i
         WARN("Keyed mutex is not currently owned.\n");
         return DXGI_ERROR_INVALID_CALL;
     }
+
+    /* what this device drew while it held the mutex is in the shared memory before the next owner acquires it */
+    dxgi_resource_flush(resource);
 
     if (resource->kmt_keyed_mutex)
     {
@@ -775,6 +780,71 @@ static HRESULT STDMETHODCALLTYPE dxgi_resource_CreateSubresourceSurface(IDXGIRes
     return S_OK;
 }
 
+/* The device of the texture behind this resource, and its immediate context (both referenced), through the public
+ * interfaces: the shared memory is written and read by the D3D11 layer. */
+static BOOL dxgi_resource_get_context(struct dxgi_resource *resource, ID3D11Texture2D **texture,
+        ID3D11DeviceContext **context)
+{
+    ID3D11Device *device;
+
+    if (!resource->outer_unknown
+            || FAILED(IUnknown_QueryInterface(resource->outer_unknown, &IID_ID3D11Texture2D, (void **)texture)))
+        return FALSE;
+    ID3D11Texture2D_GetDevice(*texture, &device);
+    ID3D11Device_GetImmediateContext(device, context);
+    ID3D11Device_Release(device);
+    return TRUE;
+}
+
+/* ID3D11DeviceContext::Flush on the texture's device writes the shared textures' frames back to their memory. */
+static void dxgi_resource_flush(struct dxgi_resource *resource)
+{
+    ID3D11DeviceContext *context;
+    ID3D11Texture2D *texture;
+
+    if (!resource->shared_memory || !dxgi_resource_get_context(resource, &texture, &context))
+        return;
+    ID3D11DeviceContext_Flush(context);
+    ID3D11DeviceContext_Release(context);
+    ID3D11Texture2D_Release(texture);
+}
+
+/* Copies the texture's current frame to dst (rows of pitch bytes): what the creator drew before it shared the texture
+ * has to be in the shared memory when that becomes the texture's backing. */
+static void dxgi_resource_read_frame(struct dxgi_resource *resource, void *dst, DWORD pitch)
+{
+    D3D11_MAPPED_SUBRESOURCE map;
+    ID3D11DeviceContext *context;
+    ID3D11Texture2D *texture, *staging;
+    D3D11_TEXTURE2D_DESC desc;
+    ID3D11Device *device;
+    UINT y, row;
+
+    if (!dxgi_resource_get_context(resource, &texture, &context))
+        return;
+    ID3D11Texture2D_GetDevice(texture, &device);
+    ID3D11Texture2D_GetDesc(texture, &desc);
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    desc.MiscFlags = 0;
+    if (SUCCEEDED(ID3D11Device_CreateTexture2D(device, &desc, NULL, &staging)))
+    {
+        ID3D11DeviceContext_CopyResource(context, (ID3D11Resource *)staging, (ID3D11Resource *)texture);
+        if (SUCCEEDED(ID3D11DeviceContext_Map(context, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &map)))
+        {
+            row = min(pitch, map.RowPitch);
+            for (y = 0; y < desc.Height; ++y)
+                memcpy((BYTE *)dst + y * pitch, (BYTE *)map.pData + y * map.RowPitch, row);
+            ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)staging, 0);
+        }
+        ID3D11Texture2D_Release(staging);
+    }
+    ID3D11Device_Release(device);
+    ID3D11DeviceContext_Release(context);
+    ID3D11Texture2D_Release(texture);
+}
+
 static HRESULT STDMETHODCALLTYPE dxgi_resource_CreateSharedHandle(IDXGIResource1 *iface,
         const SECURITY_ATTRIBUTES *attributes, DWORD access, const WCHAR *name, HANDLE *handle)
 {
@@ -876,11 +946,19 @@ static HRESULT STDMETHODCALLTYPE dxgi_resource_CreateSharedHandle(IDXGIResource1
             swprintf(map_name, ARRAY_SIZE(map_name), L"WineSharedTex_%08lx_%08lx",
                      resource->shared_pid, resource->shared_seq);
             resource->shared_mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
-                                                          0, resource->shared_memory_size, map_name);
+                                                          0, WINE_DXGI_SHARED_HEADER_SIZE + resource->shared_memory_size, map_name);
             if (resource->shared_mapping)
             {
-                resource->shared_memory = MapViewOfFile(resource->shared_mapping, FILE_MAP_ALL_ACCESS,
-                                                        0, 0, resource->shared_memory_size);
+                char *base = MapViewOfFile(resource->shared_mapping, FILE_MAP_ALL_ACCESS, 0, 0,
+                                           WINE_DXGI_SHARED_HEADER_SIZE + resource->shared_memory_size);
+
+                if (base)
+                {
+                    resource->shared_memory = base + WINE_DXGI_SHARED_HEADER_SIZE;
+                    *wine_dxgi_shared_sequence(resource->shared_memory) = 1;
+                    /* the frame drawn so far goes into the memory before it becomes the texture's backing */
+                    dxgi_resource_read_frame(resource, resource->shared_memory, pitch);
+                }
                 if (resource->shared_memory && resource->wined3d_resource)
                 {
                     struct wined3d_texture *wined3d_tex = wined3d_texture_from_resource(resource->wined3d_resource);

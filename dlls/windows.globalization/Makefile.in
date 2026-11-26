@@ -1,7 +1,12 @@
 MODULE = windows.globalization.dll
-IMPORTS = combase uuid
+IMPORTS = combase uuid advapi32 user32
 
 SOURCES = \
+	calendar.c \
 	classes.idl \
+	date_time_formatter.c \
+	font_group.c \
 	geographic_region.c \
-	main.c
+	identifiers.c \
+	main.c \
+	number_formatter.c

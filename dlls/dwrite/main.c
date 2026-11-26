@@ -727,7 +727,7 @@ static struct collectionloader *factory_get_collection_loader(struct dwritefacto
 static HRESULT factory_get_system_collection(struct dwritefactory *factory,
         DWRITE_FONT_FAMILY_MODEL family_model, REFIID riid, void **out)
 {
-    IDWriteFontCollection *collection;
+    IDWriteFontCollection *collection, *cached;
     HRESULT hr;
 
     *out = NULL;
@@ -738,8 +738,19 @@ static HRESULT factory_get_system_collection(struct dwritefactory *factory,
         return E_INVALIDARG;
     }
 
-    if (factory->system_collections[family_model])
-        return IDWriteFontCollection_QueryInterface(factory->system_collections[family_model], riid, out);
+    /* The factory keeps the collection without owning a reference (the collection owns one of the factory), and a collection removes itself
+     * from here, under the same lock, before it is freed. A collection that is being destroyed is not used. */
+    EnterCriticalSection(&factory->cs);
+    if ((cached = factory->system_collections[family_model]) && !fontcollection_addref_if_alive(cached))
+        cached = NULL;
+    LeaveCriticalSection(&factory->cs);
+
+    if (cached)
+    {
+        hr = IDWriteFontCollection_QueryInterface(cached, riid, out);
+        IDWriteFontCollection_Release(cached);
+        return hr;
+    }
 
     if (FAILED(hr = get_system_fontcollection(&factory->IDWriteFactory7_iface, family_model, &collection)))
     {
@@ -747,11 +758,22 @@ static HRESULT factory_get_system_collection(struct dwritefactory *factory,
         return hr;
     }
 
-    if (InterlockedCompareExchangePointer((void **)&factory->system_collections[family_model], collection, NULL))
+    EnterCriticalSection(&factory->cs);
+    if ((cached = factory->system_collections[family_model]) && fontcollection_addref_if_alive(cached))
+    {
+        /* another thread was first: ours is dropped after the lock, the one found stands */
+        LeaveCriticalSection(&factory->cs);
         IDWriteFontCollection_Release(collection);
+        hr = IDWriteFontCollection_QueryInterface(cached, riid, out);
+        IDWriteFontCollection_Release(cached);
+        return hr;
+    }
+    factory->system_collections[family_model] = collection;
+    LeaveCriticalSection(&factory->cs);
 
-    hr = IDWriteFontCollection_QueryInterface(factory->system_collections[family_model], riid, out);
-    IDWriteFontCollection_Release(factory->system_collections[family_model]);
+    /* the reference of the creation goes to the caller through the query */
+    hr = IDWriteFontCollection_QueryInterface(collection, riid, out);
+    IDWriteFontCollection_Release(collection);
     return hr;
 }
 
@@ -942,7 +964,7 @@ void factory_unlock(IDWriteFactory7 *iface)
 }
 
 HRESULT factory_get_cached_fontface(IDWriteFactory7 *iface, IDWriteFontFile * const *font_files, UINT32 index,
-        DWRITE_FONT_SIMULATIONS simulations, struct list **cached_list, REFIID riid, void **obj)
+        DWRITE_FONT_SIMULATIONS simulations, unsigned int instance, struct list **cached_list, REFIID riid, void **obj)
 {
     struct dwritefactory *factory = impl_from_IDWriteFactory7(iface);
     struct fontfacecached *cached;
@@ -992,6 +1014,9 @@ HRESULT factory_get_cached_fontface(IDWriteFactory7 *iface, IDWriteFontFile * co
         /* skip earlier */
         if (cached_face_index != index || cached_simulations != simulations)
             continue;
+        /* each named instance of a variable font is a face of its own */
+        if (unsafe_impl_from_IDWriteFontFace((IDWriteFontFace *)cached->fontface)->instance != instance)
+            continue;
 
         hr = IDWriteFontFace5_GetFiles(cached->fontface, &count, &file);
         if (FAILED(hr))
@@ -1035,9 +1060,10 @@ struct fontfacecached *factory_cache_fontface(IDWriteFactory7 *iface, struct lis
     return cached;
 }
 
-static HRESULT WINAPI dwritefactory_CreateFontFace(IDWriteFactory7 *iface, DWRITE_FONT_FACE_TYPE req_facetype,
+/* CreateFontFace, and the face of a variable font's named instance (1-based; 0 for the font itself) */
+HRESULT factory_create_fontface(IDWriteFactory7 *iface, DWRITE_FONT_FACE_TYPE req_facetype,
     UINT32 files_number, IDWriteFontFile* const* font_files, UINT32 index, DWRITE_FONT_SIMULATIONS simulations,
-    IDWriteFontFace **fontface)
+    unsigned int instance, IDWriteFontFace **fontface)
 {
     DWRITE_FONT_FILE_TYPE file_type;
     DWRITE_FONT_FACE_TYPE face_type;
@@ -1082,7 +1108,7 @@ static HRESULT WINAPI dwritefactory_CreateFontFace(IDWriteFactory7 *iface, DWRIT
         goto failed;
     }
 
-    hr = factory_get_cached_fontface(iface, font_files, index, simulations, &fontfaces,
+    hr = factory_get_cached_fontface(iface, font_files, index, simulations, instance, &fontfaces,
             &IID_IDWriteFontFace, (void **)fontface);
     if (hr != S_FALSE)
         goto failed;
@@ -1094,11 +1120,19 @@ static HRESULT WINAPI dwritefactory_CreateFontFace(IDWriteFactory7 *iface, DWRIT
     desc.index = index;
     desc.simulations = simulations;
     desc.font_data = NULL;
+    desc.instance = instance;
     hr = create_fontface(&desc, fontfaces, (IDWriteFontFace5 **)fontface);
 
 failed:
     IDWriteFontFileStream_Release(stream);
     return hr;
+}
+
+static HRESULT WINAPI dwritefactory_CreateFontFace(IDWriteFactory7 *iface, DWRITE_FONT_FACE_TYPE req_facetype,
+    UINT32 files_number, IDWriteFontFile* const* font_files, UINT32 index, DWRITE_FONT_SIMULATIONS simulations,
+    IDWriteFontFace **fontface)
+{
+    return factory_create_fontface(iface, req_facetype, files_number, font_files, index, simulations, 0, fontface);
 }
 
 static HRESULT WINAPI dwritefactory_CreateRenderingParams(IDWriteFactory7 *iface, IDWriteRenderingParams **params)
@@ -2251,9 +2285,11 @@ void factory_detach_fontcollection(IDWriteFactory7 *iface, IDWriteFontCollection
     struct dwritefactory *factory = impl_from_IDWriteFactory7(iface);
     unsigned int i;
 
+    EnterCriticalSection(&factory->cs);
     for (i = 0; i < ARRAY_SIZE(factory->system_collections); ++i)
-        InterlockedCompareExchangePointer((void **)&factory->system_collections[i], NULL, collection);
-    InterlockedCompareExchangePointer((void **)&factory->eudc_collection, NULL, collection);
+        if ((void *)factory->system_collections[i] == (void *)collection) factory->system_collections[i] = NULL;
+    if ((void *)factory->eudc_collection == (void *)collection) factory->eudc_collection = NULL;
+    LeaveCriticalSection(&factory->cs);
     IDWriteFactory7_Release(iface);
 }
 

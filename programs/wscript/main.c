@@ -395,7 +395,8 @@ static BOOL load_typelib(void)
     ITypeLib *typelib;
     HRESULT hres;
 
-    hres = LoadTypeLib(L"wscript.exe", &typelib);
+    /* the host's own type library is only read; registering it needs write access to HKCR */
+    hres = LoadTypeLibEx(L"wscript.exe", REGKIND_NONE, &typelib);
     if(FAILED(hres))
         return FALSE;
 

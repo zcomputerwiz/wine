@@ -2151,7 +2151,8 @@ static void calc_menu_item_size( HDC hdc, struct menu_item *item, HWND owner, IN
                 p += 1; /* advance past the Tab */
                 /* get text size after the tab */
                 h = DrawTextW( hdc, p, -1, &r, DT_SINGLELINE | DT_CALCRECT );
-                item->xTab += txt_width;
+                /* the space for the tab goes before the short cut, not after it */
+                item->xTab += txt_width + menucharsize.cx;
                 txt_height = max( txt_height, h );
                 /* space for the tab and the short cut */
                 txt_width += menucharsize.cx + r.right - r.left;
@@ -2243,10 +2244,13 @@ static void calc_menu_bar_size( HDC hdc, POINT pos, UINT width, struct menu *men
 UINT get_menu_bar_height( HWND hwnd, UINT width, INT org_x, INT org_y )
 {
     RECT rect = { org_x, org_y, org_x + width, 0 };
+    struct menu *menu;
     UINT height;
     HDC hdc;
 
     TRACE( "hwnd %p, width %d, at (%d, %d).\n", hwnd, width, org_x, org_y );
+
+    if ((menu = unsafe_menu_ptr( get_menu( hwnd )))) menu->Height = 0; /* force size recalculate */
 
     hdc = NtUserGetDCEx( hwnd, 0, DCX_CACHE | DCX_WINDOW );
     height = NtUserDrawMenuBarTemp( hwnd, hdc, &rect, 0, 0 );

@@ -40,6 +40,7 @@
 #include "lmshare.h"
 #include "lmwksta.h"
 #include "netbios.h"
+#include "wexaccounts.h"
 #include "ifmib.h"
 #include "iphlpapi.h"
 #include "ntsecapi.h"
@@ -1131,6 +1132,9 @@ NET_API_STATUS WINAPI NetUserAdd(LPCWSTR servername,
     if((status = NETAPI_ValidateServername(servername)) != NERR_Success)
         return status;
 
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return wexa_user_add(level, bufptr, parm_err);
+
     switch(level)
     {
     /* Level 3 and 4 are identical for the purposes of NetUserAdd */
@@ -1204,6 +1208,9 @@ NET_API_STATUS WINAPI NetUserDel(LPCWSTR servername, LPCWSTR username)
     if((status = NETAPI_ValidateServername(servername))!= NERR_Success)
         return status;
 
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return wexa_user_del(username);
+
     if ((user = NETAPI_FindUser(username)) == NULL)
         return NERR_UserNotFound;
 
@@ -1237,6 +1244,9 @@ NetUserGetInfo(LPCWSTR servername, LPCWSTR username, DWORD level,
               "%s was requested.\n", debugstr_w(servername));
         return NERR_InvalidComputer;
     }
+
+    if (wexa_active())
+        return wexa_user_getinfo(username, level, bufptr);
 
     if(!NETAPI_FindUser(username) && !NETAPI_IsCurrentUser(username))
     {
@@ -1411,6 +1421,9 @@ NetUserGetLocalGroups(LPCWSTR servername, LPCWSTR username, DWORD level,
     if (status != NERR_Success)
         return status;
 
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return wexa_user_getlocalgroups(username, level, flags, bufptr, prefmaxlen, entriesread, totalentries);
+
     size = UNLEN + 1;
     NetApiBufferAllocate(size * sizeof(WCHAR), (LPVOID*)&currentuser);
     if (!GetUserNameW(currentuser, &size)) {
@@ -1474,6 +1487,9 @@ NetUserEnum(LPCWSTR servername, DWORD level, DWORD filter, LPBYTE* bufptr,
               "%s was requested.\n", debugstr_w(servername));
         return NERR_InvalidComputer;
     }
+
+    if (wexa_active())
+        return wexa_user_enum(level, filter, bufptr, prefmaxlen, entriesread, totalentries, resume_handle);
 
     if (!GetUserNameW(user, &len)) return GetLastError();
 
@@ -1877,6 +1893,51 @@ static DWORD lockout_value( HKEY key, const WCHAR *name, DWORD def, DWORD max )
     return value > max ? max : value;
 }
 
+/* WineExplorer: the password policy (level 0) is kept in the same key and read back, so that "net accounts" and the
+ * security templates round-trip; nothing enforces it (the host's PAM owns password length and age). Ages are stored
+ * in days, the forced logoff in minutes, 0xffffffff meaning "never" and "unlimited"; the defaults are Windows's. */
+#define WEX_FOREVER 0xffffffff
+#define WEX_DAY 86400
+
+static NET_API_STATUS modals_set_0( const USER_MODALS_INFO_0 *umi, DWORD *parm_err )
+{
+    DWORD max_days, min_days, logoff;
+    LSTATUS ret;
+    HKEY key;
+
+    if (!umi) return ERROR_INVALID_PARAMETER;
+    if (umi->usrmod0_min_passwd_len > 256) { if (parm_err) *parm_err = 1; return ERROR_INVALID_PARAMETER; }
+    if (umi->usrmod0_max_passwd_age != WEX_FOREVER && umi->usrmod0_max_passwd_age < WEX_DAY)
+    {
+        if (parm_err) *parm_err = 2;
+        return ERROR_INVALID_PARAMETER;
+    }
+    if (umi->usrmod0_min_passwd_age != WEX_FOREVER && umi->usrmod0_min_passwd_age / WEX_DAY > 998)
+    {
+        if (parm_err) *parm_err = 3;
+        return ERROR_INVALID_PARAMETER;
+    }
+    max_days = umi->usrmod0_max_passwd_age == WEX_FOREVER ? WEX_FOREVER : umi->usrmod0_max_passwd_age / WEX_DAY;
+    min_days = umi->usrmod0_min_passwd_age / WEX_DAY;
+    if (max_days != WEX_FOREVER && min_days >= max_days && min_days)
+    {
+        if (parm_err) *parm_err = 3;   /* the minimum age has to be below the maximum */
+        return ERROR_INVALID_PARAMETER;
+    }
+    if (umi->usrmod0_password_hist_len > 24) { if (parm_err) *parm_err = 5; return ERROR_INVALID_PARAMETER; }
+    logoff = umi->usrmod0_force_logoff == WEX_FOREVER ? WEX_FOREVER : umi->usrmod0_force_logoff / 60;
+
+    if ((ret = RegCreateKeyExW( HKEY_LOCAL_MACHINE, lockout_keyW, 0, NULL, 0, KEY_SET_VALUE | KEY_WOW64_64KEY, NULL, &key, NULL )))
+        return ret;
+    ret = RegSetValueExW( key, L"MinPasswordLength", 0, REG_DWORD, (const BYTE *)&umi->usrmod0_min_passwd_len, sizeof(DWORD) );
+    if (!ret) ret = RegSetValueExW( key, L"MaxPasswordAge", 0, REG_DWORD, (const BYTE *)&max_days, sizeof(DWORD) );
+    if (!ret) ret = RegSetValueExW( key, L"MinPasswordAge", 0, REG_DWORD, (const BYTE *)&min_days, sizeof(DWORD) );
+    if (!ret) ret = RegSetValueExW( key, L"ForceLogoff", 0, REG_DWORD, (const BYTE *)&logoff, sizeof(DWORD) );
+    if (!ret) ret = RegSetValueExW( key, L"PasswordHistoryLength", 0, REG_DWORD, (const BYTE *)&umi->usrmod0_password_hist_len, sizeof(DWORD) );
+    RegCloseKey( key );
+    return ret;
+}
+
 NET_API_STATUS WINAPI NetUserModalsSet(
     LPCWSTR server, DWORD level, LPBYTE buffer, LPDWORD parm_err)
 {
@@ -1888,6 +1949,9 @@ NET_API_STATUS WINAPI NetUserModalsSet(
     TRACE("(%s %ld %p %p)\n", debugstr_w(server), level, buffer, parm_err);
 
     if (parm_err) *parm_err = 0;
+    if (level == 0) return modals_set_0( (const USER_MODALS_INFO_0 *)buffer, parm_err );
+    /* the role and the domain name and identifier belong to a domain controller */
+    if (level == 1 || level == 2) return NERR_NotPrimary;
     if (level != 3)
     {
         if (level > 2 && (level < 1001 || level > 1007)) return ERROR_INVALID_LEVEL;
@@ -1920,15 +1984,45 @@ NET_API_STATUS WINAPI NetUserModalsGet(
     switch (level)
     {
         case 0:
-            /* return global passwords parameters */
-            FIXME("level 0 not implemented!\n");
-            *pbuffer = NULL;
-            return NERR_InternalError;
+        {
+            /* return global passwords parameters (WineExplorer: stored by NetUserModalsSet, not enforced) */
+            USER_MODALS_INFO_0 *umi;
+            HKEY key = NULL;
+            DWORD max_days, min_days, logoff;
+            NET_API_STATUS status;
+
+            RegOpenKeyExW( HKEY_LOCAL_MACHINE, lockout_keyW, 0, KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key );
+            if ((status = NetApiBufferAllocate( sizeof(*umi), (void **)pbuffer )))
+            {
+                if (key) RegCloseKey( key );
+                return status;
+            }
+            umi = (USER_MODALS_INFO_0 *)*pbuffer;
+            umi->usrmod0_min_passwd_len = lockout_value( key, L"MinPasswordLength", 0, 256 );
+            max_days = lockout_value( key, L"MaxPasswordAge", 42, WEX_FOREVER );
+            min_days = lockout_value( key, L"MinPasswordAge", 0, 998 );
+            logoff = lockout_value( key, L"ForceLogoff", WEX_FOREVER, WEX_FOREVER );
+            umi->usrmod0_password_hist_len = lockout_value( key, L"PasswordHistoryLength", 0, 24 );
+            if (key) RegCloseKey( key );
+            umi->usrmod0_max_passwd_age = max_days == WEX_FOREVER ? WEX_FOREVER : max_days * WEX_DAY;
+            umi->usrmod0_min_passwd_age = min_days * WEX_DAY;
+            umi->usrmod0_force_logoff = logoff == WEX_FOREVER ? WEX_FOREVER : logoff * 60;
+            return NERR_Success;
+        }
         case 1:
-            /* return logon server and domain controller info */
-            FIXME("level 1 not implemented!\n");
-            *pbuffer = NULL;
-            return NERR_InternalError;
+        {
+            /* return logon server and domain controller info: a standalone workstation, no primary controller */
+            USER_MODALS_INFO_1 *umi;
+            NET_API_STATUS status;
+
+            if ((status = NetApiBufferAllocate( sizeof(*umi) + sizeof(WCHAR), (void **)pbuffer )))
+                return status;
+            umi = (USER_MODALS_INFO_1 *)*pbuffer;
+            umi->usrmod1_role = 0;   /* UAS_ROLE_STANDALONE */
+            umi->usrmod1_primary = (WCHAR *)(umi + 1);
+            umi->usrmod1_primary[0] = 0;
+            return NERR_Success;
+        }
         case 2:
         {
             /* return domain name and identifier */
@@ -2011,7 +2105,8 @@ NET_API_STATUS WINAPI NetUserModalsGet(
             RegOpenKeyExW( HKEY_LOCAL_MACHINE, lockout_keyW, 0, KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key );
             duration = lockout_value( key, L"LockoutDuration", 30, 99999 );
             umi->usrmod3_lockout_threshold = lockout_value( key, L"LockoutBadCount", 0, 999 );
-            umi->usrmod3_lockout_duration = duration ? duration * 60 : 0xffffffff;
+            /* forever is stored as 0 by NetUserModalsSet and as 99999 by a security template (LockoutDuration = -1) */
+            umi->usrmod3_lockout_duration = duration && duration < 99999 ? duration * 60 : 0xffffffff;
             umi->usrmod3_lockout_observation_window = 60 * lockout_value( key, L"ResetLockoutCount",
                                                                             duration && duration < 30 ? duration : 30, 99999 );
             if (key) RegCloseKey( key );
@@ -2048,6 +2143,11 @@ NET_API_STATUS WINAPI NetUserChangePassword(LPCWSTR domainname, LPCWSTR username
     struct change_password_params params = { domainname, username, oldpassword, newpassword };
 
     TRACE("(%s, %s, ..., ...)\n", debugstr_w(domainname), debugstr_w(username));
+
+    /* with the machine's accounts in session 0 the old password cannot be checked here (docs/LOCAL_USERS_DESIGN.md):
+     * a change goes through NetUserSetInfo by an administrator */
+    if (!domainname && wexa_active())
+        return ERROR_NOT_SUPPORTED;
 
     if (samba_init() && !SAMBA_CALL( change_password, &params ))
         return NERR_Success;
@@ -2283,6 +2383,8 @@ NET_API_STATUS WINAPI NetLocalGroupAdd(
 {
     FIXME("(%s %ld %p %p) stub!\n", debugstr_w(servername), level, buf,
           parm_err);
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return ERROR_NOT_SUPPORTED;   /* other groups than Administrators and Users come later */
     return NERR_Success;
 }
 
@@ -2296,6 +2398,12 @@ NET_API_STATUS WINAPI NetLocalGroupAddMember(
 {
     FIXME("(%s %s %p) stub!\n", debugstr_w(servername),
           debugstr_w(groupname), membersid);
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+    {
+        LOCALGROUP_MEMBERS_INFO_0 member = { membersid };
+
+        return wexa_group_members(groupname, 0, (BYTE *)&member, 1, TRUE);
+    }
     return NERR_Success;
 }
 
@@ -2311,6 +2419,8 @@ NET_API_STATUS WINAPI NetLocalGroupAddMembers(
 {
     FIXME("(%s %s %ld %p %ld) stub!\n", debugstr_w(servername),
           debugstr_w(groupname), level, buf, totalentries);
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return wexa_group_members(groupname, level, buf, totalentries, TRUE);
     return NERR_Success;
 }
 
@@ -2322,6 +2432,8 @@ NET_API_STATUS WINAPI NetLocalGroupDel(
     LPCWSTR groupname)
 {
     FIXME("(%s %s) stub!\n", debugstr_w(servername), debugstr_w(groupname));
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return ERROR_NOT_SUPPORTED;   /* the two groups cannot be removed, and others do not exist yet */
     return NERR_Success;
 }
 
@@ -2335,6 +2447,12 @@ NET_API_STATUS WINAPI NetLocalGroupDelMember(
 {
     FIXME("(%s %s %p) stub!\n", debugstr_w(servername),
           debugstr_w(groupname), membersid);
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+    {
+        LOCALGROUP_MEMBERS_INFO_0 member = { membersid };
+
+        return wexa_group_members(groupname, 0, (BYTE *)&member, 1, FALSE);
+    }
     return NERR_Success;
 }
 
@@ -2350,6 +2468,8 @@ NET_API_STATUS WINAPI NetLocalGroupDelMembers(
 {
     FIXME("(%s %s %ld %p %ld) stub!\n", debugstr_w(servername),
           debugstr_w(groupname), level, buf, totalentries);
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return wexa_group_members(groupname, level, buf, totalentries, FALSE);
     return NERR_Success;
 }
 
@@ -2367,6 +2487,8 @@ NET_API_STATUS WINAPI NetLocalGroupEnum(
 {
     FIXME("(%s %ld %p %ld %p %p %p) stub!\n", debugstr_w(servername),
           level, bufptr, prefmaxlen, entriesread, totalentries, resumehandle);
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return wexa_group_enum(level, bufptr, prefmaxlen, entriesread, totalentries, resumehandle);
     *entriesread = 0;
     *totalentries = 0;
     return NERR_Success;
@@ -2387,6 +2509,9 @@ NET_API_STATUS WINAPI NetLocalGroupGetInfo(
 
     FIXME("(%s %s %ld %p) semi-stub!\n", debugstr_w(servername),
           debugstr_w(groupname), level, bufptr);
+
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return wexa_group_getinfo(groupname, level, bufptr);
 
     size = sizeof(*info) + sizeof(WCHAR) * (lstrlenW(groupname)+1) + sizeof(commentW);
     NetApiBufferAllocate(size, (LPVOID*)&info);
@@ -2418,6 +2543,9 @@ NET_API_STATUS WINAPI NetLocalGroupGetMembers(
     FIXME("(%s %s %ld %p %ld, %p %p %p) stub!\n", debugstr_w(servername),
           debugstr_w(localgroupname), level, bufptr, prefmaxlen, entriesread,
           totalentries, resumehandle);
+
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return wexa_group_getmembers(localgroupname, level, bufptr, prefmaxlen, entriesread, totalentries, resumehandle);
 
     if (level == 3)
     {
@@ -2468,6 +2596,8 @@ NET_API_STATUS WINAPI NetLocalGroupSetInfo(
 {
     FIXME("(%s %s %ld %p %p) stub!\n", debugstr_w(servername),
           debugstr_w(groupname), level, buf, parm_err);
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return ERROR_NOT_SUPPORTED;   /* a group's name and comment are not kept (the two groups are fixed) */
     return NERR_Success;
 }
 
@@ -2483,7 +2613,28 @@ NET_API_STATUS WINAPI NetLocalGroupSetMembers(
 {
     FIXME("(%s %s %ld %p %ld) stub!\n", debugstr_w(servername),
             debugstr_w(groupname), level, buf, totalentries);
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return ERROR_NOT_SUPPORTED;   /* the members are changed one at a time */
     return NERR_Success;
+}
+
+/************************************************************
+ *                NetUserSetInfo  (NETAPI32.@)
+ */
+NET_API_STATUS WINAPI NetUserSetInfo(LPCWSTR servername, LPCWSTR username, DWORD level, LPBYTE buf, LPDWORD parm_err)
+{
+    NET_API_STATUS status;
+
+    TRACE("(%s, %s, %ld, %p, %p)\n", debugstr_w(servername), debugstr_w(username), level, buf, parm_err);
+
+    if ((status = NETAPI_ValidateServername(servername)) != NERR_Success)
+        return status;
+
+    if (NETAPI_IsLocalComputer(servername) && wexa_active())
+        return wexa_user_setinfo(username, level, buf, parm_err);
+
+    FIXME("(%s, %s, %ld, %p, %p) not supported here\n", debugstr_w(servername), debugstr_w(username), level, buf, parm_err);
+    return ERROR_NOT_SUPPORTED;
 }
 
 /************************************************************

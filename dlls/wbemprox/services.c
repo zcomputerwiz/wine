@@ -297,7 +297,7 @@ static HRESULT WINAPI wbem_services_OpenNamespace(
     if (ws->ns != WBEMPROX_NAMESPACE_LAST || !strNamespace)
         return WBEM_E_INVALID_NAMESPACE;
 
-    return WbemServices_create( strNamespace, NULL, (void **)ppWorkingNamespace );
+    return WbemServices_create( strNamespace, pCtx, (void **)ppWorkingNamespace );
 }
 
 static HRESULT WINAPI wbem_services_CancelAsyncCall(
@@ -508,7 +508,13 @@ HRESULT get_object( enum wbm_namespace ns, const WCHAR *object_path, IWbemClassO
     hr = parse_path( object_path, &path );
     if (hr != S_OK) return hr;
 
-    hr = create_instance_enum( ns, path, &iter );
+    if (!path->filter)  /* a class path: the class object, not an enumeration of the instances */
+    {
+        WCHAR *query = query_from_path( path );
+        hr = query ? exec_class_query( ns, query, &iter ) : E_OUTOFMEMORY;
+        free( query );
+    }
+    else hr = create_instance_enum( ns, path, &iter );
     if (hr != S_OK)
     {
         free_path( path );
@@ -608,8 +614,15 @@ static HRESULT WINAPI wbem_services_CreateClassEnum(
     IWbemContext *pCtx,
     IEnumWbemClassObject **ppEnum )
 {
-    FIXME("\n");
-    return WBEM_E_FAILED;
+    struct wbem_services *services = impl_from_IWbemServices( iface );
+
+    TRACE( "%p, %s, %#lx, %p, %p\n", iface, debugstr_w(strSuperclass), lFlags, pCtx, ppEnum );
+
+    if (!ppEnum) return WBEM_E_INVALID_PARAMETER;
+    /* the classes have no hierarchy: with a superclass there is nothing to list */
+    if (strSuperclass && strSuperclass[0])
+        return EnumWbemClassObject_create_classes( WBEMPROX_NAMESPACE_LAST, (void **)ppEnum );
+    return EnumWbemClassObject_create_classes( services->ns, (void **)ppEnum );
 }
 
 static HRESULT WINAPI wbem_services_CreateClassEnumAsync(

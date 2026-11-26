@@ -22,6 +22,7 @@
 #include <sys/xattr.h>
 #endif
 
+#include "../include/wine/wex_sysrun_conf.h"
 #include "accounts.h"
 #ifndef WEX_ACCOUNTS_STANDALONE
 #include "sysrun.h"
@@ -33,18 +34,23 @@
 #define ACCOUNT_LIMIT (MAP_LIMIT / 40)
 #define U32_MAX_VALUE UINT64_C(4294967295)
 
+/* sid[]: the three subauthorities between 21 and the RID: the machine's, 0 0 0 for the legacy record, or the
+ * domain's for a domain record (docs/DOMAIN_LOGON.md) */
 struct account_record
 {
     char name[64], key[33];
-    uint32_t uid, rid;
-    int active, legacy;
+    uint32_t uid, rid, sid[3];
+    int active, legacy, domain;
 };
 
+/* version 2 (docs/DOMAIN_LOGON.md) adds the joined domain to the header (domain[], domain_name) and a kind to
+ * every record; version 1 maps are read and written as before */
 struct account_map
 {
     uint64_t generation, next_rid;
-    uint32_t machine[3];
-    unsigned int count;
+    uint32_t machine[3], domain[3];
+    char domain_name[16];
+    unsigned int version, count;
     struct account_record records[ACCOUNT_LIMIT];
 };
 
@@ -75,19 +81,42 @@ static const char *account_directory = "/etc/wineexplorer";
 #define account_directory "/etc/wineexplorer"
 #endif
 #ifdef WEX_ACCOUNTS_TEST
-static const char *test_passwd, *test_group;
+/* test_winbind_passwd: users NSS knows but /etc/passwd does not (Winbind's), for the domain cases */
+static const char *test_passwd, *test_group, *test_winbind_passwd;
 static uid_t test_server_uid;
 #endif
 
-static int valid_name( const char *s )
+int accounts_valid_name( const char *s )
 {
-    size_t i, len = strlen( s );
-    if (!len || len > 63 || *s == '-' || !strcmp( s, "." ) || !strcmp( s, ".." )) return 0;
-    for (i = 0; i < len; i++)
-        if (!((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') ||
-              (s[i] >= '0' && s[i] <= '9') || s[i] == '_' || s[i] == '-' || s[i] == '.' ||
-              (s[i] == '$' && i == len - 1))) return 0;
+    return wex_sysrun_conf_valid_name( s );
+}
+
+/* a domain's flat (NetBIOS) name: 1 to 15 of the characters of an account name */
+static int valid_domain_name( const char *s )
+{
+    return strlen( s ) <= 15 && accounts_valid_name( s ) && !strchr( s, '$' );
+}
+
+/* DOMAIN\user, as Winbind names a domain user with "winbind use default domain = no"; the domain part goes to
+ * *domain_len. The whole name fits an account name's 63 characters. */
+static int valid_domain_account( const char *s, size_t *domain_len )
+{
+    const char *sep = strchr( s, '\\' );
+    char flat[16];
+    size_t len;
+
+    if (!sep || strlen( s ) > 63 || (len = sep - s) == 0 || len > 15 || strchr( sep + 1, '\\' )) return 0;
+    memcpy( flat, s, len );
+    flat[len] = 0;
+    if (!valid_domain_name( flat ) || !accounts_valid_name( sep + 1 )) return 0;
+    if (domain_len) *domain_len = len;
     return 1;
+}
+
+/* a name that can be in the map: a local account's, or a domain account's */
+static int valid_any_account( const char *s )
+{
+    return accounts_valid_name( s ) || valid_domain_account( s, NULL );
 }
 
 static int parse_number( const char *s, uint64_t max, uint64_t *value )
@@ -268,49 +297,35 @@ static int native_group( const char *name, struct native_group_result *out )
 
 static enum wex_account_status read_policy( int dir, struct account_policy *policy )
 {
-    char *buf, *line, *next;
-    size_t len;
-    int seen_admin = 0, seen_group = 0, seen_builtin = 0;
+    struct wex_sysrun_conf conf;
     struct native_group_result gr;
     enum wex_account_status status;
+    char *buf;
+    size_t len;
 
-    strcpy( policy->admin_group, "sudo" );
     strcpy( policy->system_group, "wexsys" );
     policy->builtin_admin[0] = 0;
+    /* the provider's own protection check first: its status (unreadable, unprotected) and diagnostic say why; the
+     * shared reader then parses the same file under the same rules */
     if ((status = read_protected( dir, "sysrun.conf", (gid_t)-1, &buf, &len ))) return status;
-    status = WEX_ACCOUNT_MAP_INVALID;
-    for (line = buf; *line; line = next)
-    {
-        next = strchr( line, '\n' );
-        *next++ = 0;
-        if (!strncmp( line, "admin_group=", 12 ))
-        {
-            if (seen_admin++ || !valid_name( line + 12 )) goto done;
-            strcpy( policy->admin_group, line + 12 );
-        }
-        else if (!strncmp( line, "group=", 6 ))
-        {
-            if (seen_group++ || !valid_name( line + 6 )) goto done;
-            strcpy( policy->system_group, line + 6 );
-        }
-        else if (!strncmp( line, "builtin_administrator=", 22 ))
-        {
-            if (seen_builtin++ || !valid_name( line + 22 )) goto done;
-            strcpy( policy->builtin_admin, line + 22 );
-        }
-    }
-    status = WEX_ACCOUNT_ADMIN_GROUP_MISSING;
-    if (!native_group( policy->admin_group, &gr )) goto done;
+    free( buf );
+    if (!wex_sysrun_conf_load_at( dir, &conf ) ||
+        !wex_sysrun_conf_admin_group( &conf, policy->admin_group, sizeof(policy->admin_group) ))
+        return WEX_ACCOUNT_MAP_INVALID;
+    if (wex_sysrun_conf_get( &conf, "group", policy->system_group, sizeof(policy->system_group) ) == WEX_SYSRUN_CONF_INVALID ||
+        wex_sysrun_conf_get( &conf, "builtin_administrator", policy->builtin_admin,
+                             sizeof(policy->builtin_admin) ) == WEX_SYSRUN_CONF_INVALID)
+        return WEX_ACCOUNT_MAP_INVALID;
+    /* get clears its output for ABSENT, so restore the system-group default. */
+    if (!policy->system_group[0]) strcpy( policy->system_group, "wexsys" );
+    if (!accounts_valid_name( policy->system_group ) ||
+        (policy->builtin_admin[0] && !accounts_valid_name( policy->builtin_admin ))) return WEX_ACCOUNT_MAP_INVALID;
+    if (!native_group( policy->admin_group, &gr )) return WEX_ACCOUNT_ADMIN_GROUP_MISSING;
     free( gr.buffer );
-    status = WEX_ACCOUNT_MAP_INVALID;
-    if (!native_group( policy->system_group, &gr )) goto done;
+    if (!native_group( policy->system_group, &gr )) return WEX_ACCOUNT_MAP_INVALID;
     policy->system_gid = gr.gr.gr_gid;
     free( gr.buffer );
-    if (policy->system_gid == (gid_t)-1) goto done;
-    status = WEX_ACCOUNT_OK;
-done:
-    free( buf );
-    return status;
+    return policy->system_gid == (gid_t)-1 ? WEX_ACCOUNT_MAP_INVALID : WEX_ACCOUNT_OK;
 }
 
 /* Split exact single-space fields. No ignored lines, trailing fields, signs,
@@ -330,17 +345,30 @@ static int fields( char *line, char **out, unsigned int count )
     return 0;
 }
 
+/* Version 1:
+ *   WEXACCOUNTS 1 <generation> <next_rid> <machine_a> <machine_b> <machine_c>
+ *   <name> <uid> <key> <active|tombstone> 21 <a> <b> <c> <rid>
+ * Version 2 (docs/DOMAIN_LOGON.md) adds the joined domain and a kind to every record:
+ *   WEXACCOUNTS 2 <generation> <next_rid> <machine_a> <machine_b> <machine_c> <domain_a> <domain_b> <domain_c> <DOMAIN>
+ *   <name> <uid> <key> <active|tombstone> <local|domain> 21 <a> <b> <c> <rid>
+ * A local record follows the rules of version 1. A domain record is named DOMAIN\user, has a UID of 1000 or more
+ * and the domain RID as it is (500 or more); while active its SID and name are of the header's domain, as a
+ * tombstone they may be of a domain the machine left. Anything else makes the whole map invalid, as in
+ * version 1: a damaged map denies every lookup rather than drop or re-pick identities. */
 static enum wex_account_status parse_map( char *buf, struct account_map *map )
 {
-    char *line = buf, *next, *v[9];
-    unsigned int i, j;
+    char *line = buf, *next, *v[11];
+    unsigned int i, j, f;
     uint64_t n;
     int legacy = 0;
 
     memset( map, 0, sizeof(*map) );
     next = strchr( line, '\n' );
     *next++ = 0;
-    if (!fields( line, v, 7 ) || strcmp( v[0], "WEXACCOUNTS" ) || strcmp( v[1], "1" ) ||
+    if (!strncmp( line, "WEXACCOUNTS 1 ", 14 )) map->version = 1;
+    else if (!strncmp( line, "WEXACCOUNTS 2 ", 14 )) map->version = 2;
+    else return WEX_ACCOUNT_MAP_INVALID;
+    if (!fields( line, v, map->version == 1 ? 7 : 11 ) ||
         !parse_number( v[2], UINT64_MAX, &map->generation ) || !map->generation ||
         !parse_number( v[3], U32_MAX_VALUE + 1, &map->next_rid ) || map->next_rid < 1001)
         return WEX_ACCOUNT_MAP_INVALID;
@@ -349,15 +377,36 @@ static enum wex_account_status parse_map( char *buf, struct account_map *map )
         if (!parse_number( v[4 + i], U32_MAX_VALUE, &n ) || !n) return WEX_ACCOUNT_MAP_INVALID;
         map->machine[i] = n;
     }
+    if (map->version == 2)
+    {
+        for (i = 0; i < 3; i++)
+        {
+            if (!parse_number( v[7 + i], U32_MAX_VALUE, &n ) || !n) return WEX_ACCOUNT_MAP_INVALID;
+            map->domain[i] = n;
+        }
+        /* the domain is not the machine */
+        if (!memcmp( map->domain, map->machine, sizeof(map->domain) )) return WEX_ACCOUNT_MAP_INVALID;
+        if (!valid_domain_name( v[10] )) return WEX_ACCOUNT_MAP_INVALID;
+        strcpy( map->domain_name, v[10] );
+    }
     for (line = next; *line; line = next)
     {
         struct account_record *r;
         if (map->count == ACCOUNT_LIMIT) return WEX_ACCOUNT_MAP_INVALID;
         next = strchr( line, '\n' );
         *next++ = 0;
-        if (!fields( line, v, 9 )) return WEX_ACCOUNT_MAP_INVALID;
+        if (!fields( line, v, map->version == 1 ? 9 : 10 )) return WEX_ACCOUNT_MAP_INVALID;
         r = &map->records[map->count++];
-        if (!valid_name( v[0] ) || !parse_number( v[1], U32_MAX_VALUE - 1, &n ) || !n)
+        /* f: the first SID field ("21") */
+        f = 4;
+        if (map->version == 2)
+        {
+            if (!strcmp( v[4], "domain" )) r->domain = 1;
+            else if (strcmp( v[4], "local" )) return WEX_ACCOUNT_MAP_INVALID;
+            f = 5;
+        }
+        if (!(r->domain ? valid_domain_account( v[0], NULL ) : accounts_valid_name( v[0] )) ||
+            !parse_number( v[1], U32_MAX_VALUE - 1, &n ) || !n)
             return WEX_ACCOUNT_MAP_INVALID;
         strcpy( r->name, v[0] );
         r->uid = n;
@@ -368,28 +417,40 @@ static enum wex_account_status parse_map( char *buf, struct account_map *map )
         else if (strcmp( v[3], "tombstone" )) return WEX_ACCOUNT_MAP_INVALID;
         /* The SID is written as five decimal subauthorities after S-1-5,
          * avoiding any platform-dependent native SID layout. */
-        if (strcmp( v[4], "21" )) return WEX_ACCOUNT_MAP_INVALID;
+        if (strcmp( v[f], "21" )) return WEX_ACCOUNT_MAP_INVALID;
         for (i = 0; i < 3; i++)
         {
-            if (!parse_number( v[5 + i], U32_MAX_VALUE, &n )) return WEX_ACCOUNT_MAP_INVALID;
-            if (n != map->machine[i] && n != 0) return WEX_ACCOUNT_MAP_INVALID;
+            if (!parse_number( v[f + 1 + i], U32_MAX_VALUE, &n )) return WEX_ACCOUNT_MAP_INVALID;
+            r->sid[i] = n;
         }
-        r->legacy = !strcmp( v[5], "0" ) && !strcmp( v[6], "0" ) && !strcmp( v[7], "0" );
-        if (!r->legacy)
-            for (i = 0; i < 3; i++)
-            {
-                parse_number( v[5 + i], U32_MAX_VALUE, &n );
-                if (n != map->machine[i]) return WEX_ACCOUNT_MAP_INVALID;
-            }
-        if (!parse_number( v[8], U32_MAX_VALUE, &n )) return WEX_ACCOUNT_MAP_INVALID;
+        if (!parse_number( v[f + 4], U32_MAX_VALUE, &n )) return WEX_ACCOUNT_MAP_INVALID;
         r->rid = n;
+        if (r->domain)
+        {
+            size_t len;
+
+            valid_domain_account( r->name, &len );
+            if (!r->sid[0] || !r->sid[1] || !r->sid[2] || r->uid < 1000 || r->rid < 500 ||
+                !memcmp( r->sid, map->machine, sizeof(r->sid) )) return WEX_ACCOUNT_MAP_INVALID;
+            if (r->active && (memcmp( r->sid, map->domain, sizeof(r->sid) ) || strlen( map->domain_name ) != len ||
+                strncmp( r->name, map->domain_name, len ))) return WEX_ACCOUNT_MAP_INVALID;
+        }
+        else
+        {
+            for (i = 0; i < 3; i++)
+                if (r->sid[i] != map->machine[i] && r->sid[i] != 0) return WEX_ACCOUNT_MAP_INVALID;
+            r->legacy = !r->sid[0] && !r->sid[1] && !r->sid[2];
+            if (!r->legacy && memcmp( r->sid, map->machine, sizeof(r->sid) )) return WEX_ACCOUNT_MAP_INVALID;
+        }
         for (j = 0; j + 1 < map->count; j++)
         {
             const struct account_record *old = &map->records[j];
-            if (old->legacy == r->legacy && old->rid == r->rid) return WEX_ACCOUNT_SID_COLLISION;
+            /* every SID once, tombstones included */
+            if (!memcmp( old->sid, r->sid, sizeof(r->sid) ) && old->rid == r->rid) return WEX_ACCOUNT_SID_COLLISION;
             if (!strcmp( old->key, r->key ) || (old->active && r->active &&
                 (old->uid == r->uid || !strcmp( old->name, r->name )))) return WEX_ACCOUNT_MAP_INVALID;
         }
+        if (r->domain) continue;
         if (r->legacy)
         {
             if (legacy++ || r->rid != 1000) return WEX_ACCOUNT_LEGACY_CONFLICT;
@@ -414,17 +475,23 @@ static int native_passwd( const char *name, uid_t uid, struct account_native *ou
 #ifdef WEX_ACCOUNTS_TEST
         if (test_passwd)
         {
-            FILE *f = fopen( test_passwd, "r" );
-            if (!f) { free( buffer ); return 0; }
-            do { err = fgetpwent_r( f, &pw, buffer, size, &found ); }
-            while (!err && found && (name ? strcmp( pw.pw_name, name ) : pw.pw_uid != uid));
-            fclose( f );
+            const char *files[2] = { test_passwd, test_winbind_passwd };
+            unsigned int k;
+            for (k = 0; k < 2 && files[k]; k++)
+            {
+                FILE *f = fopen( files[k], "r" );
+                if (!f) { free( buffer ); return 0; }
+                do { err = fgetpwent_r( f, &pw, buffer, size, &found ); }
+                while (!err && found && (name ? strcmp( pw.pw_name, name ) : pw.pw_uid != uid));
+                fclose( f );
+                if (!err && found) break;
+            }
         }
         else
 #endif
             err = name ? getpwnam_r( name, &pw, buffer, size, &found ) :
                          getpwuid_r( uid, &pw, buffer, size, &found );
-        if (!err && found && valid_name( pw.pw_name ) && pw.pw_uid &&
+        if (!err && found && valid_any_account( pw.pw_name ) && pw.pw_uid &&
             pw.pw_uid != (uid_t)-1 && pw.pw_gid != (gid_t)-1)
         {
             strcpy( out->name, pw.pw_name );
@@ -476,7 +543,7 @@ static enum wex_account_status native_accounts( struct account_native *users, un
             break;
         }
         if (!pw->pw_uid) continue;
-        if (!valid_name( pw->pw_name ) || *count == ACCOUNT_LIMIT || pw->pw_uid == (uid_t)-1 ||
+        if (!accounts_valid_name( pw->pw_name ) || *count == ACCOUNT_LIMIT || pw->pw_uid == (uid_t)-1 ||
             pw->pw_gid == (gid_t)-1) goto done;
         strcpy( u.name, pw->pw_name );
         u.uid = pw->pw_uid;
@@ -534,6 +601,8 @@ static enum wex_account_status administrator_member( const struct account_native
     }
 }
 
+static int domain_admins_member( int dir, gid_t gid, const struct account_record *r );
+
 enum wex_account_status lookup_account( const char *name, uid_t uid, uint64_t caps,
                                         struct wex_account *result )
 {
@@ -557,7 +626,7 @@ enum wex_account_status lookup_account( const char *name, uid_t uid, uint64_t ca
     status = WEX_ACCOUNT_CAPABILITY_MISSING;
     if (!(caps & WEX_ACCOUNT_MAP_V1)) goto done;
     status = WEX_ACCOUNT_UNKNOWN;
-    if (name && !valid_name( name )) goto done;
+    if (name && !valid_any_account( name )) goto done;
     if ((dir = protected_directory( account_directory, &status )) == -1) goto done;
     if ((status = read_policy( dir, &policy ))) goto done;
     if ((status = read_protected( dir, "accounts.map", policy.system_gid, &buf, &length ))) goto done;
@@ -585,6 +654,9 @@ enum wex_account_status lookup_account( const char *name, uid_t uid, uint64_t ca
     if (u->uid == getuid() && !r->legacy) goto done;
 #endif
     if ((status = administrator_member( u, policy.admin_group, &value.administrator ))) goto done;
+    /* a domain account in Domain Admins is an administrator as a member of admin_group is (WO 2): the same limited
+     * token at logon, elevation through the broker and consent */
+    if (!value.administrator && domain_admins_member( dir, policy.system_gid, r )) value.administrator = 1;
     strcpy( value.name, r->name );
     value.uid = u->uid;
     value.primary_gid = u->gid;
@@ -594,7 +666,7 @@ enum wex_account_status lookup_account( const char *name, uid_t uid, uint64_t ca
         value.incarnation[i] = strtoul( byte, NULL, 16 );
     }
     value.sid[0] = 21;
-    for (i = 0; i < 3; i++) value.sid[i+1] = r->legacy ? 0 : map->machine[i];
+    for (i = 0; i < 3; i++) value.sid[i+1] = r->sid[i];
     value.sid[4] = r->rid;
     value.generation = map->generation;
     *result = value;
@@ -609,7 +681,108 @@ done:
     return status;
 }
 
+/* The domain groups recorded at a domain account's logon (docs/DOMAIN_LOGON.md, WO 2, condition 4): the file
+ * domain-groups beside the map, written only by the root tool (wex-accounts admit, under the map lock), protected
+ * as the map is:
+ *   WEXGROUPS 1
+ *   <incarnation key> <rid> [<rid>...]
+ * one line per active domain record, the RIDs of the groups in the map's domain the account is a member of.
+ * The groups of the record with key: their number, or -1 when there is no line for it; a missing file is no
+ * groups; anything malformed is no groups either (the account is then no member of Domain Admins: fails closed). */
+#define GROUPS_MAX 1024
+static int read_domain_groups( int dir, gid_t gid, const char *key, uint32_t *rids, unsigned int max )
+{
+    char *buf = NULL, *line, *next, *field, *end;
+    size_t length;
+    unsigned int count;
+    uint64_t n;
+    int found = -1;
+
+    if (read_protected( dir, "domain-groups", gid, &buf, &length )) return -1;
+    line = buf;
+    next = strchr( line, '\n' );
+    *next++ = 0;
+    if (strcmp( line, "WEXGROUPS 1" )) goto done;
+    for (line = next; *line; line = next)
+    {
+        next = strchr( line, '\n' );
+        *next++ = 0;
+        if (strlen( line ) < 33 || line[32] != ' ' || strspn( line, "0123456789abcdef" ) != 32) { found = -1; goto done; }
+        if (strncmp( line, key, 32 )) continue;
+        if (found != -1) { found = -1; goto done; }   /* a key twice */
+        count = 0;
+        for (field = line + 33; *field; field = end)
+        {
+            char number[16];
+            size_t len = strcspn( field, " " );
+            if (!len || len >= sizeof(number) || count == max) { found = -1; goto done; }
+            memcpy( number, field, len );
+            number[len] = 0;
+            if (!parse_number( number, U32_MAX_VALUE, &n ) || n < 500) { found = -1; goto done; }
+            rids[count++] = n;
+            end = field + len;
+            if (*end == ' ' && !*++end) { found = -1; goto done; }
+        }
+        found = count;
+    }
+done:
+    free( buf );
+    return found;
+}
+
+#define DOMAIN_GROUP_RID_ADMINS_VALUE 512
+
+/* a domain account in the domain's Domain Admins (RID 512, as the root step recorded it at logon) */
+static int domain_admins_member( int dir, gid_t gid, const struct account_record *r )
+{
+    uint32_t rids[GROUPS_MAX];
+    int count, i;
+
+    if (!r->domain || (count = read_domain_groups( dir, gid, r->key, rids, GROUPS_MAX )) <= 0) return 0;
+    for (i = 0; i < count; i++) if (rids[i] == DOMAIN_GROUP_RID_ADMINS_VALUE) return 1;
+    return 0;
+}
+
 #ifndef WEX_ACCOUNTS_STANDALONE
+/* WO 2: for a server whose user is an active domain record: its SID (as accounts_own_sid), the domain SID's
+ * three subauthorities and the recorded domain groups. 1 when the user is a domain account. */
+int accounts_own_domain( uid_t uid, unsigned int subauth[5], uint32_t *rids, unsigned int max, unsigned int *count )
+{
+    struct account_map *map = NULL;
+    struct account_policy policy;
+    enum wex_account_status status;
+    char *buf = NULL;
+    size_t length;
+    unsigned int i;
+    int dir, found = 0, n, raised = sysrun_raise();
+
+    *count = 0;
+    if ((dir = protected_directory( account_directory, &status )) == -1) goto done;
+    if (read_policy( dir, &policy ) || read_protected( dir, "accounts.map", policy.system_gid, &buf, &length ))
+        goto done;
+    if (!(map = malloc( sizeof(*map) )) || parse_map( buf, map )) goto done;
+    for (i = 0; i < map->count; i++)
+    {
+        const struct account_record *r = &map->records[i];
+
+        if (!r->active || r->uid != uid || !r->domain) continue;
+        subauth[0] = 21;
+        subauth[1] = r->sid[0];
+        subauth[2] = r->sid[1];
+        subauth[3] = r->sid[2];
+        subauth[4] = r->rid;
+        if ((n = read_domain_groups( dir, policy.system_gid, r->key, rids, max )) > 0) *count = n;
+        found = 1;
+        break;
+    }
+done:
+    free( map );
+    free( buf );
+    if (dir != -1) close( dir );
+    sysrun_drop( raised );
+    return found;
+}
+
 /* System tier (docs/SYSTEM_TIER_WORK_ORDERS.md, T4-0): the SID subauthorities after S-1-5 of a local account's
  * active record, the legacy record included (21 0 0 0 1000), for a server that takes its user's SID from the map.
  * 1 when found; 0 without a valid protected map or record. Unlike lookup_account, the server's own uid is the
@@ -634,9 +807,9 @@ int accounts_own_sid( uid_t uid, unsigned int subauth[5] )
 
         if (!r->active || r->uid != uid) continue;
         subauth[0] = 21;
-        subauth[1] = r->legacy ? 0 : map->machine[0];
-        subauth[2] = r->legacy ? 0 : map->machine[1];
-        subauth[3] = r->legacy ? 0 : map->machine[2];
+        subauth[1] = r->sid[0];
+        subauth[2] = r->sid[1];
+        subauth[3] = r->sid[2];
         subauth[4] = r->rid;
         found = 1;
         break;

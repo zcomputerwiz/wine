@@ -190,10 +190,26 @@ static ULONG WINAPI async_Release( IAsyncAction *iface )
     return ref;
 }
 
+/* IInspectable::GetIids: the runtime interfaces of the object (IUnknown and IInspectable are not listed) */
+static HRESULT dispatcher_get_iids( const IID **list, ULONG list_count, ULONG *count, IID **iids )
+{
+    ULONG i;
+
+    if (!count || !iids) return E_POINTER;
+    if (!(*iids = CoTaskMemAlloc( list_count * sizeof(**iids) )))
+    {
+        *count = 0;
+        return E_OUTOFMEMORY;
+    }
+    for (i = 0; i < list_count; i++) (*iids)[i] = *list[i];
+    *count = list_count;
+    return S_OK;
+}
+
 static HRESULT WINAPI async_GetIids( IAsyncAction *iface, ULONG *count, IID **iids )
 {
-    FIXME( "iface %p, count %p, iids %p stub!\n", iface, count, iids );
-    return E_NOTIMPL;
+    static const IID *iids_list[] = { &IID_IAsyncAction, &IID_IAsyncInfo };
+    return dispatcher_get_iids( iids_list, ARRAY_SIZE(iids_list), count, iids );
 }
 
 static HRESULT WINAPI async_GetRuntimeClassName( IAsyncAction *iface, HSTRING *name )
@@ -521,8 +537,8 @@ static ULONG WINAPI dispatcher_Release( ICoreDispatcher *iface )
 
 static HRESULT WINAPI dispatcher_GetIids( ICoreDispatcher *iface, ULONG *count, IID **iids )
 {
-    FIXME( "iface %p, count %p, iids %p stub!\n", iface, count, iids );
-    return E_NOTIMPL;
+    static const IID *iids_list[] = { &IID_ICoreDispatcher, &IID_ICoreAcceleratorKeys };
+    return dispatcher_get_iids( iids_list, ARRAY_SIZE(iids_list), count, iids );
 }
 
 static HRESULT WINAPI dispatcher_GetRuntimeClassName( ICoreDispatcher *iface, HSTRING *name )
@@ -641,7 +657,8 @@ static ULONG WINAPI idle_args_Release( IIdleDispatchedHandlerArgs *iface )
 
 static HRESULT WINAPI idle_args_GetIids( IIdleDispatchedHandlerArgs *iface, ULONG *count, IID **iids )
 {
-    return E_NOTIMPL;
+    static const IID *iids_list[] = { &IID_IIdleDispatchedHandlerArgs };
+    return dispatcher_get_iids( iids_list, ARRAY_SIZE(iids_list), count, iids );
 }
 
 static HRESULT WINAPI idle_args_GetRuntimeClassName( IIdleDispatchedHandlerArgs *iface, HSTRING *name )
@@ -867,7 +884,8 @@ static ULONG WINAPI accel_Release( ICoreAcceleratorKeys *iface )
 
 static HRESULT WINAPI accel_GetIids( ICoreAcceleratorKeys *iface, ULONG *count, IID **iids )
 {
-    return E_NOTIMPL;
+    static const IID *iids_list[] = { &IID_ICoreDispatcher, &IID_ICoreAcceleratorKeys };
+    return dispatcher_get_iids( iids_list, ARRAY_SIZE(iids_list), count, iids );
 }
 
 static HRESULT WINAPI accel_GetRuntimeClassName( ICoreAcceleratorKeys *iface, HSTRING *name )

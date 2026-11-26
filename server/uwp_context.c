@@ -43,6 +43,8 @@
 #include "uwp_context.h"
 
 #define CATALOG_DIR      "appx-catalog"     /* the records, in the prefix directory */
+/* the records of the framework packages: the machine's catalog, on drive C: (the users' own cannot publish them) */
+#define MACHINE_CATALOG_DIR "dosdevices/c:/ProgramData/WineExplorer/appx-catalog"
 #define DRIVE_C_DIR      "dosdevices/c:"    /* the packages, anywhere on drive C: */
 #define RECORD_SUFFIX    ".wexappx"
 #define FULL_NAME_MAX    127   /* PACKAGE_FULL_NAME_MAX_LENGTH */
@@ -218,7 +220,7 @@ static int open_prefix_file( const char *dir, const char *name, struct stat *st 
 }
 
 /* read the record of a package; returns its text and length in characters */
-static WCHAR *read_record( const char *full_name, size_t *ret_len )
+static WCHAR *read_record( const char *catalog, const char *full_name, size_t *ret_len )
 {
     char name[FULL_NAME_MAX + sizeof(RECORD_SUFFIX)];
     struct stat st;
@@ -227,7 +229,7 @@ static WCHAR *read_record( const char *full_name, size_t *ret_len )
     int fd;
 
     snprintf( name, sizeof(name), "%s%s", full_name, RECORD_SUFFIX );
-    if ((fd = open_prefix_file( CATALOG_DIR, name, &st )) == -1)
+    if ((fd = open_prefix_file( catalog, name, &st )) == -1)
     {
         set_error( STATUS_NOT_FOUND );
         return NULL;
@@ -262,7 +264,7 @@ static WCHAR *read_record( const char *full_name, size_t *ret_len )
 }
 
 /* find the one published package of a family; returns the length of its full name, 0 with the error set */
-static size_t find_package( const struct field *family, char full_name[FULL_NAME_MAX + 1] )
+static size_t find_package( const char *catalog, const struct field *family, char full_name[FULL_NAME_MAX + 1] )
 {
     const size_t suffix_len = sizeof(RECORD_SUFFIX) - 1;
     struct dirent *de;
@@ -270,7 +272,7 @@ static size_t find_package( const struct field *family, char full_name[FULL_NAME
     DIR *dir = NULL;
     int fd;
 
-    if ((fd = openat( config_dir_fd, CATALOG_DIR, O_RDONLY | O_DIRECTORY | O_CLOEXEC )) == -1 ||
+    if ((fd = openat( config_dir_fd, catalog, O_RDONLY | O_DIRECTORY | O_CLOEXEC )) == -1 ||
         !(dir = fdopendir( fd )))
     {
         if (fd != -1) close( fd );
@@ -319,14 +321,166 @@ static void append_field( WCHAR **pos, const struct field *field )
     *pos += field->len;
 }
 
+/* the package directory of a record: a path on drive C: whose last component is the package full name */
+static int valid_root( const struct field *root, const char *full_name, size_t full_len, struct field *root_rel )
+{
+    if (root->len < 3 + full_len || to_lower( root->str[0] ) != 'c' || root->str[1] != ':' || root->str[2] != '\\')
+        return 0;
+    root_rel->str = root->str + 3;
+    root_rel->len = root->len - 3;
+    return valid_relative_path( root_rel ) &&
+           !(root_rel->len > full_len && root_rel->str[root_rel->len - full_len - 1] != '\\') &&
+           equal_ascii( root_rel->str + root_rel->len - full_len, full_len, full_name, full_len );
+}
+
+/* does the record hold a class line for this class? */
+static int record_has_class( const WCHAR *text, size_t len, const struct field *id )
+{
+    const WCHAR *pos = text, *end = text + len;
+    struct field fields[4];
+    int ret;
+
+    while ((ret = next_line( &pos, end, fields )) > 0)
+        if (ret == 3 && is_keyword( &fields[0], "class" ) && equal_field( &fields[1], id )) return 1;
+    return 0;
+}
+
+static size_t wide_len( const WCHAR *str )
+{
+    size_t len = 0;
+
+    while (str[len]) len++;
+    return len;
+}
+
+/* does a class table (class, NUL, path, NUL, ...) hold this class? */
+static int table_has_class( const WCHAR *table, size_t count, const struct field *id )
+{
+    const WCHAR *ptr = table, *end = table + count;
+
+    while (ptr < end)
+    {
+        size_t class_len = wide_len( ptr );
+
+        if (class_len == id->len && !memcmp( ptr, id->str, class_len * sizeof(WCHAR) )) return 1;
+        ptr += class_len + 1;
+        ptr += wide_len( ptr ) + 1;
+    }
+    return 0;
+}
+
+/* Append the classes of one framework record to a class table, each path made absolute with the directory of the
+ * package. Nothing is appended (and 0 returned) when the record is not a framework's, is malformed, or the table
+ * would grow beyond the limit; *used (in characters) is then unchanged. */
+static int append_framework_classes( WCHAR **table, size_t *used, size_t *capacity, size_t limit,
+                                     const char *full_name, size_t full_len, const WCHAR *own, size_t own_len,
+                                     const WCHAR *text, size_t text_len )
+{
+    const WCHAR *pos = text, *end = text + text_len, *scan;
+    struct field fields[4], root, root_rel;
+    int ret, framework = 0;
+    size_t start = *used;
+
+    if (next_line( &pos, end, fields ) != 1 ||
+        !equal_ascii( fields[0].str, fields[0].len, record_magic, sizeof(record_magic) - 1 )) return 0;
+    if (next_line( &pos, end, fields ) != 2 || !is_keyword( &fields[0], "root" )) return 0;
+    root = fields[1];
+    if (!valid_root( &root, full_name, full_len, &root_rel )) return 0;
+
+    /* a record counts as a framework only by its own "framework 1" line; the classes of any other package stay out */
+    for (scan = pos; (ret = next_line( &scan, end, fields )) > 0;)
+        if (is_keyword( &fields[0], "framework" ) && ret == 2 && fields[1].len == 1 && fields[1].str[0] == '1') framework = 1;
+    if (ret < 0 || !framework) return 0;
+
+    while ((ret = next_line( &pos, end, fields )) > 0)
+    {
+        size_t need;
+
+        if (!is_keyword( &fields[0], "class" )) continue;
+        if (ret != 3 || !valid_class_id( &fields[1] ) || !valid_relative_path( &fields[2] )) goto fail;
+        if (record_has_class( own, own_len, &fields[1] ) || table_has_class( *table, *used, &fields[1] )) continue;
+        need = fields[1].len + 1 + root.len + 1 + fields[2].len + 1;
+        if ((*used + need) * sizeof(WCHAR) > limit) goto fail;
+        if (*used + need > *capacity)
+        {
+            size_t size = *capacity * 2 > *used + need + 1024 ? *capacity * 2 : *used + need + 1024;
+            WCHAR *new = realloc( *table, size * sizeof(WCHAR) );
+
+            if (!new) goto fail;
+            *table = new;
+            *capacity = size;
+        }
+        memcpy( *table + *used, fields[1].str, fields[1].len * sizeof(WCHAR) );
+        *used += fields[1].len;
+        (*table)[(*used)++] = 0;
+        memcpy( *table + *used, root.str, root.len * sizeof(WCHAR) );
+        *used += root.len;
+        (*table)[(*used)++] = '\\';
+        memcpy( *table + *used, fields[2].str, fields[2].len * sizeof(WCHAR) );
+        *used += fields[2].len;
+        (*table)[(*used)++] = 0;
+    }
+    if (ret < 0) goto fail;
+    return 1;
+
+fail:
+    *used = start;
+    return 0;
+}
+
+/* The classes of the packages that a record depends on (its "dependency" lines), as a class table in a new buffer
+ * (*count in characters), or NULL. A dependency that is missing or not usable is left out; the package then
+ * starts without its classes. */
+static WCHAR *dependency_classes( const WCHAR *text, size_t text_len, size_t own_bytes, size_t *count )
+{
+    const WCHAR *pos = text, *end = text + text_len;
+    struct field fields[4];
+    WCHAR *table = NULL;
+    size_t used = 0, capacity = 0;
+    int ret, deps = 0;
+
+    *count = 0;
+    next_line( &pos, end, fields );   /* the magic line and the root line were checked */
+    next_line( &pos, end, fields );
+    while ((ret = next_line( &pos, end, fields )) > 0)
+    {
+        char name[FULL_NAME_MAX + 1];
+        size_t i, name_len, publisher, dep_len;
+        WCHAR *dep_text;
+
+        if (!is_keyword( &fields[0], "dependency" ) || ret != 2) continue;
+        if (++deps > UWP_MAX_DEPENDENCIES) break;
+        if (!fields[1].len || fields[1].len > FULL_NAME_MAX) continue;
+        for (i = 0; i < fields[1].len; i++) name[i] = (char)fields[1].str[i];
+        name[i] = 0;
+        if (!split_full_name( name, fields[1].len, &name_len, &publisher )) continue;
+        if (!(dep_text = read_record( MACHINE_CATALOG_DIR, name, &dep_len )))
+        {
+            clear_error();
+            continue;
+        }
+        append_framework_classes( &table, &used, &capacity, UWP_CLASSES_MAX_BYTES - own_bytes, name, fields[1].len,
+                                  text, text_len, dep_text, dep_len );
+        free( dep_text );
+    }
+    if (!used)
+    {
+        free( table );
+        return NULL;
+    }
+    *count = used;
+    return table;
+}
+
 struct uwp_context *uwp_context_from_aumid( const WCHAR *aumid, data_size_t len )
 {
     char full_name[FULL_NAME_MAX + 1], exe_path[2 * REL_PATH_MAX + 2];
+    const char *catalog;
     struct field family, app_id, fields[4], app = { NULL, 0 }, exe = { NULL, 0 }, entry = { NULL, 0 }, root, root_rel;
     const WCHAR *pos, *end;
     struct uwp_context *ctx = NULL;
-    size_t i, count = len / sizeof(WCHAR), full_len, name_len, publisher, text_len, classes = 0;
-    WCHAR *text, *out;
+    size_t i, count = len / sizeof(WCHAR), full_len, name_len, publisher, text_len, classes = 0, dep_count;
+    WCHAR *text, *out, *dep_classes;
     struct stat st;
     int fd, ret;
 
@@ -341,9 +495,18 @@ struct uwp_context *uwp_context_from_aumid( const WCHAR *aumid, data_size_t len 
     if (!family.len || !valid_app_id( &app_id )) goto invalid;
     for (i = 0; i < family.len; i++) if (!is_name_char( family.str[i] ) && family.str[i] != '_') goto invalid;
 
-    if (!(full_len = find_package( &family, full_name ))) return NULL;
+    /* the user's own packages first, then those installed for every user (the machine catalog, which only an
+     * administrator writes; the files of such a package are in C:\Program Files\WindowsApps) */
+    catalog = CATALOG_DIR;
+    if (!(full_len = find_package( catalog, &family, full_name )))
+    {
+        if (get_error() != STATUS_NOT_FOUND) return NULL;
+        catalog = MACHINE_CATALOG_DIR;
+        if (!(full_len = find_package( catalog, &family, full_name ))) return NULL;
+        set_error( STATUS_SUCCESS );   /* the user's catalog had none: that error is not the answer */
+    }
     if (!split_full_name( full_name, full_len, &name_len, &publisher )) goto invalid;
-    if (!(text = read_record( full_name, &text_len ))) return NULL;
+    if (!(text = read_record( catalog, full_name, &text_len ))) return NULL;
 
     /* A record that cannot be read completely is an error: it never counts as "no package". */
     pos = text;
@@ -355,14 +518,7 @@ struct uwp_context *uwp_context_from_aumid( const WCHAR *aumid, data_size_t len 
     /* the package directory: a path on drive C: whose last component is the package full name */
     if (next_line( &pos, end, fields ) != 2 || !is_keyword( &fields[0], "root" )) goto corrupt;
     root = fields[1];
-    if (root.len < 3 + full_len || to_lower( root.str[0] ) != 'c' || root.str[1] != ':' || root.str[2] != '\\')
-        goto corrupt;
-    root_rel.str = root.str + 3;
-    root_rel.len = root.len - 3;
-    if (!valid_relative_path( &root_rel ) ||
-        (root_rel.len > full_len && root_rel.str[root_rel.len - full_len - 1] != '\\') ||
-        !equal_ascii( root_rel.str + root_rel.len - full_len, full_len, full_name, full_len ))
-        goto corrupt;
+    if (!valid_root( &root, full_name, full_len, &root_rel )) goto corrupt;
 
     while ((ret = next_line( &pos, end, fields )))
     {
@@ -412,10 +568,15 @@ struct uwp_context *uwp_context_from_aumid( const WCHAR *aumid, data_size_t len 
     }
     close( fd );
 
+    /* the classes of the package's dependencies follow its own */
+    dep_classes = dependency_classes( text, text_len, classes, &dep_count );
+    classes += dep_count * sizeof(WCHAR);
+
     /* full name, family name (shorter than the full name), application id, root, executable, entry point, classes */
     if (!(ctx = mem_alloc( sizeof(*ctx) + (full_len * 2 + app.len + root.len + exe.len + entry.len) * sizeof(WCHAR) +
                            classes )))
     {
+        free( dep_classes );
         free( text );
         return NULL;
     }
@@ -448,6 +609,9 @@ struct uwp_context *uwp_context_from_aumid( const WCHAR *aumid, data_size_t len 
         append_field( &out, &fields[2] );
         *out++ = 0;
     }
+    if (dep_count) memcpy( out, dep_classes, dep_count * sizeof(WCHAR) );
+    out += dep_count;
+    free( dep_classes );
     ctx->sizes.classes = classes;
     ctx->total = (char *)out - (char *)(ctx + 1);
     assert( ctx->total == ctx->sizes.full_name + ctx->sizes.family_name + ctx->sizes.app_id + ctx->sizes.root +

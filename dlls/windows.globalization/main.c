@@ -331,7 +331,7 @@ static const struct IVectorView_HSTRINGVtbl hstring_vector_vtbl =
 
 static const struct IIterable_HSTRINGVtbl iterable_view_hstring_vtbl;
 
-static HRESULT hstring_vector_create(HSTRING *values, SIZE_T count, IVectorView_HSTRING **out)
+HRESULT hstring_vector_create(HSTRING *values, SIZE_T count, IVectorView_HSTRING **out)
 {
     struct hstring_vector *impl;
 
@@ -406,6 +406,7 @@ struct language_factory
 {
     IActivationFactory IActivationFactory_iface;
     ILanguageFactory ILanguageFactory_iface;
+    ILanguageStatics ILanguageStatics_iface;
     LONG ref;
 };
 
@@ -837,6 +838,13 @@ static HRESULT STDMETHODCALLTYPE windows_globalization_language_factory_QueryInt
         return S_OK;
     }
 
+    if (IsEqualGUID(iid, &IID_ILanguageStatics))
+    {
+        IUnknown_AddRef(iface);
+        *out = &factory->ILanguageStatics_iface;
+        return S_OK;
+    }
+
     FIXME("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));
     *out = NULL;
     return E_NOINTERFACE;
@@ -947,10 +955,76 @@ static const struct ILanguageFactoryVtbl language_factory_vtbl =
     language_factory_CreateLanguage,
 };
 
+DEFINE_IINSPECTABLE( language_statics, ILanguageStatics, struct language_factory, IActivationFactory_iface )
+
+/* BCP-47 syntax: a primary subtag of 2 to 8 letters (or the private use "x"), then subtags of 1 to 8 letters or
+ * digits, separated by '-' */
+static BOOL is_well_formed_tag( const WCHAR *tag, UINT32 len )
+{
+    UINT32 i, start = 0, subtag = 0;
+
+    if (!len) return FALSE;
+    for (i = 0; i <= len; i++)
+    {
+        if (i < len && tag[i] != '-')
+        {
+            if (!iswalnum( tag[i] ) || tag[i] > 0x7f) return FALSE;
+            if (!subtag && !iswalpha( tag[i] )) return FALSE;
+            continue;
+        }
+        if (i - start < 1 || i - start > 8) return FALSE;
+        if (!subtag && i - start < 2 && !(i - start == 1 && (tag[start] == 'x' || tag[start] == 'X'))) return FALSE;
+        subtag++;
+        start = i + 1;
+    }
+    return TRUE;
+}
+
+static HRESULT WINAPI language_statics_IsWellFormed( ILanguageStatics *iface, HSTRING tag, BOOLEAN *result )
+{
+    UINT32 len;
+    const WCHAR *buffer = WindowsGetStringRawBuffer( tag, &len );
+
+    TRACE( "iface %p, tag %s, result %p.\n", iface, debugstr_hstring( tag ), result );
+
+    if (!result) return E_POINTER;
+    *result = is_well_formed_tag( buffer, len );
+    return S_OK;
+}
+
+/* the language of the thread's keyboard layout */
+static HRESULT WINAPI language_statics_get_CurrentInputMethodLanguageTag( ILanguageStatics *iface, HSTRING *value )
+{
+    WCHAR name[LOCALE_NAME_MAX_LENGTH];
+    LANGID lang = LOWORD( GetKeyboardLayout( 0 ) );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    if (!LCIDToLocaleName( MAKELCID( lang, SORT_DEFAULT ), name, ARRAY_SIZE(name), 0 ))
+        return WindowsCreateString( NULL, 0, value );
+    return WindowsCreateString( name, wcslen( name ), value );
+}
+
+static const struct ILanguageStaticsVtbl language_statics_vtbl =
+{
+    language_statics_QueryInterface,
+    language_statics_AddRef,
+    language_statics_Release,
+    /* IInspectable methods */
+    language_statics_GetIids,
+    language_statics_GetRuntimeClassName,
+    language_statics_GetTrustLevel,
+    /* ILanguageStatics methods */
+    language_statics_IsWellFormed,
+    language_statics_get_CurrentInputMethodLanguageTag,
+};
+
 static struct language_factory language_factory =
 {
     {&activation_factory_language_vtbl},
     {&language_factory_vtbl},
+    {&language_statics_vtbl},
     0
 };
 
@@ -1105,6 +1179,26 @@ static struct application_languages application_languages =
     1
 };
 
+/* IInspectable::GetIids: the IIDs of the interfaces an object implements, in a CoTaskMem array */
+HRESULT inspectable_get_iids( const GUID *const *list, ULONG count, ULONG *iid_count, IID **iids )
+{
+    ULONG i;
+
+    if (!iid_count || !iids) return E_POINTER;
+    *iid_count = 0;
+    if (!(*iids = CoTaskMemAlloc( count * sizeof(IID) ))) return E_OUTOFMEMORY;
+    for (i = 0; i < count; i++) (*iids)[i] = *list[i];
+    *iid_count = count;
+    return S_OK;
+}
+
+/* IInspectable::GetRuntimeClassName */
+HRESULT inspectable_get_class_name( const WCHAR *name, HSTRING *class_name )
+{
+    if (!class_name) return E_POINTER;
+    return WindowsCreateString( name, wcslen( name ), class_name );
+}
+
 HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void **out)
 {
     FIXME("clsid %s, riid %s, out %p stub!\n", debugstr_guid(clsid), debugstr_guid(riid), out);
@@ -1137,6 +1231,41 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
     else if (!wcscmp(name, RuntimeClass_Windows_Globalization_ApplicationLanguages))
     {
         *factory = &application_languages.IActivationFactory_iface;
+        IUnknown_AddRef(*factory);
+    }
+    else if (!wcscmp(name, RuntimeClass_Windows_Globalization_Calendar))
+    {
+        *factory = calendar_factory_iface;
+        IUnknown_AddRef(*factory);
+    }
+    else if (!wcscmp(name, RuntimeClass_Windows_Globalization_CalendarIdentifiers))
+    {
+        *factory = calendar_identifiers_factory;
+        IUnknown_AddRef(*factory);
+    }
+    else if (!wcscmp(name, RuntimeClass_Windows_Globalization_ClockIdentifiers))
+    {
+        *factory = clock_identifiers_factory;
+        IUnknown_AddRef(*factory);
+    }
+    else if (!wcscmp(name, L"Windows.Globalization.NumberFormatting.DecimalFormatter"))
+    {
+        *factory = decimal_formatter_factory;
+        IUnknown_AddRef(*factory);
+    }
+    else if (!wcscmp(name, L"Windows.Globalization.NumberFormatting.CurrencyFormatter"))
+    {
+        *factory = currency_formatter_factory;
+        IUnknown_AddRef(*factory);
+    }
+    else if (!wcscmp(name, L"Windows.Globalization.DateTimeFormatting.DateTimeFormatter"))
+    {
+        *factory = date_time_formatter_factory;
+        IUnknown_AddRef(*factory);
+    }
+    else if (!wcscmp(name, L"Windows.Globalization.Fonts.LanguageFontGroup"))
+    {
+        *factory = language_font_group_factory;
         IUnknown_AddRef(*factory);
     }
 

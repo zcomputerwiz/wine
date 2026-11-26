@@ -29,6 +29,7 @@
 
 #include "taskmgr.h"
 #include "perfdata.h"
+#include "column.h"
 
 static CRITICAL_SECTION                PerfDataCriticalSection;
 static PPERFDATA                       pPerfDataOld = NULL;    /* Older perf data (saved to establish delta values) */
@@ -50,6 +51,72 @@ static PSYSTEM_PROCESSOR_PERFORMANCE_INFORMATION SystemProcessorTimeInfo = NULL;
 static size_t size_diff(size_t x, size_t y)
 {
     return x > y ? x - y : y - x;
+}
+
+/* The name of the account a process runs as, without its domain, as XP's User Name column shows it. A query-only
+ * token handle is enough: the target's token is never impersonated. */
+static void get_process_user_name(HANDLE hProcess, WCHAR *name, DWORD size)
+{
+    WCHAR domain[MAX_PATH];
+    DWORD domain_size = ARRAY_SIZE(domain), len = 0;
+    BYTE buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    TOKEN_USER *user = (TOKEN_USER *)buffer;
+    SID_NAME_USE use;
+    HANDLE token;
+
+    name[0] = 0;
+    if (!OpenProcessToken(hProcess, TOKEN_QUERY, &token))
+        return;
+    if (GetTokenInformation(token, TokenUser, user, sizeof(buffer), &len))
+    {
+        if (!LookupAccountSidW(NULL, user->User.Sid, name, &size, domain, &domain_size, &use))
+            name[0] = 0;
+    }
+    CloseHandle(token);
+}
+
+static int compare_ulonglong(ULONGLONG a, ULONGLONG b)
+{
+    return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/* Sorting the process list by a column (COLUMN_*); a tie keeps the order the list had without sorting. */
+static int __cdecl compare_perf_data(const void *p1, const void *p2)
+{
+    const PERFDATA *a = p1, *b = p2;
+    int ret = 0;
+
+    switch (TaskManagerSettings.SortColumn)
+    {
+    case COLUMN_IMAGENAME:        ret = lstrcmpiW(a->ImageName, b->ImageName); break;
+    case COLUMN_PID:              ret = compare_ulonglong(a->ProcessId, b->ProcessId); break;
+    case COLUMN_USERNAME:         ret = lstrcmpiW(a->UserName, b->UserName); break;
+    case COLUMN_SESSIONID:        ret = compare_ulonglong(a->SessionId, b->SessionId); break;
+    case COLUMN_CPUUSAGE:         ret = compare_ulonglong(a->CPUUsage, b->CPUUsage); break;
+    case COLUMN_CPUTIME:          ret = compare_ulonglong(a->CPUTime.QuadPart, b->CPUTime.QuadPart); break;
+    case COLUMN_MEMORYUSAGE:      ret = compare_ulonglong(a->vmCounters.WorkingSetSize, b->vmCounters.WorkingSetSize); break;
+    case COLUMN_PEAKMEMORYUSAGE:  ret = compare_ulonglong(a->vmCounters.PeakWorkingSetSize, b->vmCounters.PeakWorkingSetSize); break;
+    case COLUMN_MEMORYUSAGEDELTA: ret = compare_ulonglong(a->WorkingSetSizeDelta, b->WorkingSetSizeDelta); break;
+    case COLUMN_PAGEFAULTS:       ret = compare_ulonglong(a->vmCounters.PageFaultCount, b->vmCounters.PageFaultCount); break;
+    case COLUMN_PAGEFAULTSDELTA:  ret = compare_ulonglong(a->PageFaultCountDelta, b->PageFaultCountDelta); break;
+    case COLUMN_VIRTUALMEMORYSIZE: ret = compare_ulonglong(a->vmCounters.VirtualSize, b->vmCounters.VirtualSize); break;
+    case COLUMN_PAGEDPOOL:        ret = compare_ulonglong(a->vmCounters.QuotaPagedPoolUsage, b->vmCounters.QuotaPagedPoolUsage); break;
+    case COLUMN_NONPAGEDPOOL:     ret = compare_ulonglong(a->vmCounters.QuotaNonPagedPoolUsage, b->vmCounters.QuotaNonPagedPoolUsage); break;
+    case COLUMN_BASEPRIORITY:     ret = compare_ulonglong(a->BasePriority, b->BasePriority); break;
+    case COLUMN_HANDLECOUNT:      ret = compare_ulonglong(a->HandleCount, b->HandleCount); break;
+    case COLUMN_THREADCOUNT:      ret = compare_ulonglong(a->ThreadCount, b->ThreadCount); break;
+    case COLUMN_USEROBJECTS:      ret = compare_ulonglong(a->USERObjectCount, b->USERObjectCount); break;
+    case COLUMN_GDIOBJECTS:       ret = compare_ulonglong(a->GDIObjectCount, b->GDIObjectCount); break;
+    case COLUMN_IOREADS:          ret = compare_ulonglong(a->IOCounters.ReadOperationCount, b->IOCounters.ReadOperationCount); break;
+    case COLUMN_IOWRITES:         ret = compare_ulonglong(a->IOCounters.WriteOperationCount, b->IOCounters.WriteOperationCount); break;
+    case COLUMN_IOOTHER:          ret = compare_ulonglong(a->IOCounters.OtherOperationCount, b->IOCounters.OtherOperationCount); break;
+    case COLUMN_IOREADBYTES:      ret = compare_ulonglong(a->IOCounters.ReadTransferCount, b->IOCounters.ReadTransferCount); break;
+    case COLUMN_IOWRITEBYTES:     ret = compare_ulonglong(a->IOCounters.WriteTransferCount, b->IOCounters.WriteTransferCount); break;
+    case COLUMN_IOOTHERBYTES:     ret = compare_ulonglong(a->IOCounters.OtherTransferCount, b->IOCounters.OtherTransferCount); break;
+    }
+    if (!TaskManagerSettings.SortAscending) ret = -ret;
+    if (!ret) ret = compare_ulonglong(a->Order, b->Order);
+    return ret;
 }
 
 BOOL PerfDataInitialize(void)
@@ -76,11 +143,11 @@ void PerfDataRefresh(void)
     ULONG                            BufferSize;
     PSYSTEM_PROCESS_INFORMATION        pSPI;
     PPERFDATA                        pPDOld;
-    ULONG                            Idx, Idx2;
+    ULONG                            Idx, Idx2, n;
+    ULONG                            ProcessCountAll;
+    BOOL                             bShortInterval;
+    DWORD                            CurrentSessionId;
     HANDLE                            hProcess;
-    HANDLE                            hProcessToken;
-    WCHAR                            wszTemp[MAX_PATH];
-    DWORD                            dwSize;
     SYSTEM_PERFORMANCE_INFORMATION    SysPerfInfo;
     SYSTEM_TIMEOFDAY_INFORMATION      SysTimeInfo;
     SYSTEM_CACHE_INFORMATION        SysCacheInfo;
@@ -179,8 +246,13 @@ void PerfDataRefresh(void)
         CurrentKernelTime += Li2Double(SystemProcessorTimeInfo[Idx].Reserved1[1]);
     }
 
+    /* A refresh right after another one (a click on a column or on "Show processes from all users") keeps the
+     * usage figures of the last one instead of dividing by almost no time */
+    bShortInterval = liOldIdleTime.QuadPart != 0 &&
+                     SysTimeInfo.SystemTime.QuadPart - liOldSystemTime.QuadPart < 1000000;
+
     /* If it's a first call - skip idle time calcs */
-    if (liOldIdleTime.QuadPart != 0) {
+    if (liOldIdleTime.QuadPart != 0 && !bShortInterval) {
         /*  CurrentValue = NewValue - OldValue */
         dbIdleTime = Li2Double(SysPerfInfo.IdleTime) - Li2Double(liOldIdleTime);
         dbKernelTime = CurrentKernelTime - OldKernelTime;
@@ -196,30 +268,41 @@ void PerfDataRefresh(void)
     }
 
     /* Store new CPU's idle and system time */
-    liOldIdleTime = SysPerfInfo.IdleTime;
-    liOldSystemTime = SysTimeInfo.SystemTime;
-    OldKernelTime = CurrentKernelTime;
+    if (!bShortInterval) {
+        liOldIdleTime = SysPerfInfo.IdleTime;
+        liOldSystemTime = SysTimeInfo.SystemTime;
+        OldKernelTime = CurrentKernelTime;
+    }
 
     /* Determine the process count
      * We loop through the data we got from NtQuerySystemInformation
      * and count how many structures there are (until RelativeOffset is 0)
      */
     ProcessCountOld = ProcessCount;
-    ProcessCount = 0;
+    ProcessCountAll = 0;
     pSPI = (PSYSTEM_PROCESS_INFORMATION)pBuffer;
     while (pSPI) {
-        ProcessCount++;
+        ProcessCountAll++;
         if (pSPI->NextEntryOffset == 0)
             break;
         pSPI = (PSYSTEM_PROCESS_INFORMATION)((LPBYTE)pSPI + pSPI->NextEntryOffset);
     }
 
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &CurrentSessionId))
+        CurrentSessionId = 0;
+
     /* Now alloc a new PERFDATA array and fill in the data */
     HeapFree(GetProcessHeap(), 0, pPerfDataOld);
     pPerfDataOld = pPerfData;
-    pPerfData = HeapAlloc(GetProcessHeap(), 0, sizeof(PERFDATA) * ProcessCount);
+    pPerfData = HeapAlloc(GetProcessHeap(), 0, sizeof(PERFDATA) * ProcessCountAll);
     pSPI = (PSYSTEM_PROCESS_INFORMATION)pBuffer;
-    for (Idx=0; Idx<ProcessCount; Idx++) {
+    ProcessCount = 0;
+    for (n=0; n<ProcessCountAll; n++, pSPI = (PSYSTEM_PROCESS_INFORMATION)((LPBYTE)pSPI + pSPI->NextEntryOffset)) {
+        /* Without "Show processes from all users" the list holds the processes of this session only */
+        if (!TaskManagerSettings.ShowProcessesFromAllUsers && pSPI->SessionId != CurrentSessionId)
+            continue;
+        Idx = ProcessCount++;
+
         /* Get the old perf data for this process (if any) */
         /* so that we can establish delta values */
         pPDOld = NULL;
@@ -271,17 +354,18 @@ void PerfDataRefresh(void)
         pPerfData[Idx].HandleCount = pSPI->HandleCount;
         pPerfData[Idx].ThreadCount = pSPI->dwThreadCount;
         pPerfData[Idx].SessionId = pSPI->SessionId;
-        
+        pPerfData[Idx].Order = ProcessCountAll - n; /* XP lists the newest process first */
+
+        /* The account does not change while a process runs */
+        if (pPDOld && pPDOld->UserName[0])
+            lstrcpyW(pPerfData[Idx].UserName, pPDOld->UserName);
+
         hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, (DWORD_PTR)pSPI->UniqueProcessId);
+        if (!hProcess)
+            hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD_PTR)pSPI->UniqueProcessId);
         if (hProcess) {
-            if (OpenProcessToken(hProcess, TOKEN_QUERY|TOKEN_DUPLICATE|TOKEN_IMPERSONATE, &hProcessToken)) {
-                ImpersonateLoggedOnUser(hProcessToken);
-                memset(wszTemp, 0, sizeof(wszTemp));
-                dwSize = MAX_PATH;
-                GetUserNameW(wszTemp, &dwSize);
-                RevertToSelf();
-                CloseHandle(hProcessToken);
-            }
+            if (!pPerfData[Idx].UserName[0])
+                get_process_user_name(hProcess, pPerfData[Idx].UserName, ARRAY_SIZE(pPerfData[Idx].UserName));
             pPerfData[Idx].USERObjectCount = GetGuiResources(hProcess, GR_USEROBJECTS);
             pPerfData[Idx].GDIObjectCount = GetGuiResources(hProcess, GR_GDIOBJECTS);
             GetProcessIoCounters(hProcess, &pPerfData[Idx].IOCounters);
@@ -290,8 +374,16 @@ void PerfDataRefresh(void)
         }
         pPerfData[Idx].UserTime.QuadPart = pSPI->UserTime.QuadPart;
         pPerfData[Idx].KernelTime.QuadPart = pSPI->KernelTime.QuadPart;
-        pSPI = (PSYSTEM_PROCESS_INFORMATION)((LPBYTE)pSPI + pSPI->NextEntryOffset);
+        if (bShortInterval && pPDOld) {
+            /* keep the last interval's figures and its starting times (see bShortInterval) */
+            pPerfData[Idx].CPUUsage = pPDOld->CPUUsage;
+            pPerfData[Idx].WorkingSetSizeDelta = pPDOld->WorkingSetSizeDelta;
+            pPerfData[Idx].PageFaultCountDelta = pPDOld->PageFaultCountDelta;
+            pPerfData[Idx].UserTime = pPDOld->UserTime;
+            pPerfData[Idx].KernelTime = pPDOld->KernelTime;
+        }
     }
+    qsort(pPerfData, ProcessCount, sizeof(PERFDATA), compare_perf_data);
     HeapFree(GetProcessHeap(), 0, pBuffer);
     LeaveCriticalSection(&PerfDataCriticalSection);
 }

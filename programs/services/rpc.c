@@ -112,6 +112,9 @@ static DWORD check_client_access(struct service_entry *entry, BOOL service, cons
     RpcRevertToSelf();
     if (!have_token) return ERROR_ACCESS_DENIED;
 
+    /* AccessCheck takes specific rights only: GENERIC_READ, GENERIC_ALL and the others are mapped first, as the
+     * service manager on Windows does (a GENERIC_ALL open of the manager is SC_MANAGER_ALL_ACCESS) */
+    MapGenericMask(access, (GENERIC_MAPPING *)mapping);
     if (entry) service_lock(entry);
     if (AccessCheck(service ? (entry && entry->security ? entry->security : svc_sd) : scm_sd, token, *access,
                     (GENERIC_MAPPING *)mapping, &privs, &privs_size, &granted, &ok) && ok)
@@ -175,7 +178,21 @@ struct sc_remote_handle
 {
     struct sc_handle hdr;
     SC_RPC_HANDLE remote;
+    struct sc_notify_handle *notify;  /* a status notification waiting (remote_notify_thread), under remote_notify_cs */
+    BOOL notified;                    /* a notification was given for notified_state */
+    DWORD notified_state;
 };
+
+/* the notifications of session 0's services: the wrapped handles' notify links, and their remote handles while a
+ * watcher queries them, so that a handle is never closed under a query */
+static CRITICAL_SECTION remote_notify_cs;
+static CRITICAL_SECTION_DEBUG remote_notify_cs_debug =
+{
+    0, 0, &remote_notify_cs,
+    { &remote_notify_cs_debug.ProcessLocksList, &remote_notify_cs_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": remote_notify_cs") }
+};
+static CRITICAL_SECTION remote_notify_cs = { &remote_notify_cs_debug, -1, 0, 0, 0, 0 };
 
 BOOL forward_mode;
 
@@ -205,6 +222,9 @@ static DWORD wrap_remote(SC_RPC_HANDLE remote, SC_RPC_HANDLE *handle)
     wrapped->hdr.type = SC_HTYPE_REMOTE;
     wrapped->hdr.access = 0;  /* session 0 checks the access */
     wrapped->remote = remote;
+    wrapped->notify = NULL;
+    wrapped->notified = FALSE;
+    wrapped->notified_state = 0;
     *handle = &wrapped->hdr;
     return ERROR_SUCCESS;
 }
@@ -216,6 +236,7 @@ struct sc_notify_handle
     DWORD notify_mask;
     LONG ref;
     SC_RPC_NOTIFY_PARAMS_LIST *params_list;
+    struct sc_remote_handle *watched;  /* T5.4: the session 0 service watched, under remote_notify_cs */
 };
 
 struct sc_service_handle       /* service handle */
@@ -474,6 +495,18 @@ static void SC_RPC_HANDLE_destroy(SC_RPC_HANDLE handle)
         case SC_HTYPE_REMOTE:
         {
             struct sc_remote_handle *remote = (struct sc_remote_handle *)hdr;
+            struct sc_notify_handle *notify;
+
+            /* a waiting notification ends without a result, as for a service of this session */
+            EnterCriticalSection(&remote_notify_cs);
+            if ((notify = remote->notify))
+            {
+                notify->watched = NULL;
+                remote->notify = NULL;
+                SetEvent(notify->event);
+            }
+            LeaveCriticalSection(&remote_notify_cs);
+            if (notify) sc_notify_release(notify);
             forward_close(&remote->remote);
             free(remote);
             break;
@@ -523,7 +556,7 @@ DWORD __cdecl svcctl_GetServiceDisplayNameW(
     scmdatabase_lock(manager->db);
 
     entry = scmdatabase_find_service(manager->db, lpServiceName);
-    if (forward_mode && (!entry || !is_session_service(entry->name, entry->config.dwServiceType)))
+    if (service_is_session0s(entry))
     {
         SC_RPC_HANDLE remote;
 
@@ -575,7 +608,7 @@ DWORD __cdecl svcctl_GetServiceKeyNameW(
     scmdatabase_lock(manager->db);
 
     entry = scmdatabase_find_service_by_displayname(manager->db, lpServiceDisplayName);
-    if (forward_mode && (!entry || !is_session_service(entry->name, entry->config.dwServiceType)))
+    if (service_is_session0s(entry))
     {
         SC_RPC_HANDLE remote;
 
@@ -658,7 +691,7 @@ DWORD __cdecl svcctl_OpenServiceW(
 
     /* T5.4: a service that is not the session's own, or one this session does not know (made since it started),
      * is session 0's */
-    if (forward_mode && (!entry || !is_session_service(entry->name, entry->config.dwServiceType)))
+    if (service_is_session0s(entry))
     {
         SC_RPC_HANDLE remote_manager, remote_service = NULL;
 
@@ -786,7 +819,7 @@ static DWORD create_serviceW(
         return err;
 
     /* T5.4: a new service that is not a session's own is made in session 0, which checks the caller again */
-    if (forward_mode && lpServiceName && !is_session_service(lpServiceName, dwServiceType))
+    if (forward_mode && lpServiceName && !is_session_service(lpServiceName, dwServiceType, SESSION_SERVICE_DEFAULT))
     {
         SC_RPC_HANDLE remote_manager, remote_service = NULL;
 
@@ -917,6 +950,9 @@ DWORD __cdecl svcctl_DeleteService(
         err = ERROR_SERVICE_MARKED_FOR_DELETE;
 
     service_unlock(service->service_entry);
+
+    /* a restart pending after a failure would keep the deleted service in the database until its delay ends */
+    if (!err) service_cancel_restart(service->service_entry);
 
     return err;
 }
@@ -1079,7 +1115,8 @@ static void fill_status_process(SERVICE_STATUS_PROCESS *status, struct service_e
     status->dwServiceFlags  = 0;
 }
 
-static void fill_notify(struct sc_notify_handle *notify, struct service_entry *service)
+/* the notification's result: the status, or the error that ended the watch */
+static void fill_notify_status(struct sc_notify_handle *notify, const SERVICE_STATUS_PROCESS *status, DWORD error)
 {
     SC_RPC_NOTIFY_PARAMS_LIST *list;
     SERVICE_NOTIFY_STATUS_CHANGE_PARAMS_2 *cparams;
@@ -1094,9 +1131,9 @@ static void fill_notify(struct sc_notify_handle *notify, struct service_entry *s
     }
 
     cparams->dwNotifyMask = notify->notify_mask;
-    fill_status_process(&cparams->ServiceStatus, service);
-    cparams->dwNotificationStatus = ERROR_SUCCESS;
-    cparams->dwNotificationTriggered = 1 << (cparams->ServiceStatus.dwCurrentState - SERVICE_STOPPED);
+    cparams->ServiceStatus = *status;
+    cparams->dwNotificationStatus = error;
+    cparams->dwNotificationTriggered = error ? 0 : 1 << (cparams->ServiceStatus.dwCurrentState - SERVICE_STOPPED);
     cparams->pszServiceNames = NULL;
 
     list->cElements = 1;
@@ -1107,6 +1144,14 @@ static void fill_notify(struct sc_notify_handle *notify, struct service_entry *s
     InterlockedExchangePointer((void**)&notify->params_list, list);
 
     SetEvent(notify->event);
+}
+
+static void fill_notify(struct sc_notify_handle *notify, struct service_entry *service)
+{
+    SERVICE_STATUS_PROCESS status;
+
+    fill_status_process(&status, service);
+    fill_notify_status(notify, &status, ERROR_SUCCESS);
 }
 
 void notify_service_state(struct service_entry *service)
@@ -1203,11 +1248,64 @@ DWORD __cdecl svcctl_ChangeServiceConfig2W( SC_RPC_HANDLE hService, SC_RPC_CONFI
         }
         break;
     case SERVICE_CONFIG_FAILURE_ACTIONS:
-        WINE_FIXME( "SERVICE_CONFIG_FAILURE_ACTIONS not implemented: period %lu msg %s cmd %s\n",
-                    config.actions->dwResetPeriod,
-                    wine_dbgstr_w(config.actions->lpRebootMsg),
-                    wine_dbgstr_w(config.actions->lpCommand) );
-        break;
+        {
+            SERVICE_FAILURE_ACTIONSW *fa = config.actions;
+            WCHAR *msg = NULL, *cmd = NULL;
+            SC_ACTION *actions = NULL;
+            DWORD i;
+
+            if (!fa) return ERROR_INVALID_PARAMETER;
+            /* lpsaActions NULL: the actions and the reset period stay as they are */
+            if (fa->lpsaActions)
+            {
+                /* more would not fit in the value, and would be lost at the next start */
+                if (fa->cActions > MAX_FAILURE_ACTIONS) return ERROR_INVALID_PARAMETER;
+                for (i = 0; i < fa->cActions; i++)
+                {
+                    if (fa->lpsaActions[i].Type > SC_ACTION_RUN_COMMAND) return ERROR_INVALID_PARAMETER;
+                    /* a restart action needs a handle that may start the service, as on Windows */
+                    if (fa->lpsaActions[i].Type == SC_ACTION_RESTART && !(service->hdr.access & SERVICE_START))
+                        return ERROR_ACCESS_DENIED;
+                    if (fa->lpsaActions[i].Type == SC_ACTION_REBOOT)
+                        WINE_FIXME( "SC_ACTION_REBOOT: the caller's SeShutdownPrivilege is not checked\n" );
+                }
+                if (fa->cActions && !(actions = malloc( fa->cActions * sizeof(*actions) )))
+                    return ERROR_NOT_ENOUGH_MEMORY;
+                if (fa->cActions) memcpy( actions, fa->lpsaActions, fa->cActions * sizeof(*actions) );
+            }
+            /* a NULL string stays as it is, an empty one is removed */
+            if (fa->lpRebootMsg && fa->lpRebootMsg[0] && !(msg = wcsdup( fa->lpRebootMsg ))) goto failure_oom;
+            if (fa->lpCommand && fa->lpCommand[0] && !(cmd = wcsdup( fa->lpCommand ))) goto failure_oom;
+
+            service_lock( service->service_entry );
+            if (fa->lpRebootMsg)
+            {
+                free( service->service_entry->reboot_msg );
+                service->service_entry->reboot_msg = msg;
+            }
+            if (fa->lpCommand)
+            {
+                free( service->service_entry->failure_command );
+                service->service_entry->failure_command = cmd;
+            }
+            if (fa->lpsaActions)
+            {
+                free( service->service_entry->failure_actions );
+                service->service_entry->failure_actions = actions;
+                service->service_entry->failure_actions_count = fa->cActions;
+                service->service_entry->failure_reset_period = fa->cActions ? fa->dwResetPeriod : 0;
+                service->service_entry->failure_count = 0;
+            }
+            err = save_service_config( service->service_entry );
+            service_unlock( service->service_entry );
+            break;
+
+        failure_oom:
+            free( actions );
+            free( msg );
+            free( cmd );
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
     case SERVICE_CONFIG_PRESHUTDOWN_INFO:
         WINE_TRACE( "changing service %p preshutdown timeout to %ld\n",
                 service, config.preshutdown->dwPreshutdownTimeout );
@@ -1229,8 +1327,18 @@ DWORD __cdecl svcctl_ChangeServiceConfig2W( SC_RPC_HANDLE hService, SC_RPC_CONFI
         service_unlock( service->service_entry );
         break;
     case SERVICE_CONFIG_SERVICE_SID_INFO:
-        WINE_FIXME( "SERVICE_CONFIG_SERVICE_SID_INFO not implemented: type %lu\n",
-                    config.sid->dwServiceSidType );
+        /* WineExplorer (B114): an own-process service of a system account whose type is not NONE gets
+         * NT SERVICE\name in its token; RESTRICTED is kept but its token is not write-restricted */
+        if (config.sid->dwServiceSidType != SERVICE_SID_TYPE_NONE &&
+            config.sid->dwServiceSidType != SERVICE_SID_TYPE_UNRESTRICTED &&
+            config.sid->dwServiceSidType != SERVICE_SID_TYPE_RESTRICTED)
+            return ERROR_INVALID_PARAMETER;
+        if (config.sid->dwServiceSidType == SERVICE_SID_TYPE_RESTRICTED)
+            WINE_FIXME( "SERVICE_SID_TYPE_RESTRICTED: the token is not write-restricted\n" );
+        service_lock( service->service_entry );
+        service->service_entry->sid_type = config.sid->dwServiceSidType;
+        save_service_config( service->service_entry );
+        service_unlock( service->service_entry );
         break;
     default:
         WINE_FIXME("level %lu not implemented\n", config.dwInfoLevel);
@@ -1282,6 +1390,37 @@ DWORD __cdecl svcctl_QueryServiceConfig2W( SC_RPC_HANDLE hService, DWORD level,
     }
     break;
 
+    case SERVICE_CONFIG_FAILURE_ACTIONS:
+    {
+        /* the wire layout of struct service_failure_actions (svcctl.idl); sechost makes the caller's structure */
+        struct service_failure_actions *fa = (struct service_failure_actions *)buffer;
+        struct service_entry *entry = service->service_entry;
+        DWORD msg_size, cmd_size, actions_size;
+        BYTE *p;
+
+        service_lock(entry);
+        msg_size = entry->reboot_msg ? (lstrlenW(entry->reboot_msg) + 1) * sizeof(WCHAR) : 0;
+        cmd_size = entry->failure_command ? (lstrlenW(entry->failure_command) + 1) * sizeof(WCHAR) : 0;
+        actions_size = entry->failure_actions_count * sizeof(SC_ACTION);
+        *needed = sizeof(*fa) + actions_size + msg_size + cmd_size;
+        if (size >= *needed)
+        {
+            fa->reset_period = entry->failure_reset_period;
+            fa->reboot_msg_size = msg_size;
+            fa->command_size = cmd_size;
+            fa->actions_count = entry->failure_actions_count;
+            p = (BYTE *)(fa + 1);
+            if (actions_size) memcpy(p, entry->failure_actions, actions_size);
+            p += actions_size;
+            if (msg_size) memcpy(p, entry->reboot_msg, msg_size);
+            p += msg_size;
+            if (cmd_size) memcpy(p, entry->failure_command, cmd_size);
+        }
+        else err = ERROR_INSUFFICIENT_BUFFER;
+        service_unlock(entry);
+        break;
+    }
+
     case SERVICE_CONFIG_PRESHUTDOWN_INFO:
         service_lock(service->service_entry);
 
@@ -1306,6 +1445,17 @@ DWORD __cdecl svcctl_QueryServiceConfig2W( SC_RPC_HANDLE hService, DWORD level,
         service_unlock(service->service_entry);
         break;
 
+    case SERVICE_CONFIG_SERVICE_SID_INFO:
+        service_lock(service->service_entry);
+
+        *needed = sizeof(SERVICE_SID_INFO);
+        if (size >= *needed)
+            ((SERVICE_SID_INFO *)buffer)->dwServiceSidType = service->service_entry->sid_type;
+        else err = ERROR_INSUFFICIENT_BUFFER;
+
+        service_unlock(service->service_entry);
+        break;
+
     default:
         WINE_FIXME("level %lu not implemented\n", level);
         err = ERROR_INVALID_LEVEL;
@@ -1325,6 +1475,8 @@ DWORD __cdecl svcctl_QueryServiceStatusEx(
     DWORD err;
     LPSERVICE_STATUS_PROCESS pSvcStatusData;
 
+    /* session 0's process ids come from its own block (R6 of docs/SESSION0_SPLIT_REVIEW.md): one names no process of
+     * this session's server, so it is reported as it is (B85 zeroed it while ids were per server) */
     if (remote_of(hService))
         return forward_QueryServiceStatusEx(remote_of(hService), InfoLevel, lpBuffer, cbBufSize, pcbBytesNeeded);
     memset(lpBuffer, 0, cbBufSize);
@@ -1500,6 +1652,7 @@ DWORD __cdecl svcctl_StartServiceW(
     LPCWSTR *lpServiceArgVectors)
 {
     struct sc_service_handle *service;
+    BOOL running;
     DWORD err;
 
     if (remote_of(hService)) return forward_StartServiceW(remote_of(hService), dwNumServiceArgs, lpServiceArgVectors);
@@ -1511,12 +1664,25 @@ DWORD __cdecl svcctl_StartServiceW(
     if (service->service_entry->config.dwStartType == SERVICE_DISABLED)
         return ERROR_SERVICE_DISABLED;
 
+    /* as on Windows; services.exe's own winedevice hosts are marked for delete from the start and not started here */
+    if (is_marked_for_delete(service->service_entry))
+        return ERROR_SERVICE_MARKED_FOR_DELETE;
+
     /* WineExplorer Safe Mode (services.c, safeboot_allows) */
     if (!safeboot_allows(service->service_entry))
     {
         WINE_TRACE("%s is not a Safe Mode service\n", wine_dbgstr_w(service->service_entry->name));
         return ERROR_NOT_SAFEBOOT_SERVICE;
     }
+
+    /* A service that runs is answered at once, as on Windows, even while the auto-start services are being
+     * started (the startup lock is held for the whole list). */
+    service_lock(service->service_entry);
+    running = service->service_entry->process &&
+              WaitForSingleObject(service->service_entry->process->process, 0) == WAIT_TIMEOUT;
+    service_unlock(service->service_entry);
+    if (running)
+        return ERROR_SERVICE_ALREADY_RUNNING;
 
     if (!scmdatabase_lock_startup(service->service_entry->db, 3000))
         return ERROR_SERVICE_DATABASE_LOCKED;
@@ -1785,7 +1951,7 @@ static DWORD enum_merged(struct sc_manager_handle *manager, BOOL ex, DWORD type,
     {
         SERVICE_STATUS_PROCESS status;
 
-        if (!is_session_service(service->name, service->config.dwServiceType)) continue;
+        if (!service_is_session_service(service)) continue;
         if (group && service->config.lpLoadOrderGroup && !wcsicmp(group, service->config.lpLoadOrderGroup))
             group_found = TRUE;
         if (!(service->status.dwServiceType & type) || !map_state(service->status.dwCurrentState, state)) continue;
@@ -1830,7 +1996,7 @@ static DWORD enum_merged(struct sc_manager_handle *manager, BOOL ex, DWORD type,
                 memset(&status, 0, sizeof(status));
                 if (ex) status = rex->service_status_process;
                 else memcpy(&status, &rplain->service_status, sizeof(rplain->service_status));
-                if (is_session_service(name, status.dwServiceType)) continue;  /* session 0's own copy */
+                if (is_session_service_name(manager->db, name, status.dwServiceType)) continue;  /* session 0's own copy */
                 if (!add_enum_item(&items, &count, &capacity, name, display, &status))
                     err = ERROR_NOT_ENOUGH_SERVER_MEMORY;
             }
@@ -2149,6 +2315,102 @@ DWORD __cdecl svcctl_unknown46(void)
     return ERROR_CALL_NOT_IMPLEMENTED;
 }
 
+/* WineExplorer T5.4: a status notification for a service of session 0. Session 0's service manager changes the
+ * status, not this one, so a thread of this one watches it through the forwarded status query and gives the
+ * notification when the state is one asked for, as notify_service_state does for this session's services: once per
+ * registration, and not again for the state already notified on the same handle. An error of the query ends the
+ * watch with that error. */
+#define REMOTE_NOTIFY_INTERVAL 250  /* milliseconds between two queries */
+
+static DWORD WINAPI remote_notify_thread(void *arg)
+{
+    struct sc_notify_handle *notify = arg;
+    struct sc_remote_handle *watched;
+    SERVICE_STATUS_PROCESS status;
+    DWORD err, needed, mask;
+
+    for (;;)
+    {
+        EnterCriticalSection(&remote_notify_cs);
+        if (!(watched = notify->watched))  /* the service handle was closed */
+        {
+            LeaveCriticalSection(&remote_notify_cs);
+            break;
+        }
+        err = forward_QueryServiceStatusEx(watched->remote, SC_STATUS_PROCESS_INFO, (BYTE *)&status, sizeof(status),
+                                           &needed);
+        mask = err ? 0 : 1 << (status.dwCurrentState - SERVICE_STOPPED);
+        if (err || ((notify->notify_mask & mask) &&
+                    (!watched->notified || watched->notified_state != status.dwCurrentState)))
+        {
+            if (err) memset(&status, 0, sizeof(status));
+            else
+            {
+                watched->notified = TRUE;
+                watched->notified_state = status.dwCurrentState;
+            }
+            watched->notify = NULL;
+            notify->watched = NULL;
+            fill_notify_status(notify, &status, err);
+            LeaveCriticalSection(&remote_notify_cs);
+            sc_notify_release(notify);  /* the service handle's link */
+            break;
+        }
+        LeaveCriticalSection(&remote_notify_cs);
+        Sleep(REMOTE_NOTIFY_INTERVAL);
+    }
+    sc_notify_release(notify);  /* the thread's */
+    return 0;
+}
+
+static DWORD remote_notify(struct sc_remote_handle *wrapped, DWORD notify_mask, SC_NOTIFY_RPC_HANDLE *hNotify)
+{
+    struct sc_notify_handle *notify;
+    SERVICE_STATUS_PROCESS status;
+    DWORD err, needed;
+    HANDLE thread;
+
+    /* the caller needs SERVICE_QUERY_STATUS, which session 0 checks */
+    if ((err = forward_QueryServiceStatusEx(wrapped->remote, SC_STATUS_PROCESS_INFO, (BYTE *)&status,
+                                            sizeof(status), &needed)))
+        return err;
+    if (!(notify = calloc(1, sizeof(*notify)))) return ERROR_NOT_ENOUGH_SERVER_MEMORY;
+    notify->hdr.type = SC_HTYPE_NOTIFY;
+    notify->hdr.access = 0;
+    notify->notify_mask = notify_mask;
+    if (!(notify->event = CreateEventW(NULL, TRUE, FALSE, NULL)))
+    {
+        free(notify);
+        return GetLastError();
+    }
+    notify->ref = 3;  /* the returned handle, the service handle's link and the thread */
+
+    EnterCriticalSection(&remote_notify_cs);
+    if (wrapped->notify)
+    {
+        LeaveCriticalSection(&remote_notify_cs);
+        CloseHandle(notify->event);
+        free(notify);
+        return ERROR_ALREADY_REGISTERED;
+    }
+    wrapped->notify = notify;
+    notify->watched = wrapped;
+    if (!(thread = CreateThread(NULL, 0, remote_notify_thread, notify, 0, NULL)))
+    {
+        err = GetLastError();
+        wrapped->notify = NULL;
+        notify->watched = NULL;
+        LeaveCriticalSection(&remote_notify_cs);
+        CloseHandle(notify->event);
+        free(notify);
+        return err;
+    }
+    LeaveCriticalSection(&remote_notify_cs);
+    CloseHandle(thread);
+    *hNotify = &notify->hdr;
+    return ERROR_SUCCESS;
+}
+
 DWORD __cdecl svcctl_NotifyServiceStatusChange(
     SC_RPC_HANDLE handle,
     SC_RPC_NOTIFY_PARAMS params,
@@ -2167,8 +2429,7 @@ DWORD __cdecl svcctl_NotifyServiceStatusChange(
             params.params->dwNotifyMask, clientprocessguid, scmprocessguid,
             createremotequeue, hNotify);
 
-    /* T5.4: status notifications of session 0's services are not relayed yet */
-    if (remote_of(handle)) return ERROR_CALL_NOT_IMPLEMENTED;
+    if (remote_of(handle)) return remote_notify(handle, params.params->dwNotifyMask, hNotify);
     switch (hdr->type)
     {
     case SC_HTYPE_SERVICE:

@@ -8,7 +8,7 @@
 @ stub CoreUICallSendVaList
 @ stub CoreUIConfigureTestHost
 @ stub CoreUIConfigureUserIntegration
-@ stub CoreUICreate
+@ stdcall CoreUICreate(ptr)
 @ stub CoreUICreateAnonymousStream
 @ stub CoreUICreateEx
 @ stub CoreUIInitializeTestService

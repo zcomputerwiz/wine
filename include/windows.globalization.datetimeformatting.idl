@@ -1,0 +1,222 @@
+/*
+ * Copyright 2026 WineExplorer contributors
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+#ifdef __WIDL__
+#pragma winrt ns_prefix
+#endif
+
+import "inspectable.idl";
+import "windowscontracts.idl";
+import "windows.foundation.idl";
+
+namespace Windows.Globalization.DateTimeFormatting {
+    typedef enum DayFormat DayFormat;
+    typedef enum DayOfWeekFormat DayOfWeekFormat;
+    typedef enum HourFormat HourFormat;
+    typedef enum MinuteFormat MinuteFormat;
+    typedef enum MonthFormat MonthFormat;
+    typedef enum SecondFormat SecondFormat;
+    typedef enum YearFormat YearFormat;
+
+    interface IDateTimeFormatter;
+    interface IDateTimeFormatter2;
+    interface IDateTimeFormatterFactory;
+    interface IDateTimeFormatterStatics;
+
+    runtimeclass DateTimeFormatter;
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum YearFormat
+    {
+        None = 0,
+        Default = 1,
+        Abbreviated = 2,
+        Full = 3,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum MonthFormat
+    {
+        None = 0,
+        Default = 1,
+        Abbreviated = 2,
+        Full = 3,
+        Numeric = 4,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum DayFormat
+    {
+        None = 0,
+        Default = 1,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum DayOfWeekFormat
+    {
+        None = 0,
+        Default = 1,
+        Abbreviated = 2,
+        Full = 3,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum HourFormat
+    {
+        None = 0,
+        Default = 1,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum MinuteFormat
+    {
+        None = 0,
+        Default = 1,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum SecondFormat
+    {
+        None = 0,
+        Default = 1,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Globalization.DateTimeFormatting.DateTimeFormatter),
+        uuid(95eeca10-73e0-4e4b-a183-3d6ad0ba35ec)
+    ]
+    interface IDateTimeFormatter : IInspectable
+    {
+        [propget] HRESULT Languages([out, retval] Windows.Foundation.Collections.IVectorView<HSTRING> **value);
+        [propget] HRESULT GeographicRegion([out, retval] HSTRING *value);
+        [propget] HRESULT Calendar([out, retval] HSTRING *value);
+        [propget] HRESULT Clock([out, retval] HSTRING *value);
+        [propget] HRESULT NumeralSystem([out, retval] HSTRING *value);
+        [propput] HRESULT NumeralSystem([in] HSTRING value);
+        [propget] HRESULT Patterns([out, retval] Windows.Foundation.Collections.IVectorView<HSTRING> **value);
+        [propget] HRESULT Template([out, retval] HSTRING *value);
+        HRESULT Format([in] Windows.Foundation.DateTime value, [out, retval] HSTRING *result);
+        [propget] HRESULT IncludeYear([out, retval] Windows.Globalization.DateTimeFormatting.YearFormat *value);
+        [propget] HRESULT IncludeMonth([out, retval] Windows.Globalization.DateTimeFormatting.MonthFormat *value);
+        [propget] HRESULT IncludeDayOfWeek([out, retval] Windows.Globalization.DateTimeFormatting.DayOfWeekFormat *value);
+        [propget] HRESULT IncludeDay([out, retval] Windows.Globalization.DateTimeFormatting.DayFormat *value);
+        [propget] HRESULT IncludeHour([out, retval] Windows.Globalization.DateTimeFormatting.HourFormat *value);
+        [propget] HRESULT IncludeMinute([out, retval] Windows.Globalization.DateTimeFormatting.MinuteFormat *value);
+        [propget] HRESULT IncludeSecond([out, retval] Windows.Globalization.DateTimeFormatting.SecondFormat *value);
+        [propget] HRESULT ResolvedLanguage([out, retval] HSTRING *value);
+        [propget] HRESULT ResolvedGeographicRegion([out, retval] HSTRING *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Globalization.DateTimeFormatting.DateTimeFormatter),
+        uuid(27c91a86-bdaa-4fd0-9e36-671d5aa5ee03)
+    ]
+    interface IDateTimeFormatter2 : IInspectable
+    {
+        [overload("Format")] HRESULT FormatUsingTimeZone([in] Windows.Foundation.DateTime datetime, [in] HSTRING timeZoneId,
+                                                         [out, retval] HSTRING *result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Globalization.DateTimeFormatting.DateTimeFormatter),
+        uuid(bfcde7c0-df4c-4a2e-9012-f47daf3f1212)
+    ]
+    interface IDateTimeFormatterStatics : IInspectable
+    {
+        [propget] HRESULT LongDate([out, retval] Windows.Globalization.DateTimeFormatting.DateTimeFormatter **value);
+        [propget] HRESULT LongTime([out, retval] Windows.Globalization.DateTimeFormatting.DateTimeFormatter **value);
+        [propget] HRESULT ShortDate([out, retval] Windows.Globalization.DateTimeFormatting.DateTimeFormatter **value);
+        [propget] HRESULT ShortTime([out, retval] Windows.Globalization.DateTimeFormatting.DateTimeFormatter **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Globalization.DateTimeFormatting.DateTimeFormatter),
+        uuid(ec8d8a53-1a2e-412d-8815-3b745fb1a2a0)
+    ]
+    interface IDateTimeFormatterFactory : IInspectable
+    {
+        HRESULT CreateDateTimeFormatter([in] HSTRING formatTemplate,
+                                        [out, retval] Windows.Globalization.DateTimeFormatting.DateTimeFormatter **result);
+        HRESULT CreateDateTimeFormatterLanguages([in] HSTRING formatTemplate,
+                                                 [in] Windows.Foundation.Collections.IIterable<HSTRING> *languages,
+                                                 [out, retval] Windows.Globalization.DateTimeFormatting.DateTimeFormatter **result);
+        HRESULT CreateDateTimeFormatterContext([in] HSTRING formatTemplate,
+                                               [in] Windows.Foundation.Collections.IIterable<HSTRING> *languages,
+                                               [in] HSTRING geographicRegion, [in] HSTRING calendar, [in] HSTRING clock,
+                                               [out, retval] Windows.Globalization.DateTimeFormatting.DateTimeFormatter **result);
+        HRESULT CreateDateTimeFormatterDate([in] Windows.Globalization.DateTimeFormatting.YearFormat yearFormat,
+                                            [in] Windows.Globalization.DateTimeFormatting.MonthFormat monthFormat,
+                                            [in] Windows.Globalization.DateTimeFormatting.DayFormat dayFormat,
+                                            [in] Windows.Globalization.DateTimeFormatting.DayOfWeekFormat dayOfWeekFormat,
+                                            [out, retval] Windows.Globalization.DateTimeFormatting.DateTimeFormatter **result);
+        HRESULT CreateDateTimeFormatterTime([in] Windows.Globalization.DateTimeFormatting.HourFormat hourFormat,
+                                            [in] Windows.Globalization.DateTimeFormatting.MinuteFormat minuteFormat,
+                                            [in] Windows.Globalization.DateTimeFormatting.SecondFormat secondFormat,
+                                            [out, retval] Windows.Globalization.DateTimeFormatting.DateTimeFormatter **result);
+        HRESULT CreateDateTimeFormatterDateTimeLanguages([in] Windows.Globalization.DateTimeFormatting.YearFormat yearFormat,
+                                                         [in] Windows.Globalization.DateTimeFormatting.MonthFormat monthFormat,
+                                                         [in] Windows.Globalization.DateTimeFormatting.DayFormat dayFormat,
+                                                         [in] Windows.Globalization.DateTimeFormatting.DayOfWeekFormat dayOfWeekFormat,
+                                                         [in] Windows.Globalization.DateTimeFormatting.HourFormat hourFormat,
+                                                         [in] Windows.Globalization.DateTimeFormatting.MinuteFormat minuteFormat,
+                                                         [in] Windows.Globalization.DateTimeFormatting.SecondFormat secondFormat,
+                                                         [in] Windows.Foundation.Collections.IIterable<HSTRING> *languages,
+                                                         [out, retval] Windows.Globalization.DateTimeFormatting.DateTimeFormatter **result);
+        HRESULT CreateDateTimeFormatterDateTimeContext([in] Windows.Globalization.DateTimeFormatting.YearFormat yearFormat,
+                                                       [in] Windows.Globalization.DateTimeFormatting.MonthFormat monthFormat,
+                                                       [in] Windows.Globalization.DateTimeFormatting.DayFormat dayFormat,
+                                                       [in] Windows.Globalization.DateTimeFormatting.DayOfWeekFormat dayOfWeekFormat,
+                                                       [in] Windows.Globalization.DateTimeFormatting.HourFormat hourFormat,
+                                                       [in] Windows.Globalization.DateTimeFormatting.MinuteFormat minuteFormat,
+                                                       [in] Windows.Globalization.DateTimeFormatting.SecondFormat secondFormat,
+                                                       [in] Windows.Foundation.Collections.IIterable<HSTRING> *languages,
+                                                       [in] HSTRING geographicRegion, [in] HSTRING calendar, [in] HSTRING clock,
+                                                       [out, retval] Windows.Globalization.DateTimeFormatting.DateTimeFormatter **result);
+    }
+
+    [
+        activatable(Windows.Foundation.UniversalApiContract, 1.0),
+        activatable(Windows.Globalization.DateTimeFormatting.IDateTimeFormatterFactory, Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.Globalization.DateTimeFormatting.IDateTimeFormatterStatics, Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    runtimeclass DateTimeFormatter
+    {
+        [default] interface Windows.Globalization.DateTimeFormatting.IDateTimeFormatter;
+        interface Windows.Globalization.DateTimeFormatting.IDateTimeFormatter2;
+    }
+}

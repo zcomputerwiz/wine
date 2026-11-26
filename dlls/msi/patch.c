@@ -887,6 +887,14 @@ static UINT apply_patch_package( MSIPACKAGE *package, const WCHAR *file )
 
     TRACE("%p, %s\n", package, debugstr_w(file));
 
+    /* an install the broker froze a file for: the user consented to that file only, so a patch is applied only when it
+     * is that file (msiexec /i {product-code} PATCH=file); the copy is checked against its hash when it is published */
+    if (msi_broker_froze_a_file() && !msi_is_frozen_file_path( file ))
+    {
+        WARN( "patch %s is not the file the broker froze\n", debugstr_w(file) );
+        return ERROR_PATCH_PACKAGE_REJECTED;
+    }
+
     r = MSI_OpenDatabaseW( file, MSIDBOPEN_READONLY + MSIDBOPEN_PATCHFILE, &patch_db );
     if (r != ERROR_SUCCESS)
     {
@@ -964,6 +972,13 @@ UINT msi_apply_transforms( MSIPACKAGE *package )
     {
         if (xforms[i][0] == ':')
             r = apply_substorage_transform( package, package->db, xforms[i] );
+        else if (msi_broker_froze_a_file())
+        {
+            /* a transform file changes what the frozen package installs, and the broker did not freeze it: the user
+             * consented to the package alone (a transform stored in the package, ":name", is part of it) */
+            WARN( "transform %s was not frozen by the broker\n", debugstr_w(xforms[i]) );
+            r = ERROR_INSTALL_TRANSFORM_FAILURE;
+        }
         else
         {
             WCHAR *transform;

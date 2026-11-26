@@ -183,6 +183,7 @@ AddService=NDIS,0x800,NDISService
 AddService=nsiproxy,0x800,NsiProxyService
 AddService=wexelevate,0,WexElevateService
 AddService=gpsvc,0,WexPolicyService
+AddService=wexaccounts,0,WexAccountsService
 
 [DefaultInstall.ntx86.Services]
 AddService=BITS,0,BITSService
@@ -206,6 +207,7 @@ AddService=NDIS,0x800,NDISService
 AddService=nsiproxy,0x800,NsiProxyService
 AddService=wexelevate,0,WexElevateService
 AddService=gpsvc,0,WexPolicyService
+AddService=wexaccounts,0,WexAccountsService
 
 [DefaultInstall.ntamd64.Services]
 AddService=BITS,0,BITSService
@@ -229,6 +231,7 @@ AddService=NDIS,0x800,NDISService
 AddService=nsiproxy,0x800,NsiProxyService
 AddService=wexelevate,0,WexElevateService
 AddService=gpsvc,0,WexPolicyService
+AddService=wexaccounts,0,WexAccountsService
 
 [DefaultInstall.ntarm64.Services]
 AddService=BITS,0,BITSService
@@ -252,6 +255,7 @@ AddService=NDIS,0x800,NDISService
 AddService=nsiproxy,0x800,NsiProxyService
 AddService=wexelevate,0,WexElevateService
 AddService=gpsvc,0,WexPolicyService
+AddService=wexaccounts,0,WexAccountsService
 
 [Strings]
 MciExtStr="Software\Microsoft\Windows NT\CurrentVersion\MCI Extensions"
@@ -273,6 +277,8 @@ HKCR,.msc,,2,"MSCFile"
 HKCR,.ini,,2,"inifile"
 HKCR,.lnk,,2,"lnkfile"
 HKCR,.log,,2,"txtfile"
+HKCR,.appx,,2,"AppX.Package"
+HKCR,.msix,,2,"AppX.Package"
 HKCR,.msi,,2,"Msi.Package"
 HKCR,.msp,,2,"Msi.Patch"
 HKCR,.pdf,,2,"pdffile"
@@ -321,6 +327,10 @@ HKCR,MSCFile\shell\open\command,,2,"""%11%\mmc.exe"" ""%1"" %*"
 HKCR,cplfile,,2,"Control Panel Item"
 HKCR,cplfile\shell\cplopen,,2,"Open with Control Panel"
 HKCR,cplfile\shell\cplopen\command,,2,"rundll32.exe shell32.dll,Control_RunDLL ""%1"",%*"
+HKCR,.theme,,2,"themefile"
+HKCR,themefile,,2,"Windows Theme File"
+HKCR,themefile\DefaultIcon,,2,"%11%\themeui.dll,0"
+HKCR,themefile\shell\open\command,,2,"""%11%\rundll32.exe"" %11%\shell32.dll,Control_RunDLL %11%\desk.cpl desk,@Themes /Action:OpenTheme /file:""%1"""
 HKCR,Directory\Background\shellex\ContextMenuHandlers\New,,,"{d969a300-e7ff-11d0-a93b-00a0c90f2719}"
 HKCR,DirectShow,,16
 HKCR,exefile,,2,"Application"
@@ -355,6 +365,8 @@ HKCR,lnkfile\CLSID,,2,"{00021401-0000-0000-C000-000000000046}"
 HKCR,lnkfile\shellex\IconHandler,,2,"{00021401-0000-0000-C000-000000000046}"
 HKCR,lnkfile\shellex\ContextMenuHandlers\{00021401-0000-0000-C000-000000000046},,0x10,
 HKCR,MediaFoundation,,16
+HKCR,AppX.Package,,2,"App Package"
+HKCR,AppX.Package\shell\Open\command,,2,"""%11%\wexappinstall.exe"" ""%1"""
 HKCR,Msi.Package,,2,"Windows Installer Package"
 HKCR,Msi.Package\DefaultIcon,,2,"msiexec.exe"
 HKCR,Msi.Package\shell\Open\command,,2,"%11%\msiexec.exe /i ""%1"" %*"
@@ -409,6 +421,12 @@ HKCU,%CurrentVersion%\Explorer\Advanced,,16
 HKCU,%CurrentVersion%\Explorer\FileExts,,16
 HKCU,%CurrentVersion%\ImmersiveShell,"TabletMode",0x10003,0
 HKCU,%CurrentVersion%\Run,,16
+HKCU,%CurrentVersion%\Themes\Personalize,"AppsUseLightTheme",0x10003,1
+HKCU,%CurrentVersion%\Themes\Personalize,"SystemUsesLightTheme",0x10003,1
+HKCU,%CurrentVersion%\Themes\Personalize,"EnableTransparency",0x10003,1
+HKCU,%CurrentVersion%\Themes\Personalize,"ColorPrevalence",0x10003,0
+HKCU,"Control Panel\Accessibility\HighContrast","Flags",2,"126"
+HKCU,"Control Panel\Accessibility\HighContrast","High Contrast Scheme",2,""
 HKCU,%CurrentVersionNT%\Winlogon,,16
 HKLM,%CurrentVersion%,"CommonFilesDir",,"%16427%"
 HKLM,%CurrentVersion%,"FirstInstallDateTime",1,21,81,7c,23
@@ -769,6 +787,7 @@ HKLM,SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86,"Version",2,"14.51.362
 ;;some dlls have to be registered first
 11,,shell32.dll,1
 11,,stobject.dll,1
+11,,acppage.dll,1
 11,,netshell.dll,1
 11,,quartz.dll,1
 
@@ -786,6 +805,8 @@ HKLM,SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86,"Version",2,"14.51.362
 11,,mscoree.dll,1
 11,,mshtml.dll,1
 11,,msisip.dll,1
+11,,msspellcheckingfacility.dll,1
+11,,appxsip.dll,1
 11,,msmpeg2vdec.dll,1
 11,,msvdsp.dll,1
 11,,msvproc.dll,1
@@ -867,6 +888,7 @@ HKLM,SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86,"Version",2,"14.51.362
 11,,winemenubuilder.exe,-
 11,,wuauserv.exe,-
 ; registration order matters for these
+11,,msspellcheckingfacility.dll
 11,,msxml.dll
 11,,msxml2.dll
 11,,msxml3.dll
@@ -925,6 +947,7 @@ HKLM,SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86,"Version",2,"14.51.362
 11,,presentationfontcache.exe,-
 11,,wminet_utils.dll,-
 ; registration order matters for these
+11,,msspellcheckingfacility.dll
 11,,msxml.dll
 11,,msxml2.dll
 11,,msxml3.dll
@@ -1208,6 +1231,19 @@ ServiceType=16
 StartType=3
 ErrorControl=1
 
+[WexAccountsService]
+AddReg=WexAccountsServiceKeys
+Description="The Windows side of Local Users and Groups: accounts through the accounts helper of the host"
+DisplayName="Local Accounts"
+ServiceBinary="%11%\wexaccounts.exe"
+ServiceType=16
+StartType=2
+ErrorControl=1
+
+[WexAccountsServiceKeys]
+HKLM,"System\CurrentControlSet\Services\wexaccounts","WexStartInSession0Only",0x10001,1
+HKLM,"System\CurrentControlSet\Services\wexaccounts","ServiceSidType",0x10001,1
+
 [WexPolicyService]
 Description="Writes the registry policy of the computer and of the users who log on"
 DisplayName="Group Policy Client"
@@ -1232,6 +1268,7 @@ HKLM,%CurrentVersion%\RunServices,"winemenubuilder",2,"%11%\winemenubuilder.exe 
 HKLM,"System\CurrentControlSet\Services\Dnscache\Parameters",,16
 HKLM,"System\CurrentControlSet\Services\Eventlog\Application",,16
 HKLM,"System\CurrentControlSet\Services\Eventlog\System","Sources",0x10000,""
+HKLM,"System\CurrentControlSet\Services\Eventlog\Security",,16
 HKLM,"System\CurrentControlSet\Services\Tcpip\Parameters","DataBasePath",,"%12%\etc"
 HKLM,"System\CurrentControlSet\Services\Tcpip6\Parameters",,16
 HKLM,"System\CurrentControlSet\Services\VxD\MSTCP",,16
@@ -1247,6 +1284,7 @@ HKLM,"System\CurrentControlSet\Control\SafeBoot\Minimal\EventLog",,,"Service"
 HKLM,"System\CurrentControlSet\Control\SafeBoot\Minimal\MountMgr",,,"Driver"
 HKLM,"System\CurrentControlSet\Control\SafeBoot\Minimal\PlugPlay",,,"Service"
 HKLM,"System\CurrentControlSet\Control\SafeBoot\Minimal\RpcSs",,,"Service"
+HKLM,"System\CurrentControlSet\Control\SafeBoot\Minimal\SamSs",,,"Service"
 HKLM,"System\CurrentControlSet\Control\SafeBoot\Minimal\winebus",,,"Driver"
 HKLM,"System\CurrentControlSet\Control\SafeBoot\Minimal\wineusb",,,"Driver"
 HKLM,"System\CurrentControlSet\Control\SafeBoot\Minimal\Winmgmt",,,"Service"
@@ -1258,6 +1296,7 @@ HKLM,"System\CurrentControlSet\Control\SafeBoot\Network\NDIS",,,"Driver"
 HKLM,"System\CurrentControlSet\Control\SafeBoot\Network\nsiproxy",,,"Driver"
 HKLM,"System\CurrentControlSet\Control\SafeBoot\Network\PlugPlay",,,"Service"
 HKLM,"System\CurrentControlSet\Control\SafeBoot\Network\RpcSs",,,"Service"
+HKLM,"System\CurrentControlSet\Control\SafeBoot\Network\SamSs",,,"Service"
 HKLM,"System\CurrentControlSet\Control\SafeBoot\Network\TermService",,,"Service"
 HKLM,"System\CurrentControlSet\Control\SafeBoot\Network\winebus",,,"Driver"
 HKLM,"System\CurrentControlSet\Control\SafeBoot\Network\wineusb",,,"Driver"
@@ -1382,6 +1421,9 @@ winexinput.inf,"@%12%\winexinput.sys,-1"
 
 [MscFiles]
 devmgmt.msc,"@%11%\mmc.exe,-1"
+gpedit.msc,"@%11%\mmc.exe,-2"
+secpol.msc,"@%11%\mmc.exe,-3"
+compmgmt.msc,"@%11%\mmc.exe,-4"
 
 [NlsFiles]
 c_037.nls

@@ -24,7 +24,8 @@
 #include <d2d1_1.h>
 #include <d3d10_1.h>
 #include <d3d11.h>
-#include <dxgi.h>
+#include <dxgi1_2.h>
+#include <psapi.h>
 #include "dcomp.h"
 #include "wine/test.h"
 
@@ -373,6 +374,276 @@ static void test_DCompositionCreateDevice3(void)
 
     refcount = IDXGIDevice_Release(dxgi_device);
     ok(!refcount, "Device has %lu references left.\n", refcount);
+}
+
+/* The shared visuals of the Windows App Runtime: DCompositionCreateSharedVisualHandle, the private interfaces of the device and its
+ * method that opens a handle as a visual or a target (slot 29 of the vtable of IDCompositionDesktopDevice, after the public methods).
+ * Observed on Windows 11. */
+static void test_shared_visual(void)
+{
+    static const GUID IID_alias_a = {0xd14b6158, 0xc3fa, 0x4bce, {0x9c, 0x1f, 0xb6, 0x1d, 0x86, 0x65, 0xea, 0xb0}};
+    static const GUID IID_alias_b = {0x28d6ad3d, 0xee2a, 0x4bcd, {0x94, 0x19, 0x7d, 0x54, 0x80, 0x04, 0x35, 0xb1}};
+    static const GUID IID_visual_private = {0x2c4eef28, 0x1bc0, 0x4736, {0xb7, 0xdd, 0xb6, 0x26, 0x92, 0xf9, 0xbd, 0x67}};
+    typedef HRESULT (WINAPI *create_handle_t)(HANDLE *);
+    typedef HRESULT (STDMETHODCALLTYPE *open_t)(void *iface, HANDLE handle, REFIID iid, void **out);
+    create_handle_t create_handle;
+    IDCompositionDesktopDevice *desktop;
+    IDCompositionDevice *device;
+    IDCompositionVisual *visual;
+    IDCompositionTarget *target;
+    IUnknown *alias_a, *alias_b;
+    HANDLE handle, handle2;
+    open_t open;
+    void *out;
+    HRESULT hr;
+
+    create_handle = (void *)GetProcAddress(GetModuleHandleW(L"dcomp.dll"), "DCompositionCreateSharedVisualHandle");
+    if (!create_handle || !pDCompositionCreateDevice3)
+    {
+        win_skip("DCompositionCreateSharedVisualHandle() or DCompositionCreateDevice3() is unavailable.\n");
+        return;
+    }
+
+    hr = create_handle(NULL);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+    handle = NULL;
+    hr = create_handle(&handle);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(handle != NULL && handle != INVALID_HANDLE_VALUE, "Got handle %p.\n", handle);
+    hr = create_handle(&handle2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = pDCompositionCreateDevice3(NULL, &IID_IDCompositionDesktopDevice, (void **)&desktop);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr)) goto done;
+
+    /* two other IIDs answer with the very interface of IDCompositionDesktopDevice */
+    hr = IDCompositionDesktopDevice_QueryInterface(desktop, &IID_alias_a, (void **)&alias_a);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(alias_a == (IUnknown *)desktop, "Got %p, expected %p.\n", alias_a, desktop);
+    if (SUCCEEDED(hr)) IUnknown_Release(alias_a);
+    hr = IDCompositionDesktopDevice_QueryInterface(desktop, &IID_alias_b, (void **)&alias_b);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(alias_b == (IUnknown *)desktop, "Got %p, expected %p.\n", alias_b, desktop);
+    if (SUCCEEDED(hr)) IUnknown_Release(alias_b);
+
+    /* Private method 46 (one pointer argument: 8 bytes removed on 32-bit Windows 11): stores the id of the newest completed batch of
+     * changes in a dword, 0 when nothing was submitted; the second dword of an eight-byte block is not touched. Observed on Windows
+     * 11 only: older Windows may not have the method. The NULL pointer is checked on Wine, where it was not measured. */
+    {
+        typedef HRESULT (STDMETHODCALLTYPE *method46_t)(void *iface, void *completed);
+        typedef LONG (WINAPI *rtl_get_version_t)(RTL_OSVERSIONINFOW *);
+        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        BOOL is_wine = !!GetProcAddress(ntdll, "wine_get_version");
+        rtl_get_version_t get_version = (void *)GetProcAddress(ntdll, "RtlGetVersion");
+        RTL_OSVERSIONINFOW version = {sizeof(version)};
+        method46_t method46 = (*(method46_t **)desktop)[46];
+        UINT64 block;
+
+        if (get_version) get_version(&version);
+        if (!is_wine && version.dwBuildNumber < 22000)
+        {
+            win_skip("Private method 46 is only known on Windows 11.\n");
+        }
+        else
+        {
+            block = 0xdeadbeef00000000ull;
+            hr = method46(desktop, &block);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            /* Windows 11 may read 1 already (Notepad's trace shows 1 before its first Commit; the system compositor's own
+             * count, not this device's) */
+            ok(block == 0xdeadbeef00000000ull || broken(block == 0xdeadbeef00000001ull), "Got block %#I64x.\n", block);
+
+#ifdef __x86_64__
+            /* method 45 (the newest submitted batch; its stack size on i386 is not measured): 0 on a fresh device too; after a
+             * Commit that completed, the completed batch is at least 1 and the submitted one is not behind it */
+            {
+                method46_t method45 = (*(method46_t **)desktop)[45];
+                DWORD submitted = 0xdeadbeef, completed = 0xdeadbeef;
+
+                hr = method45(desktop, &submitted);
+                ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                ok(!submitted || broken(submitted == 1), "Got submitted %lu.\n", submitted);
+
+                hr = IDCompositionDesktopDevice_Commit(desktop);
+                ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                hr = IDCompositionDesktopDevice_WaitForCommitCompletion(desktop);
+                ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                hr = method46(desktop, &completed);
+                ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                hr = method45(desktop, &submitted);
+                ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                /* Windows 11 sometimes still reads 0 (two runs out of three) */
+                ok(completed >= 1 || broken(!completed), "Got completed %lu.\n", completed);
+                ok(submitted >= completed, "Got submitted %lu, completed %lu.\n", submitted, completed);
+            }
+#endif
+
+            if (is_wine)
+            {
+                hr = method46(desktop, NULL);
+                ok(hr == E_POINTER, "Got unexpected hr %#lx.\n", hr);
+            }
+        }
+    }
+
+    /* The interface {6b556968-...} of the device. Windows 11 answers the query; its slot 8 is not the one the runtime's helper
+     * calls there (it removes 12 bytes and returns E_INVALIDARG for an event handle), so the slot is checked on Wine only: it takes
+     * the commit completion event, which Commit signals, also when it fails. */
+    {
+        static const GUID IID_commit = {0x6b556968, 0x2d25, 0x11e2, {0x99, 0xf6, 0x8b, 0xc3, 0x60, 0x88, 0x70, 0x9b}};
+        typedef HRESULT (STDMETHODCALLTYPE *set_event_t)(void *iface, HANDLE event, void *arg);
+        BOOL is_wine = !!GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version");
+        HANDLE event = CreateEventW(NULL, TRUE, FALSE, NULL);
+        set_event_t set_event;
+        void *commit = NULL;
+
+        hr = IDCompositionDesktopDevice_QueryInterface(desktop, &IID_commit, &commit);
+        ok(hr == S_OK || broken(hr == E_NOINTERFACE), "Got unexpected hr %#lx.\n", hr);
+        if (hr == S_OK && is_wine)
+        {
+            IDCompositionTarget *failing_target;
+            IDCompositionVisual2 *root;
+            HWND window;
+
+            set_event = (*(set_event_t **)commit)[8];
+            hr = set_event(commit, event, NULL);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            ok(WaitForSingleObject(event, 0) == WAIT_TIMEOUT, "The event is signaled before a commit.\n");
+            hr = IDCompositionDesktopDevice_Commit(desktop);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            ok(WaitForSingleObject(event, 0) == WAIT_OBJECT_0, "The event is not signaled after a commit.\n");
+            ResetEvent(event);
+
+            /* a commit that fails (the window of a target is gone) signals it as well */
+            window = CreateWindowW(L"static", L"test", WS_POPUP, 0, 0, 1, 1, 0, 0, 0, 0);
+            hr = IDCompositionDesktopDevice_CreateVisual(desktop, &root);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            hr = IDCompositionDesktopDevice_CreateTargetForHwnd(desktop, window, TRUE, &failing_target);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            hr = IDCompositionTarget_SetRoot(failing_target, (IDCompositionVisual *)root);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            DestroyWindow(window);
+            hr = IDCompositionDesktopDevice_Commit(desktop);
+            ok(FAILED(hr), "Got unexpected hr %#lx.\n", hr);
+            ok(WaitForSingleObject(event, 0) == WAIT_OBJECT_0, "The event is not signaled after a failed commit.\n");
+            ResetEvent(event);
+            IDCompositionTarget_SetRoot(failing_target, NULL);
+            IDCompositionTarget_Release(failing_target);
+            IDCompositionVisual2_Release(root);
+
+            hr = set_event(commit, NULL, NULL);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            IDCompositionDesktopDevice_Commit(desktop);
+            ok(WaitForSingleObject(event, 0) == WAIT_TIMEOUT, "The cleared event is signaled.\n");
+        }
+        if (commit) IUnknown_Release((IUnknown *)commit);
+        CloseHandle(event);
+    }
+
+    open = (*(open_t **)desktop)[29];
+
+    hr = open(desktop, handle, &IID_IDCompositionVisual, (void **)&visual);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        /* the visuals of the system dcomp answer a private interface: the visual itself, the same pointer as for IUnknown, with its
+         * reference count (observed on Windows 11) */
+        IUnknown *unknown = NULL;
+
+        out = NULL;
+        hr = IDCompositionVisual_QueryInterface(visual, &IID_visual_private, &out);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ok(out == (void *)visual, "Got %p, expected %p.\n", out, visual);
+        if (SUCCEEDED(hr))
+        {
+            hr = IUnknown_QueryInterface((IUnknown *)out, &IID_IUnknown, (void **)&unknown);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            ok(unknown == (IUnknown *)visual, "Got %p, expected %p.\n", unknown, visual);
+            if (SUCCEEDED(hr)) IUnknown_Release(unknown);
+            IUnknown_Release((IUnknown *)out);
+        }
+        IDCompositionVisual_Release(visual);
+    }
+
+    /* An object has one visual at a time, on the device that opened it first: another open is E_ACCESSDENIED while it lives, another
+     * device stays refused after it is released, and the first device opens it again (Windows 11). The visual is not kept alive,
+     * and does not keep the device alive, when nobody holds it (the reference counts are checked on Wine). */
+    {
+        BOOL is_wine = !!GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version");
+        IDCompositionDesktopDevice *desktop2;
+        IDCompositionVisual *visual1, *visual2;
+        ULONG refcount;
+
+        if (is_wine)
+        {
+            refcount = IDCompositionDesktopDevice_AddRef(desktop);
+            ok(refcount == 2, "Got refcount %lu.\n", refcount);
+            IDCompositionDesktopDevice_Release(desktop);
+        }
+
+        hr = pDCompositionCreateDevice3(NULL, &IID_IDCompositionDesktopDevice, (void **)&desktop2);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = open(desktop, handle, &IID_IDCompositionVisual, (void **)&visual1);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        visual2 = (void *)0xdeadbeef;
+        hr = ((open_t)(*(open_t **)desktop2)[29])(desktop2, handle, &IID_IDCompositionVisual, (void **)&visual2);
+        ok(hr == E_ACCESSDENIED, "Got unexpected hr %#lx.\n", hr);
+        ok(!visual2, "Got %p.\n", visual2);
+        if (SUCCEEDED(hr)) IDCompositionVisual_Release(visual2);
+        if (visual1) IDCompositionVisual_Release(visual1);
+        visual2 = (void *)0xdeadbeef;
+        hr = ((open_t)(*(open_t **)desktop2)[29])(desktop2, handle, &IID_IDCompositionVisual, (void **)&visual2);
+        ok(hr == E_ACCESSDENIED, "Got unexpected hr %#lx.\n", hr);
+        if (SUCCEEDED(hr)) IDCompositionVisual_Release(visual2);
+        hr = open(desktop, handle, &IID_IDCompositionVisual, (void **)&visual1);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        if (SUCCEEDED(hr)) IDCompositionVisual_Release(visual1);
+        /* another device opens another object (an object opens as a target once: handle stays for the target opened below) */
+        hr = ((open_t)(*(open_t **)desktop2)[29])(desktop2, handle2, &IID_IDCompositionVisual, (void **)&visual2);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = ((open_t)(*(open_t **)desktop2)[29])(desktop2, handle2, &IID_IDCompositionTarget, (void **)&target);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            hr = IDCompositionTarget_SetRoot(target, visual2);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            IDCompositionTarget_SetRoot(target, NULL);
+            IDCompositionTarget_Release(target);
+        }
+        if (visual2 && visual2 != (void *)0xdeadbeef) IDCompositionVisual_Release(visual2);
+        refcount = IDCompositionDesktopDevice_Release(desktop2);
+        ok(!refcount, "Device 2 has %lu references left.\n", refcount);
+        if (is_wine)
+        {
+            refcount = IDCompositionDesktopDevice_AddRef(desktop);
+            ok(refcount == 2, "Got refcount %lu.\n", refcount);
+            IDCompositionDesktopDevice_Release(desktop);
+        }
+    }
+
+    hr = open(desktop, handle, &IID_IDCompositionTarget, (void **)&target);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr)) IDCompositionTarget_Release(target);
+
+    out = (void *)0xdeadbeef;
+    hr = open(desktop, (HANDLE)0x12345678, &IID_IDCompositionVisual, &out);
+    ok(FAILED(hr), "Got unexpected hr %#lx.\n", hr);
+    ok(!out, "Got %p.\n", out);
+
+    out = (void *)0xdeadbeef;
+    hr = open(desktop, handle2, &IID_IDispatch, &out);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+    ok(!out, "Got %p.\n", out);
+
+    hr = IDCompositionDesktopDevice_QueryInterface(desktop, &IID_IDCompositionDevice, (void **)&device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr)) IDCompositionDevice_Release(device);
+    IDCompositionDesktopDevice_Release(desktop);
+
+done:
+    CloseHandle(handle);
+    CloseHandle(handle2);
 }
 
 /* Based on Wine-Staging patch 0007 by Zhiyi Zhang */
@@ -1189,6 +1460,20 @@ static void test_surface_suspend_scroll_virtual(void)
         return;
     }
 
+    /* the first device interface makes surfaces too; a surface is not a swap chain (a caller asks to tell them apart) */
+    hr = IDCompositionDevice_CreateSurface(device, 32, 32, DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_ALPHA_MODE_PREMULTIPLIED, &surface);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        IUnknown *unk = (IUnknown *)0xdeadbeef;
+
+        hr = IDCompositionSurface_QueryInterface(surface, &IID_IDXGISwapChain1, (void **)&unk);
+        ok(hr == E_NOINTERFACE, "Got unexpected hr %#lx.\n", hr);
+        ok(!unk, "Got unexpected pointer %p.\n", unk);
+        IDCompositionSurface_Release(surface);
+    }
+
     hr = IDCompositionDevice2_CreateSurface(device2, 32, 32, DXGI_FORMAT_B8G8R8A8_UNORM,
             DXGI_ALPHA_MODE_PREMULTIPLIED, &surface);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
@@ -1350,6 +1635,709 @@ static void test_surface_composition(void)
     IDCompositionDesktopDevice_Release(desktop_device);
     refcount = ID3D11Device_Release(d3d11_device);
     ok(!refcount, "Device has %lu references left.\n", refcount);
+    DestroyWindow(hwnd);
+}
+
+typedef HRESULT (STDMETHODCALLTYPE *open_shared_t)(void *iface, HANDLE handle, REFIID iid, void **out);
+
+static HRESULT open_shared(IDCompositionDesktopDevice *device, HANDLE handle, REFIID iid, void **out)
+{
+    /* slot 29 of the vtable of IDCompositionDesktopDevice, see test_shared_visual() */
+    return (*(open_shared_t **)device)[29](device, handle, iid, out);
+}
+
+/* A target opened from a shared visual handle is a portal: what another device commits as its root shows inside the visual of the
+ * same handle (the compositor of the Windows App SDK shows its scene in the window of the UI thread this way). */
+static void test_shared_visual_portal(void)
+{
+    static const unsigned int window_size = 200, surface_size = 100;
+    typedef HRESULT (WINAPI *create_handle_t)(HANDLE *);
+    typedef HRESULT (WINAPI *create_surface_handle_t)(DWORD, SECURITY_ATTRIBUTES *, HANDLE *);
+    IDCompositionDesktopDevice *viewer, *portal_device;
+    create_surface_handle_t create_surface_handle;
+    IDCompositionVisual2 *shared, *portal_root;
+    IDCompositionSurfaceFactory *factory;
+    IDCompositionTarget *window_target, *portal;
+    HANDLE handle, duplicate, other;
+    create_handle_t create_handle;
+    D3D_FEATURE_LEVEL feature_level;
+    IDCompositionSurface *surface;
+    ID3D11Device *d3d11_device;
+    unsigned int order, i;
+    ULONG refcount;
+    void *out;
+    HRESULT hr;
+    HWND hwnd;
+
+    create_handle = (void *)GetProcAddress(GetModuleHandleW(L"dcomp.dll"), "DCompositionCreateSharedVisualHandle");
+    create_surface_handle = (void *)GetProcAddress(GetModuleHandleW(L"dcomp.dll"), "DCompositionCreateSurfaceHandle");
+    if (!create_handle || !pDCompositionCreateDevice3)
+    {
+        win_skip("DCompositionCreateSharedVisualHandle() or DCompositionCreateDevice3() is unavailable.\n");
+        return;
+    }
+
+    hr = pDCompositionCreateDevice3(NULL, &IID_IDCompositionDesktopDevice, (void **)&viewer);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr)) return;
+
+    /* only a handle of DCompositionCreateSharedVisualHandle opens: another object, or a closed handle, is E_HANDLE (Windows 11) */
+    hr = create_handle(&handle);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    for (i = 0; i < 4; ++i)
+    {
+        winetest_push_context("handle %u", i);
+        other = NULL;
+        if (i == 0) other = CreateEventW(NULL, TRUE, FALSE, NULL);
+        else if (i == 1) other = GetCurrentProcess();
+        else if (i == 2)
+        {
+            hr = create_handle(&other);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            CloseHandle(other);
+        }
+        /* a handle of DCompositionCreateSurfaceHandle (a stub in Wine) */
+        else if (!create_surface_handle || strcmp(winetest_platform, "windows")
+                || FAILED(create_surface_handle(COMPOSITIONOBJECT_ALL_ACCESS, NULL, &other)))
+        {
+            skip("No composition surface handle.\n");
+            winetest_pop_context();
+            continue;
+        }
+        out = (void *)0xdeadbeef;
+        hr = open_shared(viewer, other, &IID_IDCompositionVisual, &out);
+        ok(hr == E_HANDLE, "Got unexpected hr %#lx.\n", hr);
+        ok(!out, "Got %p.\n", out);
+        out = (void *)0xdeadbeef;
+        hr = open_shared(viewer, other, &IID_IDCompositionTarget, &out);
+        ok(hr == E_HANDLE, "Got unexpected hr %#lx.\n", hr);
+        ok(!out, "Got %p.\n", out);
+        if (i == 0 || i == 3) CloseHandle(other);
+        winetest_pop_context();
+    }
+    CloseHandle(handle);
+    refcount = IDCompositionDesktopDevice_Release(viewer);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+
+    hwnd = CreateWindowExW(WS_EX_TOPMOST, L"static", L"dcomp_shared_visual_portal",
+            WS_OVERLAPPED | WS_VISIBLE, 0, 0, window_size, window_size, NULL, NULL, NULL, NULL);
+    ok(hwnd != NULL, "Failed to create window.\n");
+    if (!hwnd) return;
+    MoveWindow(hwnd, 0, 0, window_size, window_size, TRUE);
+
+    hr = D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT, NULL, 0,
+            D3D11_SDK_VERSION, &d3d11_device, &feature_level, NULL);
+    if (FAILED(hr))
+        hr = D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_WARP, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT, NULL, 0,
+                D3D11_SDK_VERSION, &d3d11_device, &feature_level, NULL);
+    ok(hr == S_OK, "Failed to create D3D11 device, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        DestroyWindow(hwnd);
+        return;
+    }
+
+    /* order 0 releases the viewer first, order 1 the device of the portal first */
+    for (order = 0; order < 2; ++order)
+    {
+        winetest_push_context("order %u", order);
+
+        hr = create_handle(&handle);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ok(DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS),
+                "DuplicateHandle failed, error %lu.\n", GetLastError());
+
+        /* the viewer: the shared visual is the root of the window's target */
+        hr = pDCompositionCreateDevice3((IUnknown *)d3d11_device, &IID_IDCompositionDesktopDevice, (void **)&viewer);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = open_shared(viewer, handle, &IID_IDCompositionVisual2, (void **)&shared);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionDesktopDevice_CreateTargetForHwnd(viewer, hwnd, TRUE, &window_target);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionTarget_SetRoot(window_target, (IDCompositionVisual *)shared);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionDesktopDevice_Commit(viewer);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+        /* the portal: another device opens a duplicate of the handle as a target, and its root is a green surface */
+        hr = pDCompositionCreateDevice3((IUnknown *)d3d11_device, &IID_IDCompositionDesktopDevice, (void **)&portal_device);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = open_shared(portal_device, duplicate, &IID_IDCompositionTarget, (void **)&portal);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionDesktopDevice_CreateVisual(portal_device, &portal_root);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionDesktopDevice_CreateSurfaceFactory(portal_device, (IUnknown *)d3d11_device, &factory);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionSurfaceFactory_CreateSurface(factory, surface_size, surface_size,
+                DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED, &surface);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        render_surface_color(d3d11_device, surface, 0.0f, 1.0f, 0.0f);
+        hr = IDCompositionVisual2_SetContent(portal_root, (IUnknown *)surface);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionTarget_SetRoot(portal, (IDCompositionVisual *)portal_root);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionDesktopDevice_Commit(portal_device);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionDesktopDevice_WaitForCommitCompletion(portal_device);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        expect_rendered_color(hwnd, 50, 50, RGB(0, 0xff, 0));
+
+        /* a commit of the portal's device alone shows its new content in the viewer's window */
+        render_surface_color(d3d11_device, surface, 1.0f, 1.0f, 0.0f);
+        hr = IDCompositionDesktopDevice_Commit(portal_device);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionDesktopDevice_WaitForCommitCompletion(portal_device);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        expect_rendered_color(hwnd, 50, 50, RGB(0xff, 0xff, 0));
+
+        IDCompositionSurface_Release(surface);
+        IDCompositionSurfaceFactory_Release(factory);
+        IDCompositionVisual2_Release(portal_root);
+        CloseHandle(handle);
+        CloseHandle(duplicate);
+
+        if (!order)
+        {
+            /* the viewer goes first; the portal's device still commits */
+            IDCompositionTarget_Release(window_target);
+            IDCompositionVisual2_Release(shared);
+            refcount = IDCompositionDesktopDevice_Release(viewer);
+            ok(!refcount, "Viewer has %lu references left.\n", refcount);
+            hr = IDCompositionDesktopDevice_Commit(portal_device);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            /* the committed tree holds the device's objects until a commit without it (Windows 11) */
+            hr = IDCompositionTarget_SetRoot(portal, NULL);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            hr = IDCompositionDesktopDevice_Commit(portal_device);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            IDCompositionTarget_Release(portal);
+            refcount = IDCompositionDesktopDevice_Release(portal_device);
+            ok(!refcount, "Portal device has %lu references left.\n", refcount);
+        }
+        else
+        {
+            /* the portal goes first; the viewer still commits */
+            hr = IDCompositionTarget_SetRoot(portal, NULL);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            hr = IDCompositionDesktopDevice_Commit(portal_device);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            IDCompositionTarget_Release(portal);
+            refcount = IDCompositionDesktopDevice_Release(portal_device);
+            ok(!refcount, "Portal device has %lu references left.\n", refcount);
+            hr = IDCompositionDesktopDevice_Commit(viewer);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            IDCompositionTarget_Release(window_target);
+            IDCompositionVisual2_Release(shared);
+            refcount = IDCompositionDesktopDevice_Release(viewer);
+            ok(!refcount, "Viewer has %lu references left.\n", refcount);
+        }
+        winetest_pop_context();
+    }
+
+    refcount = ID3D11Device_Release(d3d11_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+    DestroyWindow(hwnd);
+}
+
+#define expect_not_rendered_color(a, b, c, d) _expect_not_rendered_color(__LINE__, a, b, c, d)
+static void _expect_not_rendered_color(int line, HWND hwnd, int x, int y, COLORREF old_color)
+{
+    COLORREF color = CLR_INVALID;
+    DWORD start = GetTickCount();
+    POINT point = {x, y};
+    HDC hdc;
+
+    ClientToScreen(hwnd, &point);
+    hdc = GetDC(NULL);
+    while (GetTickCount() - start < 1000)
+    {
+        if ((color = GetPixel(hdc, point.x, point.y)) != old_color) break;
+        Sleep(20);
+    }
+    ReleaseDC(NULL, hdc);
+    ok_(__FILE__, line)(color != old_color, "Still color %#06lx at (%d, %d).\n", color, x, y);
+}
+
+static IDCompositionSurface *create_color_surface(IDCompositionDesktopDevice *device, ID3D11Device *d3d11_device,
+        unsigned int size, float r, float g, float b)
+{
+    IDCompositionSurfaceFactory *factory;
+    IDCompositionSurface *surface = NULL;
+    HRESULT hr;
+
+    hr = IDCompositionDesktopDevice_CreateSurfaceFactory(device, (IUnknown *)d3d11_device, &factory);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr)) return NULL;
+    hr = IDCompositionSurfaceFactory_CreateSurface(factory, size, size, DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_ALPHA_MODE_PREMULTIPLIED, &surface);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    IDCompositionSurfaceFactory_Release(factory);
+    if (surface) render_surface_color(d3d11_device, surface, r, g, b);
+    return surface;
+}
+
+/* one thread's loop: commits its device, switching the portal's root and its content if given */
+struct portal_thread
+{
+    IDCompositionDesktopDevice *device;
+    IDCompositionTarget *target;
+    IDCompositionVisual2 *roots[2];
+    IDCompositionSurface *surface;
+    unsigned int iterations;
+    LONG failures;
+};
+
+static DWORD WINAPI portal_thread_proc(void *arg)
+{
+    struct portal_thread *t = arg;
+    unsigned int i;
+
+    for (i = 0; i < t->iterations; ++i)
+    {
+        if (t->target) IDCompositionTarget_SetRoot(t->target, (IDCompositionVisual *)t->roots[i & 1]);
+        if (t->surface) IDCompositionVisual2_SetContent(t->roots[0], (i & 2) ? NULL : (IUnknown *)t->surface);
+        if (FAILED(IDCompositionDesktopDevice_Commit(t->device))) InterlockedIncrement(&t->failures);
+    }
+    return 0;
+}
+
+static BOOL run_portal_threads(struct portal_thread *threads, unsigned int count)
+{
+    HANDLE handles[4];
+    unsigned int i;
+    DWORD ret;
+
+    for (i = 0; i < count; ++i) handles[i] = CreateThread(NULL, 0, portal_thread_proc, &threads[i], 0, NULL);
+    ret = WaitForMultipleObjects(count, handles, TRUE, 120000);
+    for (i = 0; i < count; ++i) CloseHandle(handles[i]);
+    return ret < WAIT_OBJECT_0 + count;
+}
+
+static SIZE_T get_private_bytes(void)
+{
+    BOOL (WINAPI *get_info)(HANDLE, PROCESS_MEMORY_COUNTERS *, DWORD);
+    PROCESS_MEMORY_COUNTERS counters = {sizeof(counters)};
+
+    get_info = (void *)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "K32GetProcessMemoryInfo");
+    if (!get_info || !get_info(GetCurrentProcess(), &counters, sizeof(counters))) return 0;
+    return counters.PagefileUsage;   /* the private bytes */
+}
+
+static DWORD get_handle_count(void)
+{
+    BOOL (WINAPI *get_count)(HANDLE, DWORD *);
+    DWORD count = 0;
+
+    get_count = (void *)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetProcessHandleCount");
+    if (get_count) get_count(GetCurrentProcess(), &count);
+    return count;
+}
+
+/* The portal cases of the signed-off design (docs/uwp/PORTAL_SNAPSHOT_DESIGN.md in WineExplorer): one target per object, removal,
+ * swap chains, two devices committing at once, a cycle and nesting of portals, and the registry of shared handles. */
+static void test_shared_visual_portal_cases(void)
+{
+    static const unsigned int window_size = 200, surface_size = 100;
+    typedef HRESULT (WINAPI *create_handle_t)(HANDLE *);
+    IDCompositionDesktopDevice *viewer, *portal_device, *device_a, *device_b, *device_c;
+    IDCompositionVisual2 *shared, *shared2, *root, *root2, *child, *v_c_a, *v_a_b, *root_d, *root_e, *v_a_e, *v_b_d;
+    IDCompositionTarget *window_target, *portal, *portal_a, *portal_b, *portal_d, *portal_e;
+    IDCompositionSurface *surface, *surface2;
+    struct portal_thread threads[2];
+    D3D_FEATURE_LEVEL feature_level;
+    create_handle_t create_handle;
+    HANDLE handle, duplicate, h_a, h_b, h_d, h_e, other;
+    ID3D11Device *d3d11_device;
+    BOOL is_wine = !strcmp(winetest_platform, "wine");
+    SIZE_T before, after;
+    DWORD count_before, count_after;
+    unsigned int i;
+    ULONG refcount;
+    void *out;
+    HRESULT hr;
+    HWND hwnd;
+
+    create_handle = (void *)GetProcAddress(GetModuleHandleW(L"dcomp.dll"), "DCompositionCreateSharedVisualHandle");
+    if (!create_handle || !pDCompositionCreateDevice3)
+    {
+        win_skip("DCompositionCreateSharedVisualHandle() or DCompositionCreateDevice3() is unavailable.\n");
+        return;
+    }
+    hwnd = CreateWindowExW(WS_EX_TOPMOST, L"static", L"dcomp_shared_visual_portal_cases",
+            WS_OVERLAPPED | WS_VISIBLE, 0, 0, window_size, window_size, NULL, NULL, NULL, NULL);
+    ok(hwnd != NULL, "Failed to create window.\n");
+    if (!hwnd) return;
+    MoveWindow(hwnd, 0, 0, window_size, window_size, TRUE);
+    hr = D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT, NULL, 0,
+            D3D11_SDK_VERSION, &d3d11_device, &feature_level, NULL);
+    if (FAILED(hr))
+        hr = D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_WARP, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT, NULL, 0,
+                D3D11_SDK_VERSION, &d3d11_device, &feature_level, NULL);
+    ok(hr == S_OK, "Failed to create D3D11 device, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        DestroyWindow(hwnd);
+        return;
+    }
+
+    /* A duplicate handle is the same object, also after the original is closed: while the visual lives, another open is
+     * E_ACCESSDENIED, and once it is released the duplicate opens a visual again. An object opens as a target once (Windows 11:
+     * E_ACCESSDENIED for a second target, also after the first was released, on any device). */
+    winetest_push_context("one target");
+    hr = pDCompositionCreateDevice3((IUnknown *)d3d11_device, &IID_IDCompositionDesktopDevice, (void **)&viewer);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = pDCompositionCreateDevice3((IUnknown *)d3d11_device, &IID_IDCompositionDesktopDevice, (void **)&portal_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = create_handle(&handle);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS);
+    hr = open_shared(viewer, handle, &IID_IDCompositionVisual2, (void **)&shared);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    CloseHandle(handle);
+    out = (void *)0xdeadbeef;
+    hr = open_shared(viewer, duplicate, &IID_IDCompositionVisual2, &out);
+    ok(hr == E_ACCESSDENIED, "Got unexpected hr %#lx.\n", hr);
+    ok(!out, "Got %p.\n", out);
+    if (SUCCEEDED(hr)) IUnknown_Release((IUnknown *)out);
+    IDCompositionVisual2_Release(shared);
+    hr = open_shared(viewer, duplicate, &IID_IDCompositionVisual2, (void **)&shared);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = open_shared(viewer, duplicate, &IID_IDCompositionTarget, (void **)&portal);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    out = (void *)0xdeadbeef;
+    hr = open_shared(viewer, duplicate, &IID_IDCompositionTarget, &out);
+    ok(hr == E_ACCESSDENIED, "Got unexpected hr %#lx.\n", hr);
+    ok(!out, "Got %p.\n", out);
+    IDCompositionTarget_Release(portal);
+    out = (void *)0xdeadbeef;
+    hr = open_shared(portal_device, duplicate, &IID_IDCompositionTarget, &out);
+    ok(hr == E_ACCESSDENIED, "Got unexpected hr %#lx.\n", hr);
+    ok(!out, "Got %p.\n", out);
+    if (shared) IDCompositionVisual2_Release(shared);
+    CloseHandle(duplicate);
+    refcount = IDCompositionDesktopDevice_Release(portal_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+    refcount = IDCompositionDesktopDevice_Release(viewer);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+    winetest_pop_context();
+
+    /* Removal: a root of NULL, and the release of a portal target with a root, take the portal out of the viewer's window. */
+    winetest_push_context("removal");
+    hr = pDCompositionCreateDevice3((IUnknown *)d3d11_device, &IID_IDCompositionDesktopDevice, (void **)&viewer);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = pDCompositionCreateDevice3((IUnknown *)d3d11_device, &IID_IDCompositionDesktopDevice, (void **)&portal_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = create_handle(&handle);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = open_shared(viewer, handle, &IID_IDCompositionVisual2, (void **)&shared);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_CreateTargetForHwnd(viewer, hwnd, TRUE, &window_target);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    IDCompositionTarget_SetRoot(window_target, (IDCompositionVisual *)shared);
+    hr = IDCompositionDesktopDevice_Commit(viewer);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = open_shared(portal_device, handle, &IID_IDCompositionTarget, (void **)&portal);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_CreateVisual(portal_device, &root);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    surface = create_color_surface(portal_device, d3d11_device, surface_size, 1.0f, 1.0f, 0.0f);
+    IDCompositionVisual2_SetContent(root, (IUnknown *)surface);
+    IDCompositionTarget_SetRoot(portal, (IDCompositionVisual *)root);
+    hr = IDCompositionDesktopDevice_Commit(portal_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    expect_rendered_color(hwnd, 50, 50, RGB(0xff, 0xff, 0));
+    IDCompositionTarget_SetRoot(portal, NULL);
+    hr = IDCompositionDesktopDevice_Commit(portal_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    expect_not_rendered_color(hwnd, 50, 50, RGB(0xff, 0xff, 0));
+    IDCompositionTarget_SetRoot(portal, (IDCompositionVisual *)root);
+    hr = IDCompositionDesktopDevice_Commit(portal_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    expect_rendered_color(hwnd, 50, 50, RGB(0xff, 0xff, 0));
+    /* A released portal target keeps showing what it committed last (Windows 11), also when the viewer commits, takes the
+     * shared visual out of its window and puts it back. */
+    IDCompositionTarget_Release(portal);
+    hr = IDCompositionDesktopDevice_Commit(portal_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_Commit(viewer);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    expect_rendered_color(hwnd, 50, 50, RGB(0xff, 0xff, 0));
+    IDCompositionTarget_SetRoot(window_target, NULL);
+    hr = IDCompositionDesktopDevice_Commit(viewer);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    expect_not_rendered_color(hwnd, 50, 50, RGB(0xff, 0xff, 0));
+    IDCompositionTarget_SetRoot(window_target, (IDCompositionVisual *)shared);
+    hr = IDCompositionDesktopDevice_Commit(viewer);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    expect_rendered_color(hwnd, 50, 50, RGB(0xff, 0xff, 0));
+    winetest_pop_context();
+
+    /* A swap chain in a portal's tree is not shown (a FIXME in Wine); the commits succeed and the surface beside it shows. */
+    winetest_push_context("swap chain");
+    {
+        DXGI_SWAP_CHAIN_DESC1 desc = {64, 64, DXGI_FORMAT_B8G8R8A8_UNORM, FALSE, {1, 0}, DXGI_USAGE_RENDER_TARGET_OUTPUT, 2,
+                DXGI_SCALING_STRETCH, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_ALPHA_MODE_PREMULTIPLIED, 0};
+        IDXGISwapChain1 *swapchain = NULL;
+        IDXGIFactory2 *factory = NULL;
+        IDXGIAdapter *adapter;
+        IDXGIDevice *dxgi_device;
+
+        ID3D11Device_QueryInterface(d3d11_device, &IID_IDXGIDevice, (void **)&dxgi_device);
+        IDXGIDevice_GetAdapter(dxgi_device, &adapter);
+        IDXGIAdapter_GetParent(adapter, &IID_IDXGIFactory2, (void **)&factory);
+        hr = IDXGIFactory2_CreateSwapChainForComposition(factory, (IUnknown *)d3d11_device, &desc, NULL, &swapchain);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        IDXGIFactory2_Release(factory);
+        IDXGIAdapter_Release(adapter);
+        IDXGIDevice_Release(dxgi_device);
+
+        hr = create_handle(&h_a);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = open_shared(viewer, h_a, &IID_IDCompositionVisual2, (void **)&shared2);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        IDCompositionTarget_SetRoot(window_target, (IDCompositionVisual *)shared2);
+        hr = IDCompositionDesktopDevice_Commit(viewer);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = open_shared(portal_device, h_a, &IID_IDCompositionTarget, (void **)&portal);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionDesktopDevice_CreateVisual(portal_device, &child);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        IDCompositionVisual2_SetOffsetX(child, 120.0f);
+        if (swapchain) IDCompositionVisual2_SetContent(child, (IUnknown *)swapchain);
+        render_surface_color(d3d11_device, surface, 0.0f, 1.0f, 0.0f);
+        IDCompositionVisual2_AddVisual(root, (IDCompositionVisual *)child, FALSE, NULL);
+        IDCompositionTarget_SetRoot(portal, (IDCompositionVisual *)root);
+        hr = IDCompositionDesktopDevice_Commit(portal_device);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = IDCompositionDesktopDevice_Commit(viewer);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        expect_rendered_color(hwnd, 50, 50, RGB(0, 0xff, 0));
+        IDCompositionVisual2_RemoveAllVisuals(root);
+        IDCompositionTarget_SetRoot(portal, NULL);
+        hr = IDCompositionDesktopDevice_Commit(portal_device);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        IDCompositionTarget_Release(portal);
+        IDCompositionVisual2_SetContent(child, NULL);
+        IDCompositionVisual2_Release(child);
+        if (swapchain) IDXGISwapChain1_Release(swapchain);
+        IDCompositionTarget_SetRoot(window_target, (IDCompositionVisual *)shared);
+        IDCompositionVisual2_Release(shared2);
+        CloseHandle(h_a);
+    }
+    winetest_pop_context();
+
+    /* Two threads: the viewer commits while the portal's device switches its root and the root's content (P1 of the review). */
+    winetest_push_context("concurrent");
+    hr = create_handle(&h_b);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = open_shared(viewer, h_b, &IID_IDCompositionVisual2, (void **)&shared2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    IDCompositionTarget_SetRoot(window_target, (IDCompositionVisual *)shared2);
+    hr = IDCompositionDesktopDevice_Commit(viewer);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = open_shared(portal_device, h_b, &IID_IDCompositionTarget, (void **)&portal);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_CreateVisual(portal_device, &root2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    surface2 = create_color_surface(portal_device, d3d11_device, surface_size, 0.0f, 0.0f, 1.0f);
+    IDCompositionVisual2_SetContent(root2, (IUnknown *)surface2);
+    memset(threads, 0, sizeof(threads));
+    threads[0].device = viewer;
+    threads[0].iterations = 500;
+    threads[1].device = portal_device;
+    threads[1].target = portal;
+    threads[1].roots[0] = root;
+    threads[1].roots[1] = root2;
+    threads[1].surface = surface;
+    threads[1].iterations = 500;
+    ok(run_portal_threads(threads, 2), "The threads did not finish.\n");
+    ok(!threads[0].failures, "The viewer's commit failed %ld times.\n", threads[0].failures);
+    ok(!threads[1].failures, "The portal's commit failed %ld times.\n", threads[1].failures);
+    IDCompositionTarget_SetRoot(portal, NULL);
+    hr = IDCompositionDesktopDevice_Commit(portal_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    IDCompositionTarget_Release(portal);
+    IDCompositionTarget_SetRoot(window_target, NULL);
+    hr = IDCompositionDesktopDevice_Commit(viewer);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    IDCompositionTarget_Release(window_target);
+    IDCompositionVisual2_Release(shared2);
+    IDCompositionVisual2_Release(shared);
+    IDCompositionVisual2_SetContent(root, NULL);
+    IDCompositionVisual2_SetContent(root2, NULL);
+    IDCompositionVisual2_Release(root2);
+    IDCompositionVisual2_Release(root);
+    IDCompositionSurface_Release(surface2);
+    IDCompositionSurface_Release(surface);
+    CloseHandle(h_b);
+    CloseHandle(handle);
+    /* Windows 11 may still hold the objects of the last frames here (it releases them later) */
+    IDCompositionDesktopDevice_WaitForCommitCompletion(portal_device);
+    IDCompositionDesktopDevice_WaitForCommitCompletion(viewer);
+    refcount = IDCompositionDesktopDevice_Release(portal_device);
+    ok(!refcount || broken(refcount), "Portal device has %lu references left.\n", refcount);
+    refcount = IDCompositionDesktopDevice_Release(viewer);
+    ok(!refcount || broken(refcount), "Viewer has %lu references left.\n", refcount);
+    winetest_pop_context();
+
+    /* Nesting: device C's window shows the portal of A, and A's portal tree holds a visual of B's portal: B's green surface shows in
+     * C's window through A (Wine flattens a nested portal into the outer snapshot). Then a cycle of two other objects: A's portal
+     * tree shows B's portal and B's shows A's (each object has one visual at a time). A and B committing at once both return, and
+     * memory does not grow. */
+    winetest_push_context("nesting");
+    hr = pDCompositionCreateDevice3((IUnknown *)d3d11_device, &IID_IDCompositionDesktopDevice, (void **)&device_a);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = pDCompositionCreateDevice3((IUnknown *)d3d11_device, &IID_IDCompositionDesktopDevice, (void **)&device_b);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = pDCompositionCreateDevice3((IUnknown *)d3d11_device, &IID_IDCompositionDesktopDevice, (void **)&device_c);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    create_handle(&h_a);
+    create_handle(&h_b);
+    hr = open_shared(device_c, h_a, &IID_IDCompositionVisual2, (void **)&v_c_a);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_CreateTargetForHwnd(device_c, hwnd, TRUE, &window_target);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    IDCompositionTarget_SetRoot(window_target, (IDCompositionVisual *)v_c_a);
+    hr = IDCompositionDesktopDevice_Commit(device_c);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = open_shared(device_a, h_a, &IID_IDCompositionTarget, (void **)&portal_a);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = open_shared(device_a, h_b, &IID_IDCompositionVisual2, (void **)&v_a_b);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_CreateVisual(device_a, &root);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    IDCompositionVisual2_AddVisual(root, (IDCompositionVisual *)v_a_b, FALSE, NULL);
+    IDCompositionTarget_SetRoot(portal_a, (IDCompositionVisual *)root);
+
+    hr = open_shared(device_b, h_b, &IID_IDCompositionTarget, (void **)&portal_b);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_CreateVisual(device_b, &root2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    surface2 = create_color_surface(device_b, d3d11_device, surface_size, 0.0f, 1.0f, 0.0f);
+    IDCompositionVisual2_SetContent(root2, (IUnknown *)surface2);
+    IDCompositionTarget_SetRoot(portal_b, (IDCompositionVisual *)root2);
+
+    hr = IDCompositionDesktopDevice_Commit(device_b);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_Commit(device_a);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    expect_rendered_color(hwnd, 50, 50, RGB(0, 0xff, 0));
+    /* a commit of the inner portal's device alone shows (Notepad's compositor commits without the UI thread) */
+    render_surface_color(d3d11_device, surface2, 0.0f, 0.0f, 1.0f);
+    hr = IDCompositionDesktopDevice_Commit(device_b);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    expect_rendered_color(hwnd, 50, 50, RGB(0, 0, 0xff));
+    render_surface_color(d3d11_device, surface2, 0.0f, 1.0f, 0.0f);
+
+    /* the cycle: D on device A shows E, E on device B shows D */
+    create_handle(&h_d);
+    create_handle(&h_e);
+    hr = open_shared(device_a, h_d, &IID_IDCompositionTarget, (void **)&portal_d);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = open_shared(device_a, h_e, &IID_IDCompositionVisual2, (void **)&v_a_e);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_CreateVisual(device_a, &root_d);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    IDCompositionVisual2_AddVisual(root_d, (IDCompositionVisual *)v_a_e, FALSE, NULL);
+    IDCompositionTarget_SetRoot(portal_d, (IDCompositionVisual *)root_d);
+    hr = open_shared(device_b, h_e, &IID_IDCompositionTarget, (void **)&portal_e);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = open_shared(device_b, h_d, &IID_IDCompositionVisual2, (void **)&v_b_d);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_CreateVisual(device_b, &root_e);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    IDCompositionVisual2_SetContent(root_e, (IUnknown *)surface2);
+    IDCompositionVisual2_SetOffsetX(v_b_d, 10.0f);
+    IDCompositionVisual2_AddVisual(root_e, (IDCompositionVisual *)v_b_d, FALSE, NULL);
+    IDCompositionTarget_SetRoot(portal_e, (IDCompositionVisual *)root_e);
+
+    /* warm up, then measure */
+    memset(threads, 0, sizeof(threads));
+    threads[0].device = device_a;
+    threads[0].iterations = 50;
+    threads[1].device = device_b;
+    threads[1].iterations = 50;
+    ok(run_portal_threads(threads, 2), "The threads did not finish.\n");
+    before = get_private_bytes();
+    threads[0].iterations = threads[1].iterations = 400;
+    ok(run_portal_threads(threads, 2), "The threads did not finish.\n");
+    after = get_private_bytes();
+    ok(!threads[0].failures && !threads[1].failures, "Commits failed %ld and %ld times.\n",
+            threads[0].failures, threads[1].failures);
+    if (is_wine && before && after)
+        ok(after < before + 8 * 1024 * 1024, "Private bytes grew from %Iu to %Iu.\n", before, after);
+
+    IDCompositionTarget_SetRoot(portal_a, NULL);
+    IDCompositionTarget_SetRoot(portal_b, NULL);
+    IDCompositionTarget_SetRoot(portal_d, NULL);
+    IDCompositionTarget_SetRoot(portal_e, NULL);
+    IDCompositionDesktopDevice_Commit(device_a);
+    IDCompositionDesktopDevice_Commit(device_b);
+    IDCompositionTarget_SetRoot(window_target, NULL);
+    IDCompositionDesktopDevice_Commit(device_c);
+    IDCompositionTarget_Release(window_target);
+    IDCompositionTarget_Release(portal_a);
+    IDCompositionTarget_Release(portal_b);
+    IDCompositionTarget_Release(portal_d);
+    IDCompositionTarget_Release(portal_e);
+    IDCompositionVisual2_RemoveAllVisuals(root);
+    IDCompositionVisual2_RemoveAllVisuals(root_d);
+    IDCompositionVisual2_RemoveAllVisuals(root_e);
+    IDCompositionVisual2_SetContent(root2, NULL);
+    IDCompositionVisual2_SetContent(root_e, NULL);
+    IDCompositionVisual2_Release(root);
+    IDCompositionVisual2_Release(root2);
+    IDCompositionVisual2_Release(root_d);
+    IDCompositionVisual2_Release(root_e);
+    IDCompositionVisual2_Release(v_a_b);
+    IDCompositionVisual2_Release(v_a_e);
+    IDCompositionVisual2_Release(v_b_d);
+    IDCompositionVisual2_Release(v_c_a);
+    IDCompositionSurface_Release(surface2);
+    CloseHandle(h_a);
+    CloseHandle(h_b);
+    CloseHandle(h_d);
+    CloseHandle(h_e);
+    /* (see above: Windows 11 may still hold objects of the last frames) */
+    refcount = IDCompositionDesktopDevice_Release(device_c);
+    ok(!refcount || broken(refcount), "Device C has %lu references left.\n", refcount);
+    refcount = IDCompositionDesktopDevice_Release(device_b);
+    ok(!refcount || broken(refcount), "Device B has %lu references left.\n", refcount);
+    refcount = IDCompositionDesktopDevice_Release(device_a);
+    ok(!refcount || broken(refcount), "Device A has %lu references left.\n", refcount);
+    winetest_pop_context();
+
+    /* The registry of shared handles: a named event of the caller's is not a shared handle, and a share leaves the registry
+     * once its handles are all closed (Wine: the process's handle count stays flat). */
+    winetest_push_context("registry");
+    hr = pDCompositionCreateDevice3(NULL, &IID_IDCompositionDesktopDevice, (void **)&viewer);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    other = CreateEventW(NULL, TRUE, FALSE, L"wine_dcomp_test_named_event");
+    out = (void *)0xdeadbeef;
+    hr = open_shared(viewer, other, &IID_IDCompositionVisual, &out);
+    ok(hr == E_HANDLE, "Got unexpected hr %#lx.\n", hr);
+    ok(!out, "Got %p.\n", out);
+    CloseHandle(other);
+    if (is_wine)
+    {
+        create_handle(&handle);
+        CloseHandle(handle);
+        count_before = get_handle_count();
+        for (i = 0; i < 32; ++i)
+        {
+            create_handle(&handle);
+            CloseHandle(handle);
+        }
+        count_after = get_handle_count();
+        ok(count_after <= count_before + 1, "Handle count grew from %lu to %lu.\n", count_before, count_after);
+    }
+    refcount = IDCompositionDesktopDevice_Release(viewer);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+    winetest_pop_context();
+
+    refcount = ID3D11Device_Release(d3d11_device);
+    ok(!refcount || broken(refcount), "Device has %lu references left.\n", refcount);
     DestroyWindow(hwnd);
 }
 
@@ -2305,6 +3293,167 @@ done:
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+/* The viewer's thread uses the viewer's D3D11 device (immediate context: draws into its own surface, commits its device) while
+ * another thread commits the portal's device. A Commit of the portal redraws the viewer's window on the thread that committed,
+ * so it must not touch the D3D11 device the application uses on its own thread. Failures show as a removed device, a failed
+ * Commit, a wrong final color or a crash. */
+struct viewer_thread
+{
+    IDCompositionDesktopDevice *device;
+    ID3D11Device *d3d11_device;
+    IDCompositionSurface *surface;
+    unsigned int iterations;
+    LONG failures;
+};
+
+static DWORD WINAPI viewer_thread_proc(void *arg)
+{
+    struct viewer_thread *t = arg;
+    unsigned int i;
+
+    for (i = 0; i < t->iterations; ++i)
+    {
+        render_surface_color(t->d3d11_device, t->surface, (i & 1) ? 1.0f : 0.0f, 0.0f, (i & 1) ? 0.0f : 1.0f);
+        if (FAILED(IDCompositionDesktopDevice_Commit(t->device))) InterlockedIncrement(&t->failures);
+    }
+    return 0;
+}
+
+static void test_shared_visual_portal_viewer_thread(void)
+{
+    static const unsigned int window_size = 200, surface_size = 100, iterations = 300;
+    typedef HRESULT (WINAPI *create_handle_t)(HANDLE *);
+    IDCompositionVisual2 *shared, *portal_root, *own_root;
+    IDCompositionDesktopDevice *viewer, *portal_device;
+    IDCompositionTarget *window_target, *portal;
+    IDCompositionSurface *own_surface, *portal_surface;
+    create_handle_t create_handle;
+    D3D_FEATURE_LEVEL feature_level;
+    struct viewer_thread vt = {0};
+    ID3D11Device *d3d11_device;
+    HANDLE handle, thread;
+    unsigned int i;
+    ULONG refcount;
+    HRESULT hr;
+    HWND hwnd;
+
+    create_handle = (void *)GetProcAddress(GetModuleHandleW(L"dcomp.dll"), "DCompositionCreateSharedVisualHandle");
+    if (!create_handle || !pDCompositionCreateDevice3)
+    {
+        win_skip("DCompositionCreateSharedVisualHandle() or DCompositionCreateDevice3() is unavailable.\n");
+        return;
+    }
+    hwnd = CreateWindowExW(WS_EX_TOPMOST, L"static", L"dcomp_portal_viewer_thread",
+            WS_OVERLAPPED | WS_VISIBLE, 0, 0, window_size, window_size, NULL, NULL, NULL, NULL);
+    ok(hwnd != NULL, "Failed to create window.\n");
+    if (!hwnd) return;
+    MoveWindow(hwnd, 0, 0, window_size, window_size, TRUE);
+    hr = D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT, NULL, 0,
+            D3D11_SDK_VERSION, &d3d11_device, &feature_level, NULL);
+    if (FAILED(hr))
+        hr = D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_WARP, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT, NULL, 0,
+                D3D11_SDK_VERSION, &d3d11_device, &feature_level, NULL);
+    ok(hr == S_OK, "Failed to create D3D11 device, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        DestroyWindow(hwnd);
+        return;
+    }
+
+    /* the viewer: its window shows the shared visual, with a surface of its own as the visual's sibling content */
+    hr = pDCompositionCreateDevice3((IUnknown *)d3d11_device, &IID_IDCompositionDesktopDevice, (void **)&viewer);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = create_handle(&handle);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = open_shared(viewer, handle, &IID_IDCompositionVisual2, (void **)&shared);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_CreateVisual(viewer, &own_root);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    own_surface = create_color_surface(viewer, d3d11_device, surface_size, 0.0f, 0.0f, 1.0f);
+    ok(own_surface != NULL, "Failed to create the viewer's surface.\n");
+    hr = IDCompositionVisual2_SetContent(own_root, (IUnknown *)own_surface);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionVisual2_AddVisual(own_root, (IDCompositionVisual *)shared, TRUE, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionVisual2_SetOffsetX(shared, 100.0f);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_CreateTargetForHwnd(viewer, hwnd, TRUE, &window_target);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionTarget_SetRoot(window_target, (IDCompositionVisual *)own_root);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_Commit(viewer);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* the portal: another device, a surface that changes at each Commit */
+    hr = pDCompositionCreateDevice3((IUnknown *)d3d11_device, &IID_IDCompositionDesktopDevice, (void **)&portal_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = open_shared(portal_device, handle, &IID_IDCompositionTarget, (void **)&portal);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_CreateVisual(portal_device, &portal_root);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    portal_surface = create_color_surface(portal_device, d3d11_device, surface_size, 0.0f, 1.0f, 0.0f);
+    ok(portal_surface != NULL, "Failed to create the portal's surface.\n");
+    hr = IDCompositionVisual2_SetContent(portal_root, (IUnknown *)portal_surface);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionTarget_SetRoot(portal, (IDCompositionVisual *)portal_root);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_Commit(portal_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_WaitForCommitCompletion(portal_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    expect_rendered_color(hwnd, 150, 50, RGB(0, 0xff, 0));
+
+    /* the viewer's thread draws on the D3D11 device and commits; this thread commits the portal, with new pixels each time */
+    vt.device = viewer;
+    vt.d3d11_device = d3d11_device;
+    vt.surface = own_surface;
+    vt.iterations = iterations;
+    thread = CreateThread(NULL, 0, viewer_thread_proc, &vt, 0, NULL);
+    ok(thread != NULL, "Failed to create thread.\n");
+    for (i = 0; i < iterations; ++i)
+    {
+        /* nothing is drawn here: the D3D11 device belongs to the viewer's thread. Every Commit publishes a snapshot and redraws
+         * the viewers anyway (PORTAL_SNAPSHOT_DESIGN.md, section 1) */
+        hr = IDCompositionDesktopDevice_Commit(portal_device);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        if (FAILED(hr)) break;
+    }
+    ok(WaitForSingleObject(thread, 120000) == WAIT_OBJECT_0, "The viewer's thread did not end.\n");
+    CloseHandle(thread);
+    ok(!vt.failures, "%ld commits of the viewer failed.\n", vt.failures);
+    hr = ID3D11Device_GetDeviceRemovedReason(d3d11_device);
+    ok(hr == S_OK, "The D3D11 device was removed, hr %#lx.\n", hr);
+
+    /* both devices still work: a last Commit shows the viewer's own surface and the portal's */
+    render_surface_color(d3d11_device, own_surface, 1.0f, 1.0f, 0.0f);
+    hr = IDCompositionDesktopDevice_Commit(viewer);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_WaitForCommitCompletion(viewer);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    expect_rendered_color(hwnd, 50, 50, RGB(0xff, 0xff, 0));
+    expect_rendered_color(hwnd, 150, 50, RGB(0, 0xff, 0));
+
+    hr = IDCompositionTarget_SetRoot(portal, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_Commit(portal_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    IDCompositionSurface_Release(portal_surface);
+    IDCompositionVisual2_Release(portal_root);
+    IDCompositionTarget_Release(portal);
+    refcount = IDCompositionDesktopDevice_Release(portal_device);
+    ok(!refcount, "Portal device has %lu references left.\n", refcount);
+    IDCompositionTarget_Release(window_target);
+    IDCompositionSurface_Release(own_surface);
+    IDCompositionVisual2_Release(own_root);
+    IDCompositionVisual2_Release(shared);
+    CloseHandle(handle);
+    refcount = IDCompositionDesktopDevice_Release(viewer);
+    ok(!refcount, "Viewer has %lu references left.\n", refcount);
+    refcount = ID3D11Device_Release(d3d11_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+    DestroyWindow(hwnd);
+}
+
 START_TEST(dcomp)
 {
     HMODULE module;
@@ -2330,6 +3479,7 @@ START_TEST(dcomp)
     test_DCompositionCreateDevice();
     test_DCompositionCreateDevice2();
     test_DCompositionCreateDevice3();
+    test_shared_visual();
     test_device_CreateTargetForHwnd();
     test_device_CreateVisual();
     test_device_CreateSurfaceFactory();
@@ -2338,6 +3488,9 @@ START_TEST(dcomp)
     test_surface_begin_end_Draw();
     test_surface_suspend_scroll_virtual();
     test_surface_composition();
+    test_shared_visual_portal();
+    test_shared_visual_portal_cases();
+    test_shared_visual_portal_viewer_thread();
     test_target_SetRoot();
     test_visual_SetContent();
     test_visual_SetBitmapInterpolationMode();

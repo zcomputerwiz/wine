@@ -47,6 +47,8 @@
 #include "e1s_token.h"
 #include "wine/wex_token.h"
 #include "wine/wex_profile.h"
+#define WEX_CALLER_CONSTANTS_ONLY
+#include "wine/wex_caller.h"
 
 #define MAX_SUBAUTH_COUNT 1
 
@@ -150,6 +152,9 @@ struct token
     struct list    capabilities;    /* capability SIDs */
     struct uwp_context *package;    /* package context (UWP compatibility) */
     int            package_pending; /* no process image has been checked against the context yet */
+    int            windows_sd;      /* R7: Windows' descriptor was given (token_protect_system, token_protect_elevated) */
+    int            link_bound;      /* WineExplorer H3: made by link_bound_token from another server's description */
+    unsigned int   link_session;    /* ... for that link's session */
 };
 
 struct privilege
@@ -222,6 +227,31 @@ void security_set_thread_token( struct thread *thread, obj_handle_t handle )
                                                               handle,
                                                               TOKEN_IMPERSONATE,
                                                               &token_ops );
+        if (token && thread->process->token)
+        {
+            /* WineExplorer B99, from Windows' SeTokenCanImpersonate: a token of a higher integrity than the thread's
+             * process, also with SeImpersonatePrivilege, and without that privilege an elevated token while the
+             * process is not elevated, goes to the thread as an identification-level copy. Measured: on Windows 11 a
+             * Low integrity process may open and duplicate a Medium token of its user, but SetThreadToken and
+             * ImpersonateLoggedOnUser with it give its thread an identification token; on Windows 10 the same holds
+             * for a Low copy of an elevated administrator's token (SeImpersonatePrivilege enabled) and its High
+             * parent. The rule's other part (another user's token) is left to the pipe servers
+             * (token_impersonation_level): Windows lets a process impersonate a token it got from LogonUser. */
+            struct token *process_token = thread->process->token;
+            int had = token->primary ? SecurityImpersonation : token->impersonation_level;
+
+            if (had > SecurityIdentification &&
+                (token->integrity_rid > process_token->integrity_rid ||
+                 (!token_has_privilege( process_token, SeImpersonatePrivilege ) &&
+                  token->elevation == TokenElevationTypeFull && process_token->elevation != TokenElevationTypeFull)))
+            {
+                struct token *copy = token_duplicate( token, FALSE, SecurityIdentification, NULL, NULL, 0, NULL, 0, FALSE );
+
+                release_object( token );
+                if (!copy) return;
+                token = copy;
+            }
+        }
         if (token)
         {
             if (thread->token)
@@ -238,9 +268,41 @@ void security_set_thread_token( struct thread *thread, obj_handle_t handle )
 static struct sid mapped_user_sid;
 static const struct sid *server_user_sid = &local_user_sid;
 
+/* WineExplorer domain logon WO 2 (docs/DOMAIN_LOGON.md): when the server's user is a domain account of the map,
+ * its Domain Users (the domain SID and RID 513, in place of the fixed S-1-5-21-0-0-0-513) and the domain groups
+ * the root step recorded at logon; none of it comes from the user's processes. */
+#define DOMAIN_GROUPS_MAX 1024
+static int server_user_domain;
+static struct sid server_domain_users_sid;
+static struct sid *server_domain_groups;
+static unsigned int server_domain_group_count;
+
+static void make_domain_sid( struct sid *sid, const unsigned int subauth[5], unsigned int rid )
+{
+    unsigned int i;
+
+    sid->revision = SID_REVISION;
+    sid->sub_count = 5;
+    memcpy( sid->id_auth, local_user_sid.id_auth, sizeof(sid->id_auth) );
+    for (i = 0; i < 4; i++) sid->sub_auth[i] = subauth[i];
+    sid->sub_auth[4] = rid;
+}
+
+/* the server's user is a domain account in the domain group rid (Domain Admins: 512) */
+int security_server_user_in_domain_group( unsigned int rid )
+{
+    unsigned int i;
+
+    if (!server_user_domain) return 0;
+    for (i = 0; i < server_domain_group_count; i++)
+        if (server_domain_groups[i].sub_auth[4] == rid) return 1;
+    return 0;
+}
+
 void security_init_server_user(void)
 {
-    unsigned int subauth[5], i;
+    unsigned int subauth[5], i, count;
+    uint32_t *rids;
 
     if (session0_server)
     {
@@ -248,7 +310,20 @@ void security_init_server_user(void)
         server_user_sid = &local_system_sid;
         return;
     }
-    if (!session0_client || !accounts_own_sid( getuid(), subauth )) return;
+    if (!session0_client) return;
+    if ((rids = malloc( DOMAIN_GROUPS_MAX * sizeof(*rids) )) &&
+        accounts_own_domain( getuid(), subauth, rids, DOMAIN_GROUPS_MAX, &count ))
+    {
+        server_user_domain = 1;
+        make_domain_sid( &server_domain_users_sid, subauth, DOMAIN_GROUP_RID_USERS );
+        if (count && (server_domain_groups = malloc( count * sizeof(*server_domain_groups) )))
+        {
+            for (i = 0; i < count; i++) make_domain_sid( &server_domain_groups[i], subauth, rids[i] );
+            server_domain_group_count = count;
+        }
+    }
+    free( rids );
+    if (!accounts_own_sid( getuid(), subauth )) return;
     mapped_user_sid.revision = SID_REVISION;
     mapped_user_sid.sub_count = 5;
     memcpy( mapped_user_sid.id_auth, local_user_sid.id_auth, sizeof(mapped_user_sid.id_auth) );
@@ -593,6 +668,9 @@ static struct token *create_token( unsigned int primary, unsigned int session_id
         token->is_restricted = 0;
         token->package = NULL;
         token->package_pending = 0;
+        token->windows_sd = 0;
+        token->link_bound = 0;    /* H3: a token of this server's own (link_bound_token sets it) */
+        token->link_session = 0;
 
         /* copy user */
         token->user = memdup( user, sid_len( user ));
@@ -721,6 +799,8 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
     token->lineage_id = src_token->lineage_id;
     token->auth_id = src_token->auth_id;
     token->e1s_account = src_token->e1s_account;
+    token->link_bound = src_token->link_bound;  /* a copy of a session's token stays a session's (H3) */
+    token->link_session = src_token->link_session;
 
     /* copy groups */
     LIST_FOR_EACH_ENTRY( group, &src_token->groups, struct group, entry )
@@ -1001,9 +1081,41 @@ struct token *token_create_admin( unsigned primary, int impersonation_level, int
         { &logon_sid, SE_GROUP_ENABLED|SE_GROUP_ENABLED_BY_DEFAULT|SE_GROUP_MANDATORY|SE_GROUP_LOGON_ID },
     };
 
-    token = create_token( primary, session_id, user_sid, &domain_users_sid, &domain_users_sid,
-                          admin_groups, ARRAY_SIZE( admin_groups ), admin_privs, ARRAY_SIZE( admin_privs ),
-                          default_dacl, NULL, impersonation_level, elevation );
+    if (server_user_domain && user_sid == server_user_sid)
+    {
+        /* a domain account (WO 2): the domain's Domain Users is owner and primary group, and the recorded domain
+         * groups are enabled groups of the token; everything else is the list above (Administrators included,
+         * which the logon filters to deny-only or removes as for any account, process.c) */
+        struct sid_attrs *groups;
+        unsigned int i, n = 0;
+
+        if (!(groups = malloc( (ARRAY_SIZE( admin_groups ) + server_domain_group_count) * sizeof(*groups) )))
+        {
+            free( default_dacl );
+            return NULL;
+        }
+        for (i = 0; i < ARRAY_SIZE( admin_groups ); i++)
+        {
+            groups[n] = admin_groups[i];
+            if (admin_groups[i].sid == &domain_users_sid) groups[n].sid = &server_domain_users_sid;
+            n++;
+        }
+        for (i = 0; i < server_domain_group_count; i++)
+        {
+            if (equal_sid( &server_domain_groups[i], &server_domain_users_sid )) continue;
+            groups[n].sid = &server_domain_groups[i];
+            groups[n].attrs = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY;
+            n++;
+        }
+        token = create_token( primary, session_id, user_sid, &server_domain_users_sid, &server_domain_users_sid,
+                              groups, n, admin_privs, ARRAY_SIZE( admin_privs ),
+                              default_dacl, NULL, impersonation_level, elevation );
+        free( groups );
+    }
+    else
+        token = create_token( primary, session_id, user_sid, &domain_users_sid, &domain_users_sid,
+                              admin_groups, ARRAY_SIZE( admin_groups ), admin_privs, ARRAY_SIZE( admin_privs ),
+                              default_dacl, NULL, impersonation_level, elevation );
 
     /* Assign a high security label to the token. The default would be medium
      * but Wine provides admin access to all applications right now so high
@@ -1037,8 +1149,26 @@ void token_copy_auth_id( struct token *dst, const struct token *src )
 /* Tokens of the system role (docs/ELEVATION_SYSTEM_ROLE_WORKORDER.md, C3): LocalSystem, LocalService and
  * NetworkService, all primary, Default elevation, no linked token, System integrity.
  * Privileges and groups follow the native tokens measured in docs/ELEVATION_LOCAL_VALIDATION_WORKORDER.md
- * (Task Scheduler tokens). Left out on purpose: the per-task/per-service SIDs and the unknown S-1-5-32-* SIDs. */
+ * (Task Scheduler tokens). Left out on purpose: the per-task SIDs and the unknown S-1-5-32-* SIDs. A service's own SID
+ * (NT SERVICE\name) is added by token_create_service_sid when services.exe passes it (B114). */
 struct token *token_create_service( unsigned int account, unsigned int session_id )
+{
+    return token_create_service_sid( account, session_id, NULL );
+}
+
+/* a service SID, S-1-5-80-x-x-x-x-x (SECURITY_SERVICE_ID_BASE_RID and the SHA-1 of the upper case name) */
+static int is_service_id_sid( const struct sid *sid )
+{
+    static const unsigned char nt_authority[6] = SECURITY_NT_AUTHORITY;
+
+    return sid->revision == SID_REVISION && sid->sub_count == SECURITY_SERVICE_ID_RID_COUNT &&
+           !memcmp( sid->id_auth, nt_authority, sizeof(nt_authority) ) &&
+           sid->sub_auth[0] == SECURITY_SERVICE_ID_BASE_RID;
+}
+
+/* the token of a service account; own_sid, when not NULL, is the service's own SID, added as an enabled group
+ * that may own objects, as in Windows' tokens of services whose SID type is unrestricted */
+struct token *token_create_service_sid( unsigned int account, unsigned int session_id, const struct sid *own_sid )
 {
     const unsigned int on = SE_PRIVILEGE_ENABLED;
     const unsigned int grp = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY;
@@ -1111,12 +1241,24 @@ struct token *token_create_service( unsigned int account, unsigned int session_i
     default:
         return NULL;
     }
+    if (own_sid && !is_service_id_sid( own_sid )) return NULL;
 
     /* the default DACL of the account: SYSTEM and Administrators for LocalSystem, SYSTEM and the account for the others */
     if (!(default_dacl = create_default_dacl( account == SERVICE_ACCOUNT_SYSTEM ? &builtin_admins_sid : user )))
         return NULL;
-    token = create_token( 1, session_id, user, owner, primary_group, groups, group_count, privs, priv_count,
-                          default_dacl, NULL, -1, TokenElevationTypeDefault );
+    if (own_sid)
+    {
+        struct sid_attrs with_sid[ARRAY_SIZE( service_groups ) + 1];
+
+        memcpy( with_sid, groups, group_count * sizeof(*groups) );
+        with_sid[group_count].sid = own_sid;
+        with_sid[group_count].attrs = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_OWNER;
+        token = create_token( 1, session_id, user, owner, primary_group, with_sid, group_count + 1, privs, priv_count,
+                              default_dacl, NULL, -1, TokenElevationTypeDefault );
+    }
+    else
+        token = create_token( 1, session_id, user, owner, primary_group, groups, group_count, privs, priv_count,
+                              default_dacl, NULL, -1, TokenElevationTypeDefault );
     free( default_dacl );
     if (!token) return NULL;
     /* service (SYSTEM) logons use a fixed authentication id */
@@ -1162,7 +1304,70 @@ int token_protect_elevated( struct token *token )
     set_ace( ace_next( ace ), &builtin_admins_sid, ACCESS_ALLOWED_ACE_TYPE, 0, GENERIC_ALL );
     ret = set_sd_defaults_from_token( &token->obj, sd, DACL_SECURITY_INFORMATION, token );
     free( sd );
+    if (ret) token->windows_sd = 1;
     return ret;
+}
+
+/* WineExplorer (R7 of docs/SESSION0_SPLIT_REVIEW.md): the descriptor Windows gives the token of a system process,
+ * measured black box on Windows 10 (2026-11-24: OpenProcessToken for each right from an elevated administrator, the
+ * descriptors read as SYSTEM). The mandatory label is kept. Users get nothing in either kind.
+ * - service: a service's token (services.exe asks for one per service, create_service_token). Owner and group the
+ *   account; SYSTEM all; the account all, standing in for the service's own SID (S-1-5-80-...), which Windows grants
+ *   all and Wine's tokens do not have; Administrators TOKEN_QUERY only.
+ * - otherwise, a system process that is not a service (services.exe, wineboot, session 0's own programs; on Windows
+ *   wininit, services, lsass, winlogon). Owner Administrators, group SYSTEM; SYSTEM all; Administrators assign,
+ *   duplicate, impersonate, query, query source and read control. */
+int token_protect_system( struct token *token, int service )
+{
+    const unsigned int admin_mask = service ? TOKEN_QUERY : TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE |
+                                                            TOKEN_QUERY | TOKEN_QUERY_SOURCE | READ_CONTROL;
+    const struct sid *owner = service ? token->user : &builtin_admins_sid;
+    const struct sid *group = service ? token->user : &local_system_sid;
+    const int account_ace = service && !equal_sid( token->user, &local_system_sid );
+    size_t acl_size = sizeof(struct acl) + (account_ace ? 3 : 2) * sizeof(struct ace) + sid_len( &local_system_sid ) +
+                      (account_ace ? sid_len( token->user ) : 0) + sid_len( &builtin_admins_sid );
+    size_t size = sizeof(struct security_descriptor) + sid_len( owner ) + sid_len( group ) + acl_size;
+    struct security_descriptor *sd;
+    struct acl *acl;
+    struct ace *ace;
+    char *ptr;
+    int ret;
+
+    if (!(sd = mem_alloc( size ))) return 0;
+    memset( sd, 0, size );
+    sd->control = SE_DACL_PRESENT;
+    sd->owner_len = sid_len( owner );
+    sd->group_len = sid_len( group );
+    sd->dacl_len = acl_size;
+    ptr = (char *)(sd + 1);
+    memcpy( ptr, owner, sd->owner_len );
+    ptr += sd->owner_len;
+    memcpy( ptr, group, sd->group_len );
+    ptr += sd->group_len;
+    acl = (struct acl *)ptr;
+    acl->revision = ACL_REVISION;
+    acl->size = acl_size;
+    acl->count = account_ace ? 3 : 2;
+    ace = set_ace( ace_first( acl ), &local_system_sid, ACCESS_ALLOWED_ACE_TYPE, 0, TOKEN_ALL_ACCESS );
+    if (account_ace) ace = set_ace( ace_next( ace ), token->user, ACCESS_ALLOWED_ACE_TYPE, 0, TOKEN_ALL_ACCESS );
+    set_ace( ace_next( ace ), &builtin_admins_sid, ACCESS_ALLOWED_ACE_TYPE, 0, admin_mask );
+    ret = set_sd_defaults_from_token( &token->obj, sd, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                                      DACL_SECURITY_INFORMATION, token );
+    free( sd );
+    if (ret) token->windows_sd = 1;
+    return ret;
+}
+
+/* a process's new primary token (dst, a duplicate of src, which copied src's label) gets src's owner, group and DACL
+ * when src has Windows' descriptor (token_protect_system, token_protect_elevated): a service's process keeps its
+ * service descriptor. Any other token's descriptor (most have the default DACL their label came with) is not copied. */
+int token_keep_descriptor( struct token *dst, const struct token *src )
+{
+    if (!src->windows_sd || !src->obj.sd) return 1;
+    if (!set_sd_defaults_from_token( &dst->obj, src->obj.sd, OWNER_SECURITY_INFORMATION |
+                                     GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, NULL )) return 0;
+    dst->windows_sd = 1;
+    return 1;
 }
 
 /* a token of a process that was elevated: the full half of a split administrator token */
@@ -1190,8 +1395,8 @@ DECL_HANDLER(create_service_token)
     /* Wine's administrator token also holds SeTcbPrivilege: require the system role itself (in session 0, a
      * process whose token is SYSTEM's: only session 0's own account runs programs there, and its registry-only
      * clients cannot make this request) */
-    if (token_service_account( caller ) != SERVICE_ACCOUNT_SYSTEM ||
-        (!session0_server && !sysrun_process_privileged( current->process )))
+    if (session0_server ? token_service_account( caller ) != SERVICE_ACCOUNT_SYSTEM
+                        : !sysrun_process_is_tcb_system( current->process ))
     {
         set_error( STATUS_ACCESS_DENIED );
         return;
@@ -1201,9 +1406,18 @@ DECL_HANDLER(create_service_token)
         set_error( STATUS_INVALID_PARAMETER );
         return;
     }
-    if ((token = token_create_service( req->account, caller->session_id )))
+    /* B114: the service's own SID, computed by services.exe (trusted: the caller is the system role) */
+    if (get_req_data_size() && (!sid_valid_size( get_req_data(), get_req_data_size() ) ||
+                                !is_service_id_sid( get_req_data() )))
     {
-        reply->token = alloc_handle_no_access_check( current->process, token, TOKEN_ALL_ACCESS, 0 );
+        set_error( STATUS_INVALID_SID );
+        return;
+    }
+    if ((token = token_create_service_sid( req->account, caller->session_id,
+                                           get_req_data_size() ? get_req_data() : NULL )))
+    {
+        if (token_protect_system( token, 1 ))
+            reply->token = alloc_handle_no_access_check( current->process, token, TOKEN_ALL_ACCESS, 0 );
         release_object( token );
     }
 }
@@ -1276,9 +1490,12 @@ int token_has_privilege( struct token *token, struct luid priv )
 
 /* Can the caller give a process this token? Only enforced while an elevation helper is configured.
  * A token that is not at least an impersonation-level token is refused. A copy of the caller's own
- * token (same lineage: a duplicate or a filtered version) is always allowed. Anything else needs
- * SeAssignPrimaryTokenPrivilege, which Wine's service tokens do not have yet, so SeTcbPrivilege (held
- * by a full administrator token and by the planned elevation broker) stands in for it.
+ * token (same lineage: a duplicate or a filtered version) is allowed when it gives no more than the caller has:
+ * not a higher integrity, not elevated while the caller is not (B99 route 3: a Low process's token is a copy of its
+ * Medium parent's, so the parent's token has its lineage; measured on Windows 11, a Low process's CreateProcessAsUser
+ * with a primary copy of its Medium parent's token fails with ERROR_PRIVILEGE_NOT_HELD, one of its own token works).
+ * Anything else needs SeAssignPrimaryTokenPrivilege, which Wine's service tokens do not have yet, so SeTcbPrivilege
+ * (held by a full administrator token and by the planned elevation broker) stands in for it.
  * shortcut: SeTcbPrivilege stands in for SeAssignPrimaryTokenPrivilege, drop it once the broker has its own token. */
 unsigned int token_check_assign_primary( struct token *token )
 {
@@ -1287,15 +1504,19 @@ unsigned int token_check_assign_primary( struct token *token )
     if (!elevation_enforced()) return STATUS_SUCCESS;
     if (!token->primary && token->impersonation_level < SecurityImpersonation)
         return STATUS_BAD_IMPERSONATION_LEVEL;
-    if (is_equal_luid( token->lineage_id, caller->lineage_id )) return STATUS_SUCCESS;
+    if (is_equal_luid( token->lineage_id, caller->lineage_id ) && token->integrity_rid <= caller->integrity_rid &&
+        !(token->elevation == TokenElevationTypeFull && caller->elevation != TokenElevationTypeFull))
+        return STATUS_SUCCESS;
     if (token_has_privilege( caller, SeAssignPrimaryTokenPrivilege ) || token_has_privilege( caller, SeTcbPrivilege ))
         return STATUS_SUCCESS;
     return STATUS_PRIVILEGE_NOT_HELD;
 }
 
 /* Impersonation level a pipe server gets for a client token (Windows SeTokenCanImpersonate).
- * Without SeImpersonatePrivilege in the server's primary token the level drops to identification, unless the
- * client has the server's user and is neither more trusted (integrity) nor elevated while the server is not.
+ * A client of higher integrity than the server gives identification, also with SeImpersonatePrivilege (B99: measured
+ * on Windows 10 for SetThreadToken, which uses the same check). Without SeImpersonatePrivilege in the server's primary
+ * token the level drops to identification too, unless the client has the server's user and is not elevated while
+ * the server is not.
  * shortcut: the client's requested SQOS level is not sent to the server, so it is the client token's own level
  * (impersonation by default), upgrade when create_file carries SecurityQualityOfService. */
 int token_impersonation_level( struct token *client, struct token *server )
@@ -1303,6 +1524,7 @@ int token_impersonation_level( struct token *client, struct token *server )
     int level = client->primary ? SecurityImpersonation : client->impersonation_level;
 
     if (level > SecurityImpersonation) level = SecurityImpersonation;
+    if (client->integrity_rid > server->integrity_rid) return level < SecurityIdentification ? level : SecurityIdentification;
     if (token_has_privilege( server, SeImpersonatePrivilege )) return level;
     if (equal_sid( client->user, server->user ) && client->integrity_rid <= server->integrity_rid &&
         !(client->elevation == TokenElevationTypeFull && server->elevation != TokenElevationTypeFull))
@@ -1653,6 +1875,26 @@ unsigned int token_get_session_id( struct token *token )
     return token->session_id;
 }
 
+/* WineExplorer (B120): the identity of the process that manages a desktop (creates its top window) is kept with the
+ * desktop. When that process died, only a process of the same user and session, with an integrity level at least as
+ * high and a token that is neither an AppContainer's nor restricted, may take the desktop window over. */
+struct sid *token_desktop_manager_user( struct token *token )
+{
+    return token ? memdup( token->user, sid_len( token->user )) : NULL;
+}
+
+unsigned int token_desktop_manager_il( struct token *token )
+{
+    return token->integrity_rid;
+}
+
+int token_may_take_desktop( struct token *token, const struct sid *user, unsigned int session, unsigned int il )
+{
+    if (!token || !user) return 0;
+    if (token->app_container || token->is_restricted) return 0;
+    return equal_sid( token->user, user ) && token->session_id == session && token->integrity_rid >= il;
+}
+
 void token_get_ids( const struct token *token, struct luid *token_id, struct luid *modified_id )
 {
     *token_id = token->token_id;
@@ -1867,16 +2109,36 @@ DECL_HANDLER(create_token)
 }
 
 
+/* does an open of a token ask only to read it? (MAXIMUM_ALLOWED and the generic rights that include more do not) */
+static int token_access_is_query( unsigned int access )
+{
+    if (access & MAXIMUM_ALLOWED) return 0;
+    access = map_access( access, &token_type.mapping );
+    return !(access & ~(TOKEN_QUERY | TOKEN_QUERY_SOURCE | READ_CONTROL));
+}
+
 /* open a security token */
 DECL_HANDLER(open_token)
 {
-    /* Windows needs the query right on the process or thread; with only the limited query a limited process could
-     * open the full token of an elevated process of its user (the descriptor of the token is the second line of defense) */
+    /* Windows needs only the limited query right on the process or thread (OpenProcessToken from Low integrity works
+     * there), and the token's own descriptor decides the rest. With elevation enforced, so does this server for a
+     * token that has Windows' descriptor (R7): the system role's (token_protect_system) and elevated primary tokens
+     * (token_protect_elevated), marked windows_sd. Any other token, also one with a DACL (most have the default DACL
+     * that came with their label, which grants their user everything, and an elevated client's impersonation copy
+     * has one too), keeps the stricter rule: the limited right opens it only for reading; duplicating, impersonating,
+     * assigning or adjusting needs the full query right. */
     unsigned int query = sysrun_active && elevation_enforced();
+    unsigned int read_only = token_access_is_query( req->access );
 
     if (req->flags & OPEN_TOKEN_THREAD)
     {
-        struct thread *thread = get_thread_from_handle( req->handle, query ? THREAD_QUERY_INFORMATION : 0 );
+        struct thread *thread = get_thread_from_handle( req->handle, query ? THREAD_QUERY_LIMITED_INFORMATION : 0 );
+
+        if (thread && query && !read_only && thread->token && !thread->token->windows_sd)
+        {
+            release_object( thread );
+            thread = get_thread_from_handle( req->handle, THREAD_QUERY_INFORMATION );
+        }
         if (thread)
         {
             if (thread->token)
@@ -1900,7 +2162,13 @@ DECL_HANDLER(open_token)
     }
     else
     {
-        struct process *process = get_process_from_handle( req->handle, query ? PROCESS_QUERY_INFORMATION : 0 );
+        struct process *process = get_process_from_handle( req->handle, query ? PROCESS_QUERY_LIMITED_INFORMATION : 0 );
+
+        if (process && query && !read_only && process->token && !process->token->windows_sd)
+        {
+            release_object( process );
+            process = get_process_from_handle( req->handle, PROCESS_QUERY_INFORMATION );
+        }
         if (process)
         {
             if (process->token)
@@ -2010,7 +2278,28 @@ DECL_HANDLER(duplicate_token)
     if (params.root) release_object( params.root );
 }
 
-/* native filter_token: DISABLE_MAX_PRIVILEGE keeps only SeChangeNotify; LUA_TOKEN: Administrators deny-only, Limited, Medium label */
+/* the groups that a UAC filtered token keeps for deny only: Administrators, the privileged domain groups
+ * (S-1-5-21-a-b-c-RID) and the privileged builtin aliases */
+static int sid_is_uac_filtered( const struct sid *sid )
+{
+    static const unsigned int domain_rids[] = { 512, 516, 517, 518, 519, 520, 521, 526, 527 };
+    static const unsigned int alias_rids[] = { 544, 548, 549, 550, 551, 556, 569 };
+    unsigned int i;
+
+    if (memcmp( sid->id_auth, local_user_sid.id_auth, sizeof(sid->id_auth) )) return 0;
+    if (sid->sub_count == 5 && sid->sub_auth[0] == SECURITY_NT_NON_UNIQUE)
+    {
+        for (i = 0; i < ARRAY_SIZE(domain_rids); i++) if (sid->sub_auth[4] == domain_rids[i]) return 1;
+    }
+    else if (sid->sub_count == 2 && sid->sub_auth[0] == SECURITY_BUILTIN_DOMAIN_RID)
+    {
+        for (i = 0; i < ARRAY_SIZE(alias_rids); i++) if (sid->sub_auth[1] == alias_rids[i]) return 1;
+    }
+    return 0;
+}
+
+/* native filter_token: DISABLE_MAX_PRIVILEGE keeps only SeChangeNotify; LUA_TOKEN: Administrators and the other
+ * UAC filtered groups deny-only, Limited, Medium label */
 static void token_apply_filter( struct token *token, unsigned int flags )
 {
     if (flags & (DISABLE_MAX_PRIVILEGE | LUA_TOKEN)) allocate_luid( &token->modified_id );
@@ -2031,7 +2320,7 @@ static void token_apply_filter( struct token *token, unsigned int flags )
         token->elevation = TokenElevationTypeLimited;
         LIST_FOR_EACH_ENTRY( group, &token->groups, struct group, entry )
         {
-            if (equal_sid( &group->sid, &builtin_admins_sid ))
+            if (sid_is_uac_filtered( &group->sid ))
             {
                 group->attrs &= ~(SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT);
                 group->attrs |= SE_GROUP_USE_FOR_DENY_ONLY;
@@ -2067,12 +2356,23 @@ void token_make_filtered( struct token *token )
     allocate_luid( &token->modified_id );
 }
 
+/* an administrator's token that is not split, as in Safe Mode where User Account Control does not run: all its
+ * groups and privileges stay, and it is the full (elevated) one, with the filtered half as its linked token, as the
+ * full token the broker hands out (docs/SAFE_MODE_ELEVATED_DESKTOP.md) */
+void token_make_full( struct token *token )
+{
+    token->elevation = TokenElevationTypeFull;
+    token_assign_label( token, &high_label_sid );
+    allocate_luid( &token->modified_id );
+}
+
 /* set when this server gave its user a standard token: tokens derived from it (a filtered copy is Limited
  * again) must not get a linked full token or an administrator grant */
 int standard_user_session;
 
 /* a standard user (not in the administrator group): the filtered token without Administrators and without a
- * split, so TokenElevationType is Default as for a non-split token on Windows */
+ * split, so TokenElevationType is Default as for a non-split token on Windows; the other UAC filtered groups stay
+ * for deny only */
 void token_make_standard( struct token *token )
 {
     struct group *group, *next;
@@ -2081,9 +2381,16 @@ void token_make_standard( struct token *token )
 
     LIST_FOR_EACH_ENTRY_SAFE( group, next, &token->groups, struct group, entry )
     {
-        if (!equal_sid( &group->sid, &builtin_admins_sid )) continue;
-        list_remove( &group->entry );
-        free( group );
+        if (equal_sid( &group->sid, &builtin_admins_sid ))
+        {
+            list_remove( &group->entry );
+            free( group );
+        }
+        else if (sid_is_uac_filtered( &group->sid ))
+        {
+            group->attrs &= ~(SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT);
+            group->attrs |= SE_GROUP_USE_FOR_DENY_ONLY;
+        }
     }
     token->elevation = TokenElevationTypeDefault;
     allocate_luid( &token->modified_id );
@@ -2525,316 +2832,9 @@ DECL_HANDLER(set_token_default_dacl)
  * SPDX-License-Identifier for this new implementation: GPL-2.0-or-later.
  */
 #if defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
-
-struct e1s_token_context
-{
-    struct object obj;
-    struct process *owner; /* weak: owner's handle table owns this object */
-    thread_id_t thread;
-    struct token *broker_primary;
-    struct token *issued;
-    int profile_attempted;
-    unsigned char profile_lease_id[16]; /* server-only binding, never client bytes */
-    struct luid profile_modified;
-    struct luid broker_id, broker_modified;
-    unsigned long long broker_gen, caps, expiry;
-    unsigned int state; /* 0 negotiated, 1 installed, 2 permanently consumed */
-    struct process *caller;
-    struct token *primary;
-    struct luid caller_id, caller_modified;
-    unsigned char input[WEX_TOKEN_INPUT_SIZE];
-    char name[WEX_ACCOUNT_NAME_MAX + 1];
-    int (*validate)( void *, const unsigned char * );
-    void (*release)( void * );
-    void *cookie;
-};
-
-static void e1s_context_dump( struct object *obj, int verbose )
-{
-    fprintf( stderr, "E1S token context (private)\n" );
-}
-
-static void e1s_context_destroy( struct object *obj )
-{
-    struct e1s_token_context *c = (struct e1s_token_context *)obj;
-    if (c->release) c->release( c->cookie );
-    if (c->broker_primary) release_object( c->broker_primary );
-    if (c->issued) release_object( c->issued );
-    if (c->caller) release_object( c->caller );
-    if (c->primary) release_object( c->primary );
-}
-
-static const struct object_ops e1s_context_ops =
-{
-    .size = sizeof(struct e1s_token_context),
-    .type = &no_type,
-    .dump = e1s_context_dump,
-    .destroy = e1s_context_destroy,
-};
-
-static int e1s_nonzero( const unsigned char *p, unsigned int n )
-{
-    unsigned char bits = 0;
-    while (n--) bits |= *p++;
-    return bits != 0;
-}
-
-static unsigned long long e1s_now(void)
-{
-    struct timespec ts;
-    if (clock_gettime( CLOCK_MONOTONIC, &ts ) || ts.tv_sec < 0 || ts.tv_nsec < 0 ||
-        ts.tv_nsec >= 1000000000 || (unsigned long long)ts.tv_sec > (~0ULL - 1000000000) / 1000000000)
-        return 0;
-    return (unsigned long long)ts.tv_sec * 1000000000 + ts.tv_nsec;
-}
-
-/* S6's actual image/process endorsement is mandatory in addition to H2's gate.
- * Do not infer broker role from SYSTEM, an inherited handle or a claimed PID. */
-static int e1s_broker(void)
-{
-    struct process *p = current->process;
-    struct luid id, modified;
-    if (!elevation_enforced() || !sysrun_active || current->token ||
-        !sysrun_process_is_system( p ) || !sysrun_process_privileged( p ) ||
-        token_service_account( p->token ) != SERVICE_ACCOUNT_SYSTEM ||
-        !token_has_privilege( p->token, SeTcbPrivilege ) || !p->e1s6_broker_image ||
-        !p->e1s6_broker_generation || p->token != p->e1s6_primary) return 0;
-    token_get_ids( p->token, &id, &modified );
-    return is_equal_luid( id, p->e1s6_token_id ) && is_equal_luid( modified, p->e1s6_modified_id );
-}
-
-static int e1s_context_current( const struct e1s_token_context *c )
-{
-    struct process *p = current->process;
-    return c->owner == p && c->thread == current->id && c->broker_primary == p->token &&
-           c->broker_gen == p->e1s6_broker_generation &&
-           is_equal_luid( c->broker_id, p->e1s6_token_id ) &&
-           is_equal_luid( c->broker_modified, p->e1s6_modified_id );
-}
-
-static int e1s_request_valid( const unsigned char *in, unsigned long long caps )
-{
-    unsigned int i;
-    if (wex_token_u32( in ) != 0x00010004 || wex_token_u32( in + 4 ) != WEX_TOKEN_REQUEST_SIZE ||
-        wex_token_u64( in + 8 ) != caps || !wex_token_u64( in + 16 ) ||
-        !e1s_nonzero( in + 24, 32 ) || !e1s_nonzero( in + 56, 32 ) ||
-        !e1s_nonzero( in + 88, 32 ) || !wex_token_u32( in + 120 ) ||
-        !e1s_nonzero( in + 124, 16 ) || wex_token_u32( in + 184 ) ||
-        !e1s_nonzero( in + 188, 16 )) return 0;
-    for (i = 140; i < 180; i += 8) if (!wex_token_u64( in + i )) return 0;
-    return 1;
-}
-
-static int e1s_lookup( const struct e1s_token_context *c, struct wex_account *account )
-{
-    /* Canonical name is retained by the trusted producer, never part of ISSUE.
-     * Re-resolve through S4 on every issuance; never accept a SID from the broker. */
-    return lookup_account( c->name, 0, c->caps, account ) == WEX_ACCOUNT_OK && account->administrator &&
-           account->generation == wex_token_u64( c->input + 164 ) &&
-           !memcmp( account->incarnation, c->input + 124, 16 );
-}
-
-static int e1s_caller_current( const struct e1s_token_context *c )
-{
-    struct token *t = c->primary;
-    return c->caller && c->caller->running_threads && c->caller->token == t &&
-           c->caller->session_id == t->session_id && t->primary && !t->app_container && !t->is_restricted &&
-           list_empty( &t->restricted_sids ) && list_empty( &t->capabilities ) && t->elevation == TokenElevationTypeDefault &&
-           t->integrity_rid == SECURITY_MANDATORY_MEDIUM_RID &&
-           !token_sid_present( t, &builtin_admins_sid, TRUE ) && token_service_account( t ) == -1 &&
-           (t->auth_id.low_part || t->auth_id.high_part) &&
-           is_equal_luid( t->token_id, c->caller_id ) && is_equal_luid( t->modified_id, c->caller_modified ) &&
-           t->session_id == wex_token_u32( c->input + 180 );
-}
-
-/* Build from explicit S4 identity, not token_create_admin(getuid), a linked
- * token, a caller duplicate, or a SYSTEM token with its user SID replaced.
- * S4 v1 has primary GID + fresh mapped-admin membership, no arbitrary Unix
- * supplementary SID list. Keep that precise snapshot; add only fixed Windows
- * baseline groups. Unix group SIDs follow S-1-22-2-gid. No host groups change. */
-static struct token *e1s_create_account_token( const struct wex_account *a, struct token *caller )
-{
-    struct sid user = { SID_REVISION, 5, SECURITY_NT_AUTHORITY, { 0 } };
-    struct sid primary = { SID_REVISION, 2, {0,0,0,0,0,22}, { 2, 0 } };
-    struct sid logon = { SID_REVISION, 3, SECURITY_NT_AUTHORITY, { SECURITY_LOGON_IDS_RID, 0, 0 } };
-    const unsigned int grp = SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_MANDATORY;
-    const struct sid_attrs groups[] =
-    {
-        { &world_sid, grp }, { &local_sid, grp }, { &interactive_sid, grp },
-        { &authenticated_user_sid, grp }, { &builtin_users_sid, grp },
-        { &builtin_admins_sid, grp | SE_GROUP_OWNER },
-        { &primary, grp },
-        { &logon, grp | SE_GROUP_LOGON_ID },
-    };
-    const struct luid_attr privs[] =
-    {
-        { SeChangeNotifyPrivilege, SE_PRIVILEGE_ENABLED }, { SeTcbPrivilege, 0 },
-        { SeSecurityPrivilege, 0 }, { SeBackupPrivilege, 0 }, { SeRestorePrivilege, 0 },
-        { SeSystemtimePrivilege, 0 }, { SeShutdownPrivilege, 0 }, { SeRemoteShutdownPrivilege, 0 },
-        { SeTakeOwnershipPrivilege, 0 }, { SeDebugPrivilege, 0 }, { SeSystemEnvironmentPrivilege, 0 },
-        { SeSystemProfilePrivilege, 0 }, { SeProfileSingleProcessPrivilege, 0 },
-        { SeIncreaseBasePriorityPrivilege, 0 }, { SeLoadDriverPrivilege, SE_PRIVILEGE_ENABLED },
-        { SeCreatePagefilePrivilege, 0 }, { SeIncreaseQuotaPrivilege, 0 }, { SeUndockPrivilege, 0 },
-        { SeManageVolumePrivilege, 0 }, { SeImpersonatePrivilege, SE_PRIVILEGE_ENABLED },
-        { SeCreateGlobalPrivilege, SE_PRIVILEGE_ENABLED },
-    };
-    struct token *t;
-    struct acl *dacl;
-    struct luid auth;
-
-    /* No wrapped/zero logon IDs, even at allocator exhaustion. Reserve room
-     * for create_token's ids and label/descriptor security-version changes. */
-    if ((unsigned int)prev_luid_value.high_part == ~0u && prev_luid_value.low_part >= ~0u - 8)
-    {
-        set_error( STATUS_INSUFFICIENT_RESOURCES );
-        return NULL;
-    }
-    alloc_logon_luid( &auth );
-    if ((!auth.low_part && !auth.high_part) || is_equal_luid( auth, caller->auth_id ))
-    {
-        set_error( STATUS_ACCESS_DENIED );
-        return NULL;
-    }
-    memcpy( user.sub_auth, a->sid, sizeof(a->sid) );
-    primary.sub_auth[1] = a->primary_gid;
-    logon.sub_auth[1] = auth.high_part;
-    logon.sub_auth[2] = auth.low_part;
-    if (!(dacl = create_default_dacl( &user ))) return NULL;
-    t = create_token( TRUE, caller->session_id, &user, &user,
-                      &primary, groups, ARRAY_SIZE(groups), privs, ARRAY_SIZE(privs),
-                      dacl, NULL, -1, TokenElevationTypeFull );
-    free( dacl );
-    if (!t) return NULL;
-    t->auth_id = auth;
-    if (!token_assign_label( t, &high_label_sid ) || !token_protect_elevated( t ))
-    {
-        release_object( t );
-        return NULL;
-    }
-    return t;
-}
-
-static int e1s_install_consumed( struct e1s_token_context *c, const struct e1s_token_consumed *r )
-{
-    unsigned long long now;
-    size_t n;
-    if (c->state) return 0;
-    c->state = 2;
-    if (!r || !r->canonical_name || !r->caller || !r->primary || !r->validate || !r->release ||
-        !e1s_request_valid( r->input, c->caps ) || wex_token_u64( r->input + 156 ) != c->broker_gen ||
-        !(now = e1s_now()) || now >= r->expiry || r->caller == c->owner ||
-        r->caller->token != r->primary) return 0;
-    for (n = 0; n <= WEX_ACCOUNT_NAME_MAX && r->canonical_name[n]; n++)
-        if ((unsigned char)r->canonical_name[n] > 127) return 0;
-    if (!n || n > WEX_ACCOUNT_NAME_MAX || !r->validate( r->cookie, r->input )) return 0;
-    memcpy( c->input, r->input, sizeof(c->input) );
-    memcpy( c->name, r->canonical_name, n + 1 );
-    c->caller = (struct process *)grab_object( r->caller );
-    c->primary = (struct token *)grab_object( r->primary );
-    token_get_ids( c->primary, &c->caller_id, &c->caller_modified );
-    if (!e1s_caller_current( c ))
-    {
-        release_object( c->caller );
-        release_object( c->primary );
-        c->caller = NULL;
-        c->primary = NULL;
-        return 0;
-    }
-    c->expiry = r->expiry;
-    c->validate = r->validate; c->release = r->release; c->cookie = r->cookie;
-    c->state = 1;
-    return 1;
-}
-
-/* Sole current producer: synthetic lab data. No PAM or S8 redemption is implied.
- * S18 calls the internal handoff above only after actual evidence redemption.
- * These fixture callbacks cannot be selected through a production operation. */
-static int e1s_fixture_validate( void *cookie, const unsigned char *input ) { return 1; }
-static void e1s_fixture_release( void *cookie ) {}
-
-static int e1s_install_fixture( struct e1s_token_context *c, obj_handle_t caller,
-                               const unsigned char *in, data_size_t size )
-{
-    struct e1s_token_consumed r;
-    struct process *process;
-    char name[64];
-    unsigned int n;
-    unsigned long long now;
-    int ret;
-    if (c->state) return 0;
-    if (size != WEX_TOKEN_FIXTURE_SIZE || !e1s_request_valid( in, c->caps ) ||
-        wex_token_u64( in + 156 ) != c->broker_gen) goto failed;
-    for (n = 0; n < 64 && in[204+n]; n++)
-        if (in[204+n] > 127) goto failed;
-    if (!n || n == 64 || e1s_nonzero( in + 204 + n, 64 - n )) goto failed;
-    memcpy( name, in + 204, 64 );
-    if (!(process = get_process_from_handle( caller, PROCESS_QUERY_LIMITED_INFORMATION ))) goto failed;
-    /* Deliberately synthetic identity, including unknown/tombstoned/stale
-     * records for negative issuance probes. ISSUE always calls real S4. */
-    memset( &r, 0, sizeof(r) );
-    memcpy( r.input, in, sizeof(r.input) ); r.canonical_name = name;
-    r.caller = process; r.primary = process->token;
-    now = e1s_now();
-    r.expiry = now && now <= ~0ULL - 5000000000ULL ? now + 5000000000ULL : 0;
-    r.validate = e1s_fixture_validate; r.release = e1s_fixture_release;
-    ret = e1s_install_consumed( c, &r );
-    release_object( process );
-    return ret;
-failed:
-    c->state = 2;
-    return 0;
-}
-
-static void e1s_issue( struct e1s_token_context *c, const unsigned char *in, data_size_t size,
-                       obj_handle_t *handle, unsigned char *out )
-{
-    struct wex_account account, fresh;
-    struct token *t;
-    unsigned long long now;
-    unsigned int i, installed = c->state == 1;
-
-    c->state = 2; /* burn before parsing, account lookup, allocation or comparison */
-    set_error( STATUS_ACCESS_DENIED );
-    if (!installed || size != WEX_TOKEN_INPUT_SIZE || !e1s_request_valid( in, c->caps ) ||
-        memcmp( in, c->input, WEX_TOKEN_INPUT_SIZE ) || !(now = e1s_now()) || now >= c->expiry ||
-        !e1s_caller_current( c ) || !c->validate( c->cookie, c->input ) || !e1s_lookup( c, &account )) return;
-    clear_error();
-    if (!(t = e1s_create_account_token( &account, c->primary ))) return;
-    /* Slow NSS/allocation must not extend the deadline or permit a changed caller. */
-    if (!e1s_caller_current( c ) || !c->validate( c->cookie, c->input ) || !e1s_lookup( c, &fresh ) ||
-        fresh.uid != account.uid || fresh.primary_gid != account.primary_gid ||
-        strcmp( fresh.name, account.name ) || memcmp( fresh.sid, account.sid, sizeof(account.sid) ) ||
-        !(now = e1s_now()) || now >= c->expiry)
-    {
-        set_error( STATUS_ACCESS_DENIED );
-        release_object( t );
-        return;
-    }
-    clear_error();
-    *handle = alloc_handle_no_access_check( current->process, t,
-                                            TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY, 0 );
-    if (*handle)
-    {
-        t->e1s_account = account;
-        c->issued = (struct token *)grab_object( t );
-        memset( out, 0, WEX_TOKEN_RESPONSE_SIZE );
-        wex_token_put32( out, 0x00010005 ); wex_token_put32( out + 4, WEX_TOKEN_RESPONSE_SIZE );
-        wex_token_put64( out + 8, c->caps );
-        memcpy( out + 16, in + 16, 8 ); memcpy( out + 24, in + 148, 8 );
-        /* token_ref is scoped by this context/server; not a handle or bearer grant. */
-        wex_token_put32( out + 40, t->token_id.low_part ); wex_token_put32( out + 44, t->token_id.high_part );
-        wex_token_put32( out + 48, t->auth_id.low_part ); wex_token_put32( out + 52, t->auth_id.high_part );
-        memcpy( out + 56, account.incarnation, 16 );
-        wex_token_put32( out + 72, 28 ); out[76] = SID_REVISION; out[77] = 5; out[83] = 5;
-        for (i = 0; i < 5; i++) wex_token_put32( out + 84 + 4*i, account.sid[i] );
-        wex_token_put32( out + 104, t->auth_id.low_part ); wex_token_put32( out + 108, t->auth_id.high_part );
-        wex_token_put32( out + 112, t->token_id.low_part ); wex_token_put32( out + 116, t->token_id.high_part );
-        wex_token_put32( out + 120, t->session_id ); wex_token_put32( out + 124, TokenPrimary );
-        wex_token_put32( out + 128, TokenElevationTypeFull );
-        wex_token_put32( out + 132, SECURITY_MANDATORY_HIGH_RID );
-    }
-    release_object( t );
-}
+/* WineExplorer E1 lab: the S10 token context and its operations (R5: wex_e1lab_token.h) */
+#define WEX_E1LAB_TOKEN_INCLUDED
+#include "wex_e1lab_token.h"
 #endif
 
 const struct wex_account *token_e1s_account( struct token *token )
@@ -2867,19 +2867,7 @@ int token_e1s_broker(void)
 int token_bind_e1s_profile( obj_handle_t context, struct token *token, const unsigned char *lease_id )
 {
 #if defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
-    struct e1s_token_context *c;
-    int ret = 0;
-    if (!e1s_broker() || !(c = (struct e1s_token_context *)get_handle_obj(
-            current->process, context, 0, &e1s_context_ops ))) return 0;
-    if (e1s_context_current( c ) && c->state == 2 && c->profile_attempted && c->issued == token &&
-        !e1s_nonzero( c->profile_lease_id, 16 ))
-    {
-        memcpy( c->profile_lease_id, lease_id, 16 );
-        c->profile_modified = token->modified_id;
-        ret = 1;
-    }
-    release_object( c );
-    return ret;
+    return e1lab_bind_e1s_profile( context, token, lease_id );
 #else
     return 0;
 #endif
@@ -2889,28 +2877,7 @@ int token_validate_e1s_commit( obj_handle_t context, struct token *token, const 
                              uint64_t request_id, uint64_t server_gen )
 {
 #if defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
-    struct e1s_token_context *c;
-    unsigned int status = STATUS_SUCCESS;
-    if (!(c = (struct e1s_token_context *)get_handle_obj( current->process, context, 0, &e1s_context_ops )))
-        status = STATUS_INVALID_HANDLE;
-    else
-    {
-        if (!e1s_broker() || !e1s_context_current( c )) status = STATUS_INVALID_OWNER;
-        else if (c->state != 2 || !c->profile_attempted || c->issued != token ||
-                 !is_equal_luid( c->profile_modified, token->modified_id )) status = STATUS_BAD_TOKEN_TYPE;
-        else if (wex_token_u64( c->input + 148 ) != server_gen) status = STATUS_REVISION_MISMATCH;
-        else if (wex_token_u64( c->input + 16 ) != request_id ||
-                 memcmp( c->profile_lease_id, lease_id, 16 )) status = STATUS_INVALID_PARAMETER_MIX;
-        release_object( c );
-    }
-    if (status)
-        fprintf( stderr, "E1S14 deny=%s status=%08x\n",
-                 status == STATUS_INVALID_HANDLE ? "commit-context-handle" :
-                 status == STATUS_INVALID_OWNER ? "commit-context-owner" :
-                 status == STATUS_BAD_TOKEN_TYPE ? "commit-context-token" :
-                 status == STATUS_REVISION_MISMATCH ? "commit-context-generation" : "commit-context-lease", status );
-    set_error( status );
-    return !status;
+    return e1lab_validate_e1s_commit( context, token, lease_id, request_id, server_gen );
 #else
     set_error( STATUS_NOT_SUPPORTED ); return 0;
 #endif
@@ -2937,22 +2904,7 @@ int token_e1s_commit_identity( struct token *issued, struct token *primary )
 int token_validate_e1s_profile( obj_handle_t context, struct token *token, const struct wex_account *account )
 {
 #if defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
-    struct e1s_token_context *c;
-    struct wex_account fresh;
-    unsigned long long now;
-    int ret = 0;
-    if (!e1s_broker()) return 0;
-    c = (struct e1s_token_context *)get_handle_obj( current->process, context, 0, &e1s_context_ops );
-    if (!c) return 0;
-    if (e1s_context_current( c ) && c->issued == token && c->state == 2 &&
-        (now = e1s_now()) && now < c->expiry && e1s_caller_current( c ) &&
-        c->validate( c->cookie, c->input ) && e1s_lookup( c, &fresh ) &&
-        !strcmp( fresh.name, account->name ) && fresh.uid == account->uid &&
-        fresh.primary_gid == account->primary_gid && fresh.generation == account->generation &&
-        !memcmp( fresh.sid, account->sid, sizeof(fresh.sid) ) &&
-        !memcmp( fresh.incarnation, account->incarnation, 16 )) ret = 1;
-    release_object( c );
-    return ret;
+    return e1lab_validate_e1s_profile( context, token, account );
 #else
     return 0;
 #endif
@@ -2962,25 +2914,7 @@ int token_claim_e1s_profile( obj_handle_t context, struct token *token, const vo
                             data_size_t size, struct wex_account *account )
 {
 #if defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
-    struct e1s_token_context *c;
-    const unsigned char *in = record;
-    int ret = 0;
-    if (!e1s_broker()) return 0;
-    c = (struct e1s_token_context *)get_handle_obj( current->process, context, 0, &e1s_context_ops );
-    if (!c) return 0;
-    if (e1s_context_current( c ) && !c->profile_attempted)
-    {
-        c->profile_attempted = 1; /* malformed references burn too */
-        if (size == WEX_HKU_RECORD_SIZE && wex_token_u32( in ) == 1 &&
-            wex_token_u32( in + 4 ) == WEX_HKU_RECORD_SIZE && !wex_token_u64( in + 40 ) &&
-            wex_token_u64( in + 32 ) && token && token->e1s_account.generation &&
-            !memcmp( in + 8, token->e1s_account.incarnation, 16 ) &&
-            wex_token_u64( in + 24 ) == token->e1s_account.generation &&
-            token_validate_e1s_profile( context, token, &token->e1s_account ))
-        { *account = token->e1s_account; ret = 1; }
-    }
-    release_object( c );
-    return ret;
+    return e1lab_claim_e1s_profile( context, token, record, size, account );
 #else
     return 0;
 #endif
@@ -2993,25 +2927,7 @@ int token_query_e1s_profile( obj_handle_t context, struct token *token, const vo
                              data_size_t size, struct wex_account *account )
 {
 #if defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
-    struct e1s_token_context *c;
-    const unsigned char *in = record;
-    int ret = 0;
-    if (!e1s_broker() || !token) return 0;
-    c = (struct e1s_token_context *)get_handle_obj( current->process, context, 0, &e1s_context_ops );
-    if (!c) return 0;
-    if (e1s_context_current( c ) && !c->profile_attempted &&
-        size == WEX_HKU_RECORD_SIZE && wex_token_u32( in ) == 1 &&
-        wex_token_u32( in + 4 ) == WEX_HKU_RECORD_SIZE && !wex_token_u64( in + 32 ) && !wex_token_u64( in + 40 ) &&
-        token->e1s_account.generation && !memcmp( in + 8, token->e1s_account.incarnation, 16 ) &&
-        wex_token_u64( in + 24 ) == token->e1s_account.generation)
-    {
-        release_object( c );
-        if (!token_validate_e1s_profile( context, token, &token->e1s_account )) return 0;
-        *account = token->e1s_account;
-        return 1;
-    }
-    release_object( c );
-    return ret;
+    return e1lab_query_e1s_profile( context, token, record, size, account );
 #else
     (void)context; (void)token; (void)record; (void)size; (void)account;
     return 0;
@@ -3023,15 +2939,7 @@ int token_query_e1s_profile( obj_handle_t context, struct token *token, const vo
 int token_e1s_profile_request( obj_handle_t context, struct token *token, uint64_t *request_id, uint64_t *server_gen )
 {
 #if defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(WEX_E1S13_HKU_TEST) && defined(__linux__)
-    struct e1s_token_context *c;
-    int ret = 0;
-    if (!token_validate_e1s_profile( context, token, token_e1s_account( token ) )) return 0;
-    if (!(c = (struct e1s_token_context *)get_handle_obj( current->process, context, 0, &e1s_context_ops ))) return 0;
-    *request_id = wex_token_u64( c->input + 16 );
-    *server_gen = wex_token_u64( c->input + 148 );
-    ret = *request_id && *server_gen;
-    release_object( c );
-    return ret;
+    return e1lab_e1s_profile_request( context, token, request_id, server_gen );
 #else
     return 0;
 #endif
@@ -3040,15 +2948,7 @@ int token_e1s_profile_request( obj_handle_t context, struct token *token, uint64
 int token_install_e1s_consumed( obj_handle_t context, const struct e1s_token_consumed *record )
 {
 #if defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
-    struct e1s_token_context *c;
-    int ret = 0;
-    if (!e1s_broker()) { set_error( STATUS_ACCESS_DENIED ); return 0; }
-    if (!(c = (struct e1s_token_context *)get_handle_obj( current->process, context, 0, &e1s_context_ops ))) return 0;
-    if (e1s_context_current( c )) ret = e1s_install_consumed( c, record );
-    if (ret) clear_error();
-    else set_error( STATUS_ACCESS_DENIED );
-    release_object( c );
-    return ret;
+    return e1lab_install_e1s_consumed( context, record );
 #else
     set_error( STATUS_NOT_SUPPORTED );
     return 0;
@@ -3058,58 +2958,7 @@ int token_install_e1s_consumed( obj_handle_t context, const struct e1s_token_con
 DECL_HANDLER(create_e1s_account_token)
 {
 #if defined(WEX_E1S10_TOKEN_TEST) && defined(WEX_E1S6_TRANSPORT_TEST) && defined(__linux__)
-    struct e1s_token_context *c;
-    unsigned char *out;
-    unsigned int status;
-
-    if (!e1s_broker()) { set_error( STATUS_ACCESS_DENIED ); return; }
-    if (req->operation == WEX_TOKEN_NEGOTIATE)
-    {
-        if (req->context || req->caller || get_req_data_size() || get_reply_max_size() ||
-            req->caps != WEX_TOKEN_CAPS) { set_error( STATUS_NOT_SUPPORTED ); return; }
-        if (!(c = alloc_object( &e1s_context_ops ))) return;
-        memset( (char *)c + sizeof(c->obj), 0, sizeof(*c) - sizeof(c->obj) );
-        c->owner = current->process; c->thread = current->id;
-        c->broker_primary = (struct token *)grab_object( c->owner->token );
-        c->broker_gen = c->owner->e1s6_broker_generation;
-        c->broker_id = c->owner->e1s6_token_id; c->broker_modified = c->owner->e1s6_modified_id;
-        c->caps = req->caps;
-        reply->context = alloc_handle_no_access_check( c->owner, c, 0, 0 );
-        if (reply->context) reply->caps = c->caps;
-        release_object( c );
-        return;
-    }
-    if (!(c = (struct e1s_token_context *)get_handle_obj( current->process, req->context, 0, &e1s_context_ops ))) return;
-    set_error( STATUS_ACCESS_DENIED );
-    if (!e1s_context_current( c )) goto done;
-    if (req->operation == WEX_TOKEN_TEST_INSTALL)
-    {
-        if (req->caps == c->caps && !get_reply_max_size() &&
-            e1s_install_fixture( c, req->caller, get_req_data(), get_req_data_size() )) clear_error();
-        goto done;
-    }
-    if (req->operation != WEX_TOKEN_ISSUE) { c->state = 2; goto done; }
-    /* Malformed sizing/capability also consumes the installed record. Allocate
-     * reply storage before the token handle so no later allocation can leak it. */
-    if (req->caller || req->caps != c->caps || get_reply_max_size() != WEX_TOKEN_RESPONSE_SIZE)
-    { c->state = 2; goto done; }
-    clear_error();
-    if (!(out = set_reply_data_size( WEX_TOKEN_RESPONSE_SIZE ))) { c->state = 2; goto done; }
-    memset( out, 0, WEX_TOKEN_RESPONSE_SIZE );
-    e1s_issue( c, get_req_data(), get_req_data_size(), &reply->token, out );
-    status = get_error();
-    if (!reply->token && !status) set_error( status = STATUS_INSUFFICIENT_RESOURCES );
-    if (status)
-    {
-        if (reply->token) close_handle( current->process, reply->token );
-        reply->token = 0;
-        memset( out, 0, WEX_TOKEN_RESPONSE_SIZE );
-        wex_token_put32( out, 0x00010005 ); wex_token_put32( out + 4, WEX_TOKEN_FAILURE_SIZE );
-        wex_token_put32( out + 32, status );
-        current->reply_size = WEX_TOKEN_FAILURE_SIZE;
-    }
-done:
-    release_object( c );
+    e1lab_create_e1s_account_token( req, reply );
 #else
     /* No production capability negotiation, consumed-record producer or fallback. */
     set_error( STATUS_NOT_SUPPORTED );
@@ -3146,8 +2995,7 @@ DECL_HANDLER(create_linked_token)
         /* Everyone gets an identification-level token. Windows hands a SeTcbPrivilege caller a usable primary
          * token (docs/ELEVATION_BOUNDARY_PLAN.md, N6): here only the system role does (the elevation broker),
          * because Wine's administrator token holds SeTcbPrivilege too. */
-        primary = elevation_enforced() && token_service_account( current->process->token ) == SERVICE_ACCOUNT_SYSTEM &&
-                  sysrun_process_privileged( current->process ) && token_has_privilege( current->process->token, SeTcbPrivilege );
+        primary = elevation_enforced() && sysrun_process_is_tcb_system( current->process );
         if ((linked = token_create_admin( primary, primary ? -1 : SecurityIdentification, elevation, token->session_id )))
         {
             unsigned int access = MAXIMUM_ALLOWED;
@@ -3279,6 +3127,64 @@ static int desc_get_groups( const char *buf, data_size_t size, data_size_t *pos,
     return 1;
 }
 
+/* WineExplorer H3 (docs/EVENTLOG_DESIGN.md, the caller class): a token made from another server's description over
+ * a link (link_bound_token) records it; its copies keep it */
+void token_set_link_bound( struct token *token, unsigned int session )
+{
+    token->link_bound = 1;
+    token->link_session = session;
+}
+
+int token_is_link_bound( struct token *token )
+{
+    return token->link_bound;
+}
+
+static int token_has_service_group( struct token *token )
+{
+    struct group *group;
+
+    LIST_FOR_EACH_ENTRY( group, &token->groups, struct group, entry )
+    {
+        if (group->sid.revision != SID_REVISION || memcmp( group->sid.id_auth, service_sid.id_auth, 6 ) ||
+            !group->sid.sub_count)
+            continue;
+        if (group->sid.sub_auth[0] == SECURITY_SERVICE_RID || group->sid.sub_auth[0] == 80) return 1;
+    }
+    return 0;
+}
+
+/* The one decision of who a service's caller is (E1 and U1), for every service of session 0:
+ * - system-local: SYSTEM, LocalService or NetworkService of this server, which is session 0 or a plain prefix's own;
+ *   never a token from another server's link, nor a system role in a user's server (it counts as the user, E1);
+ * - elevated administrator: a real user (not one of those accounts, no SERVICE group or service SID) with
+ *   Administrators enabled, High integrity or more and a token that is not the limited one (T1 believes it);
+ * - user: anyone else authenticated (the service accounts and service groups of a link-bound token included);
+ * - none: no token, or anonymous. */
+unsigned int token_caller_class( struct token *token )
+{
+    static const struct sid anonymous_sid = { SID_REVISION, 1, SECURITY_NT_AUTHORITY, { SECURITY_ANONYMOUS_LOGON_RID } };
+    int service_account;
+
+    if (!token || equal_sid( token->user, &anonymous_sid )) return WEX_CALLER_NONE;
+    service_account = token_service_account( token ) != -1;
+    if (service_account)
+        return !token->link_bound && (session0_server || !session0_client) ? WEX_CALLER_SYSTEM_LOCAL : WEX_CALLER_USER;
+    if (token_has_service_group( token )) return WEX_CALLER_USER;
+    if (token_sid_present( token, &builtin_admins_sid, FALSE ) && token->integrity_rid >= SECURITY_MANDATORY_HIGH_RID &&
+        token->elevation != TokenElevationTypeLimited)
+        return WEX_CALLER_ELEVATED_ADMIN;
+    return WEX_CALLER_USER;
+}
+
+/* WineExplorer X0: can the token act (a primary token, or an impersonation token at impersonation or delegation
+ * level)? An identification or anonymous impersonation token is never described to another server, since the
+ * description is always built into a primary token there (docs/SESSION0_CROSS_SERVER.md, "Trust and constraints") */
+int token_can_act( const struct token *token )
+{
+    return token->primary || token->impersonation_level >= SecurityImpersonation;
+}
+
 /* build a primary token from a description; NULL if it is malformed */
 struct token *token_create_described( const void *data, data_size_t size )
 {
@@ -3366,6 +3272,7 @@ DECL_HANDLER(set_token_package)
      * that has no context. A process gets a context by being started with such a token from the executable
      * of the application (token_package_check_image), never by changing the token it runs with. */
     if (!token->primary || token->package || is_process_token( token )) set_error( STATUS_ACCESS_DENIED );
+    else if (!uwp_compatibility_enabled( token_get_user_sid( token ) )) set_error( STATUS_NOT_SUPPORTED );  /* the gate is off */
     else if ((ctx = uwp_context_from_aumid( get_req_data(), get_req_data_size() )))
     {
         token->package = ctx;

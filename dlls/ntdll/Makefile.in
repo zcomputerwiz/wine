@@ -72,6 +72,7 @@ SOURCES = \
 	unix/tape.c \
 	unix/thread.c \
 	unix/virtual.c \
+	unix/wex_regkey.c \
 	unwind.c \
 	version.c \
 	wcstring.c

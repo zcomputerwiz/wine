@@ -467,6 +467,97 @@ static BOOL parse_win_version( HANDLE hkey )
 
 
 /**********************************************************************
+ *         compat_layer_icmp
+ *
+ * Case-insensitive comparison of two null-terminated wide strings.
+ */
+static int compat_layer_icmp( const WCHAR *a, const WCHAR *b )
+{
+    while (*a && *b)
+    {
+        WCHAR ca = *a, cb = *b;
+        if (ca >= L'a' && ca <= L'z') ca = (WCHAR)(ca - L'a' + L'A');
+        if (cb >= L'a' && cb <= L'z') cb = (WCHAR)(cb - L'a' + L'A');
+        if (ca != cb) return ca - cb;
+        a++;
+        b++;
+    }
+    return (int)*a - (int)*b;
+}
+
+
+/**********************************************************************
+ *         parse_compat_layers
+ *
+ * Read the compatibility layers for the program from the Layers key and map
+ * the first OS layer to a Wine version.
+ */
+static BOOL parse_compat_layers( HANDLE key, const WCHAR *path )
+{
+    static const struct { const WCHAR *layer; const WCHAR *version; } compat_layers[] =
+    {
+        { L"WIN95", L"win95" },
+        { L"WIN98", L"win98" },
+        { L"NT4SP5", L"nt40" },
+        { L"WIN2000", L"win2k" },
+        { L"WINXPSP2", L"winxp" },
+        { L"WINXPSP3", L"winxp" },
+        { L"WINSRV03SP1", L"win2003" },
+        { L"VISTARTM", L"vista" },
+        { L"VISTASP1", L"vista" },
+        { L"VISTASP2", L"vista" },
+        { L"WIN7RTM", L"win7" },
+        { L"WIN8RTM", L"win8" },
+        { L"WIN81RTM", L"win81" },
+    };
+    UNICODE_STRING nameW;
+    WCHAR buffer[512];
+    KEY_VALUE_PARTIAL_INFORMATION *info = (KEY_VALUE_PARTIAL_INFORMATION *)buffer;
+    WCHAR *token, *start, *end;
+    BOOL more;
+    DWORD count, i, j;
+
+    RtlInitUnicodeString( &nameW, path );
+    /* one WCHAR kept free for the terminator, as parse_win_version does */
+    if (NtQueryValueKey( key, &nameW, KeyValuePartialInformation, buffer, sizeof(buffer) - sizeof(WCHAR), &count ))
+        return FALSE;
+
+    ((WCHAR *)info->Data)[info->DataLength / sizeof(WCHAR)] = 0;
+
+    token = (WCHAR *)info->Data;
+    while (*token)
+    {
+        while (*token == L' ') token++;
+        if (!*token) break;
+        start = token;
+        while (*token && *token != L' ') token++;
+        end = token;
+        more = (*end != 0);
+        if (more) *end = 0;
+        if (*start != L'~' && *start != L'#' && *start != L'!')
+        {
+            for (i = 0; i < ARRAY_SIZE(compat_layers); i++)
+            {
+                if (compat_layer_icmp( start, compat_layers[i].layer ))
+                    continue;
+                for (j = 0; j < ARRAY_SIZE(version_names); j++)
+                {
+                    if (wcscmp( version_names[j].name, compat_layers[i].version ))
+                        continue;
+                    current_version = &VersionData[version_names[j].ver];
+                    TRACE( "got win version from compatibility layer %s\n", debugstr_w(start) );
+                    return TRUE;
+                }
+            }
+        }
+        if (!more) break;
+        token = end + 1;
+    }
+    return FALSE;
+}
+
+
+/**********************************************************************
  *         version_init
  */
 void version_init(void)
@@ -476,6 +567,7 @@ void version_init(void)
     HANDLE root, hkey, config_key;
     BOOL got_win_ver = FALSE;
     const WCHAR *p, *appname = NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer;
+    const WCHAR *fullpath = NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer;
     WCHAR appversion[MAX_PATH+20];
 
     NtQuerySystemInformation( SystemWineVersionInformation, wine_version, sizeof(wine_version), NULL );
@@ -507,6 +599,36 @@ void version_init(void)
         TRACE( "getting version from %s\n", debugstr_w(appversion) );
         got_win_ver = parse_win_version( hkey );
         NtClose( hkey );
+    }
+
+    if (!got_win_ver)
+    {
+        HANDLE layers_key;
+
+        /* @@ Wine registry key: HKCU\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers */
+        RtlOpenCurrentUser( KEY_READ, &root );
+        InitializeObjectAttributes( &attr, &nameW, OBJ_CASE_INSENSITIVE, root, NULL );
+        RtlInitUnicodeString( &nameW,
+            L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers" );
+        if (!NtOpenKey( &layers_key, KEY_READ, &attr ))
+        {
+            got_win_ver = parse_compat_layers( layers_key, fullpath );
+            NtClose( layers_key );
+        }
+        NtClose( root );
+
+        if (!got_win_ver)
+        {
+            /* @@ Wine registry key: HKLM\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers */
+            RtlInitUnicodeString( &nameW,
+                L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers" );
+            InitializeObjectAttributes( &attr, &nameW, OBJ_CASE_INSENSITIVE, NULL, NULL );
+            if (!NtOpenKey( &layers_key, KEY_READ, &attr ))
+            {
+                got_win_ver = parse_compat_layers( layers_key, fullpath );
+                NtClose( layers_key );
+            }
+        }
     }
 
     if (!got_win_ver)

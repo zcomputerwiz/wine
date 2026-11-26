@@ -33,6 +33,7 @@ extern "C" {
 typedef struct
 {
   int m_nShiftPixels;          /* amount to shift with each new point */
+  int m_nPlots;                /* how many of the plots are drawn */
   int m_nYDecimals;
 
   char m_strXUnitsString[50];
@@ -81,6 +82,7 @@ void    GraphCtrl_Reset(TGraphCtrl* this);
 void    GraphCtrl_SetBackgroundColor(TGraphCtrl* this, COLORREF 
 color);
 void    GraphCtrl_SetGridColor(TGraphCtrl* this, COLORREF color);
+void    GraphCtrl_SetPlotCount(TGraphCtrl* this, int count);
 void    GraphCtrl_SetPlotColor(TGraphCtrl* this, int plot, COLORREF 
 color);
 void    GraphCtrl_SetRange(TGraphCtrl* this, double dLower, double 

@@ -1266,6 +1266,9 @@ void __cdecl s_test_I_RpcBindingInqLocalClientPID(unsigned int protseq, RPC_BIND
     }
     else
     {
+        /* WineExplorer answers I_RpcBindingInqLocalClientPID for ncacn_np too, so that
+         * services.exe can identify a service's own process (see docs/STOCK_CHANGES.md). */
+        todo_wine_if(protseq == RPC_PROTSEQ_NMP)
         ok(status == RPC_S_INVALID_BINDING, "Got unexpected %ld.\n", status);
     }
 
@@ -1283,6 +1286,40 @@ void __cdecl s_test_I_RpcBindingInqLocalClientPID(unsigned int protseq, RPC_BIND
     CloseHandle(thread);
 
     winetest_pop_context();
+}
+
+/* a generic binding handle: every call makes a binding of its own (as a client that gives each caller its own
+ * association does) and the cleanup of the call must hand exactly that binding to the unbind routine */
+static RPC_BINDING_HANDLE generic_handle_binding;
+static int generic_binds, generic_unbinds;
+
+handle_t __RPC_USER generic_handle_t_bind(generic_handle_t handle)
+{
+    RPC_BINDING_HANDLE binding = NULL;
+    RPC_STATUS status;
+
+    generic_binds++;
+    ok(handle == 0x1234, "unexpected handle %#x\n", handle);
+    status = RpcBindingCopy(generic_handle_binding, &binding);
+    ok(status == RPC_S_OK, "RpcBindingCopy failed %ld\n", status);
+    return binding;
+}
+
+void __RPC_USER generic_handle_t_unbind(generic_handle_t handle, handle_t binding)
+{
+    RPC_STATUS status;
+
+    generic_unbinds++;
+    ok(handle == 0x1234, "unexpected handle %#x\n", handle);
+    ok(binding != NULL, "the unbind routine got no binding\n");
+    if (!binding) return;
+    status = RpcBindingFree(&binding);
+    ok(status == RPC_S_OK, "RpcBindingFree failed %ld\n", status);
+}
+
+int __cdecl s_generic_add(generic_handle_t handle, int a, int b)
+{
+  return a + b;
 }
 
 int __cdecl s_add(handle_t binding, int a, int b)
@@ -2281,6 +2318,14 @@ client(const char *test)
 
     ok(add(IMixedServer_IfHandle, 2, 3) == 5, "RPC add\n");
     ok(getNum(7, IMixedServer_IfHandle) == 9, "RPC getNum\n");
+
+    generic_handle_binding = IMixedServer_IfHandle;
+    generic_binds = generic_unbinds = 0;
+    ok(generic_add((generic_handle_t)0x1234, 4, 5) == 9, "RPC generic_add\n");
+    ok(generic_add((generic_handle_t)0x1234, 6, 7) == 13, "RPC generic_add\n");
+    ok(generic_binds == 2, "got %d binds\n", generic_binds);
+    ok(generic_unbinds == 2, "got %d unbinds\n", generic_unbinds);
+
     Shutdown(IMixedServer_IfHandle);
 
     ok(RPC_S_OK == RpcStringFreeA(&binding), "RpcStringFree\n");

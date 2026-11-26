@@ -93,6 +93,20 @@ typedef struct CRYPTCATMEMBER_
     CRYPT_ATTR_BLOB sEncodedMemberInfo;
 } CRYPTCATMEMBER;
 
+typedef struct CRYPTCATSTORE_
+{
+    DWORD cbStruct;
+    DWORD dwPublicVersion;
+    LPWSTR pwszP7File;
+    HCRYPTPROV hProv;
+    DWORD dwEncodingType;
+    DWORD fdwStoreFlags;
+    HANDLE hReserved;
+    HANDLE hAttrs;
+    HCRYPTMSG hCryptMsg;
+    HANDLE hSorted;
+} CRYPTCATSTORE;
+
 typedef struct CATALOG_INFO_
 {
     DWORD cbStruct;
@@ -144,6 +158,7 @@ BOOL      WINAPI CryptCATPersistStore(HANDLE catalog);
 CRYPTCATATTRIBUTE * WINAPI CryptCATPutAttrInfo(HANDLE catalog, CRYPTCATMEMBER *member, WCHAR *name, DWORD flags, DWORD size, BYTE *data);
 CRYPTCATATTRIBUTE * WINAPI CryptCATPutCatAttrInfo(HANDLE catalog, WCHAR *name, DWORD flags, DWORD size, BYTE *data);
 CRYPTCATMEMBER    * WINAPI CryptCATPutMemberInfo(HANDLE catalog, WCHAR *filename, WCHAR *member, GUID *subject, DWORD version, DWORD size, BYTE *data);
+CRYPTCATSTORE     * WINAPI CryptCATStoreFromHandle(HANDLE);
 
 #ifdef __cplusplus
 }

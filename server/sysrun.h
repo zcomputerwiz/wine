@@ -22,6 +22,20 @@
 #define __WINE_SERVER_SYSRUN_H
 
 #include <sys/types.h>
+#include <sys/socket.h>
+/* the launcher configuration the server reads (sysrun.c) and whose generation the lab tracks (wex_e1lab_sysrun.c) */
+#define SYSRUN_CONF "/etc/wineexplorer/sysrun.conf"
+
+/* Linux pidfd socket options (6.5) and control message, for C libraries older than the kernel */
+#ifndef SO_PASSPIDFD
+#define SO_PASSPIDFD 76
+#endif
+#ifndef SO_PEERPIDFD
+#define SO_PEERPIDFD 77
+#endif
+#ifndef SCM_PIDFD
+#define SCM_PIDFD 0x04
+#endif
 
 struct process;
 
@@ -32,6 +46,15 @@ extern int sysrun_active;
 
 extern void sysrun_init(void);
 extern const char *sysrun_machine_root(void);
+
+/* One key from the shared protected sysrun.conf reader. */
+enum sysrun_conf
+{
+    SYSRUN_CONF_ABSENT,   /* no file, or no line for the key in a valid file */
+    SYSRUN_CONF_VALUE,    /* exactly one line with a value that fits */
+    SYSRUN_CONF_INVALID   /* unsafe/unreadable file, bad syntax, duplicate key or value too long */
+};
+extern enum sysrun_conf sysrun_conf_get( const char *key, char *value, size_t size );
 extern gid_t sysrun_group(void);
 
 /* raise the effective group to the system group; returns 1 if it was raised, to be passed to sysrun_drop() */
@@ -40,6 +63,10 @@ extern void sysrun_drop( int raised );
 
 /* does this client run with the system group (SO_PEERCRED at connect time)? */
 extern int sysrun_process_privileged( const struct process *process );
+/* the system role's authority: started over the system role connection, SYSTEM's primary token, SeTcbPrivilege */
+extern int sysrun_process_is_tcb_system( struct process *process );
+/* is this a Safe Mode start (the root-owned boot mode file)? */
+extern int sysrun_safe_boot(void);
 extern int sysrun_raise_for_current(void);
 
 /* The system role (C3). Only while sysrun is active and elevation is enforced; otherwise these do nothing. */
@@ -77,5 +104,9 @@ extern int sysrun_open( const char *path, int flags, mode_t mode );
 extern int sysrun_rename( const char *old, const char *new );
 extern int sysrun_link( const char *old, const char *new );
 extern int sysrun_unlink( const char *path );
+struct stat;
+extern int sysrun_stat( const char *path, struct stat *st );
+extern int sysrun_lstat( const char *path, struct stat *st );
+extern char *sysrun_realpath( const char *path );
 
 #endif  /* __WINE_SERVER_SYSRUN_H */

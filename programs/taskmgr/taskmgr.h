@@ -48,6 +48,21 @@ typedef struct _IO_COUNTERS {
 
 #define STATUS_WINDOW	2001
 
+/* the pages, in the order of their tabs */
+#define PAGE_APPLICATIONS	0
+#define PAGE_PROCESSES		1
+#define PAGE_PERFORMANCE	2
+#define PAGE_NETWORKING		3
+#define PAGE_USERS		4
+#define PAGE_COUNT		5
+
+#define NET_COLUMN_COUNT	26
+#define USER_COLUMN_COUNT	5
+
+#define NET_HISTORY_SENT	1
+#define NET_HISTORY_RECEIVED	2
+#define NET_HISTORY_TOTAL	4
+
 typedef struct
 {
 	/* Window size & position settings */
@@ -110,6 +125,20 @@ typedef struct
 	BOOL	CPUHistory_OneGraphPerCPU;
 	BOOL	ShowKernelTimes;
 
+	/* Networking page settings */
+	BOOL	NetTabAlwaysActive;
+	BOOL	NetShowCumulative;
+	BOOL	NetAutoScale;
+	BOOL	NetShowScale;
+	DWORD	NetHistory;		/* NET_HISTORY_* */
+	BOOL	NetColumns[NET_COLUMN_COUNT];
+	int	NetColumnWidths[NET_COLUMN_COUNT];
+
+	/* Users page settings */
+	BOOL	UsersShowFullName;
+	BOOL	UserColumns[USER_COLUMN_COUNT];
+	int	UserColumnWidths[USER_COLUMN_COUNT];
+
 } TASKMANAGER_SETTINGS, *LPTASKMANAGER_SETTINGS;
 
 /* Global Variables: */
@@ -145,6 +174,11 @@ void FillSolidRect(HDC hDC, LPCRECT lpRect, COLORREF clr);
 void Font_DrawText(HDC hDC, LPWSTR lpwszText, int x, int y);
 
 #define OPTIONS_MENU_INDEX    1
+/* File, Options, View, Shut Down, Help; the Applications page adds Windows before Shut Down */
+#define MENU_COUNT_NO_WINDOWS 5
+
+void ShutDown_InitMenu(HMENU hShutdownMenu);
+void ShutDown_OnCommand(UINT id);
 
 void TaskManager_OnOptionsAlwaysOnTop(void);
 void TaskManager_OnOptionsMinimizeOnUse(void);
@@ -153,6 +187,8 @@ void TaskManager_OnOptionsShow16BitTasks(void);
 void TaskManager_OnFileNew(void);
 
 LPWSTR GetLastErrorText( LPWSTR lpwszBuf, DWORD dwSize );
+int TaskManager_HeaderWidth(HWND hList, LPCWSTR heading);
+void TaskManager_UpdateStatusParts(void);
 
 void OnAbout(void);
 
@@ -200,6 +236,19 @@ INT_PTR CALLBACK Graph_WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
 LRESULT CALLBACK ProcessListWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 INT_PTR CALLBACK ProcessPageWndProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
 INT_PTR CALLBACK PerformancePageWndProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
+
+extern HWND hNetworkPage;
+extern HWND hUsersPage;
+INT_PTR CALLBACK NetworkPageWndProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
+INT_PTR CALLBACK UsersPageWndProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
+void RefreshNetworkPage(void);
+void RefreshUsersPage(void);
+void NetworkPage_OnCommand(UINT id);
+void NetworkPage_InitMenus(HMENU hOptionsMenu, HMENU hViewMenu);
+void NetworkPage_DefaultSettings(void);
+void UsersPage_OnCommand(UINT id);
+void UsersPage_InitMenus(HMENU hOptionsMenu, HMENU hViewMenu);
+void UsersPage_DefaultSettings(void);
 
 #ifdef __cplusplus
 }

@@ -742,7 +742,13 @@ static LONG_PTR ndr_client_call( const MIDL_STUB_DESC *stub_desc, const PFORMAT_
 
         /* we only need a handle if this isn't an object method */
         if (!(proc_header->Oi_flags & Oi_OBJECT_PROC))
+        {
             hbinding = client_get_handle(stub_msg, proc_header, handle_format);
+            /* the cleanup frees the handle (a generic handle's unbind routine gets it): it must see the one made here,
+             * not the NULL that finally_ctx was filled with before the call began (B109: the binding, its association
+             * and the association's connection were leaked by every call with a generic binding handle) */
+            finally_ctx.hbinding = hbinding;
+        }
 
         stub_msg->BufferLength = 0;
 
