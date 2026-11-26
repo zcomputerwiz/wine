@@ -3964,7 +3964,7 @@ static void test_root_import_lock(void)
     ret = WaitForSingleObject( pi.hProcess, 60000 );
     ok( ret == WAIT_OBJECT_0, "the child hung on an abandoned import lock\n" );
     if (ret != WAIT_OBJECT_0) TerminateProcess( pi.hProcess, 1 );
-    wait_child_process( pi.hProcess );
+    wait_child_process( &pi );
     CloseHandle( pi.hProcess );
     CloseHandle( pi.hThread );
 }
