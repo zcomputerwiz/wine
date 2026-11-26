@@ -22,11 +22,13 @@
 #define COBJMACROS
 #include "initguid.h"
 #include "imm_private.h"
+#include "msctf.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(imm);
 
 #define IMM_INIT_MAGIC 0x19650412
 BOOL WINAPI User32InitializeImmEntryTable(DWORD);
+HRESULT WINAPI CtfImmTIMActivate(HKL, BOOL);
 
 HMODULE imm32_module;
 
@@ -105,6 +107,7 @@ struct coinit_spy
         IMM_APT_CAN_FREE = 0x4,
         IMM_APT_BROKEN = 0x8
     } apt_flags;
+    ITfThreadMgr *tim;  /* the thread's text services manager, activated by CtfImmTIMActivate */
 };
 
 static CRITICAL_SECTION ime_cs;
@@ -273,6 +276,15 @@ static void imm_couninit_thread(BOOL cleanup)
         return;
     spy->apt_flags &= ~IMM_APT_INIT;
 
+    if (spy->tim)
+    {
+        ITfThreadMgr *tim = spy->tim;
+
+        spy->tim = NULL;
+        ITfThreadMgr_Deactivate( tim );
+        ITfThreadMgr_Release( tim );
+    }
+
     if (spy->apt_flags & IMM_APT_CREATED)
     {
         spy->apt_flags &= ~IMM_APT_CREATED;
@@ -398,6 +410,7 @@ static void imm_coinit_thread(void)
         spy->ref = 1;
         spy->cookie.QuadPart = 0;
         spy->apt_flags = 0;
+        spy->tim = NULL;
         NtUserGetThreadInfo()->client_imm = (UINT_PTR)spy;
 
     }
@@ -3264,6 +3277,8 @@ static LRESULT ime_internal_msg( WPARAM wparam, LPARAM lparam)
         himc = NtUserGetWindowInputContext( hwnd );
         ImmSetActiveContext( hwnd, himc, TRUE );
         set_ime_ui_window_himc( himc );
+        /* as on Windows, the first activation of a window starts the thread's text services */
+        CtfImmTIMActivate( GetKeyboardLayout( 0 ), TRUE );
         break;
     case IME_INTERNAL_DEACTIVATE:
         hwnd = (HWND)lparam;
@@ -3345,6 +3360,46 @@ LRESULT WINAPI __wine_ime_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
         return DefWindowProcA(hwnd, msg, wparam, lparam);
     else
         return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+/***********************************************************************
+ *      CtfImmTIMActivate (IMM32.@)
+ *
+ * Starts the text services framework for the calling thread: with activate TRUE the thread gets an active msctf thread
+ * manager (TF_GetThreadMgr then returns it) and an apartment; with FALSE nothing happens. Returns S_OK (Windows 11: also
+ * when called again). user32 on Windows calls it when a window of the thread is first activated (SetForegroundWindow,
+ * SetFocus, a show that activates), not on a show without activation.
+ */
+HRESULT WINAPI CtfImmTIMActivate( HKL hkl, BOOL activate )
+{
+    static HRESULT (WINAPI *pTF_CreateThreadMgr)( ITfThreadMgr ** );
+    struct coinit_spy *spy;
+    ITfThreadMgr *tim;
+    TfClientId id;
+    HRESULT hr;
+
+    TRACE( "hkl %p, activate %d.\n", hkl, activate );
+
+    if (!activate) return S_OK;
+    imm_coinit_thread();
+    if (!(spy = get_thread_coinit_spy()) || spy->tim) return S_OK;
+
+    if (!pTF_CreateThreadMgr)
+    {
+        HMODULE msctf = LoadLibraryW( L"msctf.dll" );
+        if (!msctf) return HRESULT_FROM_WIN32( GetLastError() );
+        if (!(pTF_CreateThreadMgr = (void *)GetProcAddress( msctf, "TF_CreateThreadMgr" ))) return E_NOTIMPL;
+    }
+    if (FAILED(hr = pTF_CreateThreadMgr( &tim ))) return hr;
+    spy->tim = tim;  /* before Activate: it may activate windows of this thread again */
+    if (FAILED(hr = ITfThreadMgr_Activate( tim, &id )))
+    {
+        WARN( "Activate failed, hr %#lx.\n", hr );
+        if (spy->tim == tim) spy->tim = NULL;
+        ITfThreadMgr_Release( tim );
+        return hr;
+    }
+    return S_OK;
 }
 
 /***********************************************************************

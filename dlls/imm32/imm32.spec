@@ -19,7 +19,7 @@
 @ stub CtfImmSetAppCompatFlags
 @ stub CtfImmSetCiceroStartInThread
 @ stub CtfImmSetDefaultRemoteKeyboardLayout
-@ stub CtfImmTIMActivate
+@ stdcall CtfImmTIMActivate(long long)
 @ stub GetKeyboardLayoutCP
 @ stdcall ImmActivateLayout(long)
 @ stdcall ImmAssociateContext(long long)
