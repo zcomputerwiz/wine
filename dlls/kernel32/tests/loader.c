@@ -28,6 +28,7 @@
 #include "winbase.h"
 #include "winternl.h"
 #include "winnls.h"
+#include "verrsrc.h"
 #include "wine/test.h"
 #include "delayloadhandler.h"
 
@@ -4991,6 +4992,244 @@ static void test_Wow64Transition(void)
             debugstr_wn(name->SectionFileName.Buffer, name->SectionFileName.Length / sizeof(WCHAR)));
 }
 
+/* a version resource block: header, key, padding, value, padding; the caller patches the length */
+static BYTE *ver_block( BYTE *start, WORD val_len, WORD type, const WCHAR *key, const void *value, DWORD value_bytes )
+{
+    BYTE *p = start + 6;
+
+    *(WORD *)(start + 2) = val_len;
+    *(WORD *)(start + 4) = type;
+    memcpy( p, key, (lstrlenW( key ) + 1) * sizeof(WCHAR) );
+    p += (lstrlenW( key ) + 1) * sizeof(WCHAR);
+    p = start + ALIGN_SIZE( p - start, 4 );
+    if (value_bytes) memcpy( p, value, value_bytes );
+    p += value_bytes;
+    return start + ALIGN_SIZE( p - start, 4 );
+}
+
+/* a version resource with CompanyName "Microsoft Corporation" (Wine prefers its own builtin to such a file) */
+static DWORD make_microsoft_version( BYTE *buf )
+{
+    static const WCHAR rootW[] = L"VS_VERSION_INFO", infoW[] = L"StringFileInfo", tableW[] = L"040904B0";
+    static const WCHAR companyW[] = L"CompanyName", valueW[] = L"Microsoft Corporation";
+    VS_FIXEDFILEINFO ffi = { VS_FFI_SIGNATURE, VS_FFI_STRUCVERSION };
+    BYTE *info, *table, *str, *p;
+
+    p = ver_block( buf, sizeof(ffi), 0, rootW, &ffi, sizeof(ffi) );
+    info = p;
+    p = ver_block( info, 0, 1, infoW, NULL, 0 );
+    table = p;
+    p = ver_block( table, 0, 1, tableW, NULL, 0 );
+    str = p;
+    p = ver_block( str, ARRAY_SIZE(valueW), 1, companyW, valueW, sizeof(valueW) );
+    *(WORD *)str = p - str;
+    *(WORD *)table = p - table;
+    *(WORD *)info = p - info;
+    *(WORD *)buf = p - buf;
+    return p - buf;
+}
+
+struct res_layout
+{
+    IMAGE_RESOURCE_DIRECTORY dir0;
+    IMAGE_RESOURCE_DIRECTORY_ENTRY entry0;
+    IMAGE_RESOURCE_DIRECTORY dir1;
+    IMAGE_RESOURCE_DIRECTORY_ENTRY entry1;
+    IMAGE_RESOURCE_DIRECTORY dir2;
+    IMAGE_RESOURCE_DIRECTORY_ENTRY entry2;
+    IMAGE_RESOURCE_DATA_ENTRY data;
+};
+
+/* write a minimal native DLL without exports, with a Microsoft version resource */
+static BOOL write_microsoft_dll( const WCHAR *path )
+{
+    struct res_layout res = { { 0 } };
+    IMAGE_NT_HEADERS nt = nt_header_template;
+    IMAGE_SECTION_HEADER sec = { ".rsrc" };
+    BYTE *image;
+    DWORD size, written, ver_size;
+    HANDLE file;
+    BOOL ret;
+
+    size = 2 * page_size;
+    image = calloc( 1, size );
+    memcpy( image, &dos_header, sizeof(dos_header) );
+
+    res.dir0.NumberOfIdEntries = 1;
+    res.entry0.Id = 16;  /* RT_VERSION */
+    res.entry0.OffsetToData = 0x80000000 | offsetof( struct res_layout, dir1 );
+    res.dir1.NumberOfIdEntries = 1;
+    res.entry1.Id = 1;
+    res.entry1.OffsetToData = 0x80000000 | offsetof( struct res_layout, dir2 );
+    res.dir2.NumberOfIdEntries = 1;
+    res.entry2.Id = 0x409;
+    res.entry2.OffsetToData = offsetof( struct res_layout, data );
+    ver_size = make_microsoft_version( image + page_size + 0x60 );
+    res.data.OffsetToData = page_size + 0x60;
+    res.data.Size = ver_size;
+    memcpy( image + page_size, &res, sizeof(res) );
+
+    nt.FileHeader.NumberOfSections = 1;
+    nt.FileHeader.SizeOfOptionalHeader = sizeof(IMAGE_OPTIONAL_HEADER);
+    nt.OptionalHeader.SectionAlignment = page_size;
+    nt.OptionalHeader.FileAlignment = page_size;
+    nt.OptionalHeader.SizeOfHeaders = page_size;
+    nt.OptionalHeader.SizeOfImage = size;
+    nt.OptionalHeader.SizeOfInitializedData = page_size;
+    nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_RESOURCE].VirtualAddress = page_size;
+    nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_RESOURCE].Size = 0x60 + ver_size;
+    memcpy( image + sizeof(dos_header), &nt, sizeof(nt) );
+
+    sec.Misc.VirtualSize = page_size;
+    sec.VirtualAddress = page_size;
+    sec.SizeOfRawData = page_size;
+    sec.PointerToRawData = page_size;
+    sec.Characteristics = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ;
+    memcpy( image + sizeof(dos_header) + sizeof(nt), &sec, sizeof(sec) );
+
+    file = CreateFileW( path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, 0 );
+    ok( file != INVALID_HANDLE_VALUE, "failed to create %s err %lu\n", debugstr_w(path), GetLastError() );
+    if (file == INVALID_HANDLE_VALUE) { free( image ); return FALSE; }
+    ret = WriteFile( file, image, size, &written, NULL );
+    ok( ret && written == size, "WriteFile failed err %lu\n", GetLastError() );
+    CloseHandle( file );
+    free( image );
+    return ret;
+}
+
+/* a builtin of this name exists in Wine, and nothing in the test process loads it */
+static const WCHAR package_dll_name[] = L"rasapi32.dll";
+
+static BOOL is_stand_in( HMODULE mod, const WCHAR *expect_path )
+{
+    WCHAR buffer[MAX_PATH];
+
+    GetModuleFileNameW( mod, buffer, ARRAY_SIZE(buffer) );
+    return !wcsicmp( buffer, expect_path ) && !GetProcAddress( mod, "RasEnumConnectionsA" );
+}
+
+static void package_dll_child(void)
+{
+    WCHAR dir[MAX_PATH], path[MAX_PATH];
+    HMODULE mod;
+
+    GetModuleFileNameW( NULL, dir, ARRAY_SIZE(dir) );
+    *wcsrchr( dir, '\\' ) = 0;
+    swprintf( path, ARRAY_SIZE(path), L"%ls\\%ls", dir, package_dll_name );
+
+    /* a bare name resolves in the program's own directory first */
+    mod = LoadLibraryW( package_dll_name );
+    ok( mod != NULL, "LoadLibrary failed err %lu\n", GetLastError() );
+    if (mod)
+    {
+        WCHAR buffer[MAX_PATH];
+        GetModuleFileNameW( mod, buffer, ARRAY_SIZE(buffer) );
+        ok( is_stand_in( mod, path ), "got %s, expected %s\n", debugstr_w(buffer), debugstr_w(path) );
+        FreeLibrary( mod );
+    }
+    *child_failures = winetest_get_failures();
+}
+
+static void test_package_dll_order(void)
+{
+    static const WCHAR *packages[] =
+    {
+        L"WindowsApps\\Wine.Test_1.2.3.4_x64__0123456789abc",        /* empty resource id */
+        L"WindowsApps\\Wine.Other_2.0.0.0_neutral_en-us_0abcdefghjkmn",
+    };
+    static const WCHAR *not_packages[] =
+    {
+        L"Plain",
+        L"WindowsApps\\NotAPackage",
+        L"WindowsApps\\Wine.Test_1.2.3.4_x64__0123456789ab",         /* publisher id too short */
+        L"WindowsApps\\Wine.Test_1.2.3.4_x64__0123456789abi",        /* 'i' is not in the alphabet */
+        L"WindowsApps\\Wine.Test_1.2.3.4_x64_0123456789abc",         /* four fields only */
+        L"Elsewhere\\Wine.Test_1.2.3.4_x64__0123456789abc",          /* not below WindowsApps */
+        L"WindowsApps\\Sub\\Wine.Test_1.2.3.4_x64__0123456789abc",   /* not directly below */
+        L"xWindowsApps\\Wine.Test_1.2.3.4_x64__0123456789abc",
+    };
+    WCHAR root[MAX_PATH], dir[MAX_PATH], path[MAX_PATH], exe[MAX_PATH], cmdline[2 * MAX_PATH];
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi;
+    char **argv;
+    HMODULE mod;
+    WCHAR *p;
+    DWORD ret;
+    int i;
+
+    GetTempPathW( ARRAY_SIZE(root), root );
+    swprintf( root + wcslen( root ), ARRAY_SIZE(root) - wcslen( root ), L"wpkg%04lx", GetCurrentProcessId() & 0xffff );
+    CreateDirectoryW( root, NULL );
+
+    for (i = 0; i < ARRAY_SIZE(packages) + ARRAY_SIZE(not_packages); i++)
+    {
+        BOOL is_package = i < ARRAY_SIZE(packages);
+        const WCHAR *sub = is_package ? packages[i] : not_packages[i - ARRAY_SIZE(packages)];
+
+        swprintf( dir, ARRAY_SIZE(dir), L"%ls\\%ls", root, sub );
+        for (p = dir + wcslen( root ) + 1; *p; p++)
+            if (*p == '\\') { *p = 0; CreateDirectoryW( dir, NULL ); *p = '\\'; }
+        CreateDirectoryW( dir, NULL );
+        swprintf( path, ARRAY_SIZE(path), L"%ls\\%ls", dir, package_dll_name );
+        if (!write_microsoft_dll( path )) continue;
+
+        mod = LoadLibraryW( path );
+        ok( mod != NULL, "%s: LoadLibrary failed err %lu\n", debugstr_w(sub), GetLastError() );
+        if (mod)
+        {
+            if (is_package)
+                ok( is_stand_in( mod, path ), "%s: loaded the wrong module\n", debugstr_w(sub) );
+            else if (winetest_platform_is_wine)
+                ok( !is_stand_in( mod, path ), "%s: loaded the file in a folder that is not a package\n", debugstr_w(sub) );
+            FreeLibrary( mod );
+        }
+        if (!is_package) DeleteFileW( path );
+    }
+
+    /* a program in a package folder: its bare-name import resolves to the package's copy */
+    swprintf( dir, ARRAY_SIZE(dir), L"%ls\\%ls", root, packages[0] );
+    swprintf( exe, ARRAY_SIZE(exe), L"%ls\\pkgtest.exe", dir );
+    winetest_get_mainargs( &argv );
+    MultiByteToWideChar( CP_ACP, 0, argv[0], -1, path, ARRAY_SIZE(path) );
+    if (!CopyFileW( path, exe, FALSE )) skip( "cannot copy the test program: %lu\n", GetLastError() );
+    else
+    {
+        *child_failures = -1;
+        swprintf( cmdline, ARRAY_SIZE(cmdline), L"\"%ls\" loader package_dll", exe );
+        ret = CreateProcessW( exe, cmdline, NULL, NULL, FALSE, 0, NULL, dir, &si, &pi );
+        ok( ret, "CreateProcess failed err %lu\n", GetLastError() );
+        if (ret)
+        {
+            ret = WaitForSingleObject( pi.hProcess, 30000 );
+            ok( ret == WAIT_OBJECT_0, "child process failed to terminate\n" );
+            if (ret != WAIT_OBJECT_0) TerminateProcess( pi.hProcess, 0 );
+            if (*child_failures)
+            {
+                trace( "%ld failures in child process\n", *child_failures );
+                winetest_add_failures( *child_failures );
+            }
+            CloseHandle( pi.hThread );
+            CloseHandle( pi.hProcess );
+        }
+        DeleteFileW( exe );
+    }
+
+    for (i = 0; i < ARRAY_SIZE(packages); i++)
+    {
+        swprintf( path, ARRAY_SIZE(path), L"%ls\\%ls\\%ls", root, packages[i], package_dll_name );
+        DeleteFileW( path );
+    }
+    /* remove the folders, deepest first */
+    for (i = 0; i < ARRAY_SIZE(packages) + ARRAY_SIZE(not_packages); i++)
+    {
+        const WCHAR *sub = i < ARRAY_SIZE(packages) ? packages[i] : not_packages[i - ARRAY_SIZE(packages)];
+        swprintf( dir, ARRAY_SIZE(dir), L"%ls\\%ls", root, sub );
+        while (wcslen( dir ) > wcslen( root ) && RemoveDirectoryW( dir ))
+            *wcsrchr( dir, '\\' ) = 0;
+    }
+    RemoveDirectoryW( root );
+}
+
 START_TEST(loader)
 {
     int argc;
@@ -5052,6 +5291,11 @@ START_TEST(loader)
         *child_failures = -1;
 
     argc = winetest_get_mainargs(&argv);
+    if (argc == 3 && !strcmp( argv[2], "package_dll" ))
+    {
+        package_dll_child();
+        return;
+    }
     if (argc > 4)
     {
         test_dll_phase = atoi(argv[4]);
@@ -5068,6 +5312,7 @@ START_TEST(loader)
     }
 
     test_filenames();
+    test_package_dll_order();
     test_getmodulefilenamew_string_termination();
     test_getmodulefilenamea_string_termination();
     test_ResolveDelayLoadedAPI();
