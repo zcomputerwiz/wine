@@ -25,6 +25,7 @@
 
 #include "windef.h"
 #include "winbase.h"
+#include "winternl.h"
 #include "winuser.h"
 #include "winver.h"
 #include "wincrypt.h"
@@ -37,6 +38,7 @@
 
 #include "fusionpriv.h"
 #include "wine/debug.h"
+#include "wine/internal_lock.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(fusion);
 
@@ -553,7 +555,7 @@ HRESULT WINAPI CreateAssemblyCache(IAssemblyCache **ppAsmCache, DWORD dwReserved
 
     cache->IAssemblyCache_iface.lpVtbl = &AssemblyCacheVtbl;
     cache->ref = 1;
-    cache->lock = CreateMutexW( NULL, FALSE, L"__WINE_FUSION_CACHE_MUTEX__" );
+    cache->lock = wine_create_internal_mutex( FALSE, L"__WINE_FUSION_CACHE_MUTEX__" );
     if (!cache->lock)
     {
         free( cache );
