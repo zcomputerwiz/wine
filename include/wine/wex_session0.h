@@ -30,7 +30,7 @@
 /* the link message from a user's server to session 0: header, then the token description; SCM_RIGHTS carries
  * the channel. Session 0 answers with a reply. One message per connection. */
 #define WEX_SESSION0_MAGIC    0x30535857  /* "WXS0" */
-#define WEX_SESSION0_VERSION  8
+#define WEX_SESSION0_VERSION  9
 #define WEX_SESSION0_MAX_MSG  65536
 
 struct wex_session0_request
@@ -104,7 +104,7 @@ struct wex_session0_order_reply
     unsigned int value;
 };
 
-/* X frames (version 8, docs/SESSION0_CROSS_SERVER.md, M0 and its X0 appendix): the cross-server protocol on the
+/* X frames (version 9, docs/SESSION0_CROSS_SERVER.md, M0 and its X0 appendix): the cross-server protocol on the
  * session link, in both directions, beside the orders. A frame is a header, a body by type and, for OPEN, the
  * caller's token description and the name; size counts all of it and is at most WEX_SESSION0_MAX_MSG. A request
  * carries the sender's call number, its reply the same number and the type with WEX_X_REPLY. Replies come in any
@@ -120,9 +120,12 @@ struct wex_session0_order_reply
 #define WEX_X_TRY             7   /* success (acquired) or STATUS_TIMEOUT; re-arms the subscription; never cancelled */
 #define WEX_X_NOTICE          8   /* owner to holder: ref is ready (one per arming); no reply */
 #define WEX_X_PING            9   /* the body comes back */
+#define WEX_X_INFO            10  /* holder to owner: struct wex_x_info_req; reply: the kind's information (X3:
+                                   * struct wex_x_process_info, then the image name) */
 #define WEX_X_REPLY           0x80000000
 
-/* OPEN kinds: none in production yet (X1: global names, X3: process ids); the lab build has its counter */
+/* OPEN kinds (X1: global names); the lab build has its counter */
+#define WEX_X_KIND_PROCESS    2           /* X3 (M3): the name is a process id (unsigned int); session 0 callers only */
 #define WEX_X_KIND_LAB        0x7f000001
 
 /* caps on what is in flight (per account of the holder; requests per link) */
@@ -175,6 +178,33 @@ struct wex_x_granted
 {
     unsigned int       access;     /* the rights the owner granted (information: the owner decides) */
     unsigned int       ready;      /* QUERY: the object is ready (signaled) now */
+};
+
+struct wex_x_info_req
+{
+    unsigned int       info_class; /* X3: the ProcessInformationClass asked for (the owner's FIXME names it) */
+    unsigned int       reserved;
+};
+
+/* X3: what the owner of a process says about it (get_process_info's fields), then image_len bytes of its image's NT
+ * name. Taken at the open and again at the death notice; the holder answers its queries from it. */
+struct wex_x_process_info
+{
+    unsigned long long affinity;
+    unsigned long long peb;
+    long long          start_time;
+    long long          end_time;      /* 0 while it runs */
+    unsigned int       pid;
+    unsigned int       ppid;
+    unsigned int       exit_code;
+    unsigned int       session_id;
+    int                priority;
+    int                base_priority;
+    int                disable_boost;
+    unsigned short     machine;
+    unsigned short     running;       /* it has threads left */
+    unsigned int       image_len;
+    unsigned int       reserved;
 };
 
 struct wex_session0_reply

@@ -452,6 +452,22 @@ int session0_id_lease_current( unsigned int id, unsigned int serial )
     return serial && block && block < WEX_ID_BLOCK_COUNT && id_blocks[block].serial == serial;
 }
 
+/* X3, session 0: the live server, other than session 0 itself, that leased the block of a process id: its Unix pid
+ * and start time (its X0 epoch); 0 when there is none */
+int session0_id_owner( unsigned int id, unsigned int *pid, unsigned long long *start )
+{
+    unsigned int block = id / 4 / WEX_ID_BLOCK_SIZE;
+    const struct id_block *b;
+
+    if (!session0_server || !id || !block || block >= WEX_ID_BLOCK_COUNT) return 0;
+    if (!id_blocks_loaded) load_id_blocks();
+    b = &id_blocks[block];
+    if (!b->pid || b->pid == getpid() || !id_block_owner_alive( b )) return 0;
+    *pid = b->pid;
+    *start = b->start;
+    return 1;
+}
+
 /* A new block of ids for this server's own processes, or block again after session 0 restarted; 0 when there is
  * none. Session 0 grants its own blocks; a user's server asks session 0. */
 unsigned int session0_new_id_block( unsigned int wanted )
@@ -916,6 +932,7 @@ static int request_session_id( unsigned int wanted )
 void session0_init( int server_mode )
 {
     x_init();  /* X0: this server's epoch, before any link */
+    x_process_init();  /* X3: processes for session 0's callers (refused by session 0 itself as owner) */
     if (server_mode)
     {
         session0_server = 1;

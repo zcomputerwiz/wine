@@ -642,15 +642,17 @@ static int x_call_send( struct x_peer *peer, struct x_call *call )
 static void x_peer_end( struct x_peer *peer, const char *why )
 {
     unsigned int dropped = peer->ref_count, dead = 0;
-    struct x_held *held;
+    struct x_held *held, *next;
 
     while (!list_empty( &peer->refs ))
         x_ref_free( LIST_ENTRY( list_head( &peer->refs ), struct x_ref, peer_entry ));
-    LIST_FOR_EACH_ENTRY( held, &x_all_held, struct x_held, entry )
+    /* (a notify callback may free its held reference) */
+    LIST_FOR_EACH_ENTRY_SAFE( held, next, &x_all_held, struct x_held, entry )
         if (held->peer == peer)
         {
             held->peer = NULL;
             dead++;
+            if (held->notify) held->notify( held, held->ctx );
         }
     if (peer->conn)
     {
@@ -764,6 +766,15 @@ struct x_peer *x_peer_of_session( unsigned int session )
         if (peer->session == session && (!found || peer->conn)) found = peer;
     }
     return found;
+}
+
+struct x_peer *x_peer_of_server( unsigned int pid, unsigned long long start )
+{
+    struct x_peer *peer;
+
+    LIST_FOR_EACH_ENTRY( peer, &peers, struct x_peer, entry )
+        if (peer->epoch.pid == pid && peer->epoch.start == start) return peer;
+    return NULL;
 }
 
 /* ---- connections ---- */
@@ -900,6 +911,7 @@ static void x_notice( struct x_conn *conn, const struct wex_x_header *hdr )
         if (held->id != hdr->ref || held->peer != conn->peer) continue;
         held->notices++;
         held->hint = 1;
+        if (held->notify) held->notify( held, held->ctx );
         return;
     }
 }
@@ -1067,6 +1079,30 @@ static void x_serve( struct x_conn *conn, const struct wex_x_header *hdr, const 
         }
         x_transmit( conn, q );
         return;
+    case WEX_X_INFO:  /* X3: the kind's information, from the owner's own data, for the rights in the entry */
+    {
+        struct wex_x_info_req info;
+        void *data = NULL;
+        size_t data_size = 0;
+
+        if (size != sizeof(info))
+        {
+            x_reply( conn, hdr, STATUS_INVALID_PARAMETER, hdr->ref, NULL, 0 );
+            return;
+        }
+        memcpy( &info, body, sizeof(info) );
+        if (!(ref = x_ref_lookup( conn->peer, hdr->ref )))
+        {
+            x_reply( conn, hdr, STATUS_INVALID_HANDLE, hdr->ref, NULL, 0 );
+            return;
+        }
+        status = ref->ops->info ? ref->ops->info( ref->obj, ref->access, info.info_class, &data, &data_size )
+                                : STATUS_NOT_SUPPORTED;
+        if (!status && data_size > WEX_SESSION0_MAX_MSG - sizeof(*hdr)) status = STATUS_BUFFER_OVERFLOW;
+        x_reply( conn, hdr, status, ref->id, status ? NULL : data, status ? 0 : data_size );
+        free( data );
+        return;
+    }
     case WEX_X_QUERY:
     case WEX_X_RELEASE:
     case WEX_X_SUBSCRIBE:

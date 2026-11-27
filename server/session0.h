@@ -77,6 +77,19 @@ extern struct token *link_bound_token( uid_t uid, unsigned int session, const vo
                                        unsigned int *status );
 /* R6, session 0: the lease an opener's id came from is still its block's */
 extern int session0_id_lease_current( unsigned int id, unsigned int serial );
+/* X3, session 0: the live server (not session 0) whose id block holds id: its pid and start time */
+extern int session0_id_owner( unsigned int id, unsigned int *pid, unsigned long long *start );
+/* X3 (session0_xproc.c): session 0 opens and queries a session's processes; their owner serves them */
+struct x_rproc;
+struct get_process_info_reply;
+extern void x_process_init(void);
+extern void x_process_ended( struct process *process );
+extern int x_open_remote_process( process_id_t pid, unsigned int access, unsigned int attributes,
+                                  obj_handle_t *handle );
+extern struct x_rproc *x_remote_process_from_handle( obj_handle_t handle, unsigned int access, int *remote );
+extern int x_is_remote_process_handle( obj_handle_t handle );
+extern void x_remote_process_info( struct x_rproc *rproc, struct get_process_info_reply *reply );
+extern const WCHAR *x_remote_process_image( struct x_rproc *rproc, data_size_t *len );
 /* WineExplorer H1: wex_accounts.c */
 extern struct object *accounts_call_start( unsigned int op, unsigned int verdict, unsigned int caller_uid,
                                            const void *body, data_size_t size );

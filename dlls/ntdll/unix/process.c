@@ -1966,9 +1966,27 @@ NTSTATUS WINAPI NtOpenProcess( HANDLE *handle, ACCESS_MASK access,
         req->access     = access;
         req->attributes = attr ? attr->Attributes : 0;
         status = wine_server_call( req );
-        if (!status) *handle = wine_server_ptr_handle( reply->handle );
+        if (!status || status == STATUS_PENDING) *handle = wine_server_ptr_handle( reply->handle );
     }
     SERVER_END_REQ;
+    if (status == STATUS_PENDING)
+    {
+        /* WineExplorer X3: in session 0, a session's process is opened from its server: the handle is the open in
+         * progress, signaled when it has ended */
+        HANDLE call = *handle;
+
+        *handle = 0;
+        if (!(status = NtWaitForSingleObject( call, FALSE, NULL )))
+        {
+            SERVER_START_REQ( x_process_result )
+            {
+                req->call = wine_server_obj_handle( call );
+                if (!(status = wine_server_call( req ))) *handle = wine_server_ptr_handle( reply->handle );
+            }
+            SERVER_END_REQ;
+        }
+        NtClose( call );
+    }
     return status;
 }
 

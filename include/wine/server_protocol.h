@@ -3016,6 +3016,21 @@ struct accounts_result_reply
 };
 
 
+/* WineExplorer X3 (M3): in session 0, open_process on a session's process answers STATUS_PENDING with a call in its
+   handle; once the call is signaled, this gives the handle to the remote process (or the open's error) */
+struct x_process_result_request
+{
+    struct request_header __header;
+    obj_handle_t call;
+};
+struct x_process_result_reply
+{
+    struct reply_header __header;
+    obj_handle_t handle;
+    char __pad_12[4];
+};
+
+
 
 struct set_registry_relay_request
 {
@@ -6855,6 +6870,7 @@ enum request
     REQ_get_caller_class,
     REQ_accounts_forward,
     REQ_accounts_result,
+    REQ_x_process_result,
     REQ_set_registry_relay,
     REQ_relay_registry_notification,
     REQ_create_timer,
@@ -7197,6 +7213,7 @@ union generic_request
     struct get_caller_class_request get_caller_class_request;
     struct accounts_forward_request accounts_forward_request;
     struct accounts_result_request accounts_result_request;
+    struct x_process_result_request x_process_result_request;
     struct set_registry_relay_request set_registry_relay_request;
     struct relay_registry_notification_request relay_registry_notification_request;
     struct create_timer_request create_timer_request;
@@ -7537,6 +7554,7 @@ union generic_reply
     struct get_caller_class_reply get_caller_class_reply;
     struct accounts_forward_reply accounts_forward_reply;
     struct accounts_result_reply accounts_result_reply;
+    struct x_process_result_reply x_process_result_reply;
     struct set_registry_relay_reply set_registry_relay_reply;
     struct relay_registry_notification_reply relay_registry_notification_reply;
     struct create_timer_reply create_timer_reply;
@@ -7763,6 +7781,6 @@ union generic_reply
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 998
+#define SERVER_PROTOCOL_VERSION 999
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

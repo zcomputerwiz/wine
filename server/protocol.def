@@ -2348,6 +2348,15 @@ struct process_info
 @END
 
 
+/* WineExplorer X3 (M3): in session 0, open_process on a session's process answers STATUS_PENDING with a call in its
+   handle; once the call is signaled, this gives the handle to the remote process (or the open's error) */
+@REQ(x_process_result)
+    obj_handle_t call;
+@REPLY
+    obj_handle_t handle;
+@END
+
+
 /* WineExplorer system tier: the read end of a registry channel's wait pipe, where session 0 reports changes */
 @REQ(set_registry_relay)
     int          fd;           /* the pipe, in flight */

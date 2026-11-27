@@ -45,6 +45,7 @@ SOURCES = \
 	sock.c \
 	session0.c \
 	session0_x.c \
+	session0_xproc.c \
 	symlink.c \
 	sysrun.c \
 	sysrun.h \

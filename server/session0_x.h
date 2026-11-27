@@ -63,6 +63,10 @@ struct x_kind_ops
     unsigned int (*try_acquire)( struct object *obj );
     /* a success that could not be sent: give it back by the object's own rules */
     void (*give_back)( struct object *obj );
+    /* X3, WEX_X_INFO (may be NULL: STATUS_NOT_SUPPORTED): the information about obj for a reference with the rights
+     * granted; a malloc'ed reply body in *data */
+    unsigned int (*info)( struct object *obj, unsigned int granted, unsigned int info_class, void **data,
+                          size_t *size );
 };
 extern void x_register_kind( const struct x_kind_ops *ops );
 /* the object may have become ready: armed subscriptions on it get their notice */
@@ -85,6 +89,9 @@ struct x_held
     unsigned int        handles;
     unsigned int        notices;    /* NOTICEs received */
     int                 hint;       /* a notice came and no try since */
+    /* X3: called when a NOTICE comes for it, and once when it dies (peer set to NULL) */
+    void              (*notify)( struct x_held *held, void *ctx );
+    void               *ctx;
 };
 
 /* the completion of a call: status, and the reply's header and body (NULL when the call failed here) */
@@ -101,6 +108,8 @@ extern struct x_held *x_held_find( unsigned long long id );
 extern void x_held_free( struct x_held *held );
 /* a user's server: its peer (session 0 at its current epoch); session 0: the peer of a session, or NULL */
 extern struct x_peer *x_peer_of_session( unsigned int session );
+/* session 0: the peer of the server process pid started at start (an id block's lessee), or NULL */
+extern struct x_peer *x_peer_of_server( unsigned int pid, unsigned long long start );
 
 /* ---- for the lab (wex_x0lab.c) ---- */
 

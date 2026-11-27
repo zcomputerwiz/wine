@@ -1175,8 +1175,12 @@ struct process *get_process_from_id( process_id_t id )
 /* get a process from a handle (and increment the refcount) */
 struct process *get_process_from_handle( obj_handle_t handle, unsigned int access )
 {
-    return (struct process *)get_handle_obj( current->process, handle,
-                                             access, &process_ops );
+    struct process *process = (struct process *)get_handle_obj( current->process, handle, access, &process_ops );
+
+    /* WineExplorer X3: a session's process opened by session 0 serves only its own requests (M3) */
+    if (!process && get_error() == STATUS_OBJECT_TYPE_MISMATCH && x_is_remote_process_handle( handle ))
+        set_error( STATUS_NOT_SUPPORTED );
+    return process;
 }
 
 /* terminate a process with the given exit code */
@@ -1254,6 +1258,7 @@ static void process_killed( struct process *process )
     release_job_process( process );
     start_sigkill_timer( process );
     signal_sync( process->sync );
+    x_process_ended( process );  /* WineExplorer X3: session 0's holders get their death notice */
 }
 
 /* add a thread to a process running threads list */
@@ -1881,8 +1886,13 @@ DECL_HANDLER(init_process_done)
 /* open a handle to a process */
 DECL_HANDLER(open_process)
 {
-    struct process *process = get_process_from_id( req->pid );
+    struct process *process;
+
     reply->handle = 0;
+    /* WineExplorer X3: in session 0, a session's process is opened from its server (STATUS_PENDING: the handle is
+     * the call, which ntdll waits on before x_process_result) */
+    if (x_open_remote_process( req->pid, req->access, req->attributes, &reply->handle )) return;
+    process = get_process_from_id( req->pid );
     if (process)
     {
         reply->handle = alloc_handle( current->process, process, req->access, req->attributes );
@@ -1917,7 +1927,17 @@ DECL_HANDLER(terminate_process)
 DECL_HANDLER(get_process_info)
 {
     struct process *process;
+    struct x_rproc *rproc;
+    int remote;
 
+    /* WineExplorer X3: a session's process opened by session 0, from its owner's information */
+    if ((rproc = x_remote_process_from_handle( req->handle, PROCESS_QUERY_LIMITED_INFORMATION, &remote )))
+    {
+        x_remote_process_info( rproc, reply );
+        release_object( rproc );
+        return;
+    }
+    if (remote) return;
     if ((process = get_process_from_handle( req->handle, PROCESS_QUERY_LIMITED_INFORMATION )))
     {
         reply->pid              = get_process_id( process );
@@ -1995,7 +2015,35 @@ DECL_HANDLER(get_process_command_line)
 DECL_HANDLER(get_process_image_name)
 {
     struct process *process;
+    struct x_rproc *rproc;
+    int remote = 0;
 
+    /* WineExplorer X3: a session's process opened by session 0, from its owner's information */
+    if (!req->pid && (rproc = x_remote_process_from_handle( req->handle, PROCESS_QUERY_LIMITED_INFORMATION, &remote )))
+    {
+        data_size_t len;
+        const WCHAR *image = x_remote_process_image( rproc, &len );
+        struct unicode_str name = { image, len };
+
+        if (image)
+        {
+            if (req->win32 && name.len > 6 * sizeof(WCHAR) && name.str[5] == ':')
+            {
+                name.str += 4;
+                name.len -= 4 * sizeof(WCHAR);
+            }
+            reply->len = name.len;
+            if (name.len <= get_reply_max_size())
+            {
+                WCHAR *ptr = set_reply_data( name.str, name.len );
+                if (req->win32 && name.len > sizeof(WCHAR) && ptr[1] == '?') ptr[1] = '\\';
+            }
+            else set_error( STATUS_BUFFER_TOO_SMALL );
+        }
+        release_object( rproc );
+        return;
+    }
+    if (remote) return;
     if (req->pid) process = get_process_from_id( req->pid );
     else          process = get_process_from_handle( req->handle, PROCESS_QUERY_LIMITED_INFORMATION );
 

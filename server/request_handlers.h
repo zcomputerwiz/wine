@@ -118,6 +118,7 @@ DECL_HANDLER(get_registry_channel);
 DECL_HANDLER(get_caller_class);
 DECL_HANDLER(accounts_forward);
 DECL_HANDLER(accounts_result);
+DECL_HANDLER(x_process_result);
 DECL_HANDLER(set_registry_relay);
 DECL_HANDLER(relay_registry_notification);
 DECL_HANDLER(create_timer);
@@ -457,6 +458,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_get_caller_class,
     (req_handler)req_accounts_forward,
     (req_handler)req_accounts_result,
+    (req_handler)req_x_process_result,
     (req_handler)req_set_registry_relay,
     (req_handler)req_relay_registry_notification,
     (req_handler)req_create_timer,
@@ -1372,6 +1374,10 @@ C_ASSERT( sizeof(struct accounts_result_request) == 16 );
 C_ASSERT( offsetof(struct accounts_result_reply, helper_status) == 8 );
 C_ASSERT( offsetof(struct accounts_result_reply, total) == 12 );
 C_ASSERT( sizeof(struct accounts_result_reply) == 16 );
+C_ASSERT( offsetof(struct x_process_result_request, call) == 12 );
+C_ASSERT( sizeof(struct x_process_result_request) == 16 );
+C_ASSERT( offsetof(struct x_process_result_reply, handle) == 8 );
+C_ASSERT( sizeof(struct x_process_result_reply) == 16 );
 C_ASSERT( offsetof(struct set_registry_relay_request, fd) == 12 );
 C_ASSERT( sizeof(struct set_registry_relay_request) == 16 );
 C_ASSERT( offsetof(struct relay_registry_notification_request, event) == 12 );
