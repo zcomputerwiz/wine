@@ -672,9 +672,14 @@ static UINT send_binary( struct msi_syshost *host, HANDLE file, DWORD size )
     if (!(buffer = malloc( WEX_MSISYS_MAX_CHUNK ))) return ERROR_OUTOFMEMORY;
     while (done < size)
     {
-        if (!ReadFile( file, buffer, min( size - done, WEX_MSISYS_MAX_CHUNK ), &got, NULL ) || !got)
+        if (!ReadFile( file, buffer, min( size - done, WEX_MSISYS_MAX_CHUNK ), &got, NULL ))
         {
-            ret = got ? GetLastError() : ERROR_HANDLE_EOF;
+            ret = GetLastError();
+            break;
+        }
+        if (!got)
+        {
+            ret = ERROR_HANDLE_EOF;
             break;
         }
         if (!send_frame( host->pipe, &host->write_cs, WEX_MSISYS_CHUNK, 0, buffer, got, NULL, 0 ))
@@ -1112,9 +1117,10 @@ static DWORD WINAPI host_run_thread( void *arg )
 
     if (job->run.kind == WEX_MSISYS_KIND_DLL)
     {
-        CoInitializeEx( NULL, COINIT_MULTITHREADED );
+        /* no COM initialized on the action's thread, as in msiexec's ordinary custom action server (its main thread
+         * has the MTA): an action that wants an STA initializes it itself (WiX's CreateInternetShortcuts, Node.js:
+         * RPC_E_CHANGED_MODE otherwise) */
         done.code = custom_call_dll_function( syshost.endpoint, &job->run.guid, path );
-        CoUninitialize();
         if (!DeleteFileW( path )) WARN( "cannot remove %s: %lu\n", debugstr_w(path), GetLastError() );
         goto end;
     }
@@ -1282,6 +1288,8 @@ UINT CDECL __wine_msi_syshost( HANDLE pipe )
     InitializeCriticalSection( &syshost.write_cs );
     InitializeCriticalSection( &syshost.cs );
     list_init( &syshost.channels );
+    /* as msiexec's custom action server: the MTA on the main thread (streams are marshalled), none on the actions' */
+    CoInitializeEx( NULL, COINIT_MULTITHREADED );
 
     /* our endpoint: a random name; only SYSTEM opens it (the bridge checks a session's opener against this DACL),
      * so only the action's own connections come in */
