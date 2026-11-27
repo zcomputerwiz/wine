@@ -614,6 +614,58 @@ void window_surface_unlock( struct window_surface *surface )
     pthread_mutex_unlock( &surface->mutex );
 }
 
+/* The backdrop of a window's extended frame where nothing composes alpha (see include/wine/dcomp_underlay.h): black
+ * inside the margins becomes the backdrop colour, in the surface itself, so that what reads the window's pixels back (a
+ * WinUI island composing over its parent) sees the same. */
+static void apply_dwm_backdrop( struct window_surface *surface, const RECT *dirty, const BITMAPINFO *info, void *bits )
+{
+    static const WCHAR *const margin_props[4] =
+    {
+        WINE_DWM_BACKDROP_LEFT_PROP, WINE_DWM_BACKDROP_RIGHT_PROP, WINE_DWM_BACKDROP_TOP_PROP, WINE_DWM_BACKDROP_BOTTOM_PROP
+    };
+    ULONG_PTR backdrop = (ULONG_PTR)NtUserGetProp( surface->hwnd, WINE_DWM_BACKDROP_PROP );
+    int margins[4], width, height, x, y, i;
+    struct window_rects rects;
+    struct ratio raw_dpi;
+    RECT client, strips[4];
+    BOOL sheet = FALSE;
+    DWORD pixel, *row;
+
+    if (!backdrop || info->bmiHeader.biBitCount != 32 || info->bmiHeader.biCompression != BI_RGB) return;
+    for (i = 0; i < 4; i++)
+    {
+        margins[i] = (int)(ULONG_PTR)NtUserGetProp( surface->hwnd, margin_props[i] ) - 0x10000;
+        if (margins[i] < 0) sheet = TRUE;
+    }
+    get_win_monitor_dpi( surface->hwnd, &raw_dpi );
+    if (!get_window_rects( surface->hwnd, COORDS_SCREEN, &rects, raw_dpi )) return;
+    client = rects.client;
+    OffsetRect( &client, -rects.visible.left - surface->rect.left, -rects.visible.top - surface->rect.top );
+    memset( strips, 0, sizeof(strips) );
+    if (sheet) strips[0] = client;
+    else
+    {
+        SetRect( &strips[0], client.left, client.top, client.left + margins[0], client.bottom );
+        SetRect( &strips[1], client.right - margins[1], client.top, client.right, client.bottom );
+        SetRect( &strips[2], client.left, client.top, client.right, client.top + margins[2] );
+        SetRect( &strips[3], client.left, client.bottom - margins[3], client.right, client.bottom );
+    }
+    pixel = (backdrop & 0xff) << 16 | (backdrop & 0xff00) | (backdrop >> 16 & 0xff);   /* COLORREF to the DIB's XRGB */
+    width = info->bmiHeader.biWidth;
+    height = abs( info->bmiHeader.biHeight );
+    for (i = 0; i < 4; i++)
+    {
+        RECT strip;
+        if (!intersect_rect( &strip, &strips[i], dirty )) continue;
+        for (y = max( strip.top, 0 ); y < min( strip.bottom, height ); y++)
+        {
+            row = (DWORD *)bits + (info->bmiHeader.biHeight < 0 ? y : height - 1 - y) * width;
+            for (x = max( strip.left, 0 ); x < min( strip.right, width ); x++)
+                if (!(row[x] & 0xffffff)) row[x] = (row[x] & 0xff000000) | pixel;
+        }
+    }
+}
+
 void window_surface_flush( struct window_surface *surface )
 {
     char color_buf[FIELD_OFFSET( BITMAPINFO, bmiColors[256] )];
@@ -636,8 +688,12 @@ void window_surface_flush( struct window_surface *surface )
 
     if (intersect_rect( &dirty, &dirty, &bounds ) && (color_bits = window_surface_get_color( surface, color_info )))
     {
-        BOOL shape_changed = update_surface_shape( surface, &surface->rect, &dirty, color_info, color_bits );
-        void *shape_bits = window_surface_get_shape( surface, shape_info );
+        BOOL shape_changed;
+        void *shape_bits;
+
+        apply_dwm_backdrop( surface, &dirty, color_info, color_bits );
+        shape_changed = update_surface_shape( surface, &surface->rect, &dirty, color_info, color_bits );
+        shape_bits = window_surface_get_shape( surface, shape_info );
 
         TRACE( "Flushing hwnd %p, surface %p %s, bounds %s, dirty %s\n", surface->hwnd, surface,
                wine_dbgstr_rect( &surface->rect ), wine_dbgstr_rect( &surface->bounds ), wine_dbgstr_rect( &dirty ) );

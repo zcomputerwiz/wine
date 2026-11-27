@@ -33,6 +33,7 @@
 #include "dwmapi.h"
 #include "wine/debug.h"
 #include "wine/dwm_protocol.h"
+#include "wine/dcomp_underlay.h"
 #include "dwm_client.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dwmapi);
@@ -296,6 +297,53 @@ static const WCHAR margin_props[4][32] =
 
 static void clear_auto_blur(HWND hwnd);
 
+/* Publish the backdrop of the window's extended frame for win32u (include/wine/dcomp_underlay.h), or withdraw it: a
+ * system backdrop (Mica, Acrylic, Mica Alt) and margins, where nothing composes alpha (with DwmAlpha the compositor
+ * draws the material). Without materials the backdrop is a flat colour: the theme's face colour, or a dark grey for a
+ * dark-mode window. */
+static void update_backdrop(HWND hwnd)
+{
+    static const WCHAR *const margin_props[4] =
+    {
+        WINE_DWM_BACKDROP_LEFT_PROP, WINE_DWM_BACKDROP_RIGHT_PROP, WINE_DWM_BACKDROP_TOP_PROP, WINE_DWM_BACKDROP_BOTTOM_PROP
+    };
+    DWORD type = 0, mica = 0, dark = 0;
+    BOOL margins = FALSE, on;
+    COLORREF color;
+    int i;
+
+    get_attribute_value(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &type);
+    get_attribute_value(hwnd, DWMWA_MICA_EFFECT, &mica);
+    get_attribute_value(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark);
+    for (i = 0; i < 4; i++)
+        if ((ULONG_PTR)GetPropW(hwnd, margin_props[i]) != 0x10000 && GetPropW(hwnd, margin_props[i])) margins = TRUE;
+    on = (type == 2 || type == 3 || type == 4 || mica) && margins && !GetPropW(hwnd, L"__wine_dwm_alpha");
+    color = dark ? RGB(0x20, 0x20, 0x20) : GetSysColor(COLOR_BTNFACE);
+    if (on && (ULONG_PTR)GetPropW(hwnd, WINE_DWM_BACKDROP_PROP) == (0x01000000 | color)) return;
+    if (!on && !GetPropW(hwnd, WINE_DWM_BACKDROP_PROP)) return;
+    if (on) SetPropW(hwnd, WINE_DWM_BACKDROP_PROP, (HANDLE)(ULONG_PTR)(0x01000000 | color));
+    else RemovePropW(hwnd, WINE_DWM_BACKDROP_PROP);
+    RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+}
+
+/* the app's own margins, whatever DwmAlpha is (set_glass stores them only for the glass compositor) */
+static void store_backdrop_margins(HWND hwnd, const MARGINS *margins)
+{
+    static const WCHAR *const margin_props[4] =
+    {
+        WINE_DWM_BACKDROP_LEFT_PROP, WINE_DWM_BACKDROP_RIGHT_PROP, WINE_DWM_BACKDROP_TOP_PROP, WINE_DWM_BACKDROP_BOTTOM_PROP
+    };
+    int values[4] = { margins->cxLeftWidth, margins->cxRightWidth, margins->cyTopHeight, margins->cyBottomHeight };
+    int i;
+
+    for (i = 0; i < 4; i++)
+    {
+        if (values[i] < -1) values[i] = -1;
+        if (values[i] > 32767) values[i] = 32767;
+        SetPropW(hwnd, margin_props[i], (HANDLE)(ULONG_PTR)(values[i] + 0x10000));
+    }
+}
+
 static void set_glass(HWND hwnd, const MARGINS *margins)
 {
     int values[4] = { margins->cxLeftWidth, margins->cxRightWidth,
@@ -440,6 +488,8 @@ HRESULT WINAPI DwmExtendFrameIntoClientArea(HWND hwnd, const MARGINS* margins)
             RemovePropW(hwnd, L"__wine_aero_asked");        /* nor does a frame style switch take the glass away */
             set_glass(hwnd, margins);
         }
+        store_backdrop_margins(hwnd, margins);
+        update_backdrop(hwnd);
     }
 
     return S_OK;
@@ -549,6 +599,9 @@ HRESULT WINAPI DwmSetWindowAttribute(HWND hwnd, DWORD attributenum, LPCVOID attr
             !GetPropW(hwnd, L"__wine_dwm_alpha"))
             set_glass(hwnd, &zero_margins);
     }
+    if (attributenum == DWMWA_SYSTEMBACKDROP_TYPE || attributenum == DWMWA_MICA_EFFECT ||
+        attributenum == DWMWA_USE_IMMERSIVE_DARK_MODE)
+        update_backdrop(hwnd);
     return S_OK;
 }
 
