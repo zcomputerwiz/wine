@@ -220,6 +220,9 @@ struct d2d_device_context
     D2D1_RENDER_TARGET_PROPERTIES desc;
     D2D1_SIZE_U pixel_size;
     struct d2d_clip_stack clip_stack;
+    /* slot 9 of the private interface: drawing on this bitmap is confined to the rectangle (not referenced, compared only) */
+    const struct d2d_bitmap *update_bitmap;
+    D2D1_RECT_U update_rect;
 
     struct d2d_indexed_objects vertex_buffers;
 

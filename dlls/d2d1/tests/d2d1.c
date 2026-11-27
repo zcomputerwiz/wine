@@ -10636,6 +10636,121 @@ static void test_context_private_queued_draw(ID2D1DeviceContext *context, IUnkno
     ID2D1Bitmap1_Release(other);
     ID2D1Bitmap1_Release(bitmap);
 }
+
+static DWORD get_bitmap_pixel_at(ID2D1DeviceContext *context, ID2D1Bitmap1 *bitmap, unsigned int x, unsigned int y)
+{
+    D2D1_BITMAP_PROPERTIES1 desc = {{DXGI_FORMAT_R8G8B8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED}, 96.0f, 96.0f};
+    D2D1_RECT_U src = {x, y, x + 1, y + 1};
+    D2D1_POINT_2U origin = {0, 0};
+    D2D1_SIZE_U size = {1, 1};
+    D2D1_MAPPED_RECT mapped;
+    ID2D1Bitmap1 *readback;
+    DWORD pixel = 0xdeadbeef;
+    HRESULT hr;
+
+    desc.bitmapOptions = D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
+    hr = ID2D1DeviceContext_CreateBitmap(context, size, NULL, 0, &desc, &readback);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1Bitmap1_CopyFromBitmap(readback, &origin, (ID2D1Bitmap *)bitmap, &src);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1Bitmap1_Map(readback, D2D1_MAP_OPTIONS_READ, &mapped);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        pixel = *(DWORD *)mapped.bits;
+        ID2D1Bitmap1_Unmap(readback);
+    }
+    ID2D1Bitmap1_Release(readback);
+    return pixel;
+}
+
+/* slot 9 of the private interface {2ea67ed7-...}: (bitmap, rectangle) confines drawing on that bitmap, Clear included, to the
+ * rectangle, in pixels; (bitmap, NULL) ends it. XAML of the Windows App SDK calls it around each run of text it draws into a
+ * shared surface. Windows leaves the pixels outside the rectangle undefined (zero is read back) and draws nothing on the bitmap
+ * after the NULL call until it is told again; only what the callers rely on is checked (measured:
+ * tests/uwp/alpc/d2d-m9-probe.cpp of WineExplorer). */
+static void test_context_private_update_rect(ID2D1DeviceContext *context, IUnknown *priv)
+{
+    typedef HRESULT (STDMETHODCALLTYPE *method9_t)(void *, ID2D1Bitmap1 *, const D2D1_RECT_U *);
+    static const struct { unsigned int x, y; BOOL inside; } points[] =
+    {
+        {16, 8, TRUE}, {47, 8, TRUE}, {16, 23, TRUE}, {47, 23, TRUE}, {30, 15, TRUE},
+        {15, 8}, {16, 7}, {48, 23}, {47, 24}, {0, 0}, {4, 2}, {100, 50},
+    };
+    D2D1_BITMAP_PROPERTIES1 desc = {{DXGI_FORMAT_R8G8B8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED}, 96.0f, 96.0f};
+    D2D1_COLOR_F red = {1.0f, 0.0f, 0.0f, 1.0f}, green = {0.0f, 1.0f, 0.0f, 1.0f}, blue = {0.0f, 0.0f, 1.0f, 1.0f};
+    D2D1_RECT_F fill = {0.0f, 0.0f, 8.0f, 4.0f}, fill2 = {20.0f, 10.0f, 24.0f, 12.0f};
+    method9_t method9 = (method9_t)(*(void ***)priv)[9];
+    D2D1_RECT_U rect = {16, 8, 48, 24};
+    D2D1_SIZE_U size = {128, 64};
+    ID2D1SolidColorBrush *brush;
+    ID2D1Bitmap1 *bitmap, *other;
+    unsigned int i;
+    DWORD pixel;
+    HRESULT hr;
+
+    desc.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET;
+    hr = ID2D1DeviceContext_CreateBitmap(context, size, NULL, 0, &desc, &bitmap);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1DeviceContext_CreateBitmap(context, size, NULL, 0, &desc, &other);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1DeviceContext_CreateSolidColorBrush(context, &blue, NULL, &brush);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1DeviceContext_SetAntialiasMode(context, D2D1_ANTIALIAS_MODE_ALIASED);
+
+    ID2D1DeviceContext_SetTarget(context, (ID2D1Image *)bitmap);
+    ID2D1DeviceContext_BeginDraw(context);
+    ID2D1DeviceContext_Clear(context, &green);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1DeviceContext_SetTarget(context, NULL);
+
+    /* as XAML does: the rectangle, the target, the drawing, NULL */
+    hr = method9(priv, bitmap, &rect);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1DeviceContext_SetTarget(context, (ID2D1Image *)bitmap);
+    ID2D1DeviceContext_BeginDraw(context);
+    ID2D1DeviceContext_Clear(context, &red);
+    ID2D1DeviceContext_FillRectangle(context, &fill, (ID2D1Brush *)brush);
+    ID2D1DeviceContext_FillRectangle(context, &fill2, (ID2D1Brush *)brush);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = method9(priv, bitmap, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1DeviceContext_SetTarget(context, NULL);
+
+    for (i = 0; i < ARRAY_SIZE(points); ++i)
+    {
+        pixel = get_bitmap_pixel_at(context, bitmap, points[i].x, points[i].y);
+        if (points[i].inside)
+            ok(pixel == 0xff0000ff, "%u: Got unexpected pixel %08lx.\n", i, pixel);
+        else /* 0 on Windows, the old contents on Wine: never what was drawn */
+            ok(pixel != 0xff0000ff && pixel != 0xffff0000, "%u: Got unexpected pixel %08lx.\n", i, pixel);
+    }
+    pixel = get_bitmap_pixel_at(context, bitmap, 21, 11);
+    ok(pixel == 0xffff0000, "Got unexpected pixel %08lx.\n", pixel);
+
+    /* the rectangle is the bitmap's: another target is drawn whole while it is in force */
+    hr = method9(priv, bitmap, &rect);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1DeviceContext_SetTarget(context, (ID2D1Image *)other);
+    ID2D1DeviceContext_BeginDraw(context);
+    ID2D1DeviceContext_Clear(context, &red);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1DeviceContext_SetTarget(context, NULL);
+    hr = method9(priv, bitmap, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    pixel = get_bitmap_pixel_at(context, other, 0, 0);
+    ok(pixel == 0xff0000ff, "Got unexpected pixel %08lx.\n", pixel);
+    pixel = get_bitmap_pixel_at(context, other, 100, 50);
+    ok(pixel == 0xff0000ff, "Got unexpected pixel %08lx.\n", pixel);
+
+    ID2D1DeviceContext_SetAntialiasMode(context, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    ID2D1SolidColorBrush_Release(brush);
+    ID2D1Bitmap1_Release(other);
+    ID2D1Bitmap1_Release(bitmap);
+}
 #endif
 
 /* The private interface {46fdbfea-53f8-440c-b9e2-81dfec612a72} of the device, which the lifted compositor of the Windows App SDK asks
@@ -10752,6 +10867,7 @@ static void test_device_private(BOOL d3d11)
         ID2D1Bitmap1_Release(plain);
         ID2D1Bitmap1_Release(bitmap);
 
+        test_context_private_update_rect(context, unk);
         if (d3d11)
         {
             ID3D11Device *d3d_device;

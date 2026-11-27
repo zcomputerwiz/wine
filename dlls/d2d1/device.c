@@ -174,6 +174,15 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
         scissor_rect.right = render_target->pixel_size.width;
         scissor_rect.bottom = render_target->pixel_size.height;
     }
+    if (render_target->update_bitmap && render_target->update_bitmap == render_target->target.bitmap)
+    {
+        const D2D1_RECT_U *update = &render_target->update_rect;
+
+        scissor_rect.left = max(scissor_rect.left, (LONG)update->left);
+        scissor_rect.top = max(scissor_rect.top, (LONG)update->top);
+        scissor_rect.right = max(scissor_rect.left, min(scissor_rect.right, (LONG)update->right));
+        scissor_rect.bottom = max(scissor_rect.top, min(scissor_rect.bottom, (LONG)update->bottom));
+    }
     ID3D11DeviceContext1_RSSetScissorRects(context, 1, &scissor_rect);
     ID3D11DeviceContext1_RSSetState(context, render_target->rs);
     ID3D11DeviceContext1_OMSetRenderTargets(context, 1, &render_target->target.bitmap->rtv, NULL);
@@ -407,9 +416,25 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_private_method15(void *iface
     return S_OK;
 }
 
-static HRESULT STDMETHODCALLTYPE d2d_device_context_private_method9(void *iface, ID2D1Bitmap1 *bitmap, void *arg2, void *arg3)
+/* Slot 9: (bitmap, rectangle) before drawing on a bitmap confines the drawing, Clear included, to that rectangle of it, in pixels;
+ * (bitmap, NULL) afterwards ends that. XAML of the Windows App SDK draws each run of text into its part of a shared surface this
+ * way and clears it first, so without the rectangle every run wipes the others (measured: tests/uwp/alpc/d2d-m9-probe.cpp of
+ * WineExplorer). Windows leaves the rest of the bitmap undefined (zero was read back); here it keeps its contents. */
+static HRESULT STDMETHODCALLTYPE d2d_device_context_private_method9(void *iface, ID2D1Bitmap1 *bitmap, const D2D1_RECT_U *rect)
 {
-    FIXME("iface %p, bitmap %p, %p, %p semi-stub.\n", iface, bitmap, arg2, arg3);
+    struct d2d_device_context *context = impl_from_private(iface);
+    struct d2d_bitmap *bitmap_impl;
+
+    TRACE("iface %p, bitmap %p, rect %p.\n", iface, bitmap, rect);
+
+    if (!rect || !(bitmap_impl = d2d_bitmap_from_iface_checked((ID2D1Bitmap *)bitmap)))
+    {
+        context->update_bitmap = NULL;
+        return S_OK;
+    }
+    TRACE("rect (%u,%u)-(%u,%u).\n", rect->left, rect->top, rect->right, rect->bottom);
+    context->update_bitmap = bitmap_impl;
+    context->update_rect = *rect;
     return S_OK;
 }
 
