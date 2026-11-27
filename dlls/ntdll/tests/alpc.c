@@ -35,6 +35,9 @@ DECL_FUNCPTR(NtAlpcCreatePort)
 DECL_FUNCPTR(NtAlpcCreateSecurityContext)
 DECL_FUNCPTR(NtAlpcImpersonateClientOfPort)
 DECL_FUNCPTR(NtAlpcSendWaitReceivePort)
+DECL_FUNCPTR(NtAssociateWaitCompletionPacket)
+DECL_FUNCPTR(NtCancelWaitCompletionPacket)
+DECL_FUNCPTR(NtCreateWaitCompletionPacket)
 
 #undef DECL_FUNCPTR
 
@@ -56,6 +59,9 @@ static void init_functions(void)
     LOAD_FUNCPTR(NtAlpcCreateSecurityContext)
     LOAD_FUNCPTR(NtAlpcImpersonateClientOfPort)
     LOAD_FUNCPTR(NtAlpcSendWaitReceivePort)
+    LOAD_FUNCPTR(NtAssociateWaitCompletionPacket)
+    LOAD_FUNCPTR(NtCancelWaitCompletionPacket)
+    LOAD_FUNCPTR(NtCreateWaitCompletionPacket)
 
 #undef LOAD_FUNCPTR
 }
@@ -598,7 +604,9 @@ static void test_alpc_messages(void)
     struct test_msg msg, reply;
     OBJECT_ATTRIBUTES attr;
     LARGE_INTEGER timeout;
-    HANDLE client, thread;
+    HANDLE client, thread, iocp = NULL, packet = NULL;
+    BOOLEAN signaled = 0xcc;
+    LONG closed_expected = 1;
     NTSTATUS status;
     SIZE_T size, req;
 
@@ -656,6 +664,55 @@ static void test_alpc_messages(void)
     ok(attrs->ValidAttributes == ALPC_MESSAGE_CONTEXT_ATTRIBUTE, "Got unexpected attributes %#lx.\n",
             attrs->ValidAttributes);
 
+    /* a waitable port (ALPC_PORFLG_WAITABLE_PORT, as CoreMessagingXP's): it is not signaled while nothing waits for it,
+     * and a wait completion packet on it does not see the reply to a synchronous request, which goes to the thread that
+     * sent the request (measured on Windows 11; CoreMessagingXP keeps such a packet on its port and would otherwise go
+     * to receive a message that is not there) */
+    if (pNtCreateWaitCompletionPacket && pNtAssociateWaitCompletionPacket)
+    {
+        ALPC_PORT_ATTRIBUTES waitable_attr;
+        HANDLE waitable = NULL;
+        DWORD bytes = 0xdeadbeef;
+        ULONG_PTR key = 0xdeadbeef;
+        OVERLAPPED *ovl = (OVERLAPPED *)0xdeadbeef;
+        BOOL got;
+
+        init_port_attr(&waitable_attr, 0x40000, 0x1000);
+        init_test_msg(&msg, "hello");
+        size = sizeof(msg);
+        timeout.QuadPart = -100000000;
+        status = pNtAlpcConnectPort(&waitable, &name, NULL, &waitable_attr, ALPC_SYNC_CONNECTION, NULL, &msg.header,
+                &size, NULL, NULL, &timeout);
+        ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+        ok(WaitForSingleObject(waitable, 0) == WAIT_TIMEOUT, "the waitable port is signaled.\n");
+
+        iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
+        status = pNtCreateWaitCompletionPacket(&packet, GENERIC_ALL, NULL);
+        ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+        status = pNtAssociateWaitCompletionPacket(packet, iocp, waitable, (void *)0x77, NULL, 0, 0, &signaled);
+        ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+        ok(!signaled, "Got signaled %d.\n", signaled);
+
+        init_test_msg(&msg, "reque");
+        memset(&reply, 0xcc, sizeof(reply));
+        size = sizeof(reply);
+        timeout.QuadPart = -100000000;
+        status = pNtAlpcSendWaitReceivePort(waitable, ALPC_MSGFLG_SYNC_REQUEST, &msg.header, NULL, &reply.header, &size,
+                NULL, &timeout);
+        ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+        ok(reply.header.DataLength == 5 && !memcmp(reply.data, "REPLY", 5), "Got unexpected reply.\n");
+
+        Sleep(50);
+        got = GetQueuedCompletionStatus(iocp, &bytes, &key, &ovl, 0);
+        ok(!got && GetLastError() == WAIT_TIMEOUT, "the packet fired for the reply: got %d, key %#Ix.\n", got, key);
+        ok(WaitForSingleObject(waitable, 0) == WAIT_TIMEOUT, "the waitable port is signaled.\n");
+        pNtCancelWaitCompletionPacket(packet, TRUE);
+        CloseHandle(packet);
+        CloseHandle(iocp);
+        CloseHandle(waitable);
+        closed_expected++;
+    }
+
     /* nothing is waiting: the receive times out */
     memset(&reply, 0xcc, sizeof(reply));
     size = sizeof(reply);
@@ -669,7 +726,7 @@ static void test_alpc_messages(void)
     WaitForSingleObject(thread, 10000);
     CloseHandle(thread);
     CloseHandle(client);
-    ok(test_closed_count == 1, "Got unexpected count %ld.\n", test_closed_count);
+    ok(test_closed_count == closed_expected, "Got unexpected count %ld.\n", test_closed_count);
     CloseHandle(test_conn_port);
 }
 
