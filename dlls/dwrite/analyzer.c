@@ -1301,9 +1301,13 @@ static HRESULT analyze_linebreaks(IDWriteTextAnalysisSource *source, UINT32 posi
 
 /* The private interface {b7e6163e-7f46-43b4-84b3-e4e6249c365e} of the text analyzer (one digit away from IDWriteTextAnalyzer).
  * XAML of the Windows App SDK asks the analyzer for it and fails fast without it. Measured black box on 64-bit Windows 11: the
- * analyzer answers it with a second interface of its own (not the analyzer pointer), whose vtable has one method after IUnknown;
- * XAML calls it with an object of its own, NULL and a small count, and it returns 0 and writes nothing through its arguments.
- * Here it does nothing and returns S_OK. The argument sizes are not measured on i386, so 32-bit callers do not get the interface. */
+ * analyzer answers it with a second interface of its own (not the analyzer pointer), whose vtable has one method after IUnknown.
+ * That method finds the base direction of a text range, as (source, position, length, BOOL *rtl, BOOL *no_strong, buffer, flags)
+ * with an IDWriteTextAnalysisSource: it asks the source for its paragraph reading direction and for the text, and looks for the
+ * first character of a strong direction class (L, R or AL; explicit embedding and isolate characters do not count, the marks
+ * U+200E and U+200F do). *rtl is whether that character is R or AL; without one, *rtl is whether the paragraph direction is right
+ * to left and *no_strong is TRUE. A length of 0 does not read the text. The buffer was never written and the flags (0 and 8 seen)
+ * made no difference in the measurements. The argument sizes are not measured on i386, so 32-bit callers do not get the interface. */
 #ifdef __x86_64__
 static const GUID textanalyzer_private_iid = {0xb7e6163e, 0x7f46, 0x43b4, {0x84, 0xb3, 0xe4, 0xe6, 0x24, 0x9c, 0x36, 0x5e}};
 
@@ -1329,9 +1333,54 @@ static ULONG WINAPI textanalyzer_private_Release(void *iface)
     return 1;
 }
 
-static HRESULT WINAPI textanalyzer_private_method3(void *iface, IUnknown *object, void *arg2, UINT_PTR count)
+static HRESULT WINAPI textanalyzer_private_method3(void *iface, IDWriteTextAnalysisSource *source, UINT_PTR position,
+        UINT_PTR length, BOOL *rtl, BOOL *no_strong, void *buffer, UINT_PTR flags)
 {
-    FIXME("%p, %p, %p, %#Ix: semi-stub.\n", iface, object, arg2, count);
+    /* values of the bidi class table (enum directions in bidi.c) */
+    enum { BIDI_L = 1, BIDI_R = 2, BIDI_AL = 5 };
+    UINT32 pos = position, end = position + length;
+    BOOL paragraph_rtl;
+    HRESULT hr;
+
+    TRACE("%p, %p, %Iu, %Iu, %p, %p, %p, %#Ix.\n", iface, source, position, length, rtl, no_strong, buffer, flags);
+
+    if (!source || !rtl || !no_strong)
+        return E_INVALIDARG;
+
+    paragraph_rtl = IDWriteTextAnalysisSource_GetParagraphReadingDirection(source) == DWRITE_READING_DIRECTION_RIGHT_TO_LEFT;
+    while (pos < end)
+    {
+        const WCHAR *text = NULL;
+        UINT32 len = 0, i;
+
+        if (FAILED(hr = IDWriteTextAnalysisSource_GetTextAtPosition(source, pos, &text, &len)))
+            return hr;
+        if (!text || !len)
+            break;
+        len = min(len, end - pos);
+        for (i = 0; i < len; ++i)
+        {
+            UINT32 ch = text[i];
+            UINT8 class;
+
+            if (IS_HIGH_SURROGATE(ch) && i + 1 < len && IS_LOW_SURROGATE(text[i + 1]))
+            {
+                ch = 0x10000 + ((ch - 0xd800) << 10) + (text[i + 1] - 0xdc00);
+                ++i;
+            }
+            class = get_table_entry_32(bidi_direction_table, ch);
+            if (class == BIDI_L || class == BIDI_R || class == BIDI_AL)
+            {
+                *rtl = class != BIDI_L;
+                *no_strong = FALSE;
+                return S_OK;
+            }
+        }
+        pos += len;
+    }
+
+    *rtl = paragraph_rtl;
+    *no_strong = TRUE;
     return S_OK;
 }
 

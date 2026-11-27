@@ -2958,6 +2958,100 @@ static void test_glyph_justification_property(void)
     IDWriteFontFace_Release(fontface);
 }
 
+/* The analyzer's private interface {b7e6163e-7f46-43b4-84b3-e4e6249c365e}, which XAML of the Windows App SDK calls for every text
+ * run: its one method finds the base direction of a text range (values measured on 64-bit Windows 11). */
+typedef HRESULT (WINAPI *base_direction_func)(void *iface, IDWriteTextAnalysisSource *source, UINT_PTR position,
+        UINT_PTR length, BOOL *rtl, BOOL *no_strong, void *buffer, UINT_PTR flags);
+
+static void test_private_base_direction(void)
+{
+    static const GUID IID_private = {0xb7e6163e, 0x7f46, 0x43b4, {0x84, 0xb3, 0xe4, 0xe6, 0x24, 0x9c, 0x36, 0x5e}};
+    static const struct
+    {
+        const WCHAR *text;
+        DWRITE_READING_DIRECTION direction;
+        BOOL rtl, no_strong;
+    }
+    tests[] =
+    {
+        {L"File", DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, FALSE, FALSE},
+        {L"Ln 1, Col 1", DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, FALSE, FALSE},
+        {L"1234", DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, FALSE, TRUE},
+        {L"100%", DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, FALSE, TRUE},
+        {L" ", DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, FALSE, TRUE},
+        {L"", DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, FALSE, TRUE},
+        {L"\xe70d", DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, FALSE, FALSE},
+        {L"\x0645\x0631\x062d", DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, TRUE, FALSE},
+        {L"ab\x0645\x0631", DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, FALSE, FALSE},
+        {L"\x0645\x0631" L"a", DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, TRUE, FALSE},
+        {L"\x05e9\x05dc", DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, TRUE, FALSE},
+        {L"\x0710", DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, TRUE, FALSE},
+        {L"\xd83d\xde00", DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, FALSE, TRUE},
+        {L"e\x0301x", DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, FALSE, FALSE},
+        {L"\x65e5\x672c", DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, FALSE, FALSE},
+        {L"\x0661\x0662", DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, FALSE, TRUE},
+        {L"1\x0645", DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, TRUE, FALSE},
+        {L"\x200f" L"a", DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, TRUE, FALSE},
+        {L"\x200e\x0645", DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, FALSE, FALSE},
+        {L"\x202b" L"a", DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, FALSE, FALSE},
+        {L"\x202a\x0645", DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, TRUE, FALSE},
+        {L"\x2067" L"a", DWRITE_READING_DIRECTION_LEFT_TO_RIGHT, FALSE, FALSE},
+        {L"File", DWRITE_READING_DIRECTION_RIGHT_TO_LEFT, FALSE, FALSE},
+        {L"1234", DWRITE_READING_DIRECTION_RIGHT_TO_LEFT, TRUE, TRUE},
+        {L"\x0645\x0631", DWRITE_READING_DIRECTION_RIGHT_TO_LEFT, TRUE, FALSE},
+    };
+    IDWriteTextAnalyzer *analyzer;
+    base_direction_func func;
+    BOOL values[4];
+    char buffer[256];
+    unsigned int i, j;
+    void *private;
+    HRESULT hr;
+
+    if (sizeof(void *) != 8)
+    {
+        /* the argument layout is measured on x86_64 only */
+        skip("The analyzer's private interface is only tested on 64-bit.\n");
+        return;
+    }
+    hr = IDWriteFactory_CreateTextAnalyzer(factory, &analyzer);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IDWriteTextAnalyzer_QueryInterface(analyzer, &IID_private, &private);
+    if (FAILED(hr))
+    {
+        win_skip("The analyzer's private interface is not available.\n");
+        IDWriteTextAnalyzer_Release(analyzer);
+        return;
+    }
+    func = (base_direction_func)(*(void ***)private)[3];
+
+    for (i = 0; i < ARRAY_SIZE(tests); ++i)
+    {
+        winetest_push_context("Test %u", i);
+        init_textsource(&analysissource, tests[i].text, -1, tests[i].direction);
+        for (j = 0; j < ARRAY_SIZE(values); ++j) values[j] = 0xdeadbeef;
+        memset(buffer, 0xcc, sizeof(buffer));
+        hr = func(private, &analysissource.IDWriteTextAnalysisSource_iface, 0, analysissource.text_length,
+                &values[0], &values[1], buffer, 0);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        ok(values[0] == tests[i].rtl, "Unexpected rtl value %#x.\n", values[0]);
+        ok(values[1] == tests[i].no_strong, "Unexpected no_strong value %#x.\n", values[1]);
+        ok(values[2] == 0xdeadbeef && values[3] == 0xdeadbeef, "Got %#x, %#x after the values.\n", values[2], values[3]);
+        for (j = 0; j < sizeof(buffer); ++j) if (buffer[j] != (char)0xcc) break;
+        ok(j == sizeof(buffer), "The buffer was written at %u.\n", j);
+        winetest_pop_context();
+    }
+
+    /* a range inside the text */
+    init_textsource(&analysissource, L"ab\x0645\x0631", -1, DWRITE_READING_DIRECTION_LEFT_TO_RIGHT);
+    values[0] = values[1] = 0xdeadbeef;
+    hr = func(private, &analysissource.IDWriteTextAnalysisSource_iface, 2, 2, &values[0], &values[1], buffer, 0);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(values[0] == TRUE && values[1] == FALSE, "Got %#x, %#x.\n", values[0], values[1]);
+
+    IDWriteTextAnalyzer_Release(analyzer);
+}
+
 START_TEST(analyzer)
 {
     HRESULT hr;
@@ -2987,6 +3081,7 @@ START_TEST(analyzer)
     test_GetBaseline();
     test_GetGdiCompatibleGlyphPlacements();
     test_glyph_justification_property();
+    test_private_base_direction();
 
     IDWriteFactory_Release(factory);
 }
