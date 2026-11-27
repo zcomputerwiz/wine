@@ -805,7 +805,12 @@ static void pcall_token_done( void *ctx, unsigned int status, const struct wex_x
             memcpy( &tr, body, sizeof(tr) );
             if ((call->token = link_bound_token( x_peer_uid( peer ), x_peer_session( peer ),
                                                  (const char *)body + sizeof(tr), body_size - sizeof(tr), &status )))
-                call->token_access = tr.granted;
+            {
+                /* the owner's mask is information: never more than was asked for (unless MAXIMUM_ALLOWED) */
+                unsigned int asked = map_obj_access( (struct object *)call->token, call->access );
+
+                call->token_access = (call->access & MAXIMUM_ALLOWED) ? tr.granted : tr.granted & asked;
+            }
         }
         pcall_end( call, status );
     }
@@ -878,10 +883,23 @@ DECL_HANDLER(x_process_call)
     }
     else
     {
+        /* the caller of OpenProcessToken (its thread's token if impersonating), described: the owner checks the
+         * token's descriptor for it, as Windows does, not for whoever opened the process */
+        data_size_t desc_size;
+        void *desc;
+
+        if (!(desc = x_describe_caller( current, &desc_size, &status )))
+        {
+            release_object( call );
+            release_object( call );
+            set_error( status );
+            return;
+        }
         tk.access = req->access;
         tk.reserved = 0;
-        status = x_call( rproc->held->peer, WEX_X_TOKEN, rproc->held->id, &tk, sizeof(tk), NULL, 0, NULL, 0, 0,
+        status = x_call( rproc->held->peer, WEX_X_TOKEN, rproc->held->id, &tk, sizeof(tk), desc, desc_size, NULL, 0, 0,
                          pcall_token_done, call );
+        free( desc );
     }
     if (status != STATUS_PENDING)
     {

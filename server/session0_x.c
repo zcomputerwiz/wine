@@ -315,7 +315,7 @@ static struct x_qframe *x_build( unsigned int type, unsigned int call, unsigned 
     hdr.type = type;
     hdr.call = call;
     hdr.status = status;
-    hdr.desc_size = (type == WEX_X_OPEN) ? s2 : 0;
+    hdr.desc_size = (type == WEX_X_OPEN || type == WEX_X_TOKEN) ? s2 : 0;  /* X4: the token's caller too */
     hdr.ref = ref;
     p = q->data;
     memcpy( p, &hdr, sizeof(hdr) );
@@ -1122,7 +1122,10 @@ static void x_serve( struct x_conn *conn, const struct wex_x_header *hdr, const 
         void *data = NULL, *body_out = NULL, *joined = NULL;
         size_t data_size = 0, out_size;
 
-        if (size != (hdr->type == WEX_X_READ ? sizeof(rd) : sizeof(tk)))
+        /* a TOKEN request carries the description of OpenProcessToken's caller after its body (the review: the caller
+         * decides, as on Windows, not the identity that opened the process) */
+        if (hdr->type == WEX_X_READ ? (size != sizeof(rd) || hdr->desc_size)
+                                    : (size < sizeof(tk) || hdr->desc_size != size - sizeof(tk) || !hdr->desc_size))
         {
             x_reply( conn, hdr, STATUS_INVALID_PARAMETER, hdr->ref, NULL, 0 );
             return;
@@ -1143,10 +1146,18 @@ static void x_serve( struct x_conn *conn, const struct wex_x_header *hdr, const 
         }
         else
         {
+            struct token *caller;
+
             memcpy( &tk, body, sizeof(tk) );
-            status = ref->ops->token ? ref->ops->token( ref->obj, ref->access, ref->token, tk.access,
-                                                        &granted_reply.granted, &data, &data_size )
-                                     : STATUS_NOT_SUPPORTED;
+            /* condition 1: the caller's description becomes a token only through link_bound_token */
+            if ((caller = link_bound_token( conn->peer->uid, conn->peer->session, body + sizeof(tk), hdr->desc_size,
+                                            &status )))
+            {
+                status = ref->ops->token ? ref->ops->token( ref->obj, ref->access, caller, tk.access,
+                                                            &granted_reply.granted, &data, &data_size )
+                                         : STATUS_NOT_SUPPORTED;
+                release_object( caller );
+            }
             out_size = sizeof(granted_reply) + data_size;
             if (!status && !(joined = malloc( out_size ))) status = STATUS_NO_MEMORY;
             if (!status)
