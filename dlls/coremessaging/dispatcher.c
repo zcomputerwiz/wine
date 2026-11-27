@@ -22,20 +22,15 @@
 #include "objbase.h"
 
 #include "wine/list.h"
+#include "wine/experimental.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(messaging);
 
-/* The queue is experimental and off by default: WINE_EXPERIMENTAL, a comma-separated list, turns it on with
- * "dispatcherqueue" (or "all"). Without it the controller is the earlier stub and the DispatcherQueue class is not
- * served. */
+/* The queue is experimental and off by default: WINE_EXPERIMENTAL=dispatcherqueue (wine/experimental.h) turns it
+ * on. Without it the controller is the earlier stub and the DispatcherQueue class is not served. */
 BOOL dispatcher_queue_enabled(void)
 {
-    WCHAR buffer[256], *token, *next;
-
-    if (!GetEnvironmentVariableW( L"WINE_EXPERIMENTAL", buffer, ARRAY_SIZE(buffer) )) return FALSE;
-    for (token = wcstok_s( buffer, L", ", &next ); token; token = wcstok_s( NULL, L", ", &next ))
-        if (!wcsicmp( token, L"dispatcherqueue" ) || !wcsicmp( token, L"all" )) return TRUE;
-    return FALSE;
+    return __wine_experimental_enabled( L"dispatcherqueue" );
 }
 
 /* A queue belongs to one thread and runs its work from that thread's message loop, through a message-only window.

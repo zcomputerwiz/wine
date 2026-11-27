@@ -801,6 +801,64 @@ static void test_DispatcherQueue_Statics(void)
     IActivationFactory_Release( factory );
 }
 
+/* Wine only: with the experimental flag unset the controller is the earlier stub and the queue class is not served. */
+static void test_experimental_off(void)
+{
+    static const WCHAR *dispatcher_queue_controller_statics_name = L"Windows.System.DispatcherQueueController";
+    static const WCHAR *dispatcher_queue_statics_name = L"Windows.System.DispatcherQueue";
+    IDispatcherQueueControllerStatics *statics = NULL;
+    IDispatcherQueueController *controller = NULL;
+    struct DispatcherQueueOptions options = { 0 };
+    IActivationFactory *factory = NULL;
+    IDispatcherQueue *queue = NULL;
+    WCHAR saved[256];
+    HSTRING str = NULL;
+    DWORD len;
+    HRESULT hr;
+
+    if (strcmp( winetest_platform, "wine" ))
+    {
+        skip( "the experimental flag exists only in Wine.\n" );
+        return;
+    }
+
+    len = GetEnvironmentVariableW( L"WINE_EXPERIMENTAL", saved, ARRAY_SIZE(saved) );
+    SetEnvironmentVariableW( L"WINE_EXPERIMENTAL", NULL );
+
+    hr = WindowsCreateString( dispatcher_queue_statics_name, wcslen( dispatcher_queue_statics_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == CLASS_E_CLASSNOTAVAILABLE, "got hr %#lx.\n", hr );
+    if (SUCCEEDED(hr)) IActivationFactory_Release( factory );
+
+    hr = WindowsCreateString( dispatcher_queue_controller_statics_name, wcslen( dispatcher_queue_controller_statics_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IDispatcherQueueControllerStatics, (void **)&statics );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED(hr))
+    {
+        hr = IDispatcherQueueControllerStatics_CreateOnDedicatedThread( statics, &controller );
+        ok( hr == E_NOTIMPL, "got hr %#lx.\n", hr );
+        IDispatcherQueueControllerStatics_Release( statics );
+    }
+
+    options.dwSize = sizeof( options );
+    options.threadType = DQTYPE_THREAD_CURRENT;
+    options.apartmentType = DQTAT_COM_NONE;
+    hr = CreateDispatcherQueueController( options, (PDISPATCHERQUEUECONTROLLER *)&controller );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED(hr))
+    {
+        hr = IDispatcherQueueController_get_DispatcherQueue( controller, &queue );
+        ok( hr == E_NOTIMPL, "got hr %#lx.\n", hr );
+        IDispatcherQueueController_Release( controller );
+    }
+
+    SetEnvironmentVariableW( L"WINE_EXPERIMENTAL", len ? saved : NULL );
+}
+
 START_TEST(coremessaging)
 {
     HRESULT hr;
@@ -815,6 +873,7 @@ START_TEST(coremessaging)
     test_CreateDispatcherQueueController();
     test_DispatcherQueueController_Statics();
     test_DispatcherQueue_Statics();
+    test_experimental_off();
 
     RoUninitialize();
 }
