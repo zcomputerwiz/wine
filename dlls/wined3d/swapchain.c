@@ -91,8 +91,10 @@ static HRESULT dcomp_background_for_window(struct wined3d_swapchain *swapchain, 
         /* A child target without a redirection bitmap (a WinUI island: the tab strip, menu row and status bar of a
          * WinUI 3 window) is drawn over its parent on Windows: its transparent pixels show the parent's. Its own GL
          * output is opaque, so the parent's pixels under it are its underlay. Composed over zeros instead, every
-         * island was a black bar. */
+         * island was a black bar. Only where nothing blends the target's alpha: with DwmAlpha the compositor shows
+         * what is under its transparent pixels (a translucent popup's soft shadow), and an opaque underlay hid it. */
         if (!(GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD)) return S_OK;
+        if (GetPropW(GetAncestor(hwnd, GA_ROOT), L"__wine_dwm_alpha")) return S_OK;
         from_parent = TRUE;
     }
     if (background && background->width == width && background->height == height
