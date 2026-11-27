@@ -177,7 +177,7 @@ static void budget_free( void *p, size_t size )
 /* ---- records ---- */
 
 /* build an EVENTLOGRECORD; NULL with *status set when it is over the record maximum */
-static BYTE *build_record( const WCHAR *source, WORD type, WORD category, DWORD id, const BYTE *sid, DWORD sid_size,
+BYTE *evt_build_record( const WCHAR *source, WORD type, WORD category, DWORD id, const BYTE *sid, DWORD sid_size,
                            const WCHAR *strings, DWORD strings_size, DWORD num_strings, const BYTE *data,
                            DWORD data_size, DWORD *size, DWORD *status )
 {
@@ -260,10 +260,14 @@ void report_system_event( WORD type, DWORD id, const WCHAR *string )
     BYTE *rec;
 
     if (!log) return;
-    if (!(rec = build_record( L"EventLog", type, 0, id, NULL, 0, string, strings_size, string ? 1 : 0, NULL, 0,
-                              &size, &status )))
+    if (!(rec = evt_build_record( L"EventLog", type, 0, id, NULL, 0, string, strings_size, string ? 1 : 0, NULL, 0,
+                                  &size, &status )))
         return;
-    if (!store_append( log, rec, size )) notify_log( log );
+    if (!store_append( log, rec, size ))
+    {
+        notify_log( log );
+        journal_record( log->name, L"EventLog", type, id, NULL, 0, string, string ? 1 : 0, log->next - 1 );
+    }
     free( rec );
 }
 
@@ -522,13 +526,19 @@ static DWORD do_report( struct connection *conn, struct log_handle *h, const BYT
         pos += (len + 1) * sizeof(WCHAR);
     }
     if (pos != rep.strings_size) return ERROR_INVALID_PARAMETER;
-    if (!(rec = build_record( h->source_name, rep.type, rep.category, rep.event_id, sid, rep.sid_size,
-                              (const WCHAR *)strings, rep.strings_size, rep.num_strings, data, rep.data_size,
-                              &rec_size, &status )))
+    if (!(rec = evt_build_record( h->source_name, rep.type, rep.category, rep.event_id, sid, rep.sid_size,
+                                  (const WCHAR *)strings, rep.strings_size, rep.num_strings, data, rep.data_size,
+                                  &rec_size, &status )))
         return status;
     status = store_append( h->log, rec, rec_size );
     free( rec );
-    if (!status) notify_log( h->log );
+    if (!status)
+    {
+        notify_log( h->log );
+        /* WineExplorer: the journal gets it too (the bridge writes it, rate-limited) */
+        journal_record( h->log->name, h->source_name, rep.type, rep.event_id, sid, rep.sid_size,
+                        (const WCHAR *)strings, rep.num_strings, h->log->next - 1 );
+    }
     TRACE( "pid %04lx: event %lu into %s: %lu\n", conn->client_pid, rep.event_id, debugstr_w(h->log->name), status );
     return status;
 }
@@ -975,7 +985,8 @@ static void serve(void)
         DWORD bytes = 0, error = 0;
 
         if (!GetQueuedCompletionStatus( port, &bytes, &key_value, &ov, 1000 )) error = GetLastError();
-        if (ov)
+        if (ov && key_value == JOURNAL_KEY) journal_dispatch( ov );  /* an event from the journal bridge */
+        else if (ov)
         {
             struct io *io = CONTAINING_RECORD( ov, struct io, ov );
             struct connection *conn = io->conn;
@@ -1065,8 +1076,11 @@ void WINAPI ServiceMain(DWORD argc, LPWSTR *argv)
 
     listen_next( &local );
     if (in_session0) listen_next( &bridged );
+    /* WineExplorer (docs/EVENTLOG_JOURNAL.md): session 0's service takes the journal's mapped events from the bridge */
+    if (in_session0) journal_start( port, JOURNAL_KEY );
     eventlog_update_status(SERVICE_RUNNING);
     serve();
+    journal_stop();
     eventlog_update_status(SERVICE_STOPPED);
 
     TRACE("exiting Event Log Service\n");

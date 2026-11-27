@@ -1,6 +1,10 @@
 MODULE    = wevtsvc.dll
+UNIXLIB   = wevtsvc.so
 IMPORTS   = rpcrt4 advapi32 ntdll
 
 SOURCES = \
+	journal.c \
 	store.c \
-	wevtsvc.c
+	unixlib.c \
+	wevtsvc.c \
+	wevtsvc_msg.mc

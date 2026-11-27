@@ -1269,6 +1269,21 @@ HKLM,"System\CurrentControlSet\Services\Dnscache\Parameters",,16
 HKLM,"System\CurrentControlSet\Services\Eventlog\Application",,16
 HKLM,"System\CurrentControlSet\Services\Eventlog\System","Sources",0x10000,""
 HKLM,"System\CurrentControlSet\Services\Eventlog\Security",,16
+; WineExplorer (docs/EVENTLOG_JOURNAL.md): the journal's free-text entries, administrators only; the sources the
+; service and the journal bridge write, with the service's message module (our own wording)
+HKLM,"System\CurrentControlSet\Services\Eventlog\Linux","CustomSD",,"O:SYG:SYD:(A;;0xf0007;;;SY)(A;;0x5;;;BA)"
+HKLM,"System\CurrentControlSet\Services\Eventlog\Linux\Linux Kernel","EventMessageFile",0x20000,"%11%\wevtsvc.dll"
+HKLM,"System\CurrentControlSet\Services\Eventlog\Linux\Linux Kernel","TypesSupported",0x10001,7
+HKLM,"System\CurrentControlSet\Services\Eventlog\System\Linux Kernel","EventMessageFile",0x20000,"%11%\wevtsvc.dll"
+HKLM,"System\CurrentControlSet\Services\Eventlog\System\Linux Kernel","TypesSupported",0x10001,7
+HKLM,"System\CurrentControlSet\Services\Eventlog\Application\Linux Kernel","EventMessageFile",0x20000,"%11%\wevtsvc.dll"
+HKLM,"System\CurrentControlSet\Services\Eventlog\Application\Linux Kernel","TypesSupported",0x10001,7
+HKLM,"System\CurrentControlSet\Services\Eventlog\System\Service Control Manager","EventMessageFile",0x20000,"%11%\wevtsvc.dll"
+HKLM,"System\CurrentControlSet\Services\Eventlog\System\Service Control Manager","TypesSupported",0x10001,7
+HKLM,"System\CurrentControlSet\Services\Eventlog\System\Disk","EventMessageFile",0x20000,"%11%\wevtsvc.dll"
+HKLM,"System\CurrentControlSet\Services\Eventlog\System\Disk","TypesSupported",0x10001,7
+HKLM,"System\CurrentControlSet\Services\Eventlog\System\EventLog","EventMessageFile",0x20000,"%11%\wevtsvc.dll"
+HKLM,"System\CurrentControlSet\Services\Eventlog\System\EventLog","TypesSupported",0x10001,7
 HKLM,"System\CurrentControlSet\Services\Tcpip\Parameters","DataBasePath",,"%12%\etc"
 HKLM,"System\CurrentControlSet\Services\Tcpip6\Parameters",,16
 HKLM,"System\CurrentControlSet\Services\VxD\MSTCP",,16

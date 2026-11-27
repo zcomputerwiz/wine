@@ -76,5 +76,16 @@ extern void store_information( struct evt_log *log, struct wex_evtlog_informatio
 /* wevtsvc.c */
 extern void report_system_event( WORD type, DWORD id, const WCHAR *string );
 extern void notify_log( struct evt_log *log );
+extern BYTE *evt_build_record( const WCHAR *source, WORD type, WORD category, DWORD id, const BYTE *sid,
+                               DWORD sid_size, const WCHAR *strings, DWORD strings_size, DWORD num_strings,
+                               const BYTE *data, DWORD data_size, DWORD *size, DWORD *status );
+
+/* journal.c (WineExplorer, docs/EVENTLOG_JOURNAL.md): the link to the journal bridge, session 0 only */
+#define JOURNAL_KEY 1  /* the completion key of its posted events (connections use their address) */
+extern void journal_start( HANDLE port, ULONG_PTR key );
+extern void journal_stop(void);
+extern void journal_dispatch( void *item );
+extern void journal_record( const WCHAR *log, const WCHAR *source, WORD type, DWORD id, const BYTE *sid,
+                            DWORD sid_size, const WCHAR *strings, DWORD num_strings, DWORD number );
 
 #endif /* __WEVTSVC_PRIVATE_H */
