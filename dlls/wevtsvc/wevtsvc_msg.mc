@@ -74,7 +74,7 @@ The %1 service could not be started: %2
 MessageId=7031
 SymbolicName=WEX_MSG_SERVICE_CRASH_RESTART
 Language=ENU
-The %1 service stopped unexpectedly, %2 time(s) so far. In %3 milliseconds this will be done: %4.
+The %1 service stopped unexpectedly, %2 time(s) so far. In %3 milliseconds this will be done: %5.
 .
 MessageId=7034
 SymbolicName=WEX_MSG_SERVICE_CRASH

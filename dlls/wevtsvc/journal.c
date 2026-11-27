@@ -44,7 +44,8 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(eventlog);
 
-#define MAX_QUEUED  1024      /* records waiting for the bridge; more are dropped (and counted) */
+#define MAX_QUEUED        1024              /* records waiting for the bridge; more are dropped (and counted) */
+#define MAX_QUEUED_BYTES  (1024 * 1024)     /* and their bytes (a flood while the bridge is down) */
 
 /* an event or a gap for the service's thread */
 struct journal_item
@@ -75,7 +76,7 @@ static CRITICAL_SECTION_DEBUG cs_debug = { 0, 0, &cs, { &cs_debug.ProcessLocksLi
                                            0, 0, { (DWORD_PTR)(__FILE__ ": cs") } };
 static CRITICAL_SECTION cs = { &cs_debug, -1, 0, 0, 0, 0 };
 static struct list queue = LIST_INIT( queue );  /* struct out_frame, under cs */
-static DWORD queued, dropped;
+static DWORD queued, queued_bytes, dropped;
 static char last_cursor[WEXJ_MAX_CURSOR];       /* under cs */
 static BOOL running;
 
@@ -129,6 +130,25 @@ static WCHAR *take_string( const char **p, const char *end, DWORD max )
     return w;
 }
 
+/* what the bridge may write (the review): a bridge that went wrong can write only its own rows' sources and ids, never
+ * another program's source or the service's own events; the Linux log takes any valid source with the rows' ids */
+static BOOL bridge_may_write( DWORD log, const WCHAR *source, DWORD id )
+{
+    switch (log)
+    {
+    case WEXJ_LOG_SYSTEM:
+        if (!wcscmp( source, L"Service Control Manager" )) return id == 7000 || id == 7031 || id == 7034;
+        if (!wcscmp( source, L"Disk" )) return id == 11;
+        if (!wcscmp( source, L"Linux Kernel" )) return id >= 1 && id <= 6;
+        return FALSE;
+    case WEXJ_LOG_APPLICATION:
+        return !wcscmp( source, L"Linux Kernel" ) && id == 4;
+    case WEXJ_LOG_LINUX:
+        return id >= 1 && id <= 6;
+    }
+    return FALSE;
+}
+
 static BOOL valid_source( const WCHAR *s )
 {
     const WCHAR *p;
@@ -177,6 +197,13 @@ static BOOL post_event( const char *body, DWORD size )
     {
         if (!(strings[n] = take_string( &p, end, WEXJ_MAX_STRING ))) break;
         total += (wcslen( strings[n] ) + 1) * sizeof(WCHAR);
+    }
+    if (n == ev.num_strings && p == end && valid_source( source ) && !bridge_may_write( ev.log, source, ev.event_id ))
+    {
+        WARN( "the bridge may not write %s %lu: dropped\n", debugstr_w(source), (unsigned long)ev.event_id );
+        for (i = 0; i < n; i++) free( strings[i] );
+        free( source );
+        return TRUE;  /* refused, not malformed: the connection stays */
     }
     if (n == ev.num_strings && p == end && valid_source( source ) && (item = calloc( 1, sizeof(*item) )))
         item->strings = malloc( total + sizeof(WCHAR) );
@@ -264,6 +291,7 @@ static BOOL drain_queue( int fd )
         f = LIST_ENTRY( list_head( &queue ), struct out_frame, entry );
         list_remove( &f->entry );
         queued--;
+        queued_bytes -= f->size;
         LeaveCriticalSection( &cs );
         if (!send_frame( fd, f->data, f->size ))
         {
@@ -333,26 +361,33 @@ static DWORD WINAPI journal_thread( void *arg )
 
 static const WCHAR msg_file[] = L"%SystemRoot%\\system32\\wevtsvc.dll";
 
-/* a source that logs for the first time gets its key, with our message module */
-static void register_source( const WCHAR *log, const WCHAR *source )
+/* A source of the Linux log (the listed units' configured names) that logs for the first time gets its key, with our
+ * message module; at most 64 of them, beyond that the event is refused. The other logs' sources are wine.inf's. */
+static BOOL register_source( const WCHAR *log, const WCHAR *source )
 {
-    static WCHAR known[64][WEXJ_MAX_SOURCE + 20];
+    static WCHAR known[64][WEXJ_MAX_SOURCE + 1];
     static unsigned int known_count;
-    WCHAR path[MAX_PATH], tag[WEXJ_MAX_SOURCE + 20];
+    WCHAR path[MAX_PATH];
     DWORD types = 7, i;
     HKEY key;
 
-    swprintf( tag, ARRAY_SIZE(tag), L"%s\\%s", log, source );
-    for (i = 0; i < known_count; i++) if (!wcsicmp( known[i], tag )) return;
-    swprintf( path, ARRAY_SIZE(path), L"System\\CurrentControlSet\\Services\\EventLog\\%s", tag );
+    if (wcscmp( log, L"Linux" )) return TRUE;
+    for (i = 0; i < known_count; i++) if (!wcsicmp( known[i], source )) return TRUE;
+    if (known_count >= ARRAY_SIZE(known))
+    {
+        WARN( "more than %u Linux log sources: %s refused\n", (unsigned int)ARRAY_SIZE(known), debugstr_w(source) );
+        return FALSE;
+    }
+    swprintf( path, ARRAY_SIZE(path), L"System\\CurrentControlSet\\Services\\EventLog\\Linux\\%s", source );
     if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, path, 0, KEY_READ, &key ))
     {
-        if (RegCreateKeyExW( HKEY_LOCAL_MACHINE, path, 0, NULL, 0, KEY_WRITE, NULL, &key, NULL )) return;
+        if (RegCreateKeyExW( HKEY_LOCAL_MACHINE, path, 0, NULL, 0, KEY_WRITE, NULL, &key, NULL )) return FALSE;
         RegSetValueExW( key, L"EventMessageFile", 0, REG_EXPAND_SZ, (const BYTE *)msg_file, sizeof(msg_file) );
         RegSetValueExW( key, L"TypesSupported", 0, REG_DWORD, (const BYTE *)&types, sizeof(types) );
     }
     RegCloseKey( key );
-    if (known_count < ARRAY_SIZE(known)) lstrcpyW( known[known_count++], tag );
+    lstrcpyW( known[known_count++], source );
+    return TRUE;
 }
 
 static void store_event( const WCHAR *log_name, const WCHAR *source, WORD type, DWORD id, const WCHAR *strings,
@@ -362,11 +397,10 @@ static void store_event( const WCHAR *log_name, const WCHAR *source, WORD type, 
     DWORD cursor_len = strlen( cursor ) + 1, data_size = sizeof(DWORD) + cursor_len, size, status, magic;
     BYTE *data, *rec;
 
-    if (!log || !(data = malloc( data_size ))) return;
+    if (!log || !register_source( log_name, source ) || !(data = malloc( data_size ))) return;
     magic = WEXJ_CURSOR_MAGIC;
     memcpy( data, &magic, sizeof(magic) );
     memcpy( data + sizeof(magic), cursor, cursor_len );
-    register_source( log_name, source );
     if ((rec = evt_build_record( source, type, 0, id, NULL, 0, strings, strings_size, num_strings, data, data_size,
                                  &size, &status )))
     {
@@ -444,21 +478,34 @@ static void find_last_cursor(void)
     }
 }
 
+/* Application and System go to the journal; Security, and a log with a CustomSD, only when session 0's own key of that
+ * log says so (DWORD "WexToJournal" non-zero): the bridge's account is less privileged than the log's readers, and
+ * the decision is session 0's, the bridge's own switch a second gate (the review) */
+static BOOL log_to_journal( const WCHAR *log )
+{
+    WCHAR path[MAX_PATH];
+    DWORD value = 0, size = sizeof(value);
+
+    if (!wcsicmp( log, L"Application" ) || !wcsicmp( log, L"System" )) return TRUE;
+    swprintf( path, ARRAY_SIZE(path), L"System\\CurrentControlSet\\Services\\EventLog\\%s", log );
+    return !RegGetValueW( HKEY_LOCAL_MACHINE, path, L"WexToJournal", RRF_RT_REG_DWORD, NULL, &value, &size ) && value;
+}
+
 /* a record the service stored that did not come from the journal goes to the bridge (it writes it to the journal) */
 void journal_record( const WCHAR *log, const WCHAR *source, WORD type, DWORD id, const BYTE *sid, DWORD sid_size,
                      const WCHAR *strings, DWORD num_strings, DWORD number )
 {
+    static char frame[WEXJ_MAX_FRAME];  /* the service's one thread builds here; the queue holds exact copies */
     struct out_frame *f;
     struct wexj_header hdr;
     struct wexj_record rec;
-    char *p, *end, *sid_str = NULL;
+    char *p, *end, *sid_str = NULL, *data = frame;
     const WCHAR *s = strings;
     DWORD i;
 
-    if (!running) return;
-    if (!(f = malloc( offsetof( struct out_frame, data[WEXJ_MAX_FRAME] )))) return;
-    p = f->data + sizeof(hdr) + sizeof(rec);
-    end = f->data + WEXJ_MAX_FRAME;
+    if (!running || !log_to_journal( log )) return;
+    p = data + sizeof(hdr) + sizeof(rec);
+    end = data + WEXJ_MAX_FRAME;
     p += WideCharToMultiByte( CP_UTF8, 0, log, -1, p, end - p, NULL, NULL );
     p += WideCharToMultiByte( CP_UTF8, 0, source, -1, p, end - p, NULL, NULL );
     if (sid_size && ConvertSidToStringSidA( (PSID)sid, &sid_str ) && strlen( sid_str ) < 256)
@@ -481,18 +528,20 @@ void journal_record( const WCHAR *log, const WCHAR *source, WORD type, DWORD id,
     hdr.magic = WEXJ_MAGIC;
     hdr.version = WEXJ_VERSION;
     hdr.type = WEXJ_RECORD;
-    hdr.size = p - f->data;
+    hdr.size = p - data;
     hdr.reserved = 0;
     rec.event_id = id;
     rec.event_type = type;
     rec.num_strings = i;
     rec.record_number = number;
     rec.reserved = 0;
-    memcpy( f->data, &hdr, sizeof(hdr) );
-    memcpy( f->data + sizeof(hdr), &rec, sizeof(rec) );
+    memcpy( data, &hdr, sizeof(hdr) );
+    memcpy( data + sizeof(hdr), &rec, sizeof(rec) );
+    if (!(f = malloc( offsetof( struct out_frame, data[hdr.size] )))) return;
+    memcpy( f->data, data, hdr.size );
     f->size = hdr.size;
     EnterCriticalSection( &cs );
-    if (queued >= MAX_QUEUED)
+    if (queued >= MAX_QUEUED || queued_bytes + f->size > MAX_QUEUED_BYTES)
     {
         if (!dropped++) WARN( "the journal bridge does not keep up: records not sent\n" );
         free( f );
@@ -501,6 +550,7 @@ void journal_record( const WCHAR *log, const WCHAR *source, WORD type, DWORD id,
     {
         list_add_tail( &queue, &f->entry );
         queued++;
+        queued_bytes += f->size;
     }
     LeaveCriticalSection( &cs );
 }
