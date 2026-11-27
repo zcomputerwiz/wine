@@ -1964,6 +1964,13 @@ int session0_open_pipe( struct token *token, const WCHAR *name, data_size_t len 
     return sv[1];
 }
 
+/* F1: whether this server uses session 0 (a session's server) or is session 0; the answer does not change */
+DECL_HANDLER(get_session0_use)
+{
+    reply->client = session0_client;
+    reply->server = session0_server;
+}
+
 /* a registry channel to session 0 for the calling program, with its primary token */
 DECL_HANDLER(get_registry_channel)
 {

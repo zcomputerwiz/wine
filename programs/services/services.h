@@ -87,6 +87,8 @@ extern struct scmdatabase *active_database;
 struct service_entry *scmdatabase_find_service(struct scmdatabase *db, LPCWSTR name);
 struct service_entry *scmdatabase_find_service_by_displayname(struct scmdatabase *db, LPCWSTR name);
 DWORD scmdatabase_add_service(struct scmdatabase *db, struct service_entry *entry);
+DWORD scmdatabase_load_service(struct scmdatabase *db, const WCHAR *name, struct service_entry **entry);
+DWORD service_reload_config(struct service_entry *entry);
 
 BOOL scmdatabase_lock_startup(struct scmdatabase *db, int timeout);
 void scmdatabase_unlock_startup(struct scmdatabase *db);

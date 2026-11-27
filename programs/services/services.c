@@ -429,6 +429,16 @@ DWORD save_service_config(struct service_entry *entry)
     DWORD err;
     HKEY hKey = NULL;
 
+    /* F1: a session that forwards never writes a service's configuration: session 0's service manager does, as the
+     * caller (rpc.c sends every configuration call there). A write from here would land in session 0's machine
+     * registry as this session's system role. */
+    if (forward_mode)
+    {
+        WINE_ERR("%s: configuration not saved here, session 0's service manager keeps it\n",
+                 wine_dbgstr_w(entry->name));
+        return ERROR_ACCESS_DENIED;
+    }
+
     err = RegCreateKeyW(entry->db->root_key, entry->name, &hKey);
     if (err != ERROR_SUCCESS)
         goto cleanup;
@@ -509,7 +519,8 @@ DWORD scmdatabase_add_service(struct scmdatabase *db, struct service_entry *serv
 
 static void scmdatabase_remove_service(struct scmdatabase *db, struct service_entry *service)
 {
-    RegDeleteTreeW(db->root_key, service->name);
+    /* F1: a forwarding session's DeleteService went to session 0, which removes the key */
+    if (!forward_mode) RegDeleteTreeW(db->root_key, service->name);
     list_remove(&service->entry);
     service->entry.next = service->entry.prev = NULL;
 }
@@ -948,6 +959,53 @@ static void scmdatabase_destroy(struct scmdatabase *db)
     free(db);
 }
 
+/* a service's entry as its key holds it (in a session that uses session 0, session 0's key: Services is not a
+ * session-local key); ERROR_FILE_NOT_FOUND for a key that is not a valid service. The entry is not in the database. */
+static DWORD load_one_service(struct scmdatabase *db, const WCHAR *name, struct service_entry **ret)
+{
+    struct service_entry *entry;
+    HKEY hServiceKey;
+    DWORD err;
+
+    *ret = NULL;
+    if ((err = service_create(name, &entry)) != ERROR_SUCCESS) return err;
+
+    WINE_TRACE("Loading service %s\n", wine_dbgstr_w(name));
+    err = RegOpenKeyExW(db->root_key, name, 0, KEY_READ, &hServiceKey);
+    if (err == ERROR_SUCCESS)
+    {
+        err = load_service_config(hServiceKey, entry);
+        RegCloseKey(hServiceKey);
+    }
+
+    if (err != ERROR_SUCCESS)
+    {
+        WINE_ERR("Error %ld reading registry key for service %s - skipping\n", err, wine_dbgstr_w(name));
+        free_service_entry(entry);
+        return ERROR_FILE_NOT_FOUND;
+    }
+
+    if (entry->config.dwServiceType == 0)
+    {
+        /* Maybe an application only wrote some configuration in the service key. Continue silently */
+        WINE_TRACE("Even the service type not set for service %s - skipping\n", wine_dbgstr_w(name));
+        free_service_entry(entry);
+        return ERROR_FILE_NOT_FOUND;
+    }
+
+    if (!validate_service_config(entry))
+    {
+        WINE_ERR("Invalid configuration of service %s - skipping\n", wine_dbgstr_w(name));
+        free_service_entry(entry);
+        return ERROR_FILE_NOT_FOUND;
+    }
+
+    entry->status.dwServiceType = entry->config.dwServiceType;
+    entry->db = db;
+    *ret = entry;
+    return ERROR_SUCCESS;
+}
+
 static DWORD scmdatabase_load_services(struct scmdatabase *db)
 {
     DWORD err;
@@ -957,7 +1015,6 @@ static DWORD scmdatabase_load_services(struct scmdatabase *db)
     {
         WCHAR szName[MAX_SERVICE_NAME];
         struct service_entry *entry;
-        HKEY hServiceKey;
 
         err = RegEnumKeyW(db->root_key, i, szName, MAX_SERVICE_NAME);
         if (err == ERROR_NO_MORE_ITEMS)
@@ -969,47 +1026,70 @@ static DWORD scmdatabase_load_services(struct scmdatabase *db)
             continue;
         }
 
-        err = service_create(szName, &entry);
-        if (err != ERROR_SUCCESS)
-            break;
-
-        WINE_TRACE("Loading service %s\n", wine_dbgstr_w(szName));
-        err = RegOpenKeyExW(db->root_key, szName, 0, KEY_READ, &hServiceKey);
-        if (err == ERROR_SUCCESS)
-        {
-            err = load_service_config(hServiceKey, entry);
-            RegCloseKey(hServiceKey);
-        }
-
-        if (err != ERROR_SUCCESS)
-        {
-            WINE_ERR("Error %ld reading registry key for service %s - skipping\n", err, wine_dbgstr_w(szName));
-            free_service_entry(entry);
-            continue;
-        }
-
-        if (entry->config.dwServiceType == 0)
-        {
-            /* Maybe an application only wrote some configuration in the service key. Continue silently */
-            WINE_TRACE("Even the service type not set for service %s - skipping\n", wine_dbgstr_w(szName));
-            free_service_entry(entry);
-            continue;
-        }
-
-        if (!validate_service_config(entry))
-        {
-            WINE_ERR("Invalid configuration of service %s - skipping\n", wine_dbgstr_w(szName));
-            free_service_entry(entry);
-            continue;
-        }
-
-        entry->status.dwServiceType = entry->config.dwServiceType;
-        entry->db = db;
+        err = load_one_service(db, szName, &entry);
+        if (err == ERROR_FILE_NOT_FOUND) continue;
+        if (err != ERROR_SUCCESS) break;
 
         list_add_tail(&db->services, &entry->entry);
         release_service(entry);
     }
     return ERROR_SUCCESS;
+}
+
+/* F1: a session's own service (a driver, a built-in session service) that session 0's service manager has just made
+ * for the caller: this session loads it from session 0's key, to run its instance here. With the database locked;
+ * the entry returned holds a reference. */
+DWORD scmdatabase_load_service(struct scmdatabase *db, const WCHAR *name, struct service_entry **ret)
+{
+    DWORD err;
+
+    *ret = NULL;
+    if (scmdatabase_find_service(db, name)) return ERROR_SERVICE_EXISTS;
+    if ((err = load_one_service(db, name, ret))) return err == ERROR_FILE_NOT_FOUND ? ERROR_SERVICE_DOES_NOT_EXIST : err;
+    list_add_tail(&db->services, &(*ret)->entry);
+    return ERROR_SUCCESS;
+}
+
+/* F1: after session 0's service manager changed a session service's configuration or security for the caller, and
+ * before an access check of this session's instance: take the configuration and the security descriptor from
+ * session 0's key again, so that one descriptor (session 0's) governs both. The running state is kept. */
+DWORD service_reload_config(struct service_entry *entry)
+{
+    struct service_entry *fresh;
+    QUERY_SERVICE_CONFIGW config;
+    DWORD err;
+
+#define SWAP(field) do { void *tmp_ = (void *)entry->field; entry->field = fresh->field; fresh->field = tmp_; } while (0)
+#define TAKE(field) (entry->field = fresh->field)
+
+    if ((err = load_one_service(entry->db, entry->name, &fresh))) return err;
+    service_lock(entry);
+    config = entry->config;
+    entry->config = fresh->config;
+    fresh->config = config;
+    SWAP(description);
+    SWAP(dependOnServices);
+    SWAP(dependOnGroups);
+    SWAP(reboot_msg);
+    SWAP(failure_command);
+    SWAP(failure_actions);
+    SWAP(security);
+    TAKE(failure_actions_count);
+    TAKE(failure_reset_period);
+    TAKE(preshutdown_timeout);
+    TAKE(is_wow64);
+    TAKE(delayed_autostart);
+    TAKE(sid_type);
+    TAKE(session_service);
+    TAKE(session0_start_only);
+    TAKE(security_size);
+    if (entry->status.dwCurrentState == SERVICE_STOPPED) entry->status.dwServiceType = entry->config.dwServiceType;
+    service_unlock(entry);
+    free_service_entry(fresh);  /* now holding the old values */
+    return ERROR_SUCCESS;
+
+#undef SWAP
+#undef TAKE
 }
 
 BOOL scmdatabase_lock_startup(struct scmdatabase *db, int timeout)
@@ -1831,8 +1911,8 @@ BOOL is_session_service_name(struct scmdatabase *db, const WCHAR *name, DWORD ty
     return is_session_service(name, type, configured);
 }
 
-/* a session whose server reaches session 0 (its service manager answers) forwards; session 0 and a machine
- * without it serve everything here */
+/* a session whose server uses session 0 forwards (F1: whether session 0's service manager answers yet or not);
+ * session 0 and a machine without it serve everything here */
 static void init_forward_mode(void)
 {
     DWORD session = 0;

@@ -2314,6 +2314,15 @@ struct process_info
 @END
 
 
+/* WineExplorer system tier: whether this process's server uses session 0, fixed for the server's life (F1: a
+   session's service manager forwards to session 0 whenever its server uses it, reachable or not) */
+@REQ(get_session0_use)
+@REPLY
+    int          client;       /* the server is a session's server that uses session 0 */
+    int          server;       /* the server is session 0 */
+@END
+
+
 /* WineExplorer (H3): the class of a service's caller, decided by the server (token_caller_class, WEX_CALLER_* of
    wine/wex_caller.h): the client of the connection of a pipe server end, or a token */
 @REQ(get_caller_class)

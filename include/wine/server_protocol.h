@@ -2963,6 +2963,21 @@ struct get_registry_channel_reply
 };
 
 
+/* WineExplorer system tier: whether this process's server uses session 0, fixed for the server's life (F1: a
+   session's service manager forwards to session 0 whenever its server uses it, reachable or not) */
+struct get_session0_use_request
+{
+    struct request_header __header;
+    char __pad_12[4];
+};
+struct get_session0_use_reply
+{
+    struct reply_header __header;
+    int          client;
+    int          server;
+};
+
+
 /* WineExplorer (H3): the class of a service's caller, decided by the server (token_caller_class, WEX_CALLER_* of
    wine/wex_caller.h): the client of the connection of a pipe server end, or a token */
 struct get_caller_class_request
@@ -6852,6 +6867,7 @@ enum request
     REQ_set_registry_notification,
     REQ_rename_key,
     REQ_get_registry_channel,
+    REQ_get_session0_use,
     REQ_get_caller_class,
     REQ_accounts_forward,
     REQ_accounts_result,
@@ -7194,6 +7210,7 @@ union generic_request
     struct set_registry_notification_request set_registry_notification_request;
     struct rename_key_request rename_key_request;
     struct get_registry_channel_request get_registry_channel_request;
+    struct get_session0_use_request get_session0_use_request;
     struct get_caller_class_request get_caller_class_request;
     struct accounts_forward_request accounts_forward_request;
     struct accounts_result_request accounts_result_request;
@@ -7534,6 +7551,7 @@ union generic_reply
     struct set_registry_notification_reply set_registry_notification_reply;
     struct rename_key_reply rename_key_reply;
     struct get_registry_channel_reply get_registry_channel_reply;
+    struct get_session0_use_reply get_session0_use_reply;
     struct get_caller_class_reply get_caller_class_reply;
     struct accounts_forward_reply accounts_forward_reply;
     struct accounts_result_reply accounts_result_reply;
@@ -7763,6 +7781,6 @@ union generic_reply
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 998
+#define SERVER_PROTOCOL_VERSION 999
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

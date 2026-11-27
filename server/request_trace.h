@@ -1311,6 +1311,16 @@ static void dump_get_registry_channel_reply( const struct get_registry_channel_r
     fprintf( stderr, ", user_hive=%d", req->user_hive );
 }
 
+static void dump_get_session0_use_request( const struct get_session0_use_request *req )
+{
+}
+
+static void dump_get_session0_use_reply( const struct get_session0_use_reply *req )
+{
+    fprintf( stderr, " client=%d", req->client );
+    fprintf( stderr, ", server=%d", req->server );
+}
+
 static void dump_get_caller_class_request( const struct get_caller_class_request *req )
 {
     fprintf( stderr, " handle=%04x", req->handle );
@@ -3993,6 +4003,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_set_registry_notification_request,
     (dump_func)dump_rename_key_request,
     (dump_func)dump_get_registry_channel_request,
+    (dump_func)dump_get_session0_use_request,
     (dump_func)dump_get_caller_class_request,
     (dump_func)dump_accounts_forward_request,
     (dump_func)dump_accounts_result_request,
@@ -4332,6 +4343,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     NULL,
     NULL,
     (dump_func)dump_get_registry_channel_reply,
+    (dump_func)dump_get_session0_use_reply,
     (dump_func)dump_get_caller_class_reply,
     (dump_func)dump_accounts_forward_reply,
     (dump_func)dump_accounts_result_reply,
@@ -4671,6 +4683,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "set_registry_notification",
     "rename_key",
     "get_registry_channel",
+    "get_session0_use",
     "get_caller_class",
     "accounts_forward",
     "accounts_result",

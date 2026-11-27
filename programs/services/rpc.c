@@ -206,6 +206,16 @@ static SC_RPC_HANDLE remote_of(SC_RPC_HANDLE handle)
  * opener (svcctl_OpenSCManagerW), so whoever uses the handle has the opener's access, as on Windows */
 static DWORD manager_remote(struct sc_manager_handle *manager, SC_RPC_HANDLE *remote)
 {
+    SC_RPC_HANDLE fresh;
+    DWORD err;
+
+    /* F1: session 0's service manager was not reachable when the handle was opened (it does not wait then): a call
+     * that needs it connects now, waiting for it as forward_open_manager does, as this call's caller */
+    if (!manager->remote && forward_mode && manager->remote_error == RPC_S_SERVER_UNAVAILABLE)
+    {
+        if ((err = forward_open_manager(manager->requested, &fresh, TRUE))) return err;
+        if (InterlockedCompareExchangePointer((void **)&manager->remote, fresh, NULL)) forward_close(&fresh);
+    }
     *remote = manager->remote;
     return manager->remote ? ERROR_SUCCESS : manager->remote_error;
 }
@@ -228,6 +238,9 @@ static DWORD wrap_remote(SC_RPC_HANDLE remote, SC_RPC_HANDLE *handle)
     *handle = &wrapped->hdr;
     return ERROR_SUCCESS;
 }
+
+struct sc_service_handle;
+static DWORD session0_service_open(struct sc_service_handle *service, SC_RPC_HANDLE *remote);
 
 struct sc_notify_handle
 {
@@ -252,6 +265,21 @@ struct sc_lock_handle
 {
     struct sc_handle hdr;
 };
+
+/* F1: a session's own service (a driver, a built-in session service) is configured in session 0, as the caller:
+ * the same service there, opened with the access this session's handle holds; session 0 checks the caller against
+ * its own descriptor and writes the key itself */
+static DWORD session0_service_open(struct sc_service_handle *service, SC_RPC_HANDLE *remote)
+{
+    SC_RPC_HANDLE manager;
+    DWORD err;
+
+    *remote = NULL;
+    if ((err = forward_open_manager(SC_MANAGER_CONNECT, &manager, TRUE))) return err;
+    err = forward_OpenServiceW(manager, service->service_entry->name, service->hdr.access, remote);
+    forward_close(&manager);
+    return err;
+}
 
 static void sc_notify_retain(struct sc_notify_handle *notify)
 {
@@ -467,7 +495,7 @@ DWORD __cdecl svcctl_OpenSCManagerW(
     manager->requested = requested;
     manager->remote = NULL;
     /* T5.4: session 0's part of the handle, as this caller; this session's own services work without it */
-    manager->remote_error = forward_mode ? forward_open_manager(requested, &manager->remote)
+    manager->remote_error = forward_mode ? forward_open_manager(requested, &manager->remote, FALSE)
                                          : ERROR_SERVICE_DOES_NOT_EXIST;
 
     if (dwAccessMask & MAXIMUM_ALLOWED)
@@ -703,6 +731,9 @@ DWORD __cdecl svcctl_OpenServiceW(
     if (entry == NULL)
         return ERROR_SERVICE_DOES_NOT_EXIST;
 
+    /* F1: this session's instance is checked against session 0's descriptor, as it is now */
+    if (forward_mode) service_reload_config(entry);
+
     if (dwDesiredAccess && (err = check_client_access(entry, TRUE, &g_svc_generic, &dwDesiredAccess)))
     {
         service_lock(entry);
@@ -833,6 +864,29 @@ static DWORD create_serviceW(
         return wrap_remote(remote_service, phService);
     }
 
+    /* F1: a session's own service (a driver, a built-in session service) is made by session 0 too, as the caller,
+     * which writes its key; this session then loads it from there to run its instance, and the caller gets a handle
+     * of this session's instance with the access it asked for (as the maker, like any CreateService) */
+    if (forward_mode)
+    {
+        SC_RPC_HANDLE remote_manager, remote_service = NULL;
+
+        if (!lpServiceName) return ERROR_INVALID_NAME;
+        if ((err = manager_remote(manager, &remote_manager))) return err;
+        if ((err = forward_CreateServiceW(remote_manager, lpServiceName, lpDisplayName, dwDesiredAccess,
+                                          dwServiceType, dwStartType, dwErrorControl, lpBinaryPathName,
+                                          lpLoadOrderGroup, lpdwTagId, lpDependencies, dwDependenciesSize,
+                                          lpServiceStartName, lpPassword, dwPasswordSize, is_wow64,
+                                          &remote_service)))
+            return err;
+        forward_close(&remote_service);
+        scmdatabase_lock(manager->db);
+        err = scmdatabase_load_service(manager->db, lpServiceName, &entry);
+        scmdatabase_unlock(manager->db);
+        if (err) return err;
+        return create_handle_for_service(entry, dwDesiredAccess, phService);
+    }
+
     if (dwDesiredAccess && (err = check_client_access(NULL, TRUE, &g_svc_generic, &dwDesiredAccess)))
         return err;
 
@@ -942,6 +996,17 @@ DWORD __cdecl svcctl_DeleteService(
     if ((err = validate_service_handle(hService, DELETE, &service)) != ERROR_SUCCESS)
         return err;
 
+    /* F1: session 0 deletes the service and its key; this session's entry goes when its handles close */
+    if (forward_mode)
+    {
+        SC_RPC_HANDLE remote;
+
+        if ((err = session0_service_open(service, &remote))) return err;
+        err = forward_DeleteService(remote);
+        forward_close(&remote);
+        if (err) return err;
+    }
+
     service_lock(service->service_entry);
 
     if (!is_marked_for_delete(service->service_entry))
@@ -1015,6 +1080,20 @@ DWORD __cdecl svcctl_ChangeServiceConfigW(
 
     if ((err = validate_service_handle(hService, SERVICE_CHANGE_CONFIG, &service)) != 0)
         return err;
+
+    /* F1: session 0 changes the configuration, as the caller; this session takes it from session 0's key */
+    if (forward_mode)
+    {
+        SC_RPC_HANDLE remote;
+
+        if ((err = session0_service_open(service, &remote))) return err;
+        err = forward_ChangeServiceConfigW(remote, dwServiceType, dwStartType, dwErrorControl, lpBinaryPathName,
+                                           lpLoadOrderGroup, lpdwTagId, lpDependencies, dwDependenciesSize,
+                                           lpServiceStartName, lpPassword, dwPasswordSize, lpDisplayName);
+        forward_close(&remote);
+        if (!err) service_reload_config(service->service_entry);
+        return err;
+    }
 
     if (!check_multisz((LPCWSTR)lpDependencies, dwDependenciesSize))
         return ERROR_INVALID_PARAMETER;
@@ -1223,6 +1302,18 @@ DWORD __cdecl svcctl_ChangeServiceConfig2W( SC_RPC_HANDLE hService, SC_RPC_CONFI
     if (remote_of(hService)) return forward_ChangeServiceConfig2W(remote_of(hService), config);
     if ((err = validate_service_handle(hService, SERVICE_CHANGE_CONFIG, &service)) != 0)
         return err;
+
+    /* F1: session 0 changes it, as the caller; this session takes the result from session 0's key */
+    if (forward_mode)
+    {
+        SC_RPC_HANDLE remote;
+
+        if ((err = session0_service_open(service, &remote))) return err;
+        err = forward_ChangeServiceConfig2W(remote, config);
+        forward_close(&remote);
+        if (!err) service_reload_config(service->service_entry);
+        return err;
+    }
 
     switch (config.dwInfoLevel)
     {
@@ -2660,6 +2751,9 @@ DWORD __cdecl svcctl_QueryServiceObjectSecurity(
     if ((err = validate_service_handle(service, READ_CONTROL, &handle)) != ERROR_SUCCESS)
         return err;
 
+    /* F1: the descriptor is session 0's (one descriptor for the service and this session's instance) */
+    if (forward_mode) service_reload_config(handle->service_entry);
+
     service_lock(handle->service_entry);
     sd = build_service_descriptor(service_descriptor(handle->service_entry), info, NULL, &size);
     service_unlock(handle->service_entry);
@@ -2697,6 +2791,18 @@ DWORD __cdecl svcctl_SetServiceObjectSecurity(
     if (info != DACL_SECURITY_INFORMATION) return ERROR_INVALID_PARAMETER;
     if ((err = validate_service_handle(service, WRITE_DAC, &handle)) != ERROR_SUCCESS)
         return err;
+
+    /* F1: session 0 sets the descriptor, as the caller; this session's instance then checks against it */
+    if (forward_mode)
+    {
+        SC_RPC_HANDLE remote;
+
+        if ((err = session0_service_open(handle, &remote))) return err;
+        err = forward_SetServiceObjectSecurity(remote, info, descriptor, buf_size);
+        forward_close(&remote);
+        if (!err) service_reload_config(handle->service_entry);
+        return err;
+    }
     if (buf_size < sizeof(SECURITY_DESCRIPTOR_RELATIVE) || !IsValidSecurityDescriptor(descriptor))
         return ERROR_INVALID_PARAMETER;
     if (!GetSecurityDescriptorDacl(descriptor, &present, &dacl, &defaulted) || !present)

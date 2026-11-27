@@ -25,7 +25,7 @@
 #define __WINE_PROGRAMS_SERVICES_FORWARD_H
 
 extern BOOL forward_available(void);
-extern DWORD forward_open_manager( DWORD access, SC_RPC_HANDLE *remote );
+extern DWORD forward_open_manager( DWORD access, SC_RPC_HANDLE *remote, BOOL wait );
 extern DWORD forward_close( SC_RPC_HANDLE *remote );
 extern DWORD forward_OpenServiceW( SC_RPC_HANDLE manager, LPCWSTR name, DWORD access, SC_RPC_HANDLE *service );
 extern DWORD forward_CreateServiceW( SC_RPC_HANDLE manager, LPCWSTR name, LPCWSTR display, DWORD access,

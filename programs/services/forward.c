@@ -32,12 +32,12 @@
 #include <rpc.h>
 #include "wine/debug.h"
 #include "wine/exception.h"
+#include "wine/server.h"
 #include "svcctl_s0.h"
 #include "forward.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(service);
 
-static const WCHAR s0_pipe[] = L"\\\\.\\pipe\\WexSession0\\svcctl";
 static LONG next_binding;
 
 static handle_t s0_bind(void)
@@ -121,42 +121,68 @@ static DWORD map_exception_code( DWORD code )
  * ERROR_INSUFFICIENT_BUFFER (or ERROR_MORE_DATA) and the size */
 #define OUT_BUFFER( buffer, size ) ((size) && (buffer) ? (buffer) : (BYTE[1]){ 0 })
 
-/* this session's server uses session 0: a WexSession0\ name is a pipe of session 0 there, and is not found in a
- * server that does not use it. That session 0 cannot be reached at this moment changes nothing (T5 review): the
- * session still leaves session 0's services to it, and their calls fail until it is back */
+/* F1: this session's server uses session 0, as the server says (get_session0_use). The answer is fixed for the
+ * server's life and does not depend on session 0's service manager running: a session whose server uses session 0
+ * forwards always, and a call that cannot reach session 0's service manager fails. Only a prefix without session 0
+ * (no launcher, no development socket) serves every service here. Probing the pipe instead, as before, could not
+ * tell "no session 0" from "session 0's service manager not started yet" (both "not found"), and a session that
+ * started first served session 0's services itself for its whole life (B128), writing their keys as SYSTEM. */
 BOOL forward_available(void)
 {
-    HANDLE pipe = CreateFileW( s0_pipe, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL );
-    DWORD err = GetLastError();
+    BOOL client = FALSE;
 
-    if (pipe != INVALID_HANDLE_VALUE)
+    SERVER_START_REQ( get_session0_use )
     {
-        CloseHandle( pipe );
-        return TRUE;
+        if (!wine_server_call( req )) client = reply->client;
     }
-    if (err != ERROR_FILE_NOT_FOUND && err != ERROR_PATH_NOT_FOUND)
-        WINE_WARN( "session 0's service manager is not reachable now (%lu)\n", err );
-    return err != ERROR_FILE_NOT_FOUND && err != ERROR_PATH_NOT_FOUND;
+    SERVER_END_REQ;
+    return client;
 }
 
-/* the connection for a manager handle is made here, as the RPC caller */
-DWORD forward_open_manager( DWORD access, SC_RPC_HANDLE *remote )
+/* session 0's service manager not reachable yet (its pipe absent, or session 0 not answering): worth waiting for */
+static BOOL s0_not_ready( DWORD err )
 {
-    DWORD err;
+    return err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND || err == ERROR_PIPE_BUSY ||
+           err == ERROR_PIPE_NOT_CONNECTED || err == RPC_S_SERVER_UNAVAILABLE || err == EPT_S_NOT_REGISTERED ||
+           err == RPC_S_CALL_FAILED_DNE;
+}
+
+/* how long a call waits for session 0's service manager to come up (it starts at boot, before the logons) */
+#define S0_WAIT_MS 15000
+
+/* the connection for a manager handle is made here, as the RPC caller. Fail closed (F1): while session 0's service
+ * manager cannot be reached a call that needs it waits up to S0_WAIT_MS (wait set), then fails with
+ * RPC_S_SERVER_UNAVAILABLE; it never falls back to this session serving the service itself. OpenSCManager does not
+ * wait (wait clear): the session's own services work without session 0, and the call that needs session 0 retries. */
+DWORD forward_open_manager( DWORD access, SC_RPC_HANDLE *remote, BOOL wait )
+{
+    DWORD err, waited = wait ? 0 : S0_WAIT_MS;
 
     *remote = NULL;
-    if (RpcImpersonateClient( NULL ) != RPC_S_OK) return ERROR_ACCESS_DENIED;
-    __TRY
+    for (;;)
     {
-        err = s0_svcctl_OpenSCManagerW( NULL, NULL, access, remote );
+        if (RpcImpersonateClient( NULL ) != RPC_S_OK) return ERROR_ACCESS_DENIED;
+        __TRY
+        {
+            err = s0_svcctl_OpenSCManagerW( NULL, NULL, access, remote );
+        }
+        __EXCEPT( rpc_filter )
+        {
+            err = map_exception_code( GetExceptionCode() );
+        }
+        __ENDTRY
+        RpcRevertToSelf();
+        if (!err || !s0_not_ready( err ) || waited >= S0_WAIT_MS) break;
+        Sleep( 500 );
+        waited += 500;
     }
-    __EXCEPT( rpc_filter )
+    if (err && s0_not_ready( err ))
     {
-        err = map_exception_code( GetExceptionCode() );
+        WINE_WARN( "session 0's service manager is not reachable (%lu, waited %lu ms of %u)\n",
+                   err, wait ? waited : 0, wait ? S0_WAIT_MS : 0 );
+        err = RPC_S_SERVER_UNAVAILABLE;
     }
-    __ENDTRY
-    RpcRevertToSelf();
-    if (err) WINE_TRACE( "session 0's service manager: %lu\n", err );
+    else if (err) WINE_TRACE( "session 0's service manager: %lu\n", err );
     return err;
 }
 

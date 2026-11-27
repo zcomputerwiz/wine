@@ -1,5 +1,5 @@
 MODULE    = services.exe
-IMPORTS   = rpcrt4 advapi32 userenv setupapi
+IMPORTS   = rpcrt4 advapi32 userenv setupapi ntdll
 ENABLE_ARCHS = $(HOST_ARCH)
 
 EXTRADLLFLAGS = -mwindows
