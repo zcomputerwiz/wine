@@ -1905,11 +1905,20 @@ void token_get_ids( const struct token *token, struct luid *token_id, struct lui
     *modified_id = token->modified_id;
 }
 
+/* TEMPORARY (B132 measurement, the reviewer's item 3; removed before the batch): an access check that refuses a
+ * session's system role in session 0 (a mapped, link-bound token), with the object and the access asked */
+static void b132diag_refused( struct token *token, struct object *obj, unsigned int desired )
+{
+    if (!session0_server || !token->link_bound || !token->session_system) return;
+    fprintf( stderr, "B132diag: session %u's system role refused access %08x on ", token->link_session, desired );
+    obj->ops->dump( obj, 0 );
+}
+
 int check_object_access(struct token *token, struct object *obj, unsigned int *access)
 {
     struct generic_map mapping;
     struct security_descriptor *sd;
-    unsigned int status;
+    unsigned int status, desired = *access;
     int res;
 
     if (!token)
@@ -1969,6 +1978,7 @@ int check_object_access(struct token *token, struct object *obj, unsigned int *a
                         unsigned int write_mask = (mapping.write & ~(READ_CONTROL | SYNCHRONIZE)) | WRITE_DAC | WRITE_OWNER | DELETE;
                         if (*access & write_mask)
                         {
+                            b132diag_refused( token, obj, desired );
                             set_error( STATUS_ACCESS_DENIED );
                             return FALSE;
                         }
@@ -1982,7 +1992,11 @@ int check_object_access(struct token *token, struct object *obj, unsigned int *a
                               &mapping, access, &status ) == STATUS_SUCCESS &&
           status == STATUS_SUCCESS;
 
-    if (!res) set_error( STATUS_ACCESS_DENIED );
+    if (!res)
+    {
+        b132diag_refused( token, obj, desired );
+        set_error( STATUS_ACCESS_DENIED );
+    }
     return res;
 }
 
