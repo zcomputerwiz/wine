@@ -969,6 +969,16 @@ void x_conn_frame( struct x_conn *conn, const void *buf, size_t size, int bad )
 
 /* ---- the owner's requests ---- */
 
+static unsigned long long lab_last_ref;  /* the newest reference issued (for the lab's look at its token) */
+
+/* the lab (wex_x0lab.c): the token session 0 built for the newest reference (link_bound_token, with the link-bound
+ * token policy applied), a reference; NULL when that reference is gone */
+struct token *x_lab_last_ref_token(void)
+{
+    struct x_ref *ref = x_ref_find_any( lab_last_ref );
+    return ref && ref->token ? (struct token *)grab_object( ref->token ) : NULL;
+}
+
 static void x_serve_open( struct x_conn *conn, const struct wex_x_header *hdr, const char *body, size_t size )
 {
     struct x_peer *peer = conn->peer;
@@ -1027,6 +1037,7 @@ static void x_serve_open( struct x_conn *conn, const struct wex_x_header *hdr, c
     peer->account->refs++;
     x_account_note( peer->account, CAP_REFS, peer->account->refs );
     granted.ready = ops->ready( obj );
+    lab_last_ref = ref->id;
     x_cache_add( peer, hdr, ref->id, &granted, NULL, NULL );  /* sent again after a relink: the same reference */
     x_reply( conn, hdr, STATUS_SUCCESS, ref->id, &granted, sizeof(granted) );
     return;

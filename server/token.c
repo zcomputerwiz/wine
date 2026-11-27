@@ -3140,6 +3140,213 @@ int token_is_link_bound( struct token *token )
     return token->link_bound;
 }
 
+/* ---- WineExplorer: link-bound tokens (docs/SESSION0_CROSS_SERVER.md, "Link-bound tokens"; B132) ----
+ * What a user's server describes beyond its user SID is that server's claim. Session 0 checks it against its own
+ * accounts record before the token is used (session0.c, link_bound_token): */
+
+static int sid_in_nt_authority( const struct sid *sid )
+{
+    static const unsigned char nt_authority[6] = { 0, 0, 0, 0, 0, 5 };
+    return sid->revision == SID_REVISION && !memcmp( sid->id_auth, nt_authority, sizeof(nt_authority) );
+}
+
+/* a session's system role (SYSTEM, LocalService, NetworkService described by a user's server) becomes the account
+ * whose uid runs it: the user SID is the account's, the service SID stays only as a deny-only group (so a deny ACE
+ * still matches it, an allow ACE no longer does). Nonzero when the user was such an account. */
+int token_map_service_user( struct token *token, const unsigned int subauth[5] )
+{
+    struct sid account = { SID_REVISION, 5, SECURITY_NT_AUTHORITY,
+                           { subauth[0], subauth[1], subauth[2], subauth[3], subauth[4] } };
+    struct sid *old = token->user, *user;
+    struct group *group;
+    size_t size;
+
+    if (token_service_account( token ) == -1) return 0;
+    if (!(user = memdup( &account, sid_len( &account )))) return 0;
+    size = max( offsetof( struct group, sid.sub_auth[old->sub_count] ), sizeof(*group) );
+    if (!(group = mem_alloc( size )))
+    {
+        free( user );
+        return 0;
+    }
+    memset( group, 0, size );
+    copy_sid( &group->sid, old );
+    group->attrs = SE_GROUP_USE_FOR_DENY_ONLY;
+    list_add_tail( &token->groups, &group->entry );
+    token->user = user;
+    free( old );
+    /* the user's own limited token has INTERACTIVE (its logon): the system role in session 0 is that token, so it
+     * writes the Application log as its user does (Windows' descriptor grants IU), never System */
+    if (!token_sid_present( token, &interactive_sid, FALSE ))
+    {
+        size = max( offsetof( struct group, sid.sub_auth[interactive_sid.sub_count] ), sizeof(*group) );
+        if ((group = mem_alloc( size )))
+        {
+            memset( group, 0, size );
+            copy_sid( &group->sid, &interactive_sid );
+            group->attrs = SE_GROUP_MANDATORY | SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT;
+            list_add_tail( &token->groups, &group->entry );
+        }
+    }
+    return 1;
+}
+
+/* is rid among the verified ones */
+static int rid_verified( unsigned int rid, const unsigned int *rids, unsigned int count )
+{
+    unsigned int i;
+    for (i = 0; i < count; i++) if (rids[i] == rid) return 1;
+    return 0;
+}
+
+/* An enabled group of the token, or its user: may it stay the owner? */
+static int owner_allowed( struct token *token, const struct sid *owner )
+{
+    struct group *group;
+
+    if (equal_sid( owner, token->user )) return 1;
+    LIST_FOR_EACH_ENTRY( group, &token->groups, struct group, entry )
+        if (equal_sid( &group->sid, owner )) return !(group->attrs & SE_GROUP_USE_FOR_DENY_ONLY) &&
+                                                    (group->attrs & SE_GROUP_ENABLED);
+    return 0;
+}
+
+/* Apply what session 0's record says (flags: LINK_POLICY_ADMIN, the account is an administrator; LINK_POLICY_MAPPED,
+ * the user was a session's system role). An administrator's own description (not mapped) is believed, as since T1.
+ * Otherwise, as UAC's filtered token: every BUILTIN alias but Users and Guests deny-only (the record models only
+ * Administrators, through the admin group); domain groups kept only when verified (the domain record's groups, or
+ * the account's own domain's 513, its primary group), never Domain, Schema or Enterprise Admins; a mapped token's
+ * SERVICE and per-service groups deny-only; a standard user's privileges; Medium integrity; elevation Limited for an
+ * administrator's mapped token, else Default; the owner the user when it is no longer an enabled group. domain:
+ * the account's domain SID subauthorities (21, a, b, c), rids its verified domain groups. Nonzero when cut. */
+int token_apply_link_policy( struct token *token, unsigned int flags, const unsigned int domain[4],
+                             const unsigned int *rids, unsigned int count )
+{
+    static const unsigned int standard_privileges[] =
+    {
+        SE_CHANGE_NOTIFY_PRIVILEGE, SE_SHUTDOWN_PRIVILEGE, SE_UNDOCK_PRIVILEGE, SE_INC_WORKING_SET_PRIVILEGE,
+        SE_TIME_ZONE_PRIVILEGE,
+    };
+    struct privilege *privilege, *next;
+    struct group *group;
+    unsigned int i, elevation;
+    int cut = 0;
+
+    if ((flags & LINK_POLICY_ADMIN) && !(flags & LINK_POLICY_MAPPED)) return 0;
+    LIST_FOR_EACH_ENTRY( group, &token->groups, struct group, entry )
+    {
+        const struct sid *sid = &group->sid;
+        int keep = 1;
+
+        if (group->attrs == SE_GROUP_USE_FOR_DENY_ONLY || !sid_in_nt_authority( sid )) continue;
+        if (sid->sub_count == 2 && sid->sub_auth[0] == SECURITY_BUILTIN_DOMAIN_RID)
+            keep = sid->sub_auth[1] == DOMAIN_ALIAS_RID_USERS || sid->sub_auth[1] == DOMAIN_ALIAS_RID_GUESTS;
+        else if (sid->sub_count == 5 && sid->sub_auth[0] == SECURITY_NT_NON_UNIQUE)
+        {
+            unsigned int rid = sid->sub_auth[4];
+            int same_domain = domain && sid->sub_auth[1] == domain[1] && sid->sub_auth[2] == domain[2] &&
+                              sid->sub_auth[3] == domain[3];
+
+            if (rid == DOMAIN_GROUP_RID_ADMINS || rid == DOMAIN_GROUP_RID_SCHEMA_ADMINS ||
+                rid == DOMAIN_GROUP_RID_ENTERPRISE_ADMINS)
+                keep = 0;
+            else keep = same_domain && (rid == DOMAIN_GROUP_RID_USERS || rid_verified( rid, rids, count ));
+        }
+        else if (sid->sub_count >= 1)
+        {
+            /* every other NT-authority SID: only the computed logon groups stay (the review: a role SID claimed as a
+             * group, SYSTEM above all, would pass its ACEs as the user SID did); everything else deny-only */
+            switch (sid->sub_auth[0])
+            {
+            case SECURITY_NETWORK_RID:            /* 2 */
+            case SECURITY_BATCH_RID:              /* 3 */
+            case SECURITY_INTERACTIVE_RID:        /* 4 */
+            case SECURITY_ANONYMOUS_LOGON_RID:    /* 7 */
+            case SECURITY_AUTHENTICATED_USER_RID: /* 11 */
+            case SECURITY_TERMINAL_SERVER_RID:    /* 13 */
+            case SECURITY_REMOTE_LOGON_RID:       /* 14 */
+            case SECURITY_THIS_ORGANIZATION_RID:  /* 15 */
+            case SECURITY_LOGON_IDS_RID:          /* 5-x-y, the logon SID */
+            case 64:                              /* the authentication package */
+            case 113:                             /* local account */
+            case 114:                             /* local account and member of Administrators (deny ACEs use it) */
+                keep = 1;
+                break;
+            default:
+                keep = 0;
+            }
+        }
+        else keep = 0;
+        if (keep) continue;
+        group->attrs = SE_GROUP_USE_FOR_DENY_ONLY;
+        cut = 1;
+    }
+    LIST_FOR_EACH_ENTRY_SAFE( privilege, next, &token->privileges, struct privilege, entry )
+    {
+        for (i = 0; i < ARRAY_SIZE(standard_privileges); i++)
+            if (!privilege->luid.high_part && privilege->luid.low_part == standard_privileges[i]) break;
+        if (i < ARRAY_SIZE(standard_privileges)) continue;
+        privilege_remove( privilege );
+        cut = 1;
+    }
+    if (token->integrity_rid > SECURITY_MANDATORY_MEDIUM_RID)
+    {
+        token->integrity_rid = SECURITY_MANDATORY_MEDIUM_RID;
+        cut = 1;
+    }
+    elevation = (flags & LINK_POLICY_ADMIN) ? TokenElevationTypeLimited : TokenElevationTypeDefault;
+    if (token->elevation != elevation)
+    {
+        token->elevation = elevation;
+        cut = 1;
+    }
+    if (token->owner && !owner_allowed( token, token->owner ))
+    {
+        struct sid *owner = memdup( token->user, sid_len( token->user ));
+
+        if (owner)
+        {
+            free( token->owner );
+            token->owner = owner;
+            cut = 1;
+        }
+    }
+    /* the primary group as the owner: SYSTEM or Administrators become the user's 513 (its domain's or the machine's
+     * Users group) for an S-1-5-21 account, else the user */
+    if (token->primary_group && (equal_sid( token->primary_group, &local_system_sid ) ||
+                                 equal_sid( token->primary_group, &builtin_admins_sid )))
+    {
+        struct sid group, *primary;
+
+        memset( &group, 0, sizeof(group) );
+        memcpy( &group, token->user, sid_len( token->user ));  /* (allocated at its length) */
+        if (group.sub_count == 5 && group.sub_auth[0] == SECURITY_NT_NON_UNIQUE) group.sub_auth[4] = DOMAIN_GROUP_RID_USERS;
+        if ((primary = memdup( &group, sid_len( &group ))))
+        {
+            free( token->primary_group );
+            token->primary_group = primary;
+            cut = 1;
+        }
+    }
+    return cut;
+}
+
+#ifdef WEX_X0_LAB_TEST
+/* the X0 lab (wex_x0lab.c): a group added to a lab token before it is described, to show what session 0 makes of a
+ * description that claims it (the link-bound token hardening's test of a role SID claimed as a group) */
+void token_lab_add_group( struct token *token, const struct sid *sid, unsigned int attrs )
+{
+    size_t size = max( offsetof( struct group, sid.sub_auth[sid->sub_count] ), sizeof(struct group) );
+    struct group *group;
+
+    if (!(group = mem_alloc( size ))) return;
+    memset( group, 0, size );
+    copy_sid( &group->sid, sid );
+    group->attrs = attrs;
+    list_add_tail( &token->groups, &group->entry );
+}
+#endif
+
 static int token_has_service_group( struct token *token )
 {
     struct group *group;
