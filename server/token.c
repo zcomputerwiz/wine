@@ -3252,9 +3252,31 @@ int token_apply_link_policy( struct token *token, unsigned int flags, const unsi
                 keep = 0;
             else keep = same_domain && (rid == DOMAIN_GROUP_RID_USERS || rid_verified( rid, rids, count ));
         }
-        else if ((flags & LINK_POLICY_MAPPED) && sid->sub_count >= 1 &&
-                 (sid->sub_auth[0] == SECURITY_SERVICE_RID || sid->sub_auth[0] == 80 /* NT SERVICE\x */))
-            keep = 0;
+        else if (sid->sub_count >= 1)
+        {
+            /* every other NT-authority SID: only the computed logon groups stay (the review: a role SID claimed as a
+             * group, SYSTEM above all, would pass its ACEs as the user SID did); everything else deny-only */
+            switch (sid->sub_auth[0])
+            {
+            case SECURITY_NETWORK_RID:            /* 2 */
+            case SECURITY_BATCH_RID:              /* 3 */
+            case SECURITY_INTERACTIVE_RID:        /* 4 */
+            case SECURITY_ANONYMOUS_LOGON_RID:    /* 7 */
+            case SECURITY_AUTHENTICATED_USER_RID: /* 11 */
+            case SECURITY_TERMINAL_SERVER_RID:    /* 13 */
+            case SECURITY_REMOTE_LOGON_RID:       /* 14 */
+            case SECURITY_THIS_ORGANIZATION_RID:  /* 15 */
+            case SECURITY_LOGON_IDS_RID:          /* 5-x-y, the logon SID */
+            case 64:                              /* the authentication package */
+            case 113:                             /* local account */
+            case 114:                             /* local account and member of Administrators (deny ACEs use it) */
+                keep = 1;
+                break;
+            default:
+                keep = 0;
+            }
+        }
+        else keep = 0;
         if (keep) continue;
         group->attrs = SE_GROUP_USE_FOR_DENY_ONLY;
         cut = 1;
@@ -3289,8 +3311,41 @@ int token_apply_link_policy( struct token *token, unsigned int flags, const unsi
             cut = 1;
         }
     }
+    /* the primary group as the owner: SYSTEM or Administrators become the user's 513 (its domain's or the machine's
+     * Users group) for an S-1-5-21 account, else the user */
+    if (token->primary_group && (equal_sid( token->primary_group, &local_system_sid ) ||
+                                 equal_sid( token->primary_group, &builtin_admins_sid )))
+    {
+        struct sid group, *primary;
+
+        memset( &group, 0, sizeof(group) );
+        memcpy( &group, token->user, sid_len( token->user ));  /* (allocated at its length) */
+        if (group.sub_count == 5 && group.sub_auth[0] == SECURITY_NT_NON_UNIQUE) group.sub_auth[4] = DOMAIN_GROUP_RID_USERS;
+        if ((primary = memdup( &group, sid_len( &group ))))
+        {
+            free( token->primary_group );
+            token->primary_group = primary;
+            cut = 1;
+        }
+    }
     return cut;
 }
+
+#ifdef WEX_X0_LAB_TEST
+/* the X0 lab (wex_x0lab.c): a group added to a lab token before it is described, to show what session 0 makes of a
+ * description that claims it (the link-bound token hardening's test of a role SID claimed as a group) */
+void token_lab_add_group( struct token *token, const struct sid *sid, unsigned int attrs )
+{
+    size_t size = max( offsetof( struct group, sid.sub_auth[sid->sub_count] ), sizeof(struct group) );
+    struct group *group;
+
+    if (!(group = mem_alloc( size ))) return;
+    memset( group, 0, size );
+    copy_sid( &group->sid, sid );
+    group->attrs = attrs;
+    list_add_tail( &token->groups, &group->entry );
+}
+#endif
 
 static int token_has_service_group( struct token *token )
 {
