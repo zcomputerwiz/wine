@@ -1007,7 +1007,13 @@ static void load_graphics_driver( const WCHAR *driver, GUID *guid )
 
     if (!driver)
     {
+        DWORD session;
+
         lstrcpyW( buffer, default_driver );
+        /* WineExplorer: session 0 is not interactive (as on Windows, its windows exist but are never shown), and
+         * its services have no display to reach: its default is the null driver. An explicit Graphics value or
+         * /desktop driver still wins; other sessions keep the default list. */
+        if (ProcessIdToSessionId( GetCurrentProcessId(), &session ) && !session) lstrcpyW( buffer, L"null" );
 
         /* @@ Wine registry key: HKCU\Software\Wine\Drivers */
         if (!RegOpenKeyW( HKEY_CURRENT_USER, L"Software\\Wine\\Drivers", &hkey ))
