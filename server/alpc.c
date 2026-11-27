@@ -607,6 +607,16 @@ DECL_HANDLER(alpc_send_receive)
             {
                 if (!(msg = alloc_message( ALPC_TYPE_REPLY, req->msg_id, callback_id, data, len ))) goto done;
                 msg->sync_tid = sync_tid;
+                if (sync_tid)
+                {
+                    /* the thread that sent the request is gone: nobody could ever receive the reply, so it becomes an
+                     * ordinary one */
+                    struct thread *thread = get_thread_from_id( sync_tid );
+
+                    if (!thread) clear_error();
+                    if (!thread || thread->state == TERMINATED) msg->sync_tid = 0;
+                    if (thread) release_object( thread );
+                }
                 queue_message( client, msg );
             }
             reply->sent_id = req->msg_id;
