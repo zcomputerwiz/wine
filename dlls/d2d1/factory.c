@@ -101,8 +101,9 @@ static HRESULT d2d_factory_reload_sysmetrics(struct d2d_factory *factory)
  * {6f72c0a2-6db7-46e9-9b62-b58a23f4928b}: an interface of the factory that Windows 11 answers (a separate object, like
  * ID2D1Multithread; tests/uwp/alpc/d2dqi-probe.c) and that dwmcorei.dll of the Windows App Runtime queries in its DllMain, failing
  * to load when it is refused. What it does is not known: it calls the method in slot 6 with 0. The object here forwards IUnknown
- * to the factory and its other methods succeed and log, except slot 15, which creates a device (see there). On Windows (multithreaded
- * factory) Notepad calls slots 4, 5, 6 and 15; slots 4 to 6 write nothing through their arguments.
+ * to the factory and its other methods succeed and log, except slot 4, which combines two geometries, and slot 15, which creates a
+ * device (see there). On Windows (multithreaded factory) Notepad calls slots 4, 5, 6 and 15; slots 5 and 6 write nothing through
+ * their arguments.
  */
 #ifdef __x86_64__
 static const GUID IID_d2d_private = {0x6f72c0a2, 0x6db7, 0x46e9, {0x9b, 0x62, 0xb5, 0x8a, 0x23, 0xf4, 0x92, 0x8b}};
@@ -136,8 +137,63 @@ static ULONG STDMETHODCALLTYPE d2d_private_Release(void *iface)
         FIXME("iface %p, private slot " #n "(%p, %p): semi-stub.\n", iface, a, b); \
         return S_OK; \
     }
-D2D_PRIVATE_SLOT(3) D2D_PRIVATE_SLOT(4) D2D_PRIVATE_SLOT(5) D2D_PRIVATE_SLOT(6) D2D_PRIVATE_SLOT(7) D2D_PRIVATE_SLOT(8)
+D2D_PRIVATE_SLOT(3) D2D_PRIVATE_SLOT(5) D2D_PRIVATE_SLOT(6) D2D_PRIVATE_SLOT(7) D2D_PRIVATE_SLOT(8)
 D2D_PRIVATE_SLOT(9) D2D_PRIVATE_SLOT(10) D2D_PRIVATE_SLOT(11) D2D_PRIVATE_SLOT(12) D2D_PRIVATE_SLOT(13) D2D_PRIVATE_SLOT(14)
+
+/* Slot 4 combines two geometries into a new path geometry. Measured on 64-bit Windows 11 (wintrace in Notepad, and calls from a
+ * program): the compositor of the Windows App SDK (dwmcorei.dll) calls it after slot 15 with 1, a rectangle geometry, no transform,
+ * a path geometry, an identity matrix, 0.25 and an output pointer. The first argument is a D2D1_COMBINE_MODE (union, intersect, xor
+ * and exclude give the areas of ID2D1Geometry::CombineWithGeometry), each matrix transforms its own geometry, and the output
+ * receives a new ID2D1PathGeometry that the caller owns; it returns 0. The argument layout is measured on x86_64 only: elsewhere
+ * the slot only logs. */
+#ifdef __x86_64__
+static HRESULT STDMETHODCALLTYPE d2d_private_slot4(void *iface, UINT_PTR mode, ID2D1Geometry *geometry1,
+        const D2D1_MATRIX_3X2_F *transform1, ID2D1Geometry *geometry2, const D2D1_MATRIX_3X2_F *transform2,
+        float tolerance, ID2D1PathGeometry **out)
+{
+    ID2D1Factory *factory = (ID2D1Factory *)&impl_from_private(iface)->ID2D1Factory7_iface;
+    ID2D1TransformedGeometry *transformed = NULL;
+    ID2D1PathGeometry *path;
+    ID2D1GeometrySink *sink;
+    HRESULT hr;
+
+    TRACE("iface %p, mode %#Ix, geometry1 %p, transform1 %p, geometry2 %p, transform2 %p, tolerance %.8e, out %p.\n",
+            iface, mode, geometry1, transform1, geometry2, transform2, tolerance, out);
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!geometry1 || !geometry2 || mode > D2D1_COMBINE_MODE_EXCLUDE) return E_INVALIDARG;
+    if (transform1)
+    {
+        if (FAILED(hr = ID2D1Factory_CreateTransformedGeometry(factory, geometry1, transform1, &transformed)))
+            return hr;
+        geometry1 = (ID2D1Geometry *)transformed;
+    }
+    if (FAILED(hr = ID2D1Factory_CreatePathGeometry(factory, &path)))
+        goto done;
+    if (FAILED(hr = ID2D1PathGeometry_Open(path, &sink)))
+    {
+        ID2D1PathGeometry_Release(path);
+        goto done;
+    }
+    hr = ID2D1Geometry_CombineWithGeometry(geometry1, geometry2, mode, transform2, tolerance,
+            (ID2D1SimplifiedGeometrySink *)sink);
+    if (SUCCEEDED(hr))
+        hr = ID2D1GeometrySink_Close(sink);
+    ID2D1GeometrySink_Release(sink);
+    if (SUCCEEDED(hr))
+        *out = path;
+    else
+        ID2D1PathGeometry_Release(path);
+
+done:
+    if (transformed)
+        ID2D1TransformedGeometry_Release(transformed);
+    return hr;
+}
+#else
+D2D_PRIVATE_SLOT(4)
+#endif
 
 /* Slot 15 creates a Direct2D device. Measured on 64-bit Windows 11 (wintrace d2d1.dll!factorymt@{6f72c0a2-...}[15] in Notepad):
  * the compositor of the Windows App SDK (dwmcorei.dll) calls it once with 4, its Direct3D 11 device and an output pointer, which

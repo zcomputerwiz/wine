@@ -19088,6 +19088,97 @@ static void test_geometry_outline(BOOL d3d11)
     ID2D1Factory_Release(factory);
 }
 
+/* Slot 4 of the private factory interface {6f72c0a2-6db7-46e9-9b62-b58a23f4928b} (the compositor of the Windows App SDK calls it):
+ * it combines two geometries, each with its own transform, into a new path geometry (values measured on Windows 11). */
+typedef HRESULT (STDMETHODCALLTYPE *private_combine_func)(void *iface, UINT_PTR mode, ID2D1Geometry *geometry1,
+        const D2D1_MATRIX_3X2_F *transform1, ID2D1Geometry *geometry2, const D2D1_MATRIX_3X2_F *transform2,
+        float tolerance, ID2D1PathGeometry **out);
+
+static void test_private_combine(BOOL d3d11)
+{
+    static const GUID IID_d2d_private = {0x6f72c0a2, 0x6db7, 0x46e9, {0x9b, 0x62, 0xb5, 0x8a, 0x23, 0xf4, 0x92, 0x8b}};
+    static const D2D1_RECT_F second[] = {{5.0f, 0.0f, 15.0f, 10.0f}};
+    static const struct
+    {
+        unsigned int mode;
+        float dx1, dx2;
+        float area;
+        D2D1_RECT_F bounds;
+    }
+    tests[] =
+    {
+        {D2D1_COMBINE_MODE_UNION,      0.0f, 0.0f, 150.0f, {0.0f, 0.0f, 15.0f, 10.0f}},
+        {D2D1_COMBINE_MODE_INTERSECT,  0.0f, 0.0f,  50.0f, {5.0f, 0.0f, 10.0f, 10.0f}},
+        {D2D1_COMBINE_MODE_XOR,        0.0f, 0.0f, 100.0f, {0.0f, 0.0f, 15.0f, 10.0f}},
+        {D2D1_COMBINE_MODE_EXCLUDE,    0.0f, 0.0f,  50.0f, {0.0f, 0.0f,  5.0f, 10.0f}},
+        {D2D1_COMBINE_MODE_INTERSECT,  0.0f, 3.0f,  20.0f, {8.0f, 0.0f, 10.0f, 10.0f}},
+        {D2D1_COMBINE_MODE_INTERSECT,  5.0f, 0.0f, 100.0f, {5.0f, 0.0f, 15.0f, 10.0f}},
+        {D2D1_COMBINE_MODE_UNION,     -5.0f, 0.0f, 200.0f, {-5.0f, 0.0f, 15.0f, 10.0f}},
+        {D2D1_COMBINE_MODE_EXCLUDE,    2.0f, 3.0f,  60.0f, {2.0f, 0.0f,  8.0f, 10.0f}},
+    };
+    D2D1_RECT_F rect = {0.0f, 0.0f, 10.0f, 10.0f}, bounds;
+    private_combine_func combine;
+    ID2D1RectangleGeometry *first;
+    ID2D1PathGeometry *path, *out;
+    ID2D1Factory *factory;
+    IUnknown *private;
+    unsigned int i;
+    ULONG refcount;
+    float area;
+    HRESULT hr;
+
+    if (sizeof(void *) != 8)
+    {
+        /* the argument layout is measured on x86_64 only */
+        skip("The private combine slot is only tested on 64-bit.\n");
+        return;
+    }
+    hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, &IID_ID2D1Factory, NULL, (void **)&factory);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1Factory_QueryInterface(factory, &IID_d2d_private, (void **)&private);
+    if (FAILED(hr))
+    {
+        skip("The private factory interface is not available.\n");
+        ID2D1Factory_Release(factory);
+        return;
+    }
+    combine = (private_combine_func)(*(void ***)private)[4];
+    hr = ID2D1Factory_CreateRectangleGeometry(factory, &rect, &first);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    path = create_rects_path(factory, second, 1);
+
+    for (i = 0; i < ARRAY_SIZE(tests); ++i)
+    {
+        D2D1_MATRIX_3X2_F m1 = {{{1.0f, 0.0f, 0.0f, 1.0f, tests[i].dx1, 0.0f}}};
+        D2D1_MATRIX_3X2_F m2 = {{{1.0f, -0.0f, 0.0f, 1.0f, tests[i].dx2, 0.0f}}};
+
+        winetest_push_context("Test %u", i);
+        out = (void *)0xdeadbeef;
+        hr = combine(private, tests[i].mode, (ID2D1Geometry *)first, tests[i].dx1 != 0.0f ? &m1 : NULL,
+                (ID2D1Geometry *)path, &m2, 0.25f, &out);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            hr = ID2D1PathGeometry_ComputeArea(out, NULL, 0.25f, &area);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            ok(fabsf(area - tests[i].area) < 0.5f, "Got area %.8e.\n", area);
+            hr = ID2D1PathGeometry_GetBounds(out, NULL, &bounds);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            check_rect(&bounds, tests[i].bounds.left, tests[i].bounds.top, tests[i].bounds.right, tests[i].bounds.bottom);
+            ID2D1PathGeometry_AddRef(out);
+            refcount = ID2D1PathGeometry_Release(out);
+            ok(refcount == 1, "Got unexpected refcount %lu.\n", refcount);
+            ID2D1PathGeometry_Release(out);
+        }
+        winetest_pop_context();
+    }
+
+    ID2D1PathGeometry_Release(path);
+    ID2D1RectangleGeometry_Release(first);
+    IUnknown_Release(private);
+    ID2D1Factory_Release(factory);
+}
+
 START_TEST(d2d1)
 {
     HMODULE d2d1_dll = GetModuleHandleA("d2d1.dll");
@@ -19127,6 +19218,7 @@ START_TEST(d2d1)
     queue_test(test_radial_brush);
     queue_test(test_path_geometry);
     queue_test(test_geometry_outline);
+    queue_test(test_private_combine);
     queue_d3d10_test(test_rectangle_geometry);
     queue_d3d10_test(test_rounded_rectangle_geometry);
     queue_test(test_bitmap_formats);
