@@ -211,7 +211,12 @@ BOOL X11DRV_adopt_desktop( Window old )
     unsigned int tries;
     BOOL taken = FALSE;
 
-    if (!old || old == ours || !is_virtual_desktop() || old == DefaultRootWindow( display )) return FALSE;
+    if (!old || old == ours || !is_virtual_desktop() || old == DefaultRootWindow( display ))
+    {
+        if (old != ours)  /* the same id is this process's own window: nothing was left behind */
+            WARN( "no desktop window to take over: stored %lx, ours %lx, virtual desktop %d\n", old, ours, is_virtual_desktop() );
+        return FALSE;
+    }
 
     if (!retain_desktop( NULL ))
     {
