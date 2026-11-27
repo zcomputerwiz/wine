@@ -2014,43 +2014,29 @@ DECL_HANDLER(get_process_command_line)
 /* fetch the name of the process image */
 DECL_HANDLER(get_process_image_name)
 {
-    struct process *process;
-    struct x_rproc *rproc;
+    struct process *process = NULL;
+    struct x_rproc *rproc = NULL;
+    const WCHAR *image;
+    data_size_t len = 0;
     int remote = 0;
 
-    /* WineExplorer X3: a session's process opened by session 0, from its owner's information */
-    if (!req->pid && (rproc = x_remote_process_from_handle( req->handle, PROCESS_QUERY_LIMITED_INFORMATION, &remote )))
+    /* WineExplorer X3: a session's process opened by session 0 gives its owner's image name */
+    if (!req->pid) rproc = x_remote_process_from_handle( req->handle, PROCESS_QUERY_LIMITED_INFORMATION, &remote );
+    if (rproc) image = x_remote_process_image( rproc, &len );
+    else
     {
-        data_size_t len;
-        const WCHAR *image = x_remote_process_image( rproc, &len );
-        struct unicode_str name = { image, len };
+        if (remote) return;
+        if (req->pid) process = get_process_from_id( req->pid );
+        else          process = get_process_from_handle( req->handle, PROCESS_QUERY_LIMITED_INFORMATION );
 
-        if (image)
-        {
-            if (req->win32 && name.len > 6 * sizeof(WCHAR) && name.str[5] == ':')
-            {
-                name.str += 4;
-                name.len -= 4 * sizeof(WCHAR);
-            }
-            reply->len = name.len;
-            if (name.len <= get_reply_max_size())
-            {
-                WCHAR *ptr = set_reply_data( name.str, name.len );
-                if (req->win32 && name.len > sizeof(WCHAR) && ptr[1] == '?') ptr[1] = '\\';
-            }
-            else set_error( STATUS_BUFFER_TOO_SMALL );
-        }
-        release_object( rproc );
-        return;
+        if (!process) return;
+        image = process->image;
+        len = process->imagelen;
+        if (!image) set_error( STATUS_INVALID_HANDLE );
     }
-    if (remote) return;
-    if (req->pid) process = get_process_from_id( req->pid );
-    else          process = get_process_from_handle( req->handle, PROCESS_QUERY_LIMITED_INFORMATION );
-
-    if (!process) return;
-    if (process->image)
+    if (image)
     {
-        struct unicode_str name = { process->image, process->imagelen };
+        struct unicode_str name = { image, len };
         /* skip the \??\ prefix */
         if (req->win32 && name.len > 6 * sizeof(WCHAR) && name.str[5] == ':')
         {
@@ -2068,8 +2054,8 @@ DECL_HANDLER(get_process_image_name)
         }
         else set_error( STATUS_BUFFER_TOO_SMALL );
     }
-    else set_error( STATUS_INVALID_HANDLE );
-    release_object( process );
+    if (process) release_object( process );
+    if (rproc) release_object( rproc );
 }
 
 /* retrieve information about a process memory usage */

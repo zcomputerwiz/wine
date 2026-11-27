@@ -768,6 +768,11 @@ struct x_peer *x_peer_of_session( unsigned int session )
     return found;
 }
 
+unsigned int x_peer_session( const struct x_peer *peer )
+{
+    return peer->session;
+}
+
 struct x_peer *x_peer_of_server( unsigned int pid, unsigned long long start )
 {
     struct x_peer *peer;

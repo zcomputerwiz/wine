@@ -110,6 +110,8 @@ extern void x_held_free( struct x_held *held );
 extern struct x_peer *x_peer_of_session( unsigned int session );
 /* session 0: the peer of the server process pid started at start (an id block's lessee), or NULL */
 extern struct x_peer *x_peer_of_server( unsigned int pid, unsigned long long start );
+/* the session of a peer's link (session 0 as owner: the peer's session; a user's server: 0) */
+extern unsigned int x_peer_session( const struct x_peer *peer );
 
 /* ---- for the lab (wex_x0lab.c) ---- */
 

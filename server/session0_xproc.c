@@ -172,8 +172,14 @@ void x_process_ended( struct process *process )
 
 /* ---- session 0's side: the remote process ---- */
 
-/* the exit status a remote process reports when its owner's epoch ended before its death notice came (M6) */
+/* the exit status a remote process reports when its owner's epoch ended before its death notice came (M6), or the
+ * owner could not say after the notice: an error status, never STILL_ACTIVE nor 0, so a caller comparing exit codes
+ * does not take it for a clean exit */
 #define X_OWNER_GONE_EXIT STATUS_CONNECTION_DISCONNECTED
+
+/* how long session 0 waits for the owner to open a process (the review: a stopped or busy user's server must not
+ * hold a session 0 service's thread); past it the id counts as unreachable, as before X3 */
+#define X_OPEN_DEADLINE 5
 
 struct x_rproc
 {
@@ -195,6 +201,7 @@ struct x_pcall
     struct object             *sync;      /* signaled when the open has ended */
     struct process            *caller;    /* only this process takes the result */
     struct x_rproc            *rproc;
+    struct timeout_user       *timeout;   /* X_OPEN_DEADLINE */
     unsigned int               status;    /* STATUS_PENDING while it runs */
     unsigned int               access;
     unsigned int               attributes;
@@ -203,7 +210,8 @@ struct x_pcall
 static const WCHAR rproc_type_name[] = {'P','r','o','c','e','s','s'};
 
 /* its own type (not process_type, so SeDebugPrivilege's rule for processes does not widen a handle beyond what the
- * owner granted), with the process type's name and mapping */
+ * owner granted), with the process type's name and mapping; not in the server's type list, so the object type
+ * statistics do not count it */
 static struct type_descr rproc_type =
 {
     { rproc_type_name, sizeof(rproc_type_name) },
@@ -303,6 +311,7 @@ static void pcall_destroy( struct object *obj )
 {
     struct x_pcall *call = (struct x_pcall *)obj;
 
+    if (call->timeout) remove_timeout_user( call->timeout );
     if (call->rproc) release_object( call->rproc );
     if (call->caller) release_object( call->caller );
     if (call->sync) release_object( call->sync );
@@ -324,6 +333,10 @@ static int rproc_take_info( struct x_rproc *rproc, const void *body, size_t size
     if (size < sizeof(info)) return 0;
     memcpy( &info, body, sizeof(info) );
     if (info.image_len != size - sizeof(info) || info.image_len % sizeof(WCHAR)) return 0;
+    /* the owner is a user's server: what session 0 already knows is not taken from it (the id asked for, the
+     * session of its link); the rest are the owner's claims */
+    if (info.pid != rproc->info.pid) return 0;
+    info.session_id = x_peer_session( rproc->peer );
     if (info.image_len && !(image = memdup( (const char *)body + sizeof(info), info.image_len ))) return 0;
     free( rproc->image );
     rproc->image = image;
@@ -386,8 +399,21 @@ static void rproc_notify( struct x_held *held, void *ctx )
 
 static void pcall_end( struct x_pcall *call, unsigned int status )
 {
+    if (call->status != STATUS_PENDING) return;  /* ended by its deadline: a late reply changes nothing */
+    if (call->timeout) remove_timeout_user( call->timeout );
+    call->timeout = NULL;
     call->status = status;
     signal_sync( call->sync );
+}
+
+static void pcall_deadline( void *private )
+{
+    struct x_pcall *call = private;
+
+    call->timeout = NULL;
+    fprintf( stderr, "x3: the open of process %04x got no answer from its server in %u s\n", call->rproc->info.pid,
+             X_OPEN_DEADLINE );
+    pcall_end( call, STATUS_INVALID_CID );
 }
 
 /* the open has its information (or needs none): the death notice is armed, and the caller can take the handle */
@@ -403,11 +429,29 @@ static void pcall_opened( struct x_pcall *call )
     pcall_end( call, STATUS_SUCCESS );
 }
 
+/* a reply after the open's deadline: the owner's entry is released and the held one freed at once */
+static void rproc_drop_held( struct x_rproc *rproc )
+{
+    if (!rproc->held) return;
+    if (rproc->held->peer)
+        x_call( rproc->held->peer, WEX_X_RELEASE, rproc->held->id, NULL, 0, NULL, 0, NULL, 0, 0,
+                x_ignore_reply, NULL );
+    x_held_free( rproc->held );
+    rproc->held = NULL;
+    fprintf( stderr, "x3: a late answer for process %04x: its reference released\n", rproc->info.pid );
+}
+
 static void pcall_info_done( void *ctx, unsigned int status, const struct wex_x_header *reply, const void *body,
                              size_t body_size )
 {
     struct x_pcall *call = ctx;
 
+    if (call->status != STATUS_PENDING)
+    {
+        rproc_drop_held( call->rproc );
+        release_object( call );
+        return;
+    }
     if (!status && !rproc_take_info( call->rproc, body, body_size )) status = STATUS_INVALID_PARAMETER;
     if (!status) pcall_opened( call );
     else pcall_end( call, status );
@@ -423,6 +467,16 @@ static void pcall_open_done( void *ctx, unsigned int status, const struct wex_x_
     struct wex_x_info_req req = { ProcessBasicInformation, 0 };
 
     if (!status && (body_size != sizeof(granted) || !reply->ref)) status = STATUS_INVALID_PARAMETER;
+    if (call->status != STATUS_PENDING)
+    {
+        if (!status)
+        {
+            x_call( rproc->peer, WEX_X_RELEASE, reply->ref, NULL, 0, NULL, 0, NULL, 0, 0, x_ignore_reply, NULL );
+            fprintf( stderr, "x3: a late answer for process %04x: its reference released\n", rproc->info.pid );
+        }
+        release_object( call );
+        return;
+    }
     if (status)
     {
         pcall_end( call, status );
@@ -458,7 +512,10 @@ static void pcall_open_done( void *ctx, unsigned int status, const struct wex_x_
 }
 
 /* a descriptor that allows exactly the granted rights to everyone: a handle made later (DuplicateHandle) can be
- * narrower, never wider (a new open is the way to more rights) */
+ * narrower, never wider (a new open is the way to more rights). Its owner is SYSTEM, so a SYSTEM caller has the
+ * owner's implicit READ_CONTROL and WRITE_DAC and could widen the DACL; harmless while everything but the snapshot
+ * queries and the wait is STATUS_NOT_SUPPORTED. A change that serves more operations adds an OWNER RIGHTS ACE (or
+ * another owner) first. */
 static int rproc_set_sd( struct x_rproc *rproc, unsigned int granted )
 {
     struct security_descriptor *sd;
@@ -534,6 +591,7 @@ int x_open_remote_process( process_id_t pid, unsigned int access, unsigned int a
         return 1;
     }
     call->rproc = rproc;
+    call->timeout = NULL;
     call->caller = (struct process *)grab_object( current->process );
     call->status = STATUS_PENDING;
     call->access = access;
@@ -559,6 +617,7 @@ int x_open_remote_process( process_id_t pid, unsigned int access, unsigned int a
         set_error( status );
         return 1;
     }
+    call->timeout = add_timeout_user( -(timeout_t)X_OPEN_DEADLINE * TICKS_PER_SEC, pcall_deadline, call );
     if ((*handle = alloc_handle_no_access_check( current->process, call, SYNCHRONIZE, 0 )))
         set_error( STATUS_PENDING );
     release_object( call );
@@ -585,15 +644,24 @@ struct x_rproc *x_remote_process_from_handle( obj_handle_t handle, unsigned int 
     return (struct x_rproc *)get_handle_obj( current->process, handle, access, &rproc_ops );
 }
 
-/* (the error set before is kept) */
+/* (the error set before is kept) A remote process handle met by a request that X3 does not serve: a FIXME once
+ * per request, so a lab run shows what a program in session 0 asks of a session's process (the owner's own FIXME
+ * per information class stays as a guard) */
 int x_is_remote_process_handle( obj_handle_t handle )
 {
-    unsigned int error = get_error();
+    static unsigned char warned[(REQ_NB_REQUESTS + 7) / 8];
+    unsigned int error = get_error(), req;
     struct x_rproc *rproc;
     int remote;
 
     if ((rproc = x_remote_process_from_handle( handle, 0, &remote ))) release_object( rproc );
     set_error( error );
+    if (remote && current && (req = current->req.request_header.req) < REQ_NB_REQUESTS &&
+        !(warned[req / 8] & (1 << (req % 8))))
+    {
+        warned[req / 8] |= 1 << (req % 8);
+        fprintf( stderr, "x3: FIXME: request %u on a session's process is not supported in session 0\n", req );
+    }
     return remote;
 }
 
