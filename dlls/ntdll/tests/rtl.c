@@ -5868,9 +5868,68 @@ static void test_LdrResolveDelayLoadedAPI(void)
     }
 }
 
+/* Wine only: HKCU\Software\Wine\AppDefaults\<exe>\Version selects the reported version per program; "win11_23h2" is
+ * 10.0.22631. A copy of this test under another name gets it, this process keeps its own version. */
+static void test_appdefaults_version(void)
+{
+    static const char key_name[] = "Software\\Wine\\AppDefaults\\wexver23h2.exe";
+    char self[MAX_PATH], copy[MAX_PATH], cmdline[MAX_PATH * 2];
+    PROCESS_INFORMATION pi;
+    STARTUPINFOA si = { sizeof(si) };
+    RTL_OSVERSIONINFOEXW own = { sizeof(own) };
+    DWORD code = 0;
+    HKEY key;
+    LONG ret;
+
+    if (strcmp( winetest_platform, "wine" ))
+    {
+        skip( "AppDefaults is a Wine setting.\n" );
+        return;
+    }
+
+    RtlGetVersion( &own );
+    GetModuleFileNameA( NULL, self, sizeof(self) );
+    GetTempPathA( sizeof(copy), copy );
+    strcat( copy, "wexver23h2.exe" );
+    ok( CopyFileA( self, copy, FALSE ), "CopyFile failed, error %lu.\n", GetLastError() );
+    ret = RegCreateKeyA( HKEY_CURRENT_USER, key_name, &key );
+    ok( !ret, "RegCreateKey failed, %ld.\n", ret );
+    ret = RegSetValueExA( key, "Version", 0, REG_SZ, (const BYTE *)"win11_23h2", sizeof("win11_23h2") );
+    ok( !ret, "RegSetValueEx failed, %ld.\n", ret );
+    RegCloseKey( key );
+
+    sprintf( cmdline, "\"%s\" rtl appdefaults_child", copy );
+    if (CreateProcessA( copy, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi ))
+    {
+        WaitForSingleObject( pi.hProcess, 30000 );
+        GetExitCodeProcess( pi.hProcess, &code );
+        CloseHandle( pi.hThread );
+        CloseHandle( pi.hProcess );
+    }
+    else ok( 0, "CreateProcess failed, error %lu.\n", GetLastError() );
+    ok( code == MAKELONG( 22631, 10 ), "child reported %lu.%lu.\n", HIWORD(code), LOWORD(code) );
+    ok( own.dwBuildNumber != 22631 || own.dwMajorVersion != 10, "this process reports %lu.%lu.%lu too.\n",
+        own.dwMajorVersion, own.dwMinorVersion, own.dwBuildNumber );
+
+    RegDeleteKeyA( HKEY_CURRENT_USER, key_name );
+    DeleteFileA( copy );
+}
+
 START_TEST(rtl)
 {
+    char **argv;
+
+    if (winetest_get_mainargs( &argv ) >= 3 && !strcmp( argv[2], "appdefaults_child" ))
+    {
+        RTL_OSVERSIONINFOEXW v = { sizeof(v) };
+        RtlGetVersion( &v );
+        ExitProcess( v.dwMinorVersion == 0 && v.dwPlatformId == VER_PLATFORM_WIN32_NT
+                     ? MAKELONG( v.dwBuildNumber, v.dwMajorVersion ) : 0 );
+    }
+
     InitFunctionPtrs();
+
+    test_appdefaults_version();
 
     test_RtlQueryProcessDebugInformation();
     test_RtlCompareMemory();
