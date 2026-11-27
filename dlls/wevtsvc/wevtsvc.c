@@ -430,7 +430,13 @@ static DWORD do_tokenview( struct connection *conn, struct reply *reply )
     DWORD size, granted = 0, privs_size = sizeof(privs_buf), integrity = 0, len;
     BOOL ok = FALSE;
     HANDLE token = NULL, imp = NULL;
+    DWORD test_ops = 0, test_size = sizeof(test_ops);
 
+    /* a test operation: only while session 0's EventLog key has WexTestOps (DWORD 1, which the suite sets and
+     * removes). It reports only the caller's own token and a fixed check, so it leaks nothing even then. */
+    if (RegGetValueW( HKEY_LOCAL_MACHINE, L"System\\CurrentControlSet\\Services\\EventLog", L"WexTestOps",
+                      RRF_RT_REG_DWORD, NULL, &test_ops, &test_size ) || test_ops != 1)
+        return ERROR_INVALID_FUNCTION;
     if (!ImpersonateNamedPipeClient( conn->pipe )) return ERROR_ACCESS_DENIED;
     if (!OpenThreadToken( GetCurrentThread(), TOKEN_QUERY | TOKEN_DUPLICATE, TRUE, &token ))
     {

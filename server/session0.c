@@ -1080,6 +1080,50 @@ static int described_token_bound( struct token *token, uid_t uid )
     return 1;
 }
 
+/* Link-bound tokens (docs/SESSION0_CROSS_SERVER.md; B132): what a user's server describes beyond its user is its
+ * claim, checked here against session 0's own accounts record, looked up at every build (no cache: a demoted account
+ * loses it at its next link or open; tokens already built are copies and are not revisited). A session's system role
+ * becomes the account (token_map_service_user): SYSTEM in someone's session is never session 0's SYSTEM, whoever the
+ * account is; the consented paths (the broker, the MSI host) are the way there. Then token_apply_link_policy cuts
+ * what the record does not confirm. 0 refuses the token (a system role whose account has no record). */
+static int link_policy( struct token *token, uid_t uid )
+{
+    static uid_t noted[64][2];
+    static unsigned int noted_count;
+    struct wex_account account;
+    const struct sid *user;
+    unsigned int subauth[5], domain[4] = { 0, 0, 0, 0 }, flags = 0, count = 0, i, kind = 0;
+    uint32_t rids[64];
+    int has_domain = 0;
+
+    if (lookup_account( NULL, uid, WEX_ACCOUNT_MAP_V1, &account ) == WEX_ACCOUNT_OK && account.administrator)
+        flags |= LINK_POLICY_ADMIN;
+    if (token_service_account( token ) != -1)
+    {
+        if (!accounts_own_sid( uid, subauth ) || !token_map_service_user( token, subauth )) return 0;
+        flags |= LINK_POLICY_MAPPED;
+        kind |= 1;
+    }
+    user = token_get_user_sid( token );
+    if (user->sub_count == 5 && user->sub_auth[0] == SECURITY_NT_NON_UNIQUE)
+    {
+        for (i = 0; i < 4; i++) domain[i] = user->sub_auth[i];
+        has_domain = 1;
+    }
+    if (!accounts_own_domain( uid, subauth, rids, ARRAY_SIZE(rids), &count )) count = 0;
+    if (token_apply_link_policy( token, flags, has_domain ? domain : NULL, (const unsigned int *)rids, count ))
+        kind |= 2;
+    for (i = 0; i < noted_count; i++) if (noted[i][0] == uid && (noted[i][1] & kind) == kind) return 1;
+    if (kind)
+    {
+        if (i < ARRAY_SIZE(noted)) { noted[i][0] = uid; noted[i][1] = kind; if (i == noted_count) noted_count++; }
+        fprintf( stderr, "session0: uid %u's server%s%s\n", (unsigned int)uid,
+                 (kind & 1) ? ": its system role counts as the account" : "",
+                 (kind & 2) ? ": described more than its account has (groups, privileges, integrity), limited" : "" );
+    }
+    return 1;
+}
+
 /* the described token, if it is bound to the peer; else NULL with *status set */
 static struct token *create_bound_token( const void *desc, data_size_t size, uid_t uid, unsigned int *status )
 {
@@ -1105,7 +1149,8 @@ struct token *link_bound_token( uid_t uid, unsigned int session, const void *des
 
     *status = STATUS_INVALID_PARAMETER;
     if (!token) return NULL;
-    if ((session0_server && !described_token_bound( token, uid )) || token_get_session_id( token ) != session)
+    if ((session0_server && !described_token_bound( token, uid )) || token_get_session_id( token ) != session ||
+        (session0_server && !session0_dev && !link_policy( token, uid )))
     {
         release_object( token );
         *status = STATUS_ACCESS_DENIED;

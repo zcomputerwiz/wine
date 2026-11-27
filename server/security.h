@@ -107,6 +107,12 @@ extern struct token *token_create_described( const void *data, data_size_t size 
 extern int token_can_act( const struct token *token );
 extern void token_set_link_bound( struct token *token, unsigned int session );
 extern int token_is_link_bound( struct token *token );
+/* WineExplorer: link-bound tokens (session0.c's link_bound_token) */
+#define LINK_POLICY_ADMIN  1   /* session 0's record: the account is an administrator */
+#define LINK_POLICY_MAPPED 2   /* the user was a session's system role, now the account */
+extern int token_map_service_user( struct token *token, const unsigned int subauth[5] );
+extern int token_apply_link_policy( struct token *token, unsigned int flags, const unsigned int domain[4],
+                                    const unsigned int *rids, unsigned int count );
 extern unsigned int token_caller_class( struct token *token );  /* WEX_CALLER_* (wine/wex_caller.h) */
 extern void token_get_ids( const struct token *token, struct luid *token_id, struct luid *modified_id );
 extern int token_sid_present( struct token *token, const struct sid *sid, int deny );
