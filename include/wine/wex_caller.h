@@ -30,6 +30,8 @@
 #define WEX_CALLER_USER           1  /* an authenticated caller (a session's system role and service groups too) */
 #define WEX_CALLER_ELEVATED_ADMIN 2  /* a real user's elevated administrator token */
 #define WEX_CALLER_SYSTEM_LOCAL   3  /* SYSTEM, LocalService or NetworkService of session 0 (or a plain prefix) itself */
+#define WEX_CALLER_SESSION_SYSTEM 4  /* B132: a session's system role over a link, mapped by session 0 to the account
+                                        whose uid runs it (that account's rights; the class names what it is) */
 
 #ifndef WEX_CALLER_CONSTANTS_ONLY
 

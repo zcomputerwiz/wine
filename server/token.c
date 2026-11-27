@@ -155,6 +155,8 @@ struct token
     int            windows_sd;      /* R7: Windows' descriptor was given (token_protect_system, token_protect_elevated) */
     int            link_bound;      /* WineExplorer H3: made by link_bound_token from another server's description */
     unsigned int   link_session;    /* ... for that link's session */
+    int            session_system;  /* B132: a session's system role, mapped to its account (token_map_service_user):
+                                     * a flag, never a SID, so no ACE matches it; WEX_CALLER_SESSION_SYSTEM says it */
 };
 
 struct privilege
@@ -671,6 +673,7 @@ static struct token *create_token( unsigned int primary, unsigned int session_id
         token->windows_sd = 0;
         token->link_bound = 0;    /* H3: a token of this server's own (link_bound_token sets it) */
         token->link_session = 0;
+        token->session_system = 0;
 
         /* copy user */
         token->user = memdup( user, sid_len( user ));
@@ -801,6 +804,7 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
     token->e1s_account = src_token->e1s_account;
     token->link_bound = src_token->link_bound;  /* a copy of a session's token stays a session's (H3) */
     token->link_session = src_token->link_session;
+    token->session_system = src_token->session_system;
 
     /* copy groups */
     LIST_FOR_EACH_ENTRY( group, &src_token->groups, struct group, entry )
@@ -3174,6 +3178,7 @@ int token_map_service_user( struct token *token, const unsigned int subauth[5] )
     group->attrs = SE_GROUP_USE_FOR_DENY_ONLY;
     list_add_tail( &token->groups, &group->entry );
     token->user = user;
+    token->session_system = 1;  /* the caller class names it (WEX_CALLER_SESSION_SYSTEM); no SID does */
     free( old );
     /* the user's own limited token has INTERACTIVE (its logon): the system role in session 0 is that token, so it
      * writes the Application log as its user does (Windows' descriptor grants IU), never System */
@@ -3228,11 +3233,28 @@ int token_apply_link_policy( struct token *token, unsigned int flags, const unsi
         SE_TIME_ZONE_PRIVILEGE,
     };
     struct privilege *privilege, *next;
-    struct group *group;
+    struct group *group, *next_group;
     unsigned int i, elevation;
     int cut = 0;
 
-    if ((flags & LINK_POLICY_ADMIN) && !(flags & LINK_POLICY_MAPPED)) return 0;
+    /* SYSTEM, LocalService and NetworkService as groups of a description that session 0 did not map: no user's token
+     * has them, so they are removed, not made deny-only, whatever the description says of them (an administrator's
+     * too). A deny-only SYSTEM then means only what token_map_service_user made: a session's system role. */
+    if (!(flags & LINK_POLICY_MAPPED))
+    {
+        LIST_FOR_EACH_ENTRY_SAFE( group, next_group, &token->groups, struct group, entry )
+        {
+            const struct sid *sid = &group->sid;
+
+            if (!sid_in_nt_authority( sid ) || sid->sub_count != 1 ||
+                (sid->sub_auth[0] != SECURITY_LOCAL_SYSTEM_RID && sid->sub_auth[0] != SECURITY_LOCAL_SERVICE_RID &&
+                 sid->sub_auth[0] != SECURITY_NETWORK_SERVICE_RID)) continue;
+            list_remove( &group->entry );
+            free( group );
+            cut = 1;
+        }
+    }
+    if ((flags & LINK_POLICY_ADMIN) && !(flags & LINK_POLICY_MAPPED)) return cut;
     LIST_FOR_EACH_ENTRY( group, &token->groups, struct group, entry )
     {
         const struct sid *sid = &group->sid;
@@ -3374,6 +3396,9 @@ unsigned int token_caller_class( struct token *token )
     int service_account;
 
     if (!token || equal_sid( token->user, &anonymous_sid )) return WEX_CALLER_NONE;
+    /* B132: a session's system role over a link, which session 0 maps to its account: only the server can tell it
+     * from the user's own token. Only code that asks for this class sees it (R9's B0) */
+    if (token->link_bound && token->session_system) return WEX_CALLER_SESSION_SYSTEM;
     service_account = token_service_account( token ) != -1;
     if (service_account)
         return !token->link_bound && (session0_server || !session0_client) ? WEX_CALLER_SYSTEM_LOCAL : WEX_CALLER_USER;

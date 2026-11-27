@@ -2641,7 +2641,8 @@ DECL_HANDLER(accounts_forward)
     switch (token_caller_class( client->client_token ))
     {
     case WEX_CALLER_ELEVATED_ADMIN: verdict = WEX_ACCOUNTS_VERDICT_ELEVATED; break;
-    case WEX_CALLER_USER:           verdict = WEX_ACCOUNTS_VERDICT_USER; break;
+    case WEX_CALLER_USER:
+    case WEX_CALLER_SESSION_SYSTEM: verdict = WEX_ACCOUNTS_VERDICT_USER; break;  /* as before that class existed */
     default:                        verdict = WEX_ACCOUNTS_VERDICT_NONE; break;
     }
     if ((call = accounts_call_start( req->op, verdict, ((struct pipe_bridge *)client)->peer_uid,
