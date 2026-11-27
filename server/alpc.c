@@ -91,6 +91,7 @@ struct alpc_message
     struct token     *token;           /* token of the sending thread when the message was sent (referenced), or NULL */
     int               sec_level;       /* impersonation level the sender gave with its security attribute */
     unsigned int      status;          /* carried by connection replies */
+    unsigned int      sync_tid;        /* request: sent synchronously by this thread; reply: only this thread receives it */
     struct alpc_port *from;            /* server communication port the message came through (not referenced) */
     data_size_t       len;
     unsigned char     data[1];
@@ -105,6 +106,7 @@ struct alpc_outstanding
     int               is_connect;
     struct token     *token;           /* token of the sender when the request was sent (referenced), or NULL */
     int               sec_level;       /* impersonation level the sender gave with its security attribute */
+    unsigned int      sync_tid;        /* the thread that sent the request synchronously, or 0 */
     struct alpc_port *from;            /* server communication port (not referenced) */
 };
 
@@ -185,7 +187,11 @@ static bool alpc_port_init( struct object *obj, const void *init_data )
     return true;
 }
 
-static struct alpc_message *find_message_for( struct alpc_port *port )
+/* The next message the port gives to thread (NULL: to a waiter that is no thread, such as a wait completion packet).
+ * The reply to a synchronous request goes to the thread that sent the request only: on Windows it does not make the
+ * port signaled for anyone else (CoreMessagingXP's wait packet on its port would otherwise fire for a reply its own
+ * synchronous call takes, and its receive then waits for a message that never comes). */
+static struct alpc_message *find_message_for( struct alpc_port *port, struct thread *thread )
 {
     struct alpc_port *queue_port = port;
     struct alpc_message *msg;
@@ -196,6 +202,7 @@ static struct alpc_message *find_message_for( struct alpc_port *port )
     LIST_FOR_EACH_ENTRY( msg, &queue_port->queue, struct alpc_message, entry )
     {
         if (port->type == COMMUNICATION_PORT && !port->is_client && msg->from != port) continue;
+        if (msg->sync_tid && (msg->type & 0xff) == ALPC_TYPE_REPLY && (!thread || thread->id != msg->sync_tid)) continue;
         return msg;
     }
     return NULL;
@@ -206,7 +213,7 @@ static int alpc_port_signaled( struct object *obj, struct wait_queue_entry *entr
     struct alpc_port *port = (struct alpc_port *)obj;
 
     assert( obj->ops == &alpc_port_ops );
-    return find_message_for( port ) != NULL;
+    return find_message_for( port, entry ? get_wait_queue_thread( entry ) : NULL ) != NULL;
 }
 
 static void alpc_port_satisfied( struct object *obj, struct wait_queue_entry *entry )
@@ -254,6 +261,7 @@ static struct alpc_message *alloc_message( unsigned int type, unsigned int id, u
     msg->pid         = current ? current->process->id : 0;
     msg->tid         = current ? current->id : 0;
     msg->status      = 0;
+    msg->sync_tid    = 0;
     msg->token       = NULL;
     msg->sec_level   = -1;
     msg->from        = NULL;
@@ -573,7 +581,7 @@ DECL_HANDLER(alpc_send_receive)
             struct alpc_port *conn = port->type == CONNECTION_PORT ? port : port->conn;
             struct alpc_outstanding *out;
             struct alpc_port *client = NULL;
-            unsigned int callback_id = 0;
+            unsigned int callback_id = 0, sync_tid = 0;
             int found = 0;
 
             if (conn)
@@ -583,6 +591,7 @@ DECL_HANDLER(alpc_send_receive)
                     if (out->is_connect || out->id != req->msg_id) continue;
                     client = out->from->peer;
                     callback_id = out->callback_id;
+                    sync_tid = out->sync_tid;
                     list_remove( &out->entry );
                     free_outstanding( out );
                     found = 1;
@@ -597,6 +606,7 @@ DECL_HANDLER(alpc_send_receive)
             if (client)
             {
                 if (!(msg = alloc_message( ALPC_TYPE_REPLY, req->msg_id, callback_id, data, len ))) goto done;
+                msg->sync_tid = sync_tid;
                 queue_message( client, msg );
             }
             reply->sent_id = req->msg_id;
@@ -621,6 +631,7 @@ DECL_HANDLER(alpc_send_receive)
             id = ++next_message_id;
             if (!(msg = alloc_message( ALPC_TYPE_REQUEST | ALPC_TYPE_RECEIVED_FLAG, id, ++next_callback_id, data, len ))) goto done;
             capture_sender_token( msg, req->sec_level );
+            if (req->flags & ALPC_MSGFLG_SYNC_REQUEST) msg->sync_tid = current->id;
             if (port->is_client)
             {
                 server = port->peer;
@@ -639,7 +650,7 @@ DECL_HANDLER(alpc_send_receive)
 recv:
     if (req->has_recv)
     {
-        if (!(msg = find_message_for( port )))
+        if (!(msg = find_message_for( port, current )))
         {
             set_error( STATUS_PENDING );
             goto done;
@@ -677,6 +688,7 @@ recv:
                 out->is_connect  = (msg->type & 0xff) == ALPC_TYPE_CONNECTION_REQUEST;
                 out->token       = msg->token;  /* the record owns it from now on */
                 out->sec_level   = msg->sec_level;
+                out->sync_tid    = msg->sync_tid;
                 msg->token       = NULL;
                 out->from        = msg->from;
                 list_add_tail( &conn->outstanding, &out->entry );
