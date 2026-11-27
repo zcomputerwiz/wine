@@ -90,7 +90,6 @@ HKCU,%CurrentVersion%\Explorer\FileExts,,16
 HKCU,%CurrentVersion%\ImmersiveShell,"TabletMode",0x10003,0
 HKCU,%CurrentVersion%\Run,,16
 HKCU,%CurrentVersionNT%\Winlogon,,16
-HKCU,Software\Wine\AppDefaults\Notepad.exe,"Version",2,"win11_23h2"
 HKCU,Software\Wine\Debug,"RelayExclude",2,"ntdll.RtlEnterCriticalSection;ntdll.RtlTryEnterCriticalSection;ntdll.RtlLeaveCriticalSection;kernel32.48;kernel32.49;kernel32.94;kernel32.95;kernel32.96;kernel32.97;kernel32.98;kernel32.TlsGetValue;kernel32.TlsSetValue;kernel32.FlsGetValue;kernel32.FlsSetValue;kernel32.SetLastError"
 HKCU,Software\Wine\Debug,"RelayFromExclude",2,"winex11.drv;winemac.drv;user32;gdi32;advapi32;kernel32"
 HKCU,AppEvents\Schemes\Apps\Explorer\Navigating\.Current,,,""
@@ -429,9 +428,6 @@ HKCU,%CurrentVersion%\Themes\Personalize,"ColorPrevalence",0x10003,0
 HKCU,"Control Panel\Accessibility\HighContrast","Flags",2,"126"
 HKCU,"Control Panel\Accessibility\HighContrast","High Contrast Scheme",2,""
 HKCU,%CurrentVersionNT%\Winlogon,,16
-; WineExplorer interim: Windows App SDK's CoreMessagingXP takes a packet mode from build 26100 on that Wine does not
-; handle yet (its DispatcherQueueTimer never ticks); Notepad (Windows App SDK) is told Windows 11 23H2 (22631) until it does
-HKCU,Software\Wine\AppDefaults\Notepad.exe,"Version",2,"win11_23h2"
 HKLM,%CurrentVersion%,"CommonFilesDir",,"%16427%"
 HKLM,%CurrentVersion%,"FirstInstallDateTime",1,21,81,7c,23
 HKLM,%CurrentVersion%,"ProductId",,"12345-oem-0000001-54321"
