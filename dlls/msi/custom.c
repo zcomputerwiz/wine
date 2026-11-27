@@ -1064,8 +1064,9 @@ static custom_action_info *do_syshost_dll( MSIPACKAGE *package, INT type, LPCWST
         arch = (sizeof(void *) == 8 ? SCS_64BIT_BINARY : SCS_32BIT_BINARY);
     if ((r = msi_syshost_connect( package, arch )))
     {
-        /* only a missing service runs the action as the user; any other failure fails it */
-        *fallback = (r == ERROR_NOT_SUPPORTED);
+        /* only a prefix without session 0 runs the action as the user (msi_syshost_connect says so in
+         * syshost_unavailable, not in its return value); any other failure fails it */
+        *fallback = package->syshost_unavailable;
         if (!*fallback) ERR( "SYSTEM custom action %s cannot run: %u\n", debugstr_w(action), r );
         return NULL;
     }
@@ -1119,8 +1120,9 @@ static BOOL syshost_exe( MSIPACKAGE *package, const WCHAR *path, const WCHAR *ar
         exe.arch = (sizeof(void *) == 8 ? SCS_64BIT_BINARY : SCS_32BIT_BINARY);
     if ((r = msi_syshost_connect( package, exe.arch )))
     {
-        /* only a missing service runs the action as the user; any other failure fails it (the install rolls back) */
-        if (r == ERROR_NOT_SUPPORTED) return FALSE;
+        /* only a prefix without session 0 (syshost_unavailable) runs the action as the user; any other failure fails
+         * it (the install rolls back) */
+        if (package->syshost_unavailable) return FALSE;
         ERR( "SYSTEM custom action %s cannot run: %u\n", debugstr_w(action), r );
         *rc = ERROR_INSTALL_FAILURE;
         return TRUE;

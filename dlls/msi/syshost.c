@@ -525,7 +525,8 @@ static BOOL session0_present(void)
         CloseHandle( pipe );
         return TRUE;
     }
-    return GetLastError() == ERROR_PIPE_BUSY;
+    /* fail closed: only "not found" means no session 0 (busy, access denied and the rest mean it is there) */
+    return GetLastError() != ERROR_FILE_NOT_FOUND && GetLastError() != ERROR_PATH_NOT_FOUND;
 }
 
 /* the install's log: why a SYSTEM action fails */
