@@ -61,6 +61,9 @@
                                      * next number, ERROR_HANDLE_EOF after the last (E3: the client writes backups) */
 #define WEX_EVTLOG_NOTIFY       10  /* completes when a record is written to the handle's log (a connection of its own) */
 #define WEX_EVTLOG_CALLER       11  /* no handle; reply arg[0]: this connection's caller class (WEX_CALLER_*, wine/wex_caller.h) */
+#define WEX_EVTLOG_TOKENVIEW    12  /* tests (the link-bound token hardening): no handle; the caller's token as a service
+                                     * of session 0 sees it when it impersonates, as text: user=, owner=, sy=, ba=,
+                                     * integrity=, syaccess= (AccessCheck against O:SYG:SYD:(A;;0x1;;;SY)) */
 
 /* OPEN flags */
 #define WEX_EVTLOG_OPEN_LOG     0   /* name: a log (OpenEventLog) */
