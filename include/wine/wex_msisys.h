@@ -65,15 +65,19 @@ struct wex_msisys_request
 enum wex_msisys_type
 {
     WEX_MSISYS_READY = 1,   /* host -> client: struct wex_msisys_ready */
-    WEX_MSISYS_RUN,         /* client -> host: struct wex_msisys_run, then the entry or arguments, then the binary */
+    WEX_MSISYS_RUN,         /* client -> host: struct wex_msisys_run, then the entry or arguments and the action's name;
+                             * the binary follows in CHUNK frames (binary_size bytes in all), before any other RUN */
     WEX_MSISYS_DONE,        /* host -> client: struct wex_msisys_done */
     WEX_MSISYS_OPEN,        /* host -> client: the action opened RPC channel `channel` (no payload) */
     WEX_MSISYS_DATA,        /* both ways: one RPC PDU of channel `channel` */
     WEX_MSISYS_CLOSE,       /* both ways: channel `channel` is closed (no payload) */
     WEX_MSISYS_END,         /* client -> host: no more actions; the host removes its folder and exits */
+    WEX_MSISYS_CHUNK,       /* client -> host: the next bytes of the pending RUN's binary (WEX_MSISYS_MAX_CHUNK at most) */
 };
 
-#define WEX_MSISYS_MAX_FRAME    (512u << 20)  /* a binary of up to 512 MB */
+#define WEX_MSISYS_MAX_FRAME    (1u << 20)    /* any frame: a binary is streamed in chunks (Edge's is about 290 MB) */
+#define WEX_MSISYS_MAX_CHUNK    (1u << 20)
+#define WEX_MSISYS_MAX_BINARY   0x7fffffffu
 
 struct wex_msisys_frame
 {
@@ -99,7 +103,7 @@ struct wex_msisys_run
     UINT32 flags;           /* WEX_MSISYS_RUN_* */
     UINT32 entry_size;      /* bytes */
     UINT32 action_size;     /* bytes: the action's name (WCHAR, with its 0), for the event; after the entry */
-    UINT32 binary_size;     /* bytes; after the action's name */
+    UINT32 binary_size;     /* bytes, in the CHUNK frames that follow */
 };
 
 struct wex_msisys_done

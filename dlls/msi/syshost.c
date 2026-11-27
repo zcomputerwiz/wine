@@ -190,6 +190,7 @@ struct msi_syshost
     DWORD pid;
     HANDLE reader;
     CRITICAL_SECTION write_cs;
+    CRITICAL_SECTION run_cs;  /* a RUN frame and its binary's chunks go together */
     CRITICAL_SECTION cs;    /* channels, waits, dead */
     struct list channels;
     struct list waits;
@@ -625,12 +626,13 @@ UINT msi_syshost_connect( MSIPACKAGE *package, DWORD arch )
     host->pid = ((struct wex_msisys_ready *)data)->pid;
     free( data );
     InitializeCriticalSection( &host->write_cs );
+    InitializeCriticalSection( &host->run_cs );
     InitializeCriticalSection( &host->cs );
     list_init( &host->channels );
     list_init( &host->waits );
     if (!(host->reader = CreateThread( NULL, 0, client_reader, host, 0, NULL )))
     {
-        DeleteCriticalSection( &host->write_cs );
+        DeleteCriticalSection( &host->write_cs ); DeleteCriticalSection( &host->run_cs );
         DeleteCriticalSection( &host->cs );
         CloseHandle( pipe );
         free( host );
@@ -641,26 +643,49 @@ UINT msi_syshost_connect( MSIPACKAGE *package, DWORD arch )
     return ERROR_SUCCESS;
 }
 
-static BYTE *read_binary( const WCHAR *path, DWORD *size )
+/* the binary to send: open, and its size (WEX_MSISYS_MAX_BINARY at most) */
+static HANDLE open_binary( const WCHAR *path, DWORD *size )
 {
     LARGE_INTEGER len;
     HANDLE file;
-    BYTE *data = NULL;
 
     file = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL );
-    if (file == INVALID_HANDLE_VALUE) return NULL;
-    if (GetFileSizeEx( file, &len ) && len.QuadPart > 0 && len.QuadPart <= WEX_MSISYS_MAX_FRAME / 2 &&
-            (data = malloc( len.LowPart )))
+    if (file == INVALID_HANDLE_VALUE) return file;
+    if (!GetFileSizeEx( file, &len ) || !len.QuadPart || len.QuadPart > WEX_MSISYS_MAX_BINARY)
     {
-        if (read_full( file, data, len.LowPart )) *size = len.LowPart;
-        else
-        {
-            free( data );
-            data = NULL;
-        }
+        SetLastError( len.QuadPart ? ERROR_FILE_TOO_LARGE : ERROR_INVALID_DATA );
+        CloseHandle( file );
+        return INVALID_HANDLE_VALUE;
     }
-    CloseHandle( file );
-    return data;
+    *size = len.LowPart;
+    return file;
+}
+
+/* the binary in CHUNK frames after its RUN frame (the caller holds run_cs: no other RUN in between); a large one
+ * (Edge's installer is about 290 MB) is never held whole on either side */
+static UINT send_binary( struct msi_syshost *host, HANDLE file, DWORD size )
+{
+    BYTE *buffer;
+    DWORD done = 0, got;
+    UINT ret = ERROR_SUCCESS;
+
+    if (!(buffer = malloc( WEX_MSISYS_MAX_CHUNK ))) return ERROR_OUTOFMEMORY;
+    while (done < size)
+    {
+        if (!ReadFile( file, buffer, min( size - done, WEX_MSISYS_MAX_CHUNK ), &got, NULL ) || !got)
+        {
+            ret = got ? GetLastError() : ERROR_HANDLE_EOF;
+            break;
+        }
+        if (!send_frame( host->pipe, &host->write_cs, WEX_MSISYS_CHUNK, 0, buffer, got, NULL, 0 ))
+        {
+            ret = ERROR_BROKEN_PIPE;
+            break;
+        }
+        done += got;
+    }
+    free( buffer );
+    return ret;
 }
 
 UINT msi_syshost_run( MSIPACKAGE *package, DWORD arch, UINT kind, const GUID *guid, const WCHAR *action,
@@ -669,11 +694,11 @@ UINT msi_syshost_run( MSIPACKAGE *package, DWORD arch, UINT kind, const GUID *gu
     struct wex_msisys_run run = { *guid, kind, async ? WEX_MSISYS_RUN_ASYNC : 0 };
     struct msi_syshost *host;
     struct run_wait wait = { .guid = *guid };
-    BYTE *data, *payload;
+    BYTE *payload;
     char *entry_a = NULL;
+    HANDLE file;
     DWORD size;
     UINT r;
-    BOOL sent;
 
     if (!action) action = L"";
     run.action_size = (lstrlenW( action ) + 1) * sizeof(WCHAR);
@@ -681,10 +706,12 @@ UINT msi_syshost_run( MSIPACKAGE *package, DWORD arch, UINT kind, const GUID *gu
     if ((r = msi_syshost_connect( package, arch ))) return r;
     host = package->syshost[arch == SCS_64BIT_BINARY];
 
-    if (!(data = read_binary( binary, &size )))
+    if ((file = open_binary( binary, &size )) == INVALID_HANDLE_VALUE)
     {
-        ERR( "cannot read %s: %lu\n", debugstr_w(binary), GetLastError() );
-        return ERROR_FUNCTION_FAILED;
+        UINT err = GetLastError();
+
+        ERR( "cannot read the binary %s: %u\n", debugstr_w(binary), err );
+        return err ? err : ERROR_FUNCTION_FAILED;
     }
     run.binary_size = size;
     if (kind == WEX_MSISYS_KIND_DLL)
@@ -693,9 +720,10 @@ UINT msi_syshost_run( MSIPACKAGE *package, DWORD arch, UINT kind, const GUID *gu
         run.entry_size = entry_a ? strlen( entry_a ) + 1 : 0;
     }
     else run.entry_size = (lstrlenW( entry ) + 1) * sizeof(WCHAR);
-    if (!(payload = malloc( sizeof(run) + run.entry_size + run.action_size )))
+    if (sizeof(run) + run.entry_size + run.action_size > WEX_MSISYS_MAX_FRAME ||
+            !(payload = malloc( sizeof(run) + run.entry_size + run.action_size )))
     {
-        free( data );
+        CloseHandle( file );
         free( entry_a );
         return ERROR_OUTOFMEMORY;
     }
@@ -712,22 +740,29 @@ UINT msi_syshost_run( MSIPACKAGE *package, DWORD arch, UINT kind, const GUID *gu
     if (wait.status)
     {
         CloseHandle( wait.event );
+        CloseHandle( file );
         free( payload );
-        free( data );
         return wait.status;
     }
 
-    sent = send_frame( host->pipe, &host->write_cs, WEX_MSISYS_RUN, 0, payload,
-                       sizeof(run) + run.entry_size + run.action_size, data, size );
+    /* the RUN frame and its binary's chunks, with no other RUN in between */
+    EnterCriticalSection( &host->run_cs );
+    r = send_frame( host->pipe, &host->write_cs, WEX_MSISYS_RUN, 0, payload,
+                    sizeof(run) + run.entry_size + run.action_size, NULL, 0 ) ? send_binary( host, file, size )
+                                                                              : ERROR_BROKEN_PIPE;
+    LeaveCriticalSection( &host->run_cs );
+    CloseHandle( file );
     free( payload );
-    free( data );
-    if (!sent)
+    if (r)
     {
+        /* a binary cut short leaves the host waiting for the rest: the connection cannot go on */
+        ERR( "cannot send the binary %s: %u\n", debugstr_w(binary), r );
         EnterCriticalSection( &host->cs );
         list_remove( &wait.entry );
+        host->dead = TRUE;
         LeaveCriticalSection( &host->cs );
         CloseHandle( wait.event );
-        return ERROR_BROKEN_PIPE;
+        return r;
     }
     WaitForSingleObject( wait.event, INFINITE );
     EnterCriticalSection( &host->cs );
@@ -773,7 +808,7 @@ void msi_syshost_stop( MSIPACKAGE *package )
             Sleep( 10 );
         }
         CloseHandle( host->pipe );
-        DeleteCriticalSection( &host->write_cs );
+        DeleteCriticalSection( &host->write_cs ); DeleteCriticalSection( &host->run_cs );
         DeleteCriticalSection( &host->cs );
         free( host );
         package->syshost[i] = NULL;
@@ -875,18 +910,11 @@ static void remove_folder(void)
         WARN( "cannot remove %s: %lu\n", debugstr_w(syshost.folder), GetLastError() );
 }
 
-static BOOL write_binary( const BYTE *data, DWORD size, const WCHAR *ext, WCHAR *path, size_t path_size )
+/* a new file for a binary in our folder; its chunks are written as they arrive */
+static HANDLE new_binary_file( const WCHAR *ext, WCHAR *path, size_t path_size )
 {
-    HANDLE file;
-    BOOL ret;
-
     swprintf( path, path_size, L"%s\\%u%s", syshost.folder, (unsigned int)InterlockedIncrement( &syshost.files ), ext );
-    file = CreateFileW( path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL );
-    if (file == INVALID_HANDLE_VALUE) return FALSE;
-    ret = write_full( file, data, size );
-    CloseHandle( file );
-    if (!ret) DeleteFileW( path );
-    return ret;
+    return CreateFileW( path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL );
 }
 
 static void host_send( UINT32 type, UINT32 channel, const void *data, UINT32 size )
@@ -980,8 +1008,13 @@ struct host_run
     struct wex_msisys_run run;
     BYTE *entry;
     WCHAR *action;
-    BYTE *binary;
+    WCHAR path[MAX_PATH];   /* the binary, as we write it */
+    HANDLE file;            /* while its chunks arrive */
+    UINT32 received;
+    UINT status;            /* nonzero: it cannot run (its chunks are still taken, then the client hears why) */
 };
+
+static struct host_run *pending;  /* the RUN whose chunks are arriving (the main loop's only) */
 
 /* the audit (the orchestrator's condition in place of a consent record): an event in the System log from session 0
  * for every action run as SYSTEM, with what the service told us about the caller and the install */
@@ -1072,17 +1105,10 @@ static DWORD WINAPI host_run_thread( void *arg )
     struct wex_msisys_done done = { job->run.guid };
     PROCESS_INFORMATION pi;
     STARTUPINFOW si = { sizeof(si) };
-    WCHAR path[MAX_PATH], *cmd = NULL;
+    const WCHAR *path = job->path;
+    WCHAR *cmd = NULL;
     const WCHAR *args;
     DWORD code;
-
-    if (!write_binary( job->binary, job->run.binary_size, job->run.kind == WEX_MSISYS_KIND_DLL ? L".dll" : L".exe",
-                       path, ARRAY_SIZE(path) ))
-    {
-        ERR( "cannot write the binary: %lu\n", GetLastError() );
-        done.status = GetLastError() ? GetLastError() : ERROR_WRITE_FAULT;
-        goto end;
-    }
 
     if (job->run.kind == WEX_MSISYS_KIND_DLL)
     {
@@ -1123,9 +1149,30 @@ end:
     free( cmd );
     free( job->entry );
     free( job->action );
-    free( job->binary );
     free( job );
     return 0;
+}
+
+static void free_job( struct host_run *job )
+{
+    if (job->file && job->file != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle( job->file );
+        DeleteFileW( job->path );
+    }
+    free( job->entry );
+    free( job->action );
+    free( job );
+}
+
+/* a job that cannot run, once its chunks are taken: the client hears why, and the audit has it */
+static void refuse_job( struct host_run *job )
+{
+    struct wex_msisys_done done = { job->run.guid, job->status };
+
+    host_audit( job->action, done.status, 0 );
+    host_send( WEX_MSISYS_DONE, 0, &done, sizeof(done) );
+    free_job( job );
 }
 
 static BOOL wide_terminated( const BYTE *data, UINT32 size )
@@ -1137,54 +1184,79 @@ static BOOL wide_terminated( const BYTE *data, UINT32 size )
     return !last;
 }
 
-/* the client's request, read as untrusted: sizes that add up, terminated strings; FALSE ends the connection */
+/* the client's request, read as untrusted: sizes that add up, terminated strings, one RUN at a time; FALSE ends the
+ * connection. The binary's file is made now, and its chunks follow (host_chunk) */
 static BOOL host_start_run( const BYTE *data, UINT32 size )
 {
-    struct wex_msisys_done done = { { 0 } };
     struct host_run *job;
     const BYTE *p;
-    HANDLE thread;
 
-    if (size < sizeof(job->run) || !(job = calloc( 1, sizeof(*job) ))) return FALSE;
+    if (pending || size < sizeof(job->run) || !(job = calloc( 1, sizeof(*job) ))) return FALSE;
     memcpy( &job->run, data, sizeof(job->run) );
     p = data + sizeof(job->run);
-    if ((UINT64)sizeof(job->run) + job->run.entry_size + job->run.action_size + job->run.binary_size != size ||
-            !job->run.binary_size || (job->run.kind != WEX_MSISYS_KIND_DLL && job->run.kind != WEX_MSISYS_KIND_EXE) ||
+    if ((UINT64)sizeof(job->run) + job->run.entry_size + job->run.action_size != size ||
+            !job->run.binary_size || job->run.binary_size > WEX_MSISYS_MAX_BINARY ||
+            (job->run.kind != WEX_MSISYS_KIND_DLL && job->run.kind != WEX_MSISYS_KIND_EXE) ||
             (job->run.flags & ~WEX_MSISYS_RUN_ASYNC) ||
             /* the entry: a function name, or arguments */
             (job->run.kind == WEX_MSISYS_KIND_DLL ? (!job->run.entry_size || p[job->run.entry_size - 1])
                                                   : !wide_terminated( p, job->run.entry_size )) ||
             !wide_terminated( p + job->run.entry_size, job->run.action_size ))
         goto fail;
-    if (!(job->entry = malloc( job->run.entry_size )) || !(job->action = malloc( job->run.action_size )) ||
-            !(job->binary = malloc( job->run.binary_size )))
+    if (!(job->entry = malloc( job->run.entry_size )) || !(job->action = malloc( job->run.action_size )))
         goto fail;
     memcpy( job->entry, p, job->run.entry_size );
     memcpy( job->action, p + job->run.entry_size, job->run.action_size );
-    memcpy( job->binary, p + job->run.entry_size + job->run.action_size, job->run.binary_size );
-    if ((thread = CreateThread( NULL, 0, host_run_thread, job, 0, NULL )))
+    job->file = new_binary_file( job->run.kind == WEX_MSISYS_KIND_DLL ? L".dll" : L".exe", job->path,
+                                 ARRAY_SIZE(job->path) );
+    if (job->file == INVALID_HANDLE_VALUE)
     {
-        CloseHandle( thread );
-        return TRUE;
+        job->status = GetLastError() ? GetLastError() : ERROR_WRITE_FAULT;
+        ERR( "cannot make a file for the binary: %u\n", job->status );
     }
-    /* a valid request we cannot run: the client hears so, the connection stays */
-    done.guid = job->run.guid;
-    done.status = ERROR_OUTOFMEMORY;
-    host_audit( job->action, done.status, 0 );
-    host_send( WEX_MSISYS_DONE, 0, &done, sizeof(done) );
-    free( job->entry );
-    free( job->action );
-    free( job->binary );
-    free( job );
+    pending = job;
     return TRUE;
 
 fail:
     ERR( "a malformed request from the client: ending\n" );
     free( job->entry );
     free( job->action );
-    free( job->binary );
     free( job );
     return FALSE;
+}
+
+/* the pending RUN's next bytes; when they are all there the job starts. FALSE (no RUN, too many bytes) ends the
+ * connection */
+static BOOL host_chunk( const BYTE *data, UINT32 size )
+{
+    struct host_run *job = pending;
+    HANDLE thread;
+
+    if (!job || !size || size > job->run.binary_size - job->received) return FALSE;
+    if (!job->status && !write_full( job->file, data, size ))
+    {
+        job->status = GetLastError() ? GetLastError() : ERROR_WRITE_FAULT;
+        ERR( "cannot write the binary: %u\n", job->status );
+    }
+    job->received += size;
+    if (job->received < job->run.binary_size) return TRUE;
+
+    pending = NULL;
+    if (job->status)
+    {
+        refuse_job( job );
+        return TRUE;
+    }
+    CloseHandle( job->file );
+    job->file = NULL;
+    if ((thread = CreateThread( NULL, 0, host_run_thread, job, 0, NULL ))) CloseHandle( thread );
+    else
+    {
+        job->status = ERROR_OUTOFMEMORY;
+        DeleteFileW( job->path );
+        refuse_job( job );
+    }
+    return TRUE;
 }
 
 /* a relayed answer of the client's msi endpoint, read as untrusted before the action's rpcrt4 parses it */
@@ -1243,6 +1315,13 @@ UINT CDECL __wine_msi_syshost( HANDLE pipe )
         case WEX_MSISYS_RUN:
             if (!host_start_run( data, frame.size )) end = TRUE;
             break;
+        case WEX_MSISYS_CHUNK:
+            if (!host_chunk( data, frame.size ))
+            {
+                ERR( "a chunk without its RUN, or too many bytes: ending\n" );
+                end = TRUE;
+            }
+            break;
         case WEX_MSISYS_DATA:
             if (!valid_pdu( data, frame.size ))
             {
@@ -1278,6 +1357,8 @@ UINT CDECL __wine_msi_syshost( HANDLE pipe )
     }
 
     TRACE( "the install is over, ending\n" );
+    if (pending) free_job( pending );  /* a binary cut short */
+    pending = NULL;
     remove_folder();
     return 0;
 }
