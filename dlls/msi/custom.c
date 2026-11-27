@@ -1057,13 +1057,16 @@ static custom_action_info *do_syshost_dll( MSIPACKAGE *package, INT type, LPCWST
     custom_action_info *info;
     USHORT machine = IMAGE_FILE_MACHINE_UNKNOWN;
     DWORD arch;
+    UINT r;
 
     *fallback = FALSE;
     if (!get_binary_type( source, &arch, &machine ))
         arch = (sizeof(void *) == 8 ? SCS_64BIT_BINARY : SCS_32BIT_BINARY);
-    if (msi_syshost_connect( package, arch ))
+    if ((r = msi_syshost_connect( package, arch )))
     {
-        *fallback = TRUE;
+        /* only a missing service runs the action as the user; any other failure fails it */
+        *fallback = (r == ERROR_NOT_SUPPORTED);
+        if (!*fallback) ERR( "SYSTEM custom action %s cannot run: %u\n", debugstr_w(action), r );
         return NULL;
     }
     if (!custom_start_rpc_server( package )) return NULL;
@@ -1109,11 +1112,19 @@ static BOOL syshost_exe( MSIPACKAGE *package, const WCHAR *path, const WCHAR *ar
     struct syshost_exe exe = { package, 0, path, arg, !!(type & msidbCustomActionTypeAsync), action };
     USHORT machine;
     HANDLE thread;
+    UINT r;
 
     if (!msi_syshost_wanted( package, type )) return FALSE;
     if (!get_binary_type( path, &exe.arch, &machine ))
         exe.arch = (sizeof(void *) == 8 ? SCS_64BIT_BINARY : SCS_32BIT_BINARY);
-    if (msi_syshost_connect( package, exe.arch )) return FALSE;
+    if ((r = msi_syshost_connect( package, exe.arch )))
+    {
+        /* only a missing service runs the action as the user; any other failure fails it (the install rolls back) */
+        if (r == ERROR_NOT_SUPPORTED) return FALSE;
+        ERR( "SYSTEM custom action %s cannot run: %u\n", debugstr_w(action), r );
+        *rc = ERROR_INSTALL_FAILURE;
+        return TRUE;
+    }
 
     TRACE( "running %s as SYSTEM in session 0\n", debugstr_w(action) );
     if (!(thread = CreateThread( NULL, 0, syshost_exe_thread, &exe, 0, NULL )))
@@ -1126,7 +1137,11 @@ static BOOL syshost_exe( MSIPACKAGE *package, const WCHAR *path, const WCHAR *ar
 
     *rc = ERROR_SUCCESS;
     if (exe.status)
-        ERR( "SYSTEM custom action %s did not run: %u\n", debugstr_w(action), exe.status );  /* as execute_command */
+    {
+        /* the host could not run it, or went away: the action fails (never run again as the user) */
+        ERR( "SYSTEM custom action %s did not run: %u\n", debugstr_w(action), exe.status );
+        *rc = ERROR_INSTALL_FAILURE;
+    }
     else if (!exe.async && !(type & msidbCustomActionTypeContinue) && exe.code)
     {
         TRACE( "exit code is %u\n", exe.code );

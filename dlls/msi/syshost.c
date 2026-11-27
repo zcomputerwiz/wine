@@ -513,13 +513,43 @@ static DWORD WINAPI client_reader( void *arg )
     return 0;
 }
 
+/* whether this prefix has a session 0: its service manager's pipe is reachable through the bridge (a plain prefix
+ * or development mode has no session 0, and the bridge answers "not found" for any name) */
+static BOOL session0_present(void)
+{
+    HANDLE pipe = CreateFileW( L"\\\\.\\pipe\\WexSession0\\svcctl", GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                               OPEN_EXISTING, SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL );
+
+    if (pipe != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle( pipe );
+        return TRUE;
+    }
+    return GetLastError() == ERROR_PIPE_BUSY;
+}
+
+/* the install's log: why a SYSTEM action fails */
+static void log_failure( MSIPACKAGE *package, const WCHAR *what, DWORD err )
+{
+    WCHAR text[256];
+    MSIRECORD *rec;
+
+    swprintf( text, ARRAY_SIZE(text), L"WexMsiServer (SYSTEM custom actions): %s (%lu); the action fails", what, err );
+    ERR( "%s\n", debugstr_w(text) );
+    if (!(rec = MSI_CreateRecord( 0 ))) return;
+    MSI_RecordSetStringW( rec, 0, text );
+    MSI_ProcessMessage( package, INSTALLMESSAGE_INFO, rec );
+    msiobj_release( &rec->hdr );
+}
+
 UINT msi_syshost_connect( MSIPACKAGE *package, DWORD arch )
 {
     struct wex_msisys_request request = { WEX_MSISYS_MAGIC, WEX_MSISYS_VERSION };
     struct wex_msisys_frame frame;
     struct msi_syshost *host;
-    unsigned int index = (arch == SCS_64BIT_BINARY);
+    unsigned int index = (arch == SCS_64BIT_BINARY), tries;
     UINT32 status;
+    DWORD err;
     BYTE *data;
     HANDLE pipe;
 
@@ -527,15 +557,35 @@ UINT msi_syshost_connect( MSIPACKAGE *package, DWORD arch )
     if (package->syshost[index]) return ERROR_BROKEN_PIPE;  /* the host died: the install fails, no fallback */
     if (package->syshost_unavailable) return ERROR_NOT_SUPPORTED;
 
-    /* identification only: the service checks who asks, it never acts as the user */
-    pipe = CreateFileW( WEX_MSISYS_PIPE, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
-                        SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL );
-    if (pipe == INVALID_HANDLE_VALUE)
+    /* Only a prefix without session 0 runs the actions as the user. With session 0 a missing pipe (the service
+     * stopped or crashed) fails the action, logged, and so does every other failure: the install rolls back rather
+     * than changing the action's identity silently (the reviewer's and the orchestrator's conditions). The service
+     * is not started from here: a session's service manager starts a session-0-only service locally, in the
+     * session's own server, not in session 0 (measured in c7_msi), and that copy is of no use */
+    for (tries = 0;; tries++)
     {
-        WARN( "no SYSTEM custom action host (%lu): actions without impersonation run as the installing user\n",
-              GetLastError() );
-        package->syshost_unavailable = 1;
-        return ERROR_NOT_SUPPORTED;
+        /* identification only: the service checks who asks, it never acts as the user */
+        pipe = CreateFileW( WEX_MSISYS_PIPE, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+                            SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL );
+        if (pipe != INVALID_HANDLE_VALUE) break;
+        err = GetLastError();
+        if ((err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) && !session0_present())
+        {
+            WARN( "no session 0: actions without impersonation run as the installing user\n" );
+            package->syshost_unavailable = 1;
+            return ERROR_NOT_SUPPORTED;
+        }
+        if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND)
+        {
+            log_failure( package, L"the session 0 service wexmsiserver is not running", err );
+            return err;
+        }
+        if (err != ERROR_PIPE_BUSY || tries >= 5)
+        {
+            log_failure( package, L"the service cannot be reached", err );
+            return err;
+        }
+        WaitNamedPipeW( WEX_MSISYS_PIPE, 5000 );
     }
 
     request.arch = arch == SCS_64BIT_BINARY ? 64 : 32;
@@ -546,15 +596,14 @@ UINT msi_syshost_connect( MSIPACKAGE *package, DWORD arch )
     {
         ERR( "the session 0 service did not answer: %lu\n", GetLastError() );
         CloseHandle( pipe );
-        package->syshost_unavailable = 1;
-        return ERROR_NOT_SUPPORTED;
+        return ERROR_BROKEN_PIPE;
     }
     if (status)
     {
-        WARN( "the session 0 service refused a SYSTEM host: %u; actions run as the installing user\n", status );
+        /* msi_syshost_wanted asks only for an elevated per-machine install: a refusal means something is wrong */
+        ERR( "the session 0 service refused a SYSTEM host: %u\n", status );
         CloseHandle( pipe );
-        package->syshost_unavailable = 1;
-        return ERROR_NOT_SUPPORTED;
+        return status;
     }
     if (!(data = read_frame( pipe, &frame )) || frame.type != WEX_MSISYS_READY ||
             frame.size != sizeof(struct wex_msisys_ready))
@@ -751,6 +800,7 @@ static struct
     WCHAR endpoint[48];             /* our ncalrpc endpoint, relayed to the client */
     WCHAR endpoint_pipe[80];
     WCHAR folder[MAX_PATH];         /* the binaries we write */
+    HANDLE lock;                    /* host.lock in it, held open: a restarted service skips a folder in use */
     LONG files;
     SECURITY_ATTRIBUTES endpoint_sa;
 } syshost;
@@ -765,11 +815,14 @@ static void random_hex( WCHAR *buffer, size_t size )
               guid.Data4[6], guid.Data4[7] );
 }
 
-/* the folder for the binaries: SYSTEM and Administrators only, made by us before the first binary */
+/* the folder for the binaries: SYSTEM and Administrators, as Windows' C:\Windows\Installer\MSI*.tmp, made by us
+ * before the first binary. In the machine root the server maps both (SYSTEM too) to the system group's bits (B41,
+ * sd_system_group_mode): mode 2770, session 0's account and the system group, nobody else; a user's limited processes
+ * have no access, elevated ones and the sessions' system roles have the group, as for every machine-root file */
 static BOOL make_folder(void)
 {
     SECURITY_ATTRIBUTES sa = { sizeof(sa) };
-    WCHAR windir[MAX_PATH], name[40];
+    WCHAR windir[MAX_PATH], name[40], lock[MAX_PATH];
     BOOL ret = FALSE;
     int tries;
 
@@ -786,8 +839,15 @@ static BOOL make_folder(void)
         ret = CreateDirectoryW( syshost.folder, &sa );  /* a fresh one, never one that is there already */
     }
     LocalFree( sa.lpSecurityDescriptor );
-    if (!ret) ERR( "cannot make a folder for the binaries: %lu\n", GetLastError() );
-    return ret;
+    if (!ret)
+    {
+        ERR( "cannot make a folder for the binaries: %lu\n", GetLastError() );
+        return FALSE;
+    }
+    swprintf( lock, ARRAY_SIZE(lock), L"%s\\host.lock", syshost.folder );
+    syshost.lock = CreateFileW( lock, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_FLAG_DELETE_ON_CLOSE, NULL );
+    if (syshost.lock == INVALID_HANDLE_VALUE) WARN( "no lock file in the folder: %lu\n", GetLastError() );
+    return TRUE;
 }
 
 static void remove_folder(void)
@@ -797,6 +857,8 @@ static void remove_folder(void)
     HANDLE find;
 
     if (!syshost.folder[0]) return;
+    if (syshost.lock && syshost.lock != INVALID_HANDLE_VALUE) CloseHandle( syshost.lock );  /* deleted on close */
+    syshost.lock = NULL;
     swprintf( path, ARRAY_SIZE(path), L"%s\\*", syshost.folder );
     if ((find = FindFirstFileW( path, &data )) != INVALID_HANDLE_VALUE)
     {
