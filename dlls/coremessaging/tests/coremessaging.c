@@ -267,7 +267,6 @@ static void check_create_dispatcher_queue_controller_( unsigned int line, DWORD 
     if (hr == E_INVALIDARG) return;
 
     hr = IDispatcherQueueController_get_DispatcherQueue( dispatcher_queue_controller, &dispatcher_queue );
-    todo_wine
     ok_(__FILE__, line)( hr == S_OK, "got IDispatcherQueueController_get_DispatcherQueue hr %#lx.\n", hr );
     if (FAILED(hr)) goto done;
 
@@ -309,7 +308,7 @@ static void check_create_dispatcher_queue_controller_( unsigned int line, DWORD 
     /* shutdown waits for queued handlers */
     if (winetest_platform_is_wine) Sleep( 200 );
     ret = WaitForSingleObject( event_handler->event, 100 );
-    todo_wine ok_(__FILE__, line)( ret == WAIT_TIMEOUT, "Unexpected wait result %lu.\n", ret );
+    ok_(__FILE__, line)( ret == WAIT_TIMEOUT, "Unexpected wait result %lu.\n", ret );
     SetEvent( queue_handler->event );
 
     /* queue uses the message loop when dispatched on current thread */
@@ -438,18 +437,14 @@ static void test_DispatcherQueueController_Statics(void)
     ok( hr == S_OK, "got hr %#lx.\n", hr );
 
     hr = IDispatcherQueueControllerStatics_CreateOnDedicatedThread( dispatcher_queue_controller_statics, NULL );
-    todo_wine
     ok( hr == E_POINTER || hr == 0x80000005 /* win10 22h2 */, "got hr %#lx.\n", hr );
     hr = IDispatcherQueueControllerStatics_CreateOnDedicatedThread( dispatcher_queue_controller_statics, &dispatcher_queue_controller );
-    todo_wine
     ok( hr == S_OK, "got hr %#lx.\n", hr );
     if (FAILED(hr)) goto done;
 
     hr = IDispatcherQueueController_get_DispatcherQueue( dispatcher_queue_controller, NULL );
-    todo_wine
     ok( hr == E_POINTER || hr == 0x80000005 /* win10 22h2 */, "got hr %#lx.\n", hr );
     hr = IDispatcherQueueController_get_DispatcherQueue( dispatcher_queue_controller, &dispatcher_queue );
-    todo_wine
     ok( hr == S_OK, "got hr %#lx.\n", hr );
 
     check_interface( dispatcher_queue, &IID_IUnknown );
@@ -500,7 +495,7 @@ static void test_DispatcherQueueController_Statics(void)
     /* shutdown waits for queued handlers */
     if (winetest_platform_is_wine) Sleep( 200 );
     ret = WaitForSingleObject( event_handler->event, 100 );
-    todo_wine ok( ret == WAIT_TIMEOUT, "Unexpected wait result %lu.\n", ret );
+    ok( ret == WAIT_TIMEOUT, "Unexpected wait result %lu.\n", ret );
 
     SetEvent( queue_handler->event );
     ret = WaitForSingleObject( event_handler->event, 5000 );
@@ -536,6 +531,276 @@ done:
     ok( ref == 1, "got ref %ld.\n", ref );
 }
 
+static char record_order[8];
+static unsigned int record_count;
+
+struct record_handler
+{
+    IDispatcherQueueHandler IDispatcherQueueHandler_iface;
+    ITypedEventHandler_DispatcherQueueTimer_IInspectable ITypedEventHandler_DispatcherQueueTimer_IInspectable_iface;
+    LONG ref;
+    char tag;
+    DWORD thread_id;
+};
+
+static struct record_handler *impl_from_record_IDispatcherQueueHandler( IDispatcherQueueHandler *iface )
+{
+    return CONTAINING_RECORD( iface, struct record_handler, IDispatcherQueueHandler_iface );
+}
+
+static HRESULT WINAPI record_handler_QueryInterface( IDispatcherQueueHandler *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IDispatcherQueueHandler ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IUnknown ))
+    {
+        *out = iface;
+        IDispatcherQueueHandler_AddRef( iface );
+        return S_OK;
+    }
+
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI record_handler_AddRef( IDispatcherQueueHandler *iface )
+{
+    struct record_handler *handler = impl_from_record_IDispatcherQueueHandler( iface );
+    return InterlockedIncrement( &handler->ref );
+}
+
+static ULONG WINAPI record_handler_Release( IDispatcherQueueHandler *iface )
+{
+    struct record_handler *handler = impl_from_record_IDispatcherQueueHandler( iface );
+    return InterlockedDecrement( &handler->ref );
+}
+
+static HRESULT WINAPI record_handler_Invoke( IDispatcherQueueHandler *iface )
+{
+    struct record_handler *handler = impl_from_record_IDispatcherQueueHandler( iface );
+
+    handler->thread_id = GetCurrentThreadId();
+    if (record_count < ARRAY_SIZE(record_order) - 1) record_order[record_count++] = handler->tag;
+    return S_OK;
+}
+
+static const IDispatcherQueueHandlerVtbl record_handler_vtbl =
+{
+    record_handler_QueryInterface,
+    record_handler_AddRef,
+    record_handler_Release,
+    record_handler_Invoke,
+};
+
+static struct record_handler *impl_from_ITypedEventHandler_DispatcherQueueTimer_IInspectable( ITypedEventHandler_DispatcherQueueTimer_IInspectable *iface )
+{
+    return CONTAINING_RECORD( iface, struct record_handler, ITypedEventHandler_DispatcherQueueTimer_IInspectable_iface );
+}
+
+static HRESULT WINAPI tick_handler_QueryInterface( ITypedEventHandler_DispatcherQueueTimer_IInspectable *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_ITypedEventHandler_DispatcherQueueTimer_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IUnknown ))
+    {
+        *out = iface;
+        ITypedEventHandler_DispatcherQueueTimer_IInspectable_AddRef( iface );
+        return S_OK;
+    }
+
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI tick_handler_AddRef( ITypedEventHandler_DispatcherQueueTimer_IInspectable *iface )
+{
+    struct record_handler *handler = impl_from_ITypedEventHandler_DispatcherQueueTimer_IInspectable( iface );
+    return InterlockedIncrement( &handler->ref );
+}
+
+static ULONG WINAPI tick_handler_Release( ITypedEventHandler_DispatcherQueueTimer_IInspectable *iface )
+{
+    struct record_handler *handler = impl_from_ITypedEventHandler_DispatcherQueueTimer_IInspectable( iface );
+    return InterlockedDecrement( &handler->ref );
+}
+
+static HRESULT WINAPI tick_handler_Invoke( ITypedEventHandler_DispatcherQueueTimer_IInspectable *iface, IDispatcherQueueTimer *timer, IInspectable *args )
+{
+    struct record_handler *handler = impl_from_ITypedEventHandler_DispatcherQueueTimer_IInspectable( iface );
+
+    ok( !args, "got args %p.\n", args );
+    handler->thread_id = GetCurrentThreadId();
+    if (record_count < ARRAY_SIZE(record_order) - 1) record_order[record_count++] = handler->tag;
+    return S_OK;
+}
+
+static const ITypedEventHandler_DispatcherQueueTimer_IInspectableVtbl tick_handler_vtbl =
+{
+    tick_handler_QueryInterface,
+    tick_handler_AddRef,
+    tick_handler_Release,
+    tick_handler_Invoke,
+};
+
+static void init_record_handler( struct record_handler *handler, char tag )
+{
+    handler->IDispatcherQueueHandler_iface.lpVtbl = &record_handler_vtbl;
+    handler->ITypedEventHandler_DispatcherQueueTimer_IInspectable_iface.lpVtbl = &tick_handler_vtbl;
+    handler->ref = 1;
+    handler->tag = tag;
+    handler->thread_id = 0;
+}
+
+static void pump_messages( DWORD timeout )
+{
+    DWORD end = GetTickCount() + timeout;
+    MSG msg;
+
+    do
+    {
+        while (PeekMessageW( &msg, 0, 0, 0, PM_REMOVE ))
+        {
+            TranslateMessage( &msg );
+            DispatchMessageW( &msg );
+        }
+        MsgWaitForMultipleObjects( 0, NULL, FALSE, 10, QS_ALLINPUT );
+    } while ((LONG)(end - GetTickCount()) > 0);
+}
+
+static void test_DispatcherQueue_Statics(void)
+{
+    static const WCHAR *dispatcher_queue_statics_name = L"Windows.System.DispatcherQueue";
+    struct record_handler low, normal, high, tick;
+    IDispatcherQueueController *controller = NULL;
+    struct DispatcherQueueOptions options = { 0 };
+    IDispatcherQueueStatics *statics = NULL;
+    IDispatcherQueue *queue, *current;
+    IActivationFactory *factory = NULL;
+    IDispatcherQueueTimer *timer;
+    EventRegistrationToken token;
+    IAsyncAction *operation;
+    HSTRING str = NULL;
+    boolean result;
+    TimeSpan span;
+    HRESULT hr;
+    LONG ref;
+
+    hr = WindowsCreateString( dispatcher_queue_statics_name, wcslen( dispatcher_queue_statics_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK || broken(hr == REGDB_E_CLASSNOTREG), "got hr %#lx.\n", hr );
+    if (hr == REGDB_E_CLASSNOTREG)
+    {
+        win_skip( "%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w( dispatcher_queue_statics_name ) );
+        return;
+    }
+
+    check_interface( factory, &IID_IUnknown );
+    check_interface( factory, &IID_IInspectable );
+    check_interface( factory, &IID_IAgileObject );
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_IDispatcherQueueStatics, (void **)&statics );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    current = (void *)0xdeadbeef;
+    hr = IDispatcherQueueStatics_GetForCurrentThread( statics, &current );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !current, "got queue %p.\n", current );
+
+    options.dwSize = sizeof( options );
+    options.threadType = DQTYPE_THREAD_CURRENT;
+    options.apartmentType = DQTAT_COM_NONE;
+    hr = CreateDispatcherQueueController( options, (PDISPATCHERQUEUECONTROLLER *)&controller );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IDispatcherQueueController_get_DispatcherQueue( controller, &queue );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = IDispatcherQueueStatics_GetForCurrentThread( statics, &current );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( current == queue, "got queue %p, expected %p.\n", current, queue );
+    if (current) IDispatcherQueue_Release( current );
+
+    /* higher priorities run first */
+    init_record_handler( &low, 'l' );
+    init_record_handler( &normal, 'n' );
+    init_record_handler( &high, 'h' );
+    record_count = 0;
+    memset( record_order, 0, sizeof(record_order) );
+    hr = IDispatcherQueue_TryEnqueueWithPriority( queue, DispatcherQueuePriority_Low, &low.IDispatcherQueueHandler_iface, &result );
+    ok( hr == S_OK && result, "got hr %#lx, result %d.\n", hr, result );
+    hr = IDispatcherQueue_TryEnqueueWithPriority( queue, DispatcherQueuePriority_Normal, &normal.IDispatcherQueueHandler_iface, &result );
+    ok( hr == S_OK && result, "got hr %#lx, result %d.\n", hr, result );
+    hr = IDispatcherQueue_TryEnqueueWithPriority( queue, DispatcherQueuePriority_High, &high.IDispatcherQueueHandler_iface, &result );
+    ok( hr == S_OK && result, "got hr %#lx, result %d.\n", hr, result );
+    ok( !record_count, "handlers ran before the message loop: %s.\n", record_order );
+    pump_messages( 100 );
+    ok( !strcmp( record_order, "hnl" ), "got order %s.\n", record_order );
+    ok( high.thread_id == GetCurrentThreadId(), "handler ran on thread %04lx.\n", high.thread_id );
+    ok( low.ref == 1, "got ref %ld.\n", low.ref );
+
+    /* a one-shot timer */
+    hr = IDispatcherQueue_CreateTimer( queue, &timer );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IDispatcherQueueTimer_get_IsRepeating( timer, &result );
+    ok( hr == S_OK && result == TRUE, "got hr %#lx, result %d.\n", hr, result );
+    hr = IDispatcherQueueTimer_get_IsRunning( timer, &result );
+    ok( hr == S_OK && result == FALSE, "got hr %#lx, result %d.\n", hr, result );
+    hr = IDispatcherQueueTimer_get_Interval( timer, &span );
+    ok( hr == S_OK && !span.Duration, "got hr %#lx, interval %I64d.\n", hr, span.Duration );
+    span.Duration = 20 * 10000;
+    hr = IDispatcherQueueTimer_put_Interval( timer, span );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IDispatcherQueueTimer_put_IsRepeating( timer, FALSE );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    init_record_handler( &tick, 't' );
+    hr = IDispatcherQueueTimer_add_Tick( timer, &tick.ITypedEventHandler_DispatcherQueueTimer_IInspectable_iface, &token );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    record_count = 0;
+    memset( record_order, 0, sizeof(record_order) );
+    hr = IDispatcherQueueTimer_Start( timer );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IDispatcherQueueTimer_get_IsRunning( timer, &result );
+    ok( hr == S_OK && result == TRUE, "got hr %#lx, result %d.\n", hr, result );
+    pump_messages( 300 );
+    ok( !strcmp( record_order, "t" ), "got ticks %s.\n", record_order );
+    ok( tick.thread_id == GetCurrentThreadId(), "tick ran on thread %04lx.\n", tick.thread_id );
+    hr = IDispatcherQueueTimer_get_IsRunning( timer, &result );
+    ok( hr == S_OK && result == FALSE, "got hr %#lx, result %d.\n", hr, result );
+    hr = IDispatcherQueueTimer_remove_Tick( timer, token );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( tick.ref == 1, "got ref %ld.\n", tick.ref );
+    IDispatcherQueueTimer_Release( timer );
+
+    hr = IDispatcherQueueController_ShutdownQueueAsync( controller, &operation );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    pump_messages( 100 );
+    IAsyncAction_Release( operation );
+
+    hr = IDispatcherQueueStatics_GetForCurrentThread( statics, &current );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !current, "got queue %p.\n", current );
+
+    IDispatcherQueue_Release( queue );
+    ref = IDispatcherQueueController_Release( controller );
+    ok( !ref, "got ref %ld.\n", ref );
+
+    /* a controller released without a shutdown takes the queue away */
+    hr = CreateDispatcherQueueController( options, (PDISPATCHERQUEUECONTROLLER *)&controller );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    IDispatcherQueueController_Release( controller );
+    hr = IDispatcherQueueStatics_GetForCurrentThread( statics, &current );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !current, "got queue %p.\n", current );
+    if (current) IDispatcherQueue_Release( current );
+
+    IDispatcherQueueStatics_Release( statics );
+    IActivationFactory_Release( factory );
+}
+
 START_TEST(coremessaging)
 {
     HRESULT hr;
@@ -545,6 +810,7 @@ START_TEST(coremessaging)
 
     test_CreateDispatcherQueueController();
     test_DispatcherQueueController_Statics();
+    test_DispatcherQueue_Statics();
 
     RoUninitialize();
 }
