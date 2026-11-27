@@ -8299,6 +8299,63 @@ static void test_associate_wait_completion_packet(void)
     ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
 }
 
+/* A packet that reaches a thread already waiting in NtRemoveIoCompletion can be associated again, as for one that was queued first. */
+static void test_rearm_wait_completion_packet(void)
+{
+    ULONG_PTR key_context, apc_context;
+    HANDLE completion, packet, timer;
+    LARGE_INTEGER timeout, due;
+    IO_STATUS_BLOCK iosb;
+    BOOLEAN signaled;
+    NTSTATUS status;
+    int i;
+
+    if (!pNtAssociateWaitCompletionPacket)
+    {
+        win_skip("NtAssociateWaitCompletionPacket is unavailable.\n");
+        return;
+    }
+
+    status = pNtCreateIoCompletion(&completion, IO_COMPLETION_ALL_ACCESS, NULL, 0);
+    ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+    status = pNtCreateWaitCompletionPacket(&packet, GENERIC_ALL, NULL);
+    ok(status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status);
+    timer = CreateWaitableTimerW(NULL, TRUE, NULL);
+    ok(timer != NULL, "CreateWaitableTimerW failed, error %lu.\n", GetLastError());
+
+    for (i = 0; i < 2; i++)
+    {
+        /* the timer fires while this thread waits for the port; setting it resets its signaled state */
+        due.QuadPart = -500000; /* 50 ms */
+        ok(SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE), "SetWaitableTimer failed, error %lu.\n", GetLastError());
+        signaled = 0xcc;
+        status = pNtAssociateWaitCompletionPacket(packet, completion, timer, (void *)(ULONG_PTR)(0x10 + i), (void *)0xb,
+                                                  STATUS_SUCCESS, (ULONG_PTR)0xc, &signaled);
+        ok(status == STATUS_SUCCESS, "%d: got unexpected status %#lx.\n", i, status);
+        ok(!signaled, "%d: got signaled %d.\n", i, signaled);
+        timeout.QuadPart = -10000000; /* 1 s */
+        key_context = apc_context = 0;
+        status = pNtRemoveIoCompletion(completion, &key_context, &apc_context, &iosb, &timeout);
+        ok(status == STATUS_SUCCESS, "%d: got unexpected status %#lx.\n", i, status);
+        ok(key_context == 0x10 + i, "%d: got unexpected completion key %Id.\n", i, key_context);
+
+        /* the manual-reset timer is still signaled: the packet is queued at once */
+        signaled = 0xcc;
+        status = pNtAssociateWaitCompletionPacket(packet, completion, timer, (void *)0x20, (void *)0xb,
+                                                  STATUS_SUCCESS, (ULONG_PTR)0xc, &signaled);
+        ok(status == STATUS_SUCCESS, "%d: got unexpected status %#lx.\n", i, status);
+        ok(signaled == TRUE, "%d: got signaled %d.\n", i, signaled);
+        timeout.QuadPart = 0;
+        status = pNtRemoveIoCompletion(completion, &key_context, &apc_context, &iosb, &timeout);
+        ok(status == STATUS_SUCCESS, "%d: got unexpected status %#lx.\n", i, status);
+        ok(key_context == 0x20, "%d: got unexpected completion key %Id.\n", i, key_context);
+    }
+
+    CloseHandle(timer);
+    pNtClose(packet);
+    pNtClose(completion);
+}
+
 static void test_cancel_wait_completion_packet(void)
 {
     static const char pipe_name[] = "\\\\.\\pipe\\test_cancel_wait_completion_packet";
@@ -8610,6 +8667,7 @@ START_TEST(file)
     test_file_map_large_size();
     test_create_wait_completion_packet();
     test_associate_wait_completion_packet();
+    test_rearm_wait_completion_packet();
     test_cancel_wait_completion_packet();
     test_find_file();
 }
