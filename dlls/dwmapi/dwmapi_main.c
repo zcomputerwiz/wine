@@ -299,8 +299,9 @@ static void clear_auto_blur(HWND hwnd);
 
 /* Publish the backdrop of the window's extended frame for win32u (include/wine/dcomp_underlay.h), or withdraw it: a
  * system backdrop (Mica, Acrylic, Mica Alt) and margins, where nothing composes alpha (with DwmAlpha the compositor
- * draws the material). Without materials the backdrop is a flat colour: the theme's face colour, or a dark grey for a
- * dark-mode window. */
+ * draws the material). Without materials the backdrop is a flat colour: the materials' base grey, light F3F3F3 or dark
+ * 202020, the same as WineExplorer's shared table of material tints (src/include/wexhost.h, wex_material_default_tint),
+ * which this side of the tree cannot include. */
 static void update_backdrop(HWND hwnd)
 {
     static const WCHAR *const margin_props[4] =
@@ -318,7 +319,7 @@ static void update_backdrop(HWND hwnd)
     for (i = 0; i < 4; i++)
         if ((ULONG_PTR)GetPropW(hwnd, margin_props[i]) != 0x10000 && GetPropW(hwnd, margin_props[i])) margins = TRUE;
     on = (type == 2 || type == 3 || type == 4 || mica) && margins && !GetPropW(hwnd, L"__wine_dwm_alpha");
-    color = dark ? RGB(0x20, 0x20, 0x20) : GetSysColor(COLOR_BTNFACE);
+    color = dark ? RGB(0x20, 0x20, 0x20) : RGB(0xf3, 0xf3, 0xf3);
     if (on && (ULONG_PTR)GetPropW(hwnd, WINE_DWM_BACKDROP_PROP) == (0x01000000 | color)) return;
     if (!on && !GetPropW(hwnd, WINE_DWM_BACKDROP_PROP)) return;
     if (on) SetPropW(hwnd, WINE_DWM_BACKDROP_PROP, (HANDLE)(ULONG_PTR)(0x01000000 | color));
