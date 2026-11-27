@@ -39,8 +39,16 @@
 #include "windows.system.h"
 
 #include "async_private.h"
+#include "dispatcherqueue.h"
 
 HRESULT async_action_create( IUnknown *invoker, async_operation_callback callback, IAsyncAction **out );
+
+BOOL dispatcher_queue_enabled(void);
+extern IActivationFactory *dispatcher_queue_factory;
+HRESULT dispatcher_queue_create( DISPATCHERQUEUE_THREAD_TYPE type, DISPATCHERQUEUE_THREAD_APARTMENTTYPE apartment,
+                                 IDispatcherQueue **out );
+HRESULT dispatcher_queue_shutdown_async( IDispatcherQueue *queue, IAsyncAction **operation );
+void dispatcher_queue_controller_released( IDispatcherQueue *queue );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

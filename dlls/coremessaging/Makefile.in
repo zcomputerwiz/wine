@@ -1,5 +1,5 @@
 MODULE    = coremessaging.dll
-IMPORTS   = combase
+IMPORTS   = combase user32
 IMPORTLIB = coremessaging
 
 SOURCES = \
@@ -7,4 +7,5 @@ SOURCES = \
 	async_private.idl \
 	classes.idl \
 	coreui.c \
+	dispatcher.c \
 	main.c
