@@ -63,6 +63,7 @@ struct wined3d_dcomp_background
     unsigned int refcount, width, height;
     HBITMAP bitmap;
     uint32_t *pixels;
+    BOOL from_parent;   /* a child island without a redirection bitmap: the parent's pixels under it */
 };
 
 static void dcomp_background_release(struct wined3d_dcomp_background *background)
@@ -79,11 +80,23 @@ static HRESULT dcomp_background_for_window(struct wined3d_swapchain *swapchain, 
 {
     struct wined3d_dcomp_background *background = swapchain->dcomp_background;
     BITMAPINFO info = {{sizeof(BITMAPINFOHEADER)}};
+    DWORD ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+    BOOL from_parent = FALSE;
 
     *out = NULL;
     /* These windows have no ordinary opaque GDI redirection underlay. */
-    if (GetWindowLongW(hwnd, GWL_EXSTYLE) & (WS_EX_LAYERED | WS_EX_NOREDIRECTIONBITMAP)) return S_OK;
-    if (background && background->width == width && background->height == height)
+    if (ex_style & WS_EX_LAYERED) return S_OK;
+    if (ex_style & WS_EX_NOREDIRECTIONBITMAP)
+    {
+        /* A child target without a redirection bitmap (a WinUI island: the tab strip, menu row and status bar of a
+         * WinUI 3 window) is drawn over its parent on Windows: its transparent pixels show the parent's. Its own GL
+         * output is opaque, so the parent's pixels under it are its underlay. Composed over zeros instead, every
+         * island was a black bar. */
+        if (!(GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD)) return S_OK;
+        from_parent = TRUE;
+    }
+    if (background && background->width == width && background->height == height
+            && background->from_parent == from_parent)
     {
         ++background->refcount;
         *out = background;
@@ -104,6 +117,7 @@ static HRESULT dcomp_background_for_window(struct wined3d_swapchain *swapchain, 
     background->refcount = 1;
     background->width = width;
     background->height = height;
+    background->from_parent = from_parent;
     *out = background;
     return S_OK;
 }
@@ -1342,6 +1356,8 @@ static BOOL dcomp_capture_background(struct wined3d_swapchain *swapchain, struct
     unsigned int width = swapchain->composite_texture->resource.width;
     unsigned int height = swapchain->composite_texture->resource.height;
     unsigned int pitch, slice_pitch, x, y;
+    HWND source_hwnd = swapchain->win_handle;
+    POINT origin = {0, 0};
     HDC source = NULL, memory = NULL;
     HGDIOBJ previous = NULL;
     uint32_t *row;
@@ -1350,9 +1366,15 @@ static BOOL dcomp_capture_background(struct wined3d_swapchain *swapchain, struct
     if (background && required)
     {
         if (background->width != width || background->height != height) return FALSE;
-        if (!(source = GetDC(swapchain->win_handle)) || !(memory = CreateCompatibleDC(NULL))) goto done;
+        if (background->from_parent)
+        {
+            /* the parent's own GDI pixels under the island (its window surface holds no presented GL output) */
+            source_hwnd = GetAncestor(swapchain->win_handle, GA_PARENT);
+            MapWindowPoints(swapchain->win_handle, source_hwnd, &origin, 1);
+        }
+        if (!(source = GetDC(source_hwnd)) || !(memory = CreateCompatibleDC(NULL))) goto done;
         if (!(previous = SelectObject(memory, background->bitmap)) || previous == HGDI_ERROR) goto done;
-        if (!BitBlt(memory, 0, 0, width, height, source, 0, 0, SRCCOPY)) goto done;
+        if (!BitBlt(memory, 0, 0, width, height, source, origin.x, origin.y, SRCCOPY)) goto done;
         GdiFlush();
     }
     if (!wined3d_texture_prepare_location(swapchain->composite_texture, 0, context, WINED3D_LOCATION_SYSMEM)) goto done;
@@ -1370,7 +1392,7 @@ static BOOL dcomp_capture_background(struct wined3d_swapchain *swapchain, struct
 done:
     if (previous && previous != HGDI_ERROR) SelectObject(memory, previous);
     if (memory) DeleteDC(memory);
-    if (source) ReleaseDC(swapchain->win_handle, source);
+    if (source) ReleaseDC(source_hwnd, source);
     if (!success) ERR("Failed to capture application composition background.\n");
     return success;
 }
