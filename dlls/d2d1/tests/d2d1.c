@@ -18953,6 +18953,141 @@ static void test_sprite_batch(BOOL d3d11)
     release_test_context(&ctx);
 }
 
+static ID2D1PathGeometry *create_rects_path(ID2D1Factory *factory, const D2D1_RECT_F *rects, unsigned int count)
+{
+    ID2D1PathGeometry *path;
+    ID2D1GeometrySink *sink;
+    unsigned int i;
+    HRESULT hr;
+
+    hr = ID2D1Factory_CreatePathGeometry(factory, &path);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1PathGeometry_Open(path, &sink);
+    for (i = 0; i < count; ++i)
+    {
+        D2D1_POINT_2F start = {rects[i].left, rects[i].top};
+        D2D1_POINT_2F points[3] = {{rects[i].right, rects[i].top}, {rects[i].right, rects[i].bottom},
+                {rects[i].left, rects[i].bottom}};
+
+        ID2D1GeometrySink_BeginFigure(sink, start, D2D1_FIGURE_BEGIN_FILLED);
+        ID2D1GeometrySink_AddLines(sink, points, 3);
+        ID2D1GeometrySink_EndFigure(sink, D2D1_FIGURE_END_CLOSED);
+    }
+    hr = ID2D1GeometrySink_Close(sink);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1GeometrySink_Release(sink);
+    return path;
+}
+
+/* the area that the outline of a geometry covers, measured by writing the outline into a path geometry */
+static float outline_area(ID2D1Factory *factory, ID2D1Geometry *geometry, const D2D1_MATRIX_3X2_F *transform,
+        D2D1_RECT_F *bounds)
+{
+    ID2D1PathGeometry *path;
+    ID2D1GeometrySink *sink;
+    float area = -1.0f;
+    HRESULT hr;
+
+    ID2D1Factory_CreatePathGeometry(factory, &path);
+    ID2D1PathGeometry_Open(path, &sink);
+    hr = ID2D1Geometry_Outline(geometry, transform, 0.25f, (ID2D1SimplifiedGeometrySink *)sink);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1GeometrySink_Close(sink);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1GeometrySink_Release(sink);
+    hr = ID2D1PathGeometry_ComputeArea(path, NULL, 0.25f, &area);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1PathGeometry_GetBounds(path, NULL, bounds);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1PathGeometry_Release(path);
+    return area;
+}
+
+#define check_rect(r, l, t, ri, b) check_rect_(__LINE__, r, l, t, ri, b)
+static void check_rect_(unsigned int line, const D2D1_RECT_F *r, float l, float t, float ri, float b)
+{
+    ok_(__FILE__, line)(fabsf(r->left - l) < 0.01f && fabsf(r->top - t) < 0.01f && fabsf(r->right - ri) < 0.01f
+            && fabsf(r->bottom - b) < 0.01f, "Got rect {%.2f, %.2f, %.2f, %.2f}, expected {%.2f, %.2f, %.2f, %.2f}.\n",
+            r->left, r->top, r->right, r->bottom, l, t, ri, b);
+}
+
+/* Outline, GetWidenedBounds and the bounds and area of rounded rectangles and ellipses (values measured on Windows 11) */
+static void test_geometry_outline(BOOL d3d11)
+{
+    static const D2D1_RECT_F two[] = {{0.0f, 0.0f, 10.0f, 10.0f}, {5.0f, 5.0f, 15.0f, 15.0f}};
+    static const D2D1_RECT_F one[] = {{0.0f, 0.0f, 10.0f, 10.0f}};
+    D2D1_MATRIX_3X2_F scale = {{{2.0f, 0.0f, 0.0f, 3.0f, 0.0f, 0.0f}}};
+    D2D1_MATRIX_3X2_F move = {{{1.0f, 0.0f, 0.0f, 1.0f, 100.0f, 50.0f}}};
+    ID2D1RoundedRectangleGeometry *rounded;
+    D2D1_ROUNDED_RECT rr = {{0.0f, 0.0f, 40.0f, 20.0f}, 4.0f, 4.0f};
+    D2D1_ELLIPSE e = {{10.0f, 10.0f}, 5.0f, 3.0f};
+    ID2D1PathGeometry *path2, *path1;
+    ID2D1EllipseGeometry *ellipse;
+    ID2D1Factory *factory;
+    D2D1_RECT_F bounds;
+    float area;
+    HRESULT hr;
+
+    hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &IID_ID2D1Factory, NULL, (void **)&factory);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    path2 = create_rects_path(factory, two, 2);
+    path1 = create_rects_path(factory, one, 1);
+
+    /* the default fill mode is alternate: the overlap of the two squares is outside */
+    area = outline_area(factory, (ID2D1Geometry *)path2, NULL, &bounds);
+    ok(fabsf(area - 150.0f) < 0.5f, "Got area %.8e.\n", area);
+    check_rect(&bounds, 0.0f, 0.0f, 15.0f, 15.0f);
+    area = outline_area(factory, (ID2D1Geometry *)path2, &scale, &bounds);
+    ok(fabsf(area - 900.0f) < 0.5f, "Got area %.8e.\n", area);
+    check_rect(&bounds, 0.0f, 0.0f, 30.0f, 45.0f);
+    area = outline_area(factory, (ID2D1Geometry *)path2, &move, &bounds);
+    ok(fabsf(area - 150.0f) < 0.5f, "Got area %.8e.\n", area);
+    check_rect(&bounds, 100.0f, 50.0f, 115.0f, 65.0f);
+
+    hr = ID2D1PathGeometry_GetWidenedBounds(path1, 2.0f, NULL, NULL, 0.25f, &bounds);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    check_rect(&bounds, -1.0f, -1.0f, 11.0f, 11.0f);
+    hr = ID2D1PathGeometry_GetWidenedBounds(path1, 2.0f, NULL, &scale, 0.25f, &bounds);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    check_rect(&bounds, -2.0f, -3.0f, 22.0f, 33.0f);
+    hr = ID2D1PathGeometry_GetWidenedBounds(path1, 0.0f, NULL, NULL, 0.25f, &bounds);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    check_rect(&bounds, 0.0f, 0.0f, 10.0f, 10.0f);
+
+    hr = ID2D1Factory_CreateRoundedRectangleGeometry(factory, &rr, &rounded);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1RoundedRectangleGeometry_ComputeArea(rounded, NULL, 0.25f, &area);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(fabsf(area - 785.0f) < 1.0f, "Got area %.8e.\n", area);
+    area = outline_area(factory, (ID2D1Geometry *)rounded, NULL, &bounds);
+    ok(fabsf(area - 785.0f) < 1.0f, "Got area %.8e.\n", area);
+    check_rect(&bounds, 0.0f, 0.0f, 40.0f, 20.0f);
+    hr = ID2D1RoundedRectangleGeometry_GetBounds(rounded, NULL, &bounds);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    check_rect(&bounds, 0.0f, 0.0f, 40.0f, 20.0f);
+    hr = ID2D1RoundedRectangleGeometry_GetWidenedBounds(rounded, 1.0f, NULL, NULL, 0.25f, &bounds);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    check_rect(&bounds, -0.5f, -0.5f, 40.5f, 20.5f);
+
+    hr = ID2D1Factory_CreateEllipseGeometry(factory, &e, &ellipse);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1EllipseGeometry_GetBounds(ellipse, NULL, &bounds);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    check_rect(&bounds, 5.0f, 7.0f, 15.0f, 13.0f);
+    hr = ID2D1EllipseGeometry_GetWidenedBounds(ellipse, 4.0f, NULL, NULL, 0.25f, &bounds);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    check_rect(&bounds, 3.0f, 5.0f, 17.0f, 15.0f);
+    area = outline_area(factory, (ID2D1Geometry *)ellipse, NULL, &bounds);
+    ok(fabsf(area - 45.9f) < 0.5f, "Got area %.8e.\n", area);
+    check_rect(&bounds, 5.0f, 7.0f, 15.0f, 13.0f);
+
+    ID2D1EllipseGeometry_Release(ellipse);
+    ID2D1RoundedRectangleGeometry_Release(rounded);
+    ID2D1PathGeometry_Release(path1);
+    ID2D1PathGeometry_Release(path2);
+    ID2D1Factory_Release(factory);
+}
+
 START_TEST(d2d1)
 {
     HMODULE d2d1_dll = GetModuleHandleA("d2d1.dll");
@@ -18991,6 +19126,7 @@ START_TEST(d2d1)
     queue_test(test_linear_brush);
     queue_test(test_radial_brush);
     queue_test(test_path_geometry);
+    queue_test(test_geometry_outline);
     queue_d3d10_test(test_rectangle_geometry);
     queue_d3d10_test(test_rounded_rectangle_geometry);
     queue_test(test_bitmap_formats);
