@@ -144,9 +144,8 @@ D2D_PRIVATE_SLOT(9) D2D_PRIVATE_SLOT(10) D2D_PRIVATE_SLOT(11) D2D_PRIVATE_SLOT(1
  * program): the compositor of the Windows App SDK (dwmcorei.dll) calls it after slot 15 with 1, a rectangle geometry, no transform,
  * a path geometry, an identity matrix, 0.25 and an output pointer. The first argument is a D2D1_COMBINE_MODE (union, intersect, xor
  * and exclude give the areas of ID2D1Geometry::CombineWithGeometry), each matrix transforms its own geometry, and the output
- * receives a new ID2D1PathGeometry that the caller owns; it returns 0. The argument layout is measured on x86_64 only: elsewhere
- * the slot only logs. */
-#ifdef __x86_64__
+ * receives a new ID2D1PathGeometry that the caller owns; it returns 0. 32-bit Windows 11 has the same layout and results (a
+ * 32-bit program calling it). The private interface itself is offered on x86_64 only, see d2d_factory_QueryInterface. */
 static HRESULT STDMETHODCALLTYPE d2d_private_slot4(void *iface, UINT_PTR mode, ID2D1Geometry *geometry1,
         const D2D1_MATRIX_3X2_F *transform1, ID2D1Geometry *geometry2, const D2D1_MATRIX_3X2_F *transform2,
         float tolerance, ID2D1PathGeometry **out)
@@ -191,9 +190,6 @@ done:
         ID2D1TransformedGeometry_Release(transformed);
     return hr;
 }
-#else
-D2D_PRIVATE_SLOT(4)
-#endif
 
 /* Slot 15 creates a Direct2D device. Measured on 64-bit Windows 11 (wintrace d2d1.dll!factorymt@{6f72c0a2-...}[15] in Notepad):
  * the compositor of the Windows App SDK (dwmcorei.dll) calls it once with 4, its Direct3D 11 device and an output pointer, which

@@ -19127,17 +19127,12 @@ static void test_private_combine(BOOL d3d11)
     float area;
     HRESULT hr;
 
-    if (sizeof(void *) != 8)
-    {
-        /* the argument layout is measured on x86_64 only */
-        skip("The private combine slot is only tested on 64-bit.\n");
-        return;
-    }
     hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, &IID_ID2D1Factory, NULL, (void **)&factory);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
     hr = ID2D1Factory_QueryInterface(factory, &IID_d2d_private, (void **)&private);
     if (FAILED(hr))
     {
+        /* Windows has it on both architectures; Wine offers it on x86_64 only */
         skip("The private factory interface is not available.\n");
         ID2D1Factory_Release(factory);
         return;
