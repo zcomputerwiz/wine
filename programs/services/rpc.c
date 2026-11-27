@@ -210,7 +210,9 @@ static DWORD manager_remote(struct sc_manager_handle *manager, SC_RPC_HANDLE *re
     DWORD err;
 
     /* F1: session 0's service manager was not reachable when the handle was opened (it does not wait then): a call
-     * that needs it connects now, waiting for it as forward_open_manager does, as this call's caller */
+     * that needs it connects now, waiting for it as forward_open_manager does, as this call's caller. That is the
+     * opener's process in practice (an RPC context handle belongs to the client's connection); at worst another
+     * thread of it that impersonates differently, whose own token session 0 then checks. */
     if (!manager->remote && forward_mode && manager->remote_error == RPC_S_SERVER_UNAVAILABLE)
     {
         if ((err = forward_open_manager(manager->requested, &fresh, TRUE))) return err;
