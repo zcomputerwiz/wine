@@ -156,6 +156,89 @@ static void destroy_dead_children( Display *display, Window desktop )
     if (children) XFree( children );
 }
 
+static BOOL window_title_is_desktop( Display *display, Window win )
+{
+    static const char suffix[] = "Wine Desktop";
+    char *name = NULL;
+    size_t len;
+    BOOL ret = FALSE;
+
+    X11DRV_expect_error( display, ignore_x_error, NULL );
+    if (XFetchName( display, win, &name ) && name)
+    {
+        len = strlen( name );
+        ret = len >= sizeof(suffix) - 1 && !strcmp( name + len - (sizeof(suffix) - 1), suffix );
+        XFree( name );
+    }
+    XSync( display, False );
+    X11DRV_check_error();
+    return ret;
+}
+
+static BOOL window_owner_is_dead( Display *display, Window win )
+{
+    Atom type;
+    int format;
+    unsigned long nitems, left;
+    unsigned char *data;
+    long pid = 0;
+    BOOL dead = FALSE;
+
+    X11DRV_expect_error( display, ignore_x_error, NULL );
+    if (!XGetWindowProperty( display, win, x11drv_atom(_NET_WM_PID), 0, 1, False, XA_CARDINAL,
+                             &type, &format, &nitems, &left, &data ) && data)
+    {
+        if (nitems == 1 && format == 32) pid = *(long *)data;
+        XFree( data );
+    }
+    XSync( display, False );
+    X11DRV_check_error();
+    if (pid > 0 && pid != getpid() && kill( pid, 0 ) == -1 && errno == ESRCH) dead = TRUE;
+    return dead;
+}
+
+static void destroy_orphans_in( Display *display, Window parent, Window ours, int depth )
+{
+    Window root, up, *children;
+    unsigned int i, count;
+
+    X11DRV_expect_error( display, ignore_x_error, NULL );
+    if (!XQueryTree( display, parent, &root, &up, &children, &count )) count = 0, children = NULL;
+    XSync( display, False );
+    X11DRV_check_error();
+    for (i = 0; i < count; i++)
+    {
+        if (children[i] == ours) continue;
+        if (window_title_is_desktop( display, children[i] ) && window_owner_is_dead( display, children[i] ))
+        {
+            WARN( "destroying the desktop window %lx of a manager that is gone\n", children[i] );
+            X11DRV_expect_error( display, ignore_x_error, NULL );
+            XDestroyWindow( display, children[i] );
+            XSync( display, False );
+            X11DRV_check_error();
+        }
+        else if (depth > 0) destroy_orphans_in( display, children[i], ours, depth - 1 );  /* a window manager's frames */
+    }
+    if (children) XFree( children );
+}
+
+/***********************************************************************
+ *           X11DRV_destroy_orphan_desktops
+ *
+ * With the X server keeping a dead manager's resources (WINE_X11_RETAIN_DESKTOP), a manager that died together with its
+ * wineserver (no other Wine program held the server) leaves no stored window id to take over, and its desktop window,
+ * taskbar and desktop view would stay on screen, orphaned, above the new desktop. The new manager destroys the windows
+ * titled "Wine Desktop" whose _NET_WM_PID is a process that no longer exists (with their children), except its own.
+ */
+void X11DRV_destroy_orphan_desktops( Window ours )
+{
+    Display *display = thread_init_display();
+
+    if (!retain_desktop( NULL ) || !is_virtual_desktop()) return;
+    destroy_orphans_in( display, DefaultRootWindow( display ), ours, 1 );
+    XFlush( display );
+}
+
 /* whether the X window still exists */
 static BOOL x_window_exists( Display *display, Window win, XWindowAttributes *attrs )
 {

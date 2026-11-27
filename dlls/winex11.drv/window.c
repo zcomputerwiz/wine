@@ -2853,6 +2853,7 @@ void X11DRV_SetDesktopWindow( HWND hwnd )
             ERR( "Failed to create virtual desktop window data\n" );
             root_window = DefaultRootWindow( gdi_display );
         }
+        else X11DRV_destroy_orphan_desktops( root_window );  /* a manager that died with its server (B121) */
     }
     else
     {
@@ -2871,6 +2872,7 @@ void X11DRV_SetDesktopWindow( HWND hwnd )
                 ERR( "Failed to create virtual desktop window data\n" );
                 root_window = DefaultRootWindow( gdi_display );
             }
+            else if (!adopted) X11DRV_destroy_orphan_desktops( root_window );
         }
         else if (win && win != root_window) X11DRV_init_desktop( win );
     }
