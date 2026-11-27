@@ -28,6 +28,7 @@
 #include <stdarg.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <fcntl.h>   /* TEMPORARY: b132diag_refused */
 #include <string.h>
 #include <time.h>
 
@@ -1909,9 +1910,24 @@ void token_get_ids( const struct token *token, struct luid *token_id, struct lui
  * session's system role in session 0 (a mapped, link-bound token), with the object and the access asked */
 static void b132diag_refused( struct token *token, struct object *obj, unsigned int desired )
 {
+    int fd, saved;
+
     if (!session0_server || !token->link_bound || !token->session_system) return;
     fprintf( stderr, "B132diag: session %u's system role refused access %08x on ", token->link_session, desired );
     obj->ops->dump( obj, 0 );
+    /* also outside the suite's directory, which its teardown removes with session0.log in it */
+    if ((fd = open( "/var/tmp/b132diag.log", O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0666 )) == -1) return;
+    fflush( stderr );
+    if ((saved = dup( 2 )) != -1)
+    {
+        dup2( fd, 2 );
+        fprintf( stderr, "B132diag: session %u's system role refused access %08x on ", token->link_session, desired );
+        obj->ops->dump( obj, 0 );
+        fflush( stderr );
+        dup2( saved, 2 );
+        close( saved );
+    }
+    close( fd );
 }
 
 int check_object_access(struct token *token, struct object *obj, unsigned int *access)
