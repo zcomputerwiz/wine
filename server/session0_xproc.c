@@ -154,6 +154,60 @@ static unsigned int xproc_info( struct object *obj, unsigned int granted, unsign
     return STATUS_SUCCESS;
 }
 
+/* X4: a read of the process's memory, through this server's own process object (the path a local read with a VM_READ
+ * handle takes): never a Unix pid from the caller, never a descriptor handed out */
+static unsigned int xproc_read( struct object *obj, unsigned int granted, unsigned long long addr, unsigned int size,
+                                void **data, size_t *data_size )
+{
+    struct process *process = (struct process *)obj;
+    unsigned int status;
+    char *buf;
+
+    if (!(granted & PROCESS_VM_READ)) return STATUS_ACCESS_DENIED;
+    if (!process->running_threads) return STATUS_PROCESS_IS_TERMINATING;
+    if (!(buf = malloc( size ))) return STATUS_NO_MEMORY;
+    clear_error();
+    if (!read_process_memory( process, addr, size, buf ))
+    {
+        status = get_error();
+        clear_error();
+        free( buf );
+        return status ? status : STATUS_PARTIAL_COPY;
+    }
+    *data = buf;
+    *data_size = size;
+    return STATUS_SUCCESS;
+}
+
+/* X4: the process's token, for session 0 (the kind is refused in session 0 itself, so a user's server never gets a
+ * token this way): the token's own descriptor decides, for the caller's token, as OpenProcessToken's would */
+static unsigned int xproc_token( struct object *obj, unsigned int granted, struct token *caller, unsigned int access,
+                                 unsigned int *token_granted, void **data, size_t *data_size )
+{
+    struct process *process = (struct process *)obj;
+    data_size_t size;
+    unsigned int status, mapped;
+    void *desc;
+
+    struct object *token_obj = (struct object *)process->token;  /* (struct token is opaque here; obj comes first) */
+
+    if (!(granted & PROCESS_QUERY_LIMITED_INFORMATION)) return STATUS_ACCESS_DENIED;
+    if (!process->token) return STATUS_NO_TOKEN;
+    mapped = map_obj_access( token_obj, access );
+    clear_error();
+    if (!check_object_access( caller, token_obj, &mapped ))
+    {
+        status = get_error();
+        clear_error();
+        return status ? status : STATUS_ACCESS_DENIED;
+    }
+    if (!(desc = x_describe_token( process->token, &size, &status ))) return status;
+    *token_granted = mapped;
+    *data = desc;
+    *data_size = size;
+    return STATUS_SUCCESS;
+}
+
 static const struct x_kind_ops process_kind =
 {
     .kind        = WEX_X_KIND_PROCESS,
@@ -162,6 +216,8 @@ static const struct x_kind_ops process_kind =
     .try_acquire = xproc_try_acquire,
     .give_back   = xproc_give_back,
     .info        = xproc_info,
+    .read        = xproc_read,
+    .token       = xproc_token,
 };
 
 /* a process of this server ended: session 0's subscriptions to it get their death notice */
@@ -205,6 +261,11 @@ struct x_pcall
     unsigned int               status;    /* STATUS_PENDING while it runs */
     unsigned int               access;
     unsigned int               attributes;
+    unsigned int               op;        /* WEX_PCALL_*: the open (X3), a read or the token (X4) */
+    void                      *data;      /* a read's bytes */
+    unsigned int               data_size; /* the bytes asked for */
+    struct token              *token;     /* the token, built here from the owner's description */
+    unsigned int               token_access;
 };
 
 static const WCHAR rproc_type_name[] = {'P','r','o','c','e','s','s'};
@@ -315,6 +376,8 @@ static void pcall_destroy( struct object *obj )
     if (call->rproc) release_object( call->rproc );
     if (call->caller) release_object( call->caller );
     if (call->sync) release_object( call->sync );
+    if (call->token) release_object( call->token );
+    free( call->data );
 }
 
 static void rproc_set_ended( struct x_rproc *rproc )
@@ -411,9 +474,12 @@ static void pcall_deadline( void *private )
     struct x_pcall *call = private;
 
     call->timeout = NULL;
-    fprintf( stderr, "x3: the open of process %04x got no answer from its server in %u s\n", call->rproc->info.pid,
-             X_OPEN_DEADLINE );
-    pcall_end( call, STATUS_INVALID_CID );
+    fprintf( stderr, "x3: the %s of process %04x got no answer from its server in %u s\n",
+             call->op == WEX_PCALL_READ ? "read" : call->op == WEX_PCALL_TOKEN ? "token" : "open",
+             call->rproc->info.pid, X_OPEN_DEADLINE );
+    /* an open: the id counts as unreachable, as before X3; a read or a token: a time-out (an error status, unlike
+     * STATUS_TIMEOUT, which counts as success) */
+    pcall_end( call, call->op == WEX_PCALL_OPEN ? STATUS_INVALID_CID : STATUS_IO_TIMEOUT );
 }
 
 /* the open has its information (or needs none): the death notice is armed, and the caller can take the handle */
@@ -596,6 +662,11 @@ int x_open_remote_process( process_id_t pid, unsigned int access, unsigned int a
     call->status = STATUS_PENDING;
     call->access = access;
     call->attributes = attributes;
+    call->op = WEX_PCALL_OPEN;
+    call->data = NULL;
+    call->data_size = 0;
+    call->token = NULL;
+    call->token_access = 0;
     if (!(rproc->sync = create_internal_sync( 1, 0 )) || !(call->sync = create_internal_sync( 1, 0 )))
     {
         release_object( call );
@@ -656,8 +727,9 @@ int x_is_remote_process_handle( obj_handle_t handle )
 
     if ((rproc = x_remote_process_from_handle( handle, 0, &remote ))) release_object( rproc );
     set_error( error );
+    /* (a read and the token are served by x_process_call, ntdll's next step after this answer: no FIXME for them) */
     if (remote && current && (req = current->req.request_header.req) < REQ_NB_REQUESTS &&
-        !(warned[req / 8] & (1 << (req % 8))))
+        req != REQ_read_process_memory && req != REQ_open_token && !(warned[req / 8] & (1 << (req % 8))))
     {
         warned[req / 8] |= 1 << (req % 8);
         fprintf( stderr, "x3: FIXME: request %u on a session's process is not supported in session 0\n", req );
@@ -700,7 +772,131 @@ void x_process_init(void)
     x_register_kind( &process_kind );
 }
 
-/* the result of a remote OpenProcess that has ended (STATUS_PENDING while it has not): the handle */
+/* X4: a read's reply, the bytes asked for exactly */
+static void pcall_read_done( void *ctx, unsigned int status, const struct wex_x_header *reply, const void *body,
+                             size_t body_size )
+{
+    struct x_pcall *call = ctx;
+
+    if (call->status == STATUS_PENDING)  /* not after its deadline: then nothing is kept */
+    {
+        if (!status && (body_size != call->data_size || !(call->data = memdup( body, body_size ))))
+            status = body_size != call->data_size ? STATUS_INVALID_PARAMETER : STATUS_NO_MEMORY;
+        pcall_end( call, status );
+    }
+    release_object( call );
+}
+
+/* X4: the token's description becomes a token here only through link_bound_token: bound to the link's account and
+ * session, as every description in an X frame is (X0's condition 1) */
+static void pcall_token_done( void *ctx, unsigned int status, const struct wex_x_header *reply, const void *body,
+                              size_t body_size )
+{
+    struct x_pcall *call = ctx;
+    struct x_peer *peer = call->rproc->held ? call->rproc->held->peer : NULL;
+    struct wex_x_token_reply tr;
+
+    if (call->status == STATUS_PENDING)
+    {
+        if (!status && (body_size <= sizeof(tr) || !peer)) status = peer ? STATUS_INVALID_PARAMETER
+                                                                         : STATUS_CONNECTION_DISCONNECTED;
+        if (!status)
+        {
+            memcpy( &tr, body, sizeof(tr) );
+            if ((call->token = link_bound_token( x_peer_uid( peer ), x_peer_session( peer ),
+                                                 (const char *)body + sizeof(tr), body_size - sizeof(tr), &status )))
+                call->token_access = tr.granted;
+        }
+        pcall_end( call, status );
+    }
+    release_object( call );
+}
+
+/* X4: a read of a remote process's memory or its token: answers the call (a handle, signaled when it has ended), as
+ * open_process's remote branch does; ntdll uses it when the ordinary request gives STATUS_NOT_SUPPORTED */
+DECL_HANDLER(x_process_call)
+{
+    struct x_pcall *call;
+    struct x_rproc *rproc;
+    struct wex_x_read_req rd;
+    struct wex_x_token_req tk;
+    unsigned int needed, status;
+    int remote;
+
+    switch (req->op)
+    {
+    case WEX_PCALL_READ:  needed = PROCESS_VM_READ; break;
+    case WEX_PCALL_TOKEN: needed = PROCESS_QUERY_LIMITED_INFORMATION; break;
+    default: set_error( STATUS_INVALID_PARAMETER ); return;
+    }
+    if (!(rproc = x_remote_process_from_handle( req->handle, needed, &remote )))
+    {
+        if (!remote) set_error( STATUS_NOT_SUPPORTED );  /* not a remote process: the ordinary request's answer */
+        return;
+    }
+    if (req->op == WEX_PCALL_READ && (!req->size || req->size > WEX_X_MAX_READ))
+    {
+        release_object( rproc );
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+    if (!rproc->held || !rproc->held->peer)
+    {
+        release_object( rproc );
+        set_error( STATUS_PROCESS_IS_TERMINATING );  /* its owner is gone */
+        return;
+    }
+    if (!(call = alloc_object( &pcall_ops )))
+    {
+        release_object( rproc );
+        return;
+    }
+    call->rproc = rproc;
+    call->timeout = NULL;
+    call->caller = (struct process *)grab_object( current->process );
+    call->status = STATUS_PENDING;
+    call->access = req->access;
+    call->attributes = req->attributes;
+    call->op = req->op;
+    call->data = NULL;
+    call->data_size = req->size;
+    call->token = NULL;
+    call->token_access = 0;
+    if (!(call->sync = create_internal_sync( 1, 0 )))
+    {
+        release_object( call );
+        return;
+    }
+    grab_object( call );  /* for the call in flight */
+    if (req->op == WEX_PCALL_READ)
+    {
+        rd.addr = req->addr;
+        rd.size = req->size;
+        rd.reserved = 0;
+        status = x_call( rproc->held->peer, WEX_X_READ, rproc->held->id, &rd, sizeof(rd), NULL, 0, NULL, 0, 0,
+                         pcall_read_done, call );
+    }
+    else
+    {
+        tk.access = req->access;
+        tk.reserved = 0;
+        status = x_call( rproc->held->peer, WEX_X_TOKEN, rproc->held->id, &tk, sizeof(tk), NULL, 0, NULL, 0, 0,
+                         pcall_token_done, call );
+    }
+    if (status != STATUS_PENDING)
+    {
+        release_object( call );
+        release_object( call );
+        set_error( status );
+        return;
+    }
+    call->timeout = add_timeout_user( -(timeout_t)X_OPEN_DEADLINE * TICKS_PER_SEC, pcall_deadline, call );
+    reply->call = alloc_handle_no_access_check( current->process, call, SYNCHRONIZE, 0 );
+    release_object( call );
+}
+
+/* the result of a remote call that has ended (STATUS_PENDING while it has not): the open's handle (X3), the read's
+ * bytes or the token's handle (X4) */
 DECL_HANDLER(x_process_result)
 {
     struct x_pcall *call = (struct x_pcall *)get_handle_obj( current->process, req->call, 0, &pcall_ops );
@@ -709,6 +905,11 @@ DECL_HANDLER(x_process_result)
     if (call->caller != current->process) set_error( STATUS_ACCESS_DENIED );
     else if (call->status == STATUS_PENDING) set_error( STATUS_PENDING );
     else if (call->status) set_error( call->status );
+    else if (call->op == WEX_PCALL_READ)
+        set_reply_data( call->data, min( call->data_size, get_reply_max_size() ));
+    else if (call->op == WEX_PCALL_TOKEN)
+        reply->handle = alloc_handle_no_access_check( current->process, call->token, call->token_access,
+                                                      call->attributes );
     else if (!call->rproc->obj.sd && !rproc_set_sd( call->rproc, call->rproc->granted )) set_error( STATUS_NO_MEMORY );
     else reply->handle = alloc_handle_no_access_check( current->process, call->rproc, call->rproc->granted,
                                                        call->attributes );

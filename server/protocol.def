@@ -2353,7 +2353,22 @@ struct process_info
 @REQ(x_process_result)
     obj_handle_t call;
 @REPLY
-    obj_handle_t handle;
+    obj_handle_t handle;       /* the open's process (X3), the token (X4) */
+    VARARG(data,bytes);        /* a read's bytes (X4) */
+@END
+
+
+/* WineExplorer X4 (M3): in session 0, a read of a session's process's memory or its token, after the ordinary request
+   gave STATUS_NOT_SUPPORTED for the remote handle: the call, then x_process_result */
+@REQ(x_process_call)
+    obj_handle_t handle;       /* the remote process */
+    unsigned int op;           /* WEX_PCALL_READ or WEX_PCALL_TOKEN (wine/wex_session0.h) */
+    unsigned int access;       /* the token's: desired access */
+    unsigned int attributes;   /* the token handle's attributes */
+    data_size_t  size;         /* a read's size, at most WEX_X_MAX_READ */
+    client_ptr_t addr;         /* a read's address */
+@REPLY
+    obj_handle_t call;
 @END
 
 

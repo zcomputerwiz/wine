@@ -3027,6 +3027,27 @@ struct x_process_result_reply
 {
     struct reply_header __header;
     obj_handle_t handle;
+    /* VARARG(data,bytes); */
+    char __pad_12[4];
+};
+
+
+/* WineExplorer X4 (M3): in session 0, a read of a session's process's memory or its token, after the ordinary request
+   gave STATUS_NOT_SUPPORTED for the remote handle: the call, then x_process_result */
+struct x_process_call_request
+{
+    struct request_header __header;
+    obj_handle_t handle;
+    unsigned int op;
+    unsigned int access;
+    unsigned int attributes;
+    data_size_t  size;
+    client_ptr_t addr;
+};
+struct x_process_call_reply
+{
+    struct reply_header __header;
+    obj_handle_t call;
     char __pad_12[4];
 };
 
@@ -6871,6 +6892,7 @@ enum request
     REQ_accounts_forward,
     REQ_accounts_result,
     REQ_x_process_result,
+    REQ_x_process_call,
     REQ_set_registry_relay,
     REQ_relay_registry_notification,
     REQ_create_timer,
@@ -7214,6 +7236,7 @@ union generic_request
     struct accounts_forward_request accounts_forward_request;
     struct accounts_result_request accounts_result_request;
     struct x_process_result_request x_process_result_request;
+    struct x_process_call_request x_process_call_request;
     struct set_registry_relay_request set_registry_relay_request;
     struct relay_registry_notification_request relay_registry_notification_request;
     struct create_timer_request create_timer_request;
@@ -7555,6 +7578,7 @@ union generic_reply
     struct accounts_forward_reply accounts_forward_reply;
     struct accounts_result_reply accounts_result_reply;
     struct x_process_result_reply x_process_result_reply;
+    struct x_process_call_reply x_process_call_reply;
     struct set_registry_relay_reply set_registry_relay_reply;
     struct relay_registry_notification_reply relay_registry_notification_reply;
     struct create_timer_reply create_timer_reply;
@@ -7781,6 +7805,6 @@ union generic_reply
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 999
+#define SERVER_PROTOCOL_VERSION 1000
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

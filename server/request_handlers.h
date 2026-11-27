@@ -119,6 +119,7 @@ DECL_HANDLER(get_caller_class);
 DECL_HANDLER(accounts_forward);
 DECL_HANDLER(accounts_result);
 DECL_HANDLER(x_process_result);
+DECL_HANDLER(x_process_call);
 DECL_HANDLER(set_registry_relay);
 DECL_HANDLER(relay_registry_notification);
 DECL_HANDLER(create_timer);
@@ -459,6 +460,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_accounts_forward,
     (req_handler)req_accounts_result,
     (req_handler)req_x_process_result,
+    (req_handler)req_x_process_call,
     (req_handler)req_set_registry_relay,
     (req_handler)req_relay_registry_notification,
     (req_handler)req_create_timer,
@@ -1378,6 +1380,15 @@ C_ASSERT( offsetof(struct x_process_result_request, call) == 12 );
 C_ASSERT( sizeof(struct x_process_result_request) == 16 );
 C_ASSERT( offsetof(struct x_process_result_reply, handle) == 8 );
 C_ASSERT( sizeof(struct x_process_result_reply) == 16 );
+C_ASSERT( offsetof(struct x_process_call_request, handle) == 12 );
+C_ASSERT( offsetof(struct x_process_call_request, op) == 16 );
+C_ASSERT( offsetof(struct x_process_call_request, access) == 20 );
+C_ASSERT( offsetof(struct x_process_call_request, attributes) == 24 );
+C_ASSERT( offsetof(struct x_process_call_request, size) == 28 );
+C_ASSERT( offsetof(struct x_process_call_request, addr) == 32 );
+C_ASSERT( sizeof(struct x_process_call_request) == 40 );
+C_ASSERT( offsetof(struct x_process_call_reply, call) == 8 );
+C_ASSERT( sizeof(struct x_process_call_reply) == 16 );
 C_ASSERT( offsetof(struct set_registry_relay_request, fd) == 12 );
 C_ASSERT( sizeof(struct set_registry_relay_request) == 16 );
 C_ASSERT( offsetof(struct relay_registry_notification_request, event) == 12 );

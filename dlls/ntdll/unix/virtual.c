@@ -7369,6 +7369,8 @@ NTSTATUS WINAPI NtReadVirtualMemory( HANDLE process, const void *addr, void *buf
     }
     else
     {
+        SIZE_T size_asked = size;
+
         SERVER_START_REQ( read_process_memory )
         {
             req->handle = wine_server_obj_handle( process );
@@ -7377,6 +7379,8 @@ NTSTATUS WINAPI NtReadVirtualMemory( HANDLE process, const void *addr, void *buf
             if ((status = wine_server_call( req ))) size = 0;
         }
         SERVER_END_REQ;
+        /* WineExplorer X4: in session 0, a session's process is read by its server */
+        if (status == STATUS_NOT_SUPPORTED) status = remote_process_read( process, addr, buffer, size_asked, &size );
     }
     if (bytes_read) *bytes_read = size;
     return status;

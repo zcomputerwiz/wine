@@ -336,6 +336,9 @@ extern unsigned int xstate_get_size( UINT64 compaction_mask, UINT64 mask );
 extern void copy_xstate( XSAVE_AREA_HEADER *dst, XSAVE_AREA_HEADER *src, UINT64 mask );
 
 extern void set_process_instrumentation_callback( void *callback );
+/* WineExplorer X4 (process.c): session 0's read and token of a session's process, served by its server */
+extern NTSTATUS remote_process_read( HANDLE process, const void *addr, void *buffer, SIZE_T size, SIZE_T *done );
+extern NTSTATUS remote_process_token( HANDLE process, ACCESS_MASK access, ULONG attributes, HANDLE *handle );
 
 extern void *get_cpu_area( struct thread_data *data, USHORT machine );
 extern NTSTATUS init_thread_stack( TEB *teb, ULONG_PTR limit, SIZE_T reserve_size, SIZE_T commit_size );

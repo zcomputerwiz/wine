@@ -163,6 +163,8 @@ NTSTATUS WINAPI NtOpenProcessTokenEx( HANDLE process, DWORD access, DWORD attrib
         if (!ret) *handle = wine_server_ptr_handle( reply->token );
     }
     SERVER_END_REQ;
+    /* WineExplorer X4: in session 0, a session's process's token comes from its server */
+    if (ret == STATUS_NOT_SUPPORTED) ret = remote_process_token( process, access, attributes, handle );
     return ret;
 }
 

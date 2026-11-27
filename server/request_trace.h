@@ -1355,6 +1355,22 @@ static void dump_x_process_result_request( const struct x_process_result_request
 static void dump_x_process_result_reply( const struct x_process_result_reply *req )
 {
     fprintf( stderr, " handle=%04x", req->handle );
+    dump_varargs_bytes( ", data=", cur_size );
+}
+
+static void dump_x_process_call_request( const struct x_process_call_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    fprintf( stderr, ", op=%08x", req->op );
+    fprintf( stderr, ", access=%08x", req->access );
+    fprintf( stderr, ", attributes=%08x", req->attributes );
+    fprintf( stderr, ", size=%u", req->size );
+    dump_uint64( ", addr=", &req->addr );
+}
+
+static void dump_x_process_call_reply( const struct x_process_call_reply *req )
+{
+    fprintf( stderr, " call=%04x", req->call );
 }
 
 static void dump_set_registry_relay_request( const struct set_registry_relay_request *req )
@@ -4007,6 +4023,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_accounts_forward_request,
     (dump_func)dump_accounts_result_request,
     (dump_func)dump_x_process_result_request,
+    (dump_func)dump_x_process_call_request,
     (dump_func)dump_set_registry_relay_request,
     (dump_func)dump_relay_registry_notification_request,
     (dump_func)dump_create_timer_request,
@@ -4347,6 +4364,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_accounts_forward_reply,
     (dump_func)dump_accounts_result_reply,
     (dump_func)dump_x_process_result_reply,
+    (dump_func)dump_x_process_call_reply,
     NULL,
     (dump_func)dump_relay_registry_notification_reply,
     (dump_func)dump_create_timer_reply,
@@ -4687,6 +4705,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "accounts_forward",
     "accounts_result",
     "x_process_result",
+    "x_process_call",
     "set_registry_relay",
     "relay_registry_notification",
     "create_timer",

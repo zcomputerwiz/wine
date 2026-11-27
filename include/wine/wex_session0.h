@@ -122,6 +122,8 @@ struct wex_session0_order_reply
 #define WEX_X_PING            9   /* the body comes back */
 #define WEX_X_INFO            10  /* holder to owner: struct wex_x_info_req; reply: the kind's information (X3:
                                    * struct wex_x_process_info, then the image name) */
+#define WEX_X_READ            11  /* X4: struct wex_x_read_req; reply: the bytes (at most WEX_X_MAX_READ) */
+#define WEX_X_TOKEN           12  /* X4: struct wex_x_token_req; reply: struct wex_x_token_reply, the description */
 #define WEX_X_REPLY           0x80000000
 
 /* OPEN kinds (X1: global names); the lab build has its counter */
@@ -183,6 +185,34 @@ struct wex_x_granted
 struct wex_x_info_req
 {
     unsigned int       info_class; /* X3: the ProcessInformationClass asked for (the owner's FIXME names it) */
+    unsigned int       reserved;
+};
+
+/* the operations of session 0's request x_process_call (server/protocol.def) */
+#define WEX_PCALL_OPEN        0   /* open_process's own remote branch (X3) */
+#define WEX_PCALL_READ        1   /* NtReadVirtualMemory (X4) */
+#define WEX_PCALL_TOKEN       2   /* NtOpenProcessTokenEx (X4) */
+
+/* X4: a read of a process's memory (PROCESS_VM_READ in the reference): at most WEX_X_MAX_READ bytes a request, so the
+ * reply stays in one frame; larger reads are split by the holder */
+#define WEX_X_MAX_READ        (60 * 1024)
+struct wex_x_read_req
+{
+    unsigned long long addr;
+    unsigned int       size;
+    unsigned int       reserved;
+};
+
+/* X4: a process's token, towards session 0 only: the access the caller asks for on the token */
+struct wex_x_token_req
+{
+    unsigned int       access;
+    unsigned int       reserved;
+};
+
+struct wex_x_token_reply
+{
+    unsigned int       granted;    /* the rights the owner's check of the token's descriptor gave */
     unsigned int       reserved;
 };
 

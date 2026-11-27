@@ -773,6 +773,11 @@ unsigned int x_peer_session( const struct x_peer *peer )
     return peer->session;
 }
 
+uid_t x_peer_uid( const struct x_peer *peer )
+{
+    return peer->uid;
+}
+
 struct x_peer *x_peer_of_server( unsigned int pid, unsigned long long start )
 {
     struct x_peer *peer;
@@ -1105,6 +1110,55 @@ static void x_serve( struct x_conn *conn, const struct wex_x_header *hdr, const 
                                 : STATUS_NOT_SUPPORTED;
         if (!status && data_size > WEX_SESSION0_MAX_MSG - sizeof(*hdr)) status = STATUS_BUFFER_OVERFLOW;
         x_reply( conn, hdr, status, ref->id, status ? NULL : data, status ? 0 : data_size );
+        free( data );
+        return;
+    }
+    case WEX_X_READ:   /* X4: the object's memory, for the rights in the entry */
+    case WEX_X_TOKEN:  /* X4: the object's token described, checked for the caller's token in the entry */
+    {
+        struct wex_x_read_req rd;
+        struct wex_x_token_req tk;
+        struct wex_x_token_reply granted_reply = { 0, 0 };
+        void *data = NULL, *body_out = NULL, *joined = NULL;
+        size_t data_size = 0, out_size;
+
+        if (size != (hdr->type == WEX_X_READ ? sizeof(rd) : sizeof(tk)))
+        {
+            x_reply( conn, hdr, STATUS_INVALID_PARAMETER, hdr->ref, NULL, 0 );
+            return;
+        }
+        if (!(ref = x_ref_lookup( conn->peer, hdr->ref )))
+        {
+            x_reply( conn, hdr, STATUS_INVALID_HANDLE, hdr->ref, NULL, 0 );
+            return;
+        }
+        if (hdr->type == WEX_X_READ)
+        {
+            memcpy( &rd, body, sizeof(rd) );
+            if (!rd.size || rd.size > WEX_X_MAX_READ) status = STATUS_INVALID_PARAMETER;
+            else status = ref->ops->read ? ref->ops->read( ref->obj, ref->access, rd.addr, rd.size, &data, &data_size )
+                                         : STATUS_NOT_SUPPORTED;
+            body_out = data;
+            out_size = data_size;
+        }
+        else
+        {
+            memcpy( &tk, body, sizeof(tk) );
+            status = ref->ops->token ? ref->ops->token( ref->obj, ref->access, ref->token, tk.access,
+                                                        &granted_reply.granted, &data, &data_size )
+                                     : STATUS_NOT_SUPPORTED;
+            out_size = sizeof(granted_reply) + data_size;
+            if (!status && !(joined = malloc( out_size ))) status = STATUS_NO_MEMORY;
+            if (!status)
+            {
+                memcpy( joined, &granted_reply, sizeof(granted_reply) );
+                memcpy( (char *)joined + sizeof(granted_reply), data, data_size );
+            }
+            body_out = joined;
+        }
+        if (!status && out_size > WEX_SESSION0_MAX_MSG - sizeof(*hdr)) status = STATUS_BUFFER_OVERFLOW;
+        x_reply( conn, hdr, status, ref->id, status ? NULL : body_out, status ? 0 : out_size );
+        free( joined );
         free( data );
         return;
     }

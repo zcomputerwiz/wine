@@ -66,6 +66,7 @@
 #include "winioctl.h"
 #include "ddk/ntddk.h"
 #include "unix_private.h"
+#include "wine/wex_session0.h"
 #include "wine/condrv.h"
 #include "wine/server.h"
 #include "wine/debug.h"
@@ -1953,6 +1954,67 @@ NTSTATUS WINAPI NtSetInformationProcess( HANDLE handle, PROCESSINFOCLASS class, 
 /**********************************************************************
  *           NtOpenProcess  (NTDLL.@)
  */
+/* WineExplorer X4: in session 0, a call on a session's process that its server serves (a read, the token): the server
+ * answers a call handle, signaled when it has ended; the result then gives the bytes into buffer or a handle */
+static NTSTATUS remote_process_call( HANDLE process, unsigned int op, ACCESS_MASK access, ULONG attributes,
+                                     const void *addr, unsigned int size, void *buffer, HANDLE *handle )
+{
+    HANDLE call = 0;
+    NTSTATUS status;
+
+    SERVER_START_REQ( x_process_call )
+    {
+        req->handle     = wine_server_obj_handle( process );
+        req->op         = op;
+        req->access     = access;
+        req->attributes = attributes;
+        req->size       = size;
+        req->addr       = wine_server_client_ptr( addr );
+        if (!(status = wine_server_call( req ))) call = wine_server_ptr_handle( reply->call );
+    }
+    SERVER_END_REQ;
+    if (status) return status;
+    if (!(status = NtWaitForSingleObject( call, FALSE, NULL )))
+    {
+        SERVER_START_REQ( x_process_result )
+        {
+            req->call = wine_server_obj_handle( call );
+            if (buffer) wine_server_set_reply( req, buffer, size );
+            if (!(status = wine_server_call( req )) && handle) *handle = wine_server_ptr_handle( reply->handle );
+            if (!status && buffer && wine_server_reply_size( reply ) != size) status = STATUS_PARTIAL_COPY;
+        }
+        SERVER_END_REQ;
+    }
+    NtClose( call );
+    return status;
+}
+
+/* WineExplorer X4: NtReadVirtualMemory on a session's process from session 0, in pieces of at most WEX_X_MAX_READ */
+NTSTATUS remote_process_read( HANDLE process, const void *addr, void *buffer, SIZE_T size, SIZE_T *done )
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    SIZE_T pos = 0;
+
+    while (pos < size)
+    {
+        unsigned int chunk = min( size - pos, WEX_X_MAX_READ );
+
+        if ((status = remote_process_call( process, WEX_PCALL_READ, 0, 0, (const char *)addr + pos, chunk,
+                                           (char *)buffer + pos, NULL )))
+            break;
+        pos += chunk;
+    }
+    *done = pos;
+    if (status && pos) status = STATUS_PARTIAL_COPY;
+    return status;
+}
+
+/* WineExplorer X4: NtOpenProcessTokenEx on a session's process from session 0 */
+NTSTATUS remote_process_token( HANDLE process, ACCESS_MASK access, ULONG attributes, HANDLE *handle )
+{
+    return remote_process_call( process, WEX_PCALL_TOKEN, access, attributes, NULL, 0, NULL, handle );
+}
+
 NTSTATUS WINAPI NtOpenProcess( HANDLE *handle, ACCESS_MASK access,
                                const OBJECT_ATTRIBUTES *attr, const CLIENT_ID *id )
 {

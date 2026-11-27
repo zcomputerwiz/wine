@@ -67,6 +67,13 @@ struct x_kind_ops
      * granted; a malloc'ed reply body in *data */
     unsigned int (*info)( struct object *obj, unsigned int granted, unsigned int info_class, void **data,
                           size_t *size );
+    /* X4, WEX_X_READ (may be NULL): size bytes of obj's memory at addr, for the rights granted; malloc'ed in *data */
+    unsigned int (*read)( struct object *obj, unsigned int granted, unsigned long long addr, unsigned int size,
+                          void **data, size_t *data_size );
+    /* X4, WEX_X_TOKEN (may be NULL): obj's token described, after the check of access against its descriptor for the
+     * caller's token; the rights given in *granted, the description malloc'ed in *data */
+    unsigned int (*token)( struct object *obj, unsigned int granted, struct token *caller, unsigned int access,
+                           unsigned int *token_granted, void **data, size_t *data_size );
 };
 extern void x_register_kind( const struct x_kind_ops *ops );
 /* the object may have become ready: armed subscriptions on it get their notice */
@@ -112,6 +119,8 @@ extern struct x_peer *x_peer_of_session( unsigned int session );
 extern struct x_peer *x_peer_of_server( unsigned int pid, unsigned long long start );
 /* the session of a peer's link (session 0 as owner: the peer's session; a user's server: 0) */
 extern unsigned int x_peer_session( const struct x_peer *peer );
+/* the account of a peer's server */
+extern uid_t x_peer_uid( const struct x_peer *peer );
 
 /* ---- for the lab (wex_x0lab.c) ---- */
 
