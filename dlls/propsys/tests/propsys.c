@@ -3250,6 +3250,104 @@ static void test_PropertySystem(void)
     CoUninitialize();
 }
 
+static void test_PSGetPropertyDescriptionListFromString(void)
+{
+    static const struct
+    {
+        const WCHAR *string;
+        HRESULT hr;
+        UINT count;
+        const WCHAR *names[2];
+        PROPDESC_VIEW_FLAGS view[2];
+    }
+    tests[] =
+    {
+        {L"prop:System.Security.EncryptionOwners", S_OK, 1, {L"System.Security.EncryptionOwners"}},
+        {L"prop:System.ItemNameDisplay;System.Security.EncryptionOwners", S_OK, 2,
+                {L"System.ItemNameDisplay", L"System.Security.EncryptionOwners"}},
+        {L"prop:*System.ItemNameDisplay;~System.Security.EncryptionOwners", S_OK, 2,
+                {L"System.ItemNameDisplay", L"System.Security.EncryptionOwners"}, {PDVF_SHOWONLYIFPRESENT, PDVF_HIDELABEL}},
+        {L"prop:System.ItemNameDisplay;Not.A.Property;System.Security.EncryptionOwners", INPLACE_S_TRUNCATED, 2,
+                {L"System.ItemNameDisplay", L"System.Security.EncryptionOwners"}},
+        {L"prop:Not.A.Property", INPLACE_S_TRUNCATED, 0},
+        {L"prop:", S_OK, 0},
+        {L"PROP:System.ItemNameDisplay", S_OK, 1, {L"System.ItemNameDisplay"}},
+        {L"prop: System.ItemNameDisplay ; System.Security.EncryptionOwners", INPLACE_S_TRUNCATED, 0},
+        {L"prop:System.ItemNameDisplay;", S_OK, 1, {L"System.ItemNameDisplay"}},
+        {L"System.ItemNameDisplay", E_FAIL},
+        {L"", E_FAIL},
+        {NULL, E_INVALIDARG},
+    };
+    IPropertyDescriptionList *list;
+    IPropertyDescription *desc;
+    PROPDESC_VIEW_FLAGS view;
+    unsigned int i, j;
+    IUnknown *unk;
+    UINT count;
+    WCHAR *name;
+    VARTYPE vt;
+    HRESULT hr;
+
+    CoInitialize(NULL);
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        winetest_push_context("%s", debugstr_w(tests[i].string));
+        list = (void *)0xdeadbeef;
+        hr = PSGetPropertyDescriptionListFromString(tests[i].string, &IID_IPropertyDescriptionList, (void **)&list);
+        ok(hr == tests[i].hr, "got %#lx\n", hr);
+        if (FAILED(hr))
+        {
+            ok(!list || broken(list == (void *)0xdeadbeef), "got %p\n", list);
+            winetest_pop_context();
+            continue;
+        }
+        hr = IPropertyDescriptionList_GetCount(list, &count);
+        ok(hr == S_OK, "got %#lx\n", hr);
+        ok(count == tests[i].count, "got count %u\n", count);
+        for (j = 0; j < count && j < ARRAY_SIZE(tests[i].names); j++)
+        {
+            hr = IPropertyDescriptionList_GetAt(list, j, &IID_IPropertyDescription, (void **)&desc);
+            ok(hr == S_OK, "got %#lx\n", hr);
+            if (FAILED(hr)) continue;
+            hr = IPropertyDescription_GetCanonicalName(desc, &name);
+            ok(hr == S_OK, "got %#lx\n", hr);
+            ok(!wcscmp(name, tests[i].names[j]), "%u: got %s\n", j, debugstr_w(name));
+            CoTaskMemFree(name);
+            hr = IPropertyDescription_GetViewFlags(desc, &view);
+            ok(hr == S_OK, "got %#lx\n", hr);
+            ok(view == tests[i].view[j], "%u: got view flags %#x\n", j, view);
+            IPropertyDescription_Release(desc);
+        }
+        desc = (void *)0xdeadbeef;
+        hr = IPropertyDescriptionList_GetAt(list, count, &IID_IPropertyDescription, (void **)&desc);
+        ok(hr == TYPE_E_OUTOFBOUNDS, "got %#lx\n", hr);
+        ok(!desc, "got %p\n", desc);
+        IPropertyDescriptionList_Release(list);
+        winetest_pop_context();
+    }
+
+    hr = PSGetPropertyDescriptionListFromString(L"prop:System.ItemNameDisplay", &IID_IUnknown, (void **)&unk);
+    ok(hr == S_OK, "got %#lx\n", hr);
+    IUnknown_Release(unk);
+    unk = (void *)0xdeadbeef;
+    hr = PSGetPropertyDescriptionListFromString(L"prop:System.ItemNameDisplay", &IID_IPropertyDescription, (void **)&unk);
+    ok(hr == E_NOINTERFACE, "got %#lx\n", hr);
+    ok(!unk, "got %p\n", unk);
+
+    /* the type of the property that Notepad asks for */
+    hr = PSGetPropertyDescriptionListFromString(L"prop:System.Security.EncryptionOwners", &IID_IPropertyDescriptionList,
+            (void **)&list);
+    ok(hr == S_OK, "got %#lx\n", hr);
+    hr = IPropertyDescriptionList_GetAt(list, 0, &IID_IPropertyDescription, (void **)&desc);
+    ok(hr == S_OK, "got %#lx\n", hr);
+    hr = IPropertyDescription_GetPropertyType(desc, &vt);
+    ok(hr == S_OK, "got %#lx\n", hr);
+    ok(vt == (VT_VECTOR | VT_LPWSTR), "got %#x\n", vt);
+    IPropertyDescription_Release(desc);
+    IPropertyDescriptionList_Release(list);
+    CoUninitialize();
+}
+
 static void test_PropVariantToFileTime(void)
 {
     PROPVARIANT propvar;
@@ -3317,4 +3415,5 @@ START_TEST(propsys)
     test_PropVariantToUInt32Vector();
 
     test_PropertySystem();
+    test_PSGetPropertyDescriptionListFromString();
 }

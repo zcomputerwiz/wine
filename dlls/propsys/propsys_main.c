@@ -299,10 +299,12 @@ HRESULT WINAPI PSGetPropertyDescription(REFPROPERTYKEY propkey, REFIID riid, voi
     return hr;
 }
 
+static HRESULT propdesc_list_from_string( const WCHAR *string, REFIID riid, void **out );
+
 HRESULT WINAPI PSGetPropertyDescriptionListFromString(LPCWSTR proplist, REFIID riid, void **ppv)
 {
-    FIXME("%s, %p, %p\n", debugstr_w(proplist), riid, ppv);
-    return E_NOTIMPL;
+    TRACE("%s, %s, %p\n", debugstr_w(proplist), debugstr_guid(riid), ppv);
+    return propdesc_list_from_string(proplist, riid, ppv);
 }
 
 HRESULT WINAPI PSGetNameFromPropertyKey(REFPROPERTYKEY key, LPWSTR *name)
@@ -595,6 +597,7 @@ struct property_description
     PROPERTYKEY key;
     VARTYPE type;
     PROPDESC_TYPE_FLAGS type_flags;
+    PROPDESC_VIEW_FLAGS view_flags;
     WCHAR *canonical_name;
 };
 
@@ -698,8 +701,11 @@ static HRESULT WINAPI propdesc_GetTypeFlags( IPropertyDescription *iface, PROPDE
 
 static HRESULT WINAPI propdesc_GetViewFlags( IPropertyDescription *iface, PROPDESC_VIEW_FLAGS *flags )
 {
-    FIXME( "(%p, %p) stub!\n", iface, flags );
-    return E_NOTIMPL;
+    struct property_description *propdesc = impl_from_IPropertyDescription( iface );
+
+    TRACE( "(%p, %p)\n", iface, flags );
+    *flags = propdesc->view_flags;
+    return S_OK;
 }
 
 static HRESULT WINAPI propdesc_GetDefaultColumnWidth( IPropertyDescription *iface, UINT *chars )
@@ -862,6 +868,7 @@ static struct system_property_description system_properties[] =
     {L"System.Devices.AepService.ProtocolId", &PKEY_Devices_AepService_ProtocolId, VT_CLSID},
     {L"System.Devices.ModelName", &PKEY_Devices_ModelName, VT_LPWSTR},
     {L"System.Devices.Manufacturer", &PKEY_Devices_Manufacturer, VT_LPWSTR},
+    {L"System.Security.EncryptionOwners", &PKEY_Security_EncryptionOwners, VT_VECTOR | VT_LPWSTR},
 };
 
 static HRESULT propdesc_from_system_property( const struct system_property_description *desc, IPropertyDescription **out )
@@ -913,4 +920,157 @@ static HRESULT propdesc_get_by_key( const PROPERTYKEY *key, IPropertyDescription
     }
 
     return TYPE_E_ELEMENTNOTFOUND;
+}
+
+struct property_description_list
+{
+    IPropertyDescriptionList IPropertyDescriptionList_iface;
+    LONG ref;
+
+    UINT count;
+    IPropertyDescription *descs[];
+};
+
+static inline struct property_description_list *impl_from_IPropertyDescriptionList( IPropertyDescriptionList *iface )
+{
+    return CONTAINING_RECORD( iface, struct property_description_list, IPropertyDescriptionList_iface );
+}
+
+static HRESULT WINAPI propdesc_list_QueryInterface( IPropertyDescriptionList *iface, REFIID iid, void **out )
+{
+    TRACE( "(%p, %s, %p)\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( &IID_IUnknown, iid ) || IsEqualGUID( &IID_IPropertyDescriptionList, iid ))
+    {
+        *out = iface;
+        IPropertyDescriptionList_AddRef( iface );
+        return S_OK;
+    }
+
+    *out = NULL;
+    WARN( "%s not implemented\n", debugstr_guid( iid ) );
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI propdesc_list_AddRef( IPropertyDescriptionList *iface )
+{
+    struct property_description_list *list = impl_from_IPropertyDescriptionList( iface );
+    ULONG ref = InterlockedIncrement( &list->ref );
+
+    TRACE( "(%p) ref %lu\n", iface, ref );
+    return ref;
+}
+
+static ULONG WINAPI propdesc_list_Release( IPropertyDescriptionList *iface )
+{
+    struct property_description_list *list = impl_from_IPropertyDescriptionList( iface );
+    ULONG ref = InterlockedDecrement( &list->ref );
+    UINT i;
+
+    TRACE( "(%p) ref %lu\n", iface, ref );
+    if (!ref)
+    {
+        for (i = 0; i < list->count; i++)
+            IPropertyDescription_Release( list->descs[i] );
+        free( list );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI propdesc_list_GetCount( IPropertyDescriptionList *iface, UINT *count )
+{
+    struct property_description_list *list = impl_from_IPropertyDescriptionList( iface );
+
+    TRACE( "(%p, %p)\n", iface, count );
+    *count = list->count;
+    return S_OK;
+}
+
+static HRESULT WINAPI propdesc_list_GetAt( IPropertyDescriptionList *iface, UINT index, REFIID iid, void **out )
+{
+    struct property_description_list *list = impl_from_IPropertyDescriptionList( iface );
+
+    TRACE( "(%p, %u, %s, %p)\n", iface, index, debugstr_guid( iid ), out );
+    if (index >= list->count)
+    {
+        *out = NULL;
+        return TYPE_E_OUTOFBOUNDS;
+    }
+    return IPropertyDescription_QueryInterface( list->descs[index], iid, out );
+}
+
+static const IPropertyDescriptionListVtbl property_description_list_vtbl =
+{
+    propdesc_list_QueryInterface,
+    propdesc_list_AddRef,
+    propdesc_list_Release,
+    propdesc_list_GetCount,
+    propdesc_list_GetAt,
+};
+
+/* "prop:" (in any case) and canonical names separated by ';', each name possibly after '*' (show only if present) and '~' (hide
+ * the label). Names are not trimmed; unknown names are left out and give INPLACE_S_TRUNCATED. */
+static HRESULT propdesc_list_from_string( const WCHAR *string, REFIID riid, void **out )
+{
+    struct property_description_list *list;
+    const WCHAR *p, *end;
+    BOOL missing = FALSE;
+    UINT max = 1;
+    HRESULT hr;
+
+    if (!out)
+        return E_INVALIDARG;
+    *out = NULL;
+    if (!string)
+        return E_INVALIDARG;
+    if (wcsnicmp( string, L"prop:", 5 ))
+        return E_FAIL;
+    string += 5;
+    for (p = string; *p; p++)
+        if (*p == ';') max++;
+    if (!(list = calloc( 1, offsetof( struct property_description_list, descs[max] ) )))
+        return E_OUTOFMEMORY;
+    list->IPropertyDescriptionList_iface.lpVtbl = &property_description_list_vtbl;
+    list->ref = 1;
+
+    for (p = string; *p; p = *end ? end + 1 : end)
+    {
+        PROPDESC_VIEW_FLAGS view = 0;
+        IPropertyDescription *desc;
+        WCHAR *name;
+        size_t len;
+
+        if (!(end = wcschr( p, ';' ))) end = p + wcslen( p );
+        for (;; p++)
+        {
+            if (*p == '*') view |= PDVF_SHOWONLYIFPRESENT;
+            else if (*p == '~') view |= PDVF_HIDELABEL;
+            else break;
+        }
+        if (!(len = end - p)) continue;
+        if (!(name = malloc( (len + 1) * sizeof(WCHAR) )))
+        {
+            IPropertyDescriptionList_Release( &list->IPropertyDescriptionList_iface );
+            return E_OUTOFMEMORY;
+        }
+        memcpy( name, p, len * sizeof(WCHAR) );
+        name[len] = 0;
+        hr = propdesc_get_by_name( name, &desc );
+        if (FAILED( hr ))
+        {
+            TRACE( "%s not found\n", debugstr_w( name ) );
+            missing = TRUE;
+            free( name );
+            continue;
+        }
+        free( name );
+        impl_from_IPropertyDescription( desc )->view_flags |= view;
+        list->descs[list->count++] = desc;
+    }
+
+    hr = IPropertyDescriptionList_QueryInterface( &list->IPropertyDescriptionList_iface, riid, out );
+    IPropertyDescriptionList_Release( &list->IPropertyDescriptionList_iface );
+    if (SUCCEEDED( hr ) && missing)
+        hr = INPLACE_S_TRUNCATED;
+    return hr;
 }

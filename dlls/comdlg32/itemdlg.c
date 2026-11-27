@@ -3402,8 +3402,9 @@ static HRESULT WINAPI IFileSaveDialog_fnSetCollectedProperties(IFileSaveDialog* 
                                                                BOOL fAppendDefault)
 {
     FileDialogImpl *This = impl_from_IFileSaveDialog(iface);
-    FIXME("stub - %p (%p, %d)\n", This, pList, fAppendDefault);
-    return E_NOTIMPL;
+    /* Windows accepts any list, NULL too; the properties are not shown here, so the list is not kept. */
+    FIXME("semi-stub - %p (%p, %d)\n", This, pList, fAppendDefault);
+    return S_OK;
 }
 
 static HRESULT WINAPI IFileSaveDialog_fnGetProperties(IFileSaveDialog* iface, IPropertyStore **ppStore)

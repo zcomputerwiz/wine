@@ -951,13 +951,10 @@ static void test_basics(void)
     }
 
     /* SetCollectedProperties */
-    todo_wine
-    {
     hr = IFileSaveDialog_SetCollectedProperties(pfsd, NULL, TRUE);
     ok(hr == S_OK, "got 0x%08lx\n", hr);
     hr = IFileSaveDialog_SetCollectedProperties(pfsd, NULL, FALSE);
     ok(hr == S_OK, "got 0x%08lx\n", hr);
-    }
 
     /* SetSaveAsItem */
     todo_wine
