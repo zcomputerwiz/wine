@@ -411,12 +411,27 @@ void wayland_wex_update_hosting(struct wayland_surface *surface)
         return;
     }
     if (!surface->content_width || surface->window.minimized) return;
+    /* An output scale change alone is not a new layout for a hosted group: the shell converts the Win32 placement
+     * (the window keeps its top left and its device-independent size, wexshell's wex_scale_changed), and the
+     * request follows that. A request made now, from the unconverted rectangle at the new scale, resizes the native
+     * client for the other scale, and its answer races the conversion. Maximized and fullscreen windows keep the
+     * driver's own conversion (the shell leaves them alone). */
+    if (surface->wex_host_scale > 0 && surface->window.scale != surface->wex_host_scale &&
+        EqualRect(&surface->window.client_rect, &surface->wex_host_client) &&
+        !(surface->window.state & (WAYLAND_SURFACE_CONFIG_STATE_MAXIMIZED | WAYLAND_SURFACE_CONFIG_STATE_FULLSCREEN)))
+    {
+        TRACE("host %p: scale %f -> %f, waiting for the converted placement\n", surface->hwnd,
+              surface->wex_host_scale, surface->window.scale);
+        return;
+    }
     if (!surface->wex_resize_pending &&
         (!surface->wex_host_attempted || !EqualRect(&rect, &surface->wex_host_rect) ||
          surface->content_width != surface->wex_host_content_width ||
          surface->content_height != surface->wex_host_content_height))
     {
         surface->wex_host_rect = rect;
+        surface->wex_host_client = surface->window.client_rect;
+        surface->wex_host_scale = surface->window.scale;
         surface->wex_host_content_width = surface->content_width;
         surface->wex_host_content_height = surface->content_height;
         surface->wex_host_attempted = TRUE;
