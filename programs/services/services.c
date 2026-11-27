@@ -1241,7 +1241,9 @@ error:
 /* WineExplorer: in session 0, each service's debug output (its stderr: ntdll's WINEDEBUGLOG) goes to
  * /var/log/wineexplorer/services/NAME.log (the installed machine's tmpfiles.d makes the folder, session 0's account's
  * only). Where the folder is not there, the service cannot open the file and keeps the stderr it inherits (the
- * session 0 unit's). A copy of the environment block with that variable, or NULL to use the block as it is. */
+ * session 0 unit's). A copy of the environment block with that variable, or NULL to use the block as it is.
+ * Names that differ only in replaced characters share a file (same account). An existing WINEDEBUGLOG is dropped
+ * in any case spelling; ntdll takes only the exact one, and only under /var/log/wineexplorer/ (process.c). */
 static WCHAR *service_log_environment(const WCHAR *name)
 {
     static const WCHAR var[] = L"WINEDEBUGLOG=";

@@ -334,17 +334,27 @@ static ULONG get_env_size( const RTL_USER_PROCESS_PARAMETERS *params, char **win
 }
 
 /* WineExplorer: WINEDEBUGLOG of the new process's Windows environment, for its Unix environment (as WINEDEBUG
- * above): the process's debug output goes to that file (debug.c). Session 0's services.exe sets one per service. */
+ * above): the process's debug output goes to that file (debug.c). Session 0's services.exe sets one per service.
+ * The block is the creator's, and the new process may run as another account (the elevation broker, runas): only a
+ * file under /var/log/wineexplorer/ (root's, and session 0's services/ folder) is taken from it, with no ".."
+ * component, so a caller cannot make another account create or append to a file of its choosing. A WINEDEBUGLOG
+ * in the user's own Unix environment is not affected. Matched case-sensitively, as the Unix variable: a variant
+ * spelling is ignored. */
 static char *get_debug_log_var( const RTL_USER_PROCESS_PARAMETERS *params )
 {
     static const WCHAR WINEDEBUGLOG[] = {'W','I','N','E','D','E','B','U','G','L','O','G','=',0};
-    WCHAR *ptr = params->Environment;
+    static const WCHAR prefixW[] = {'/','v','a','r','/','l','o','g','/','w','i','n','e','e','x','p','l','o','r','e','r','/',0};
+    WCHAR *ptr = params->Environment, *path, *slash;
     char *ret;
     DWORD len;
 
     for (; *ptr; ptr += wcslen(ptr) + 1)
     {
         if (wcsncmp( ptr, WINEDEBUGLOG, ARRAY_SIZE( WINEDEBUGLOG ) - 1 )) continue;
+        path = ptr + ARRAY_SIZE( WINEDEBUGLOG ) - 1;
+        if (wcsncmp( path, prefixW, ARRAY_SIZE( prefixW ) - 1 )) return NULL;
+        for (slash = wcschr( path, '/' ); slash; slash = wcschr( slash + 1, '/' ))
+            if (slash[1] == '.' && slash[2] == '.' && (!slash[3] || slash[3] == '/')) return NULL;
         len = wcslen(ptr) * 3 + 1;
         if ((ret = malloc( len ))) ntdll_wcstoumbs( ptr, wcslen(ptr) + 1, ret, len, FALSE );
         return ret;
