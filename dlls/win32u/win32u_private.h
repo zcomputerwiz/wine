@@ -159,6 +159,7 @@ extern void set_standard_scroll_painted( HWND hwnd, int bar, BOOL painted );
 extern void track_scroll_bar( HWND hwnd, int scrollbar, POINT pt );
 
 /* sysparams.c */
+extern void set_gui_thread(void);
 extern UINT system_dpi;
 extern BOOL emulate_modeset;
 extern BOOL decorated_mode;

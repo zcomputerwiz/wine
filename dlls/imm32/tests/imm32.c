@@ -8431,6 +8431,144 @@ static void test_ime_ui_window( const char *argv0 )
     wait_child_process( &info );
 }
 
+static HRESULT (WINAPI *pCtfImmTIMActivate)( HKL, BOOL );
+static HRESULT (WINAPI *pTF_GetThreadMgr)( IUnknown ** );
+
+static BOOL thread_has_tim(void)
+{
+    IUnknown *tim = NULL;
+    HRESULT hr = pTF_GetThreadMgr( &tim );
+    if (FAILED(hr) || !tim) return FALSE;
+    tim->lpVtbl->Release( tim );
+    return TRUE;
+}
+
+static void pump_messages(void)
+{
+    MSG msg;
+    while (PeekMessageW( &msg, NULL, 0, 0, PM_REMOVE )) DispatchMessageW( &msg );
+}
+
+static DWORD WINAPI tim_activate_thread( void *arg )
+{
+    HKL hkl = GetKeyboardLayout( 0 );
+    HRESULT hr;
+    HWND hwnd;
+
+    hwnd = CreateWindowW( L"static", L"tim", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, NULL, NULL, NULL, NULL );
+    ok( !!hwnd, "CreateWindowW failed, error %lu\n", GetLastError() );
+    pump_messages();
+    ok( !thread_has_tim(), "thread manager present after CreateWindow\n" );
+
+    hr = pCtfImmTIMActivate( hkl, FALSE );
+    ok( hr == S_OK, "CtfImmTIMActivate( FALSE ) returned %#lx\n", hr );
+    ok( !thread_has_tim(), "thread manager present after CtfImmTIMActivate( FALSE )\n" );
+
+    hr = pCtfImmTIMActivate( hkl, TRUE );
+    ok( hr == S_OK, "CtfImmTIMActivate( TRUE ) returned %#lx\n", hr );
+    ok( thread_has_tim(), "no thread manager after CtfImmTIMActivate( TRUE )\n" );
+    hr = pCtfImmTIMActivate( hkl, TRUE );
+    ok( hr == S_OK, "second CtfImmTIMActivate( TRUE ) returned %#lx\n", hr );
+
+    DestroyWindow( hwnd );
+    return 0;
+}
+
+static DWORD WINAPI tim_focus_thread( void *arg )
+{
+    HWND hwnd;
+
+    hwnd = CreateWindowW( L"static", L"tim", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, NULL, NULL, NULL, NULL );
+    ok( !!hwnd, "CreateWindowW failed, error %lu\n", GetLastError() );
+    ShowWindow( hwnd, SW_SHOWNOACTIVATE );
+    pump_messages();
+    ok( !thread_has_tim(), "thread manager present after SW_SHOWNOACTIVATE\n" );
+
+    SetFocus( hwnd );
+    pump_messages();
+    ok( thread_has_tim(), "no thread manager after SetFocus\n" );
+
+    DestroyWindow( hwnd );
+    return 0;
+}
+
+static DWORD WINAPI tim_mta_thread( void *arg )
+{
+    APTTYPEQUALIFIER qualifier;
+    APTTYPE type;
+    HRESULT hr;
+    HWND hwnd;
+
+    /* a thread in the MTA gets the thread manager too, and stays in the MTA */
+    hr = CoInitializeEx( NULL, COINIT_MULTITHREADED );
+    ok( hr == S_OK, "CoInitializeEx returned %#lx\n", hr );
+    hwnd = CreateWindowW( L"static", L"tim", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, NULL, NULL, NULL, NULL );
+    ok( !!hwnd, "CreateWindowW failed, error %lu\n", GetLastError() );
+    SetFocus( hwnd );
+    pump_messages();
+    ok( thread_has_tim(), "no thread manager after SetFocus in the MTA\n" );
+    hr = CoGetApartmentType( &type, &qualifier );
+    ok( hr == S_OK && type == APTTYPE_MTA, "got hr %#lx, type %d\n", hr, type );
+    DestroyWindow( hwnd );
+    CoUninitialize();
+    return 0;
+}
+
+static DWORD WINAPI tim_sta_then_mta_thread( void *arg )
+{
+    APTTYPEQUALIFIER qualifier;
+    APTTYPE type;
+    HRESULT hr;
+    HWND hwnd;
+
+    /* the manager stays when the thread leaves imm32's implicit apartment for the MTA */
+    hwnd = CreateWindowW( L"static", L"tim", WS_OVERLAPPEDWINDOW, 0, 0, 100, 100, NULL, NULL, NULL, NULL );
+    ok( !!hwnd, "CreateWindowW failed, error %lu\n", GetLastError() );
+    SetFocus( hwnd );
+    pump_messages();
+    ok( thread_has_tim(), "no thread manager after SetFocus\n" );
+    hr = CoInitializeEx( NULL, COINIT_MULTITHREADED );
+    ok( hr == S_OK, "CoInitializeEx returned %#lx\n", hr );
+    hr = CoGetApartmentType( &type, &qualifier );
+    ok( hr == S_OK && type == APTTYPE_MTA, "got hr %#lx, type %d\n", hr, type );
+    ok( thread_has_tim(), "no thread manager after entering the MTA\n" );
+    DestroyWindow( hwnd );
+    CoUninitialize();
+    return 0;
+}
+
+/* user32 starts the text services of a thread (CtfImmTIMActivate) when one of its windows is first activated */
+static void test_CtfImmTIMActivate(void)
+{
+    HMODULE msctf;
+    HANDLE thread;
+
+    pCtfImmTIMActivate = (void *)GetProcAddress( GetModuleHandleW( L"imm32.dll" ), "CtfImmTIMActivate" );
+    msctf = LoadLibraryW( L"msctf.dll" );
+    if (msctf) pTF_GetThreadMgr = (void *)GetProcAddress( msctf, "TF_GetThreadMgr" );
+    if (!pCtfImmTIMActivate || !pTF_GetThreadMgr)
+    {
+        win_skip( "CtfImmTIMActivate or TF_GetThreadMgr not available\n" );
+        return;
+    }
+
+    thread = CreateThread( NULL, 0, tim_activate_thread, NULL, 0, NULL );
+    ok( !WaitForSingleObject( thread, 5000 ), "thread did not finish\n" );
+    CloseHandle( thread );
+
+    thread = CreateThread( NULL, 0, tim_focus_thread, NULL, 0, NULL );
+    ok( !WaitForSingleObject( thread, 5000 ), "thread did not finish\n" );
+    CloseHandle( thread );
+
+    thread = CreateThread( NULL, 0, tim_mta_thread, NULL, 0, NULL );
+    ok( !WaitForSingleObject( thread, 5000 ), "thread did not finish\n" );
+    CloseHandle( thread );
+
+    thread = CreateThread( NULL, 0, tim_sta_then_mta_thread, NULL, 0, NULL );
+    ok( !WaitForSingleObject( thread, 5000 ), "thread did not finish\n" );
+    CloseHandle( thread );
+}
+
 START_TEST(imm32)
 {
     char **argv;
@@ -8456,6 +8594,7 @@ START_TEST(imm32)
 
     test_ime_ui_window( argv[0] );
     test_com_initialization();
+    test_CtfImmTIMActivate();
 
     test_ImmEnumInputContext();
 

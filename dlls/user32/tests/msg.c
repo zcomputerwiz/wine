@@ -21865,10 +21865,46 @@ static DWORD CALLBACK is_gui_thread_proc(void *arg)
     return 0;
 }
 
+/* calls into win32k a thread may make first, without any window or message queue: each makes it a GUI thread */
+static DWORD CALLBACK is_gui_thread_first_call_proc(void *arg)
+{
+    WNDCLASSEXW info = {sizeof(info)};
+    WNDCLASSW cls = {0};
+    BOOL ret;
+    HDC dc;
+
+    ret = IsGUIThread(FALSE);
+    ok(!ret, "got %d.\n", ret);
+
+    switch ((INT_PTR)arg)
+    {
+    case 0:
+        cls.lpfnWndProc = DefWindowProcW;
+        cls.hInstance = GetModuleHandleW(NULL);
+        cls.lpszClassName = L"is_gui_thread_class";
+        ok(!!RegisterClassW(&cls), "RegisterClassW failed, error %lu.\n", GetLastError());
+        UnregisterClassW(cls.lpszClassName, cls.hInstance);
+        break;
+    case 1:
+        ok(GetClassInfoExW(NULL, L"BUTTON", &info), "GetClassInfoExW failed, error %lu.\n", GetLastError());
+        break;
+    case 2:
+        dc = CreateCompatibleDC(NULL);
+        ok(!!dc, "CreateCompatibleDC failed.\n");
+        DeleteDC(dc);
+        break;
+    }
+
+    ret = IsGUIThread(FALSE);
+    ok(ret == TRUE, "case %Id: got %d.\n", (INT_PTR)arg, ret);
+    return 0;
+}
+
 static void test_IsGUIThread(void)
 {
     HANDLE thread;
     BOOL ret;
+    int i;
 
     ret = IsGUIThread(FALSE);
     ok(ret == TRUE, "got %d.\n", ret);
@@ -21879,6 +21915,13 @@ static void test_IsGUIThread(void)
     thread = CreateThread(NULL, 0, is_gui_thread_proc, (void *)1, 0, NULL);
     WaitForSingleObject(thread, INFINITE);
     CloseHandle(thread);
+
+    for (i = 0; i < 3; i++)
+    {
+        thread = CreateThread(NULL, 0, is_gui_thread_first_call_proc, (void *)(INT_PTR)i, 0, NULL);
+        WaitForSingleObject(thread, INFINITE);
+        CloseHandle(thread);
+    }
 }
 
 START_TEST(msg)

@@ -4985,6 +4985,12 @@ MONITORINFO monitor_info_from_window( HWND hwnd, UINT flags )
     return info;
 }
 
+/* a win32k call that does not otherwise touch the thread's user data makes the thread a GUI thread (IsGUIThread) */
+void set_gui_thread(void)
+{
+    get_user_thread_info()->gui_thread = TRUE;
+}
+
 /***********************************************************************
  *	     NtUserGetSystemDpiForProcess    (win32u.@)
  */
@@ -7822,8 +7828,8 @@ ULONG_PTR WINAPI NtUserCallOneParam( ULONG_PTR arg, ULONG code )
     case NtUserCallOneParam_IsGUIThread:
     {
         /* on Windows a thread becomes a GUI thread with its first win32k call; here: once it has used the session's
-         * shared queue, desktop or input data, or waited for messages, or after a conversion (IsGUIThread(TRUE), or
-         * loading user32) */
+         * shared queue, desktop or input data, or waited for messages, or made one of the calls that convert it
+         * (set_gui_thread), or after a conversion (IsGUIThread(TRUE), or loading user32) */
         struct user_thread_info *info = get_user_thread_info();
 
         if (info->session_data || info->server_queue || info->gui_thread) return TRUE;
