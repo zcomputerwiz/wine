@@ -175,6 +175,26 @@ static BOOL window_title_is_desktop( Display *display, Window win )
     return ret;
 }
 
+/* the pid in _NET_WM_PID is only ours to judge when the client runs on this machine (WM_CLIENT_MACHINE) */
+static BOOL window_is_from_this_host( Display *display, Window win )
+{
+    XTextProperty prop;
+    char host[256];
+    BOOL same = FALSE;
+
+    if (gethostname( host, sizeof(host) )) return FALSE;
+    host[sizeof(host) - 1] = 0;
+    X11DRV_expect_error( display, ignore_x_error, NULL );
+    if (XGetWMClientMachine( display, win, &prop ))
+    {
+        if (prop.value && prop.nitems && prop.format == 8) same = !strncmp( (char *)prop.value, host, prop.nitems ) && !host[prop.nitems];
+        XFree( prop.value );
+    }
+    XSync( display, False );
+    X11DRV_check_error();
+    return same;
+}
+
 static BOOL window_owner_is_dead( Display *display, Window win )
 {
     Atom type;
@@ -193,7 +213,8 @@ static BOOL window_owner_is_dead( Display *display, Window win )
     }
     XSync( display, False );
     X11DRV_check_error();
-    if (pid > 0 && pid != getpid() && kill( pid, 0 ) == -1 && errno == ESRCH) dead = TRUE;
+    if (pid > 0 && pid != getpid() && window_is_from_this_host( display, win ) &&
+        kill( pid, 0 ) == -1 && errno == ESRCH) dead = TRUE;
     return dead;
 }
 
