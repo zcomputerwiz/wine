@@ -622,6 +622,35 @@ done:
     free(version);
 }
 
+/* The shell folders that a per-machine installation (ALLUSERS=1) puts into the all users profile. ALLUSERS can also
+ * come from the command line, which is parsed after the package is created, so msi_adjust_privilege_properties sets
+ * them again once ALLUSERS is final. */
+static void set_allusers_folders( MSIPACKAGE *package )
+{
+    static const struct
+    {
+        const WCHAR *name;
+        int user, common;
+    }
+    folders[] =
+    {
+        { L"StartMenuFolder",   CSIDL_STARTMENU,        CSIDL_COMMON_STARTMENU },
+        { L"StartupFolder",     CSIDL_STARTUP,          CSIDL_COMMON_STARTUP },
+        { L"DesktopFolder",     CSIDL_DESKTOPDIRECTORY, CSIDL_COMMON_DESKTOPDIRECTORY },
+        { L"ProgramMenuFolder", CSIDL_PROGRAMS,         CSIDL_COMMON_PROGRAMS },
+    };
+    BOOL allusers = msi_get_property_int( package->db, L"ALLUSERS", 0 ) == 1;
+    WCHAR pth[MAX_PATH];
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(folders); i++)
+    {
+        if (FAILED(SHGetFolderPathW( NULL, allusers ? folders[i].common : folders[i].user, NULL, 0, pth ))) continue;
+        lstrcatW( pth, L"\\" );
+        msi_set_property( package->db, folders[i].name, pth, -1 );
+    }
+}
+
 static VOID set_installer_properties(MSIPACKAGE *package)
 {
     WCHAR *ptr;
@@ -658,29 +687,11 @@ static VOID set_installer_properties(MSIPACKAGE *package)
     lstrcatW(pth, L"\\");
     msi_set_property( package->db, L"SendToFolder", pth, -1 );
 
-    SHGetFolderPathW(NULL, CSIDL_STARTMENU, NULL, 0, pth);
-    lstrcatW(pth, L"\\");
-    msi_set_property( package->db, L"StartMenuFolder", pth, -1 );
-
-    SHGetFolderPathW(NULL, CSIDL_STARTUP, NULL, 0, pth);
-    lstrcatW(pth, L"\\");
-    msi_set_property( package->db, L"StartupFolder", pth, -1 );
-
     SHGetFolderPathW(NULL, CSIDL_TEMPLATES, NULL, 0, pth);
     lstrcatW(pth, L"\\");
     msi_set_property( package->db, L"TemplateFolder", pth, -1 );
 
-    if (msi_get_property_int( package->db, L"ALLUSERS", 0 ) == 1)
-        SHGetFolderPathW(NULL, CSIDL_COMMON_DESKTOPDIRECTORY, NULL, 0, pth);
-    else
-        SHGetFolderPathW(NULL, CSIDL_DESKTOP, NULL, 0, pth);
-    lstrcatW(pth, L"\\");
-    msi_set_property( package->db, L"DesktopFolder", pth, -1 );
-
-    /* FIXME: set to AllUsers profile path if ALLUSERS is set */
-    SHGetFolderPathW(NULL, CSIDL_PROGRAMS, NULL, 0, pth);
-    lstrcatW(pth, L"\\");
-    msi_set_property( package->db, L"ProgramMenuFolder", pth, -1 );
+    set_allusers_folders( package );
 
     SHGetFolderPathW(NULL, CSIDL_ADMINTOOLS, NULL, 0, pth);
     lstrcatW(pth, L"\\");
@@ -973,6 +984,7 @@ void msi_adjust_privilege_properties( MSIPACKAGE *package )
     msi_set_property( package->db, L"Privileged", L"1", -1 );
     msi_set_property( package->db, L"MsiRunningElevated", L"1", -1 );
     msi_set_property( package->db, L"MsiTrueAdminUser", L"1", -1 );
+    set_allusers_folders( package );
 }
 
 MSIPACKAGE *MSI_CreatePackage( MSIDATABASE *db )

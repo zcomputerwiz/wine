@@ -9602,6 +9602,59 @@ static void test_desktopfolder(void)
     DeleteFileA(msifile);
 }
 
+/* the shell folders of a per-machine installation are the all users ones, of a per-user installation the user's */
+static void test_allusers_folders(void)
+{
+    static const struct
+    {
+        const char *name;
+        int user, common;
+    }
+    folders[] =
+    {
+        { "StartMenuFolder",   CSIDL_STARTMENU,        CSIDL_COMMON_STARTMENU },
+        { "StartupFolder",     CSIDL_STARTUP,          CSIDL_COMMON_STARTUP },
+        { "DesktopFolder",     CSIDL_DESKTOPDIRECTORY, CSIDL_COMMON_DESKTOPDIRECTORY },
+        { "ProgramMenuFolder", CSIDL_PROGRAMS,         CSIDL_COMMON_PROGRAMS },
+    };
+    char expected_path[MAX_PATH], actual_path[MAX_PATH];
+    MSIHANDLE db, package;
+    unsigned int i, allusers;
+    DWORD size;
+    HRESULT hr;
+    UINT r;
+
+    for (allusers = 0; allusers <= 1; allusers++)
+    {
+        package = 0;
+        db = create_package_db();
+        ok(db, "Failed to create package database\n");
+        create_property_table(db);
+        if (allusers) add_property_entry(db, "'ALLUSERS', '1'");
+        r = package_from_db(db, &package);
+        ok(r == ERROR_SUCCESS, "Failed to open package: %u\n", r);
+        for (i = 0; i < ARRAY_SIZE(folders); i++)
+        {
+            hr = SHGetFolderPathA(NULL, allusers ? folders[i].common : folders[i].user, NULL, SHGFP_TYPE_CURRENT,
+                                  expected_path);
+            if (FAILED(hr))
+            {
+                skip("no path for %s (allusers %u): %#lx\n", folders[i].name, allusers, hr);
+                continue;
+            }
+            lstrcatA(expected_path, "\\");
+            size = sizeof(actual_path);
+            actual_path[0] = 0;
+            r = MsiGetPropertyA(package, folders[i].name, actual_path, &size);
+            ok(r == ERROR_SUCCESS, "Failed to get %s: %u\n", folders[i].name, r);
+            ok(!lstrcmpiA(actual_path, expected_path), "allusers %u: %s expected %s, got %s\n", allusers,
+               folders[i].name, expected_path, actual_path);
+        }
+        MsiCloseHandle(package);
+        DeleteFileA(msifile);
+    }
+}
+
 START_TEST(package)
 {
     char temp_path[MAX_PATH], prev_path[MAX_PATH];
@@ -9660,6 +9713,7 @@ START_TEST(package)
     test_controlevent();
     test_top_level_action();
     test_desktopfolder();
+    test_allusers_folders();
 
     SetCurrentDirectoryA(prev_path);
 }
