@@ -43,6 +43,7 @@
 
 HRESULT async_action_create( IUnknown *invoker, async_operation_callback callback, IAsyncAction **out );
 
+BOOL dispatcher_queue_enabled(void);
 extern IActivationFactory *dispatcher_queue_factory;
 HRESULT dispatcher_queue_create( DISPATCHERQUEUE_THREAD_TYPE type, DISPATCHERQUEUE_THREAD_APARTMENTTYPE apartment,
                                  IDispatcherQueue **out );

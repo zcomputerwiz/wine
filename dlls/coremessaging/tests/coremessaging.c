@@ -805,6 +805,10 @@ START_TEST(coremessaging)
 {
     HRESULT hr;
 
+    /* Wine's DispatcherQueue is experimental and off by default; Windows ignores the variable. */
+    if (!GetEnvironmentVariableW( L"WINE_EXPERIMENTAL", NULL, 0 ))
+        SetEnvironmentVariableW( L"WINE_EXPERIMENTAL", L"dispatcherqueue" );
+
     hr = RoInitialize( RO_INIT_MULTITHREADED );
     ok( hr == S_OK, "RoInitialize failed, hr %#lx\n", hr );
 
