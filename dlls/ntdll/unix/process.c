@@ -333,6 +333,25 @@ static ULONG get_env_size( const RTL_USER_PROCESS_PARAMETERS *params, char **win
     return (ptr - params->Environment) * sizeof(WCHAR);
 }
 
+/* WineExplorer: WINEDEBUGLOG of the new process's Windows environment, for its Unix environment (as WINEDEBUG
+ * above): the process's debug output goes to that file (debug.c). Session 0's services.exe sets one per service. */
+static char *get_debug_log_var( const RTL_USER_PROCESS_PARAMETERS *params )
+{
+    static const WCHAR WINEDEBUGLOG[] = {'W','I','N','E','D','E','B','U','G','L','O','G','=',0};
+    WCHAR *ptr = params->Environment;
+    char *ret;
+    DWORD len;
+
+    for (; *ptr; ptr += wcslen(ptr) + 1)
+    {
+        if (wcsncmp( ptr, WINEDEBUGLOG, ARRAY_SIZE( WINEDEBUGLOG ) - 1 )) continue;
+        len = wcslen(ptr) * 3 + 1;
+        if ((ret = malloc( len ))) ntdll_wcstoumbs( ptr, wcslen(ptr) + 1, ret, len, FALSE );
+        return ret;
+    }
+    return NULL;
+}
+
 
 /***********************************************************************
  *           get_unix_curdir
@@ -404,6 +423,7 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
 {
     NTSTATUS status = STATUS_SUCCESS;
     int stdin_fd = -1, stdout_fd = -1;
+    char *debug_log = get_debug_log_var( params );
     pid_t pid;
     char **argv;
 
@@ -434,6 +454,7 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
             if (stdout_fd != -1 && stdout_fd != 1) close( stdout_fd );
 
             if (winedebug) putenv( winedebug );
+            if (debug_log) putenv( debug_log );
             if (!sysrun_prepare_child( drop_group )) _exit(1);
             if (unixdir != -1)
             {
@@ -461,6 +482,7 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
 
     if (stdin_fd != -1 && stdin_fd != 0) close( stdin_fd );
     if (stdout_fd != -1 && stdout_fd != 1) close( stdout_fd );
+    free( debug_log );
     return status;
 }
 

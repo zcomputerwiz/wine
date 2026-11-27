@@ -23,6 +23,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <assert.h>
+#include <wctype.h>
 #include <windows.h>
 #include <winsvc.h>
 #include <winternl.h>
@@ -1237,6 +1238,53 @@ error:
     return ERROR_NOT_ENOUGH_SERVER_MEMORY;
 }
 
+/* WineExplorer: in session 0, each service's debug output (its stderr: ntdll's WINEDEBUGLOG) goes to
+ * /var/log/wineexplorer/services/NAME.log (the installed machine's tmpfiles.d makes the folder, session 0's account's
+ * only). Where the folder is not there, the service cannot open the file and keeps the stderr it inherits (the
+ * session 0 unit's). A copy of the environment block with that variable, or NULL to use the block as it is. */
+static WCHAR *service_log_environment(const WCHAR *name)
+{
+    static const WCHAR var[] = L"WINEDEBUGLOG=";
+    const WCHAR *p, *src = environment;
+    WCHAR entry[MAX_PATH], *ret, *q, *own = NULL;
+    size_t len = 0;
+    int i, n;
+
+    if (!in_session0) return NULL;
+    /* no block from the token (CreateEnvironmentBlock fails for session 0's SYSTEM): a service then gets this
+     * process's environment, so the copy starts from that */
+    if (!src && !(src = own = GetEnvironmentStringsW())) return NULL;
+
+    /* the name as a file name: letters, digits, '-', '_' and '.', nothing else */
+    n = swprintf(entry, ARRAY_SIZE(entry), L"%s/var/log/wineexplorer/services/", var);
+    for (i = 0; name[i] && n < ARRAY_SIZE(entry) - 8; i++)
+        entry[n++] = (iswalnum(name[i]) || name[i] == '-' || name[i] == '_' || name[i] == '.') ? name[i] : '_';
+    if (!i || name[0] == '.')
+    {
+        if (own) FreeEnvironmentStringsW(own);
+        return NULL;
+    }
+    wcscpy(entry + n, L".log");
+
+    for (p = src; *p; p += lstrlenW(p) + 1) len += lstrlenW(p) + 1;
+    if (!(ret = malloc((len + lstrlenW(entry) + 2) * sizeof(WCHAR))))
+    {
+        if (own) FreeEnvironmentStringsW(own);
+        return NULL;
+    }
+    for (p = src, q = ret; *p; p += lstrlenW(p) + 1)
+    {
+        if (!wcsnicmp(p, var, ARRAY_SIZE(var) - 1)) continue;  /* one of its own: ours is the one */
+        wcscpy(q, p);
+        q += lstrlenW(p) + 1;
+    }
+    wcscpy(q, entry);
+    q += lstrlenW(entry) + 1;
+    *q = 0;
+    if (own) FreeEnvironmentStringsW(own);
+    return ret;
+}
+
 static DWORD service_start_process(struct service_entry *service_entry, struct process_entry **new_process,
                                    BOOL *shared_process)
 {
@@ -1246,7 +1294,7 @@ static DWORD service_start_process(struct service_entry *service_entry, struct p
     BOOL is_wow64 = FALSE;
     HANDLE token, service_token = NULL;
     const WCHAR *sddl;
-    WCHAR *path;
+    WCHAR *path, *service_env;
     DWORD err;
     BOOL r;
 
@@ -1383,6 +1431,22 @@ found:
             RtlInitUnicodeString( &value, val );
             RtlSetEnvironmentVariable( (WCHAR **)&environment, &name, &value );
         }
+        /* WineExplorer: session 0's services trace with the channels session 0's unit was given (an
+         * administrator's /etc/wineexplorer/session0.env); the block from the token has none */
+        if (in_session0)
+        {
+            WCHAR debug[512];
+            DWORD len = GetEnvironmentVariableW( L"WINEDEBUG", debug, ARRAY_SIZE(debug) );
+
+            if (len && len < ARRAY_SIZE(debug))
+            {
+                UNICODE_STRING name = RTL_CONSTANT_STRING(L"WINEDEBUG");
+                UNICODE_STRING value;
+
+                RtlInitUnicodeString( &value, debug );
+                RtlSetEnvironmentVariable( (WCHAR **)&environment, &name, &value );
+            }
+        }
         CloseHandle(token);
     }
 
@@ -1396,14 +1460,18 @@ found:
     process->use_count++;
     service_unlock(service_entry);
 
+    service_env = service_log_environment(service_entry->name);
     if (service_token)
     {
         r = CreateProcessAsUserW(service_token, NULL, path, NULL, NULL, FALSE,
-                                 CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS, environment, NULL, &si, &pi);
+                                 CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS,
+                                 service_env ? service_env : environment, NULL, &si, &pi);
         CloseHandle(service_token);
     }
     else
-        r = CreateProcessW(NULL, path, NULL, NULL, FALSE, CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS, environment, NULL, &si, &pi);
+        r = CreateProcessW(NULL, path, NULL, NULL, FALSE, CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS,
+                           service_env ? service_env : environment, NULL, &si, &pi);
+    free(service_env);
     free(path);
     if (!r)
     {

@@ -190,6 +190,24 @@ static void debug_usage(void)
     exit(1);
 }
 
+/* WineExplorer: WINEDEBUGLOG=/absolute/path sends the debug output (stderr) to that file, appended, created with
+ * mode 0600 by the process's own account. Session 0's services.exe gives each service one under
+ * /var/log/wineexplorer/services: their stderr is otherwise the session 0 unit's, or /dev/null, which turns the
+ * output off below. Children inherit the descriptor. */
+static void open_debug_log(void)
+{
+    const char *path = getenv( "WINEDEBUGLOG" );
+    int fd;
+
+    if (!path || path[0] != '/') return;
+    if ((fd = open( path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600 )) == -1) return;
+    if (fd != 2)
+    {
+        dup2( fd, 2 );  /* clears close-on-exec on 2 */
+        close( fd );
+    }
+}
+
 /* initialize all options at startup */
 static void init_options(void)
 {
@@ -198,6 +216,7 @@ static void init_options(void)
     struct stat st1, st2;
 
     nb_debug_options = 0;
+    open_debug_log();
 
     /* check for stderr pointing to /dev/null */
     if (!fstat( 2, &st1 ) && S_ISCHR(st1.st_mode) &&
