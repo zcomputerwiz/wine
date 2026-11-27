@@ -155,6 +155,8 @@ static void completion_wait_satisfied( struct object *obj, struct wait_queue_ent
     msg = LIST_ENTRY( msg_entry, struct comp_msg, queue_entry );
     --wait->completion->depth;
     list_remove( &msg->queue_entry );
+    /* the packet of a wait completion packet message is free again, as when remove_completion takes the message */
+    remove_completion_packet_msg( msg );
     if (wait->msg) free( wait->msg );
     wait->msg = msg;
 }
