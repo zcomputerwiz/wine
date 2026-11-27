@@ -268,12 +268,14 @@ static void create_session( unsigned int id )
     static const WCHAR dir_dosdevicesW[] = {'D','o','s','D','e','v','i','c','e','s'};
     static const WCHAR dir_windowsW[] = {'W','i','n','d','o','w','s'};
     static const WCHAR dir_winstationsW[] = {'W','i','n','d','o','w','S','t','a','t','i','o','n','s'};
+    static const WCHAR dir_wineobjW[] = {'W','i','n','e','O','b','j','e','c','t','s'};
     static const struct unicode_str dir_sessions_str = {dir_sessionsW, sizeof(dir_sessionsW)};
     static const struct unicode_str dir_bnolinks_str = {dir_bnolinksW, sizeof(dir_bnolinksW)};
     static const struct unicode_str dir_bno_str = {dir_bnoW, sizeof(dir_bnoW)};
     static const struct unicode_str dir_dosdevices_str = {dir_dosdevicesW, sizeof(dir_dosdevicesW)};
     static const struct unicode_str dir_windows_str = {dir_windowsW, sizeof(dir_windowsW)};
     static const struct unicode_str dir_winstations_str = {dir_winstationsW, sizeof(dir_winstationsW)};
+    static const struct unicode_str dir_wineobj_str = {dir_wineobjW, sizeof(dir_wineobjW)};
 
     /* symlinks */
     static const WCHAR link_globalW[] = {'G','l','o','b','a','l'};
@@ -284,7 +286,7 @@ static void create_session( unsigned int id )
     static const struct unicode_str link_session_str = {link_sessionW, sizeof(link_sessionW)};
 
     static struct directory *dir_bno_global, *dir_sessions, *dir_bnolinks;
-    struct directory *dir_id, *dir_bno, *dir_dosdevices, *dir_windows, *dir_winstation;
+    struct directory *dir_id, *dir_bno, *dir_dosdevices, *dir_windows, *dir_winstation, *dir_wineobj;
     struct object *link_global, *link_local, *link_session, *link_bno, *link_windows;
     struct unicode_str id_str;
     char id_strA[10];
@@ -304,6 +306,9 @@ static void create_session( unsigned int id )
     id_strW = ascii_to_unicode_str( id_strA, &id_str );
     dir_id = create_directory( &dir_sessions->obj, id_str, 0, HASH_SIZE, NULL );
     dir_dosdevices = create_directory( &dir_id->obj, dir_dosdevices_str, OBJ_PERMANENT, HASH_SIZE, NULL );
+    /* WineExplorer: Wine's internal locks (wine/internal_lock.h); a real directory in every session, session 0's
+     * included, never linked into \BaseNamedObjects */
+    dir_wineobj = create_directory( &dir_id->obj, dir_wineobj_str, OBJ_PERMANENT, HASH_SIZE, NULL );
 
     /* for session 0, directories are created under the root */
     if (!id)
@@ -333,6 +338,7 @@ static void create_session( unsigned int id )
     release_object( link_bno );
 
     release_object( dir_dosdevices );
+    release_object( dir_wineobj );
     release_object( dir_winstation );
     release_object( dir_windows );
     release_object( dir_bno );

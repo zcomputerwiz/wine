@@ -26,6 +26,7 @@
 #include "wincrypt.h"
 #include "winternl.h"
 #include "wine/debug.h"
+#include "wine/internal_lock.h"
 #include "crypt32_private.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(crypt);
@@ -770,17 +771,21 @@ void CRYPT_ImportSystemRootCertsToReg(void)
     if (root_certs_imported)
         return;
 
-    hsem = CreateSemaphoreW( NULL, 0, 1, L"crypt32_root_semaphore");
+    /* WineExplorer: a mutex, not a semaphore created at 0: if the importing process dies, the waiters get it
+     * abandoned instead of waiting forever. One of Wine's internal locks (wine/internal_lock.h). */
+    hsem = wine_create_internal_mutex( TRUE, L"crypt32_root_mutex" );
     if (!hsem)
     {
-        ERR("Failed to create semaphore\n");
+        ERR("Failed to create mutex\n");
         return;
     }
 
     if(GetLastError() == ERROR_ALREADY_EXISTS)
     {
-        WaitForSingleObject(hsem, INFINITE);
-        goto done;
+        /* owned after either wait; WAIT_ABANDONED: the importing process died mid-import, so this one imports
+         * (create, import and release all happen on this thread) */
+        if (WaitForSingleObject(hsem, INFINITE) != WAIT_ABANDONED)
+            goto done;
     }
 
     /* the shared (64-bit) view, which 32-bit and 64-bit programs both read (store.c, CRYPT_SysRegOpenStoreW) */
@@ -802,6 +807,6 @@ done:
     RegCloseKey(key);
     CertCloseStore(cached, 0);
     root_certs_imported = TRUE;
-    ReleaseSemaphore(hsem, 1, NULL);
+    ReleaseMutex(hsem);
     CloseHandle(hsem);
 }

@@ -33,6 +33,7 @@
 
 #include "kernelbase.h"
 #include "wine/debug.h"
+#include "wine/internal_lock.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(security);
 
@@ -1582,9 +1583,10 @@ done:
 #define AC_MAPPING_ROOT   L"Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppContainer\\Mappings"
 #define AC_MONIKER_VALUE  L"Moniker"
 #define AC_DISPLAY_VALUE  L"DisplayName"
-/* A fully qualified NT object path is required: a bare relative name with no
- * RootDirectory is not a valid object path (STATUS_OBJECT_PATH_SYNTAX_BAD). */
-#define AC_LOCK_NAME      L"\\BaseNamedObjects\\WineAppContainerRegistrationLock"
+/* The lock is one of Wine's internal locks (wine/internal_lock.h, \Sessions\<session>\WineObjects), not in
+ * \BaseNamedObjects: it guards the user's own mappings, and no program (nor another server sharing
+ * \BaseNamedObjects, WineExplorer's session 0) can reach it there. */
+#define AC_LOCK_NAME      L"WineAppContainerRegistrationLock"
 /* Sanity cap for a stored moniker; anything larger is treated as corrupt. */
 #define AC_MAX_MONIKER_BYTES 0x10000
 
@@ -1594,11 +1596,13 @@ done:
  * fallback). OBJ_OPENIF lets us open the object another process created first. */
 static HRESULT ac_lock_acquire( HANDLE *lock )
 {
-    static const WCHAR lock_name[] = AC_LOCK_NAME;
+    WCHAR lock_name[MAX_PATH];
     OBJECT_ATTRIBUTES attr;
     UNICODE_STRING name;
     NTSTATUS status;
 
+    if (!wine_internal_lock_path( AC_LOCK_NAME, lock_name, ARRAY_SIZE(lock_name) ))
+        return HRESULT_FROM_WIN32( ERROR_FILENAME_EXCED_RANGE );
     RtlInitUnicodeString( &name, lock_name );
     InitializeObjectAttributes( &attr, &name, OBJ_CASE_INSENSITIVE | OBJ_OPENIF, NULL, NULL );
     status = NtCreateMutant( lock, SYNCHRONIZE, &attr, FALSE );

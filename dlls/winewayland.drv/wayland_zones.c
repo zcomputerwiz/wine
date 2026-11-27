@@ -13,6 +13,7 @@
 #include "waylanddrv.h"
 #include "wexwayland.h"
 #include "wine/debug.h"
+#include "wine/internal_lock.h"
 WINE_DEFAULT_DEBUG_CHANNEL(waylanddrv);
 
 static char *zone_handle;
@@ -100,7 +101,7 @@ void wayland_zones_init(void)
     HANDLE user, key = NULL, mutex = NULL;
     OBJECT_ATTRIBUTES attr;
     UNICODE_STRING name, value;
-    WCHAR value_name[64];
+    WCHAR value_name[64], lock_name[96];
     char buffer[4096], *display = getenv("WAYLAND_DISPLAY"), *runtime = getenv("XDG_RUNTIME_DIR");
     KEY_VALUE_PARTIAL_INFORMATION *info = (void *)buffer;
     ULONG size;
@@ -118,7 +119,11 @@ void wayland_zones_init(void)
     snprintf(buffer, sizeof(buffer), "Zone_%08x", hash);
     for (i = 0; (value_name[i] = buffer[i]); ++i) {}
     RtlInitUnicodeString(&value, value_name);
-    RtlInitUnicodeString(&name, u"\\BaseNamedObjects\\WineWaylandZones");
+    /* one of Wine's internal locks (wine/internal_lock.h), out of \BaseNamedObjects */
+    snprintf(buffer, sizeof(buffer), WINE_INTERNAL_LOCK_DIR_FMT "WineWaylandZones", NtCurrentTeb()->Peb->SessionId);
+    for (i = 0; i < ARRAY_SIZE(lock_name) - 1 && (lock_name[i] = buffer[i]); ++i) {}
+    lock_name[i] = 0;
+    RtlInitUnicodeString(&name, lock_name);
     InitializeObjectAttributes(&attr, &name, OBJ_OPENIF | OBJ_CASE_INSENSITIVE, NULL, NULL);
     if (NtCreateMutant(&mutex, MUTANT_ALL_ACCESS, &attr, FALSE) < 0) return;
     if (NtWaitForSingleObject(mutex, FALSE, NULL) < 0) { NtClose(mutex); return; }

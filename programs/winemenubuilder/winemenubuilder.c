@@ -84,6 +84,7 @@
 #include "wine/debug.h"
 #include "wine/list.h"
 #include "wine/rbtree.h"
+#include "wine/internal_lock.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(menubuilder);
 
@@ -2301,7 +2302,7 @@ static BOOL InvokeShellLinker( IShellLinkW *sl, LPCWSTR link, BOOL bWait )
     }
 
     /* building multiple menus concurrently has race conditions */
-    hsem = CreateSemaphoreA( NULL, 1, 1, "winemenubuilder_semaphore");
+    hsem = wine_create_internal_semaphore( 1, 1, L"winemenubuilder_semaphore" );
     if( WAIT_OBJECT_0 != MsgWaitForMultipleObjects( 1, &hsem, FALSE, INFINITE, QS_ALLINPUT ) )
     {
         WINE_ERR("failed wait for semaphore\n");
@@ -2417,7 +2418,7 @@ static BOOL InvokeShellLinkerForURL( IUniformResourceLocatorW *url, LPCWSTR link
                  wine_dbgstr_w( pv[0].pwszVal ));
     }
 
-    hSem = CreateSemaphoreA( NULL, 1, 1, "winemenubuilder_semaphore");
+    hSem = wine_create_internal_semaphore( 1, 1, L"winemenubuilder_semaphore" );
     if( WAIT_OBJECT_0 != MsgWaitForMultipleObjects( 1, &hSem, FALSE, INFINITE, QS_ALLINPUT ) )
     {
         WINE_ERR("failed wait for semaphore\n");
@@ -2611,7 +2612,7 @@ static void RefreshFileTypeAssociations(void)
     WCHAR *applications_dir;
     BOOL hasChanged;
 
-    hSem = CreateSemaphoreA( NULL, 1, 1, "winemenubuilder_semaphore");
+    hSem = wine_create_internal_semaphore( 1, 1, L"winemenubuilder_semaphore" );
     if( WAIT_OBJECT_0 != MsgWaitForMultipleObjects( 1, &hSem, FALSE, INFINITE, QS_ALLINPUT ) )
     {
         WINE_ERR("failed wait for semaphore\n");
