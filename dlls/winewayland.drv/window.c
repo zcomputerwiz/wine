@@ -708,6 +708,38 @@ static void wayland_configure_window(HWND hwnd)
 }
 
 /**********************************************************************
+ *           wayland_scale_restore_rect
+ *
+ * A maximized window restores to the rectangle it had before: in the pixels of the scale it was maximized at. After an
+ * output scale change keep the client area's device-independent size, as the shell does for restored windows (top left
+ * kept, the frame keeps its physical metrics). Runs on the window's thread, which owns the restore rectangle.
+ */
+static void wayland_scale_restore_rect(HWND hwnd, UINT old_scale, UINT new_scale)
+{
+    WINDOWPLACEMENT wpl = { .length = sizeof(wpl) };
+    DWORD style, ex_style;
+    RECT frame = {0};
+    int client_w, client_h;
+
+    if (!old_scale || !new_scale || old_scale == new_scale) return;
+    if (!NtUserGetWindowPlacement(hwnd, &wpl) || wpl.showCmd != SW_SHOWMAXIMIZED) return;
+    style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
+    ex_style = NtUserGetWindowLongW(hwnd, GWL_EXSTYLE);
+    if (!(style & WS_MAXIMIZE)) return;
+    NtUserAdjustWindowRect(&frame, style, FALSE, ex_style, 0);
+    client_w = wpl.rcNormalPosition.right - wpl.rcNormalPosition.left - (frame.right - frame.left);
+    client_h = wpl.rcNormalPosition.bottom - wpl.rcNormalPosition.top - (frame.bottom - frame.top);
+    if (client_w <= 0 || client_h <= 0) return;
+    client_w = ((long long)client_w * new_scale + old_scale / 2) / old_scale;
+    client_h = ((long long)client_h * new_scale + old_scale / 2) / old_scale;
+    TRACE("hwnd %p restore rect %s, scale %u -> %u, client %dx%d\n", hwnd, wine_dbgstr_rect(&wpl.rcNormalPosition),
+          old_scale, new_scale, client_w, client_h);
+    wpl.rcNormalPosition.right = wpl.rcNormalPosition.left + client_w + (frame.right - frame.left);
+    wpl.rcNormalPosition.bottom = wpl.rcNormalPosition.top + client_h + (frame.bottom - frame.top);
+    NtUserSetWindowPlacement(hwnd, &wpl);
+}
+
+/**********************************************************************
  *           WAYLAND_WindowMessage
  */
 LRESULT WAYLAND_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -744,6 +776,9 @@ LRESULT WAYLAND_WindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_WAYLAND_WEX_RESIZE:
         wayland_wex_dispatch_resize(hwnd);
+        return 0;
+    case WM_WAYLAND_SCALE_RESTORE:
+        wayland_scale_restore_rect(hwnd, wp, lp);
         return 0;
     case WM_WAYLAND_SET_FOREGROUND:
         /* Private shell views are focused only in response to Wine's own

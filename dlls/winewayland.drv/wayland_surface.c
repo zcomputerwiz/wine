@@ -246,6 +246,12 @@ void wp_fractional_scale_handle_scale(void* user_data,
         return;
     }
 
+    /* The shell converts the placement of every restored window across a scale change from outside (explorer), but it
+     * cannot see the restore rectangle of a maximized window of another process (GetWindowPlacement gives it the
+     * current rectangle): that one is converted here, on the window's own thread. */
+    if (process_wayland.wex_manager && surface->window.scale > 0 && (surface->window.state & WAYLAND_SURFACE_CONFIG_STATE_MAXIMIZED))
+        NtUserPostMessage(hwnd, WM_WAYLAND_SCALE_RESTORE, (WPARAM)(surface->window.scale * 120.0 + 0.5), scale_fixed);
+
     surface->window.scale = scale;
     if (process_wayland.wex_manager)
     {
