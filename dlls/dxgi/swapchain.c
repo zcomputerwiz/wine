@@ -472,6 +472,7 @@ static HRESULT dcomp_surface_frame(ID3D11Texture2D *texture, struct wined3d_dcom
     ID3D11Texture2D_GetDesc(texture, &desc);
     if (desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM && desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM)
         return E_NOTIMPL;
+    TRACE("staging readback of a %ux%u composition surface.\n", desc.Width, desc.Height);
     ID3D11Texture2D_GetDevice(texture, &device);
     desc.MipLevels = desc.ArraySize = 1;
     desc.SampleDesc.Count = 1;
@@ -542,7 +543,11 @@ static HRESULT dcomp_binding_target_scene(IWineDCompSwapChain *iface,
     wined3d_scene.target_hwnd = target;
     wined3d_scene.layer_count = dcomp_scene->layer_count;
 
-    for (i = 0; i < dcomp_scene->layer_count; ++i)
+    /* The layers are translated, and every composition surface read back, once, when the scene is prepared.
+     * Activation takes the snapshot WineD3D saved then and ignores the content of the scene it is given (it needs
+     * it to be non-NULL), so converting the layers again would read every surface back a second time and add a
+     * second way for the publication to fail. */
+    for (i = 0; prepare && i < dcomp_scene->layer_count; ++i)
     {
         const struct wine_dcomp_layer_desc *src_layer = &dcomp_scene->layers[i];
         struct wined3d_dcomp_layer *dst_layer = &wined3d_scene.layers[i];
