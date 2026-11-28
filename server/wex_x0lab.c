@@ -397,7 +397,7 @@ struct lab_args
 {
     char        *word[4];
     unsigned int words;
-    const char  *opt_n, *opt_access, *opt_level, *opt_session, *opt_peer, *opt_size;
+    const char  *opt_n, *opt_access, *opt_level, *opt_session, *opt_peer, *opt_size, *opt_claim;
     int          raw, nowait;
 };
 
@@ -416,6 +416,7 @@ static void parse_args( char *line, struct lab_args *args )
         else if (!strncmp( tok, "session=", 8 )) args->opt_session = tok + 8;
         else if (!strncmp( tok, "peer=", 5 )) args->opt_peer = tok + 5;
         else if (!strncmp( tok, "size=", 5 )) args->opt_size = tok + 5;
+        else if (!strncmp( tok, "claim=", 6 )) args->opt_claim = tok + 6;
         else if (args->words < ARRAY_SIZE(args->word)) args->word[args->words++] = tok;
     }
 }
@@ -498,7 +499,14 @@ static void lab_command( struct lab_client *client, char *line )
         struct token *token = lab_token( args.opt_level );
         unsigned int status = STATUS_NO_MEMORY;
         data_size_t size = 0;
-        void *desc = token ? x_describe_token( token, &size, &status ) : NULL;
+        void *desc;
+
+        /* claim=sy: the description claims SYSTEM as an enabled group (the link-bound token hardening's test; a
+         * user's server that went wrong) */
+        if (token && args.opt_claim && !strcmp( args.opt_claim, "sy" ))
+            token_lab_add_group( token, &local_system_sid,
+                                 SE_GROUP_MANDATORY | SE_GROUP_ENABLED | SE_GROUP_ENABLED_BY_DEFAULT );
+        desc = token ? x_describe_token( token, &size, &status ) : NULL;
 
         if (token) release_object( token );
         if (!desc)
@@ -526,6 +534,22 @@ static void lab_command( struct lab_client *client, char *line )
         strcpy( batch->name, args.word[1] );
         batch_start( client, batch, args.nowait );
         return;
+    }
+    else if (!strcmp( verb, "reftoken" ))
+    {
+        /* session 0: what it made of the newest reference's description: sy=1 when SYSTEM still grants (an enabled
+         * group or the user), denied=1 when it is there deny-only */
+        struct token *token = x_lab_last_ref_token();
+
+        if (!token) strcpy( text, "status=c0000008\n" );
+        else
+        {
+            int grants = token_sid_present( token, &local_system_sid, FALSE );
+            int present = token_sid_present( token, &local_system_sid, TRUE );
+
+            snprintf( text, sizeof(text), "status=0 sy=%d denied=%d\n", grants, present && !grants );
+            release_object( token );
+        }
     }
     else if (!strcmp( verb, "ping" ))
     {

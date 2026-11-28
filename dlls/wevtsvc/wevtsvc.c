@@ -31,6 +31,7 @@
  * holds for requests and replies stay under a budget. */
 
 #include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 
@@ -397,6 +398,79 @@ struct reply
     DWORD body_size;
 };
 
+/* the state of a group in a token: enabled, denyonly, disabled or absent */
+static const char *group_state( HANDLE token, WELL_KNOWN_SID_TYPE type )
+{
+    BYTE buf[4096], sid[SECURITY_MAX_SID_SIZE];
+    TOKEN_GROUPS *groups = (TOKEN_GROUPS *)buf;
+    DWORD size = sizeof(sid), i;
+
+    if (!CreateWellKnownSid( type, NULL, sid, &size ) ||
+        !GetTokenInformation( token, TokenGroups, buf, sizeof(buf), &size ))
+        return "unknown";
+    for (i = 0; i < groups->GroupCount; i++)
+    {
+        if (!EqualSid( groups->Groups[i].Sid, sid )) continue;
+        if (groups->Groups[i].Attributes & SE_GROUP_USE_FOR_DENY_ONLY) return "denyonly";
+        return (groups->Groups[i].Attributes & SE_GROUP_ENABLED) ? "enabled" : "disabled";
+    }
+    return "absent";
+}
+
+/* tests (the link-bound token hardening): the caller's token as any service of session 0 sees it when it impersonates
+ * (not the restricted copy this service checks with), and an access check of a SYSTEM-only descriptor */
+static DWORD do_tokenview( struct connection *conn, struct reply *reply )
+{
+    static const GENERIC_MAPPING mapping = { 1, 1, 1, 1 };
+    BYTE user_buf[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE], owner_buf[sizeof(TOKEN_OWNER) + SECURITY_MAX_SID_SIZE];
+    BYTE label_buf[sizeof(TOKEN_MANDATORY_LABEL) + SECURITY_MAX_SID_SIZE], privs_buf[256];
+    PRIVILEGE_SET *privs = (PRIVILEGE_SET *)privs_buf;
+    char *user = NULL, *owner = NULL, text[512];
+    PSECURITY_DESCRIPTOR sd = NULL;
+    DWORD size, granted = 0, privs_size = sizeof(privs_buf), integrity = 0, len;
+    BOOL ok = FALSE;
+    HANDLE token = NULL, imp = NULL;
+    DWORD test_ops = 0, test_size = sizeof(test_ops);
+
+    /* a test operation: only while session 0's EventLog key has WexTestOps (DWORD 1, which the suite sets and
+     * removes). It reports only the caller's own token and a fixed check, so it leaks nothing even then. */
+    if (RegGetValueW( HKEY_LOCAL_MACHINE, L"System\\CurrentControlSet\\Services\\EventLog", L"WexTestOps",
+                      RRF_RT_REG_DWORD, NULL, &test_ops, &test_size ) || test_ops != 1)
+        return ERROR_INVALID_FUNCTION;
+    if (!ImpersonateNamedPipeClient( conn->pipe )) return ERROR_ACCESS_DENIED;
+    if (!OpenThreadToken( GetCurrentThread(), TOKEN_QUERY | TOKEN_DUPLICATE, TRUE, &token ))
+    {
+        RevertToSelf();
+        return ERROR_ACCESS_DENIED;
+    }
+    RevertToSelf();
+    if (GetTokenInformation( token, TokenUser, user_buf, sizeof(user_buf), &size ))
+        ConvertSidToStringSidA( ((TOKEN_USER *)user_buf)->User.Sid, &user );
+    if (GetTokenInformation( token, TokenOwner, owner_buf, sizeof(owner_buf), &size ))
+        ConvertSidToStringSidA( ((TOKEN_OWNER *)owner_buf)->Owner, &owner );
+    if (GetTokenInformation( token, TokenIntegrityLevel, label_buf, sizeof(label_buf), &size ))
+    {
+        PSID label = ((TOKEN_MANDATORY_LABEL *)label_buf)->Label.Sid;
+        integrity = *GetSidSubAuthority( label, *GetSidSubAuthorityCount( label ) - 1 );
+    }
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW( L"O:SYG:SYD:(A;;0x1;;;SY)", SDDL_REVISION_1, &sd, NULL ) &&
+        DuplicateToken( token, SecurityIdentification, &imp ))
+        AccessCheck( sd, imp, 1, (GENERIC_MAPPING *)&mapping, privs, &privs_size, &granted, &ok );
+    len = snprintf( text, sizeof(text), "user=%s owner=%s sy=%s ba=%s bo=%s integrity=%lx syaccess=%d",
+                    user ? user : "?", owner ? owner : "?", group_state( token, WinLocalSystemSid ),
+                    group_state( token, WinBuiltinAdministratorsSid ), group_state( token, WinBuiltinBackupOperatorsSid ),
+                    integrity, ok && granted ? 1 : 0 );
+    LocalFree( user );
+    LocalFree( owner );
+    LocalFree( sd );
+    if (imp) CloseHandle( imp );
+    CloseHandle( token );
+    if (!(reply->body = budget_alloc( len + 1 ))) return ERROR_NOT_ENOUGH_MEMORY;
+    memcpy( reply->body, text, len + 1 );
+    reply->body_size = len + 1;
+    return ERROR_SUCCESS;
+}
+
 /* a terminated UTF-16 string of exactly size bytes, at most max characters */
 static BOOL valid_string( const BYTE *p, DWORD size, DWORD max )
 {
@@ -664,6 +738,7 @@ static DWORD dispatch( struct connection *conn, const struct wex_evtlog_header *
         reply->hdr.arg[0] = conn->caller_class;  /* who the server says this caller is (tests of H3) */
         return ERROR_SUCCESS;
     }
+    if (req->op == WEX_EVTLOG_TOKENVIEW) return do_tokenview( conn, reply );
     if (req->op != WEX_EVTLOG_OPEN && !(h = get_handle( conn, req->handle ))) return ERROR_INVALID_HANDLE;
     switch (req->op)
     {

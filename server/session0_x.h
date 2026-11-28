@@ -119,5 +119,7 @@ extern unsigned int x_lost_seconds;
 /* a frame of only a header, as given (the lab: replies, notices and HELLOs that must not be answered) */
 extern int x_send_raw_header( struct x_peer *peer, unsigned int type, unsigned int call, unsigned long long ref );
 extern struct list x_all_held;
+/* the token session 0 built for the newest reference it issued (a reference), or NULL */
+extern struct token *x_lab_last_ref_token(void);
 
 #endif /* __WINE_SERVER_SESSION0_X_H */
