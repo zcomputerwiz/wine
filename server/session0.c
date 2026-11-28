@@ -632,6 +632,21 @@ static void init_listener(void)
 
     if (!get_socket_path( 0 )) fatal_error( "--session0: no session0_socket in %s\n", SESSION0_CONF );
     session0_dev = getenv( "WEX_SESSION0_DEV" ) && !strcmp( getenv( "WEX_SESSION0_DEV" ), "1" );
+    if (session0_dev)
+    {
+        /* development trust turns off what B132 limits (link_policy, the bridge's rule 3): said loudly, and refused
+         * for the machine's own session 0, whose socket or account the configuration names, so that a stray
+         * drop-in in its unit cannot switch it on quietly (the reviewer, 2026-11-28) */
+        char name[64];
+        struct passwd *pw;
+
+        fprintf( stderr, "wineserver: --session0: development mode (WEX_SESSION0_DEV=1): session 0 trusts any peer "
+                 "of its own uid and limits no session's token; never on an installed system\n" );
+        if (socket_from_conf ||
+            (read_conf( "session0_user", name, sizeof(name) ) && (pw = getpwnam( name )) && pw->pw_uid == getuid()))
+            fatal_error( "--session0: development mode refused: this is the machine's session 0 (%s)\n",
+                         socket_from_conf ? "its socket is the configuration's" : "it runs as the configured account" );
+    }
     if (!session0_dev)
     {
         char group[64];
