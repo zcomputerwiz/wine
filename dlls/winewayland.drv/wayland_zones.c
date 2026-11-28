@@ -204,6 +204,15 @@ static void item_position(void *data, struct xx_zone_item_v1 *item, int32_t x, i
         wayland_win_data_release(win);
         return;
     }
+    /* The compositor places a maximized or fullscreen toplevel itself. A position reported while either side is in
+     * such a state is not the restored window's place: taking it would move the window that Win32 has just
+     * restored (or maximized) back to where it was. */
+    if ((win->wayland_surface->window.state | win->wayland_surface->current.state) &
+        (WAYLAND_SURFACE_CONFIG_STATE_MAXIMIZED | WAYLAND_SURFACE_CONFIG_STATE_FULLSCREEN))
+    {
+        wayland_win_data_release(win);
+        return;
+    }
     point.x = x + win->wayland_surface->zone_frame.left - win->wayland_surface->window_geometry_offset.x;
     point.y = y + win->wayland_surface->zone_frame.top - win->wayland_surface->window_geometry_offset.y;
     point = map_point_from_surface(win->wayland_surface, point);
@@ -236,6 +245,11 @@ void wayland_zone_place(struct wayland_surface *surface)
 {
     POINT point;
     if (!surface->zone_item || surface->window.minimized) return;
+    /* The compositor places a maximized or fullscreen toplevel (window.rect may also still be the old state's
+     * rectangle here); a hosted frame is placed by Win32 in every state. */
+    if ((surface->window.state & (WAYLAND_SURFACE_CONFIG_STATE_MAXIMIZED | WAYLAND_SURFACE_CONFIG_STATE_FULLSCREEN)) &&
+        !(surface->wex_window && NtUserGetProp(surface->hwnd, WEX_WAYLAND_HOST_PROP)))
+        return;
     point.x = surface->window.rect.left;
     point.y = surface->window.rect.top;
     point = map_point_to_surface(surface, point);
