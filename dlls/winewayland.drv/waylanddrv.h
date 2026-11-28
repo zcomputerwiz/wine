@@ -338,6 +338,8 @@ struct wayland_surface
     BOOL wex_resize_pending, wex_resize_dispatching;
     RECT wex_host_rect;
     int wex_host_content_width, wex_host_content_height;
+    RECT wex_host_client;   /* the Win32 client rectangle the last layout request was made from */
+    double wex_host_scale;  /* and the scale it was converted at */
 
     struct wayland_surface_config pending, requested, processing, current;
     BOOL resizing;
