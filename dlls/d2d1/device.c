@@ -118,6 +118,9 @@ static void d2d_clip_stack_pop(struct d2d_clip_stack *stack)
 
 static void d2d_device_context_run_queued_draws(struct d2d_device_context *context);
 
+/* private data of a texture, set by d3d11 (dlls/d3d11/device.c): a RECT that drawing on it is confined to */
+static const GUID wine_d3d11_update_rect = {0x7a0c5d3e, 0x51b2, 0x4f0a, {0x9c, 0x6e, 0x2b, 0x1d, 0x8f, 0x43, 0xa7, 0x65}};
+
 static void d2d_device_context_draw(struct d2d_device_context *render_target, enum d2d_shape_type shape_type,
         ID3D11Buffer *ib, unsigned int index_count, ID3D11Buffer *vb, unsigned int vb_stride,
         struct d2d_brush *brush, struct d2d_brush *opacity_brush)
@@ -182,6 +185,21 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
         scissor_rect.top = max(scissor_rect.top, (LONG)update->top);
         scissor_rect.right = max(scissor_rect.left, min(scissor_rect.right, (LONG)update->right));
         scissor_rect.bottom = max(scissor_rect.top, min(scissor_rect.bottom, (LONG)update->bottom));
+    }
+    /* the update rectangle that slot 6 of d3d11's private device interface put on the texture */
+    if (render_target->target.bitmap->resource)
+    {
+        UINT size = sizeof(RECT);
+        RECT update;
+
+        if (SUCCEEDED(ID3D11Resource_GetPrivateData(render_target->target.bitmap->resource, &wine_d3d11_update_rect,
+                &size, &update)) && size == sizeof(update))
+        {
+            scissor_rect.left = max(scissor_rect.left, update.left);
+            scissor_rect.top = max(scissor_rect.top, update.top);
+            scissor_rect.right = max(scissor_rect.left, min(scissor_rect.right, update.right));
+            scissor_rect.bottom = max(scissor_rect.top, min(scissor_rect.bottom, update.bottom));
+        }
     }
     ID3D11DeviceContext1_RSSetScissorRects(context, 1, &scissor_rect);
     ID3D11DeviceContext1_RSSetState(context, render_target->rs);

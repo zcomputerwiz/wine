@@ -10751,6 +10751,121 @@ static void test_context_private_update_rect(ID2D1DeviceContext *context, IUnkno
     ID2D1Bitmap1_Release(other);
     ID2D1Bitmap1_Release(bitmap);
 }
+
+static DWORD get_texture_pixel(ID3D11Device *device, ID3D11Texture2D *texture, unsigned int x, unsigned int y)
+{
+    D3D11_MAPPED_SUBRESOURCE map;
+    D3D11_TEXTURE2D_DESC desc;
+    ID3D11DeviceContext *d3d_context;
+    ID3D11Texture2D *staging;
+    DWORD pixel = 0xdeadbeef;
+    HRESULT hr;
+
+    ID3D11Texture2D_GetDesc(texture, &desc);
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    desc.MiscFlags = 0;
+    hr = ID3D11Device_CreateTexture2D(device, &desc, NULL, &staging);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID3D11Device_GetImmediateContext(device, &d3d_context);
+    ID3D11DeviceContext_CopyResource(d3d_context, (ID3D11Resource *)staging, (ID3D11Resource *)texture);
+    hr = ID3D11DeviceContext_Map(d3d_context, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &map);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        pixel = *(DWORD *)((BYTE *)map.pData + y * map.RowPitch + x * 4);
+        ID3D11DeviceContext_Unmap(d3d_context, (ID3D11Resource *)staging, 0);
+    }
+    ID3D11DeviceContext_Release(d3d_context);
+    ID3D11Texture2D_Release(staging);
+    return pixel;
+}
+
+/* slots 6 and 7 of the Direct3D device's private interface {26c5dc23-...}: (texture, rectangle, 0) begins an update of that
+ * rectangle of a texture and (texture) ends it; Direct2D drawing on a bitmap of the texture in between, Clear included, stays
+ * inside the rectangle. XAML of the Windows App SDK draws its text and icons this way. After slot 7 Windows reads zero from the
+ * texture on this device (the update goes to the compositor); that is not checked (measured: tests/uwp/alpc/d3d11-m6-probe.cpp
+ * of WineExplorer). */
+static void test_context_d3d11_update_rect(ID2D1DeviceContext *context, ID3D11Device *d3d_device)
+{
+    static const GUID iid_d3d11_private = {0x26c5dc23, 0xe49c, 0x4b0a, {0x8f, 0x79, 0xe7, 0xb1, 0xac, 0x80, 0x4d, 0x32}};
+    typedef HRESULT (STDMETHODCALLTYPE *method6_t)(void *, ID3D11Texture2D *, const RECT *, void *);
+    typedef HRESULT (STDMETHODCALLTYPE *method7_t)(void *, ID3D11Texture2D *, void *, void *);
+    static const struct { unsigned int x, y; BOOL inside; } points[] =
+    {
+        {16, 8, TRUE}, {47, 23, TRUE}, {30, 15, TRUE}, {15, 8}, {48, 23}, {47, 24}, {0, 0}, {100, 50},
+    };
+    D2D1_BITMAP_PROPERTIES1 props = {{DXGI_FORMAT_R8G8B8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED}, 96.0f, 96.0f};
+    D2D1_COLOR_F red = {1.0f, 0.0f, 0.0f, 1.0f}, green = {0.0f, 1.0f, 0.0f, 1.0f}, blue = {0.0f, 0.0f, 1.0f, 1.0f};
+    D2D1_RECT_F fill = {0.0f, 0.0f, 8.0f, 4.0f}, fill2 = {20.0f, 10.0f, 24.0f, 12.0f};
+    D3D11_TEXTURE2D_DESC desc = {128, 64, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, {1, 0}, D3D11_USAGE_DEFAULT,
+            D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE};
+    RECT rect = {16, 8, 48, 24};
+    ID2D1SolidColorBrush *brush;
+    ID3D11Texture2D *texture;
+    IDXGISurface *surface;
+    ID2D1Bitmap1 *bitmap;
+    unsigned int i;
+    void *priv;
+    DWORD pixel;
+    HRESULT hr;
+
+    hr = ID3D11Device_QueryInterface(d3d_device, &iid_d3d11_private, &priv);
+    if (FAILED(hr))
+    {
+        win_skip("The private Direct3D device interface is not supported.\n");
+        return;
+    }
+    hr = ID3D11Device_CreateTexture2D(d3d_device, &desc, NULL, &texture);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID3D11Texture2D_QueryInterface(texture, &IID_IDXGISurface, (void **)&surface);
+    props.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
+    hr = ID2D1DeviceContext_CreateBitmapFromDxgiSurface(context, surface, &props, &bitmap);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = ID2D1DeviceContext_CreateSolidColorBrush(context, &blue, NULL, &brush);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    ID2D1DeviceContext_SetTarget(context, (ID2D1Image *)bitmap);
+    ID2D1DeviceContext_BeginDraw(context);
+    ID2D1DeviceContext_Clear(context, &green);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1DeviceContext_SetTarget(context, NULL);
+
+    hr = ((method6_t)(*(void ***)priv)[6])(priv, texture, &rect, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1DeviceContext_SetTarget(context, (ID2D1Image *)bitmap);
+    ID2D1DeviceContext_BeginDraw(context);
+    ID2D1DeviceContext_SetAntialiasMode(context, D2D1_ANTIALIAS_MODE_ALIASED);
+    ID2D1DeviceContext_Clear(context, &red);
+    ID2D1DeviceContext_FillRectangle(context, &fill, (ID2D1Brush *)brush);
+    ID2D1DeviceContext_FillRectangle(context, &fill2, (ID2D1Brush *)brush);
+    hr = ID2D1DeviceContext_EndDraw(context, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ID2D1DeviceContext_SetAntialiasMode(context, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    ID2D1DeviceContext_SetTarget(context, NULL);
+
+    for (i = 0; i < ARRAY_SIZE(points); ++i)
+    {
+        pixel = get_texture_pixel(d3d_device, texture, points[i].x, points[i].y);
+        if (points[i].inside)
+            ok(pixel == 0xff0000ff, "%u: Got unexpected pixel %08lx.\n", i, pixel);
+        else /* 0 on Windows, the old contents on Wine: never what was drawn */
+            ok(pixel != 0xff0000ff && pixel != 0xffff0000, "%u: Got unexpected pixel %08lx.\n", i, pixel);
+    }
+    pixel = get_texture_pixel(d3d_device, texture, 21, 11);
+    ok(pixel == 0xffff0000, "Got unexpected pixel %08lx.\n", pixel);
+
+    hr = ((method7_t)(*(void ***)priv)[7])(priv, texture, NULL, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    ID2D1SolidColorBrush_Release(brush);
+    ID2D1Bitmap1_Release(bitmap);
+    IDXGISurface_Release(surface);
+    ID3D11Texture2D_Release(texture);
+    IUnknown_Release((IUnknown *)priv);
+}
 #endif
 
 /* The private interface {46fdbfea-53f8-440c-b9e2-81dfec612a72} of the device, which the lifted compositor of the Windows App SDK asks
@@ -10874,6 +10989,7 @@ static void test_device_private(BOOL d3d11)
 
             IDXGIDevice_QueryInterface(ctx.device, &IID_ID3D11Device, (void **)&d3d_device);
             test_context_private_queued_draw(context, unk, d3d_device);
+            test_context_d3d11_update_rect(context, d3d_device);
             ID3D11Device_Release(d3d_device);
         }
         IUnknown_Release(unk);

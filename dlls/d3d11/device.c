@@ -6683,8 +6683,43 @@ static HRESULT STDMETHODCALLTYPE d3d11_compositor_private_method##n(void *iface,
     FIXME("iface %p, private method " #n ": %p, %p, %p, semi-stub.\n", iface, arg1, arg2, arg3); \
     return S_OK; \
 }
-D3D11_COMPOSITOR_PRIVATE_NOP(3) D3D11_COMPOSITOR_PRIVATE_NOP(6) D3D11_COMPOSITOR_PRIVATE_NOP(7) D3D11_COMPOSITOR_PRIVATE_NOP(8)
+D3D11_COMPOSITOR_PRIVATE_NOP(3) D3D11_COMPOSITOR_PRIVATE_NOP(8)
 D3D11_COMPOSITOR_PRIVATE_NOP(12)
+
+/* Slot 6 (texture, rectangle, 0) begins an update of that rectangle of a texture and slot 7 (texture) ends it: on Windows all
+ * drawing on the texture in between, ClearRenderTargetView included, is confined to the rectangle, and the device reads zero
+ * outside it and, after slot 7, everywhere (measured: tests/uwp/alpc/d3d11-m6-probe.cpp of WineExplorer). XAML of the Windows App
+ * SDK draws its text and icons into shared textures this way, with Direct2D, and clears the rectangle first. Here the rectangle is
+ * kept as private data of the texture, where d2d1, the only known user, finds it for its scissor rectangle; Direct3D drawing is
+ * not confined and the texture stays readable. */
+static const GUID wine_d3d11_update_rect = {0x7a0c5d3e, 0x51b2, 0x4f0a, {0x9c, 0x6e, 0x2b, 0x1d, 0x8f, 0x43, 0xa7, 0x65}};
+
+static HRESULT STDMETHODCALLTYPE d3d11_compositor_private_method6(void *iface, ID3D11Texture2D *texture, const RECT *rect, void *arg3)
+{
+    TRACE("iface %p, texture %p, rect %s, %p.\n", iface, texture, wine_dbgstr_rect(rect), arg3);
+
+    if (!texture)
+        return S_OK;
+    if (rect)
+        ID3D11Texture2D_SetPrivateData(texture, &wine_d3d11_update_rect, sizeof(*rect), rect);
+    else
+        ID3D11Texture2D_SetPrivateData(texture, &wine_d3d11_update_rect, 0, NULL);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d3d11_compositor_private_method7(void *iface, ID3D11Texture2D *texture, void *arg2, void *arg3)
+{
+    TRACE("iface %p, texture %p.\n", iface, texture);
+
+    if (!texture)
+        return S_OK;
+    ID3D11Texture2D_SetPrivateData(texture, &wine_d3d11_update_rect, 0, NULL);
+    /* The update is handed over. XAML does not flush; the compositor reads the texture on its own device, through an NT
+     * handle. Windows does not show the update to such a device either (it goes to the compositor some other way), but here
+     * sharing is a write-back to shared memory, which a Flush does. */
+    ID3D11DeviceContext4_Flush(&impl_from_compositor_private(iface)->immediate_context.ID3D11DeviceContext4_iface);
+    return S_OK;
+}
 
 #define D3D11_COMPOSITOR_PRIVATE_STUB(n) \
 static void STDMETHODCALLTYPE d3d11_compositor_private_unimplemented##n(void) \
