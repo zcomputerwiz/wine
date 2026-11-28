@@ -2544,10 +2544,11 @@ unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_si
         close( sock );
         return status;
     }
-    /* a pipe for a session's system role only: what session 0 mapped (WEX_CALLER_SESSION_SYSTEM), or in development
-     * mode, where nothing is mapped, a described SYSTEM */
-    if (pipe_bridge_allowed( name, len ) == 3 && token_caller_class( token ) != WEX_CALLER_SESSION_SYSTEM &&
-        token_service_account( token ) != SERVICE_ACCOUNT_SYSTEM)
+    /* a pipe for a session's system role only: what session 0 mapped (WEX_CALLER_SESSION_SYSTEM). Development mode
+     * maps nothing and trusts its own uid (T1 runs every session as one account and opens the name from a program as
+     * a carrier for the bridge's checks): there the name stays a rule 2 pipe, as before B132 */
+    if (pipe_bridge_allowed( name, len ) == 3 && !session0_dev_mode() &&
+        token_caller_class( token ) != WEX_CALLER_SESSION_SYSTEM)
     {
         fprintf( stderr, "session0: pipe open refused for uid %u: only a session's system role opens this pipe\n",
                  (unsigned int)uid );
