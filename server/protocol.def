@@ -1106,6 +1106,11 @@ struct window_info
     client_ptr_t         wndproc;          /* window proc */
 };
 
+/* what a minimized or maximized window restores to, kept in the window's shared data for the other processes
+ * (GetWindowPlacement on a window of another process); a window in the normal state has none */
+#define WINDOW_PLACEMENT_VALID        0x00000001  /* normal_rect and the positions are set */
+#define WINDOW_PLACEMENT_RESTORE_MAX  0x00000002  /* a minimized window restores to maximized (WPF_RESTORETOMAXIMIZED) */
+
 typedef volatile struct
 {
     struct obj_locator   class;            /* object locator for the window class shared object */
@@ -1115,6 +1120,13 @@ typedef volatile struct
     int                  __pad;
     struct ratio         dpi;              /* effective DPI of the window monitor */
     struct ratio         raw_dpi;          /* raw DPI of the window monitor */
+    struct rectangle     normal_rect;      /* rectangle the window restores to, in its own DPI (WINDOW_PLACEMENT_VALID) */
+    int                  min_x;            /* minimized position, in its own DPI */
+    int                  min_y;
+    int                  max_x;            /* maximized position, in its own DPI */
+    int                  max_y;
+    unsigned int         placement_flags;  /* WINDOW_PLACEMENT_* */
+    int                  __pad2;
     data_size_t          private_size;     /* length of private extra bytes range */
     data_size_t          extra_size;       /* size of the extra info */
     struct window_info   info;             /* window info (GWLP_*) */
@@ -2891,6 +2903,18 @@ enum message_type
 @REPLY
     lparam_t       old_info;      /* previous window info value */
     unsigned int   old_ansi;      /* previous window info is ansi */
+@END
+
+
+/* Store what a minimized or maximized window restores to, for the other processes */
+@REQ(set_window_placement)
+    user_handle_t  handle;        /* handle to the window */
+    unsigned int   flags;         /* WINDOW_PLACEMENT_*; 0 clears the stored placement */
+    struct rectangle normal;      /* rectangle the window restores to, in its own DPI */
+    int            min_x;         /* minimized position */
+    int            min_y;
+    int            max_x;         /* maximized position */
+    int            max_y;
 @END
 
 

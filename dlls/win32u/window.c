@@ -3129,6 +3129,94 @@ static void placement_screen_to_workarea( HWND hwnd, WINDOWPLACEMENT *wp )
     OffsetRect( &wp->rcNormalPosition, -mon_info.rcWork.left, -mon_info.rcWork.top );
 }
 
+/* What a minimized or maximized window restores to lives in its own WND, which no other process can read. It is
+ * kept in the window's shared data as well (set_window_placement), for GetWindowPlacement on a window of another
+ * process. Sent when the window changes between normal, minimized and maximized (force), when its placement is set,
+ * and once more, to clear it, when the window is normal again; a window that was never minimized or maximized costs
+ * nothing. */
+static void publish_window_placement( HWND hwnd, BOOL force )
+{
+    WND *win = get_win_ptr( hwnd );
+    BOOL zoomed;
+    RECT normal;
+    POINT min_pos, max_pos;
+    UINT flags = 0;
+
+    if (!win || win == WND_OTHER_PROCESS || win == WND_DESKTOP) return;
+    zoomed = (win->dwStyle & (WS_MINIMIZE | WS_MAXIMIZE)) != 0;
+    if (!force && zoomed == !!(win->flags & WIN_PLACEMENT_PUSHED))
+    {
+        release_win_ptr( win );
+        return;
+    }
+    if (zoomed)
+    {
+        /* the same update as GetWindowPlacement makes */
+        if (win->dwStyle & WS_MINIMIZE)
+        {
+            win->min_pos.x = win->rects.window.left;
+            win->min_pos.y = win->rects.window.top;
+        }
+        else
+        {
+            win->max_pos.x = win->rects.window.left;
+            win->max_pos.y = win->rects.window.top;
+        }
+        update_maximized_pos( win );
+        flags = WINDOW_PLACEMENT_VALID;
+        if (win->flags & WIN_RESTORE_MAX) flags |= WINDOW_PLACEMENT_RESTORE_MAX;
+        win->flags |= WIN_PLACEMENT_PUSHED;
+    }
+    else
+    {
+        if (!(win->flags & WIN_PLACEMENT_PUSHED)) { release_win_ptr( win ); return; }
+        win->flags &= ~WIN_PLACEMENT_PUSHED;
+    }
+    normal = win->normal_rect;
+    min_pos = win->min_pos;
+    max_pos = win->max_pos;
+    release_win_ptr( win );
+
+    SERVER_START_REQ( set_window_placement )
+    {
+        req->handle = wine_server_user_handle( hwnd );
+        req->flags = flags;
+        req->normal.left = normal.left;
+        req->normal.top = normal.top;
+        req->normal.right = normal.right;
+        req->normal.bottom = normal.bottom;
+        req->min_x = min_pos.x;
+        req->min_y = min_pos.y;
+        req->max_x = max_pos.x;
+        req->max_y = max_pos.y;
+        wine_server_call( req );
+    }
+    SERVER_END_REQ;
+}
+
+/* the placement another process has stored for a minimized or maximized window; FALSE when there is none */
+static BOOL get_shared_window_placement( HWND hwnd, RECT *normal, POINT *min_pos, POINT *max_pos, UINT *flags )
+{
+    struct object_lock lock = OBJECT_LOCK_INIT;
+    const window_shm_t *window_shm = NULL;
+    NTSTATUS status;
+    UINT shared_flags = 0;
+
+    while ((status = get_shared_window( hwnd, &lock, &window_shm )) == STATUS_PENDING)
+    {
+        shared_flags = window_shm->placement_flags;
+        SetRect( normal, window_shm->normal_rect.left, window_shm->normal_rect.top,
+                 window_shm->normal_rect.right, window_shm->normal_rect.bottom );
+        min_pos->x = window_shm->min_x;
+        min_pos->y = window_shm->min_y;
+        max_pos->x = window_shm->max_x;
+        max_pos->y = window_shm->max_y;
+    }
+    if (status || !(shared_flags & WINDOW_PLACEMENT_VALID)) return FALSE;
+    *flags = (shared_flags & WINDOW_PLACEMENT_RESTORE_MAX) ? WPF_RESTORETOMAXIMIZED : 0;
+    return TRUE;
+}
+
 /* Coordinates returned in WINDOWPLACEMENT is always in screen coordinates */
 BOOL get_window_placement( HWND hwnd, WINDOWPLACEMENT *placement )
 {
@@ -3151,13 +3239,13 @@ BOOL get_window_placement( HWND hwnd, WINDOWPLACEMENT *placement )
     }
     if (win == WND_OTHER_PROCESS)
     {
-        RECT normal_position;
+        RECT normal_position, shared_normal;
+        POINT shared_min, shared_max;
+        UINT shared_flags;
         DWORD style;
 
         if (!get_window_rect( hwnd, &normal_position, get_thread_dpi() ))
             return FALSE;
-
-        FIXME("not fully supported on other process window %p.\n", hwnd);
 
         placement->length  = sizeof(*placement);
         style = get_window_long( hwnd, GWL_STYLE );
@@ -3165,12 +3253,33 @@ BOOL get_window_placement( HWND hwnd, WINDOWPLACEMENT *placement )
             placement->showCmd = SW_SHOWMINIMIZED;
         else
             placement->showCmd = (style & WS_MAXIMIZE) ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
-        /* provide some dummy information */
         placement->flags = 0;
         placement->ptMinPosition.x = -1;
         placement->ptMinPosition.y = -1;
         placement->ptMaxPosition.x = -1;
         placement->ptMaxPosition.y = -1;
+        /* a minimized or maximized window restores to the rectangle its own process keeps in the window's shared
+         * data; without it (the window was created that way and not changed since) only the current rectangle is known */
+        if ((style & (WS_MINIMIZE | WS_MAXIMIZE))
+                && get_shared_window_placement( hwnd, &shared_normal, &shared_min, &shared_max, &shared_flags ))
+        {
+            struct ratio win_dpi = get_dpi_for_window( hwnd );
+
+            placement->flags = shared_flags;
+            placement->rcNormalPosition = map_dpi_rect( shared_normal, win_dpi, get_thread_dpi() );
+            /* as for a window of this process: a minimized window's position is where it is now */
+            if (style & WS_MINIMIZE)
+            {
+                placement->ptMinPosition.x = normal_position.left;
+                placement->ptMinPosition.y = normal_position.top;
+            }
+            else if (!empty_point( shared_min ))
+                placement->ptMinPosition = map_dpi_point( shared_min, win_dpi, get_thread_dpi() );
+            if (!empty_point( shared_max ))
+                placement->ptMaxPosition = map_dpi_point( shared_max, win_dpi, get_thread_dpi() );
+            return TRUE;
+        }
+        if (style & (WS_MINIMIZE | WS_MAXIMIZE)) FIXME( "no restore placement for window %p of another process.\n", hwnd );
         placement->rcNormalPosition = normal_position;
         return TRUE;
     }
@@ -3290,6 +3399,7 @@ void set_window_normal_placement( HWND hwnd, RECT rect )
         make_rect_onscreen( &rect );
         win->normal_rect = rect_thread_to_win_dpi( hwnd, rect );
         release_win_ptr( win );
+        publish_window_placement( hwnd, TRUE );
     }
 }
 
@@ -3353,6 +3463,8 @@ static BOOL set_window_placement( HWND hwnd, const WINDOWPLACEMENT *wndpl, UINT 
         if (wndpl->flags & WPF_RESTORETOMAXIMIZED)
             win_set_flags( hwnd, WIN_RESTORE_MAX, 0 );
     }
+    /* the restore placement may have changed without a change of state */
+    publish_window_placement( hwnd, TRUE );
     return TRUE;
 }
 
@@ -5209,6 +5321,9 @@ static BOOL show_window( HWND hwnd, INT cmd )
     }
 
 done:
+    /* the restore placement of a minimized or maximized window, for the other processes (publish_window_placement) */
+    if (!(style & WS_CHILD))
+        publish_window_placement( hwnd, ((style ^ get_window_long( hwnd, GWL_STYLE )) & (WS_MINIMIZE | WS_MAXIMIZE)) != 0 );
     set_thread_dpi_awareness_context( context );
     return was_visible;
 }

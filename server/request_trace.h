@@ -1929,6 +1929,17 @@ static void dump_set_window_info_reply( const struct set_window_info_reply *req 
     fprintf( stderr, ", old_ansi=%08x", req->old_ansi );
 }
 
+static void dump_set_window_placement_request( const struct set_window_placement_request *req )
+{
+    fprintf( stderr, " handle=%08x", req->handle );
+    fprintf( stderr, ", flags=%08x", req->flags );
+    dump_rectangle( ", normal=", &req->normal );
+    fprintf( stderr, ", min_x=%d", req->min_x );
+    fprintf( stderr, ", min_y=%d", req->min_y );
+    fprintf( stderr, ", max_x=%d", req->max_x );
+    fprintf( stderr, ", max_y=%d", req->max_y );
+}
+
 static void dump_set_window_fnid_request( const struct set_window_fnid_request *req )
 {
     fprintf( stderr, " handle=%08x", req->handle );
@@ -4047,6 +4058,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_window_info_request,
     (dump_func)dump_init_window_info_request,
     (dump_func)dump_set_window_info_request,
+    (dump_func)dump_set_window_placement_request,
     (dump_func)dump_set_window_fnid_request,
     (dump_func)dump_set_parent_request,
     (dump_func)dump_get_window_parents_request,
@@ -4387,6 +4399,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     NULL,
     (dump_func)dump_set_window_info_reply,
     NULL,
+    NULL,
     (dump_func)dump_set_parent_reply,
     (dump_func)dump_get_window_parents_reply,
     (dump_func)dump_get_window_list_reply,
@@ -4725,6 +4738,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "get_window_info",
     "init_window_info",
     "set_window_info",
+    "set_window_placement",
     "set_window_fnid",
     "set_parent",
     "get_window_parents",

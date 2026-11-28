@@ -2615,6 +2615,34 @@ DECL_HANDLER(set_window_info)
 }
 
 
+/* store what a minimized or maximized window restores to in its shared data, for the other processes */
+DECL_HANDLER(set_window_placement)
+{
+    struct window *win;
+
+    if (!(win = get_window( req->handle ))) return;
+    if (win->thread->process != current->process)
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return;
+    }
+
+    SHARED_WRITE_BEGIN( win->shared, window_shm_t )
+    {
+        shared->normal_rect.left   = req->normal.left;
+        shared->normal_rect.top    = req->normal.top;
+        shared->normal_rect.right  = req->normal.right;
+        shared->normal_rect.bottom = req->normal.bottom;
+        shared->min_x = req->min_x;
+        shared->min_y = req->min_y;
+        shared->max_x = req->max_x;
+        shared->max_y = req->max_y;
+        shared->placement_flags = req->flags;
+    }
+    SHARED_WRITE_END;
+}
+
+
 /* get a list of the window parents, up to the root of the tree */
 DECL_HANDLER(get_window_parents)
 {

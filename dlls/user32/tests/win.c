@@ -13423,7 +13423,7 @@ static void other_process_proc(HWND hwnd)
     ok(wp.showCmd == SW_SHOWMAXIMIZED, "Unexpected showCmd %#x.\n", wp.showCmd);
     todo_wine ok(wp.flags == WPF_RESTORETOMAXIMIZED, "Unexpected flags %#x.\n", wp.flags);
     /* the rectangle the window restores to, not the maximized one */
-    todo_wine ok(EqualRect(&wp.rcNormalPosition, &normal), "Unexpected normal position %s.\n",
+    ok(EqualRect(&wp.rcNormalPosition, &normal), "Unexpected normal position %s.\n",
             wine_dbgstr_rect(&wp.rcNormalPosition));
     SetEvent(test_done_event);
 
@@ -13433,8 +13433,8 @@ static void other_process_proc(HWND hwnd)
     ret = GetWindowPlacement(hwnd, &wp);
     ok(ret, "Unexpected ret %#lx.\n", ret);
     ok(wp.showCmd == SW_SHOWMINIMIZED, "Unexpected showCmd %#x.\n", wp.showCmd);
-    todo_wine ok(wp.flags == WPF_RESTORETOMAXIMIZED, "Unexpected flags %#x.\n", wp.flags);
-    todo_wine ok(EqualRect(&wp.rcNormalPosition, &normal), "Unexpected normal position %s.\n",
+    ok(wp.flags == WPF_RESTORETOMAXIMIZED, "Unexpected flags %#x.\n", wp.flags);
+    ok(EqualRect(&wp.rcNormalPosition, &normal), "Unexpected normal position %s.\n",
             wine_dbgstr_rect(&wp.rcNormalPosition));
     SetEvent(test_done_event);
 
@@ -13444,8 +13444,8 @@ static void other_process_proc(HWND hwnd)
     ret = GetWindowPlacement(hwnd, &wp);
     ok(ret, "Unexpected ret %#lx.\n", ret);
     ok(wp.showCmd == SW_SHOWMAXIMIZED, "Unexpected showCmd %#x.\n", wp.showCmd);
-    todo_wine ok(wp.flags == WPF_RESTORETOMAXIMIZED, "Unexpected flags %#x.\n", wp.flags);
-    todo_wine ok(EqualRect(&wp.rcNormalPosition, &normal), "Unexpected normal position %s.\n",
+    ok(wp.flags == WPF_RESTORETOMAXIMIZED, "Unexpected flags %#x.\n", wp.flags);
+    ok(EqualRect(&wp.rcNormalPosition, &normal), "Unexpected normal position %s.\n",
             wine_dbgstr_rect(&wp.rcNormalPosition));
     SetEvent(test_done_event);
 

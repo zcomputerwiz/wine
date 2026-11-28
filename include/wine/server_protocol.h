@@ -1090,6 +1090,11 @@ struct window_info
     client_ptr_t         wndproc;
 };
 
+/* what a minimized or maximized window restores to, kept in the window's shared data for the other processes
+ * (GetWindowPlacement on a window of another process); a window in the normal state has none */
+#define WINDOW_PLACEMENT_VALID        0x00000001
+#define WINDOW_PLACEMENT_RESTORE_MAX  0x00000002
+
 typedef volatile struct
 {
     struct obj_locator   class;
@@ -1099,6 +1104,13 @@ typedef volatile struct
     int                  __pad;
     struct ratio         dpi;
     struct ratio         raw_dpi;
+    struct rectangle     normal_rect;
+    int                  min_x;
+    int                  min_y;
+    int                  max_x;
+    int                  max_y;
+    unsigned int         placement_flags;
+    int                  __pad2;
     data_size_t          private_size;
     data_size_t          extra_size;
     struct window_info   info;
@@ -3871,6 +3883,25 @@ struct set_window_info_reply
     lparam_t       old_info;
     unsigned int   old_ansi;
     char __pad_20[4];
+};
+
+
+
+struct set_window_placement_request
+{
+    struct request_header __header;
+    user_handle_t  handle;
+    unsigned int   flags;
+    struct rectangle normal;
+    int            min_x;
+    int            min_y;
+    int            max_x;
+    int            max_y;
+    char __pad_52[4];
+};
+struct set_window_placement_reply
+{
+    struct reply_header __header;
 };
 
 
@@ -6906,6 +6937,7 @@ enum request
     REQ_get_window_info,
     REQ_init_window_info,
     REQ_set_window_info,
+    REQ_set_window_placement,
     REQ_set_window_fnid,
     REQ_set_parent,
     REQ_get_window_parents,
@@ -7248,6 +7280,7 @@ union generic_request
     struct get_window_info_request get_window_info_request;
     struct init_window_info_request init_window_info_request;
     struct set_window_info_request set_window_info_request;
+    struct set_window_placement_request set_window_placement_request;
     struct set_window_fnid_request set_window_fnid_request;
     struct set_parent_request set_parent_request;
     struct get_window_parents_request get_window_parents_request;
@@ -7588,6 +7621,7 @@ union generic_reply
     struct get_window_info_reply get_window_info_reply;
     struct init_window_info_reply init_window_info_reply;
     struct set_window_info_reply set_window_info_reply;
+    struct set_window_placement_reply set_window_placement_reply;
     struct set_window_fnid_reply set_window_fnid_reply;
     struct set_parent_reply set_parent_reply;
     struct get_window_parents_reply get_window_parents_reply;
@@ -7763,6 +7797,6 @@ union generic_reply
     struct load_e1s_profile_reply load_e1s_profile_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 998
+#define SERVER_PROTOCOL_VERSION 999
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

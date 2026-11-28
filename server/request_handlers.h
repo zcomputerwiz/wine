@@ -169,6 +169,7 @@ DECL_HANDLER(set_window_owner);
 DECL_HANDLER(get_window_info);
 DECL_HANDLER(init_window_info);
 DECL_HANDLER(set_window_info);
+DECL_HANDLER(set_window_placement);
 DECL_HANDLER(set_window_fnid);
 DECL_HANDLER(set_parent);
 DECL_HANDLER(get_window_parents);
@@ -508,6 +509,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_get_window_info,
     (req_handler)req_init_window_info,
     (req_handler)req_set_window_info,
+    (req_handler)req_set_window_placement,
     (req_handler)req_set_window_fnid,
     (req_handler)req_set_parent,
     (req_handler)req_get_window_parents,
@@ -1668,6 +1670,14 @@ C_ASSERT( sizeof(struct set_window_info_request) == 40 );
 C_ASSERT( offsetof(struct set_window_info_reply, old_info) == 8 );
 C_ASSERT( offsetof(struct set_window_info_reply, old_ansi) == 16 );
 C_ASSERT( sizeof(struct set_window_info_reply) == 24 );
+C_ASSERT( offsetof(struct set_window_placement_request, handle) == 12 );
+C_ASSERT( offsetof(struct set_window_placement_request, flags) == 16 );
+C_ASSERT( offsetof(struct set_window_placement_request, normal) == 20 );
+C_ASSERT( offsetof(struct set_window_placement_request, min_x) == 36 );
+C_ASSERT( offsetof(struct set_window_placement_request, min_y) == 40 );
+C_ASSERT( offsetof(struct set_window_placement_request, max_x) == 44 );
+C_ASSERT( offsetof(struct set_window_placement_request, max_y) == 48 );
+C_ASSERT( sizeof(struct set_window_placement_request) == 56 );
 C_ASSERT( offsetof(struct set_window_fnid_request, handle) == 12 );
 C_ASSERT( offsetof(struct set_window_fnid_request, atom) == 16 );
 C_ASSERT( sizeof(struct set_window_fnid_request) == 24 );
