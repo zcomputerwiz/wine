@@ -34,6 +34,7 @@
 
 extern int session0_server;   /* this server is session 0 */
 extern int session0_client;   /* this server's programs get their machine registry from session 0 */
+extern int session0_dev_mode( void );   /* development trust (WEX_SESSION0_DEV): link_policy maps nothing */
 
 /* after sysrun_init and the options, before the registry is loaded */
 extern void session0_init( int server_mode );

@@ -89,6 +89,11 @@ int session0_client;
 
 static char session0_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
 static int session0_dev;                /* development trust: a peer of session 0's own uid */
+
+int session0_dev_mode( void )
+{
+    return session0_dev;
+}
 static gid_t peer_group;                /* production trust: the launcher's system group */
 static uid_t hive_owner = (uid_t)-1;    /* the session 0 account, when it is configured */
 
