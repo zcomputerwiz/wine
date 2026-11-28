@@ -77,6 +77,7 @@ enum wayland_window_message
     WM_WAYLAND_FOREIGN_FOREGROUND,
     WM_WAYLAND_WEX_UPDATE,
     WM_WAYLAND_WEX_RESIZE,
+    WM_WAYLAND_SCALE_RESTORE,   /* wp: the old scale, lp: the new one (thousandths of 1/120): convert the restore rect */
 };
 
 enum wayland_surface_config_state
