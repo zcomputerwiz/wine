@@ -2457,7 +2457,8 @@ static struct object *pipe_bridge_open_remote( struct named_pipe *pipe, unsigned
     return &client->obj;
 }
 
-/* session 0: the pipes that a session may open here (1), and those only a session with a session link may (2) */
+/* session 0: the pipes that a session may open here (1), those only a session with a session link may (2), and those
+ * only a session's system role may, over its session link (3) */
 static int pipe_bridge_allowed( const WCHAR *name, data_size_t len )
 {
     static const WCHAR svcctl[] = {'s','v','c','c','t','l'};
@@ -2468,7 +2469,9 @@ static int pipe_bridge_allowed( const WCHAR *name, data_size_t len )
     if (len == sizeof(svcctl) && !memicmp_strW( name, svcctl, len )) return 1;
     if (len == sizeof(eventlog) && !memicmp_strW( name, eventlog, len )) return 2;  /* link_bound_token needs the link */
     if (len == sizeof(accounts) && !memicmp_strW( name, accounts, len )) return 2;
-    if (len == sizeof(broker) && !memicmp_strW( name, broker, len )) return 2;
+    /* B132: the session's agent only (a session's system role, WEX_CALLER_SESSION_SYSTEM): refused here, before it
+     * takes one of B0's instances, so that no other caller can hold them (r9_idle_clients_do_not_hold_broker) */
+    if (len == sizeof(broker) && !memicmp_strW( name, broker, len )) return 3;
     /* a service's ncalrpc endpoint: the pipe's descriptor decides, and the service checks its callers itself */
     if (is_lrpc_pipe_name( name, len )) return 1;
     return 0;
@@ -2488,10 +2491,10 @@ static struct named_pipe *pipe_bridge_find( const WCHAR *name, data_size_t len, 
     int allowed = 0;
 
     if (!len || len % sizeof(WCHAR) || !(allowed = pipe_bridge_allowed( name, len )) ||
-        (allowed == 2 && session < 0))
+        (allowed >= 2 && session < 0))
     {
         fprintf( stderr, "session0: pipe open refused for uid %u: %s\n", (unsigned int)uid,
-                 allowed == 2 ? "the server has no session link" : "the name is not on the list" );
+                 allowed >= 2 ? "the server has no session link" : "the name is not on the list" );
         *status = STATUS_ACCESS_DENIED;
         return NULL;
     }
@@ -2540,6 +2543,17 @@ unsigned int pipe_bridge_accept( struct token *token, const WCHAR *name, data_si
     {
         close( sock );
         return status;
+    }
+    /* a pipe for a session's system role only: what session 0 mapped (WEX_CALLER_SESSION_SYSTEM), or in development
+     * mode, where nothing is mapped, a described SYSTEM */
+    if (pipe_bridge_allowed( name, len ) == 3 && token_caller_class( token ) != WEX_CALLER_SESSION_SYSTEM &&
+        token_service_account( token ) != SERVICE_ACCOUNT_SYSTEM)
+    {
+        fprintf( stderr, "session0: pipe open refused for uid %u: only a session's system role opens this pipe\n",
+                 (unsigned int)uid );
+        release_object( pipe );
+        close( sock );
+        return STATUS_ACCESS_DENIED;
     }
     if (!check_object_access( token, &pipe->obj, &access ) ||
         !(pipe->sharing & FILE_SHARE_READ) || !(pipe->sharing & FILE_SHARE_WRITE))
